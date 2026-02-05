@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/// <reference types="node" />
 import chokidar from "chokidar";
 import crypto from "crypto";
 import fs from "fs";
@@ -7,6 +8,7 @@ import process from "process";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import Parser from "tree-sitter";
+import type { Language, SyntaxNode } from "tree-sitter";
 import Python from "tree-sitter-python";
 import Go from "tree-sitter-go";
 import JavaScript from "tree-sitter-javascript";
@@ -45,7 +47,7 @@ const DEFAULT_EXCLUDES = new Set([
   ".trace_state.json",
 ]);
 
-const LANG_BY_EXT: Record<string, Parser.Language> = {
+const LANG_BY_EXT: Record<string, Language> = {
   ".py": Python,
   ".pyi": Python,
   ".ts": TypeScript.typescript,
@@ -228,7 +230,7 @@ function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
     return ranges.some(([rStart, rEnd]) => !(end < rStart || start > rEnd));
   }
 
-  function getName(node: Parser.SyntaxNode): string | null {
+  function getName(node: SyntaxNode): string | null {
     for (const child of node.namedChildren) {
       if (["identifier", "name", "type_identifier"].includes(child.type)) {
         return newText.slice(child.startIndex, child.endIndex);
@@ -239,7 +241,7 @@ function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
 
   const results: Array<{ type: string; name: string | null; start: number; end: number }> = [];
 
-  function walk(node: Parser.SyntaxNode) {
+  function walk(node: SyntaxNode) {
     const start = node.startPosition.row + 1;
     const end = node.endPosition.row + 1;
     if (intersects(start, end)) {

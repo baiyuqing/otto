@@ -38,6 +38,14 @@ Notes:
 npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg
 ```
 
+## Testing
+
+An end-to-end test validates the minimal workflow: file change → log entry → SVG output.
+
+```bash
+npm test
+```
+
 ## Log Format
 
 Entries are appended to `docs/agent-trace.md`. Each entry includes a human-readable summary and a JSON block with:

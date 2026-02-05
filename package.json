@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "trace:watch": "tsx scripts/trace_watch.ts",
-    "trace:svg": "tsx scripts/trace_svg.ts"
+    "trace:svg": "tsx scripts/trace_svg.ts",
+    "test": "node --test tests/e2e.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

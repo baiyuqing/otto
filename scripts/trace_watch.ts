@@ -7,12 +7,7 @@ import path from "path";
 import process from "process";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import Parser from "tree-sitter";
-import type { Language, SyntaxNode } from "tree-sitter";
-import Python from "tree-sitter-python";
-import Go from "tree-sitter-go";
-import JavaScript from "tree-sitter-javascript";
-import TypeScript from "tree-sitter-typescript";
+import { createRequire } from "module";
 
 type ChangeHunk = {
   old_start: number;
@@ -47,15 +42,42 @@ const DEFAULT_EXCLUDES = new Set([
   ".trace_state.json",
 ]);
 
-const LANG_BY_EXT: Record<string, Language> = {
-  ".py": Python,
-  ".pyi": Python,
-  ".ts": TypeScript.typescript,
-  ".tsx": TypeScript.tsx,
-  ".js": JavaScript,
-  ".jsx": JavaScript,
-  ".go": Go,
+const require = createRequire(import.meta.url);
+
+type TreeSitterBundle = {
+  Parser: any;
+  languages: Record<string, any>;
 };
+
+let treeSitterBundle: TreeSitterBundle | null | undefined;
+
+function loadTreeSitter(): TreeSitterBundle | null {
+  if (treeSitterBundle !== undefined) {
+    return treeSitterBundle;
+  }
+  try {
+    const Parser = require("tree-sitter");
+    const Python = require("tree-sitter-python");
+    const Go = require("tree-sitter-go");
+    const JavaScript = require("tree-sitter-javascript");
+    const TypeScript = require("tree-sitter-typescript");
+    treeSitterBundle = {
+      Parser,
+      languages: {
+        ".py": Python,
+        ".pyi": Python,
+        ".ts": TypeScript.typescript,
+        ".tsx": TypeScript.tsx,
+        ".js": JavaScript,
+        ".jsx": JavaScript,
+        ".go": Go,
+      },
+    };
+  } catch {
+    treeSitterBundle = null;
+  }
+  return treeSitterBundle;
+}
 
 function utcNow(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -207,12 +229,16 @@ function parseDiff(oldText: string, newText: string) {
 }
 
 function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
+  const bundle = loadTreeSitter();
+  if (!bundle) {
+    return [] as Array<{ type: string; name: string | null; start: number; end: number }>;
+  }
   const ext = path.extname(filePath);
-  const language = LANG_BY_EXT[ext];
+  const language = bundle.languages[ext];
   if (!language) {
     return [] as Array<{ type: string; name: string | null; start: number; end: number }>;
   }
-  const parser = new Parser();
+  const parser = new bundle.Parser();
   parser.setLanguage(language);
   const tree = parser.parse(newText);
 
@@ -230,7 +256,7 @@ function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
     return ranges.some(([rStart, rEnd]) => !(end < rStart || start > rEnd));
   }
 
-  function getName(node: SyntaxNode): string | null {
+  function getName(node: any): string | null {
     for (const child of node.namedChildren) {
       if (["identifier", "name", "type_identifier"].includes(child.type)) {
         return newText.slice(child.startIndex, child.endIndex);
@@ -241,7 +267,7 @@ function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
 
   const results: Array<{ type: string; name: string | null; start: number; end: number }> = [];
 
-  function walk(node: SyntaxNode) {
+  function walk(node: any) {
     const start = node.startPosition.row + 1;
     const end = node.endPosition.row + 1;
     if (intersects(start, end)) {

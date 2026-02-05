@@ -11,13 +11,13 @@ A lightweight workflow to correlate local file edits with LLM conversation conte
 
 ## Requirements
 
-- Python 3.10+
-- Dependencies: `watchdog`, `tree_sitter`, `tree_sitter_languages`
+- Node.js 18+
+- Dependencies installed via `npm install`
 
 ## Setup
 
 ```bash
-python -m pip install watchdog tree_sitter tree_sitter_languages
+npm install
 ```
 
 ## Usage
@@ -25,7 +25,7 @@ python -m pip install watchdog tree_sitter tree_sitter_languages
 ### 1. Start the watcher
 
 ```bash
-python scripts/trace_watch.py --conversation-log /path/to/conversation.jsonl
+npm run trace:watch -- --conversation-log /path/to/conversation.jsonl
 ```
 
 Notes:
@@ -35,7 +35,7 @@ Notes:
 ### 2. Generate the SVG
 
 ```bash
-python scripts/trace_svg.py --log docs/agent-trace.md --out docs/agent-trace.svg
+npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg
 ```
 
 ## Log Format
@@ -50,8 +50,8 @@ Entries are appended to `docs/agent-trace.md`. Each entry includes a human-reada
 
 ## Repository Layout
 
-- `scripts/trace_watch.py`: file watcher and logger
-- `scripts/trace_svg.py`: SVG renderer
+- `scripts/trace_watch.ts`: file watcher and logger
+- `scripts/trace_svg.ts`: SVG renderer
 - `docs/agent-trace.md`: trace log (auto-appended)
 
 ## Supported Languages

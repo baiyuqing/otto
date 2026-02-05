@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.sqlite3
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+# Virtual Environments
+venv/
+# Node.js
+node_modules/
+# Logs
+logs/
+# Coverage
+.coverage
+.coverage.*
+# Test results
+nosetests.xml
+# Pytest
+.pytest_cache/
+# Coverage reports
+coverage.xml
+# HTML reports
+htmlcov/
+
+# Caches
+.cache/
+# Temporary files
+*.tmp
+
+# Operating System
+# Windows
+Thumbs.db
+Desktop.ini
+# Linux
+*~
+*.swp
+# macOS
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+
+# Misc
+*.bak
+
+# Binaries
+*.exe
+*.out
+# Build directories
+bin/
+
+# Documentation
+docs/_build/

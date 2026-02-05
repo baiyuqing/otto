@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Trace"
+  short_description: "Trace file edits to conversations and render SVG graphs"
+  default_prompt: "Use the agent-trace workflow to watch file changes, map AST nodes with tree-sitter, append entries to docs/agent-trace.md, and render docs/agent-trace.svg. Adjust conversation log parsing and language mappings as needed."

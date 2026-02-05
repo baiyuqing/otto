@@ -38,6 +38,17 @@ Notes:
 npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg
 ```
 
+### Optional: Log Codex CLI conversations
+
+If you use the Codex CLI and want `conversation.jsonl` to be written automatically, run the wrapper:
+
+```bash
+npm run codex:log
+```
+
+This will launch `codex --no-alt-screen` and append JSONL records to `docs/conversation.jsonl` by default.
+Set `CODEX_CONV_LOG=/path/to/conversation.jsonl` to override the output location.
+
 ## Testing
 
 Test coverage is split into unit checks and an end-to-end flow.

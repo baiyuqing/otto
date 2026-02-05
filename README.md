@@ -40,7 +40,13 @@ npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg
 
 ## Testing
 
-An end-to-end test validates the minimal workflow: file change → log entry → SVG output.
+Test coverage is split into unit checks and an end-to-end flow.
+
+- Unit tests (`tests/trace_svg.test.mjs`) validate Markdown parsing, SVG rendering, and escaping.
+- Unit tests (`tests/trace_watch.test.mjs`) validate diff math, hashing, JSONL parsing, and AST fallback.
+- End-to-end (`tests/e2e.mjs`) validates file change → log entry → SVG output.
+
+Run all tests:
 
 ```bash
 npm test

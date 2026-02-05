@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 import fs from "fs";
 import path from "path";
-import yargs from "yargs";
-import { hideBin } from "yargs/helpers";
 
 type TraceEntry = {
   trace_entry?: boolean;
@@ -116,12 +114,28 @@ function renderSvg(entries: TraceEntry[], outPath: string) {
   fs.writeFileSync(outPath, parts.join("\n"), "utf8");
 }
 
-function main() {
-  const argv = yargs(hideBin(process.argv))
-    .option("log", { type: "string", default: "docs/agent-trace.md" })
-    .option("out", { type: "string", default: "docs/agent-trace.svg" })
-    .parseSync();
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const out: { log: string; out: string } = {
+    log: "docs/agent-trace.md",
+    out: "docs/agent-trace.svg",
+  };
+  for (let i = 0; i < args.length; i += 1) {
+    const key = args[i];
+    const value = args[i + 1];
+    if (key === "--log" && value) {
+      out.log = value;
+      i += 1;
+    } else if (key === "--out" && value) {
+      out.out = value;
+      i += 1;
+    }
+  }
+  return out;
+}
 
+function main() {
+  const argv = parseArgs();
   const logPath = path.resolve(argv.log);
   const outPath = path.resolve(argv.out);
   const entries = loadEntries(logPath);

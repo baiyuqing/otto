@@ -137,5 +137,14 @@ test("end-to-end: watch -> log -> svg", async () => {
   assert.ok(svg.includes("Change"), "SVG output missing Change label");
 
   watcher.kill("SIGINT");
-  await sleep(300);
+  await new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      watcher.kill("SIGKILL");
+      resolve(true);
+    }, 1000);
+    watcher.on("exit", () => {
+      clearTimeout(timeout);
+      resolve(true);
+    });
+  });
 });

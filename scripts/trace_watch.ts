@@ -8,6 +8,7 @@ import process from "process";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 
 type ChangeHunk = {
   old_start: number;
@@ -79,11 +80,11 @@ function loadTreeSitter(): TreeSitterBundle | null {
   return treeSitterBundle;
 }
 
-function utcNow(): string {
+export function utcNow(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
-function sha256(text: string): string {
+export function sha256(text: string): string {
   return crypto.createHash("sha256").update(text, "utf8").digest("hex");
 }
 
@@ -118,7 +119,7 @@ function saveState(statePath: string, state: Record<string, { hash: string; cont
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
 }
 
-function getLatestConversation(logPath?: string) {
+export function getLatestConversation(logPath?: string) {
   if (!logPath || !fs.existsSync(logPath)) {
     return {
       id: null,
@@ -165,7 +166,7 @@ function getLatestConversation(logPath?: string) {
   };
 }
 
-function parseDiff(oldText: string, newText: string) {
+export function parseDiff(oldText: string, newText: string) {
   const oldLines = oldText.split(/\r?\n/);
   const newLines = newText.split(/\r?\n/);
   let oldLine = 1;
@@ -228,7 +229,7 @@ function parseDiff(oldText: string, newText: string) {
   return { added, deleted, hunks };
 }
 
-function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
+export function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
   const bundle = loadTreeSitter();
   if (!bundle) {
     return [] as Array<{ type: string; name: string | null; start: number; end: number }>;
@@ -295,7 +296,7 @@ function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
   return Array.from(unique.values()).slice(0, 12);
 }
 
-function summarizeNodes(nodes: Array<{ type: string; name: string | null; start: number; end: number }>) {
+export function summarizeNodes(nodes: Array<{ type: string; name: string | null; start: number; end: number }>) {
   if (!nodes.length) return "no AST matches";
   const parts: string[] = [];
   for (const node of nodes.slice(0, 3)) {
@@ -410,4 +411,7 @@ function main() {
   });
 }
 
-main();
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main();
+}

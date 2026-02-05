@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
 type TraceEntry = {
   trace_entry?: boolean;
@@ -14,7 +15,7 @@ type TraceEntry = {
   summary?: string;
 };
 
-function loadEntries(logPath: string): TraceEntry[] {
+export function loadEntries(logPath: string): TraceEntry[] {
   if (!fs.existsSync(logPath)) {
     return [];
   }
@@ -49,12 +50,12 @@ function loadEntries(logPath: string): TraceEntry[] {
   return entries;
 }
 
-function sanitize(text?: string | null): string {
+export function sanitize(text?: string | null): string {
   if (!text) return "unknown";
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function renderSvg(entries: TraceEntry[], outPath: string) {
+export function renderSvg(entries: TraceEntry[], outPath: string) {
   if (!entries.length) {
     fs.writeFileSync(outPath, '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="120"></svg>');
     return;
@@ -142,4 +143,7 @@ function main() {
   renderSvg(entries, outPath);
 }
 
-main();
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main();
+}

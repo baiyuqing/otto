@@ -19,3 +19,36 @@ Fields:
 ## Entries
 
 Entries are appended below by `scripts/trace_watch.py`.
+
+### 2026-02-05T13:42:39Z
+Conversation: id=null message_id=null role=null
+File: `tests/e2e.mjs`
+Summary: +151 -1; no AST matches
+```json
+{
+  "trace_entry": true,
+  "timestamp": "2026-02-05T13:42:39Z",
+  "conversation": {
+    "id": null,
+    "message_id": null,
+    "role": null,
+    "created_at": null,
+    "excerpt": null
+  },
+  "file": "tests/e2e.mjs",
+  "change": {
+    "added": 151,
+    "deleted": 1,
+    "hunks": [
+      {
+        "old_start": 1,
+        "old_lines": 1,
+        "new_start": 1,
+        "new_lines": 151
+      }
+    ]
+  },
+  "ast": [],
+  "summary": "+151 -1; no AST matches"
+}
+```

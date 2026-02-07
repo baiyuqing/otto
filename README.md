@@ -1,6 +1,6 @@
 # Agent Trace Toolkit
 
-A lightweight workflow to correlate local file edits with LLM conversation context and visualize the links as SVG. The system watches your workspace, records per-file changes, extracts structural context with tree-sitter, and appends a structured entry to a Markdown log that can be rendered into a conversation↔change graph.
+A lightweight toolkit to trace AI coding sessions: it links LLM conversations to code edits, extracts AST context, and visualizes the relationship for review and auditing. Designed for AI coding/agent workflows (ChatGPT/Codex/Claude), Git-friendly, and runnable offline.
 
 ## What It Does
 
@@ -8,22 +8,26 @@ A lightweight workflow to correlate local file edits with LLM conversation conte
 - Maps edited line ranges to AST nodes using tree-sitter (Python/TS/Go).
 - Appends a structured entry to `docs/agent-trace.md`.
 - Renders a two-column SVG that links conversation messages to changes.
+- Generates an interactive HTML graph for filters/search/drill-down.
 
 ## Requirements
 
 - Node.js 18+
 - Dependencies installed via `npm install`
 
-## Setup
+## Quick Start
 
 ```bash
 npm install
+npm run trace:demo-ui                 # generate demo assets (html/json/svg)
+open docs/demo-clean/agent-trace.html # view interactive graph locally
 ```
 
 ## Manuals
 
 - Install guide: `docs/INSTALL.md`
 - Codex plugin guide: `docs/CODEX_PLUGIN_MANUAL.md`
+- Why this project: `docs/WHY.md`
 
 ## Usage
 

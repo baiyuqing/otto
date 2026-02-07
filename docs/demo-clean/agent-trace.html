@@ -1,149 +1,4 @@
-#!/usr/bin/env node
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { loadEntries } from "./trace_svg.ts";
-
-type RawTraceEntry = {
-  trace_entry?: boolean;
-  timestamp?: string;
-  conversation?: {
-    id?: string | null;
-    message_id?: string | null;
-    role?: string | null;
-    created_at?: string | null;
-    excerpt?: string | null;
-  };
-  file?: string;
-  summary?: string;
-  change?: {
-    added?: number;
-    deleted?: number;
-    hunks?: Array<{ old_start?: number; old_lines?: number; new_start?: number; new_lines?: number }>;
-  };
-  ast?: Array<{ type?: string; name?: string | null; start?: number; end?: number }>;
-};
-
-type UiConversation = {
-  key: string;
-  id: string;
-  messageId: string;
-  role: string;
-  createdAt: string;
-  excerpt: string;
-};
-
-type UiChange = {
-  id: string;
-  index: number;
-  timestamp: string;
-  file: string;
-  summary: string;
-  added: number;
-  deleted: number;
-  astCount: number;
-  ast: Array<{ type: string; name: string; start: number; end: number }>;
-  conversationKey: string;
-};
-
-type UiData = {
-  generatedAt: string;
-  stats: {
-    entries: number;
-    conversations: number;
-    files: number;
-  };
-  files: string[];
-  roles: string[];
-  conversations: UiConversation[];
-  changes: UiChange[];
-};
-
-function utcNow(): string {
-  return new Date().toISOString();
-}
-
-function normalizeText(value: unknown, fallback = "unknown"): string {
-  if (typeof value !== "string") return fallback;
-  const trimmed = value.trim();
-  return trimmed.length ? trimmed : fallback;
-}
-
-export function buildUiData(entries: RawTraceEntry[]): UiData {
-  const conversations: UiConversation[] = [];
-  const conversationMap = new Map<string, UiConversation>();
-  const changes: UiChange[] = [];
-  const fileSet = new Set<string>();
-  const roleSet = new Set<string>();
-
-  entries.forEach((raw, index) => {
-    const conv = raw.conversation ?? {};
-    const convId = normalizeText(conv.id, "unknown");
-    const messageId = normalizeText(conv.message_id, "unknown");
-    const role = normalizeText(conv.role, "unknown");
-    const key = `${convId}::${messageId}::${role}`;
-
-    if (!conversationMap.has(key)) {
-      const uiConv: UiConversation = {
-        key,
-        id: convId,
-        messageId,
-        role,
-        createdAt: normalizeText(conv.created_at, "unknown"),
-        excerpt: normalizeText(conv.excerpt, "(no excerpt)"),
-      };
-      conversationMap.set(key, uiConv);
-      conversations.push(uiConv);
-      roleSet.add(role);
-    }
-
-    const file = normalizeText(raw.file, "unknown");
-    fileSet.add(file);
-
-    const ast = Array.isArray(raw.ast)
-      ? raw.ast.map((node) => ({
-          type: normalizeText(node.type, "unknown"),
-          name: normalizeText(node.name, ""),
-          start: typeof node.start === "number" ? node.start : 0,
-          end: typeof node.end === "number" ? node.end : 0,
-        }))
-      : [];
-
-    changes.push({
-      id: `chg-${index + 1}`,
-      index,
-      timestamp: normalizeText(raw.timestamp, "unknown"),
-      file,
-      summary: normalizeText(raw.summary, "(no summary)"),
-      added: typeof raw.change?.added === "number" ? raw.change.added : 0,
-      deleted: typeof raw.change?.deleted === "number" ? raw.change.deleted : 0,
-      astCount: ast.length,
-      ast,
-      conversationKey: key,
-    });
-  });
-
-  return {
-    generatedAt: utcNow(),
-    stats: {
-      entries: changes.length,
-      conversations: conversations.length,
-      files: fileSet.size,
-    },
-    files: Array.from(fileSet).sort(),
-    roles: Array.from(roleSet).sort(),
-    conversations,
-    changes,
-  };
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-export function renderHtml(data: UiData): string {
-  const payload = JSON.stringify(data);
-  return `<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -293,7 +148,7 @@ export function renderHtml(data: UiData): string {
     </div>
   </div>
 
-  <script id="trace-data" type="application/json">${escapeHtml(payload)}</script>
+  <script id="trace-data" type="application/json">{"generatedAt":"2026-02-07T02:54:04.165Z","stats":{"entries":2,"conversations":1,"files":1},"files":["api_service.ts"],"roles":["assistant"],"conversations":[{"key":"conv-demo-002::msg-102::assistant","id":"conv-demo-002","messageId":"msg-102","role":"assistant","createdAt":"2026-02-07T10:10:03Z","excerpt":"Sure. I will add retryWithBackoff and parseJson in api_service.ts."}],"changes":[{"id":"chg-1","index":0,"timestamp":"2026-02-07T10:10:31Z","file":"api_service.ts","summary":"+23 -1; function_declaration retryWithBackoff (1-14), function_declaration fetchData (16-22)","added":23,"deleted":1,"astCount":2,"ast":[{"type":"function_declaration","name":"retryWithBackoff","start":1,"end":14},{"type":"function_declaration","name":"fetchData","start":16,"end":22}],"conversationKey":"conv-demo-002::msg-102::assistant"},{"id":"chg-2","index":1,"timestamp":"2026-02-07T10:10:34Z","file":"api_service.ts","summary":"+4 -0; function_declaration parseJson (24-26)","added":4,"deleted":0,"astCount":1,"ast":[{"type":"function_declaration","name":"parseJson","start":24,"end":26}],"conversationKey":"conv-demo-002::msg-102::assistant"}]}</script>
   <script>
     const data = JSON.parse(document.getElementById("trace-data").textContent);
     const state = { file: "all", role: "all", q: "", selectedChangeId: null };
@@ -351,7 +206,7 @@ export function renderHtml(data: UiData): string {
       const astLines = (change.ast || []).length
         ? change.ast
             .map((n) => "- " + n.type + (n.name ? " " + n.name : "") + " (" + n.start + "-" + n.end + ")")
-            .join("\\n")
+            .join("\n")
         : "- none";
       detail.textContent = [
         "change_id: " + change.id,
@@ -363,7 +218,7 @@ export function renderHtml(data: UiData): string {
         "excerpt: " + (conv ? conv.excerpt : "unknown"),
         "ast:",
         astLines,
-      ].join("\\n");
+      ].join("\n");
     }
 
     function makeNode(groupClass, x, y, width, height, title, subtitle, clickHandler, selected) {
@@ -559,52 +414,4 @@ export function renderHtml(data: UiData): string {
     render();
   </script>
 </body>
-</html>`;
-}
-
-function parseArgs() {
-  const args = process.argv.slice(2);
-  const out: { log: string; out: string; json?: string } = {
-    log: "docs/agent-trace.md",
-    out: "docs/agent-trace.html",
-  };
-  for (let i = 0; i < args.length; i += 1) {
-    const key = args[i];
-    const value = args[i + 1];
-    if (key === "--log" && value) {
-      out.log = value;
-      i += 1;
-    } else if (key === "--out" && value) {
-      out.out = value;
-      i += 1;
-    } else if (key === "--json" && value) {
-      out.json = value;
-      i += 1;
-    }
-  }
-  return out;
-}
-
-function main() {
-  const argv = parseArgs();
-  const logPath = path.resolve(argv.log);
-  const outPath = path.resolve(argv.out);
-  const jsonPath = path.resolve(argv.json ?? argv.out.replace(/\.html?$/i, ".json"));
-
-  const rawEntries = loadEntries(logPath) as RawTraceEntry[];
-  const data = buildUiData(rawEntries);
-  const html = renderHtml(data);
-
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
-  fs.writeFileSync(outPath, html, "utf8");
-  fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2), "utf8");
-
-  process.stdout.write(`Wrote UI: ${outPath}\n`);
-  process.stdout.write(`Wrote JSON: ${jsonPath}\n`);
-}
-
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
-  main();
-}
+</html>

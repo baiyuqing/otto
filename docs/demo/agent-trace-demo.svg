@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="884">
+<style>text{font-family:Arial,sans-serif;font-size:12px;}</style>
+<rect width="100%" height="100%" fill="#fff" />
+<text x="40" y="24" fill="#111">Conversation</text>
+<rect x="40" y="52" width="420" height="36" rx="6" fill="#f2f4f8" stroke="#cbd5e1" />
+<text x="50" y="74" fill="#111">assistant msg-002</text>
+<text x="520" y="24" fill="#111">Change</text>
+<rect x="520" y="52" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="68" fill="#0f172a">demo/api_service.ts</text>
+<text x="530" y="82" fill="#475569">+23 -1; no AST matches</text>
+<rect x="520" y="104" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="120" fill="#0f172a">docs/demo/.trace_state_demo.json</text>
+<text x="530" y="134" fill="#475569">+7 -1; no AST matches</text>
+<rect x="520" y="156" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="172" fill="#0f172a">docs/demo/agent-trace-demo.md</text>
+<text x="530" y="186" fill="#475569">+66 -0; no AST matches</text>
+<rect x="520" y="208" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="224" fill="#0f172a">docs/demo/.trace_state_demo.json</text>
+<text x="530" y="238" fill="#475569">+12 -2; no AST matches</text>
+<rect x="520" y="260" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="276" fill="#0f172a">docs/demo/agent-trace-demo.md</text>
+<text x="530" y="290" fill="#475569">+66 -0; no AST matches</text>
+<rect x="520" y="312" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="328" fill="#0f172a">docs/demo/agent-trace-demo.md</text>
+<text x="530" y="342" fill="#475569">+33 -0; no AST matches</text>
+<rect x="520" y="364" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="380" fill="#0f172a">docs/demo/.trace_state_demo.json</text>
+<text x="530" y="394" fill="#475569">+6 -6; no AST matches</text>
+<rect x="520" y="416" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="432" fill="#0f172a">docs/demo/agent-trace-demo.md</text>
+<text x="530" y="446" fill="#475569">+72 -0; no AST matches</text>
+<rect x="520" y="468" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="484" fill="#0f172a">docs/demo/.trace_state_demo.json</text>
+<text x="530" y="498" fill="#475569">+4 -4; no AST matches</text>
+<rect x="520" y="520" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="536" fill="#0f172a">demo/api_service.ts</text>
+<text x="530" y="550" fill="#475569">+4 -0; no AST matches</text>
+<rect x="520" y="572" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="588" fill="#0f172a">docs/demo/agent-trace-demo.md</text>
+<text x="530" y="602" fill="#475569">+105 -0; no AST matches</text>
+<rect x="520" y="624" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="640" fill="#0f172a">docs/demo/.trace_state_demo.json</text>
+<text x="530" y="654" fill="#475569">+7 -7; no AST matches</text>
+<rect x="520" y="676" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="692" fill="#0f172a">docs/demo/agent-trace-demo.md</text>
+<text x="530" y="706" fill="#475569">+78 -0; no AST matches</text>
+<rect x="520" y="728" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="744" fill="#0f172a">docs/demo/.trace_state_demo.json</text>
+<text x="530" y="758" fill="#475569">+5 -5; no AST matches</text>
+<rect x="520" y="780" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="796" fill="#0f172a">docs/demo/agent-trace-demo.md</text>
+<text x="530" y="810" fill="#475569">+72 -0; no AST matches</text>
+<rect x="520" y="832" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="848" fill="#0f172a">docs/demo/.trace_state_demo.json</text>
+<text x="530" y="862" fill="#475569">+5 -5; no AST matches</text>
+<line x1="460" y1="70" x2="520" y2="70" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="122" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="174" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="226" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="278" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="330" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="382" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="434" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="486" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="538" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="590" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="642" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="694" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="746" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="798" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="850" stroke="#94a3b8" stroke-width="1.5" />
+</svg>

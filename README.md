@@ -34,6 +34,7 @@ npm run trace:watch -- --conversation-log /path/to/conversation.jsonl
 ```
 
 Notes:
+
 - The conversation log is expected to be JSONL (one JSON object per line).
 - If no log is provided, entries are still recorded but the conversation fields will be null.
 

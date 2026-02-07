@@ -49,6 +49,8 @@ Desktop.ini
 *.swp
 # macOS
 .DS_Store
+.trace_state.json
+resume
 
 # IDEs
 .idea/

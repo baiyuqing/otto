@@ -2,54 +2,54 @@
 
 ## Project Structure & Module Organization
 
-This repository is currently a minimal skeleton. The only tracked file is `.gitignore`, and there are no committed source, test, or asset directories yet. Until the codebase is established, organize new work in conventional Python paths:
+This repo hosts the Agent Trace Toolkit plus a Codex skill definition.
 
-- `src/` for application/library code.
-- `tests/` for unit/integration tests (mirroring `src/`).
-- `scripts/` for one-off utilities and maintenance tasks.
-- `docs/` for longer-form documentation.
+- `scripts/` contains the TypeScript CLIs (`trace_watch.ts`, `trace_svg.ts`).
+- `docs/` contains usage docs and the trace log (`agent-trace.md`).
+- `skills/agent-trace/` contains the Codex skill (`SKILL.md`, `agents/openai.yaml`).
+- `package.json` and `tsconfig.json` define the Node/TypeScript setup.
 
-If you add a new top-level directory, note it in this guide so future contributors can find it.
+If you add new top-level directories, document them here to keep the layout discoverable.
 
 ## Build, Test, and Development Commands
 
-There are no repo-defined build or run scripts yet. When introducing them, add the exact commands here. For now, typical local flows are:
+This project is Node-based and runs TypeScript with `tsx`.
 
-- `python -m venv .venv` to create a local virtual environment.
-- `source .venv/bin/activate` to activate it.
-- `python -m pytest` to run tests once a test suite exists.
+- `npm install` or `pnpm install` installs dependencies.
+- `npm run trace:watch -- --conversation-log /path/to/conversation.jsonl` starts the watcher.
+- `npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg` renders the SVG.
+
+If you introduce tests, add a `test` script in `package.json` and document it here.
 
 ## Coding Style & Naming Conventions
 
-No formatter or linter is configured yet. Keep style consistent with standard Python conventions:
+Follow TypeScript conventions unless a file dictates otherwise.
 
-- 4-space indentation and UTF-8 files.
-- `snake_case` for functions and variables.
-- `PascalCase` for classes.
-- Module names in `lower_snake_case`.
+- 2-space indentation and UTF-8 files.
+- `camelCase` for functions and variables.
+- `PascalCase` for types and classes.
+- Keep CLI argument names kebab-case (for example `--conversation-log`).
 
-If you adopt tools like `black`, `ruff`, or `isort`, document the exact command (for example `python -m black src tests`).
+If you add a formatter or linter (for example `prettier` or `eslint`), record the exact commands here.
 
 ## Testing Guidelines
 
-There are no tests committed yet, but the repository already ignores `.pytest_cache`, implying `pytest` is intended. When adding tests:
+No automated tests are configured yet. If you add tests:
 
-- Use filenames like `tests/test_<module>.py`.
-- Prefer small, focused tests with clear arrange/act/assert structure.
-- Record any coverage targets here if required.
-
-Run the suite with `python -m pytest`.
+- Place them under `tests/`.
+- Mirror the `scripts/` layout for integration tests.
+- Document how to run them in this file.
 
 ## Commit & Pull Request Guidelines
 
-Recent commits are short and direct (examples: `Implement`, `Update CLAUDE`, `Add development plan`). Follow that convention: concise, imperative messages under ~50 characters.
+Recent commits are short and direct (for example `Add pnpm lockfile`, `Update trace svg args`). Keep messages concise and imperative.
 
 For pull requests, include:
 
-- A short summary and the motivation for the change.
-- Test results (for example: `python -m pytest`).
-- Screenshots or logs when behavior changes are user-visible.
+- A short summary and motivation.
+- Test results or manual verification steps.
+- Screenshots or logs if the SVG output changes.
 
 ## Security & Configuration Notes
 
-`.env` files are ignored by default. Keep secrets in environment variables and avoid committing credentials. If new configuration files are added, ensure they are documented and safe for version control.
+`.env` files are ignored. Keep secrets in environment variables. Document any new config files added under `docs/`.

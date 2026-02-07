@@ -1,0 +1,29 @@
+{
+  "name": "agent-trace-toolkit",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "trace:watch": "tsx scripts/trace_watch.ts",
+    "trace:svg": "tsx scripts/trace_svg.ts",
+    "codex:log": "tsx scripts/codex_log.ts",
+    "test": "node --import tsx --test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/yargs": "^17.0.35",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.1",
+    "node-pty": "^1.0.0",
+    "strip-ansi": "^7.1.0",
+    "tree-sitter": "^0.20.1",
+    "tree-sitter-go": "^0.20.0",
+    "tree-sitter-javascript": "^0.20.4",
+    "tree-sitter-python": "^0.20.4",
+    "tree-sitter-typescript": "^0.20.3",
+    "yargs": "^17.7.2"
+  }
+}

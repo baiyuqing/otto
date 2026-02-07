@@ -65,3 +65,6 @@ bin/
 
 # Documentation
 docs/_build/
+
+docs/agent-trace.md
+docs/agent-trace.svg

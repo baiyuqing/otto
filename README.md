@@ -44,6 +44,25 @@ Notes:
 npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg
 ```
 
+### 3. Generate interactive HTML UI
+
+```bash
+npm run trace:ui -- --log docs/agent-trace.md --out docs/agent-trace.html
+```
+
+This writes:
+
+- `docs/agent-trace.html` (interactive graph with filter/search/detail panel)
+- `docs/agent-trace.json` (normalized graph data)
+
+### 4. One-command demo output
+
+```bash
+npm run trace:demo-ui
+```
+
+This generates a complete demo set in `docs/demo-clean/` and `demo/workspace/`.
+
 ### Optional: Log Codex CLI conversations
 
 If you use the Codex CLI and want `conversation.jsonl` to be written automatically, run the wrapper:

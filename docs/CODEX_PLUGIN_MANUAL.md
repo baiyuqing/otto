@@ -63,11 +63,25 @@ npm run trace:watch -- --conversation-log docs/conversation.jsonl
 npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg
 ```
 
+4. 生成可交互 HTML（推荐）：
+
+```bash
+npm run trace:ui -- --log docs/agent-trace.md --out docs/agent-trace.html
+```
+
+5. 一键生成可展示 Demo：
+
+```bash
+npm run trace:demo-ui
+```
+
 ## 6. 输出文件说明
 
 - `docs/conversation.jsonl`: 对话日志（JSONL）
 - `docs/agent-trace.md`: 变更追踪日志（含机器可读 JSON 块）
 - `docs/agent-trace.svg`: 对话与变更双向关系图
+- `docs/agent-trace.html`: 可交互关系图（筛选/搜索/节点详情）
+- `docs/agent-trace.json`: 关系图规范化数据
 
 ## 7. 常见问题
 

@@ -1,0 +1,608 @@
+#!/usr/bin/env node
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { loadEntries } from "./trace_svg.ts";
+
+type RawTraceEntry = {
+  trace_entry?: boolean;
+  timestamp?: string;
+  conversation?: {
+    id?: string | null;
+    message_id?: string | null;
+    role?: string | null;
+    created_at?: string | null;
+    excerpt?: string | null;
+  };
+  file?: string;
+  summary?: string;
+  change?: {
+    added?: number;
+    deleted?: number;
+    hunks?: Array<{ old_start?: number; old_lines?: number; new_start?: number; new_lines?: number }>;
+  };
+  ast?: Array<{ type?: string; name?: string | null; start?: number; end?: number }>;
+};
+
+type UiConversation = {
+  key: string;
+  id: string;
+  messageId: string;
+  role: string;
+  createdAt: string;
+  excerpt: string;
+};
+
+type UiChange = {
+  id: string;
+  index: number;
+  timestamp: string;
+  file: string;
+  summary: string;
+  added: number;
+  deleted: number;
+  astCount: number;
+  ast: Array<{ type: string; name: string; start: number; end: number }>;
+  conversationKey: string;
+};
+
+type UiData = {
+  generatedAt: string;
+  stats: {
+    entries: number;
+    conversations: number;
+    files: number;
+  };
+  files: string[];
+  roles: string[];
+  conversations: UiConversation[];
+  changes: UiChange[];
+};
+
+function utcNow(): string {
+  return new Date().toISOString();
+}
+
+function normalizeText(value: unknown, fallback = "unknown"): string {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : fallback;
+}
+
+export function buildUiData(entries: RawTraceEntry[]): UiData {
+  const conversations: UiConversation[] = [];
+  const conversationMap = new Map<string, UiConversation>();
+  const changes: UiChange[] = [];
+  const fileSet = new Set<string>();
+  const roleSet = new Set<string>();
+
+  entries.forEach((raw, index) => {
+    const conv = raw.conversation ?? {};
+    const convId = normalizeText(conv.id, "unknown");
+    const messageId = normalizeText(conv.message_id, "unknown");
+    const role = normalizeText(conv.role, "unknown");
+    const key = `${convId}::${messageId}::${role}`;
+
+    if (!conversationMap.has(key)) {
+      const uiConv: UiConversation = {
+        key,
+        id: convId,
+        messageId,
+        role,
+        createdAt: normalizeText(conv.created_at, "unknown"),
+        excerpt: normalizeText(conv.excerpt, "(no excerpt)"),
+      };
+      conversationMap.set(key, uiConv);
+      conversations.push(uiConv);
+      roleSet.add(role);
+    }
+
+    const file = normalizeText(raw.file, "unknown");
+    fileSet.add(file);
+
+    const ast = Array.isArray(raw.ast)
+      ? raw.ast.map((node) => ({
+          type: normalizeText(node.type, "unknown"),
+          name: normalizeText(node.name, ""),
+          start: typeof node.start === "number" ? node.start : 0,
+          end: typeof node.end === "number" ? node.end : 0,
+        }))
+      : [];
+
+    changes.push({
+      id: `chg-${index + 1}`,
+      index,
+      timestamp: normalizeText(raw.timestamp, "unknown"),
+      file,
+      summary: normalizeText(raw.summary, "(no summary)"),
+      added: typeof raw.change?.added === "number" ? raw.change.added : 0,
+      deleted: typeof raw.change?.deleted === "number" ? raw.change.deleted : 0,
+      astCount: ast.length,
+      ast,
+      conversationKey: key,
+    });
+  });
+
+  return {
+    generatedAt: utcNow(),
+    stats: {
+      entries: changes.length,
+      conversations: conversations.length,
+      files: fileSet.size,
+    },
+    files: Array.from(fileSet).sort(),
+    roles: Array.from(roleSet).sort(),
+    conversations,
+    changes,
+  };
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+export function renderHtml(data: UiData): string {
+  const payload = JSON.stringify(data);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Trace UI</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --panel: #ffffff;
+      --line: #cbd5e1;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #2563eb;
+      --conv: #f1f5f9;
+      --change: #eff6ff;
+      --selected: #dbeafe;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      color: var(--text);
+      background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+    }
+    .shell {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 10px;
+      align-items: end;
+    }
+    .controls label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .controls input, .controls select, .controls button {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      height: 34px;
+      padding: 0 10px;
+      background: #fff;
+    }
+    .controls button {
+      background: #f8fafc;
+      cursor: pointer;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 12px;
+    }
+    .graph-wrap {
+      height: 68vh;
+      min-height: 480px;
+      overflow: hidden;
+      position: relative;
+    }
+    svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      cursor: grab;
+      user-select: none;
+    }
+    .node { cursor: pointer; }
+    .node.conv rect { fill: var(--conv); stroke: var(--line); }
+    .node.change rect { fill: var(--change); stroke: #93c5fd; }
+    .node.selected rect { fill: var(--selected); stroke: var(--accent); stroke-width: 2; }
+    .edge { stroke: #94a3b8; stroke-width: 1.4; opacity: 0.55; }
+    .edge.selected { stroke: var(--accent); stroke-width: 2; opacity: 1; }
+    .kpi { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+    .kpi span {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      background: #fff;
+    }
+    .detail {
+      min-height: 220px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #0b1220;
+    }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr 1fr; }
+      .graph-wrap { height: 52vh; min-height: 360px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="panel">
+      <div class="kpi" id="kpi"></div>
+      <div class="controls">
+        <div>
+          <label for="fileFilter">File</label>
+          <select id="fileFilter"></select>
+        </div>
+        <div>
+          <label for="roleFilter">Role</label>
+          <select id="roleFilter"></select>
+        </div>
+        <div>
+          <label for="searchInput">Search</label>
+          <input id="searchInput" type="text" placeholder="file / summary / timestamp" />
+        </div>
+        <div>
+          <label for="resetBtn">Actions</label>
+          <button id="resetBtn" type="button">Reset Filters</button>
+        </div>
+      </div>
+    </div>
+    <div class="layout">
+      <div class="panel graph-wrap">
+        <svg id="graph" viewBox="0 0 980 680" aria-label="Trace graph">
+          <g id="viewport"></g>
+        </svg>
+        <div class="hint">Drag to pan. Scroll to zoom. Click a change node for details.</div>
+      </div>
+      <div class="panel">
+        <h3>Details</h3>
+        <div class="detail" id="detail">Select a node to inspect.</div>
+      </div>
+    </div>
+  </div>
+
+  <script id="trace-data" type="application/json">${escapeHtml(payload)}</script>
+  <script>
+    const data = JSON.parse(document.getElementById("trace-data").textContent);
+    const state = { file: "all", role: "all", q: "", selectedChangeId: null };
+
+    const fileFilter = document.getElementById("fileFilter");
+    const roleFilter = document.getElementById("roleFilter");
+    const searchInput = document.getElementById("searchInput");
+    const resetBtn = document.getElementById("resetBtn");
+    const kpi = document.getElementById("kpi");
+    const detail = document.getElementById("detail");
+    const svg = document.getElementById("graph");
+    const viewport = document.getElementById("viewport");
+
+    const NS = "http://www.w3.org/2000/svg";
+    let zoom = 1;
+    let panX = 0;
+    let panY = 0;
+    let dragging = false;
+    let dragStart = { x: 0, y: 0 };
+
+    function option(select, value, text) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = text;
+      select.appendChild(opt);
+    }
+
+    function applyTransform() {
+      viewport.setAttribute("transform", "translate(" + panX + "," + panY + ") scale(" + zoom + ")");
+    }
+
+    function norm(value) {
+      return String(value || "").toLowerCase();
+    }
+
+    function filteredChanges() {
+      return data.changes.filter((ch) => {
+        if (state.file !== "all" && ch.file !== state.file) return false;
+        const conv = data.conversations.find((c) => c.key === ch.conversationKey);
+        if (state.role !== "all" && conv && conv.role !== state.role) return false;
+        if (state.q) {
+          const hay = [ch.file, ch.summary, ch.timestamp, conv ? conv.excerpt : ""].join(" ").toLowerCase();
+          if (!hay.includes(state.q)) return false;
+        }
+        return true;
+      });
+    }
+
+    function setDetail(change) {
+      if (!change) {
+        detail.textContent = "Select a node to inspect.";
+        return;
+      }
+      const conv = data.conversations.find((c) => c.key === change.conversationKey);
+      const astLines = (change.ast || []).length
+        ? change.ast.map((n) => "- " + n.type + (n.name ? " " + n.name : "") + " (" + n.start + "-" + n.end + ")").join("\n")
+        : "- none";
+      detail.textContent = [
+        "change_id: " + change.id,
+        "timestamp: " + change.timestamp,
+        "file: " + change.file,
+        "summary: " + change.summary,
+        "diff: +" + change.added + " -" + change.deleted,
+        "conversation: " + (conv ? conv.role + " " + conv.messageId : "unknown"),
+        "excerpt: " + (conv ? conv.excerpt : "unknown"),
+        "ast:",
+        astLines,
+      ].join("\n");
+    }
+
+    function makeNode(groupClass, x, y, width, height, title, subtitle, clickHandler, selected) {
+      const g = document.createElementNS(NS, "g");
+      g.setAttribute("class", "node " + groupClass + (selected ? " selected" : ""));
+      g.setAttribute("transform", "translate(" + x + "," + y + ")");
+
+      const rect = document.createElementNS(NS, "rect");
+      rect.setAttribute("width", String(width));
+      rect.setAttribute("height", String(height));
+      rect.setAttribute("rx", "8");
+      g.appendChild(rect);
+
+      const t1 = document.createElementNS(NS, "text");
+      t1.setAttribute("x", "10");
+      t1.setAttribute("y", "18");
+      t1.setAttribute("font-size", "12");
+      t1.setAttribute("fill", "#0f172a");
+      t1.textContent = title;
+      g.appendChild(t1);
+
+      const t2 = document.createElementNS(NS, "text");
+      t2.setAttribute("x", "10");
+      t2.setAttribute("y", "32");
+      t2.setAttribute("font-size", "11");
+      t2.setAttribute("fill", "#475569");
+      t2.textContent = subtitle;
+      g.appendChild(t2);
+
+      g.addEventListener("click", clickHandler);
+      return g;
+    }
+
+    function render() {
+      const changes = filteredChanges();
+      const convKeys = new Set(changes.map((c) => c.conversationKey));
+      const convs = data.conversations.filter((c) => convKeys.has(c.key));
+
+      kpi.innerHTML = "";
+      [
+        "entries " + changes.length,
+        "conversations " + convs.length,
+        "files " + new Set(changes.map((c) => c.file)).size,
+        "generated " + data.generatedAt,
+      ].forEach((text) => {
+        const el = document.createElement("span");
+        el.textContent = text;
+        kpi.appendChild(el);
+      });
+
+      viewport.innerHTML = "";
+
+      if (!changes.length) {
+        const empty = document.createElementNS(NS, "text");
+        empty.setAttribute("x", "40");
+        empty.setAttribute("y", "50");
+        empty.setAttribute("fill", "#64748b");
+        empty.textContent = "No entries match current filters.";
+        viewport.appendChild(empty);
+        setDetail(null);
+        return;
+      }
+
+      const convY = new Map();
+      convs.forEach((conv, idx) => convY.set(conv.key, 60 + idx * 64));
+      const changeY = new Map();
+      changes.forEach((ch, idx) => changeY.set(ch.id, 60 + idx * 54));
+
+      const maxHeight = Math.max(180, Math.max(convs.length * 64 + 120, changes.length * 54 + 120));
+      svg.setAttribute("viewBox", "0 0 980 " + maxHeight);
+
+      changes.forEach((ch) => {
+        const y1 = (convY.get(ch.conversationKey) || 60) + 20;
+        const y2 = (changeY.get(ch.id) || 60) + 20;
+        const line = document.createElementNS(NS, "line");
+        line.setAttribute("class", "edge" + (state.selectedChangeId === ch.id ? " selected" : ""));
+        line.setAttribute("x1", "340");
+        line.setAttribute("y1", String(y1));
+        line.setAttribute("x2", "540");
+        line.setAttribute("y2", String(y2));
+        viewport.appendChild(line);
+      });
+
+      convs.forEach((conv) => {
+        const y = convY.get(conv.key) || 60;
+        const linked = changes.find((ch) => ch.conversationKey === conv.key && ch.id === state.selectedChangeId);
+        const node = makeNode(
+          "conv",
+          60,
+          y,
+          280,
+          42,
+          conv.role + " " + conv.messageId,
+          conv.excerpt.slice(0, 52),
+          () => {
+            const first = changes.find((ch) => ch.conversationKey === conv.key);
+            if (first) {
+              state.selectedChangeId = first.id;
+              setDetail(first);
+              render();
+            }
+          },
+          Boolean(linked),
+        );
+        viewport.appendChild(node);
+      });
+
+      changes.forEach((ch) => {
+        const y = changeY.get(ch.id) || 60;
+        const subtitle = "AST " + ch.astCount + " | +" + ch.added + " -" + ch.deleted;
+        const node = makeNode(
+          "change",
+          540,
+          y,
+          380,
+          42,
+          ch.file,
+          subtitle,
+          () => {
+            state.selectedChangeId = ch.id;
+            setDetail(ch);
+            render();
+          },
+          state.selectedChangeId === ch.id,
+        );
+        viewport.appendChild(node);
+      });
+
+      if (!state.selectedChangeId || !changes.find((ch) => ch.id === state.selectedChangeId)) {
+        state.selectedChangeId = changes[0].id;
+      }
+      setDetail(changes.find((ch) => ch.id === state.selectedChangeId) || null);
+    }
+
+    option(fileFilter, "all", "All files");
+    data.files.forEach((file) => option(fileFilter, file, file));
+    option(roleFilter, "all", "All roles");
+    data.roles.forEach((role) => option(roleFilter, role, role));
+
+    fileFilter.addEventListener("change", () => {
+      state.file = fileFilter.value;
+      render();
+    });
+    roleFilter.addEventListener("change", () => {
+      state.role = roleFilter.value;
+      render();
+    });
+    searchInput.addEventListener("input", () => {
+      state.q = norm(searchInput.value);
+      render();
+    });
+    resetBtn.addEventListener("click", () => {
+      state.file = "all";
+      state.role = "all";
+      state.q = "";
+      state.selectedChangeId = null;
+      fileFilter.value = "all";
+      roleFilter.value = "all";
+      searchInput.value = "";
+      zoom = 1;
+      panX = 0;
+      panY = 0;
+      applyTransform();
+      render();
+    });
+
+    svg.addEventListener("wheel", (ev) => {
+      ev.preventDefault();
+      const delta = ev.deltaY < 0 ? 1.08 : 0.92;
+      zoom = Math.min(3, Math.max(0.45, zoom * delta));
+      applyTransform();
+    }, { passive: false });
+
+    svg.addEventListener("mousedown", (ev) => {
+      dragging = true;
+      dragStart = { x: ev.clientX - panX, y: ev.clientY - panY };
+      svg.style.cursor = "grabbing";
+    });
+
+    window.addEventListener("mousemove", (ev) => {
+      if (!dragging) return;
+      panX = ev.clientX - dragStart.x;
+      panY = ev.clientY - dragStart.y;
+      applyTransform();
+    });
+
+    window.addEventListener("mouseup", () => {
+      dragging = false;
+      svg.style.cursor = "grab";
+    });
+
+    applyTransform();
+    render();
+  </script>
+</body>
+</html>`;
+}
+
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const out: { log: string; out: string; json?: string } = {
+    log: "docs/agent-trace.md",
+    out: "docs/agent-trace.html",
+  };
+  for (let i = 0; i < args.length; i += 1) {
+    const key = args[i];
+    const value = args[i + 1];
+    if (key === "--log" && value) {
+      out.log = value;
+      i += 1;
+    } else if (key === "--out" && value) {
+      out.out = value;
+      i += 1;
+    } else if (key === "--json" && value) {
+      out.json = value;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function main() {
+  const argv = parseArgs();
+  const logPath = path.resolve(argv.log);
+  const outPath = path.resolve(argv.out);
+  const jsonPath = path.resolve(argv.json ?? argv.out.replace(/\.html?$/i, ".json"));
+
+  const rawEntries = loadEntries(logPath) as RawTraceEntry[];
+  const data = buildUiData(rawEntries);
+  const html = renderHtml(data);
+
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
+  fs.writeFileSync(outPath, html, "utf8");
+  fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2), "utf8");
+
+  process.stdout.write(`Wrote UI: ${outPath}\n`);
+  process.stdout.write(`Wrote JSON: ${jsonPath}\n`);
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main();
+}

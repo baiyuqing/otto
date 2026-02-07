@@ -28,7 +28,8 @@ If the help text prints, the installation is complete.
 If you want to trigger this workflow as a Codex skill, link the skill into your Codex skills directory:
 
 ```bash
-ln -s /Users/baiyuqing/Work/code/ai/otto/skills/agent-trace /Users/baiyuqing/.codex/skills/agent-trace
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s "$(pwd)/skills/agent-trace" "${CODEX_HOME:-$HOME/.codex}/skills/agent-trace"
 ```
 
-Adjust the paths if your workspace or Codex home directory differs.
+Run the command from the repository root so `$(pwd)/skills/agent-trace` points to this project.

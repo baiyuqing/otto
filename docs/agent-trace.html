@@ -87,6 +87,8 @@
     .node.selected rect { fill: var(--selected); stroke: var(--accent); stroke-width: 2; }
     .edge { stroke: #94a3b8; stroke-width: 1.4; opacity: 0.55; }
     .edge.selected { stroke: var(--accent); stroke-width: 2; opacity: 1; }
+    .edge.sequence { stroke: #9ca3af; stroke-width: 1.5; stroke-dasharray: 4 3; opacity: 0.8; }
+    .edge.sequence { stroke: #9ca3af; stroke-width: 1.5; stroke-dasharray: 4 3; opacity: 0.8; }
     .kpi { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
     .kpi span {
       border: 1px solid var(--line);
@@ -148,7 +150,7 @@
     </div>
   </div>
 
-  <script id="trace-data" type="application/json">{"generatedAt":"2026-02-07T03:10:25.460Z","stats":{"entries":0,"conversations":0,"files":0},"files":[],"roles":[],"conversations":[],"changes":[]}</script>
+  <script id="trace-data" type="application/json">{"generatedAt":"2026-02-07T03:42:00.370Z","stats":{"entries":2,"conversations":2,"files":2},"files":["demo/bookstore/schema.sql","demo/bookstore/server.ts"],"roles":["assistant"],"conversations":[{"key":"bookstore-demo::a-1::assistant","id":"bookstore-demo","messageId":"a-1","role":"assistant","createdAt":"2026-02-07T12:00:05Z","excerpt":"I'll add an in-memory server in demo/bookstore/server.ts with /books and /preorders."},{"key":"bookstore-demo::a-2::assistant","id":"bookstore-demo","messageId":"a-2","role":"assistant","createdAt":"2026-02-07T12:01:20Z","excerpt":"Adding schema.sql with books and preorders tables plus seed data."}],"changes":[{"id":"chg-1","index":0,"timestamp":"2026-02-07T12:00:30Z","file":"demo/bookstore/server.ts","summary":"+120 -0; function_declaration createPreorder (21-37), function handlePreorder (50-74), arrow_function server (83-105)","added":120,"deleted":0,"astCount":3,"ast":[{"type":"function_declaration","name":"createPreorder","start":21,"end":37},{"type":"function_declaration","name":"handlePreorder","start":50,"end":74},{"type":"arrow_function","name":"","start":83,"end":105}],"conversationKey":"bookstore-demo::a-1::assistant"},{"id":"chg-2","index":1,"timestamp":"2026-02-07T12:01:40Z","file":"demo/bookstore/schema.sql","summary":"+17 -0; create_table books (1-7), create_table preorders (9-15)","added":17,"deleted":0,"astCount":2,"ast":[{"type":"create_table","name":"books","start":1,"end":7},{"type":"create_table","name":"preorders","start":9,"end":15}],"conversationKey":"bookstore-demo::a-2::assistant"}]}</script>
   <script>
     const data = JSON.parse(document.getElementById("trace-data").textContent);
     const state = { file: "all", role: "all", q: "", selectedChangeId: null };
@@ -290,6 +292,8 @@
       const maxHeight = Math.max(180, Math.max(convs.length * 64 + 120, changes.length * 54 + 120));
       svg.setAttribute("viewBox", "0 0 980 " + maxHeight);
 
+      // conversation -> change edges
+      // conversation -> change edges
       changes.forEach((ch) => {
         const y1 = (convY.get(ch.conversationKey) || 60) + 20;
         const y2 = (changeY.get(ch.id) || 60) + 20;
@@ -301,6 +305,38 @@
         line.setAttribute("y2", String(y2));
         viewport.appendChild(line);
       });
+
+      // change -> change sequence edges (chronological order)
+      const sorted = [...changes].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      for (let i = 0; i < sorted.length - 1; i += 1) {
+        const from = sorted[i];
+        const to = sorted[i + 1];
+        const y1 = (changeY.get(from.id) || 60) + 20;
+        const y2 = (changeY.get(to.id) || 60) + 20;
+        const seq = document.createElementNS(NS, "line");
+        seq.setAttribute("class", "edge sequence");
+        seq.setAttribute("x1", "780");
+        seq.setAttribute("y1", String(y1));
+        seq.setAttribute("x2", "780");
+        seq.setAttribute("y2", String(y2));
+        viewport.appendChild(seq);
+      }
+
+      // change -> change sequence edges (chronological order)
+      const sorted = [...changes].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      for (let i = 0; i < sorted.length - 1; i += 1) {
+        const from = sorted[i];
+        const to = sorted[i + 1];
+        const y1 = (changeY.get(from.id) || 60) + 20;
+        const y2 = (changeY.get(to.id) || 60) + 20;
+        const seq = document.createElementNS(NS, "line");
+        seq.setAttribute("class", "edge sequence");
+        seq.setAttribute("x1", "780");
+        seq.setAttribute("y1", String(y1));
+        seq.setAttribute("x2", "780");
+        seq.setAttribute("y2", String(y2));
+        viewport.appendChild(seq);
+      }
 
       convs.forEach((conv) => {
         const y = convY.get(conv.key) || 60;

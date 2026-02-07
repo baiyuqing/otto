@@ -1,0 +1,2 @@
+{"conversation_id":"conv-demo-001","message_id":"msg-001","role":"user","created_at":"2026-02-07T10:00:00Z","content":"Please add a retry helper for API calls and update the service."}
+{"conversation_id":"conv-demo-001","message_id":"msg-002","role":"assistant","created_at":"2026-02-07T10:00:05Z","content":"I will add retryWithBackoff and wire it into ApiService.fetchData."}

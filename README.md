@@ -20,6 +20,11 @@ A lightweight workflow to correlate local file edits with LLM conversation conte
 npm install
 ```
 
+## Manuals
+
+- Install guide: `docs/INSTALL.md`
+- Codex plugin guide: `docs/CODEX_PLUGIN_MANUAL.md`
+
 ## Usage
 
 ### 1. Start the watcher
@@ -29,6 +34,7 @@ npm run trace:watch -- --conversation-log /path/to/conversation.jsonl
 ```
 
 Notes:
+
 - The conversation log is expected to be JSONL (one JSON object per line).
 - If no log is provided, entries are still recorded but the conversation fields will be null.
 
@@ -37,6 +43,25 @@ Notes:
 ```bash
 npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg
 ```
+
+### 3. Generate interactive HTML UI
+
+```bash
+npm run trace:ui -- --log docs/agent-trace.md --out docs/agent-trace.html
+```
+
+This writes:
+
+- `docs/agent-trace.html` (interactive graph with filter/search/detail panel)
+- `docs/agent-trace.json` (normalized graph data)
+
+### 4. One-command demo output
+
+```bash
+npm run trace:demo-ui
+```
+
+This generates a complete demo set in `docs/demo-clean/` and `demo/workspace/`.
 
 ### Optional: Log Codex CLI conversations
 
@@ -88,9 +113,9 @@ Entries are appended to `docs/agent-trace.md`. Each entry includes a human-reada
 
 ## Customization
 
-- Excludes are defined in `scripts/trace_watch.py` (`DEFAULT_EXCLUDES`).
-- Language mapping is defined in `scripts/trace_watch.py` (`LANG_BY_EXT`).
-- SVG layout is implemented in `scripts/trace_svg.py`.
+- Excludes are defined in `scripts/trace_watch.ts` (`DEFAULT_EXCLUDES`).
+- Language mapping is defined in `scripts/trace_watch.ts` (`LANG_BY_EXT`).
+- SVG layout is implemented in `scripts/trace_svg.ts`.
 
 ## Limitations
 

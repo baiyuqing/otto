@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="180">
+<style>text{font-family:Arial,sans-serif;font-size:12px;}</style>
+<rect width="100%" height="100%" fill="#fff" />
+<text x="40" y="24" fill="#111">Conversation</text>
+<rect x="40" y="52" width="420" height="36" rx="6" fill="#f2f4f8" stroke="#cbd5e1" />
+<text x="50" y="74" fill="#111">assistant msg-102</text>
+<text x="520" y="24" fill="#111">Change</text>
+<rect x="520" y="52" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="68" fill="#0f172a">api_service.ts</text>
+<text x="530" y="82" fill="#475569">+23 -1; function_declaration retryWithBackoff (1-14), function_declaration fetchData (16-22)</text>
+<rect x="520" y="104" width="440" height="36" rx="6" fill="#eef6ff" stroke="#93c5fd" />
+<text x="530" y="120" fill="#0f172a">api_service.ts</text>
+<text x="530" y="134" fill="#475569">+4 -0; function_declaration parseJson (24-26)</text>
+<line x1="460" y1="70" x2="520" y2="70" stroke="#94a3b8" stroke-width="1.5" />
+<line x1="460" y1="70" x2="520" y2="122" stroke="#94a3b8" stroke-width="1.5" />
+</svg>

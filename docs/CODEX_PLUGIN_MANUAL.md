@@ -22,7 +22,7 @@ npm install
 把 Skill 链接到 Codex 技能目录：
 
 ```bash
-ln -s /Users/baiyuqing/Work/code/ai/otto/skills/agent-trace /Users/baiyuqing/.codex/skills/agent-trace
+ln -s /path/to/repo/skills/agent-trace \"${CODEX_HOME:-$HOME/.codex}/skills/agent-trace\"
 ```
 
 如果你使用自定义 `CODEX_HOME`，把目标路径替换为 `$CODEX_HOME/skills/agent-trace`。

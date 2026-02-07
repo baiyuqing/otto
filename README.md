@@ -20,6 +20,11 @@ A lightweight workflow to correlate local file edits with LLM conversation conte
 npm install
 ```
 
+## Manuals
+
+- Install guide: `docs/INSTALL.md`
+- Codex plugin guide: `docs/CODEX_PLUGIN_MANUAL.md`
+
 ## Usage
 
 ### 1. Start the watcher
@@ -88,9 +93,9 @@ Entries are appended to `docs/agent-trace.md`. Each entry includes a human-reada
 
 ## Customization
 
-- Excludes are defined in `scripts/trace_watch.py` (`DEFAULT_EXCLUDES`).
-- Language mapping is defined in `scripts/trace_watch.py` (`LANG_BY_EXT`).
-- SVG layout is implemented in `scripts/trace_svg.py`.
+- Excludes are defined in `scripts/trace_watch.ts` (`DEFAULT_EXCLUDES`).
+- Language mapping is defined in `scripts/trace_watch.ts` (`LANG_BY_EXT`).
+- SVG layout is implemented in `scripts/trace_svg.ts`.
 
 ## Limitations
 

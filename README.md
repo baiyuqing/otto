@@ -96,11 +96,14 @@ npm test
 
 Entries are appended to `docs/agent-trace.md`. Each entry includes a human-readable summary and a JSON block with:
 
+- `schema_version` (log shape)
 - `timestamp` (UTC)
-- `conversation` (id, message_id, role, created_at, excerpt)
+- `conversation` (id, message_id, role, created_at, excerpt, optional model/tokens/latency/cost)
+- `conversation_window` (recent messages for context)
 - `file`
 - `change` (added, deleted, hunks)
-- `ast` (nodes intersecting modified lines)
+- `ast` (nodes intersecting modified lines plus language/grammar/confidence)
+- `git` (head, branch, dirty)
 
 ## Repository Layout
 

@@ -43,8 +43,9 @@ test("getLatestConversation reads JSONL last line", () => {
 });
 
 test("parseAst returns empty list when tree-sitter is unavailable", () => {
-  const nodes = parseAst("/tmp/example.py", "def foo():\n    return 1\n", [
+  const ast = parseAst("/tmp/example.py", "def foo():\n    return 1\n", [
     { old_start: 1, old_lines: 0, new_start: 1, new_lines: 1 },
   ]);
-  assert.ok(Array.isArray(nodes));
+  assert.ok(Array.isArray(ast.nodes));
+  assert.equal(ast.ok, false);
 });

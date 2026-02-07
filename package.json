@@ -9,7 +9,8 @@
     "trace:ui": "node --import tsx scripts/trace_ui.ts",
     "trace:demo-ui": "node --import tsx scripts/trace_demo_ui.ts",
     "codex:log": "node --import tsx scripts/codex_log.ts",
-    "test": "node --import tsx --test"
+    "test": "node --import tsx --test",
+    "demo:bookstore": "node --import tsx demo/bookstore/server.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

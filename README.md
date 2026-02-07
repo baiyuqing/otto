@@ -67,6 +67,19 @@ npm run trace:demo-ui
 
 This generates a complete demo set in `docs/demo-clean/` and `demo/workspace/`.
 
+### 5. Bookstore demo (TypeScript, in-memory + MySQL-ready)
+
+```bash
+npm run demo:bookstore
+```
+
+Then hit the API:
+
+- List books: `curl http://localhost:3000/books`
+- Preorder: `curl -X POST http://localhost:3000/preorders -H 'Content-Type: application/json' -d '{\"bookId\":\"1\",\"email\":\"you@example.com\"}'`
+
+Notes: persists in memory by default; optional MySQL schema lives in `demo/bookstore/schema.sql` (install `mysql2` and wire a pool if you want real storage).
+
 ### Optional: Log Codex CLI conversations
 
 If you use the Codex CLI and want `conversation.jsonl` to be written automatically, run the wrapper:

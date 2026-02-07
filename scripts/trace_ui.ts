@@ -243,6 +243,8 @@ export function renderHtml(data: UiData): string {
     .node.selected rect { fill: var(--selected); stroke: var(--accent); stroke-width: 2; }
     .edge { stroke: #94a3b8; stroke-width: 1.4; opacity: 0.55; }
     .edge.selected { stroke: var(--accent); stroke-width: 2; opacity: 1; }
+    .edge.sequence { stroke: #9ca3af; stroke-width: 1.5; stroke-dasharray: 4 3; opacity: 0.8; }
+    .edge.sequence { stroke: #9ca3af; stroke-width: 1.5; stroke-dasharray: 4 3; opacity: 0.8; }
     .kpi { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
     .kpi span {
       border: 1px solid var(--line);
@@ -446,6 +448,8 @@ export function renderHtml(data: UiData): string {
       const maxHeight = Math.max(180, Math.max(convs.length * 64 + 120, changes.length * 54 + 120));
       svg.setAttribute("viewBox", "0 0 980 " + maxHeight);
 
+      // conversation -> change edges
+      // conversation -> change edges
       changes.forEach((ch) => {
         const y1 = (convY.get(ch.conversationKey) || 60) + 20;
         const y2 = (changeY.get(ch.id) || 60) + 20;
@@ -457,6 +461,38 @@ export function renderHtml(data: UiData): string {
         line.setAttribute("y2", String(y2));
         viewport.appendChild(line);
       });
+
+      // change -> change sequence edges (chronological order)
+      const sorted = [...changes].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      for (let i = 0; i < sorted.length - 1; i += 1) {
+        const from = sorted[i];
+        const to = sorted[i + 1];
+        const y1 = (changeY.get(from.id) || 60) + 20;
+        const y2 = (changeY.get(to.id) || 60) + 20;
+        const seq = document.createElementNS(NS, "line");
+        seq.setAttribute("class", "edge sequence");
+        seq.setAttribute("x1", "780");
+        seq.setAttribute("y1", String(y1));
+        seq.setAttribute("x2", "780");
+        seq.setAttribute("y2", String(y2));
+        viewport.appendChild(seq);
+      }
+
+      // change -> change sequence edges (chronological order)
+      const sorted = [...changes].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      for (let i = 0; i < sorted.length - 1; i += 1) {
+        const from = sorted[i];
+        const to = sorted[i + 1];
+        const y1 = (changeY.get(from.id) || 60) + 20;
+        const y2 = (changeY.get(to.id) || 60) + 20;
+        const seq = document.createElementNS(NS, "line");
+        seq.setAttribute("class", "edge sequence");
+        seq.setAttribute("x1", "780");
+        seq.setAttribute("y1", String(y1));
+        seq.setAttribute("x2", "780");
+        seq.setAttribute("y2", String(y2));
+        viewport.appendChild(seq);
+      }
 
       convs.forEach((conv) => {
         const y = convY.get(conv.key) || 60;

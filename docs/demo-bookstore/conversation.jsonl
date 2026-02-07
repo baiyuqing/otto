@@ -1,0 +1,4 @@
+{"conversation_id":"bookstore-demo","message_id":"u-1","role":"user","created_at":"2026-02-07T12:00:00Z","content":"Build a minimal TypeScript bookstore API with GET /books and POST /preorders. Start with in-memory data."}
+{"conversation_id":"bookstore-demo","message_id":"a-1","role":"assistant","created_at":"2026-02-07T12:00:05Z","content":"I'll add an in-memory server in demo/bookstore/server.ts with /books and /preorders."}
+{"conversation_id":"bookstore-demo","message_id":"u-2","role":"user","created_at":"2026-02-07T12:01:10Z","content":"Also add a MySQL schema for persistence and seed two books."}
+{"conversation_id":"bookstore-demo","message_id":"a-2","role":"assistant","created_at":"2026-02-07T12:01:20Z","content":"Adding schema.sql with books and preorders tables plus seed data."}

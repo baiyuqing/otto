@@ -5,10 +5,13 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import process from "process";
+import { execSync } from "child_process";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
+
+const SCHEMA_VERSION = "2026-02-07";
 
 type ChangeHunk = {
   old_start: number;
@@ -19,6 +22,7 @@ type ChangeHunk = {
 
 type TraceEntry = {
   trace_entry: true;
+  schema_version: string;
   timestamp: string;
   conversation: {
     id: string | null;
@@ -26,10 +30,28 @@ type TraceEntry = {
     role: string | null;
     created_at: string | null;
     excerpt: string | null;
+    model?: string | null;
+    latency_ms?: number | null;
+    tokens_prompt?: number | null;
+    tokens_completion?: number | null;
+    cost_usd?: number | null;
   };
+  conversation_window: Array<{
+    id: string | null;
+    message_id: string | null;
+    role: string | null;
+    created_at: string | null;
+  }>;
   file: string;
   change: { added: number; deleted: number; hunks: ChangeHunk[] };
-  ast: Array<{ type: string; name: string | null; start: number; end: number }>;
+  ast: {
+    nodes: Array<{ type: string; name: string | null; start: number; end: number }>;
+    language: string | null;
+    grammar_version: string | null;
+    ok: boolean;
+    confidence: number;
+  };
+  git: { head: string | null; branch: string | null; dirty: boolean | null };
   summary: string;
 };
 
@@ -48,6 +70,7 @@ const require = createRequire(import.meta.url);
 type TreeSitterBundle = {
   Parser: any;
   languages: Record<string, any>;
+  versions: Record<string, string>;
 };
 
 let treeSitterBundle: TreeSitterBundle | null | undefined;
@@ -62,6 +85,11 @@ function loadTreeSitter(): TreeSitterBundle | null {
     const Go = require("tree-sitter-go");
     const JavaScript = require("tree-sitter-javascript");
     const TypeScript = require("tree-sitter-typescript");
+    const coreVersion = require("tree-sitter/package.json").version ?? null;
+    const pyVersion = require("tree-sitter-python/package.json").version ?? null;
+    const goVersion = require("tree-sitter-go/package.json").version ?? null;
+    const jsVersion = require("tree-sitter-javascript/package.json").version ?? null;
+    const tsVersion = require("tree-sitter-typescript/package.json").version ?? null;
     treeSitterBundle = {
       Parser,
       languages: {
@@ -72,6 +100,13 @@ function loadTreeSitter(): TreeSitterBundle | null {
         ".js": JavaScript,
         ".jsx": JavaScript,
         ".go": Go,
+      },
+      versions: {
+        core: coreVersion,
+        python: pyVersion,
+        go: goVersion,
+        javascript: jsVersion,
+        typescript: tsVersion,
       },
     };
   } catch {
@@ -166,6 +201,45 @@ export function getLatestConversation(logPath?: string) {
   };
 }
 
+export function getConversationWindow(logPath?: string, limit = 5) {
+  if (!logPath || !fs.existsSync(logPath)) {
+    return [] as Array<{ id: string | null; message_id: string | null; role: string | null; created_at: string | null }>;
+  }
+  const lines = fs.readFileSync(logPath, "utf8").split(/\r?\n/).reverse();
+  const window: Array<{ id: string | null; message_id: string | null; role: string | null; created_at: string | null }> =
+    [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj === "object") {
+        window.push({
+          id: obj.conversation_id ?? obj.id ?? null,
+          message_id: obj.message_id ?? obj.id ?? null,
+          role: obj.role ?? null,
+          created_at: obj.created_at ?? obj.timestamp ?? null,
+        });
+      }
+      if (window.length >= limit) break;
+    } catch {
+      continue;
+    }
+  }
+  return window.reverse();
+}
+
+export function getGitInfo(root: string) {
+  try {
+    const head = execSync("git rev-parse HEAD", { cwd: root, encoding: "utf8" }).trim();
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: root, encoding: "utf8" }).trim();
+    const dirty = execSync("git status --porcelain", { cwd: root, encoding: "utf8" }).trim().length > 0;
+    return { head, branch, dirty };
+  } catch {
+    return { head: null, branch: null, dirty: null };
+  }
+}
+
 export function parseDiff(oldText: string, newText: string) {
   const oldLines = oldText.split(/\r?\n/);
   const newLines = newText.split(/\r?\n/);
@@ -232,12 +306,24 @@ export function parseDiff(oldText: string, newText: string) {
 export function parseAst(filePath: string, newText: string, hunks: ChangeHunk[]) {
   const bundle = loadTreeSitter();
   if (!bundle) {
-    return [] as Array<{ type: string; name: string | null; start: number; end: number }>;
+    return {
+      nodes: [] as Array<{ type: string; name: string | null; start: number; end: number }>,
+      language: null,
+      grammar_version: null,
+      ok: false,
+      confidence: 0,
+    };
   }
   const ext = path.extname(filePath);
   const language = bundle.languages[ext];
   if (!language) {
-    return [] as Array<{ type: string; name: string | null; start: number; end: number }>;
+    return {
+      nodes: [] as Array<{ type: string; name: string | null; start: number; end: number }>,
+      language: ext || null,
+      grammar_version: bundle.versions.core ?? null,
+      ok: false,
+      confidence: 0,
+    };
   }
   const parser = new bundle.Parser();
   parser.setLanguage(language);
@@ -250,7 +336,13 @@ export function parseAst(filePath: string, newText: string, hunks: ChangeHunk[])
   });
 
   if (!ranges.length) {
-    return [] as Array<{ type: string; name: string | null; start: number; end: number }>;
+    return {
+      nodes: [] as Array<{ type: string; name: string | null; start: number; end: number }>,
+      language: ext || null,
+      grammar_version: bundle.versions.core ?? null,
+      ok: true,
+      confidence: 0.8,
+    };
   }
 
   function intersects(start: number, end: number) {
@@ -293,7 +385,13 @@ export function parseAst(filePath: string, newText: string, hunks: ChangeHunk[])
       unique.set(key, item);
     }
   }
-  return Array.from(unique.values()).slice(0, 12);
+  return {
+    nodes: Array.from(unique.values()).slice(0, 12),
+    language: ext || null,
+    grammar_version: bundle.versions.core ?? null,
+    ok: true,
+    confidence: 1,
+  };
 }
 
 export function summarizeNodes(nodes: Array<{ type: string; name: string | null; start: number; end: number }>) {
@@ -318,11 +416,13 @@ function appendMarkdown(logPath: string, entry: TraceEntry) {
   const lines: string[] = [];
   lines.push("");
   lines.push(`### ${entry.timestamp}`);
+  lines.push(`Schema: ${entry.schema_version}`);
   lines.push(`Conversation: id=${conv.id} message_id=${conv.message_id} role=${conv.role}`);
   if (conv.excerpt) {
     lines.push(`Excerpt: ${conv.excerpt}`);
   }
   lines.push(`File: \`${entry.file}\``);
+  lines.push(`Git: head=${entry.git.head} branch=${entry.git.branch} dirty=${entry.git.dirty}`);
   lines.push(`Summary: ${entry.summary}`);
   lines.push("```json");
   lines.push(JSON.stringify(entry, null, 2));
@@ -330,17 +430,27 @@ function appendMarkdown(logPath: string, entry: TraceEntry) {
   fs.appendFileSync(logPath, lines.join("\n"), "utf8");
 }
 
-function buildEntry(root: string, filePath: string, oldText: string, newText: string, conv: TraceEntry["conversation"]): TraceEntry {
+function buildEntry(
+  root: string,
+  filePath: string,
+  oldText: string,
+  newText: string,
+  conv: TraceEntry["conversation"],
+  conversationWindow: TraceEntry["conversation_window"]
+): TraceEntry {
   const change = parseDiff(oldText, newText);
-  const nodes = parseAst(filePath, newText, change.hunks);
-  const summary = `+${change.added} -${change.deleted}; ${summarizeNodes(nodes)}`;
+  const ast = parseAst(filePath, newText, change.hunks);
+  const summary = `+${change.added} -${change.deleted}; ${summarizeNodes(ast.nodes)}`;
   return {
     trace_entry: true,
+    schema_version: SCHEMA_VERSION,
     timestamp: utcNow(),
     conversation: conv,
+    conversation_window: conversationWindow,
     file: path.relative(root, filePath).replace(/\\/g, "/"),
     change,
-    ast: nodes,
+    ast,
+    git: getGitInfo(root),
     summary,
   };
 }
@@ -394,7 +504,8 @@ function main() {
         return;
       }
       const conv = getLatestConversation(conversationLog);
-      const entry = buildEntry(root, filePath, oldText, newText, conv);
+      const conversationWindow = getConversationWindow(conversationLog, 6);
+      const entry = buildEntry(root, filePath, oldText, newText, conv, conversationWindow);
       appendMarkdown(logPath, entry);
       state[rel] = { hash: newHash, content: newText, updated_at: utcNow() };
       saveState(statePath, state);

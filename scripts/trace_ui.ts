@@ -21,7 +21,15 @@ type RawTraceEntry = {
     deleted?: number;
     hunks?: Array<{ old_start?: number; old_lines?: number; new_start?: number; new_lines?: number }>;
   };
-  ast?: Array<{ type?: string; name?: string | null; start?: number; end?: number }>;
+  ast?:
+    | {
+        nodes?: Array<{ type?: string; name?: string | null; start?: number; end?: number }>;
+        language?: string | null;
+        grammar_version?: string | null;
+        ok?: boolean;
+        confidence?: number;
+      }
+    | Array<{ type?: string; name?: string | null; start?: number; end?: number }>;
 };
 
 type UiConversation = {
@@ -100,14 +108,17 @@ export function buildUiData(entries: RawTraceEntry[]): UiData {
     const file = normalizeText(raw.file, "unknown");
     fileSet.add(file);
 
-    const ast = Array.isArray(raw.ast)
-      ? raw.ast.map((node) => ({
-          type: normalizeText(node.type, "unknown"),
-          name: normalizeText(node.name, ""),
-          start: typeof node.start === "number" ? node.start : 0,
-          end: typeof node.end === "number" ? node.end : 0,
-        }))
-      : [];
+    const astArray = Array.isArray(raw.ast)
+      ? raw.ast
+      : Array.isArray((raw.ast as any)?.nodes)
+        ? (raw.ast as any).nodes
+        : [];
+    const ast = astArray.map((node) => ({
+      type: normalizeText((node as any).type, "unknown"),
+      name: normalizeText((node as any).name, ""),
+      start: typeof (node as any).start === "number" ? (node as any).start : 0,
+      end: typeof (node as any).end === "number" ? (node as any).end : 0,
+    }));
 
     changes.push({
       id: `chg-${index + 1}`,

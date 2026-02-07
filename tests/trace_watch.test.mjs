@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseDiff, summarizeNodes, sha256, getLatestConversation, parseAst } from "../scripts/trace_watch.ts";
+import {
+  parseDiff,
+  summarizeNodes,
+  sha256,
+  getLatestConversation,
+  getConversationWindow,
+  getGitInfo,
+  parseAst,
+} from "../scripts/trace_watch.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -42,9 +50,34 @@ test("getLatestConversation reads JSONL last line", () => {
   assert.equal(conv.role, "assistant");
 });
 
+test("getConversationWindow returns recent messages in order", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trace-"));
+  const log = path.join(dir, "conversation.jsonl");
+  fs.writeFileSync(
+    log,
+    JSON.stringify({ id: "c1", message_id: "m1", role: "user", created_at: "t1" }) + "\n" +
+      JSON.stringify({ id: "c2", message_id: "m2", role: "assistant", created_at: "t2" }) + "\n" +
+      JSON.stringify({ id: "c3", message_id: "m3", role: "assistant", created_at: "t3" }) + "\n",
+    "utf8",
+  );
+  const window = getConversationWindow(log, 2);
+  assert.equal(window.length, 2);
+  assert.equal(window[0].message_id, "m2");
+  assert.equal(window[1].message_id, "m3");
+});
+
+test("getGitInfo returns nulls outside a repo", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-trace-"));
+  const info = getGitInfo(dir);
+  assert.equal(info.head, null);
+  assert.equal(info.branch, null);
+  assert.equal(info.dirty, null);
+});
+
 test("parseAst returns empty list when tree-sitter is unavailable", () => {
-  const nodes = parseAst("/tmp/example.py", "def foo():\n    return 1\n", [
+  const ast = parseAst("/tmp/example.py", "def foo():\n    return 1\n", [
     { old_start: 1, old_lines: 0, new_start: 1, new_lines: 1 },
   ]);
-  assert.ok(Array.isArray(nodes));
+  assert.ok(Array.isArray(ast.nodes));
+  assert.equal(ast.ok, false);
 });

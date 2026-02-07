@@ -22,7 +22,7 @@ npm install
 把 Skill 链接到 Codex 技能目录：
 
 ```bash
-ln -s /path/to/repo/skills/agent-trace \"${CODEX_HOME:-$HOME/.codex}/skills/agent-trace\"
+ln -s /path/to/repo/skills/agent-trace "${CODEX_HOME:-$HOME/.codex}/skills/agent-trace"
 ```
 
 如果你使用自定义 `CODEX_HOME`，把目标路径替换为 `$CODEX_HOME/skills/agent-trace`。
@@ -103,5 +103,6 @@ npm test
 测试覆盖：
 
 - `tests/trace_watch.test.mjs`
+- `tests/trace_ui.test.mjs`
 - `tests/trace_svg.test.mjs`
 - `tests/e2e.mjs`

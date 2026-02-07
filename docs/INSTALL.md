@@ -23,6 +23,12 @@ npm run trace:watch -- --help
 
 If the help text prints, the installation is complete.
 
+Optionally verify the Codex conversation wrapper:
+
+```bash
+npm run codex:log -- --help
+```
+
 ## Optional: Enable Codex Skill
 
 If you want to trigger this workflow as a Codex skill, link the skill into your Codex skills directory:

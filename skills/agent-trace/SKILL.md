@@ -13,7 +13,7 @@ Use this skill to wire a local "conversation <> code change" trace system. The w
 
 1. Confirm the conversation log location and format (JSONL).
 2. Start the watcher to append entries to `docs/agent-trace.md`.
-3. Generate the SVG from the Markdown log.
+3. Generate SVG and/or interactive UI from the Markdown log.
 4. If mappings look wrong, adjust the log parser or AST language mapping.
 
 ## Commands
@@ -22,6 +22,10 @@ Use this skill to wire a local "conversation <> code change" trace system. The w
   - `npm run trace:watch -- --conversation-log /path/to/conversation.jsonl`
 - Generate SVG:
   - `npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg`
+- Generate UI:
+  - `npm run trace:ui -- --log docs/agent-trace.md --out docs/agent-trace.html`
+- Optional Codex wrapper:
+  - `npm run codex:log`
 
 ## Conversation Log Mapping
 
@@ -43,11 +47,14 @@ Language support is determined by file extension in `LANG_BY_EXT` inside `script
 
 Entries are appended to `docs/agent-trace.md`. Each entry includes a summary line and an embedded JSON block with:
 
+- `schema_version`
 - `timestamp` (UTC)
 - `conversation` (id, message_id, role, created_at, excerpt)
+- `conversation_window`
 - `file`
 - `change` (added, deleted, hunks)
-- `ast` (nodes intersecting modified lines)
+- `ast` (nodes + language + grammar version + confidence)
+- `git` (head, branch, dirty)
 
 The SVG renderer (`scripts/trace_svg.ts`) reads the JSON blocks and draws a two-column graph with linking lines.
 

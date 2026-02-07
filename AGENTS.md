@@ -18,8 +18,11 @@ This project is Node-based and runs TypeScript with `tsx`.
 - `npm install` or `pnpm install` installs dependencies.
 - `npm run trace:watch -- --conversation-log /path/to/conversation.jsonl` starts the watcher.
 - `npm run trace:svg -- --log docs/agent-trace.md --out docs/agent-trace.svg` renders the SVG.
+- `npm run trace:ui -- --log docs/agent-trace.md --out docs/agent-trace.html` renders the interactive UI.
+- `npm run codex:log` starts Codex with JSONL conversation capture.
+- `npm run test` runs the test suite.
 
-If you introduce tests, add a `test` script in `package.json` and document it here.
+Current tests live under `tests/` and are executed by `npm test`.
 
 ## Coding Style & Naming Conventions
 
@@ -34,11 +37,18 @@ If you add a formatter or linter (for example `prettier` or `eslint`), record th
 
 ## Testing Guidelines
 
-No automated tests are configured yet. If you add tests:
+Automated tests are configured with Node test runner. Existing files:
+
+- `tests/trace_watch.test.mjs`
+- `tests/trace_ui.test.mjs`
+- `tests/trace_svg.test.mjs`
+- `tests/e2e.mjs`
+
+When adding tests:
 
 - Place them under `tests/`.
 - Mirror the `scripts/` layout for integration tests.
-- Document how to run them in this file.
+- Keep tests deterministic across environments.
 
 ## Commit & Pull Request Guidelines
 

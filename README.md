@@ -96,6 +96,7 @@ Set `CODEX_CONV_LOG=/path/to/conversation.jsonl` to override the output location
 Test coverage is split into unit checks and an end-to-end flow.
 
 - Unit tests (`tests/trace_svg.test.mjs`) validate Markdown parsing, SVG rendering, and escaping.
+- Unit tests (`tests/trace_ui.test.mjs`) validate UI data normalization and HTML embedding.
 - Unit tests (`tests/trace_watch.test.mjs`) validate diff math, hashing, JSONL parsing, and AST fallback.
 - End-to-end (`tests/e2e.mjs`) validates file change → log entry → SVG output.
 

@@ -4,7 +4,7 @@
 
 `mysqlbench` is a lightweight MySQL workload probe written in Go.
 
-It repeatedly executes a SQL statement (default: `SELECT 1`) using the local `mysql` CLI and reports live latency/throughput statistics so you can quickly assess basic database responsiveness under concurrent load.
+It repeatedly executes a SQL statement (default: `SELECT 1`) using Go's MySQL client (`database/sql` + `go-sql-driver/mysql`) and reports live latency/throughput statistics so you can quickly assess basic database responsiveness under concurrent load.
 
 ## What it does
 
@@ -21,7 +21,6 @@ It repeatedly executes a SQL statement (default: `SELECT 1`) using the local `my
 
 - Go 1.24+
 - A reachable MySQL-compatible endpoint
-- `mysql` client binary installed and available in `PATH` (or provide `-mysql-bin`)
 
 ## Build
 
@@ -52,8 +51,6 @@ go build -o mysqlbench .
   - Total benchmark runtime.
 - `-report-interval` (default: `5s`)
   - Periodic reporting cadence.
-- `-mysql-bin` (default: `mysql`)
-  - Path to MySQL client executable.
 
 ## Output format
 
@@ -71,9 +68,8 @@ Final summary: ok=12345 err=12 elapsed=60.01s tps=205.72 p95=4.10ms p99=8.33ms m
 
 ## Notes and caveats
 
-- Query execution is delegated to an external `mysql` process per operation; measurements include that process invocation overhead.
-- Password is passed as a CLI argument (`-p...`) to `mysql`; be mindful of process visibility and shell history in shared environments.
-- DSNs that include query parameters are accepted, but only the database name before `?` is used for connection selection.
+- Query execution uses pooled Go MySQL connections; there is no per-operation process-spawn overhead.
+- Use a least-privilege database account for benchmarking to reduce risk when running write queries.
 
 ## Development
 

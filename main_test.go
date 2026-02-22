@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestQuantile(t *testing.T) {
 	vals := []float64{1, 2, 3, 4, 5}
@@ -14,3 +19,44 @@ func TestQuantile(t *testing.T) {
 		t.Fatalf("q50 got %v", got)
 	}
 }
+
+func TestHistogramQuantile(t *testing.T) {
+	h := newHistogram([]float64{1, 2, 5})
+	h.observe(0.8)
+	h.observe(1.2)
+	h.observe(10)
+
+	s := h.snapshot()
+	if s.count != 3 {
+		t.Fatalf("count=%d", s.count)
+	}
+	if got := s.quantile(0.95); got != 10 {
+		t.Fatalf("q95=%v", got)
+	}
+}
+
+func TestWritePrometheusMetrics(t *testing.T) {
+	m := newMetrics(time.Now().Add(-2 * time.Second))
+	m.record(1200*time.Microsecond, nil)
+	m.record(3*time.Millisecond, nil)
+	m.record(0, assertErr{})
+
+	rr := httptest.NewRecorder()
+	writePrometheusMetrics(rr, m)
+	out := rr.Body.String()
+
+	for _, want := range []string{
+		"mysqlbench_success_total 2",
+		"mysqlbench_failure_total 1",
+		"mysqlbench_latency_ms_count 2",
+		"mysqlbench_memory_alloc_bytes",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output: %s", want, out)
+		}
+	}
+}
+
+type assertErr struct{}
+
+func (assertErr) Error() string { return "boom" }

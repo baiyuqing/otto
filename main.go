@@ -214,10 +214,6 @@ func main() {
 		}
 	}()
 
-	if err := db.PingContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "database ping failed:", err)
-		os.Exit(1)
-	}
 	if err := runQuery(ctx, db, cfg.query); err != nil {
 		fmt.Fprintln(os.Stderr, "warmup query failed:", err)
 		os.Exit(1)

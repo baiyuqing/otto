@@ -20,6 +20,25 @@
 - Go 1.25+
 - 可访问的 MySQL（或兼容）实例
 
+## TLS 支持
+
+`mysqlbench` 基于 `go-sql-driver/mysql`，TLS 通过 DSN 参数进行配置。
+
+常见选项：
+
+- `tls=true`：强制使用 TLS（按主机信任链校验证书）。
+- `tls=skip-verify`：启用 TLS 但跳过证书/主机名校验（仅测试场景）。
+- `tls=preferred`：优先使用 TLS，不可用时允许回退到非 TLS。
+
+示例：
+
+```bash
+./mysqlbench \
+  -dsn 'root:password@tcp(127.0.0.1:3306)/mysql?tls=true' \
+  -concurrency 32 \
+  -duration 1m
+```
+
 ## 构建
 
 ```bash

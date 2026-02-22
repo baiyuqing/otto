@@ -22,6 +22,25 @@ It repeatedly executes a SQL statement (default: `SELECT 1`) using Go's MySQL cl
 - Go 1.25+
 - A reachable MySQL-compatible endpoint
 
+## TLS support
+
+`mysqlbench` uses `go-sql-driver/mysql`, so TLS is configured through the DSN parameters.
+
+Common options:
+
+- `tls=true` — require TLS (certificate is verified against host trust store).
+- `tls=skip-verify` — enable TLS without certificate/hostname verification (testing only).
+- `tls=preferred` — use TLS when available, otherwise allow non-TLS fallback.
+
+Example:
+
+```bash
+./mysqlbench \
+  -dsn 'root:password@tcp(127.0.0.1:3306)/mysql?tls=true' \
+  -concurrency 32 \
+  -duration 1m
+```
+
 ## Build
 
 ```bash

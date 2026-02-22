@@ -15,6 +15,8 @@ It repeatedly executes a SQL statement (default: `SELECT 1`) using Go's MySQL cl
   - Success and error counts
   - TPS (transactions per second)
   - Latency `p95`, `p99`, and `max`
+  - Runtime memory usage (`mem_alloc_mb`, `mem_sys_mb`)
+- Optionally exposes Prometheus-compatible metrics over HTTP.
 - Prints a final benchmark summary at the end.
 
 ## Requirements
@@ -70,6 +72,23 @@ go build -o mysqlbench .
   - Total benchmark runtime.
 - `-report-interval` (default: `5s`)
   - Periodic reporting cadence.
+- `-prometheus-listen` (default: empty)
+  - HTTP listen address for Prometheus scraping, e.g. `:9090`. Empty disables endpoint.
+- `-prometheus-path` (default: `/metrics`)
+  - HTTP path for Prometheus metrics.
+
+## Prometheus metrics
+
+Enable the metrics endpoint with `-prometheus-listen`:
+
+```bash
+./mysqlbench \
+  -dsn 'root:password@tcp(127.0.0.1:3306)/mysql' \
+  -prometheus-listen ':9090' \
+  -prometheus-path '/metrics'
+```
+
+Then scrape `http://localhost:9090/metrics`. Exported series include success/error counters, TPS gauge, latency histogram, and Go memory gauges.
 
 ## Output format
 

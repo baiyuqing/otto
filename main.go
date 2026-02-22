@@ -2,13 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
 	"math"
-	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sort"
 	"strings"
@@ -16,6 +15,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	_ "github.com/go-sql-driver/mysql"
 )
 
 type config struct {
@@ -24,15 +25,6 @@ type config struct {
 	concurrency    int
 	duration       time.Duration
 	reportInterval time.Duration
-	mysqlBin       string
-}
-
-type mysqlTarget struct {
-	user string
-	pass string
-	host string
-	port string
-	db   string
 }
 
 type metrics struct {
@@ -45,45 +37,6 @@ type metrics struct {
 	windowLatency []float64
 	totalLatency  []float64
 	startedAt     time.Time
-}
-
-func parseDSN(dsn string) (mysqlTarget, error) {
-	// expected: user:pass@tcp(host:port)/db
-	var t mysqlTarget
-	at := strings.Index(dsn, "@tcp(")
-	if at <= 0 {
-		return t, errors.New("dsn must look like user:pass@tcp(host:port)/db")
-	}
-	creds := dsn[:at]
-	rest := dsn[at+5:]
-
-	credsParts := strings.SplitN(creds, ":", 2)
-	if len(credsParts) != 2 || credsParts[0] == "" {
-		return t, errors.New("dsn credentials must be user:pass")
-	}
-	t.user = credsParts[0]
-	t.pass = credsParts[1]
-
-	closeIdx := strings.Index(rest, ")/")
-	if closeIdx <= 0 {
-		return t, errors.New("dsn missing )/ after host:port")
-	}
-	hostPort := rest[:closeIdx]
-	after := rest[closeIdx+2:]
-	if hostPort == "" || after == "" {
-		return t, errors.New("dsn must include host:port and db")
-	}
-	h, p, err := net.SplitHostPort(hostPort)
-	if err != nil {
-		return t, fmt.Errorf("invalid host:port %q: %w", hostPort, err)
-	}
-	t.host = h
-	t.port = p
-	t.db = strings.SplitN(after, "?", 2)[0]
-	if t.db == "" {
-		return t, errors.New("dsn database name is empty")
-	}
-	return t, nil
 }
 
 func (m *metrics) record(duration time.Duration, err error) {
@@ -155,12 +108,11 @@ func quantile(sorted []float64, q float64) float64 {
 
 func parseFlags() (config, error) {
 	cfg := config{}
-	flag.StringVar(&cfg.dsn, "dsn", "root:root@tcp(127.0.0.1:3306)/mysql", "MySQL DSN (user:pass@tcp(host:port)/db)")
+	flag.StringVar(&cfg.dsn, "dsn", "root:root@tcp(127.0.0.1:3306)/mysql", "MySQL DSN")
 	flag.StringVar(&cfg.query, "query", "SELECT 1", "SQL query")
 	flag.IntVar(&cfg.concurrency, "concurrency", 16, "Number of concurrent workers")
 	flag.DurationVar(&cfg.duration, "duration", 30*time.Second, "Benchmark duration")
 	flag.DurationVar(&cfg.reportInterval, "report-interval", 5*time.Second, "Statistics report interval")
-	flag.StringVar(&cfg.mysqlBin, "mysql-bin", "mysql", "Path to mysql client binary")
 	flag.Parse()
 
 	if cfg.concurrency <= 0 || cfg.duration <= 0 || cfg.reportInterval <= 0 {
@@ -172,19 +124,35 @@ func parseFlags() (config, error) {
 	return cfg, nil
 }
 
-func runQuery(ctx context.Context, bin string, t mysqlTarget, query string) error {
-	cmd := exec.CommandContext(ctx, bin,
-		"-h", t.host,
-		"-P", t.port,
-		"-u", t.user,
-		fmt.Sprintf("-p%s", t.pass),
-		"-D", t.db,
-		"-Nse", query,
-	)
-	return cmd.Run()
+func runQuery(ctx context.Context, db *sql.DB, query string) error {
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "does not return rows") {
+			_, execErr := db.ExecContext(ctx, query)
+			return execErr
+		}
+		return err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	vals := make([]any, len(cols))
+	scanArgs := make([]any, len(cols))
+	for i := range vals {
+		scanArgs[i] = &vals[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(scanArgs...); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
 
-func worker(ctx context.Context, cfg config, target mysqlTarget, m *metrics) {
+func worker(ctx context.Context, cfg config, db *sql.DB, m *metrics) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -192,7 +160,7 @@ func worker(ctx context.Context, cfg config, target mysqlTarget, m *metrics) {
 		default:
 		}
 		start := time.Now()
-		err := runQuery(ctx, cfg.mysqlBin, target, cfg.query)
+		err := runQuery(ctx, db, cfg.query)
 		m.record(time.Since(start), err)
 	}
 }
@@ -222,15 +190,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "invalid args:", err)
 		os.Exit(2)
 	}
-	target, err := parseDSN(cfg.dsn)
+
+	db, err := sql.Open("mysql", cfg.dsn)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "invalid dsn:", err)
-		os.Exit(2)
-	}
-	if _, err := exec.LookPath(cfg.mysqlBin); err != nil {
-		fmt.Fprintf(os.Stderr, "mysql binary %q not found: %v\n", cfg.mysqlBin, err)
+		fmt.Fprintln(os.Stderr, "failed to open dsn:", err)
 		os.Exit(1)
 	}
+	defer db.Close()
+	db.SetMaxOpenConns(cfg.concurrency)
+	db.SetMaxIdleConns(cfg.concurrency)
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
 	defer cancel()
@@ -246,7 +214,11 @@ func main() {
 		}
 	}()
 
-	if err := runQuery(ctx, cfg.mysqlBin, target, cfg.query); err != nil {
+	if err := db.PingContext(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "database ping failed:", err)
+		os.Exit(1)
+	}
+	if err := runQuery(ctx, db, cfg.query); err != nil {
 		fmt.Fprintln(os.Stderr, "warmup query failed:", err)
 		os.Exit(1)
 	}
@@ -257,7 +229,7 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(cfg.concurrency)
 	for i := 0; i < cfg.concurrency; i++ {
-		go func() { defer wg.Done(); worker(ctx, cfg, target, m) }()
+		go func() { defer wg.Done(); worker(ctx, cfg, db, m) }()
 	}
 	go reporter(ctx, m, cfg.reportInterval)
 

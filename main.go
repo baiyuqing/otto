@@ -147,6 +147,7 @@ func runQuery(ctx context.Context, db *sql.DB, query string) error {
 
 	cols, err := rows.Columns()
 	if err != nil {
+		_ = tx.Rollback()
 		return err
 	}
 	vals := make([]any, len(cols))

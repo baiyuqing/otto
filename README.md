@@ -19,7 +19,7 @@ It repeatedly executes a SQL statement (default: `SELECT 1`) using Go's MySQL cl
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.25+
 - A reachable MySQL-compatible endpoint
 
 ## Build

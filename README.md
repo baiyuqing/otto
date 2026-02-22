@@ -71,6 +71,38 @@ Final summary: ok=12345 err=12 elapsed=60.01s tps=205.72 p95=4.10ms p99=8.33ms m
 - Query execution uses pooled Go MySQL connections; there is no per-operation process-spawn overhead.
 - Use a least-privilege database account for benchmarking to reduce risk when running write queries.
 
+## Docker
+
+Build image:
+
+```bash
+docker build -t mysqlbench:latest .
+```
+
+Build a multi-arch image (x86_64 + arm64) with Buildx:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t mysqlbench:latest \
+  .
+```
+
+Run benchmark from container:
+
+```bash
+docker run --rm mysqlbench:latest \
+  -dsn 'root:password@tcp(host.docker.internal:3306)/mysql' \
+  -concurrency 32 \
+  -duration 1m
+```
+
+Open a shell with built-in diagnostics tools (`bash`, `curl`, `ping`, `nc`, `dig`, `mysql`):
+
+```bash
+docker run --rm -it --entrypoint bash mysqlbench:latest
+```
+
 ## Development
 
 Run tests:

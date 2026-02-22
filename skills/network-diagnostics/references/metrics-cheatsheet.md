@@ -3,34 +3,34 @@
 ## Core signals
 
 - **Packet loss (ping/mtr)**
-  - Sustained loss >1% is usually user-visible for real-time traffic.
-  - Burst loss with long quiet periods often maps to queue drops.
-- **Latency (RTT)**
-  - Higher average RTT with low jitter may indicate longer path.
-  - High jitter with occasional spikes suggests congestion or unstable queueing.
+  - Sustained loss >1% is often user-visible for real-time traffic.
+  - Loss to gateway implies local/LAN issue before WAN investigation.
+- **Latency and jitter**
+  - Higher baseline RTT with low jitter may indicate longer route/path change.
+  - High jitter and spikes suggest transient queueing or congestion.
 - **TCP retransmissions**
-  - Increasing retransmit counters during incidents confirms delivery problems.
-  - Retransmits with no packet loss in ICMP can still happen due to middleboxes/QoS.
+  - Rising retransmits during incidents indicate delivery impairment.
+  - Retransmits can rise even with low ICMP loss (QoS, middleboxes, asymmetry).
 - **Interface errors/drops**
-  - RX/TX errors or drops on host interfaces indicate local bottlenecks first.
+  - RX/TX drops, overruns, or errors on host NICs indicate local contention first.
 
 ## Fault-domain hints
 
 - **Likely local host/LAN issue**
-  - Interface drops/errors increase.
-  - Gateway ping unreliable.
+  - Gateway ping unstable, or interface drops/errors increase.
+  - Multiple remote targets fail similarly.
 - **Likely WAN/transit issue**
-  - Local gateway stable but remote target shows loss/jitter.
-  - mtr loss appears at or after ISP edge hops.
+  - Gateway stable, but remote targets show loss/jitter.
+  - mtr degradation begins at/after ISP edge hops.
 - **Likely remote service issue**
-  - Path mostly stable until final hop/service subnet.
-  - Only one destination impacted while peers are healthy.
+  - Only one destination/service subnet is degraded.
+  - Most path hops are stable until final segment.
 
 ## Escalation bundle
 
 Provide:
 
-1. Timestamped triage output from at least two runs.
-2. Source host, destination, and test duration.
-3. Percent loss, min/avg/max RTT, and retransmit trend.
-4. Any route/interface changes observed.
+1. Timestamped outputs from at least two runs (good vs bad window).
+2. Source host/region, destination(s), and test duration.
+3. Loss %, RTT min/avg/max, gateway-vs-target comparison.
+4. Retransmit/error counter trend and any route/interface changes.

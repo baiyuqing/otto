@@ -125,12 +125,22 @@ func parseFlags() (config, error) {
 }
 
 func runQuery(ctx context.Context, db *sql.DB, query string) error {
-	rows, err := db.QueryContext(ctx, query)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "does not return rows") {
-			_, execErr := db.ExecContext(ctx, query)
-			return execErr
+			_, execErr := tx.ExecContext(ctx, query)
+			if execErr != nil {
+				_ = tx.Rollback()
+				return execErr
+			}
+			return tx.Commit()
 		}
+		_ = tx.Rollback()
 		return err
 	}
 	defer rows.Close()
@@ -146,10 +156,15 @@ func runQuery(ctx context.Context, db *sql.DB, query string) error {
 	}
 	for rows.Next() {
 		if err := rows.Scan(scanArgs...); err != nil {
+			_ = tx.Rollback()
 			return err
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func worker(ctx context.Context, cfg config, db *sql.DB, m *metrics) {

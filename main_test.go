@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -60,3 +62,28 @@ func TestWritePrometheusMetrics(t *testing.T) {
 type assertErr struct{}
 
 func (assertErr) Error() string { return "boom" }
+
+func TestParseFlagsConnectionMode(t *testing.T) {
+	originalArgs := os.Args
+	originalFlagSet := flag.CommandLine
+	defer func() {
+		os.Args = originalArgs
+		flag.CommandLine = originalFlagSet
+	}()
+
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{"mysqlbench", "-connection-mode", connectionModePerTxn, "-duration", "1s", "-report-interval", "1s"}
+	cfg, err := parseFlags()
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if cfg.connectionMode != connectionModePerTxn {
+		t.Fatalf("connectionMode=%q", cfg.connectionMode)
+	}
+
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{"mysqlbench", "-connection-mode", "bad-mode", "-duration", "1s", "-report-interval", "1s"}
+	if _, err := parseFlags(); err == nil {
+		t.Fatal("expected invalid connection-mode error")
+	}
+}

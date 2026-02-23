@@ -62,6 +62,8 @@ go build -o mysqlbench .
   - MySQL DSN，格式为 `user:pass@tcp(host:port)/db`。
 - `-query`（默认：`SELECT 1`）
   - 每次操作执行的 SQL 语句。
+- `-connection-mode`（默认：`long-running`）
+  - 连接模式。`long-running` 表示整个压测期间复用连接池；`per-transaction` 表示每个事务新建一个连接并在事务完成后关闭。
 - `-concurrency`（默认：`16`）
   - 并发 worker 数量。
 - `-duration`（默认：`30s`）
@@ -85,7 +87,8 @@ Final summary: ok=12345 err=12 elapsed=60.01s tps=205.72 p95=4.10ms p99=8.33ms m
 
 ## 注意事项
 
-- 查询通过 Go 连接池复用连接执行；统计结果不再包含每次进程拉起开销。
+- 默认模式（`-connection-mode long-running`）通过 Go 连接池复用连接执行。
+- 如需模拟每笔事务独立建连，请使用 `-connection-mode per-transaction`。
 - 建议使用最小权限数据库账号执行压测，尤其是执行写入语句时。
 
 ## 开发与测试

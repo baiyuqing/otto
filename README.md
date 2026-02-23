@@ -66,6 +66,8 @@ go build -o mysqlbench .
   - MySQL DSN in `user:pass@tcp(host:port)/db` format.
 - `-query` (default: `SELECT 1`)
   - SQL executed for each operation.
+- `-connection-mode` (default: `long-running`)
+  - Connection strategy. `long-running` uses a shared pool for the full run; `per-transaction` opens and closes a new DB connection for each transaction.
 - `-concurrency` (default: `16`)
   - Number of concurrent workers.
 - `-duration` (default: `30s`)
@@ -106,7 +108,8 @@ Final summary: ok=12345 err=12 elapsed=60.01s tps=205.72 p95=4.10ms p99=8.33ms m
 
 ## Notes and caveats
 
-- Query execution uses pooled Go MySQL connections; there is no per-operation process-spawn overhead.
+- By default (`-connection-mode long-running`), queries use pooled Go MySQL connections.
+- Use `-connection-mode per-transaction` to force each transaction to open a fresh connection and close it afterwards.
 - Use a least-privilege database account for benchmarking to reduce risk when running write queries.
 
 ## Docker

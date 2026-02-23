@@ -25,12 +25,18 @@ import (
 type config struct {
 	dsn              string
 	query            string
+	connectionMode   string
 	concurrency      int
 	duration         time.Duration
 	reportInterval   time.Duration
 	prometheusListen string
 	prometheusPath   string
 }
+
+const (
+	connectionModeLongRunning = "long-running"
+	connectionModePerTxn      = "per-transaction"
+)
 
 type histogram struct {
 	bounds []float64
@@ -160,6 +166,7 @@ func parseFlags() (config, error) {
 	cfg := config{}
 	flag.StringVar(&cfg.dsn, "dsn", "root:root@tcp(127.0.0.1:3306)/mysql", "MySQL DSN")
 	flag.StringVar(&cfg.query, "query", "SELECT 1", "SQL query")
+	flag.StringVar(&cfg.connectionMode, "connection-mode", connectionModeLongRunning, "Connection mode: long-running or per-transaction")
 	flag.IntVar(&cfg.concurrency, "concurrency", 16, "Number of concurrent workers")
 	flag.DurationVar(&cfg.duration, "duration", 30*time.Second, "Benchmark duration")
 	flag.DurationVar(&cfg.reportInterval, "report-interval", 5*time.Second, "Statistics report interval")
@@ -173,10 +180,17 @@ func parseFlags() (config, error) {
 	if cfg.dsn == "" || cfg.query == "" {
 		return cfg, errors.New("dsn and query must not be empty")
 	}
+	if !isValidConnectionMode(cfg.connectionMode) {
+		return cfg, fmt.Errorf("invalid connection-mode %q: must be %q or %q", cfg.connectionMode, connectionModeLongRunning, connectionModePerTxn)
+	}
 	if cfg.prometheusListen != "" && !strings.HasPrefix(cfg.prometheusPath, "/") {
 		return cfg, errors.New("prometheus-path must start with '/'")
 	}
 	return cfg, nil
+}
+
+func isValidConnectionMode(mode string) bool {
+	return mode == connectionModeLongRunning || mode == connectionModePerTxn
 }
 
 func runQuery(ctx context.Context, db *sql.DB, query string) error {
@@ -223,7 +237,38 @@ func runQuery(ctx context.Context, db *sql.DB, query string) error {
 	return tx.Commit()
 }
 
-func worker(ctx context.Context, cfg config, db *sql.DB, m *metrics) {
+type queryRunner func(context.Context) error
+
+func makeQueryRunner(cfg config) (queryRunner, func(), error) {
+	if cfg.connectionMode == connectionModePerTxn {
+		runner := func(ctx context.Context) error {
+			db, err := sql.Open("mysql", cfg.dsn)
+			if err != nil {
+				return err
+			}
+			db.SetMaxOpenConns(1)
+			db.SetMaxIdleConns(0)
+			defer db.Close()
+			return runQuery(ctx, db, cfg.query)
+		}
+		return runner, func() {}, nil
+	}
+
+	db, err := sql.Open("mysql", cfg.dsn)
+	if err != nil {
+		return nil, nil, err
+	}
+	db.SetMaxOpenConns(cfg.concurrency)
+	db.SetMaxIdleConns(cfg.concurrency)
+
+	runner := func(ctx context.Context) error {
+		return runQuery(ctx, db, cfg.query)
+	}
+	cleanup := func() { _ = db.Close() }
+	return runner, cleanup, nil
+}
+
+func worker(ctx context.Context, run queryRunner, m *metrics) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -231,7 +276,7 @@ func worker(ctx context.Context, cfg config, db *sql.DB, m *metrics) {
 		default:
 		}
 		start := time.Now()
-		err := runQuery(ctx, db, cfg.query)
+		err := run(ctx)
 		m.record(time.Since(start), err)
 	}
 }
@@ -358,14 +403,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	db, err := sql.Open("mysql", cfg.dsn)
+	run, cleanup, err := makeQueryRunner(cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "failed to open dsn:", err)
+		fmt.Fprintln(os.Stderr, "failed to create query runner:", err)
 		os.Exit(1)
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(cfg.concurrency)
-	db.SetMaxIdleConns(cfg.concurrency)
+	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
 	defer cancel()
@@ -381,19 +424,19 @@ func main() {
 		}
 	}()
 
-	if err := runQuery(ctx, db, cfg.query); err != nil {
+	if err := run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "warmup query failed:", err)
 		os.Exit(1)
 	}
 
 	m := newMetrics(time.Now())
-	fmt.Printf("Starting mysqlbench: dsn=%q query=%q concurrency=%d duration=%s report_interval=%s\n", cfg.dsn, cfg.query, cfg.concurrency, cfg.duration, cfg.reportInterval)
+	fmt.Printf("Starting mysqlbench: dsn=%q query=%q connection_mode=%s concurrency=%d duration=%s report_interval=%s\n", cfg.dsn, cfg.query, cfg.connectionMode, cfg.concurrency, cfg.duration, cfg.reportInterval)
 	startPrometheusServer(ctx, cfg, m)
 
 	var wg sync.WaitGroup
 	wg.Add(cfg.concurrency)
 	for i := 0; i < cfg.concurrency; i++ {
-		go func() { defer wg.Done(); worker(ctx, cfg, db, m) }()
+		go func() { defer wg.Done(); worker(ctx, run, m) }()
 	}
 	go reporter(ctx, m, cfg.reportInterval)
 

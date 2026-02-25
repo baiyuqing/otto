@@ -5,8 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
+
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 type config struct {
@@ -86,4 +89,46 @@ func trimMatchingQuotes(s string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
+}
+
+func formatDSNForLog(dsn string) (string, error) {
+	cfg, err := mysqlDriver.ParseDSN(dsn)
+	if err != nil {
+		return "", err
+	}
+
+	paramPairs := make([]string, 0, len(cfg.Params))
+	for k, v := range cfg.Params {
+		paramPairs = append(paramPairs, fmt.Sprintf("%s=%s", k, v))
+	}
+	sort.Strings(paramPairs)
+
+	params := "-"
+	if len(paramPairs) > 0 {
+		params = strings.Join(paramPairs, ",")
+	}
+
+	loc := "-"
+	if cfg.Loc != nil {
+		loc = cfg.Loc.String()
+	}
+
+	tls := "-"
+	if cfg.TLSConfig != "" {
+		tls = cfg.TLSConfig
+	}
+
+	return fmt.Sprintf(
+		"user=%q password_set=%t net=%q addr=%q db=%q parse_time=%t tls=%q collation=%q loc=%q params=%s",
+		cfg.User,
+		cfg.Passwd != "",
+		cfg.Net,
+		cfg.Addr,
+		cfg.DBName,
+		cfg.ParseTime,
+		tls,
+		cfg.Collation,
+		loc,
+		params,
+	), nil
 }

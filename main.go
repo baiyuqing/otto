@@ -44,7 +44,12 @@ func main() {
 	}
 
 	m := newMetrics(time.Now())
-	fmt.Printf("Starting mysqlbench: dsn=%q query=%q connection_mode=%s concurrency=%d duration=%s report_interval=%s\n", cfg.dsn, cfg.query, cfg.connectionMode, cfg.concurrency, cfg.duration, cfg.reportInterval)
+	dsnLog, err := formatDSNForLog(cfg.dsn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to parse dsn for logging: %v\n", err)
+		dsnLog = "unparsed"
+	}
+	fmt.Printf("Starting mysqlbench: dsn={%s} query=%q connection_mode=%s concurrency=%d duration=%s report_interval=%s\n", dsnLog, cfg.query, cfg.connectionMode, cfg.concurrency, cfg.duration, cfg.reportInterval)
 	startPrometheusServer(ctx, cfg, m)
 
 	var wg sync.WaitGroup

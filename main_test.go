@@ -142,3 +142,34 @@ func TestParseFlagsDSNQuotedValue(t *testing.T) {
 		t.Fatalf("dsn=%q want=%q", cfg.dsn, wantDSN)
 	}
 }
+
+func TestFormatDSNForLog(t *testing.T) {
+	got, err := formatDSNForLog("mock.user:mock_password@tcp(127.0.0.1:3306)/test?parseTime=true&tls=true")
+	if err != nil {
+		t.Fatalf("formatDSNForLog returned error: %v", err)
+	}
+
+	for _, want := range []string{
+		`user="mock.user"`,
+		`password_set=true`,
+		`net="tcp"`,
+		`addr="127.0.0.1:3306"`,
+		`db="test"`,
+		`parse_time=true`,
+		`tls="true"`,
+		`params=-`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "mock_password") {
+		t.Fatalf("password should be redacted, got %q", got)
+	}
+}
+
+func TestFormatDSNForLogInvalid(t *testing.T) {
+	if _, err := formatDSNForLog("://bad"); err == nil {
+		t.Fatal("expected parse error for invalid dsn")
+	}
+}

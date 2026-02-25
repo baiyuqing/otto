@@ -87,3 +87,58 @@ func TestParseFlagsConnectionMode(t *testing.T) {
 		t.Fatal("expected invalid connection-mode error")
 	}
 }
+
+func TestParseFlagsDSNCombinedArgument(t *testing.T) {
+	originalArgs := os.Args
+	originalFlagSet := flag.CommandLine
+	defer func() {
+		os.Args = originalArgs
+		flag.CommandLine = originalFlagSet
+	}()
+
+	wantDSN := "NM3rfffVaeub.root:oo6Yv4caX6v5qLBx@tcp(10.0.7.254:4000)/test"
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{
+		"mysqlbench",
+		"-dsn '" + wantDSN + "'",
+		"-duration", "1s",
+		"-report-interval", "1s",
+	}
+
+	cfg, err := parseFlags()
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if cfg.dsn != wantDSN {
+		t.Fatalf("dsn=%q want=%q", cfg.dsn, wantDSN)
+	}
+	if gotUser := strings.SplitN(cfg.dsn, ":", 2)[0]; gotUser != "NM3rfffVaeub.root" {
+		t.Fatalf("username=%q", gotUser)
+	}
+}
+
+func TestParseFlagsDSNQuotedValue(t *testing.T) {
+	originalArgs := os.Args
+	originalFlagSet := flag.CommandLine
+	defer func() {
+		os.Args = originalArgs
+		flag.CommandLine = originalFlagSet
+	}()
+
+	wantDSN := "NM3rfffVaeub.root:oo6Yv4caX6v5qLBx@tcp(10.0.7.254:4000)/test"
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	os.Args = []string{
+		"mysqlbench",
+		"-dsn", "'" + wantDSN + "'",
+		"-duration", "1s",
+		"-report-interval", "1s",
+	}
+
+	cfg, err := parseFlags()
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if cfg.dsn != wantDSN {
+		t.Fatalf("dsn=%q want=%q", cfg.dsn, wantDSN)
+	}
+}

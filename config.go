@@ -33,7 +33,7 @@ func parseFlags() (config, error) {
 	flag.StringVar(&cfg.dsn, "dsn", "mock_user:mock_password@tcp(127.0.0.1:3306)/mysql", "MySQL DSN")
 	flag.StringVar(&cfg.query, "query", "SELECT 1", "SQL query")
 	flag.StringVar(&cfg.connectionMode, "connection-mode", connectionModeLongRunning, "Connection mode: long-running or per-transaction")
-	flag.IntVar(&cfg.concurrency, "concurrency", 16, "Number of concurrent workers")
+	flag.IntVar(&cfg.concurrency, "concurrency", 1, "Number of concurrent workers")
 	flag.DurationVar(&cfg.duration, "duration", 30*time.Second, "Benchmark duration")
 	flag.DurationVar(&cfg.reportInterval, "report-interval", 5*time.Second, "Statistics report interval")
 	flag.StringVar(&cfg.prometheusListen, "prometheus-listen", "", "Prometheus metrics listen address (e.g. :9090). Empty disables endpoint")

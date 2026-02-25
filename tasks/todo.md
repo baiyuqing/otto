@@ -32,3 +32,20 @@
 - Kept the same runtime flow in `main()` and moved parsing, metrics, query execution, and reporting into dedicated files.
 - Verified formatting and tests after refactor.
 - Validation: `go test ./...` passed.
+
+
+## Current Task: Robust DSN Flag Parsing
+
+- [x] Reproduce DSN parse failure for `"-dsn '...@tcp(...)'"` input shape.
+- [x] Normalize DSN CLI args to support combined token and quoted literal values.
+- [x] Add tests covering DSN normalization and account-segment preservation without hard-coded credentials.
+- [x] Run go test to verify behavior.
+- [x] Record review notes and verification in this task section.
+
+### Review
+
+- Reproduced the failing invocation shape where the entire `-dsn 'value'` arrives as one CLI argument.
+- Updated flag parsing to normalize combined DSN arguments and strip matching wrapping quotes from DSN values.
+- Added regression tests for both combined-argument and quoted-value DSN forms.
+- Verified account segment extraction remains stable for DSN inputs, without embedding concrete credentials.
+- Validation: `go test ./...` passed.

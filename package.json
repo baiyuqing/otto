@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "collab:seed-demo": "tsx src/collaboration/seed-demo.ts",
+    "collab:serve": "tsx src/collaboration/http-server.ts",
     "dev": "tsx src/cli.ts",
     "cli": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",

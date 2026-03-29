@@ -55,6 +55,10 @@ flowchart TD
 
 ```text
 src/
+  collaboration/
+    types.ts
+    store.ts
+    view-model.ts
   core/
     agent-kernel.ts
     types.ts
@@ -96,6 +100,7 @@ src/
     sqlite-index.ts
 docs/
   architecture.md
+  collaboration-ui.md
   soul.md
 ```
 
@@ -313,6 +318,90 @@ The first useful auto-configuration pass should inspect:
 - `SOUL.md`
 
 From that, the framework should enable a small set of built-in skills without asking the user to wire anything by hand.
+
+## Collaboration Model
+
+The framework should support three collaboration spaces:
+
+- `dm`: private user-agent conversation
+- `channel`: shared team conversation or thread
+- `agent`: internal agent-to-agent dialogue
+
+These should be first-class types, not transport-specific details. A channel thread and an internal worker dialogue may belong to the same task, but they should remain separate conversations with different visibility rules.
+
+```ts
+export type ConversationSpaceKind = "dm" | "channel" | "agent";
+export type ConversationKind = "root" | "thread";
+export type ConversationVisibility = "private" | "shared" | "internal";
+
+export interface CollaborationConversation {
+  id: string;
+  ref: ConversationRef;
+  visibility: ConversationVisibility;
+  title: string;
+  participantIds: string[];
+  taskId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollaborationTask {
+  id: string;
+  title: string;
+  status: CollaborationTaskStatus;
+  ownerAgentId: string;
+  runtimeTarget: string;
+  primaryConversationId: string;
+  internalConversationIds: string[];
+}
+```
+
+### Collaboration Rules
+
+- `dm` can use private memory
+- `channel` can use shared project memory only
+- `agent` can carry internal orchestration messages
+- internal agent dialogue must not be auto-published into the public channel thread
+
+This lets the framework show agent-to-agent discussion in the UI without polluting the team-facing conversation.
+
+## Database-First Collaboration
+
+For v1, a database can replace Slack as the collaboration substrate.
+
+Recommended role split:
+
+- files hold soul and curated long-term memory
+- database holds conversations, tasks, messages, approvals, and session state
+- Slack later becomes a projection or ingestion adapter, not the source of truth
+
+Recommended read interface:
+
+```ts
+export interface CollaborationStore {
+  listConversations(query?: CollaborationConversationQuery): Promise<CollaborationConversation[]>;
+  getConversation(conversationId: string): Promise<CollaborationConversation | null>;
+  listMessages(query: CollaborationMessageQuery): Promise<CollaborationMessage[]>;
+  listParticipants(participantIds: string[]): Promise<CollaborationParticipant[]>;
+  listTasks(query?: CollaborationTaskQuery): Promise<CollaborationTask[]>;
+  getTask(taskId: string): Promise<CollaborationTask | null>;
+}
+```
+
+This is the right place to back the system with SQLite first and Postgres later.
+
+## Frontend Read Model
+
+The UI should not query raw runtime events directly. It should consume a stable read model built from collaboration types.
+
+Required views:
+
+- inbox grouped by `dm`, `channel`, and `agent`
+- timeline view for one conversation
+- task sidebar with owner, runtime target, and linked conversations
+- linked view between a public thread and internal agent dialogue for the same task
+
+The read-model builder lives in `src/collaboration/view-model.ts`, and the higher-level UI design is documented in [docs/collaboration-ui.md](./collaboration-ui.md).
 
 ## Prompt System
 

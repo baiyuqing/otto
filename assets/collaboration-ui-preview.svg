@@ -1,0 +1,155 @@
+<svg width="1440" height="960" viewBox="0 0 1440 960" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="160" y1="60" x2="1280" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101826"/>
+      <stop offset="1" stop-color="#1B2433"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#182234"/>
+      <stop offset="1" stop-color="#121B29"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#223147"/>
+      <stop offset="1" stop-color="#182537"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#060A12" flood-opacity="0.35"/>
+    </filter>
+    <style>
+      .title { font: 700 34px "SF Pro Display", "Segoe UI", sans-serif; fill: #F3F5F8; }
+      .subtitle { font: 500 15px "SF Pro Text", "Segoe UI", sans-serif; fill: #A9B5C9; }
+      .panel-title { font: 700 18px "SF Pro Text", "Segoe UI", sans-serif; fill: #F8FAFC; }
+      .section-label { font: 700 13px "SF Pro Text", "Segoe UI", sans-serif; fill: #8EA1BA; letter-spacing: 0.08em; }
+      .card-title { font: 700 15px "SF Pro Text", "Segoe UI", sans-serif; fill: #F8FAFC; }
+      .body { font: 500 13px "SF Pro Text", "Segoe UI", sans-serif; fill: #C9D3E1; }
+      .muted { font: 500 12px "SF Pro Text", "Segoe UI", sans-serif; fill: #8C9AB0; }
+      .small { font: 600 11px "SF Pro Text", "Segoe UI", sans-serif; fill: #D4DEEB; letter-spacing: 0.06em; }
+      .pill { font: 700 11px "SF Pro Text", "Segoe UI", sans-serif; }
+      .lane { font: 700 13px "SF Pro Text", "Segoe UI", sans-serif; fill: #D8E2EE; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="960" fill="#0A111C"/>
+  <rect x="44" y="36" width="1352" height="888" rx="32" fill="url(#bg)" filter="url(#shadow)"/>
+
+  <text x="86" y="96" class="title">Otto Collaboration Console</text>
+  <text x="86" y="126" class="subtitle">DM / Channel / Agent Dialogue unified in one task view</text>
+
+  <rect x="72" y="156" width="300" height="736" rx="24" fill="url(#panel)" stroke="#22324A"/>
+  <rect x="392" y="156" width="660" height="736" rx="24" fill="url(#panel)" stroke="#22324A"/>
+  <rect x="1072" y="156" width="296" height="736" rx="24" fill="url(#panel)" stroke="#22324A"/>
+
+  <text x="102" y="198" class="panel-title">Inbox</text>
+  <text x="102" y="226" class="muted">三个会话面</text>
+
+  <text x="102" y="274" class="section-label">DIRECT MESSAGES</text>
+  <rect x="96" y="290" width="252" height="94" rx="18" fill="url(#card)" stroke="#2B405E"/>
+  <circle cx="126" cy="324" r="12" fill="#F1B44C"/>
+  <text x="148" y="322" class="card-title">Yuqing + Otto</text>
+  <text x="148" y="344" class="body">Can you review this idea?</text>
+  <text x="148" y="364" class="muted">Private DM</text>
+  <rect x="292" y="318" width="38" height="22" rx="11" fill="#24456B"/>
+  <text x="305" y="333" class="pill" fill="#A9D6FF">3</text>
+
+  <text x="102" y="430" class="section-label">CHANNEL CONVERSATIONS</text>
+  <rect x="96" y="446" width="252" height="112" rx="18" fill="#1D2E44" stroke="#2D5E78"/>
+  <rect x="108" y="460" width="76" height="24" rx="12" fill="#123B47"/>
+  <text x="126" y="476" class="pill" fill="#6CE0D6">RUNNING</text>
+  <text x="108" y="508" class="card-title">#design-thread</text>
+  <text x="108" y="530" class="body">The design draft is ready.</text>
+  <text x="108" y="550" class="muted">Channel Thread</text>
+  <text x="108" y="574" class="muted">updated 2m ago</text>
+
+  <text x="102" y="616" class="section-label">AGENT DIALOGUES</text>
+  <rect x="96" y="632" width="252" height="112" rx="18" fill="#231F36" stroke="#51407C"/>
+  <rect x="108" y="646" width="92" height="24" rx="12" fill="#352A57"/>
+  <text x="122" y="662" class="pill" fill="#D8C3FF">INTERNAL</text>
+  <text x="108" y="694" class="card-title">Task 42 internal</text>
+  <text x="108" y="716" class="body">Planner handed the task back.</text>
+  <text x="108" y="736" class="muted">Internal Agent Dialogue</text>
+  <text x="108" y="760" class="muted">2 worker agents</text>
+
+  <rect x="96" y="804" width="252" height="56" rx="16" fill="#111A28" stroke="#25354D"/>
+  <text x="118" y="838" class="body">Filter: all conversations</text>
+  <circle cx="314" cy="832" r="10" fill="#6CE0D6"/>
+
+  <text x="426" y="198" class="panel-title">Conversation</text>
+  <text x="426" y="226" class="muted">公开 thread 和内部 agent 对话可以切换查看</text>
+
+  <rect x="424" y="252" width="196" height="40" rx="20" fill="#163243" stroke="#286783"/>
+  <text x="454" y="277" class="body">#design-thread</text>
+  <rect x="632" y="252" width="230" height="40" rx="20" fill="#101928" stroke="#2C3D57"/>
+  <text x="662" y="277" class="body">task-42 internal agents</text>
+
+  <rect x="424" y="318" width="596" height="542" rx="20" fill="#0F1724" stroke="#25344D"/>
+
+  <line x1="562" y1="350" x2="562" y2="830" stroke="#23344D" stroke-dasharray="4 8"/>
+  <line x1="704" y1="350" x2="704" y2="830" stroke="#23344D" stroke-dasharray="4 8"/>
+  <line x1="846" y1="350" x2="846" y2="830" stroke="#23344D" stroke-dasharray="4 8"/>
+
+  <rect x="440" y="334" width="106" height="30" rx="15" fill="#172536"/>
+  <text x="476" y="354" class="lane">Yuqing</text>
+  <rect x="582" y="334" width="92" height="30" rx="15" fill="#1A2A3E"/>
+  <text x="614" y="354" class="lane">Otto</text>
+  <rect x="724" y="334" width="104" height="30" rx="15" fill="#221F39"/>
+  <text x="752" y="354" class="lane">Planner</text>
+  <rect x="868" y="334" width="110" height="30" rx="15" fill="#172434"/>
+  <text x="900" y="354" class="lane">System</text>
+
+  <rect x="450" y="390" width="160" height="78" rx="18" fill="#F2B957"/>
+  <text x="468" y="420" font-family="SF Pro Text, Segoe UI, sans-serif" font-size="14" font-weight="700" fill="#1B1E26">Can you review</text>
+  <text x="468" y="440" font-family="SF Pro Text, Segoe UI, sans-serif" font-size="14" font-weight="700" fill="#1B1E26">this collaboration idea?</text>
+  <text x="468" y="458" class="muted" fill="#5E4B1A">13:08</text>
+
+  <rect x="590" y="486" width="172" height="92" rx="18" fill="#17334A" stroke="#2D6D8E"/>
+  <text x="608" y="516" class="card-title">I drafted the public</text>
+  <text x="608" y="536" class="card-title">model and DB-first path.</text>
+  <rect x="608" y="548" width="64" height="22" rx="11" fill="#11495B"/>
+  <text x="622" y="563" class="pill" fill="#7FE5DD">STATUS</text>
+  <text x="608" y="574" class="muted">Otto · 13:11</text>
+
+  <rect x="732" y="610" width="180" height="86" rx="18" fill="#2A2146" stroke="#5E4EA0"/>
+  <text x="750" y="640" class="card-title">I will own the planning</text>
+  <text x="750" y="660" class="card-title">and task breakdown.</text>
+  <text x="750" y="682" class="muted">Planner · 13:12</text>
+
+  <rect x="874" y="462" width="122" height="64" rx="18" fill="#182B3C" stroke="#35536E"/>
+  <text x="892" y="490" class="card-title">handoff</text>
+  <text x="892" y="510" class="body">Planner -> Otto</text>
+
+  <rect x="592" y="720" width="198" height="84" rx="18" fill="#18293B" stroke="#385776"/>
+  <text x="610" y="748" class="card-title">Result: keep DM, channel,</text>
+  <text x="610" y="768" class="card-title">and agent dialogue separate.</text>
+  <text x="610" y="790" class="muted">visible in one task shell</text>
+
+  <text x="1102" y="198" class="panel-title">Task Sidebar</text>
+  <text x="1102" y="226" class="muted">一个任务串起公开协作和内部协作</text>
+
+  <rect x="1096" y="256" width="248" height="104" rx="18" fill="#1B2C42" stroke="#32506F"/>
+  <text x="1118" y="286" class="section-label">ACTIVE TASK</text>
+  <text x="1118" y="314" class="card-title">Design collaboration UI</text>
+  <text x="1118" y="336" class="body">owner: Otto</text>
+  <text x="1222" y="336" class="body">runtime: codex</text>
+
+  <rect x="1096" y="384" width="248" height="126" rx="18" fill="#121C2B" stroke="#253851"/>
+  <text x="1118" y="414" class="section-label">STATE</text>
+  <rect x="1118" y="430" width="88" height="24" rx="12" fill="#123B47"/>
+  <text x="1144" y="446" class="pill" fill="#6CE0D6">RUNNING</text>
+  <text x="1118" y="478" class="body">Public thread linked</text>
+  <text x="1118" y="500" class="body">Internal worker dialogue linked</text>
+
+  <rect x="1096" y="534" width="248" height="158" rx="18" fill="#111A28" stroke="#253851"/>
+  <text x="1118" y="564" class="section-label">LINKED CONVERSATIONS</text>
+  <rect x="1118" y="580" width="204" height="38" rx="14" fill="#172536"/>
+  <text x="1134" y="603" class="body">#design-thread</text>
+  <rect x="1118" y="628" width="204" height="38" rx="14" fill="#1F1E34"/>
+  <text x="1134" y="651" class="body">task-42 internal agents</text>
+  <rect x="1118" y="676" width="110" height="24" rx="12" fill="#2C2747"/>
+  <text x="1144" y="692" class="pill" fill="#D7C6FF">PRIVATE MEMORY</text>
+
+  <rect x="1096" y="716" width="248" height="144" rx="18" fill="#121C2B" stroke="#253851"/>
+  <text x="1118" y="746" class="section-label">APPROVALS AND NOTES</text>
+  <text x="1118" y="776" class="body">DM can use private memory.</text>
+  <text x="1118" y="798" class="body">Channel can use shared memory only.</text>
+  <text x="1118" y="820" class="body">Internal agent chat stays off-channel.</text>
+</svg>

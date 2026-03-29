@@ -23,7 +23,7 @@ Treat the runtime as an executor and the framework as the persistent mind.
 - Runtime: can read, write, call tools, and stream tokens
 - Framework: decides what to remember, what to inject, how to behave, and how to stay consistent
 
-The key abstraction is an `AgentKernel` that sits above runtime adapters. A runtime target may be local, such as `codex`, or daemon-backed, such as `slock:codex`.
+The key abstraction is an `AgentKernel` that sits above runtime adapters. A runtime target may be local, such as `codex`, or daemon-backed, such as `remote:codex`.
 
 ## Architecture
 
@@ -40,10 +40,10 @@ flowchart TD
     F --> C
     G --> H["RuntimeInventory"]
     H --> I["Local Targets"]
-    H --> J["Slock Targets"]
+    H --> J["Remote Targets"]
     G --> K["RuntimeAdapter"]
     K --> L["Local Codex / Claude Code"]
-    K --> M["Slock Daemon Adapter"]
+    K --> M["Remote Daemon Adapter"]
     K --> N["Runtime Events"]
     N --> B
     B --> O["Reflection + Writeback"]
@@ -69,7 +69,7 @@ src/
     types.ts
     codex-runtime.ts
     claude-code-runtime.ts
-    slock-daemon.ts
+    remote-daemon.ts
   prompt/
     assembler.ts
     layers.ts
@@ -166,11 +166,11 @@ The framework should work well before the user writes custom config.
 
 The runtime layer is split into three pieces:
 
-1. `RuntimeDescriptor`: what target the user wants, for example `codex` or `slock:codex`
+1. `RuntimeDescriptor`: what target the user wants, for example `codex` or `remote:codex`
 2. `RuntimeInventoryProvider`: where available runtime targets come from
 3. `RuntimeAdapter`: how a target is actually executed
 
-This split matters because `slock` is not a model runtime itself. It is a transport and discovery layer that exposes multiple runtimes behind one daemon session.
+This split matters because the remote daemon is not a model runtime itself. It is a transport and discovery layer that exposes multiple runtimes behind one daemon session.
 
 ```ts
 export type RuntimeTarget = string;
@@ -213,18 +213,18 @@ export interface RuntimeAdapter {
 ### Inventory Responsibilities
 
 - list local static runtimes such as `demo`, `codex`, and `claude-code`
-- list daemon-backed runtimes such as `slock:claude`, `slock:codex`, and `slock:gemini`
+- list daemon-backed runtimes such as `remote:claude`, `remote:codex`, and `remote:gemini`
 - keep target naming stable even if transport changes underneath
 
-### Slock Modeling
+### Remote Daemon Modeling
 
-The framework should model Slock as:
+The framework should model the remote daemon as:
 
 - inventory source
 - daemon transport
 - multi-runtime host
 
-It should not model Slock as:
+It should not model the remote daemon as:
 
 - a replacement for the agent kernel
 - a replacement for soul or memory

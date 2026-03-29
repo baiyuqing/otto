@@ -18,7 +18,7 @@ export * from "./runtime/claude-code-runtime.js";
 export * from "./runtime/codex-runtime.js";
 export * from "./runtime/demo-runtime.js";
 export * from "./runtime/inventory.js";
-export * from "./runtime/slock-daemon.js";
+export * from "./runtime/remote-daemon.js";
 export * from "./runtime/types.js";
 export * from "./session/types.js";
 export * from "./skills/registry.js";

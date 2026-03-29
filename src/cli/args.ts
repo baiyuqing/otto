@@ -8,9 +8,9 @@ export interface CliOptions {
   sessionHint?: string;
   json: boolean;
   listRuntimes: boolean;
-  slockRuntimes: string[];
-  slockServerUrl?: string;
-  slockMachineLabel?: string;
+  remoteRuntimes: string[];
+  remoteServerUrl?: string;
+  remoteMachineLabel?: string;
   message?: string;
 }
 
@@ -42,8 +42,8 @@ export function formatUsage(): string {
   return [
     "Usage:",
     '  npm run dev -- --runtime demo "your prompt"',
-    '  npm run dev -- --runtime slock:codex --slock-runtimes claude,codex,gemini "your prompt"',
-    "  npm run dev -- --list-runtimes --slock-runtimes claude,codex,gemini",
+    '  npm run dev -- --runtime remote:codex --remote-runtimes claude,codex,gemini "your prompt"',
+    "  npm run dev -- --list-runtimes --remote-runtimes claude,codex,gemini",
     '  npm run cli -- --runtime demo "your prompt"',
     "",
     "Options:",
@@ -51,9 +51,9 @@ export function formatUsage(): string {
     "  --workspace <path>",
     "  --session <session-id>",
     "  --list-runtimes",
-    "  --slock-runtimes <claude,codex,gemini>",
-    "  --slock-server-url <url>",
-    "  --slock-machine-label <label>",
+    "  --remote-runtimes <claude,codex,gemini>",
+    "  --remote-server-url <url>",
+    "  --remote-machine-label <label>",
     "  --json",
   ].join("\n");
 }
@@ -64,9 +64,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
   let sessionHint: string | undefined;
   let json = false;
   let listRuntimes = false;
-  let slockServerUrl: string | undefined;
-  let slockMachineLabel: string | undefined;
-  let slockRuntimes = parseCommaSeparated(process.env.SLOCK_RUNTIMES ?? "");
+  let remoteServerUrl: string | undefined;
+  let remoteMachineLabel: string | undefined;
+  let remoteRuntimes = parseCommaSeparated(process.env.REMOTE_RUNTIMES ?? "");
   const messageParts: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -95,16 +95,16 @@ export function parseCliArgs(argv: string[]): CliOptions {
       case "--list-runtimes":
         listRuntimes = true;
         break;
-      case "--slock-runtimes":
-        slockRuntimes = parseCommaSeparated(requireValue(argv, index, token));
+      case "--remote-runtimes":
+        remoteRuntimes = parseCommaSeparated(requireValue(argv, index, token));
         index += 1;
         break;
-      case "--slock-server-url":
-        slockServerUrl = requireValue(argv, index, token);
+      case "--remote-server-url":
+        remoteServerUrl = requireValue(argv, index, token);
         index += 1;
         break;
-      case "--slock-machine-label":
-        slockMachineLabel = requireValue(argv, index, token);
+      case "--remote-machine-label":
+        remoteMachineLabel = requireValue(argv, index, token);
         index += 1;
         break;
       case "--help":
@@ -128,9 +128,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(sessionHint ? { sessionHint } : {}),
     json,
     listRuntimes,
-    slockRuntimes,
-    ...(slockServerUrl ? { slockServerUrl } : {}),
-    ...(slockMachineLabel ? { slockMachineLabel } : {}),
+    remoteRuntimes,
+    ...(remoteServerUrl ? { remoteServerUrl } : {}),
+    ...(remoteMachineLabel ? { remoteMachineLabel } : {}),
     ...(message ? { message } : {}),
   };
 }

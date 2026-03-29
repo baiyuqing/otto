@@ -8,7 +8,7 @@ This repository already supports a useful local trial flow for the framework its
 - auto-detect built-in skills from the workspace
 - load `AGENT.md` or `AGENTS.md`
 - load `SOUL.md` if present
-- list local and Slock-style runtime targets
+- list local and remote daemon runtime targets
 - route a request into the kernel
 - see prompt-layer and runtime-target behavior end to end
 
@@ -16,14 +16,14 @@ What is **not** implemented yet:
 
 - real `Codex` execution
 - real `Claude Code` execution
-- real Slock daemon transport
+- real remote daemon transport
 - durable memory writeback beyond the null engine
 
 So the right way to trial this version is:
 
 - use `demo` to validate the framework flow
 - use `--list-runtimes` to validate runtime inventory
-- use `slock:*` targets to validate routing and target modeling
+- use `remote:*` targets to validate routing and target modeling
 
 ## Prerequisites
 
@@ -90,18 +90,18 @@ codex  [local]  Local Codex
 claude-code  [local]  Local Claude Code
 ```
 
-## Simulate Slock Runtime Discovery
+## Simulate Remote Runtime Discovery
 
-The current code can model Slock-discovered runtimes even though it does not execute them yet.
+The current code can model daemon-discovered remote runtimes even though it does not execute them yet.
 
-List local plus Slock-style targets:
+List local plus remote daemon targets:
 
 ```bash
 npm run dev -- \
   --list-runtimes \
-  --slock-runtimes claude,codex,gemini \
-  --slock-server-url https://api.slock.ai \
-  --slock-machine-label Yuqing
+  --remote-runtimes claude,codex,gemini \
+  --remote-server-url https://runtime.example.com \
+  --remote-machine-label Yuqing
 ```
 
 Expected output:
@@ -110,12 +110,12 @@ Expected output:
 demo  [local]  Local Demo Runtime
 codex  [local]  Local Codex
 claude-code  [local]  Local Claude Code
-slock:claude  [daemon]  Slock claude
-slock:codex  [daemon]  Slock codex
-slock:gemini  [daemon]  Slock gemini
+remote:claude  [daemon]  Remote claude
+remote:codex  [daemon]  Remote codex
+remote:gemini  [daemon]  Remote gemini
 ```
 
-This confirms that the framework now treats Slock as:
+This confirms that the framework now treats the remote daemon as:
 
 - runtime inventory source
 - daemon-backed transport layer
@@ -123,24 +123,24 @@ This confirms that the framework now treats Slock as:
 
 and not as one single runtime id.
 
-## Try Slock Routing
+## Try Remote Routing
 
-You can also verify that the framework routes `slock:*` correctly:
+You can also verify that the framework routes `remote:*` correctly:
 
 ```bash
 npm run dev -- \
-  --runtime slock:codex \
-  --slock-runtimes claude,codex,gemini \
-  "hello through slock"
+  --runtime remote:codex \
+  --remote-runtimes claude,codex,gemini \
+  "hello through remote"
 ```
 
 Expected result:
 
 ```text
-Slock daemon transport for "slock:codex" is not implemented yet.
+Remote daemon transport for "remote:codex" is not implemented yet.
 ```
 
-That error is expected. It proves the request was routed to the Slock daemon adapter instead of the local `codex` adapter.
+That error is expected. It proves the request was routed to the remote daemon adapter instead of the local `codex` adapter.
 
 ## Use a Specific Workspace
 
@@ -305,11 +305,11 @@ Use this checklist if you want to validate the framework quickly:
 1. `npm install`
 2. `npm run dev -- --runtime demo "show me bootstrap skills"`
 3. `npm run dev -- --list-runtimes`
-4. `npm run dev -- --list-runtimes --slock-runtimes claude,codex,gemini`
+4. `npm run dev -- --list-runtimes --remote-runtimes claude,codex,gemini`
 5. add a test `SOUL.md`
 6. add a test `AGENT.md` or `AGENTS.md`
 7. rerun the demo command with `--workspace`
-8. optionally run `npm run dev -- --runtime slock:codex --slock-runtimes claude,codex,gemini "hello"`
+8. optionally run `npm run dev -- --runtime remote:codex --remote-runtimes claude,codex,gemini "hello"`
 9. optionally run `npm run company:seed-demo -- .otto/company.sqlite` and inspect the small-company flow in the web UI
 
 If all of that works, the framework shell is behaving as designed.
@@ -324,7 +324,7 @@ You forgot the final free-form message, or you used a non-listing command withou
 
 The target is not in the current runtime inventory. Use `--list-runtimes` first.
 
-### `Slock daemon transport for "slock:codex" is not implemented yet.`
+### `Remote daemon transport for "remote:codex" is not implemented yet.`
 
 Expected for now. Discovery and routing exist; transport does not.
 
@@ -337,7 +337,7 @@ The selected workspace does not match any built-in skill conditions, or you ran 
 Once you are comfortable with this manual, the next meaningful step is to implement one of these:
 
 1. real `CodexRuntimeAdapter`
-2. real `SlockDaemonAdapter`
+2. real `RemoteDaemonAdapter`
 3. persistent session store
 4. file-backed memory engine
 

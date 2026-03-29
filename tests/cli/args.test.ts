@@ -6,22 +6,22 @@ describe("parseCliArgs", () => {
   it("parses runtime, workspace, session, json, and message", () => {
     const options = parseCliArgs([
       "--runtime",
-      "slock:codex",
+      "remote:codex",
       "--workspace",
       ".",
       "--session",
       "abc123",
-      "--slock-runtimes",
+      "--remote-runtimes",
       "claude,codex,gemini",
       "--json",
       "hello",
       "world",
     ]);
 
-    expect(options.runtimeTarget).toBe("slock:codex");
+    expect(options.runtimeTarget).toBe("remote:codex");
     expect(options.sessionHint).toBe("abc123");
     expect(options.json).toBe(true);
-    expect(options.slockRuntimes).toEqual(["claude", "codex", "gemini"]);
+    expect(options.remoteRuntimes).toEqual(["claude", "codex", "gemini"]);
     expect(options.message).toBe("hello world");
   });
 

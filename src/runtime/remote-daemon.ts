@@ -9,55 +9,55 @@ import type {
   RuntimeSessionRef,
 } from "./types.js";
 
-export type SlockRuntimeFamily = "claude" | "codex" | "gemini";
+export type RemoteRuntimeFamily = "claude" | "codex" | "gemini";
 
-export interface SlockDaemonConfig {
+export interface RemoteDaemonConfig {
   serverUrl?: string;
   machineLabel?: string;
 }
 
-export interface SlockDiscoveredRuntime {
-  family: SlockRuntimeFamily;
+export interface RemoteDiscoveredRuntime {
+  family: RemoteRuntimeFamily;
   label?: string;
   capabilities?: Partial<RuntimeCapabilities>;
 }
 
-export interface SlockDaemonBridge {
-  discoverRuntimes(): Promise<SlockDiscoveredRuntime[]>;
+export interface RemoteDaemonBridge {
+  discoverRuntimes(): Promise<RemoteDiscoveredRuntime[]>;
 }
 
-const defaultSlockCapabilities: RuntimeCapabilities = {
+const defaultRemoteCapabilities: RuntimeCapabilities = {
   canResumeSession: true,
   canInterrupt: true,
   supportsToolStreaming: true,
   supportsStructuredOutput: false,
 };
 
-export class StaticSlockDaemonBridge implements SlockDaemonBridge {
-  constructor(private readonly runtimes: SlockDiscoveredRuntime[]) {}
+export class StaticRemoteDaemonBridge implements RemoteDaemonBridge {
+  constructor(private readonly runtimes: RemoteDiscoveredRuntime[]) {}
 
-  async discoverRuntimes(): Promise<SlockDiscoveredRuntime[]> {
+  async discoverRuntimes(): Promise<RemoteDiscoveredRuntime[]> {
     return [...this.runtimes];
   }
 }
 
-export class SlockRuntimeInventoryProvider implements RuntimeInventoryProvider {
+export class RemoteRuntimeInventoryProvider implements RuntimeInventoryProvider {
   constructor(
-    private readonly bridge: SlockDaemonBridge,
-    private readonly config: SlockDaemonConfig = {},
+    private readonly bridge: RemoteDaemonBridge,
+    private readonly config: RemoteDaemonConfig = {},
   ) {}
 
   async list(): Promise<RuntimeDescriptor[]> {
     const runtimes = await this.bridge.discoverRuntimes();
 
     return runtimes.map((runtime) => ({
-      target: `slock:${runtime.family}`,
-      adapterId: "slock",
+      target: `remote:${runtime.family}`,
+      adapterId: "remote",
       family: runtime.family,
-      label: runtime.label ?? `Slock ${runtime.family}`,
+      label: runtime.label ?? `Remote ${runtime.family}`,
       transport: "daemon",
       capabilities: {
-        ...defaultSlockCapabilities,
+        ...defaultRemoteCapabilities,
         ...runtime.capabilities,
       },
       metadata: {
@@ -68,14 +68,14 @@ export class SlockRuntimeInventoryProvider implements RuntimeInventoryProvider {
   }
 }
 
-export class SlockDaemonAdapter extends StubRuntimeAdapter {
-  readonly adapterId = "slock";
+export class RemoteDaemonAdapter extends StubRuntimeAdapter {
+  readonly adapterId = "remote";
 
-  readonly capabilities = defaultSlockCapabilities;
+  readonly capabilities = defaultRemoteCapabilities;
 
   async *executeTurn(input: ExecuteTurnInput): AsyncIterable<RuntimeEvent> {
     throw new NotImplementedError(
-      `Slock daemon transport for "${input.descriptor.target}" is not implemented yet.`,
+      `Remote daemon transport for "${input.descriptor.target}" is not implemented yet.`,
     );
   }
 

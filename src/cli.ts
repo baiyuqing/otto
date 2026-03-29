@@ -13,10 +13,10 @@ import { CodexRuntimeAdapter } from "./runtime/codex-runtime.js";
 import { DemoRuntimeAdapter } from "./runtime/demo-runtime.js";
 import { CompositeRuntimeInventoryProvider, StaticRuntimeInventoryProvider } from "./runtime/inventory.js";
 import {
-  SlockDaemonAdapter,
-  SlockRuntimeInventoryProvider,
-  StaticSlockDaemonBridge,
-} from "./runtime/slock-daemon.js";
+  RemoteDaemonAdapter,
+  RemoteRuntimeInventoryProvider,
+  StaticRemoteDaemonBridge,
+} from "./runtime/remote-daemon.js";
 import type { RuntimeAdapter, RuntimeInventoryProvider } from "./runtime/types.js";
 import { InMemorySessionManager } from "./session/types.js";
 import { BuiltinSkillRegistry } from "./skills/registry.js";
@@ -56,18 +56,18 @@ async function main(): Promise<void> {
     ];
     const adapters: RuntimeAdapter[] = [...localAdapters];
 
-    if (options.slockRuntimes.length > 0) {
-      adapters.push(new SlockDaemonAdapter());
+    if (options.remoteRuntimes.length > 0) {
+      adapters.push(new RemoteDaemonAdapter());
       inventoryProviders.push(
-        new SlockRuntimeInventoryProvider(
-          new StaticSlockDaemonBridge(
-            options.slockRuntimes.map((family) => ({
+        new RemoteRuntimeInventoryProvider(
+          new StaticRemoteDaemonBridge(
+            options.remoteRuntimes.map((family) => ({
               family: family as "claude" | "codex" | "gemini",
             })),
           ),
           {
-            ...(options.slockServerUrl ? { serverUrl: options.slockServerUrl } : {}),
-            ...(options.slockMachineLabel ? { machineLabel: options.slockMachineLabel } : {}),
+            ...(options.remoteServerUrl ? { serverUrl: options.remoteServerUrl } : {}),
+            ...(options.remoteMachineLabel ? { machineLabel: options.remoteMachineLabel } : {}),
           },
         ),
       );

@@ -77,13 +77,13 @@ src/
   memory/
     engine.ts
     retrieval.ts
+    evolution.ts
     writeback.ts
     types.ts
     stores/
       working-store.ts
-      episodic-store.ts
-      semantic-store.ts
-      relationship-store.ts
+      factual-store.ts
+      experiential-store.ts
   persona/
     soul.ts
     soul-engine.ts
@@ -101,6 +101,8 @@ src/
 docs/
   architecture.md
   collaboration-ui.md
+  memory-architecture.md
+  memory-todo.md
   soul.md
 ```
 
@@ -117,17 +119,17 @@ Agent identity should remain inspectable without proprietary infrastructure.
 
 Indexes can be rebuilt. Core agent state should be human-readable.
 
-### 2. Deterministic recall before semantic recall
+### 2. Deterministic recall before deep retrieval
 
-Memory retrieval should not start with vector search.
+Memory retrieval should not start with a global embedding search.
 
 Recall order:
 
 1. session state
 2. task-local working memory
-3. pinned project memory
-4. relationship memory
-5. semantic retrieval
+3. pinned factual memory
+4. scoped experiential memory
+5. deep retrieval
 6. archived session summaries
 
 This keeps behavior stable and reduces retrieval noise.
@@ -150,7 +152,7 @@ Prompt composition should be traceable as:
 
 The framework may infer candidate soul changes, but it should not silently rewrite identity.
 
-- episodic and relationship memory can update automatically
+- factual and experiential memory can update automatically
 - soul changes should require approval or an explicit policy gate
 
 ### 5. Ease of use beats ceremony
@@ -236,6 +238,82 @@ It should not model the remote daemon as:
 - mutating `SOUL.md`
 - selecting project context
 - deciding whether a reflection should be persisted
+
+## Memory Model
+
+The framework should treat memory as a first-class subsystem rather than a prompt appendix.
+
+Use three functional memory classes:
+
+1. `working`
+2. `factual`
+3. `experiential`
+
+Keep `SOUL.md` separate from all three.
+
+### Working Memory
+
+Working memory is the active task frame.
+
+It should hold:
+
+- the current objective
+- the current plan
+- open loops
+- active files and artifacts
+- blockers and pending approvals
+- the latest concise task summary
+
+This is the highest-priority memory for turn quality.
+
+### Factual Memory
+
+Factual memory stores stable facts the agent may need again.
+
+Examples:
+
+- user collaboration preferences
+- project conventions
+- environment facts
+- accepted architectural decisions
+- confirmed team relationships
+
+Factual memory is not a chat log. Every item should be attributable and reviewable.
+
+### Experiential Memory
+
+Experiential memory stores lessons from doing work.
+
+Examples:
+
+- effective debugging paths
+- review patterns
+- known runtime quirks
+- common failure modes
+- previously successful task strategies
+
+Experiential memory should compress repeated episodes into reusable guidance instead of growing as raw logs forever.
+
+### Memory Dynamics
+
+The memory lifecycle should follow three stages:
+
+1. formation
+2. evolution
+3. retrieval
+
+Formation creates memory candidates from turns, activities, task transitions, and artifacts.
+
+Evolution deduplicates, supersedes, merges, forgets, and promotes memory over time.
+
+Retrieval selects the smallest high-value subset needed for the next turn.
+
+### Detailed Memory Design
+
+The dedicated design and rollout live in:
+
+- `docs/memory-architecture.md`
+- `docs/memory-todo.md`
 
 ## Agent Kernel
 

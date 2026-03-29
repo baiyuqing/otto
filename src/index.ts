@@ -9,6 +9,7 @@ export * from "./company/types.js";
 export * from "./core/agent-kernel.js";
 export * from "./core/types.js";
 export * from "./memory/engine.js";
+export * from "./memory/sqlite-store.js";
 export * from "./memory/types.js";
 export * from "./persona/soul.js";
 export * from "./prompt/assembler.js";

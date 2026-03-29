@@ -147,33 +147,38 @@ function createTaskLayer(userMessage: UserMessage): PromptLayer {
 function renderMemoryRecall(recall: MemoryRecall): string {
   const parts: string[] = [];
 
-  if (recall.pinned.length > 0) {
-    parts.push("### Pinned\n" + recall.pinned.map((entry) => `- ${entry}`).join("\n"));
+  if (recall.working) {
+    const workingLines = [
+      `- Objective: ${recall.working.objective}`,
+      ...(recall.working.summary.length > 0 ? [`- Summary: ${recall.working.summary}`] : []),
+      ...(recall.working.ownerAgentId ? [`- Owner: ${recall.working.ownerAgentId}`] : []),
+      ...(recall.working.plan.length > 0 ? [`- Plan: ${recall.working.plan.join(" | ")}`] : []),
+      ...(recall.working.openLoops.length > 0
+        ? [`- Open loops: ${recall.working.openLoops.join(" | ")}`]
+        : []),
+      ...(recall.working.blockers.length > 0 ? [`- Blockers: ${recall.working.blockers.join(" | ")}`] : []),
+      ...(recall.working.activeArtifacts.length > 0
+        ? [`- Active artifacts: ${recall.working.activeArtifacts.join(" | ")}`]
+        : []),
+    ];
+
+    parts.push("### Working\n" + workingLines.join("\n"));
   }
 
-  if (recall.episodic.length > 0) {
+  if (recall.factual.length > 0) {
     parts.push(
-      "### Episodic\n" +
-        recall.episodic
-          .map((entry) => `- ${entry.taskSummary} (${entry.outcome})`)
+      "### Factual\n" +
+        recall.factual
+          .map((entry) => `- ${entry.title}: ${entry.content}`)
           .join("\n"),
     );
   }
 
-  if (recall.semantic.length > 0) {
+  if (recall.experiential.length > 0) {
     parts.push(
-      "### Semantic\n" +
-        recall.semantic
-          .map((entry) => `- ${entry.topic}: ${entry.fact}`)
-          .join("\n"),
-    );
-  }
-
-  if (recall.relationship.length > 0) {
-    parts.push(
-      "### Relationship\n" +
-        recall.relationship
-          .map((entry) => `- ${entry.preference}`)
+      "### Experiential\n" +
+        recall.experiential
+          .map((entry) => `- ${entry.title}: ${entry.content}`)
           .join("\n"),
     );
   }
@@ -371,10 +376,9 @@ export class DefaultAgentKernel implements AgentKernel {
       diagnostics: {
         runtime: descriptor.target,
         recalledCounts: {
-          pinned: recall.pinned.length,
-          episodic: recall.episodic.length,
-          semantic: recall.semantic.length,
-          relationship: recall.relationship.length,
+          working: recall.working ? 1 : 0,
+          factual: recall.factual.length,
+          experiential: recall.experiential.length,
         },
         ...(skills.length > 0 ? { skills: skills.map((skill) => skill.id) } : {}),
         ...(usage ? { usage } : {}),

@@ -9,18 +9,17 @@ import type {
 export class NullMemoryEngine implements MemoryEngine {
   async recall(_query: MemoryRetrievalQuery): Promise<MemoryRecall> {
     return {
-      pinned: [],
-      episodic: [],
-      semantic: [],
-      relationship: [],
+      working: null,
+      factual: [],
+      experiential: [],
     };
   }
 
   async writeTurn(_input: TurnWritebackInput): Promise<WritebackReport> {
     return {
-      episodesWritten: 0,
-      semanticsWritten: 0,
-      relationshipsUpdated: 0,
+      workingMemoryUpdated: false,
+      factsWritten: 0,
+      experiencesWritten: 0,
       candidateSoulDeltas: 0,
     };
   }

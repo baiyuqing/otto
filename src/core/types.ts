@@ -28,10 +28,9 @@ export interface RuntimeError {
 export interface KernelDiagnostics {
   runtime: string;
   recalledCounts: {
-    pinned: number;
-    episodic: number;
-    semantic: number;
-    relationship: number;
+    working: number;
+    factual: number;
+    experiential: number;
   };
   skills?: string[];
   usage?: TokenUsage;

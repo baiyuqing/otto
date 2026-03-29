@@ -110,7 +110,7 @@ describe("DefaultAgentKernel", () => {
 
     expect(result.outputText).toBe("memory keeps identity");
     expect(result.session.sessionId).toContain("fake:");
-    expect(result.writeback.episodesWritten).toBe(0);
+    expect(result.writeback.factsWritten).toBe(0);
     expect(result.diagnostics.runtime).toBe("codex");
     expect(runtime.lastPrompt?.system).toContain("framework");
     expect(runtime.lastPrompt?.system).toContain("codex");

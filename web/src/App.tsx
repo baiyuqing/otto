@@ -9,6 +9,7 @@ import type {
   CollaborationMessage,
   CollaborationParticipant,
   CollaborationTask,
+  ActivityFeedItem,
   ConversationListItem,
   ConversationListSection,
   ConversationTimelineItem,
@@ -57,6 +58,18 @@ function getConversationMessages(
   conversationId: string,
 ): CollaborationMessage[] {
   return messages.filter((message) => message.conversationId === conversationId);
+}
+
+function getConversationActivities(
+  activities: typeof fallbackState.activities,
+  selectedConversation: CollaborationConversation,
+  task: CollaborationTask | undefined,
+) {
+  if (task) {
+    return activities.filter((activity) => activity.taskId === task.id);
+  }
+
+  return activities.filter((activity) => activity.conversationId === selectedConversation.id);
 }
 
 function getParticipant(participants: CollaborationParticipant[], participantId: string): CollaborationParticipant | undefined {
@@ -150,6 +163,26 @@ function visibilityTone(visibility: CollaborationConversation["visibility"]): st
     case "internal":
       return "violet";
   }
+}
+
+function getActivityTone(item: ActivityFeedItem): string {
+  if (item.status === "failed") {
+    return "rose";
+  }
+
+  if (item.status === "started") {
+    return "amber";
+  }
+
+  if (item.visibility === "internal") {
+    return "violet";
+  }
+
+  if (item.visibility === "shared") {
+    return "teal";
+  }
+
+  return "neutral";
 }
 
 interface InboxSectionProps {
@@ -284,10 +317,16 @@ export default function App() {
     selectedTask,
   );
   const selectedMessages = getConversationMessages(collaborationState.messages, selectedConversation.id);
+  const selectedActivities = getConversationActivities(
+    collaborationState.activities,
+    selectedConversation,
+    selectedTask,
+  );
   const detail = buildConversationDetailView({
     conversation: selectedConversation,
     participants: collaborationState.participants,
     messages: selectedMessages,
+    activities: selectedActivities,
     task: selectedTask,
     linkedConversations,
   });
@@ -455,6 +494,33 @@ export default function App() {
                     {conversation.visibility}
                   </span>
                 </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="detail-card">
+          <div className="detail-card__label">Recent activity</div>
+          {detail.activityFeed.length === 0 ? (
+            <div className="detail-card__text">No activity recorded for this conversation yet.</div>
+          ) : (
+            <div className="activity-list">
+              {detail.activityFeed.slice(0, 6).map((activity) => (
+                <div key={activity.id} className="activity-item">
+                  <div className="activity-item__header">
+                    <span className="activity-item__title">{activity.title}</span>
+                    <span className={`message-pill message-pill--${getActivityTone(activity)}`}>
+                      {activity.status}
+                    </span>
+                  </div>
+                  <div className="activity-item__meta">
+                    <span>{activity.actorLabel}</span>
+                    <span>{formatTime(activity.createdAt)}</span>
+                  </div>
+                  {activity.detail ? (
+                    <div className="detail-card__text">{activity.detail}</div>
+                  ) : null}
+                </div>
               ))}
             </div>
           )}

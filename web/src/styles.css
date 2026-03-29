@@ -23,6 +23,8 @@
   --violet-bg: #ede9fe;
   --indigo: #3730a3;
   --indigo-bg: #e0e7ff;
+  --rose: #be123c;
+  --rose-bg: #ffe4e6;
   --slate: #475569;
   --slate-bg: #e2e8f0;
   --shadow: 0 22px 48px rgba(15, 23, 42, 0.14);
@@ -317,6 +319,12 @@ button {
   background: #dcfce7;
 }
 
+.message-pill--rose,
+.status-pill--rose {
+  color: var(--rose);
+  background: var(--rose-bg);
+}
+
 .unread-pill {
   min-width: 24px;
   color: #2563eb;
@@ -495,10 +503,43 @@ button {
 }
 
 .linked-conversation-list,
-.participant-list {
+.participant-list,
+.activity-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.activity-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+
+.activity-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.activity-item__header,
+.activity-item__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-item__title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.activity-item__meta {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .linked-conversation-button {

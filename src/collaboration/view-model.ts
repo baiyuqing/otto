@@ -1,4 +1,5 @@
 import type {
+  CollaborationActivityEvent,
   CollaborationConversation,
   CollaborationMessage,
   CollaborationParticipant,
@@ -38,6 +39,18 @@ export interface ConversationTaskSummary {
   runtimeTarget: string;
 }
 
+export interface ActivityFeedItem {
+  id: string;
+  actorLabel: string;
+  actorKind: ParticipantKind;
+  kind: CollaborationActivityEvent["kind"];
+  status: CollaborationActivityEvent["status"];
+  title: string;
+  detail?: string;
+  visibility: CollaborationActivityEvent["visibility"];
+  createdAt: string;
+}
+
 export interface ConversationDetailView {
   conversationId: string;
   title: string;
@@ -45,6 +58,7 @@ export interface ConversationDetailView {
   visibility: ConversationVisibility;
   lanes: ConversationLane[];
   timeline: ConversationTimelineItem[];
+  activityFeed: ActivityFeedItem[];
   linkedConversations: ConversationLinkSummary[];
   activeTask?: ConversationTaskSummary;
 }
@@ -72,6 +86,7 @@ export interface BuildConversationDetailInput {
   conversation: CollaborationConversation;
   participants: CollaborationParticipant[];
   messages: CollaborationMessage[];
+  activities?: CollaborationActivityEvent[];
   task?: CollaborationTask;
   linkedConversations?: CollaborationConversation[];
 }
@@ -174,6 +189,27 @@ export function buildConversationDetailView(input: BuildConversationDetailInput)
       return item;
     });
 
+  const activityFeed = (input.activities ?? [])
+    .slice()
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map((activity) => {
+      const item: ActivityFeedItem = {
+        id: activity.id,
+        actorLabel: getParticipantLabel(participantMap, activity.actor.id),
+        actorKind: activity.actor.kind,
+        kind: activity.kind,
+        status: activity.status,
+        title: activity.title,
+        visibility: activity.visibility,
+        createdAt: activity.createdAt,
+      };
+      if (activity.detail) {
+        item.detail = activity.detail;
+      }
+
+      return item;
+    });
+
   const linkedConversations = (input.linkedConversations ?? []).map((conversation) => ({
     conversationId: conversation.id,
     title: conversation.title,
@@ -188,6 +224,7 @@ export function buildConversationDetailView(input: BuildConversationDetailInput)
     visibility: input.conversation.visibility,
     lanes,
     timeline,
+    activityFeed,
     linkedConversations,
   };
   if (input.task) {

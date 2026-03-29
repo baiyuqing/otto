@@ -365,6 +365,44 @@ export interface CollaborationTask {
 
 This lets the framework show agent-to-agent discussion in the UI without polluting the team-facing conversation.
 
+## Activity Events
+
+Messages are not enough. The framework should also capture agent actions as first-class activity events.
+
+Examples:
+
+- shell command started / finished
+- task status updated
+- GitHub comment added
+- channel history read
+- memory file changed
+- agent lifecycle state changed
+
+These events should be stored separately from user-visible messages, but linked to the same task and conversation model.
+
+```ts
+export interface CollaborationActivityEvent {
+  id: string;
+  taskId?: string;
+  conversationId?: string;
+  actor: MessageSenderRef;
+  kind: CollaborationActivityKind;
+  visibility: ConversationVisibility;
+  status: "started" | "completed" | "failed" | "info";
+  title: string;
+  detail?: string;
+  payload?: Record<string, boolean | number | string | null>;
+  createdAt: string;
+  endedAt?: string;
+  parentEventId?: string;
+}
+```
+
+This gives the UI a way to answer a different question:
+
+- messages answer "what did the agent say?"
+- activities answer "what did the agent do?"
+
 ## Database-First Collaboration
 
 For v1, a database can replace Slack as the collaboration substrate.

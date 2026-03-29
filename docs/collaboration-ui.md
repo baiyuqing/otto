@@ -8,6 +8,7 @@ The framework needs a front end that can show:
 - public channel conversations
 - task threads under a channel
 - internal agent-to-agent dialogue for the same task
+- agent activity events such as shell work, GitHub writes, task-state changes, and memory writeback
 
 The key design rule is that these are not the same surface, even if they all end up rendered in one UI.
 
@@ -29,6 +30,11 @@ Task
 Message
   -> belongs to one conversation
   -> carries sender, kind, visibility, and task linkage
+
+ActivityEvent
+  -> belongs to a task and optionally a conversation
+  -> records what the agent did, not only what it said
+  -> can be public, private, or internal
 ```
 
 ### Why this model
@@ -36,6 +42,7 @@ Message
 - DM and channel are different collaboration modes
 - thread is the real unit of work
 - internal agent coordination should be visible in the UI but should not pollute the public conversation
+- users need to see agent actions such as shell work, GitHub comments, and memory writes
 - Slack later becomes just one provider, not the core data model
 
 ## UI Surfaces
@@ -82,6 +89,7 @@ The right rail should show:
 - current owner agent
 - linked conversations
 - approval state
+- recent activity events
 
 This is where the UI explains how one public thread maps to one task and multiple internal conversations.
 
@@ -110,9 +118,11 @@ Recommended read APIs:
 GET /api/conversations
 GET /api/conversations/:id
 GET /api/conversations/:id/messages
+GET /api/conversations/:id/activities
 GET /api/tasks
 GET /api/tasks/:id
 GET /api/tasks/:id/conversations
+GET /api/tasks/:id/activities
 ```
 
 V1 can stay read-only. Message sending and approval actions can come later.
@@ -144,7 +154,8 @@ Ship the smallest UI that proves the model:
 2. open one conversation and render the timeline
 3. show linked conversations for the same task
 4. show task status and owner agent
-5. make internal agent dialogue visible without mixing it into the public thread
+5. show recent agent activity for the selected task
+6. make internal agent dialogue visible without mixing it into the public thread
 
 ## TypeScript Boundaries
 

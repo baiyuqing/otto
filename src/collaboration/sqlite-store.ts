@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { CollaborationSnapshot } from "./demo-data.js";
 import type {
+  CollaborationActivityEvent,
   CollaborationConversation,
   CollaborationMessage,
   CollaborationParticipant,
@@ -13,6 +14,7 @@ import type {
   AgentHandoffPayload,
 } from "./types.js";
 import type {
+  CollaborationActivityQuery,
   CollaborationConversationQuery,
   CollaborationMessageQuery,
   CollaborationStore,
@@ -70,6 +72,23 @@ interface MessageRow {
   handoff_json: string | null;
   status_json: string | null;
   approval_json: string | null;
+}
+
+interface ActivityRow {
+  id: string;
+  task_id: string | null;
+  conversation_id: string | null;
+  actor_id: string;
+  actor_kind: CollaborationActivityEvent["actor"]["kind"];
+  kind: CollaborationActivityEvent["kind"];
+  visibility: CollaborationActivityEvent["visibility"];
+  status: CollaborationActivityEvent["status"];
+  title: string;
+  detail: string | null;
+  payload_json: string | null;
+  created_at: string;
+  ended_at: string | null;
+  parent_event_id: string | null;
 }
 
 function ensureDatabaseDirectory(path: string): void {
@@ -169,6 +188,29 @@ function decodeMessage(row: MessageRow): CollaborationMessage {
   };
 }
 
+function decodeActivity(row: ActivityRow): CollaborationActivityEvent {
+  return {
+    id: row.id,
+    ...(row.task_id ? { taskId: row.task_id } : {}),
+    ...(row.conversation_id ? { conversationId: row.conversation_id } : {}),
+    actor: {
+      id: row.actor_id,
+      kind: row.actor_kind,
+    },
+    kind: row.kind,
+    visibility: row.visibility,
+    status: row.status,
+    title: row.title,
+    ...(row.detail ? { detail: row.detail } : {}),
+    ...(parseJsonColumn<Record<string, boolean | number | string | null>>(row.payload_json)
+      ? { payload: parseJsonColumn<Record<string, boolean | number | string | null>>(row.payload_json)! }
+      : {}),
+    createdAt: row.created_at,
+    ...(row.ended_at ? { endedAt: row.ended_at } : {}),
+    ...(row.parent_event_id ? { parentEventId: row.parent_event_id } : {}),
+  };
+}
+
 export interface SqliteCollaborationStoreOptions {
   initialize?: boolean;
 }
@@ -246,6 +288,23 @@ export class SqliteCollaborationStore implements CollaborationStore {
         approval_json TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS collaboration_activity_events (
+        id TEXT PRIMARY KEY,
+        task_id TEXT,
+        conversation_id TEXT,
+        actor_id TEXT NOT NULL,
+        actor_kind TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        status TEXT NOT NULL,
+        title TEXT NOT NULL,
+        detail TEXT,
+        payload_json TEXT,
+        created_at TEXT NOT NULL,
+        ended_at TEXT,
+        parent_event_id TEXT
+      );
+
       CREATE TABLE IF NOT EXISTS collaboration_unread_counts (
         conversation_id TEXT PRIMARY KEY,
         unread_count INTEGER NOT NULL
@@ -321,6 +380,44 @@ export class SqliteCollaborationStore implements CollaborationStore {
     return rows.map(decodeMessage);
   }
 
+  async listActivityEvents(query: CollaborationActivityQuery = {}): Promise<CollaborationActivityEvent[]> {
+    const conditions: string[] = [];
+    const params: SqliteScalar[] = [];
+
+    if (query.taskId) {
+      conditions.push("task_id = ?");
+      params.push(query.taskId);
+    }
+
+    if (query.conversationId) {
+      conditions.push("conversation_id = ?");
+      params.push(query.conversationId);
+    }
+
+    if (query.visibility && query.visibility.length > 0) {
+      conditions.push(`visibility IN (${createPlaceholders(query.visibility.length)})`);
+      params.push(...query.visibility);
+    }
+
+    if (query.kinds && query.kinds.length > 0) {
+      conditions.push(`kind IN (${createPlaceholders(query.kinds.length)})`);
+      params.push(...query.kinds);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const sql = `
+      SELECT *
+      FROM collaboration_activity_events
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT ?
+    `;
+    params.push(query.limit ?? 100);
+
+    const rows = this.database.prepare(sql).all(...params) as unknown as ActivityRow[];
+    return rows.map(decodeActivity);
+  }
+
   async listParticipants(participantIds: string[]): Promise<CollaborationParticipant[]> {
     if (participantIds.length === 0) {
       return [];
@@ -393,6 +490,9 @@ export class SqliteCollaborationStore implements CollaborationStore {
   }
 
   async readSnapshot(): Promise<CollaborationSnapshot> {
+    const activities = (this.database
+      .prepare("SELECT * FROM collaboration_activity_events ORDER BY created_at DESC")
+      .all() as unknown as ActivityRow[]).map(decodeActivity);
     const participants = (this.database
       .prepare("SELECT * FROM collaboration_participants ORDER BY id ASC")
       .all() as unknown as ParticipantRow[]).map(decodeParticipant);
@@ -408,6 +508,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
     const unreadCounts = await this.listUnreadCounts();
 
     return {
+      activities,
       participants,
       conversations,
       tasks,
@@ -468,6 +569,24 @@ export class SqliteCollaborationStore implements CollaborationStore {
         approval_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    const insertActivity = this.database.prepare(`
+      INSERT INTO collaboration_activity_events (
+        id,
+        task_id,
+        conversation_id,
+        actor_id,
+        actor_kind,
+        kind,
+        visibility,
+        status,
+        title,
+        detail,
+        payload_json,
+        created_at,
+        ended_at,
+        parent_event_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
     const insertUnreadCount = this.database.prepare(`
       INSERT INTO collaboration_unread_counts (conversation_id, unread_count)
       VALUES (?, ?)
@@ -477,6 +596,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
 
     try {
       this.database.exec(`
+        DELETE FROM collaboration_activity_events;
         DELETE FROM collaboration_messages;
         DELETE FROM collaboration_unread_counts;
         DELETE FROM collaboration_tasks;
@@ -540,6 +660,25 @@ export class SqliteCollaborationStore implements CollaborationStore {
           serializeJson(message.handoff),
           serializeJson(message.status),
           serializeJson(message.approval),
+        );
+      }
+
+      for (const activity of snapshot.activities) {
+        insertActivity.run(
+          activity.id,
+          activity.taskId ?? null,
+          activity.conversationId ?? null,
+          activity.actor.id,
+          activity.actor.kind,
+          activity.kind,
+          activity.visibility,
+          activity.status,
+          activity.title,
+          activity.detail ?? null,
+          serializeJson(activity.payload),
+          activity.createdAt,
+          activity.endedAt ?? null,
+          activity.parentEventId ?? null,
         );
       }
 

@@ -1,4 +1,5 @@
 import type {
+  CollaborationActivityEvent,
   CollaborationConversation,
   CollaborationMessage,
   CollaborationParticipant,
@@ -6,6 +7,7 @@ import type {
 } from "./types.js";
 
 export interface CollaborationSnapshot {
+  activities: CollaborationActivityEvent[];
   participants: CollaborationParticipant[];
   conversations: CollaborationConversation[];
   messages: CollaborationMessage[];
@@ -219,7 +221,124 @@ export function createDemoCollaborationSnapshot(): CollaborationSnapshot {
     },
   ];
 
+  const activities: CollaborationActivityEvent[] = [
+    {
+      id: "activity-1",
+      taskId: "task-42",
+      conversationId: "channel-design-thread",
+      actor: { id: "agent-otto", kind: "agent" },
+      kind: "agent.lifecycle",
+      visibility: "internal",
+      status: "started",
+      title: "Working on task 42",
+      detail: "Picked up the Slack-like collaboration simplification request.",
+      createdAt: "2026-03-29T05:10:30.000Z",
+    },
+    {
+      id: "activity-2",
+      taskId: "task-42",
+      conversationId: "channel-design-thread",
+      actor: { id: "agent-otto", kind: "agent" },
+      kind: "chat.history_read",
+      visibility: "internal",
+      status: "completed",
+      title: "Read channel history",
+      detail: "Loaded the recent thread context before drafting the simpler UI direction.",
+      createdAt: "2026-03-29T05:11:00.000Z",
+    },
+    {
+      id: "activity-3",
+      taskId: "task-42",
+      conversationId: "channel-design-thread",
+      actor: { id: "agent-otto", kind: "agent" },
+      kind: "shell.command_started",
+      visibility: "internal",
+      status: "started",
+      title: "Inspected current collaboration shell",
+      detail: "Reviewed the existing TypeScript collaboration model and web preview.",
+      createdAt: "2026-03-29T05:11:40.000Z",
+      payload: {
+        tool: "shell",
+      },
+    },
+    {
+      id: "activity-4",
+      taskId: "task-42",
+      conversationId: "channel-design-thread",
+      actor: { id: "agent-otto", kind: "agent" },
+      kind: "shell.command_finished",
+      visibility: "internal",
+      status: "completed",
+      title: "Inspection finished",
+      detail: "Confirmed the clean extension point for activity events.",
+      createdAt: "2026-03-29T05:12:10.000Z",
+      parentEventId: "activity-3",
+    },
+    {
+      id: "activity-5",
+      taskId: "task-42",
+      conversationId: "agent-task-42",
+      actor: { id: "agent-planner", kind: "agent" },
+      kind: "agent.output",
+      visibility: "internal",
+      status: "completed",
+      title: "Planner returned a layout recommendation",
+      detail: "Suggested keeping the worker discussion in a separate internal thread.",
+      createdAt: "2026-03-29T05:12:50.000Z",
+    },
+    {
+      id: "activity-6",
+      taskId: "task-42",
+      conversationId: "channel-design-thread",
+      actor: { id: "agent-otto", kind: "agent" },
+      kind: "message.sent",
+      visibility: "shared",
+      status: "completed",
+      title: "Posted status update to the public thread",
+      detail: "Shared the simplified layout direction with the channel.",
+      createdAt: "2026-03-29T05:14:00.000Z",
+    },
+    {
+      id: "activity-7",
+      taskId: "task-42",
+      actor: { id: "system", kind: "system" },
+      kind: "task.status_updated",
+      visibility: "shared",
+      status: "completed",
+      title: "Task status moved to running",
+      detail: "The task is now actively being executed by Otto.",
+      createdAt: "2026-03-29T05:14:10.000Z",
+    },
+    {
+      id: "activity-8",
+      taskId: "task-42",
+      actor: { id: "agent-otto", kind: "agent" },
+      kind: "memory.file_changed",
+      visibility: "internal",
+      status: "completed",
+      title: "Prepared memory writeback",
+      detail: "Queued updates for MEMORY.md and work-log notes after the review pass.",
+      createdAt: "2026-03-29T05:20:40.000Z",
+      payload: {
+        files: 2,
+      },
+    },
+    {
+      id: "activity-9",
+      taskId: "task-17",
+      conversationId: "channel-roadmap",
+      actor: { id: "agent-otto", kind: "agent" },
+      kind: "github.comment_added",
+      visibility: "shared",
+      status: "completed",
+      title: "Posted GitHub review follow-up",
+      detail: "Added the approval request summary to the roadmap issue thread.",
+      createdAt: "2026-03-29T04:44:00.000Z",
+    },
+  ];
+
   return {
+    activities,
     participants,
     conversations,
     messages,

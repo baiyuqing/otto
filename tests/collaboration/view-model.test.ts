@@ -5,6 +5,7 @@ import {
   buildConversationListSections,
 } from "../../src/collaboration/view-model.js";
 import type {
+  CollaborationActivityEvent,
   CollaborationConversation,
   CollaborationMessage,
   CollaborationParticipant,
@@ -73,6 +74,20 @@ describe("buildConversationDetailView", () => {
         },
       },
     ];
+    const activities: CollaborationActivityEvent[] = [
+      {
+        id: "activity-1",
+        taskId: "task-42",
+        conversationId: "conv-agent",
+        actor: { id: "agent-2", kind: "agent" },
+        kind: "agent.output",
+        visibility: "internal",
+        status: "completed",
+        title: "Planner returned a recommendation",
+        detail: "Recommend keeping worker chat in its own thread.",
+        createdAt: "2026-03-29T10:03:00.000Z",
+      },
+    ];
     const linkedConversations: CollaborationConversation[] = [
       {
         id: "conv-channel",
@@ -95,6 +110,7 @@ describe("buildConversationDetailView", () => {
       conversation,
       participants,
       messages,
+      activities,
       task,
       linkedConversations,
     });
@@ -102,6 +118,7 @@ describe("buildConversationDetailView", () => {
     expect(view.subtitle).toBe("Internal Agent Dialogue");
     expect(view.lanes.map((lane) => lane.label)).toEqual(["Otto", "Planner", "System"]);
     expect(view.timeline[1]?.badge).toBe("handoff agent-2 -> agent-1");
+    expect(view.activityFeed[0]?.title).toBe("Planner returned a recommendation");
     expect(view.activeTask?.ownerAgentId).toBe("Otto");
     expect(view.linkedConversations[0]?.title).toBe("Design thread");
   });

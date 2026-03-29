@@ -1,0 +1,22 @@
+{
+  "name": "otto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "collab:seed-demo": "tsx src/collaboration/seed-demo.ts",
+    "collab:serve": "tsx src/collaboration/http-server.ts",
+    "company:seed-demo": "tsx src/company/seed-demo.ts",
+    "dev": "tsx src/cli.ts",
+    "cli": "node dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.1.1"
+  }
+}

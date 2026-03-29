@@ -1,0 +1,146 @@
+<svg width="1440" height="960" viewBox="0 0 1440 960" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="shell" x1="40" y1="32" x2="1400" y2="920" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F7F8FB"/>
+      <stop offset="1" stop-color="#EEF1F6"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="22" flood-color="#0B1320" flood-opacity="0.16"/>
+    </filter>
+    <style>
+      .title { font: 700 30px "SF Pro Display", "Segoe UI", sans-serif; fill: #1F2937; }
+      .subtitle { font: 500 14px "SF Pro Text", "Segoe UI", sans-serif; fill: #667085; }
+      .section { font: 700 12px "SF Pro Text", "Segoe UI", sans-serif; fill: #7A8699; letter-spacing: 0.08em; }
+      .panel-title { font: 700 18px "SF Pro Text", "Segoe UI", sans-serif; fill: #111827; }
+      .item-title { font: 700 15px "SF Pro Text", "Segoe UI", sans-serif; fill: #111827; }
+      .body { font: 500 14px "SF Pro Text", "Segoe UI", sans-serif; fill: #334155; }
+      .muted { font: 500 12px "SF Pro Text", "Segoe UI", sans-serif; fill: #7B8794; }
+      .pill { font: 700 11px "SF Pro Text", "Segoe UI", sans-serif; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="960" fill="#E8ECF3"/>
+  <rect x="36" y="30" width="1368" height="900" rx="24" fill="url(#shell)" filter="url(#shadow)"/>
+
+  <rect x="36" y="30" width="84" height="900" rx="24" fill="#222B38"/>
+  <circle cx="78" cy="86" r="22" fill="#F59E0B"/>
+  <circle cx="78" cy="154" r="18" fill="#475569"/>
+  <circle cx="78" cy="212" r="18" fill="#475569"/>
+  <circle cx="78" cy="270" r="18" fill="#475569"/>
+  <rect x="60" y="834" width="36" height="36" rx="18" fill="#475569"/>
+
+  <rect x="120" y="30" width="308" height="900" fill="#F8FAFC"/>
+  <line x1="428" y1="30" x2="428" y2="930" stroke="#E2E8F0"/>
+
+  <rect x="428" y="30" width="658" height="900" fill="#FFFFFF"/>
+  <line x1="1086" y1="30" x2="1086" y2="930" stroke="#E2E8F0"/>
+
+  <rect x="1086" y="30" width="318" height="900" fill="#FBFCFE"/>
+
+  <text x="152" y="82" class="title">Otto</text>
+  <text x="152" y="108" class="subtitle">Slack-like collaboration view</text>
+
+  <rect x="146" y="132" width="256" height="40" rx="12" fill="#EEF2F7"/>
+  <text x="166" y="157" class="body">Search conversations</text>
+
+  <text x="152" y="214" class="section">DIRECT MESSAGES</text>
+  <rect x="140" y="228" width="268" height="78" rx="14" fill="#FFFFFF" stroke="#DCE3EC"/>
+  <circle cx="168" cy="258" r="14" fill="#FBBF24"/>
+  <text x="192" y="252" class="item-title">Yuqing + Otto</text>
+  <text x="192" y="274" class="muted">Can you review this idea?</text>
+  <rect x="356" y="246" width="28" height="20" rx="10" fill="#DBEAFE"/>
+  <text x="366" y="260" class="pill" fill="#2563EB">3</text>
+
+  <text x="152" y="344" class="section">CHANNELS</text>
+  <rect x="136" y="358" width="272" height="96" rx="16" fill="#E9F7F5" stroke="#BFE7DD"/>
+  <text x="160" y="390" class="item-title"># design-thread</text>
+  <text x="160" y="412" class="body">The design draft is ready.</text>
+  <text x="160" y="434" class="muted">Task 42 · running</text>
+  <rect x="320" y="376" width="64" height="22" rx="11" fill="#CCFBF1"/>
+  <text x="337" y="391" class="pill" fill="#0F766E">RUNNING</text>
+
+  <rect x="136" y="470" width="272" height="78" rx="14" fill="#FFFFFF" stroke="#DCE3EC"/>
+  <text x="160" y="502" class="item-title"># roadmap</text>
+  <text x="160" y="524" class="muted">Waiting for approval</text>
+
+  <text x="152" y="590" class="section">AGENT DIALOGUES</text>
+  <rect x="136" y="604" width="272" height="92" rx="16" fill="#F3F0FF" stroke="#DDD6FE"/>
+  <text x="160" y="636" class="item-title">task-42 internal</text>
+  <text x="160" y="658" class="body">Planner handed the task back.</text>
+  <text x="160" y="680" class="muted">2 agents · internal only</text>
+
+  <text x="460" y="76" class="panel-title"># design-thread</text>
+  <text x="460" y="102" class="subtitle">Task 42 public thread</text>
+  <line x1="428" y1="126" x2="1086" y2="126" stroke="#E2E8F0"/>
+
+  <rect x="460" y="148" width="594" height="44" rx="14" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <text x="480" y="175" class="body">Reply in thread...</text>
+
+  <circle cx="486" cy="252" r="18" fill="#FBBF24"/>
+  <text x="516" y="248" class="item-title">Yuqing</text>
+  <text x="576" y="248" class="muted">13:08</text>
+  <text x="516" y="274" class="body">Can you simplify the collaboration UI so it feels closer to Slack?</text>
+
+  <circle cx="486" cy="346" r="18" fill="#93C5FD"/>
+  <text x="516" y="342" class="item-title">Otto</text>
+  <text x="556" y="342" class="muted">13:11</text>
+  <text x="516" y="368" class="body">Yes. I would reduce it to a familiar shell: conversation list on the left,</text>
+  <text x="516" y="390" class="body">main thread in the middle, and a task or internal-thread panel on the right.</text>
+
+  <rect x="516" y="414" width="270" height="36" rx="12" fill="#F1F5F9"/>
+  <text x="534" y="437" class="muted">public thread stays clean; internal agent chat is separate</text>
+
+  <circle cx="486" cy="506" r="18" fill="#C4B5FD"/>
+  <text x="516" y="502" class="item-title">Planner</text>
+  <text x="570" y="502" class="muted">13:12</text>
+  <text x="516" y="528" class="body">I can keep the worker discussion in an internal thread instead of showing a multi-lane canvas.</text>
+
+  <rect x="516" y="552" width="172" height="26" rx="13" fill="#EDE9FE"/>
+  <text x="536" y="569" class="pill" fill="#6D28D9">INTERNAL NOTE</text>
+
+  <circle cx="486" cy="632" r="18" fill="#93C5FD"/>
+  <text x="516" y="628" class="item-title">Otto</text>
+  <text x="556" y="628" class="muted">13:14</text>
+  <text x="516" y="654" class="body">The right panel can then show task state, linked internal dialogue, runtime, and approvals.</text>
+
+  <circle cx="486" cy="738" r="18" fill="#94A3B8"/>
+  <text x="516" y="734" class="item-title">System</text>
+  <text x="570" y="734" class="muted">13:15</text>
+  <text x="516" y="760" class="body">Task 42 is linked to 1 public thread and 1 internal agent conversation.</text>
+
+  <text x="1118" y="76" class="panel-title">Task 42</text>
+  <text x="1118" y="102" class="subtitle">Thread details</text>
+  <line x1="1086" y1="126" x2="1404" y2="126" stroke="#E2E8F0"/>
+
+  <rect x="1110" y="152" width="270" height="84" rx="16" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <text x="1132" y="182" class="section">STATUS</text>
+  <rect x="1132" y="194" width="72" height="22" rx="11" fill="#CCFBF1"/>
+  <text x="1150" y="209" class="pill" fill="#0F766E">RUNNING</text>
+  <text x="1218" y="210" class="muted">owner: Otto</text>
+
+  <rect x="1110" y="252" width="270" height="120" rx="16" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <text x="1132" y="282" class="section">LINKED</text>
+  <text x="1132" y="310" class="body">Public thread</text>
+  <text x="1132" y="332" class="muted"># design-thread</text>
+  <text x="1132" y="360" class="body">Internal dialogue</text>
+  <text x="1132" y="382" class="muted">task-42 internal</text>
+
+  <rect x="1110" y="388" width="270" height="126" rx="16" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <text x="1132" y="418" class="section">MEMORY ACCESS</text>
+  <text x="1132" y="448" class="body">DM: private memory allowed</text>
+  <text x="1132" y="474" class="body">Channel: shared memory only</text>
+  <text x="1132" y="500" class="body">Agent dialogue: internal orchestration</text>
+
+  <rect x="1110" y="530" width="270" height="148" rx="16" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <text x="1132" y="560" class="section">APPROVALS</text>
+  <rect x="1132" y="578" width="120" height="28" rx="14" fill="#FEF3C7"/>
+  <text x="1160" y="596" class="pill" fill="#B45309">WAITING</text>
+  <text x="1132" y="632" class="body">Publish summary to channel</text>
+  <text x="1132" y="654" class="muted">not yet approved</text>
+
+  <rect x="1110" y="694" width="270" height="166" rx="16" fill="#FFFFFF" stroke="#E2E8F0"/>
+  <text x="1132" y="724" class="section">SIMPLIFIED RULE</text>
+  <text x="1132" y="754" class="body">Main thread looks like Slack.</text>
+  <text x="1132" y="780" class="body">Internal agent chat lives in the side panel,</text>
+  <text x="1132" y="806" class="body">not in the public timeline.</text>
+</svg>

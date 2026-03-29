@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.build.json",
     "collab:seed-demo": "tsx src/collaboration/seed-demo.ts",
     "collab:serve": "tsx src/collaboration/http-server.ts",
+    "company:seed-demo": "tsx src/company/seed-demo.ts",
     "dev": "tsx src/cli.ts",
     "cli": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -146,6 +146,24 @@ This writes one shared demo snapshot containing:
 
 The web preview should try `/api/collaboration` first. If the local SQLite HTTP server is not running, it may fall back to the bundled demo snapshot.
 
+### 3-agent company bootstrap
+
+Use the company seed command if you want to inspect the framework as a tiny software company:
+
+```bash
+npm run company:seed-demo -- .otto/company.sqlite
+npm run collab:serve -- .otto/company.sqlite --port 4318
+cd web && npm run dev
+```
+
+This writes a snapshot with:
+
+- one private DM between the user and the manager
+- one public channel thread
+- one internal agent room for manager, builder, and reviewer
+- one task tying the public and internal conversations together
+- activity events that show what each agent did
+
 ## Recommended V1 Scope
 
 Ship the smallest UI that proves the model:

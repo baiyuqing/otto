@@ -262,6 +262,42 @@ Current limitation:
 
 So this is best used as a structural trial, not as durable continuity.
 
+## Try the 3-Agent Company Demo
+
+If you want to see the system as a small company instead of a single thread snapshot, seed the dedicated company demo database:
+
+```bash
+npm run company:seed-demo -- .otto/company.sqlite
+npm run collab:serve -- .otto/company.sqlite --port 4318
+cd web && npm run dev
+```
+
+What this gives you:
+
+- one private DM between you and the manager agent
+- one public channel thread owned by the manager
+- one internal agent dialogue for manager, builder, and reviewer
+- one linked task with activity events such as status updates, shell work, and handoff
+
+Default company roles:
+
+- `Mara (Manager)` owns the public thread
+- `Jules (Builder)` does the implementation slice
+- `Nia (Reviewer)` checks the result and hands back sign-off
+
+You can also override the company task prompt:
+
+```bash
+npm run company:seed-demo -- .otto/company.sqlite "Build a settings page, review it, and summarize the result publicly."
+```
+
+Open the UI and look for:
+
+- `SQLite live data` in the top bar
+- a public `# company-updates` thread
+- an internal agent conversation linked to the same task
+- `Recent activity` in the right sidebar
+
 ## Current Trial Checklist
 
 Use this checklist if you want to validate the framework quickly:
@@ -274,6 +310,7 @@ Use this checklist if you want to validate the framework quickly:
 6. add a test `AGENT.md` or `AGENTS.md`
 7. rerun the demo command with `--workspace`
 8. optionally run `npm run dev -- --runtime slock:codex --slock-runtimes claude,codex,gemini "hello"`
+9. optionally run `npm run company:seed-demo -- .otto/company.sqlite` and inspect the small-company flow in the web UI
 
 If all of that works, the framework shell is behaving as designed.
 

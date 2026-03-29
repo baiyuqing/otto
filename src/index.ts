@@ -4,6 +4,8 @@ export * from "./collaboration/store.js";
 export * from "./collaboration/sqlite-store.js";
 export * from "./collaboration/types.js";
 export * from "./collaboration/view-model.js";
+export * from "./company/demo-company.js";
+export * from "./company/types.js";
 export * from "./core/agent-kernel.js";
 export * from "./core/types.js";
 export * from "./memory/engine.js";

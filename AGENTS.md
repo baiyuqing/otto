@@ -20,6 +20,7 @@ This repository now uses a minimal TypeScript toolchain.
 - `npm install` installs development dependencies
 - `npm run build` compiles the TypeScript source into `dist/`
 - `npm run collab:seed-demo -- .otto/collaboration.sqlite` seeds a local SQLite collaboration database with demo DM/channel/agent data
+- `npm run company:seed-demo -- .otto/company.sqlite` seeds a local SQLite collaboration database with a 3-agent "small company" demo
 - `npm run collab:serve -- .otto/collaboration.sqlite --port 4318` serves the collaboration snapshot over a local read-only HTTP API
 - `npm run dev -- --runtime demo "your prompt"` runs the CLI directly from TypeScript
 - `npm run dev -- --list-runtimes --slock-runtimes claude,codex,gemini` lists local and Slock-style discovered runtime targets

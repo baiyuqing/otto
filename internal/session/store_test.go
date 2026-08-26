@@ -207,6 +207,59 @@ func TestOpenRejectsMalformedHeaderEvenWhenFinal(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsSemanticallyInvalidFinalRecord(t *testing.T) {
+	header := marshalLine(t, Record{Type: recordTypeHeader, Header: &Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}})
+	cases := map[string]string{
+		"missing message payload": `{"type":"message"}`,
+		"unsupported record type": `{"type":"warning"}`,
+	}
+
+	for name, finalLine := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			content := header + "\n" + finalLine + "\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, _, err := Open(path); err == nil {
+				t.Fatal("expected semantically invalid final record to fail")
+			}
+		})
+	}
+}
+
+func TestPersistenceWireSchemaIsExplicitAllowlist(t *testing.T) {
+	recordType := reflect.TypeOf(persistedRecord{})
+	if field, ok := recordType.FieldByName("Header"); !ok {
+		t.Fatal("persistedRecord.Header missing")
+	} else if field.Type == reflect.TypeOf((*Header)(nil)) {
+		t.Fatal("persistedRecord.Header must not embed session.Header directly")
+	}
+	if field, ok := recordType.FieldByName("Message"); !ok {
+		t.Fatal("persistedRecord.Message missing")
+	} else if field.Type == reflect.TypeOf((*model.Message)(nil)) {
+		t.Fatal("persistedRecord.Message must not embed model.Message directly")
+	}
+	assertJSONTags(t, recordType, "type", "header,omitempty", "message,omitempty")
+	assertJSONTags(t, reflect.TypeOf(persistedHeader{}), "version", "id", "workspace", "provider", "profile,omitempty", "model", "created_at")
+	assertJSONTags(t, reflect.TypeOf(persistedMessage{}), "id", "role", "blocks", "created_at", "finish_reason,omitempty", "usage,omitempty")
+	assertJSONTags(t, reflect.TypeOf(persistedBlock{}), "type", "text,omitempty", "tool_call_id,omitempty", "tool_name,omitempty", "arguments,omitempty", "is_error,omitempty")
+	assertJSONTags(t, reflect.TypeOf(persistedUsage{}), "input_tokens", "output_tokens")
+
+	messageType := reflect.TypeOf(persistedMessage{})
+	if field, ok := messageType.FieldByName("Blocks"); !ok {
+		t.Fatal("persistedMessage.Blocks missing")
+	} else if field.Type == reflect.TypeOf([]model.Block(nil)) {
+		t.Fatal("persistedMessage.Blocks must not embed model.Block directly")
+	}
+	if field, ok := messageType.FieldByName("Usage"); !ok {
+		t.Fatal("persistedMessage.Usage missing")
+	} else if field.Type == reflect.TypeOf((*model.Usage)(nil)) {
+		t.Fatal("persistedMessage.Usage must not embed model.Usage directly")
+	}
+}
+
 func TestStoreAppendAfterCloseFails(t *testing.T) {
 	store, err := Create(t.TempDir(), Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
 	if err != nil {
@@ -317,4 +370,15 @@ func marshalLine(t *testing.T, record Record) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+func assertJSONTags(t *testing.T, typ reflect.Type, want ...string) {
+	t.Helper()
+	got := make([]string, 0, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		got = append(got, typ.Field(i).Tag.Get("json"))
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s json tags = %v, want %v", typ.Name(), got, want)
+	}
 }

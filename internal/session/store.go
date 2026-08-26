@@ -43,7 +43,7 @@ func Create(root string, header Header) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create session file: %w", err)
 	}
-	if err := writeRecord(file, Record{Type: recordTypeHeader, Header: &header}); err != nil {
+	if err := writeRecord(file, newPersistedHeaderRecord(header)); err != nil {
 		file.Close()
 		return nil, err
 	}
@@ -104,21 +104,13 @@ func Open(path string) (*Store, []Warning, error) {
 				file.Close()
 				return nil, nil, fmt.Errorf("unsupported session version %d", record.Header.Version)
 			}
-			header = *record.Header
+			header = record.Header.sessionHeader()
 		default:
 			if record.Type != recordTypeMessage || record.Message == nil {
-				if i == len(lines)-1 {
-					if err := truncateSession(file, line.start); err != nil {
-						file.Close()
-						return nil, nil, err
-					}
-					warnings = append(warnings, Warning{Message: fmt.Sprintf("truncated malformed final session line at %s", path)})
-					break
-				}
 				file.Close()
 				return nil, nil, fmt.Errorf("session line %d: invalid record", i+1)
 			}
-			messages = append(messages, cloneMessage(*record.Message))
+			messages = append(messages, record.Message.modelMessage())
 		}
 	}
 
@@ -159,7 +151,7 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 	if s.closed {
 		return errSessionClosed
 	}
-	if err := writeRecord(s.file, Record{Type: recordTypeMessage, Message: &message}); err != nil {
+	if err := writeRecord(s.file, newPersistedMessageRecord(message)); err != nil {
 		return err
 	}
 	s.messages = append(s.messages, cloneMessage(message))
@@ -238,7 +230,7 @@ func (s *Store) repairDanglingToolCalls() ([]Warning, error) {
 	return warnings, nil
 }
 
-func writeRecord(file *os.File, record Record) error {
+func writeRecord(file *os.File, record persistedRecord) error {
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("encode session record: %w", err)
@@ -265,10 +257,10 @@ func truncateSession(file *os.File, size int64) error {
 	return nil
 }
 
-func decodeRecord(line []byte) (Record, error) {
-	var record Record
+func decodeRecord(line []byte) (persistedRecord, error) {
+	var record persistedRecord
 	if err := json.Unmarshal(line, &record); err != nil {
-		return Record{}, fmt.Errorf("decode session record: %w", err)
+		return persistedRecord{}, fmt.Errorf("decode session record: %w", err)
 	}
 	return record, nil
 }

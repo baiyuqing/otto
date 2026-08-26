@@ -104,6 +104,51 @@ func TestCompleteHandlesSSEFramingAndMultipleIndexedCalls(t *testing.T) {
 	}
 }
 
+func TestCompleteEmitsStableToolCallIdentityForInterleavedContinuations(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"function\":{\"name\":\"write\",\"arguments\":\"{\\\"pa\"}},{\"index\":0,\"id\":\"call-a\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}}]}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"A\\\"}\"}}]}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"th\\\":\\\"B\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	var events []provider.StreamEvent
+	response, err := New(server.URL, "key", server.Client()).Complete(context.Background(), provider.Request{Model: "model"}, func(event provider.StreamEvent) {
+		if event.Type == provider.StreamToolCallDelta {
+			events = append(events, event)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []provider.StreamEvent{
+		{Type: provider.StreamToolCallDelta, ToolCallID: "call-b", ToolName: "write", Arguments: `{"pa`},
+		{Type: provider.StreamToolCallDelta, ToolCallID: "call-a", ToolName: "read", Arguments: `{"pa`},
+		{Type: provider.StreamToolCallDelta, ToolCallID: "call-a", ToolName: "read", Arguments: `th":"A"}`},
+		{Type: provider.StreamToolCallDelta, ToolCallID: "call-b", ToolName: "write", Arguments: `th":"B"}`},
+	}
+	if len(events) != len(want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("event[%d] = %#v, want %#v", i, events[i], want[i])
+		}
+	}
+	if len(response.Message.Blocks) != 2 {
+		t.Fatalf("blocks = %#v, want two tool calls", response.Message.Blocks)
+	}
+	if got := response.Message.Blocks[0]; got.ToolCallID != "call-b" || got.ToolName != "write" || string(got.Arguments) != `{"path":"B"}` {
+		t.Fatalf("call-b = %#v", got)
+	}
+	if got := response.Message.Blocks[1]; got.ToolCallID != "call-a" || got.ToolName != "read" || string(got.Arguments) != `{"path":"A"}` {
+		t.Fatalf("call-a = %#v", got)
+	}
+}
+
 func TestCompleteRejectsMalformedOrIncompleteStreams(t *testing.T) {
 	tests := []struct {
 		name string

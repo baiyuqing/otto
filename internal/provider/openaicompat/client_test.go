@@ -209,6 +209,37 @@ func TestCompleteStopsAfterThreeRetryableAttempts(t *testing.T) {
 	}
 }
 
+func TestCompletePreservesCancellationIdentityDuringRetryBackoff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "retry later", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := New(server.URL, "key", server.Client())
+	sleepStarted := make(chan struct{})
+	client.sleep = func(ctx context.Context, _ time.Duration) error {
+		close(sleepStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := client.Complete(ctx, provider.Request{Model: "model"}, nil)
+		errCh <- err
+	}()
+
+	<-sleepStarted
+	cancel()
+
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation identity", err)
+	}
+}
+
 func TestCompleteDoesNotRetryUnauthorizedAndRedactsBoundedError(t *testing.T) {
 	const key = "very-secret-key"
 	attempts := 0

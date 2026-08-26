@@ -77,8 +77,8 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 				call.arguments += delta.Function.Arguments
 				event := provider.StreamEvent{
 					Type:       provider.StreamToolCallDelta,
-					ToolCallID: delta.ID,
-					ToolName:   delta.Function.Name,
+					ToolCallID: call.id,
+					ToolName:   call.name,
 					Arguments:  delta.Function.Arguments,
 				}
 				emitted = true

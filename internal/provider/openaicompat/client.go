@@ -73,6 +73,9 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 			retryDelay = &delay
 		}
 		if err := c.sleep(ctx, *retryDelay); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return provider.Response{}, ctxErr
+			}
 			return provider.Response{}, c.safeError(err)
 		}
 	}
@@ -137,6 +140,9 @@ func parseRetryAfter(value string) *time.Duration {
 
 func (c *Client) safeError(err error) error {
 	if err == nil || c.apiKey == "" {
+		return err
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
 	message := strings.ReplaceAll(err.Error(), "Bearer "+c.apiKey, "[REDACTED]")

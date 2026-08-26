@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestReadRejectsInvalidJSON(t *testing.T) {
@@ -94,6 +95,24 @@ func TestReadReportsOutputTruncation(t *testing.T) {
 		t.Fatalf("unexpected error: %#v", result)
 	}
 	if !strings.HasPrefix(result.Content, "abcde") || !strings.Contains(result.Content, "truncated") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestReadTruncationRemainsValidUTF8(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("é"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewReadTool(workspace, 1).Execute(context.Background(), json.RawMessage(`{"path":"sample.txt"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %#v", result)
+	}
+	if !utf8.ValidString(result.Content) {
+		t.Fatalf("result content is not valid UTF-8: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "truncated") {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 }

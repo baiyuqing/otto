@@ -88,7 +88,25 @@ func (t *readTool) Execute(_ context.Context, arguments json.RawMessage) Result 
 	if collector.Discarded() == 0 {
 		return Result{Content: content}
 	}
-	return Result{Content: fmt.Sprintf("%s\n[truncated: %d bytes omitted]", string(collector.Bytes()), collector.Discarded())}
+
+	raw := collector.Bytes()
+	safe := validUTF8Prefix(raw)
+	omitted := collector.Discarded() + len(raw) - len(safe)
+	if len(safe) == 0 {
+		return Result{Content: fmt.Sprintf("[truncated: %d bytes omitted]", omitted)}
+	}
+	return Result{Content: fmt.Sprintf("%s\n[truncated: %d bytes omitted]", string(safe), omitted)}
+}
+
+func validUTF8Prefix(data []byte) []byte {
+	if utf8.Valid(data) {
+		return append([]byte(nil), data...)
+	}
+	prefix := append([]byte(nil), data...)
+	for len(prefix) > 0 && !utf8.Valid(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix
 }
 
 func decodeStrictJSON(arguments json.RawMessage, destination any, required ...string) error {

@@ -59,15 +59,7 @@ func newPersistedHeader(header Header) *persistedHeader {
 }
 
 func (header persistedHeader) sessionHeader() Header {
-	return Header{
-		Version:   header.Version,
-		ID:        header.ID,
-		Workspace: header.Workspace,
-		Provider:  header.Provider,
-		Profile:   header.Profile,
-		Model:     header.Model,
-		CreatedAt: header.CreatedAt,
-	}
+	return Header(header)
 }
 
 func newPersistedMessage(message model.Message) *persistedMessage {

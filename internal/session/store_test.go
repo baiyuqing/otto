@@ -330,7 +330,7 @@ func TestMessagesReturnsIndependentSlices(t *testing.T) {
 			first := store.Messages()
 			first[0].Blocks[0].Text = "mutated"
 			first[0].Usage.InputTokens = 99
-			first = append(first, model.Message{ID: "msg-2"})
+			_ = append(first, model.Message{ID: "msg-2"})
 
 			second := store.Messages()
 			if got, want := len(second), 1; got != want {

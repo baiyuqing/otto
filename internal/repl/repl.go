@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/session"
 )
 
 const maxInputBytes = 1 << 20
@@ -124,6 +125,9 @@ func (r *REPL) Run(ctx context.Context) error {
 		_, _ = fmt.Fprintln(r.stdout)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, session.ErrFatalPersistence) {
+			return err
 		}
 		sendAck(ack, stop)
 	}

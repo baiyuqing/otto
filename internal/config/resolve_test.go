@@ -95,15 +95,52 @@ func TestResolveUsesOTTOAPIKeyFallback(t *testing.T) {
 	}
 }
 
-func TestResolveParsesInvalidShellTimeout(t *testing.T) {
-	file := File{
-		Profiles: map[string]Profile{
-			"local": {Provider: "openai-compatible", Model: "test-model", BaseURL: "https://example.com/v1", APIKeyEnv: "PROFILE_KEY"},
-		},
-		Agent: Agent{ShellTimeout: "not-a-duration"},
+func TestResolveRejectsInvalidShellTimeout(t *testing.T) {
+	for _, timeout := range []string{"not-a-duration", "0s", "-1s"} {
+		t.Run(timeout, func(t *testing.T) {
+			file := File{
+				Profiles: map[string]Profile{
+					"local": {Provider: "openai-compatible", Model: "test-model", BaseURL: "https://example.com/v1", APIKeyEnv: "PROFILE_KEY"},
+				},
+				Agent: Agent{ShellTimeout: timeout},
+			}
+			if _, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "local"}); err == nil || !strings.Contains(err.Error(), "shell_timeout") {
+				t.Fatalf("expected invalid duration error, got %v", err)
+			}
+		})
 	}
-	if _, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "local"}); err == nil || !strings.Contains(err.Error(), "shell_timeout") {
-		t.Fatalf("expected invalid duration error, got %v", err)
+}
+
+func TestResolveRejectsBaseURLsRejectedByOpenAIClient(t *testing.T) {
+	for _, baseURL := range []string{
+		"https://example.com/v1?tenant=x",
+		"https://example.com/v1?",
+		"https://example.com/v1#fragment",
+		"ftp://example.com/v1",
+		"http:///v1",
+		"http://[::1",
+	} {
+		t.Run(baseURL, func(t *testing.T) {
+			file := File{Profiles: map[string]Profile{
+				"local": {Provider: "openai-compatible", Model: "test-model", BaseURL: baseURL, APIKeyEnv: "PROFILE_KEY"},
+			}}
+			if _, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "local"}); err == nil || !strings.Contains(err.Error(), "base_url") {
+				t.Fatalf("expected invalid base URL error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveNormalizesBaseURLLikeOpenAIClient(t *testing.T) {
+	file := File{Profiles: map[string]Profile{
+		"local": {Provider: "openai-compatible", Model: "test-model", BaseURL: "https://example.com/gateway/v1/", APIKeyEnv: "PROFILE_KEY"},
+	}}
+	runtime, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.BaseURL != "https://example.com/gateway/v1" {
+		t.Fatalf("BaseURL = %q, want normalized URL", runtime.BaseURL)
 	}
 }
 

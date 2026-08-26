@@ -2,8 +2,9 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"time"
+
+	"github.com/baiyuqing/otto/internal/provider/openaicompat"
 )
 
 const (
@@ -81,9 +82,11 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 	if baseURL == "" {
 		return Runtime{}, fmt.Errorf("missing base_url")
 	}
-	if err := validateBaseURL(baseURL); err != nil {
-		return Runtime{}, err
+	normalizedBaseURL, err := openaicompat.NormalizeBaseURL(baseURL)
+	if err != nil {
+		return Runtime{}, fmt.Errorf("invalid base_url: %w", err)
 	}
+	baseURL = normalizedBaseURL
 
 	maxTurns := defaultMaxTurns
 	if file.Agent.MaxTurns > 0 {
@@ -98,6 +101,9 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		duration, err := time.ParseDuration(file.Agent.ShellTimeout)
 		if err != nil {
 			return Runtime{}, fmt.Errorf("invalid shell_timeout: %w", err)
+		}
+		if duration <= 0 {
+			return Runtime{}, fmt.Errorf("invalid shell_timeout: must be greater than zero")
 		}
 		shellTimeout = duration
 	}
@@ -136,20 +142,6 @@ func envValue(env map[string]string, key string) string {
 		return ""
 	}
 	return env[key]
-}
-
-func validateBaseURL(value string) error {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return fmt.Errorf("invalid base_url %q: %w", value, err)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("invalid base_url %q: must use http or https", value)
-	}
-	if parsed.Host == "" {
-		return fmt.Errorf("invalid base_url %q: missing host", value)
-	}
-	return nil
 }
 
 func resolveAPIKey(env map[string]string, apiKeyEnv string) (string, error) {

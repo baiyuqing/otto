@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -436,6 +438,115 @@ func TestRunPreservesProviderCancellation(t *testing.T) {
 	}
 	if gotErr != context.Canceled {
 		t.Fatalf("error event = %v, want %v", gotErr, context.Canceled)
+	}
+}
+
+func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testing.T) {
+	credential := fmt.Sprintf("credential-%d", time.Now().UnixNano())
+	workspaceRoot := t.TempDir()
+	midpoint := len(credential) / 2
+	if err := os.WriteFile(filepath.Join(workspaceRoot, ".part-1"), []byte(credential[:midpoint]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, ".part-2"), []byte(credential[midpoint:]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := tool.NewWorkspace(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := tool.NewRegistry(tool.NewBashTool(workspace, "/bin/sh", time.Second, 51200, tool.BashSecurity{RedactValues: []string{credential}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "secret-session", Workspace: workspaceRoot, Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"cat .part-1 .part-2"}`)}}}, FinishReason: model.FinishToolCalls}},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	runner := New(fakeProvider, registry, store, Options{Model: "test", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	var toolEvent Event
+	if err := runner.Run(context.Background(), "check", func(event Event) {
+		if event.Type == EventToolCallFinished {
+			toolEvent = event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for location, content := range map[string]string{
+		"tool event": toolEvent.ToolResult.Content,
+		"session":    string(persisted),
+		"next request": func() string {
+			encoded, marshalErr := json.Marshal(fakeProvider.requests[1])
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			return string(encoded)
+		}(),
+	} {
+		if strings.Contains(content, credential) || !strings.Contains(content, "[REDACTED]") {
+			t.Fatalf("%s did not safely redact credential: %q", location, content)
+		}
+	}
+}
+
+func TestRunClassifiesFatalPersistenceAtEveryDurableBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		failRole      model.Role
+		wantBoundary  string
+		wantProviders int
+		wantTools     int
+	}{
+		{name: "user append", failRole: model.RoleUser, wantBoundary: "persist user message", wantProviders: 0, wantTools: 0},
+		{name: "assistant append", failRole: model.RoleAssistant, wantBoundary: "persist assistant message", wantProviders: 1, wantTools: 0},
+		{name: "tool append", failRole: model.RoleTool, wantBoundary: "persist tool result", wantProviders: 1, wantTools: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			persistErr := fmt.Errorf("%w: injected session failure", session.ErrFatalPersistence)
+			memory := &interceptSession{base: session.NewMemory(testHeader(t))}
+			memory.fail = func(_ int, message model.Message) error {
+				if message.Role == test.failRole {
+					return persistErr
+				}
+				return nil
+			}
+			recorder := &recordingTool{name: "echo"}
+			recorder.execute = func(context.Context, json.RawMessage) tool.Result {
+				recorder.calls = append(recorder.calls, "called")
+				return tool.Result{Content: "hello"}
+			}
+			registry, err := toolpkgNewRegistry(recorder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fakeProvider := &scriptedProvider{scripts: []providerScript{
+				{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}}, FinishReason: model.FinishToolCalls}},
+				{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "must not run"}}}, FinishReason: model.FinishStop}},
+			}}
+			runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+
+			runErr := runner.Run(context.Background(), "inspect", nil)
+			if !errors.Is(runErr, session.ErrFatalPersistence) || !strings.Contains(runErr.Error(), test.wantBoundary) {
+				t.Fatalf("Run() error = %v, want fatal persistence at %q", runErr, test.wantBoundary)
+			}
+			if len(fakeProvider.requests) != test.wantProviders {
+				t.Fatalf("provider calls = %d, want %d", len(fakeProvider.requests), test.wantProviders)
+			}
+			if len(recorder.calls) != test.wantTools {
+				t.Fatalf("tool calls = %d, want %d", len(recorder.calls), test.wantTools)
+			}
+		})
 	}
 }
 

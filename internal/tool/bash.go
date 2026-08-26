@@ -14,24 +14,45 @@ import (
 	"github.com/baiyuqing/otto/internal/model"
 )
 
+type BashSecurity struct {
+	RemoveEnv    []string
+	RedactValues []string
+}
+
 type bashTool struct {
 	workspace      *Workspace
 	shell          string
 	timeout        time.Duration
 	maxOutputBytes int
+	removeEnv      map[string]struct{}
+	redactValues   []string
 }
 
 type bashArgs struct {
 	Command string `json:"command"`
 }
 
-func NewBashTool(workspace *Workspace, shell string, timeout time.Duration, maxOutputBytes int) Tool {
-	return &bashTool{
+func NewBashTool(workspace *Workspace, shell string, timeout time.Duration, maxOutputBytes int, securityOptions ...BashSecurity) Tool {
+	tool := &bashTool{
 		workspace:      workspace,
 		shell:          shell,
 		timeout:        timeout,
 		maxOutputBytes: maxOutputBytes,
+		removeEnv:      make(map[string]struct{}),
 	}
+	for _, security := range securityOptions {
+		for _, name := range security.RemoveEnv {
+			if name != "" {
+				tool.removeEnv[name] = struct{}{}
+			}
+		}
+		for _, value := range security.RedactValues {
+			if value != "" {
+				tool.redactValues = append(tool.redactValues, value)
+			}
+		}
+	}
+	return tool
 }
 
 func (t *bashTool) Definition() model.ToolDefinition {
@@ -52,7 +73,12 @@ func (t *bashTool) Definition() model.ToolDefinition {
 	}
 }
 
-func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
+func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) (result Result) {
+	defer func() {
+		for _, value := range t.redactValues {
+			result.Content = strings.ReplaceAll(result.Content, value, "[REDACTED]")
+		}
+	}()
 	var args bashArgs
 	if err := decodeStrictJSON(arguments, &args, "command"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
@@ -69,11 +95,19 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 
 	stdout := newCappedByteCollector(t.maxOutputBytes)
 	stderr := newCappedByteCollector(t.maxOutputBytes)
+	redactedStdout := newExactRedactingWriter(stdout, t.redactValues)
+	redactedStderr := newExactRedactingWriter(stderr, t.redactValues)
+	flushOutput := func() error {
+		if err := redactedStdout.Flush(); err != nil {
+			return err
+		}
+		return redactedStderr.Flush()
+	}
 	cmd := exec.Command(t.shell, "-lc", args.Command)
 	cmd.Dir = t.workspace.root
-	cmd.Env = os.Environ()
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	cmd.Env = filterEnvironment(os.Environ(), t.removeEnv)
+	cmd.Stdout = redactedStdout
+	cmd.Stderr = redactedStderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -95,17 +129,26 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 
 	select {
 	case err := <-waitCh:
+		if flushErr := flushOutput(); flushErr != nil {
+			return Result{Content: fmt.Sprintf("capture shell output: %v", flushErr), IsError: true}
+		}
 		return t.resultForExit(err, stdout, stderr)
 	case <-ctx.Done():
 		waitErr := t.killAndWait(cmd, waitCh)
 		if waitErr != nil && !isProcessTermination(waitErr) {
 			return Result{Content: fmt.Sprintf("cancel shell command: %v", waitErr), IsError: true}
 		}
+		if flushErr := flushOutput(); flushErr != nil {
+			return Result{Content: fmt.Sprintf("capture shell output: %v", flushErr), IsError: true}
+		}
 		return Result{Content: formatBashResult(stdout, stderr, formatTerminationStatus("status: cancelled", waitErr)), IsError: false}
 	case <-timeoutCh:
 		waitErr := t.killAndWait(cmd, waitCh)
 		if waitErr != nil && !isProcessTermination(waitErr) {
 			return Result{Content: fmt.Sprintf("timeout shell command: %v", waitErr), IsError: true}
+		}
+		if flushErr := flushOutput(); flushErr != nil {
+			return Result{Content: fmt.Sprintf("capture shell output: %v", flushErr), IsError: true}
 		}
 		return Result{Content: formatBashResult(stdout, stderr, formatTerminationStatus(fmt.Sprintf("status: timed out after %s", t.timeout), waitErr)), IsError: false}
 	}
@@ -158,6 +201,20 @@ func terminationSignal(err error) string {
 		return ""
 	}
 	return ws.Signal().String()
+}
+
+func filterEnvironment(environment []string, removed map[string]struct{}) []string {
+	if len(removed) == 0 {
+		return environment
+	}
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, _ := strings.Cut(entry, "=")
+		if _, remove := removed[name]; !remove {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func formatBashResult(stdout, stderr *cappedByteCollector, status string) string {

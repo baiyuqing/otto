@@ -113,6 +113,59 @@ func TestCreateUsesExpectedPermissionsAndPath(t *testing.T) {
 	}
 }
 
+func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		writeFail bool
+		syncFail  bool
+	}{
+		{name: "write failure", writeFail: true},
+		{name: "sync failure", syncFail: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := Create(t.TempDir(), Header{Version: 1, ID: "session-1", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+
+			injected := errors.New("injected durable failure")
+			writer := &faultingDurableWriter{file: store.file}
+			if test.writeFail {
+				writer.writeErr = injected
+			}
+			if test.syncFail {
+				writer.syncErr = injected
+			}
+			store.writer = writer
+
+			message := model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}
+			firstErr := store.Append(context.Background(), message)
+			if !errors.Is(firstErr, ErrFatalPersistence) || !errors.Is(firstErr, injected) {
+				t.Fatalf("first Append() error = %v, want fatal persistence wrapping injected failure", firstErr)
+			}
+			writes, syncs := writer.writes, writer.syncs
+
+			secondErr := store.Append(context.Background(), message)
+			if !errors.Is(secondErr, ErrFatalPersistence) || !errors.Is(secondErr, injected) {
+				t.Fatalf("second Append() error = %v, want poisoned fatal persistence error", secondErr)
+			}
+			canceledCtx, cancel := context.WithCancel(context.Background())
+			cancel()
+			canceledErr := store.Append(canceledCtx, message)
+			if !errors.Is(canceledErr, ErrFatalPersistence) || !errors.Is(canceledErr, injected) {
+				t.Fatalf("canceled Append() after poison = %v, want fatal persistence error", canceledErr)
+			}
+			if writer.writes != writes || writer.syncs != syncs {
+				t.Fatalf("poisoned store attempted another durable append: writes %d->%d syncs %d->%d", writes, writer.writes, syncs, writer.syncs)
+			}
+			if got := store.Messages(); len(got) != 0 {
+				t.Fatalf("Messages() = %#v, want no committed messages", got)
+			}
+		})
+	}
+}
+
 func TestOpenTruncatesMalformedFinalLineWithWarning(t *testing.T) {
 	root := t.TempDir()
 	store, err := Create(root, Header{Version: 1, ID: "session-1", Workspace: root, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
@@ -131,7 +184,7 @@ func TestOpenTruncatesMalformedFinalLineWithWarning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := file.WriteString("not-json"); err != nil {
+	if _, err := file.WriteString(`{"type":"message","message":`); err != nil {
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -154,8 +207,8 @@ func TestOpenTruncatesMalformedFinalLineWithWarning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(content), "not-json") {
-		t.Fatalf("session file was not truncated: %q", string(content))
+	if strings.Count(string(content), "\n") != 2 || !strings.HasSuffix(string(content), "\n") {
+		t.Fatalf("session file was not truncated to two complete records: %q", string(content))
 	}
 
 	reopenedAgain, secondWarnings, err := Open(path)
@@ -204,6 +257,84 @@ func TestOpenRejectsMalformedHeaderEvenWhenFinal(t *testing.T) {
 
 	if _, _, err := Open(path); err == nil {
 		t.Fatal("expected malformed header to fail")
+	}
+}
+
+func TestOpenRejectsCompleteMalformedFinalJSONWithoutMutation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	header := marshalLine(t, Record{Type: recordTypeHeader, Header: &Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}})
+	content := header + "\nnot-json"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Open(path); err == nil {
+		t.Fatal("expected complete malformed final JSON to fail")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != content {
+		t.Fatalf("invalid complete final record was mutated: %q", after)
+	}
+}
+
+func TestOpenRejectsInvalidPersistedFixturesBeforeMutation(t *testing.T) {
+	const timestamp = "1970-01-01T00:00:01Z"
+	validHeader := `{"type":"header","header":{"version":1,"id":"session-1","workspace":"/tmp/project","provider":"openai-compatible","model":"test-model","created_at":"` + timestamp + `"}}`
+	validUser := `{"type":"message","message":{"id":"user-1","role":"user","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `"}}`
+	cases := map[string]string{
+		"unknown record field":        strings.Replace(validHeader, `"type":"header"`, `"type":"header","extra":true`, 1),
+		"unknown header field":        strings.Replace(validHeader, `"version":1`, `"version":1,"extra":true`, 1),
+		"missing header version":      strings.Replace(validHeader, `"version":1,`, "", 1),
+		"missing header id":           strings.Replace(validHeader, `"id":"session-1",`, "", 1),
+		"missing header workspace":    strings.Replace(validHeader, `"workspace":"/tmp/project",`, "", 1),
+		"missing header provider":     strings.Replace(validHeader, `"provider":"openai-compatible",`, "", 1),
+		"missing header model":        strings.Replace(validHeader, `"model":"test-model",`, "", 1),
+		"zero header timestamp":       strings.Replace(validHeader, `"created_at":"`+timestamp+`"`, `"created_at":"0001-01-01T00:00:00Z"`, 1),
+		"header with message payload": strings.TrimSuffix(validHeader, "}") + `,"message":{"id":"unexpected"}}`,
+		"unknown message field":       validHeader + "\n" + strings.Replace(validUser, `"id":"user-1"`, `"id":"user-1","extra":true`, 1),
+		"missing message id":          validHeader + "\n" + strings.Replace(validUser, `"id":"user-1",`, "", 1),
+		"invalid message role":        validHeader + "\n" + strings.Replace(validUser, `"role":"user"`, `"role":"system"`, 1),
+		"zero message timestamp":      validHeader + "\n" + strings.Replace(validUser, `"created_at":"`+timestamp+`"`, `"created_at":"0001-01-01T00:00:00Z"`, 1),
+		"empty message blocks":        validHeader + "\n" + strings.Replace(validUser, `[{"type":"text","text":"hello"}]`, `[]`, 1),
+		"unknown block field":         validHeader + "\n" + strings.Replace(validUser, `"text":"hello"`, `"text":"hello","extra":true`, 1),
+		"user tool-call block":        validHeader + "\n" + strings.Replace(validUser, `{"type":"text","text":"hello"}`, `{"type":"tool_call","tool_call_id":"call-1","tool_name":"read","arguments":{}}`, 1),
+		"assistant tool-result block": validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_result","tool_call_id":"call-1","tool_name":"read"}],"created_at":"` + timestamp + `","finish_reason":"stop"}}`,
+		"tool text block":             validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"text","text":"bad"}],"created_at":"` + timestamp + `"}}`,
+		"invalid finish reason":       validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `","finish_reason":"bad"}}`,
+		"missing assistant finish":    validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `"}}`,
+		"negative usage":              validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `","finish_reason":"stop","usage":{"input_tokens":-1,"output_tokens":0}}}`,
+		"unknown usage field":         validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `","finish_reason":"stop","usage":{"input_tokens":1,"output_tokens":0,"extra":true}}}`,
+		"missing tool-call id":        validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_name":"read","arguments":{}}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
+		"missing tool-call name":      validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"call-1","arguments":{}}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
+		"null tool-call arguments":    validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"call-1","tool_name":"read","arguments":null}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
+		"non-object tool arguments":   validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"call-1","tool_name":"read","arguments":"not-an-object"}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
+		"missing tool-result id":      validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"tool_result","tool_name":"read"}],"created_at":"` + timestamp + `"}}`,
+		"missing tool-result name":    validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"tool_result","tool_call_id":"call-1"}],"created_at":"` + timestamp + `"}}`,
+		"orphan tool result":          validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"tool_result","tool_call_id":"call-1","tool_name":"read"}],"created_at":"` + timestamp + `"}}`,
+		"message with header payload": validHeader + "\n" + strings.TrimSuffix(validUser, "}") + `,"header":{"version":1}}`,
+		"header after first line":     validHeader + "\n" + validHeader,
+	}
+
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			original := content + "\n"
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := Open(path); err == nil {
+				t.Fatal("expected invalid persisted fixture to fail")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != original {
+				t.Fatalf("invalid fixture was mutated: before=%q after=%q", original, after)
+			}
+		})
 	}
 }
 
@@ -352,7 +483,7 @@ func createSessionWithDanglingCall(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant := model.Message{ID: "assistant-1", Role: model.RoleAssistant, CreatedAt: time.Unix(2, 0).UTC(), Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}}
+	assistant := model.Message{ID: "assistant-1", Role: model.RoleAssistant, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishToolCalls, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}}
 	if err := store.Append(context.Background(), assistant); err != nil {
 		t.Fatal(err)
 	}
@@ -370,6 +501,30 @@ func marshalLine(t *testing.T, record Record) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+type faultingDurableWriter struct {
+	file     *os.File
+	writeErr error
+	syncErr  error
+	writes   int
+	syncs    int
+}
+
+func (w *faultingDurableWriter) Write(data []byte) (int, error) {
+	w.writes++
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	return w.file.Write(data)
+}
+
+func (w *faultingDurableWriter) Sync() error {
+	w.syncs++
+	if w.syncErr != nil {
+		return w.syncErr
+	}
+	return w.file.Sync()
 }
 
 func assertJSONTags(t *testing.T, typ reflect.Type, want ...string) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,9 +29,9 @@ func TestRunHelpDoesNotRequireCredentials(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, flag := range []string{"--config", "--cwd", "--continue", "--resume", "--no-session"} {
-		if !strings.Contains(stdout.String(), flag) {
-			t.Fatalf("help missing %s: %s", flag, stdout.String())
+	for _, text := range []string{"--config", "--cwd", "--continue", "--resume", "--no-session", "WARNING", "unsandboxed", "anything accessible to your macOS user"} {
+		if !strings.Contains(stdout.String(), text) {
+			t.Fatalf("help missing %s: %s", text, stdout.String())
 		}
 	}
 	if stderr.Len() != 0 {
@@ -66,6 +68,30 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 				t.Fatalf("code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
 			}
 		})
+	}
+}
+
+func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "https://example.test/v1?tenant=x")
+	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resume")
+	deps := defaultRunDependencies()
+	var openCalls atomic.Int32
+	deps.openSession = func(string, string, io.Writer) (session.Session, error) {
+		openCalls.Add(1)
+		return nil, errors.New("session must not open")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code == 0 || !strings.Contains(stderr.String(), "base_url") {
+		t.Fatalf("code = %d, stderr = %q, want base_url error", code, stderr.String())
+	}
+	if openCalls.Load() != 0 {
+		t.Fatalf("open session calls = %d, want 0", openCalls.Load())
 	}
 }
 
@@ -352,6 +378,82 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	}
 	if strings.Contains(string(persisted), "smoke-secret") {
 		t.Fatal("API key leaked into session")
+	}
+}
+
+func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *testing.T) {
+	resolvedCredential := fmt.Sprintf("resolved-%d", time.Now().UnixNano())
+	fallbackCredential := fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	const profileKeyEnv = "OTTO_E2E_PROFILE_KEY"
+	t.Setenv(profileKeyEnv, resolvedCredential)
+	t.Setenv("OTTO_API_KEY", fallbackCredential)
+	t.Setenv("OTTO_E2E_UNRELATED", "preserved-environment")
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	midpoint := len(resolvedCredential) / 2
+	if err := os.WriteFile(filepath.Join(workspace, ".credential-part-1"), []byte(resolvedCredential[:midpoint]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".credential-part-2"), []byte(resolvedCredential[midpoint:]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var requestBodies []string
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+resolvedCredential {
+			t.Errorf("Authorization = %q, want resolved credential", got)
+		}
+		mu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		requestCount++
+		current := requestCount
+		mu.Unlock()
+		if current == 1 {
+			command := "env; printf 'reconstructed='; cat .credential-part-1 .credential-part-2"
+			writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`, fmt.Sprintf(`{"command":%q}`, command)))
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"credentials stayed private"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	configPath := writeCLIConfig(t, "openai-compatible", profileKeyEnv, server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check credentials\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, "OTTO_API_KEY": fallbackCredential,
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+
+	persisted, err := os.ReadFile(onlySessionPath(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	bodies := append([]string(nil), requestBodies...)
+	mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(bodies))
+	}
+	for location, content := range map[string]string{
+		"stdout": stdout.String(), "stderr": stderr.String(), "JSONL": string(persisted), "provider request 1": bodies[0], "provider request 2": bodies[1],
+	} {
+		for _, forbidden := range []string{resolvedCredential, fallbackCredential, profileKeyEnv, "OTTO_API_KEY"} {
+			if strings.Contains(content, forbidden) {
+				t.Fatalf("%s leaked protected credential data %q", location, forbidden)
+			}
+		}
+	}
+	if !strings.Contains(string(persisted), "reconstructed=[REDACTED]") || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
+		t.Fatalf("persisted bash event/result did not redact credential while preserving unrelated environment: %s", persisted)
 	}
 }
 

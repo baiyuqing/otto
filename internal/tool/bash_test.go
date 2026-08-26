@@ -83,6 +83,52 @@ func TestBashInheritsEnvironment(t *testing.T) {
 	}
 }
 
+func TestBashRemovesCredentialEnvironmentAndRedactsResolvedValue(t *testing.T) {
+	resolvedCredential := "resolved-" + strings.Repeat("x", 24)
+	t.Setenv("OTTO_API_KEY", "fallback-value")
+	t.Setenv("OTTO_TEST_PROFILE_KEY", resolvedCredential)
+	t.Setenv("OTTO_BASH_TEST_VALUE", "inherited-value")
+	t.Setenv("OTTO_TEST_SECRET_PART_1", resolvedCredential[:len(resolvedCredential)/2])
+	t.Setenv("OTTO_TEST_SECRET_PART_2", resolvedCredential[len(resolvedCredential)/2:])
+
+	workspace := mustWorkspace(t, t.TempDir())
+	bash := NewBashTool(workspace, "/bin/sh", 5*time.Second, 51200, BashSecurity{
+		RemoveEnv:    []string{"OTTO_API_KEY", "OTTO_TEST_PROFILE_KEY"},
+		RedactValues: []string{resolvedCredential},
+	})
+	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{
+		"command": `printf 'fallback=%s profile=%s inherited=%s reconstructed=%s%s' "$OTTO_API_KEY" "$OTTO_TEST_PROFILE_KEY" "$OTTO_BASH_TEST_VALUE" "$OTTO_TEST_SECRET_PART_1" "$OTTO_TEST_SECRET_PART_2"`,
+	}))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if strings.Contains(result.Content, resolvedCredential) || strings.Contains(result.Content, "fallback-value") {
+		t.Fatalf("credential leaked in bash result: %q", result.Content)
+	}
+	for _, expected := range []string{"fallback= profile= inherited=inherited-value", "reconstructed=[REDACTED]"} {
+		if !strings.Contains(result.Content, expected) {
+			t.Fatalf("bash result missing %q: %q", expected, result.Content)
+		}
+	}
+}
+
+func TestBashRedactsCredentialBeforeOutputTruncation(t *testing.T) {
+	credential := "credential-" + strings.Repeat("z", 32)
+	workspace := mustWorkspace(t, t.TempDir())
+	bash := NewBashTool(workspace, "/bin/sh", 5*time.Second, 12, BashSecurity{RedactValues: []string{credential}})
+
+	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "printf %s " + credential}))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if strings.Contains(result.Content, credential) || strings.Contains(result.Content, credential[:12]) {
+		t.Fatalf("credential or truncated prefix leaked: %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "[REDACTED]") {
+		t.Fatalf("redaction marker missing: %q", result.Content)
+	}
+}
+
 func TestBashReportsStdoutAndStderrTruncationSeparately(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	bash := NewBashTool(workspace, "/bin/sh", 5*time.Second, 12)

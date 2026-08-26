@@ -1,6 +1,8 @@
 package session
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,11 +13,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
 )
+
+type durableRecordWriter interface {
+	Write([]byte) (int, error)
+	Sync() error
+}
 
 type Store struct {
 	mu       sync.Mutex
@@ -23,6 +31,8 @@ type Store struct {
 	messages []model.Message
 	path     string
 	file     *os.File
+	writer   durableRecordWriter
+	fatalErr error
 	closed   bool
 }
 
@@ -48,7 +58,32 @@ func Create(root string, header Header) (*Store, error) {
 		return nil, err
 	}
 
-	return &Store{header: header, path: path, file: file}, nil
+	return &Store{header: header, path: path, file: file, writer: file}, nil
+}
+
+func ReadHeader(path string) (Header, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return Header{}, fmt.Errorf("open session file: %w", err)
+	}
+	defer file.Close()
+
+	line, err := bufio.NewReader(file).ReadBytes('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return Header{}, fmt.Errorf("read session header: %w", err)
+	}
+	line = bytes.TrimSuffix(line, []byte{'\n'})
+	if len(line) == 0 {
+		return Header{}, errors.New("session file is empty")
+	}
+	record, err := decodeRecord(line)
+	if err != nil {
+		return Header{}, fmt.Errorf("decode session header: %w", err)
+	}
+	if err := validateHeaderRecord(record); err != nil {
+		return Header{}, err
+	}
+	return record.Header.sessionHeader(), nil
 }
 
 func Open(path string) (*Store, []Warning, error) {
@@ -69,9 +104,12 @@ func Open(path string) (*Store, []Warning, error) {
 	}
 
 	var (
-		header   Header
-		messages []model.Message
-		warnings []Warning
+		header         Header
+		messages       []model.Message
+		warnings       []Warning
+		pendingCalls   = make(map[string]string)
+		seenCallIDs    = make(map[string]struct{})
+		seenMessageIDs = make(map[string]struct{})
 	)
 
 	for i, line := range lines {
@@ -82,12 +120,12 @@ func Open(path string) (*Store, []Warning, error) {
 
 		record, err := decodeRecord(line.content)
 		if err != nil {
-			if i > 0 && i == len(lines)-1 {
+			if i > 0 && i == len(lines)-1 && isIncompleteJSON(line.content) {
 				if err := truncateSession(file, line.start); err != nil {
 					file.Close()
 					return nil, nil, err
 				}
-				warnings = append(warnings, Warning{Message: fmt.Sprintf("truncated malformed final session line at %s", path)})
+				warnings = append(warnings, Warning{Message: fmt.Sprintf("truncated incomplete final session line at %s", path)})
 				break
 			}
 			file.Close()
@@ -96,19 +134,15 @@ func Open(path string) (*Store, []Warning, error) {
 
 		switch i {
 		case 0:
-			if record.Type != recordTypeHeader || record.Header == nil {
+			if err := validateHeaderRecord(record); err != nil {
 				file.Close()
-				return nil, nil, errors.New("session header record is missing")
-			}
-			if record.Header.Version != currentVersion {
-				file.Close()
-				return nil, nil, fmt.Errorf("unsupported session version %d", record.Header.Version)
+				return nil, nil, err
 			}
 			header = record.Header.sessionHeader()
 		default:
-			if record.Type != recordTypeMessage || record.Message == nil {
+			if err := validateMessageRecord(record, pendingCalls, seenCallIDs, seenMessageIDs); err != nil {
 				file.Close()
-				return nil, nil, fmt.Errorf("session line %d: invalid record", i+1)
+				return nil, nil, fmt.Errorf("session line %d: %w", i+1, err)
 			}
 			messages = append(messages, record.Message.modelMessage())
 		}
@@ -119,7 +153,7 @@ func Open(path string) (*Store, []Warning, error) {
 		return nil, nil, fmt.Errorf("seek session file: %w", err)
 	}
 
-	store := &Store{header: header, messages: messages, path: path, file: file}
+	store := &Store{header: header, messages: messages, path: path, file: file, writer: file}
 	repairWarnings, err := store.repairDanglingToolCalls()
 	if err != nil {
 		file.Close()
@@ -142,17 +176,20 @@ func (s *Store) Messages() []model.Message {
 }
 
 func (s *Store) Append(ctx context.Context, message model.Message) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return errSessionClosed
 	}
-	if err := writeRecord(s.file, newPersistedMessageRecord(message)); err != nil {
+	if s.fatalErr != nil {
+		return s.fatalErr
+	}
+	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if err := writeRecord(s.writer, newPersistedMessageRecord(message)); err != nil {
+		s.fatalErr = &fatalPersistenceError{cause: err}
+		return s.fatalErr
 	}
 	s.messages = append(s.messages, cloneMessage(message))
 	return nil
@@ -230,7 +267,7 @@ func (s *Store) repairDanglingToolCalls() ([]Warning, error) {
 	return warnings, nil
 }
 
-func writeRecord(file *os.File, record persistedRecord) error {
+func writeRecord(file durableRecordWriter, record persistedRecord) error {
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("encode session record: %w", err)
@@ -258,11 +295,180 @@ func truncateSession(file *os.File, size int64) error {
 }
 
 func decodeRecord(line []byte) (persistedRecord, error) {
+	decoder := json.NewDecoder(bytes.NewReader(line))
+	decoder.DisallowUnknownFields()
 	var record persistedRecord
-	if err := json.Unmarshal(line, &record); err != nil {
+	if err := decoder.Decode(&record); err != nil {
+		return persistedRecord{}, fmt.Errorf("decode session record: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return persistedRecord{}, errors.New("decode session record: trailing JSON value")
+		}
 		return persistedRecord{}, fmt.Errorf("decode session record: %w", err)
 	}
 	return record, nil
+}
+
+func isIncompleteJSON(line []byte) bool {
+	var value any
+	err := json.Unmarshal(line, &value)
+	return err != nil && strings.Contains(err.Error(), "unexpected end of JSON input")
+}
+
+func validateHeaderRecord(record persistedRecord) error {
+	if record.Type != recordTypeHeader || record.Header == nil || record.Message != nil {
+		return errors.New("session header record is missing or malformed")
+	}
+	header := record.Header
+	if header.Version != currentVersion {
+		return fmt.Errorf("unsupported session version %d", header.Version)
+	}
+	if strings.TrimSpace(header.ID) == "" {
+		return errors.New("session header id is required")
+	}
+	if strings.TrimSpace(header.Workspace) == "" {
+		return errors.New("session header workspace is required")
+	}
+	if strings.TrimSpace(header.Provider) == "" {
+		return errors.New("session header provider is required")
+	}
+	if strings.TrimSpace(header.Model) == "" {
+		return errors.New("session header model is required")
+	}
+	if header.CreatedAt.IsZero() {
+		return errors.New("session header timestamp is required")
+	}
+	return nil
+}
+
+func validateMessageRecord(record persistedRecord, pendingCalls map[string]string, seenCallIDs, seenMessageIDs map[string]struct{}) error {
+	if record.Type != recordTypeMessage || record.Message == nil || record.Header != nil {
+		return errors.New("invalid message record shape")
+	}
+	message := record.Message
+	if strings.TrimSpace(message.ID) == "" {
+		return errors.New("message id is required")
+	}
+	if _, exists := seenMessageIDs[message.ID]; exists {
+		return fmt.Errorf("duplicate message id %q", message.ID)
+	}
+	seenMessageIDs[message.ID] = struct{}{}
+	if message.CreatedAt.IsZero() {
+		return errors.New("message timestamp is required")
+	}
+	if len(message.Blocks) == 0 {
+		return errors.New("message blocks are required")
+	}
+	if message.Usage != nil {
+		if message.Role != model.RoleAssistant {
+			return errors.New("usage is only valid on assistant messages")
+		}
+		if message.Usage.InputTokens < 0 || message.Usage.OutputTokens < 0 {
+			return errors.New("usage token counts must be nonnegative")
+		}
+	}
+
+	if len(pendingCalls) > 0 && message.Role != model.RoleTool {
+		return errors.New("unresolved tool calls must be followed by tool results")
+	}
+
+	hasToolCall := false
+	switch message.Role {
+	case model.RoleUser:
+		if message.FinishReason != "" {
+			return errors.New("finish reason is not valid on user messages")
+		}
+	case model.RoleAssistant:
+		if !validFinishReason(message.FinishReason) {
+			return fmt.Errorf("invalid assistant finish reason %q", message.FinishReason)
+		}
+	case model.RoleTool:
+		if message.FinishReason != "" {
+			return errors.New("finish reason is not valid on tool messages")
+		}
+	default:
+		return fmt.Errorf("invalid message role %q", message.Role)
+	}
+
+	for _, block := range message.Blocks {
+		switch block.Type {
+		case model.BlockText:
+			if message.Role != model.RoleUser && message.Role != model.RoleAssistant {
+				return fmt.Errorf("text block is incompatible with role %q", message.Role)
+			}
+			if block.ToolCallID != "" || block.ToolName != "" || len(block.Arguments) != 0 || block.IsError {
+				return errors.New("text block contains incompatible fields")
+			}
+		case model.BlockToolCall:
+			if message.Role != model.RoleAssistant {
+				return fmt.Errorf("tool-call block is incompatible with role %q", message.Role)
+			}
+			if strings.TrimSpace(block.ToolCallID) == "" || strings.TrimSpace(block.ToolName) == "" {
+				return errors.New("tool-call id and name are required")
+			}
+			if !validToolArguments(block.Arguments) {
+				return errors.New("tool-call arguments must be a valid JSON object")
+			}
+			if block.Text != "" || block.IsError {
+				return errors.New("tool-call block contains incompatible fields")
+			}
+			if _, exists := seenCallIDs[block.ToolCallID]; exists {
+				return fmt.Errorf("duplicate tool-call id %q", block.ToolCallID)
+			}
+			seenCallIDs[block.ToolCallID] = struct{}{}
+			pendingCalls[block.ToolCallID] = block.ToolName
+			hasToolCall = true
+		case model.BlockToolResult:
+			if message.Role != model.RoleTool {
+				return fmt.Errorf("tool-result block is incompatible with role %q", message.Role)
+			}
+			if strings.TrimSpace(block.ToolCallID) == "" || strings.TrimSpace(block.ToolName) == "" {
+				return errors.New("tool-result id and name are required")
+			}
+			if len(block.Arguments) != 0 {
+				return errors.New("tool-result block contains incompatible arguments")
+			}
+			name, exists := pendingCalls[block.ToolCallID]
+			if !exists {
+				return fmt.Errorf("tool result %q has no pending call", block.ToolCallID)
+			}
+			if name != block.ToolName {
+				return fmt.Errorf("tool result %q name does not match pending call", block.ToolCallID)
+			}
+			delete(pendingCalls, block.ToolCallID)
+		default:
+			return fmt.Errorf("invalid block type %q", block.Type)
+		}
+	}
+	if message.Role == model.RoleAssistant {
+		if hasToolCall && message.FinishReason != model.FinishToolCalls {
+			return errors.New("assistant tool calls require tool_calls finish reason")
+		}
+		if !hasToolCall && message.FinishReason == model.FinishToolCalls {
+			return errors.New("tool_calls finish reason requires a tool call")
+		}
+	}
+	return nil
+}
+
+func validFinishReason(reason model.FinishReason) bool {
+	switch reason {
+	case model.FinishStop, model.FinishToolCalls, model.FinishLength, model.FinishUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validToolArguments(arguments json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(arguments)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' || !json.Valid(trimmed) {
+		return false
+	}
+	var object map[string]json.RawMessage
+	return json.Unmarshal(trimmed, &object) == nil && object != nil
 }
 
 type lineInfo struct {

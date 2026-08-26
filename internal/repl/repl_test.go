@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
 
@@ -106,6 +107,25 @@ func TestREPLWritesProviderErrorsToStderrAndContinues(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "recovered") || calls != 2 {
 		t.Fatalf("stdout = %q, calls = %d", stdout.String(), calls)
+	}
+}
+
+func TestREPLTerminatesAfterFatalPersistenceError(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected append failure"))
+	var calls int
+	var stdout, stderr bytes.Buffer
+	runner := &fakeRunner{run: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		calls++
+		emit(agent.Event{Type: agent.EventAgentError, Err: fatalErr})
+		return fatalErr
+	}}
+	r := New(strings.NewReader("first\nsecond\n/exit\n"), &stdout, &stderr, runner, Info{})
+	err := r.Run(context.Background())
+	if !errors.Is(err, session.ErrFatalPersistence) {
+		t.Fatalf("Run() error = %v, want fatal persistence", err)
+	}
+	if calls != 1 {
+		t.Fatalf("runner calls = %d, want no later prompt processing", calls)
 	}
 }
 

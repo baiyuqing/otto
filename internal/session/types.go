@@ -2,12 +2,31 @@ package session
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
 )
 
 const currentVersion = 1
+
+var ErrFatalPersistence = errors.New("fatal session persistence failure")
+
+type fatalPersistenceError struct {
+	cause error
+}
+
+func (err *fatalPersistenceError) Error() string {
+	return ErrFatalPersistence.Error() + ": " + err.cause.Error()
+}
+
+func (err *fatalPersistenceError) Unwrap() error {
+	return err.cause
+}
+
+func (err *fatalPersistenceError) Is(target error) bool {
+	return target == ErrFatalPersistence
+}
 
 const (
 	recordTypeHeader  = "header"

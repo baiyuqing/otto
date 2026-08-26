@@ -33,6 +33,7 @@ type interruptSubscription struct {
 
 type runDependencies struct {
 	subscribeInterrupts func() interruptSubscription
+	readSessionHeader   func(string, string) (session.Header, error)
 	openSession         func(string, string, io.Writer) (session.Session, error)
 	newSession          func(bool, string, string, config.Runtime) (session.Session, error)
 }
@@ -40,6 +41,7 @@ type runDependencies struct {
 func defaultRunDependencies() runDependencies {
 	return runDependencies{
 		subscribeInterrupts: subscribeOSInterrupts,
+		readSessionHeader:   readSessionHeader,
 		openSession:         openSession,
 		newSession:          newSession,
 	}
@@ -116,17 +118,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	defer func() { _ = closeCurrent() }()
 
-	if options.resumePath != "" {
-		currentSession, err = deps.openSession(options.resumePath, workspacePath, stderr)
-		if err != nil {
-			return fail(stderr, "%v", err)
-		}
-	} else if options.continueLast {
-		path, findErr := newestSessionPath(sessionRoot, workspacePath)
-		if findErr != nil {
-			return fail(stderr, "%v", findErr)
-		}
-		currentSession, err = deps.openSession(path, workspacePath, stderr)
+	sessionPath := options.resumePath
+	if options.continueLast {
+		sessionPath, err = newestSessionPath(sessionRoot, workspacePath)
 		if err != nil {
 			return fail(stderr, "%v", err)
 		}
@@ -137,8 +131,11 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "load config: %v", err)
 	}
 	defaults := config.SessionDefaults{}
-	if currentSession != nil {
-		header := currentSession.Header()
+	if sessionPath != "" {
+		header, headerErr := deps.readSessionHeader(sessionPath, workspacePath)
+		if headerErr != nil {
+			return fail(stderr, "%v", headerErr)
+		}
 		defaults.Provider = header.Provider
 		defaults.Model = header.Model
 		if options.profile == "" && header.Profile != "" {
@@ -171,17 +168,22 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		tool.NewReadTool(workspace, runtime.MaxOutputBytes),
 		tool.NewWriteTool(workspace),
 		tool.NewEditTool(workspace),
-		tool.NewBashTool(workspace, shell, runtime.ShellTimeout, runtime.MaxOutputBytes),
+		tool.NewBashTool(workspace, shell, runtime.ShellTimeout, runtime.MaxOutputBytes, tool.BashSecurity{
+			RemoveEnv:    []string{"OTTO_API_KEY", runtime.APIKeyEnv},
+			RedactValues: []string{runtime.APIKey},
+		}),
 	)
 	if err != nil {
 		return fail(stderr, "create tool registry: %v", err)
 	}
 
-	if currentSession == nil {
+	if sessionPath != "" {
+		currentSession, err = deps.openSession(sessionPath, workspacePath, stderr)
+	} else {
 		currentSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
-		if err != nil {
-			return fail(stderr, "%v", err)
-		}
+	}
+	if err != nil {
+		return fail(stderr, "%v", err)
 	}
 
 	processCtx, cancelProcess := context.WithCancel(ctx)
@@ -328,6 +330,9 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 func printUsage(output io.Writer) {
 	_, _ = io.WriteString(output, `Usage: otto [options]
 
+WARNING: bash is unsandboxed and can access anything accessible to your macOS user.
+File tools stay within the selected workspace; shell commands do not.
+
 Options:
   --help                 show help
   --config PATH          configuration file
@@ -414,6 +419,21 @@ func validateShell(path string) error {
 		return fmt.Errorf("invalid shell %q: not executable", path)
 	}
 	return nil
+}
+
+func readSessionHeader(path, workspace string) (session.Header, error) {
+	header, err := session.ReadHeader(path)
+	if err != nil {
+		return session.Header{}, err
+	}
+	headerWorkspace, err := canonicalDirectory(header.Workspace)
+	if err != nil {
+		return session.Header{}, fmt.Errorf("resolve session workspace: %w", err)
+	}
+	if headerWorkspace != workspace {
+		return session.Header{}, fmt.Errorf("session workspace %q does not match cwd", headerWorkspace)
+	}
+	return header, nil
 }
 
 func openSession(path, workspace string, stderr io.Writer) (session.Session, error) {

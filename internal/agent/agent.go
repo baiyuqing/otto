@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
@@ -48,7 +49,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		CreatedAt: a.options.Now(),
 		Blocks:    []model.Block{{Type: model.BlockText, Text: userText}},
 	}); err != nil {
-		return a.fail(emit, err)
+		return a.fail(emit, fmt.Errorf("persist user message: %w", err))
 	}
 
 	for turn := 0; turn < a.options.MaxTurns; turn++ {
@@ -86,7 +87,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		}
 
 		if err := a.session.Append(ctx, assistant); err != nil {
-			return a.fail(emit, err)
+			return a.fail(emit, fmt.Errorf("persist assistant message: %w", err))
 		}
 		a.emit(emit, Event{Type: EventProviderUsage, Usage: response.Usage})
 
@@ -117,7 +118,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 					IsError:    result.IsError,
 				}},
 			}); err != nil {
-				return a.fail(emit, err)
+				return a.fail(emit, fmt.Errorf("persist tool result for %q: %w", block.ToolCallID, err))
 			}
 		}
 		if err := ctx.Err(); err != nil {

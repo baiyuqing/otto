@@ -37,15 +37,18 @@ func New(baseURL, apiKey string, httpClient *http.Client) *Client {
 	if client.httpClient == nil {
 		client.httpClient = http.DefaultClient
 	}
+	client.baseURL, client.err = NormalizeBaseURL(baseURL)
+	return client
+}
+
+func NormalizeBaseURL(baseURL string) (string, error) {
 	parsed, err := url.Parse(baseURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		client.err = fmt.Errorf("invalid OpenAI-compatible base URL")
-		return client
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("invalid OpenAI-compatible base URL")
 	}
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 	parsed.RawPath = strings.TrimSuffix(parsed.RawPath, "/")
-	client.baseURL = parsed.String()
-	return client
+	return parsed.String(), nil
 }
 
 func (c *Client) Complete(ctx context.Context, request provider.Request, emit func(provider.StreamEvent)) (provider.Response, error) {

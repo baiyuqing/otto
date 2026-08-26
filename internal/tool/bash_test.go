@@ -103,7 +103,7 @@ func TestBashReportsStdoutAndStderrTruncationSeparately(t *testing.T) {
 	}
 }
 
-func TestBashCallerCancellationKillsProcessGroup(t *testing.T) {
+func TestBashCallerCancellationReportsCancelledStatus(t *testing.T) {
 	root := t.TempDir()
 	workspace := mustWorkspace(t, root)
 	marker := filepath.Join(root, "cancel-child-survived")
@@ -114,7 +114,7 @@ func TestBashCallerCancellationKillsProcessGroup(t *testing.T) {
 	time.AfterFunc(50*time.Millisecond, cancel)
 
 	result := bash.Execute(ctx, mustJSON(t, map[string]string{"command": command}))
-	if !result.IsError || !strings.Contains(result.Content, "cancel") {
+	if result.IsError || !strings.Contains(result.Content, "status: cancelled") || !strings.Contains(result.Content, "signal: killed") {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 
@@ -124,7 +124,20 @@ func TestBashCallerCancellationKillsProcessGroup(t *testing.T) {
 	}
 }
 
-func TestBashTimeoutKillsProcessGroup(t *testing.T) {
+func TestBashPreCancelledContextReportsCancelledStatus(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	bash := NewBashTool(workspace, "/bin/sh", 5*time.Second, 51200)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := bash.Execute(ctx, mustJSON(t, map[string]string{"command": "echo hi"}))
+	if result.IsError || !strings.Contains(result.Content, "status: cancelled") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestBashTimeoutReportsTimedOutStatus(t *testing.T) {
 	root := t.TempDir()
 	workspace := mustWorkspace(t, root)
 	marker := filepath.Join(root, "child-survived")
@@ -132,7 +145,7 @@ func TestBashTimeoutKillsProcessGroup(t *testing.T) {
 	bash := NewBashTool(workspace, "/bin/sh", 50*time.Millisecond, 51200)
 
 	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": command}))
-	if !strings.Contains(result.Content, "timed out") {
+	if result.IsError || !strings.Contains(result.Content, "status: timed out") || !strings.Contains(result.Content, "signal: killed") {
 		t.Fatalf("unexpected result: %s", result.Content)
 	}
 

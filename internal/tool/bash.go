@@ -64,7 +64,7 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		return Result{Content: "invalid shell configuration", IsError: true}
 	}
 	if err := ctx.Err(); err != nil {
-		return Result{Content: fmt.Sprintf("command cancelled: %v", err), IsError: true}
+		return Result{Content: formatBashResult(newCappedByteCollector(t.maxOutputBytes), newCappedByteCollector(t.maxOutputBytes), "status: cancelled"), IsError: false}
 	}
 
 	stdout := newCappedByteCollector(t.maxOutputBytes)
@@ -101,13 +101,13 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		if waitErr != nil && !isProcessTermination(waitErr) {
 			return Result{Content: fmt.Sprintf("cancel shell command: %v", waitErr), IsError: true}
 		}
-		return Result{Content: formatBashResult(stdout, stderr, "status: cancelled"), IsError: true}
+		return Result{Content: formatBashResult(stdout, stderr, formatTerminationStatus("status: cancelled", waitErr)), IsError: false}
 	case <-timeoutCh:
 		waitErr := t.killAndWait(cmd, waitCh)
 		if waitErr != nil && !isProcessTermination(waitErr) {
 			return Result{Content: fmt.Sprintf("timeout shell command: %v", waitErr), IsError: true}
 		}
-		return Result{Content: formatBashResult(stdout, stderr, fmt.Sprintf("status: timed out after %s", t.timeout)), IsError: true}
+		return Result{Content: formatBashResult(stdout, stderr, formatTerminationStatus(fmt.Sprintf("status: timed out after %s", t.timeout), waitErr)), IsError: false}
 	}
 }
 
@@ -139,6 +139,25 @@ func isProcessTermination(err error) bool {
 	}
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr)
+}
+
+func formatTerminationStatus(status string, err error) string {
+	if signal := terminationSignal(err); signal != "" {
+		return status + "; signal: " + signal
+	}
+	return status
+}
+
+func terminationSignal(err error) string {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
+		return ""
+	}
+	ws, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return ""
+	}
+	return ws.Signal().String()
 }
 
 func formatBashResult(stdout, stderr *cappedByteCollector, status string) string {

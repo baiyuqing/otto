@@ -1,2 +1,7 @@
 .worktrees/
 .superpowers/
+/otto
+/dist/
+.DS_Store
+.otto/
+*.test

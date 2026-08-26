@@ -457,6 +457,36 @@ func TestRunRejectsEmptyUserText(t *testing.T) {
 	}
 }
 
+func TestRunEmitsErrorForEmptyUserText(t *testing.T) {
+	registry, err := tool.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{}
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+
+	var gotErr error
+	var events []Event
+	err = runner.Run(context.Background(), "   ", func(event Event) {
+		events = append(events, event)
+		if event.Type == EventAgentError {
+			gotErr = event.Err
+		}
+	})
+	if err != ErrEmptyUserText {
+		t.Fatalf("Run() error = %v, want %v", err, ErrEmptyUserText)
+	}
+	if gotErr != ErrEmptyUserText {
+		t.Fatalf("error event = %v, want %v", gotErr, ErrEmptyUserText)
+	}
+	if len(fakeProvider.requests) != 0 {
+		t.Fatalf("provider calls = %d, want 0", len(fakeProvider.requests))
+	}
+	if got := eventTypes(events); len(got) != 1 || got[0] != EventAgentError {
+		t.Fatalf("events = %v, want only error", got)
+	}
+}
+
 type providerScript struct {
 	response provider.Response
 	err      error

@@ -38,7 +38,7 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 
 func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) error {
 	if text := trimSpace(userText); text == "" {
-		return ErrEmptyUserText
+		return a.fail(emit, ErrEmptyUserText)
 	}
 
 	a.emit(emit, Event{Type: EventAgentStarted})

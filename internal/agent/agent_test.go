@@ -305,6 +305,118 @@ func TestRunReturnsProviderFailure(t *testing.T) {
 	}
 }
 
+func TestRunPersistsCanceledToolResultBeforeNextPrompt(t *testing.T) {
+	started := make(chan struct{})
+	cancelingTool := &recordingTool{name: "wait"}
+	cancelingTool.execute = func(ctx context.Context, _ json.RawMessage) tool.Result {
+		close(started)
+		<-ctx.Done()
+		return tool.Result{Content: "tool execution canceled", IsError: true}
+	}
+	registry, err := toolpkgNewRegistry(cancelingTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			response: provider.Response{
+				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "wait", Arguments: json.RawMessage(`{}`)}}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "recovered"}}}, FinishReason: model.FinishStop}},
+	}}
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(ctx, "first prompt", nil) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("tool did not start")
+	}
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Run() error = %v, want %v", err, context.Canceled)
+	}
+
+	messages := memory.Messages()
+	if len(messages) != 3 || messages[1].Role != model.RoleAssistant || messages[2].Role != model.RoleTool {
+		t.Fatalf("messages after cancellation = %#v, want user+assistant+tool", messages)
+	}
+	result := messages[2].Blocks[0]
+	if result.ToolCallID != "call-1" || result.ToolName != "wait" || result.Text != "tool execution canceled" || !result.IsError {
+		t.Fatalf("persisted cancellation result = %#v", result)
+	}
+
+	if err := runner.Run(context.Background(), "next prompt", nil); err != nil {
+		t.Fatalf("next Run() = %v", err)
+	}
+	if len(fakeProvider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want canceled turn plus next prompt", len(fakeProvider.requests))
+	}
+	nextMessages := fakeProvider.requests[1].Messages
+	if len(nextMessages) != 4 || nextMessages[2].Role != model.RoleTool || nextMessages[2].Blocks[0].ToolCallID != "call-1" || nextMessages[3].Text() != "next prompt" {
+		t.Fatalf("next provider messages = %#v, want matched tool result before next user", nextMessages)
+	}
+}
+
+func TestRunDoesNotExecuteLaterToolCallsAfterCancellation(t *testing.T) {
+	started := make(chan struct{})
+	waitTool := &recordingTool{name: "wait"}
+	waitTool.execute = func(ctx context.Context, _ json.RawMessage) tool.Result {
+		close(started)
+		<-ctx.Done()
+		return tool.Result{Content: "first canceled", IsError: true}
+	}
+	laterTool := &recordingTool{name: "later"}
+	laterTool.execute = func(_ context.Context, _ json.RawMessage) tool.Result {
+		laterTool.calls = append(laterTool.calls, "executed")
+		return tool.Result{Content: "unexpected execution"}
+	}
+	registry, err := toolpkgNewRegistry(waitTool, laterTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{
+		response: provider.Response{
+			Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "wait", Arguments: json.RawMessage(`{}`)},
+				{Type: model.BlockToolCall, ToolCallID: "call-2", ToolName: "later", Arguments: json.RawMessage(`{}`)},
+			}},
+			FinishReason: model.FinishToolCalls,
+		},
+	}}}
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Run(ctx, "prompt", nil) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first tool did not start")
+	}
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want %v", err, context.Canceled)
+	}
+	if len(laterTool.calls) != 0 {
+		t.Fatalf("later tool calls = %v, want no execution after cancellation", laterTool.calls)
+	}
+	messages := memory.Messages()
+	if len(messages) != 4 || messages[2].Blocks[0].ToolCallID != "call-1" || messages[3].Blocks[0].ToolCallID != "call-2" {
+		t.Fatalf("messages = %#v, want durable results for both tool calls", messages)
+	}
+	laterResult := messages[3].Blocks[0]
+	if !laterResult.IsError || !strings.Contains(laterResult.Text, "context canceled") {
+		t.Fatalf("later cancellation result = %#v", laterResult)
+	}
+}
+
 func TestRunPreservesProviderCancellation(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{err: context.Canceled}}}
 	registry, err := tool.NewRegistry()

@@ -26,6 +26,34 @@ import (
 
 const systemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
 
+type interruptSubscription struct {
+	signals <-chan os.Signal
+	stop    func()
+}
+
+type runDependencies struct {
+	subscribeInterrupts func() interruptSubscription
+	openSession         func(string, string, io.Writer) (session.Session, error)
+	newSession          func(bool, string, string, config.Runtime) (session.Session, error)
+}
+
+func defaultRunDependencies() runDependencies {
+	return runDependencies{
+		subscribeInterrupts: subscribeOSInterrupts,
+		openSession:         openSession,
+		newSession:          newSession,
+	}
+}
+
+func subscribeOSInterrupts() interruptSubscription {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	return interruptSubscription{
+		signals: signals,
+		stop:    func() { signal.Stop(signals) },
+	}
+}
+
 type cliOptions struct {
 	configPath     string
 	cwd            string
@@ -50,6 +78,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) int {
+	return runWithDependencies(ctx, args, stdin, stdout, stderr, getenv, defaultRunDependencies())
+}
+
+func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string, deps runDependencies) int {
 	options, help, err := parseFlags(args, stdout, stderr)
 	if help {
 		return 0
@@ -85,7 +117,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	defer func() { _ = closeCurrent() }()
 
 	if options.resumePath != "" {
-		currentSession, err = openSession(options.resumePath, workspacePath, stderr)
+		currentSession, err = deps.openSession(options.resumePath, workspacePath, stderr)
 		if err != nil {
 			return fail(stderr, "%v", err)
 		}
@@ -94,7 +126,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if findErr != nil {
 			return fail(stderr, "%v", findErr)
 		}
-		currentSession, err = openSession(path, workspacePath, stderr)
+		currentSession, err = deps.openSession(path, workspacePath, stderr)
 		if err != nil {
 			return fail(stderr, "%v", err)
 		}
@@ -146,7 +178,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	if currentSession == nil {
-		currentSession, err = newSession(options.noSession, sessionRoot, workspacePath, runtime)
+		currentSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
 		if err != nil {
 			return fail(stderr, "%v", err)
 		}
@@ -154,20 +186,22 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	processCtx, cancelProcess := context.WithCancel(ctx)
 	defer cancelProcess()
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt)
-	defer signal.Stop(signals)
+	subscription := deps.subscribeInterrupts()
+	if subscription.stop == nil {
+		subscription.stop = func() {}
+	}
 
 	var replMu sync.Mutex
 	var currentREPL *repl.REPL
 	signalDone := make(chan struct{})
-	defer close(signalDone)
+	signalStopped := make(chan struct{})
 	go func() {
+		defer close(signalStopped)
 		for {
 			select {
 			case <-signalDone:
 				return
-			case <-signals:
+			case <-subscription.signals:
 				replMu.Lock()
 				active := currentREPL != nil && currentREPL.Interrupt()
 				replMu.Unlock()
@@ -177,14 +211,20 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			}
 		}
 	}()
+	defer func() {
+		subscription.stop()
+		close(signalDone)
+		<-signalStopped
+	}()
 
+	input := repl.NewInput(stdin)
 	for {
 		header := currentSession.Header()
 		client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
 		runner := agent.New(client, registry, currentSession, agent.Options{
 			Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
 		})
-		console := repl.New(stdin, stdout, stderr, runner, repl.Info{
+		console := repl.NewWithInput(input, stdout, stderr, runner, repl.Info{
 			SessionID: header.ID, SessionPath: currentSession.Path(), Provider: runtime.Provider, Model: runtime.Model,
 		})
 
@@ -205,7 +245,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			if processCtx.Err() != nil {
 				return 130
 			}
-			currentSession, err = newSession(options.noSession, sessionRoot, workspacePath, runtime)
+			currentSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
 			if err != nil {
 				return fail(stderr, "%v", err)
 			}

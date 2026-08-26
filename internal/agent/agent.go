@@ -90,6 +90,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		}
 		a.emit(emit, Event{Type: EventProviderUsage, Usage: response.Usage})
 
+		durabilityCtx := context.WithoutCancel(ctx)
 		hadToolCall := false
 		for _, block := range assistant.Blocks {
 			if block.Type != model.BlockToolCall {
@@ -97,9 +98,14 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 			}
 			hadToolCall = true
 			a.emit(emit, Event{Type: EventToolCallStarted, ToolName: block.ToolName, ToolCallID: block.ToolCallID})
-			result := a.registry.Execute(ctx, block.ToolName, cloneArguments(block.Arguments))
+			var result tool.Result
+			if err := ctx.Err(); err != nil {
+				result = tool.Result{Content: err.Error(), IsError: true}
+			} else {
+				result = a.registry.Execute(ctx, block.ToolName, cloneArguments(block.Arguments))
+			}
 			a.emit(emit, Event{Type: EventToolCallFinished, ToolName: block.ToolName, ToolCallID: block.ToolCallID, ToolResult: result})
-			if err := a.session.Append(ctx, model.Message{
+			if err := a.session.Append(durabilityCtx, model.Message{
 				ID:        a.options.NewID(),
 				Role:      model.RoleTool,
 				CreatedAt: a.options.Now(),
@@ -113,6 +119,9 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 			}); err != nil {
 				return a.fail(emit, err)
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			return a.fail(emit, err)
 		}
 		if !hadToolCall {
 			a.emit(emit, Event{Type: EventAgentFinished})

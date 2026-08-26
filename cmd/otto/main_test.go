@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 )
@@ -209,11 +211,14 @@ func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n/session\n/exit\nmust not run\n"), &stdout, &stderr, testGetenv(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "ID: ") {
+		t.Fatalf("/session after /new was not executed: stdout = %q", stdout.String())
 	}
 	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
 	if err != nil {
@@ -221,6 +226,19 @@ func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
 	}
 	if len(paths) != 2 {
 		t.Fatalf("session files = %v, want two", paths)
+	}
+	for _, path := range paths {
+		store, _, err := session.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if messages := store.Messages(); len(messages) != 0 {
+			_ = store.Close()
+			t.Fatalf("/exit after /new did not stop later input: messages = %#v", messages)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -337,6 +355,159 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	}
 }
 
+func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		select {
+		case <-r.Context().Done():
+		case <-releaseRequest:
+		}
+	}))
+	defer server.Close()
+	defer close(releaseRequest)
+
+	interrupts := make(chan os.Signal, 1)
+	subscribed := make(chan struct{})
+	var stopCalls atomic.Int32
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		close(subscribed)
+		return interruptSubscription{
+			signals: interrupts,
+			stop:    func() { stopCalls.Add(1) },
+		}
+	}
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	codeCh := make(chan int, 1)
+	go func() {
+		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("wait\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+		}), deps)
+	}()
+
+	select {
+	case <-subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("interrupt subscription did not start")
+	}
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("active provider turn did not start")
+	}
+	interrupts <- os.Interrupt
+	select {
+	case code := <-codeCh:
+		if code != 0 {
+			t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("active interrupt did not return to REPL for /exit")
+	}
+	if stopCalls.Load() != 1 {
+		t.Fatalf("interrupt subscription stop calls = %d, want 1", stopCalls.Load())
+	}
+}
+
+func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
+	interrupts := make(chan os.Signal, 1)
+	subscribed := make(chan struct{})
+	var stopCalls atomic.Int32
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		close(subscribed)
+		return interruptSubscription{
+			signals: interrupts,
+			stop:    func() { stopCalls.Add(1) },
+		}
+	}
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	codeCh := make(chan int, 1)
+	go func() {
+		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, reader, &stdout, &stderr, testGetenv(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+		}), deps)
+	}()
+
+	select {
+	case <-subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("interrupt subscription did not start")
+	}
+	interrupts <- os.Interrupt
+	select {
+	case code := <-codeCh:
+		if code != 130 {
+			t.Fatalf("code = %d, stderr = %q, want 130", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle interrupt did not stop command")
+	}
+	if stopCalls.Load() != 1 {
+		t.Fatalf("interrupt subscription stop calls = %d, want 1", stopCalls.Load())
+	}
+}
+
+func TestRunClosesSessionsOnReplacementAndREPLError(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		input     string
+		wantCode  int
+		wantCount int
+	}{
+		{name: "replacement", input: "/new\n/exit\n", wantCode: 0, wantCount: 2},
+		{name: "REPL error", input: strings.Repeat("x", (1<<20)+1) + "\n", wantCode: 1, wantCount: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+			deps := defaultRunDependencies()
+			deps.subscribeInterrupts = func() interruptSubscription {
+				return interruptSubscription{stop: func() {}}
+			}
+			var stores []*trackingSession
+			deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+				store := &trackingSession{Session: session.NewMemory(session.Header{
+					Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
+					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+				})}
+				stores = append(stores, store)
+				return store, nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(test.input), &stdout, &stderr, testGetenv(map[string]string{
+				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+			}), deps)
+			if code != test.wantCode {
+				t.Fatalf("code = %d, stderr = %q, want %d", code, stderr.String(), test.wantCode)
+			}
+			if len(stores) != test.wantCount {
+				t.Fatalf("created stores = %d, want %d", len(stores), test.wantCount)
+			}
+			for i, store := range stores {
+				if store.closeCalls.Load() != 1 {
+					t.Fatalf("store %d close calls = %d, want 1", i, store.closeCalls.Load())
+				}
+			}
+		})
+	}
+}
+
 func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
 	const secret = "argument-secret"
 	var stdout, stderr bytes.Buffer
@@ -347,6 +518,16 @@ func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
 	if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
 		t.Fatalf("secret echoed in output: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
+}
+
+type trackingSession struct {
+	session.Session
+	closeCalls atomic.Int32
+}
+
+func (s *trackingSession) Close() error {
+	s.closeCalls.Add(1)
+	return s.Session.Close()
 }
 
 func writeCLIConfig(t *testing.T, providerName, keyEnv, baseURL string) string {

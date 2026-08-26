@@ -27,8 +27,18 @@ type Info struct {
 	Model       string
 }
 
+type Input struct {
+	scanner *bufio.Scanner
+}
+
+func NewInput(reader io.Reader) *Input {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), maxInputBytes+1)
+	return &Input{scanner: scanner}
+}
+
 type REPL struct {
-	stdin        io.Reader
+	input        *Input
 	stdout       io.Writer
 	stderr       io.Writer
 	runner       AgentRunner
@@ -38,21 +48,22 @@ type REPL struct {
 }
 
 func New(stdin io.Reader, stdout, stderr io.Writer, runner AgentRunner, info Info) *REPL {
-	return &REPL{stdin: stdin, stdout: stdout, stderr: stderr, runner: runner, info: info}
+	return NewWithInput(NewInput(stdin), stdout, stderr, runner, info)
+}
+
+func NewWithInput(input *Input, stdout, stderr io.Writer, runner AgentRunner, info Info) *REPL {
+	return &REPL{input: input, stdout: stdout, stderr: stderr, runner: runner, info: info}
 }
 
 func (r *REPL) Run(ctx context.Context) error {
 	if r.info.SessionID != "" {
 		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", r.info.SessionID)
 	}
-	scanner := bufio.NewScanner(r.stdin)
-	scanner.Buffer(make([]byte, 64*1024), maxInputBytes+1)
-
 	lines := make(chan scanResult)
 	ack := make(chan struct{})
 	stop := make(chan struct{})
 	defer close(stop)
-	go scanLines(scanner, lines, ack, stop)
+	go scanLines(r.input.scanner, lines, ack, stop)
 
 	for {
 		_, _ = io.WriteString(r.stdout, "> ")

@@ -358,9 +358,6 @@ func validateMessageRecord(record persistedRecord, pendingCalls map[string]strin
 	if message.CreatedAt.IsZero() {
 		return errors.New("message timestamp is required")
 	}
-	if len(message.Blocks) == 0 {
-		return errors.New("message blocks are required")
-	}
 	if message.Usage != nil {
 		if message.Role != model.RoleAssistant {
 			return errors.New("usage is only valid on assistant messages")
@@ -390,6 +387,9 @@ func validateMessageRecord(record persistedRecord, pendingCalls map[string]strin
 		}
 	default:
 		return fmt.Errorf("invalid message role %q", message.Role)
+	}
+	if len(message.Blocks) == 0 && message.Role != model.RoleAssistant {
+		return errors.New("message blocks are required")
 	}
 
 	for _, block := range message.Blocks {

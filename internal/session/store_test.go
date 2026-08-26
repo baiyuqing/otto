@@ -41,6 +41,32 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOpenRoundTripsZeroBlockAssistantMessage(t *testing.T) {
+	root := t.TempDir()
+	header := Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}
+	store, err := Create(root, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{ID: "assistant-1", Role: model.RoleAssistant, Blocks: []model.Block{}, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishUnknown}
+	if err := store.Append(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 || !reflect.DeepEqual(reopened.Messages(), []model.Message{message}) {
+		t.Fatalf("unexpected reopen result: warnings=%v messages=%#v", warnings, reopened.Messages())
+	}
+}
+
 func TestOpenRepairsDanglingToolCall(t *testing.T) {
 	path := createSessionWithDanglingCall(t)
 	store, warnings, err := Open(path)
@@ -297,7 +323,8 @@ func TestOpenRejectsInvalidPersistedFixturesBeforeMutation(t *testing.T) {
 		"missing message id":          validHeader + "\n" + strings.Replace(validUser, `"id":"user-1",`, "", 1),
 		"invalid message role":        validHeader + "\n" + strings.Replace(validUser, `"role":"user"`, `"role":"system"`, 1),
 		"zero message timestamp":      validHeader + "\n" + strings.Replace(validUser, `"created_at":"`+timestamp+`"`, `"created_at":"0001-01-01T00:00:00Z"`, 1),
-		"empty message blocks":        validHeader + "\n" + strings.Replace(validUser, `[{"type":"text","text":"hello"}]`, `[]`, 1),
+		"empty user message blocks":   validHeader + "\n" + strings.Replace(validUser, `[{"type":"text","text":"hello"}]`, `[]`, 1),
+		"empty tool message blocks":   validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[],"created_at":"` + timestamp + `"}}`,
 		"unknown block field":         validHeader + "\n" + strings.Replace(validUser, `"text":"hello"`, `"text":"hello","extra":true`, 1),
 		"user tool-call block":        validHeader + "\n" + strings.Replace(validUser, `{"type":"text","text":"hello"}`, `{"type":"tool_call","tool_call_id":"call-1","tool_name":"read","arguments":{}}`, 1),
 		"assistant tool-result block": validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_result","tool_call_id":"call-1","tool_name":"read"}],"created_at":"` + timestamp + `","finish_reason":"stop"}}`,

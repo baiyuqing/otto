@@ -1,0 +1,400 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/session"
+)
+
+func TestRunHelpDoesNotRequireCredentials(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--help"}, strings.NewReader(""), &stdout, &stderr, func(string) string { return "" })
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, flag := range []string{"--config", "--cwd", "--continue", "--resume", "--no-session"} {
+		if !strings.Contains(stdout.String(), flag) {
+			t.Fatalf("help missing %s: %s", flag, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("help wrote to stderr: %q", stderr.String())
+	}
+}
+
+func TestRunReportsResolutionErrors(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	valid := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	unsupported := writeCLIConfig(t, "other-provider", "TEST_KEY", "http://127.0.0.1:1")
+	missingKey := writeCLIConfig(t, "openai-compatible", "MISSING_KEY", "http://127.0.0.1:1")
+	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing API key", args: []string{"--config", missingKey, "--cwd", workspace}, want: "missing api key"},
+		{name: "invalid profile", args: []string{"--config", valid, "--profile", "missing", "--cwd", workspace}, want: `profile "missing" not found`},
+		{name: "unsupported provider", args: []string{"--config", unsupported, "--cwd", workspace}, want: "unsupported provider"},
+		{name: "missing resume", args: []string{"--config", valid, "--cwd", workspace, "--resume", filepath.Join(t.TempDir(), "missing.jsonl")}, want: "open session file"},
+		{name: "conflicting continue and resume", args: []string{"--continue", "--resume", "anything"}, want: "cannot be used together"},
+		{name: "invalid max turns", args: []string{"--max-turns", "0"}, want: "max-turns must be greater than zero"},
+		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid value"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), test.args, strings.NewReader("/exit\n"), &stdout, &stderr, env)
+			if code == 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestRunNoSessionAndExplicitConfig(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Path: \n") {
+		t.Fatalf("memory session path should be empty: %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".otto", "sessions")); !os.IsNotExist(err) {
+		t.Fatalf("--no-session created persistent root: %v", err)
+	}
+}
+
+func TestRunCanonicalizesCWDBeforeCreatingSession(t *testing.T) {
+	home := t.TempDir()
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(workspace, link); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", link}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	path := onlySessionPath(t, home)
+	store, _, err := session.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	canonical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Header().Workspace; got != canonical {
+		t.Fatalf("workspace = %q, want %q", got, canonical)
+	}
+}
+
+func TestRunResumeAndContinueSelectSessions(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	oldPath := createCLISession(t, root, workspace, "old-session")
+	time.Sleep(10 * time.Millisecond)
+	newPath := createCLISession(t, root, workspace, "new-session")
+	now := time.Now()
+	if err := os.Chtimes(oldPath, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(newPath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "resume", args: []string{"--resume", oldPath}, want: "ID: old-session"},
+		{name: "continue", args: []string{"--continue"}, want: "ID: new-session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"--config", configPath, "--cwd", workspace}, test.args...)
+			code := run(context.Background(), args, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, env)
+			if code != 0 || !strings.Contains(stdout.String(), test.want) {
+				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunResumeUsesPersistedProfileForEndpointAndKey(t *testing.T) {
+	var defaultRequests, resumedRequests atomic.Int32
+	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		defaultRequests.Add(1)
+		writeSSE(w, `{"choices":[{"delta":{"content":"wrong profile"},"finish_reason":"stop"}]}`)
+	}))
+	defer defaultServer.Close()
+	resumedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resumedRequests.Add(1)
+		if r.Header.Get("Authorization") != "Bearer resumed-secret" {
+			t.Errorf("authorization did not use resumed profile key")
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"resumed profile"},"finish_reason":"stop"}]}`)
+	}))
+	defer resumedServer.Close()
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resumed-session")
+	configPath := filepath.Join(t.TempDir(), "otto.toml")
+	content := fmt.Sprintf(`default_profile = "default"
+[profiles.default]
+provider = "openai-compatible"
+base_url = %q
+model = "default-model"
+api_key_env = "DEFAULT_KEY"
+[profiles.test]
+provider = "openai-compatible"
+base_url = %q
+model = "resumed-model"
+api_key_env = "RESUMED_KEY"
+`, defaultServer.URL, resumedServer.URL)
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "DEFAULT_KEY": "default-secret", "RESUMED_KEY": "resumed-secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if defaultRequests.Load() != 0 || resumedRequests.Load() != 1 || !strings.Contains(stdout.String(), "resumed profile") {
+		t.Fatalf("default requests = %d, resumed requests = %d, stdout = %q", defaultRequests.Load(), resumedRequests.Load(), stdout.String())
+	}
+}
+
+func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("session files = %v, want two", paths)
+	}
+}
+
+func TestRunAppliesMaxTurnsAndShellTimeout(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"sleep 0.2\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1", "--shell-timeout", "10ms"}, strings.NewReader("run slowly\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if requests.Load() != 1 || !strings.Contains(stderr.String(), "agent max turns exceeded") {
+		t.Fatalf("requests = %d, stderr = %q", requests.Load(), stderr.String())
+	}
+	content, err := os.ReadFile(onlySessionPath(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "timed out after 10ms") {
+		t.Fatalf("session missing timed-out tool result: %s", content)
+	}
+}
+
+func TestRunEndToEndToolCallSmoke(t *testing.T) {
+	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if len(payload.Messages) == 0 || payload.Messages[0].Role != "system" || payload.Messages[0].Content != expectedSystemPrompt {
+			t.Errorf("system message = %#v", payload.Messages)
+		}
+		if requestCount == 1 {
+			var names []string
+			for _, item := range payload.Tools {
+				names = append(names, item.Function.Name)
+			}
+			if !reflect.DeepEqual(names, []string{"read", "write", "edit", "bash"}) {
+				t.Errorf("tool names = %v", names)
+			}
+			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write","arguments":"{\"path\":\"created.txt\",\"content\":\"hello\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "smoke-secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if requestCount != 2 {
+		t.Fatalf("requests = %d, want 2", requestCount)
+	}
+	created, err := os.ReadFile(filepath.Join(workspace, "created.txt"))
+	if err != nil || string(created) != "hello" {
+		t.Fatalf("created file = %q, error = %v", created, err)
+	}
+	if !strings.Contains(stdout.String(), "[tool] write (call-write)") || !strings.Contains(stdout.String(), "[tool result] wrote created.txt (5 bytes)") || !strings.Contains(stdout.String(), "complete") {
+		t.Fatalf("unexpected compact output: %q", stdout.String())
+	}
+
+	store, _, err := session.Open(onlySessionPath(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	messages := store.Messages()
+	var roles []model.Role
+	for _, message := range messages {
+		roles = append(roles, message.Role)
+	}
+	if !reflect.DeepEqual(roles, []model.Role{model.RoleUser, model.RoleAssistant, model.RoleTool, model.RoleAssistant}) {
+		t.Fatalf("session roles = %v", roles)
+	}
+	if got := messages[len(messages)-1].Text(); got != "complete" {
+		t.Fatalf("final assistant text = %q", got)
+	}
+	persisted, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(persisted), "smoke-secret") {
+		t.Fatal("API key leaked into session")
+	}
+}
+
+func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
+	const secret = "argument-secret"
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--api-key", secret}, strings.NewReader(""), &stdout, &stderr, func(string) string { return "" })
+	if code == 0 {
+		t.Fatal("--api-key unexpectedly accepted")
+	}
+	if strings.Contains(stdout.String(), secret) || strings.Contains(stderr.String(), secret) {
+		t.Fatalf("secret echoed in output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func writeCLIConfig(t *testing.T, providerName, keyEnv, baseURL string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "otto.toml")
+	content := fmt.Sprintf(`default_profile = "test"
+[profiles.test]
+provider = %q
+base_url = %q
+model = "test-model"
+api_key_env = %q
+`, providerName, baseURL, keyEnv)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func testGetenv(values map[string]string) func(string) string {
+	return func(key string) string { return values[key] }
+}
+
+func createCLISession(t *testing.T, root, workspace, id string) string {
+	t.Helper()
+	store, err := session.Create(root, session.Header{Version: 1, ID: id, Workspace: workspace, Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func onlySessionPath(t *testing.T, home string) string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("session paths = %v, want one", paths)
+	}
+	return paths[0]
+}
+
+func writeSSE(w http.ResponseWriter, chunk string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+}

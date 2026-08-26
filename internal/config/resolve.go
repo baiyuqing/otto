@@ -17,6 +17,7 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		Profile: overrides.Profile,
 	}
 
+	explicitProfile := overrides.Profile != ""
 	selectedProfile := overrides.Profile
 	if selectedProfile == "" {
 		selectedProfile = file.DefaultProfile
@@ -41,9 +42,14 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		model = profile.Model
 		baseURL = profile.BaseURL
 		apiKeyEnv = profile.APIKeyEnv
-	} else {
-		provider = session.Provider
-		model = session.Model
+	}
+	if !explicitProfile {
+		if session.Provider != "" {
+			provider = session.Provider
+		}
+		if session.Model != "" {
+			model = session.Model
+		}
 	}
 
 	if v := envValue(env, "OTTO_PROVIDER"); v != "" {
@@ -154,10 +160,10 @@ func resolveAPIKey(env map[string]string, apiKeyEnv string) (string, error) {
 		if fallback := envValue(env, "OTTO_API_KEY"); fallback != "" {
 			return fallback, nil
 		}
-		return "", nil
+		return "", fmt.Errorf("missing api key")
 	}
 	if fallback := envValue(env, "OTTO_API_KEY"); fallback != "" {
 		return fallback, nil
 	}
-	return "", nil
+	return "", fmt.Errorf("missing api key")
 }

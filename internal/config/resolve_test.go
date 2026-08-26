@@ -14,7 +14,7 @@ func TestResolvePrecedence(t *testing.T) {
 			"explicit":   {Provider: "openai-compatible", Model: "profile-model", BaseURL: "https://profile.example/v1", APIKeyEnv: "PROFILE_KEY"},
 		},
 	}
-	runtime, err := Resolve(file, map[string]string{"OTTO_MODEL": "env-model"}, SessionDefaults{Provider: "openai-compatible", Model: "session-model"}, Overrides{Profile: "explicit"})
+	runtime, err := Resolve(file, map[string]string{"OTTO_MODEL": "env-model", "PROFILE_KEY": "secret"}, SessionDefaults{Provider: "openai-compatible", Model: "session-model"}, Overrides{Profile: "explicit"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestExplicitProfileOverridesResumedProviderAndModel(t *testing.T) {
 	file := File{Profiles: map[string]Profile{
 		"explicit": {Provider: "openai-compatible", Model: "profile-model", BaseURL: "https://example.com/v1", APIKeyEnv: "PROFILE_KEY"},
 	}}
-	runtime, err := Resolve(file, nil, SessionDefaults{Provider: "codex", Model: "old-model"}, Overrides{Profile: "explicit"})
+	runtime, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{Provider: "codex", Model: "old-model"}, Overrides{Profile: "explicit"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,16 +73,12 @@ func TestResolveRejectsUnsupportedProvider(t *testing.T) {
 	}
 }
 
-func TestResolveHandlesMissingNamedAPIKeyEnvironmentVariable(t *testing.T) {
+func TestResolveRejectsMissingNamedAPIKeyEnvironmentVariable(t *testing.T) {
 	file := File{Profiles: map[string]Profile{
 		"local": {Provider: "openai-compatible", Model: "test-model", BaseURL: "https://example.com/v1", APIKeyEnv: "PROFILE_KEY"},
 	}}
-	runtime, err := Resolve(file, map[string]string{}, SessionDefaults{}, Overrides{Profile: "local"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.APIKey != "" {
-		t.Fatalf("APIKey = %q, want empty", runtime.APIKey)
+	if _, err := Resolve(file, map[string]string{}, SessionDefaults{}, Overrides{Profile: "local"}); err == nil || !strings.Contains(err.Error(), "api key") {
+		t.Fatalf("expected missing API key error, got %v", err)
 	}
 }
 
@@ -108,6 +104,22 @@ func TestResolveParsesInvalidShellTimeout(t *testing.T) {
 	}
 	if _, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "local"}); err == nil || !strings.Contains(err.Error(), "shell_timeout") {
 		t.Fatalf("expected invalid duration error, got %v", err)
+	}
+}
+
+func TestResolvePrefersSessionDefaultsOverDefaultProfile(t *testing.T) {
+	file := File{
+		DefaultProfile: "configured",
+		Profiles: map[string]Profile{
+			"configured": {Provider: "openai-compatible", Model: "config-model", BaseURL: "https://config.example/v1", APIKeyEnv: "CONFIG_KEY"},
+		},
+	}
+	runtime, err := Resolve(file, map[string]string{"CONFIG_KEY": "secret"}, SessionDefaults{Provider: "openai-compatible", Model: "session-model"}, Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Model != "session-model" || runtime.BaseURL != "https://config.example/v1" {
+		t.Fatalf("session did not win over default profile: %#v", runtime)
 	}
 }
 

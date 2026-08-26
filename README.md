@@ -83,7 +83,7 @@ OTTO_API_KEY=your-key ./otto \
 
 ## Configuration and precedence
 
-Otto only reads a global config file. It does not auto-discover project-local configuration.
+Otto auto-discovers only the global config file at `~/.config/otto/config.toml`. It does not auto-discover project-local configuration, but you can explicitly select any path with `--config`.
 
 Default path:
 

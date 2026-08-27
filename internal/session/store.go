@@ -47,7 +47,8 @@ type Store struct {
 
 func Create(root string, header Header) (*Store, error) {
 	header.Version = CurrentVersion
-	if err := validateDomainHeader(header); err != nil {
+	createdAt, err := validateDomainHeader(header)
+	if err != nil {
 		return nil, err
 	}
 	workspaceKey, err := workspaceKey(header.Workspace)
@@ -75,7 +76,6 @@ func Create(root string, header Header) (*Store, error) {
 		return nil, writeErr
 	}
 
-	createdAt := header.CreatedAt.Format(time.RFC3339Nano)
 	piHeaderRecord := piHeader{
 		Type:      "session",
 		Version:   PiSessionVersion,
@@ -340,23 +340,32 @@ func resolvePiStoreState(decoded piFile) (Header, []model.Message, map[string]st
 	return header, messages, entryIDs, leafID, nil
 }
 
-func validateDomainHeader(header Header) error {
+func validateDomainHeader(header Header) (string, error) {
 	if strings.TrimSpace(header.ID) == "" || strings.ContainsAny(header.ID, `/\\`) || header.ID == "." || header.ID == ".." {
-		return fmt.Errorf("%w: session id is invalid", ErrInvalidSession)
+		return "", fmt.Errorf("%w: session id is invalid", ErrInvalidSession)
 	}
 	if strings.TrimSpace(header.Workspace) == "" {
-		return fmt.Errorf("%w: session workspace is required", ErrInvalidSession)
+		return "", fmt.Errorf("%w: session workspace is required", ErrInvalidSession)
 	}
 	if strings.TrimSpace(header.Provider) == "" {
-		return fmt.Errorf("%w: session provider is required", ErrInvalidSession)
+		return "", fmt.Errorf("%w: session provider is required", ErrInvalidSession)
 	}
 	if strings.TrimSpace(header.Model) == "" {
-		return fmt.Errorf("%w: session model is required", ErrInvalidSession)
+		return "", fmt.Errorf("%w: session model is required", ErrInvalidSession)
 	}
-	if header.CreatedAt.IsZero() {
-		return fmt.Errorf("%w: session timestamp is required", ErrInvalidSession)
+	return formatPersistedTimestamp(header.CreatedAt, "session")
+}
+
+func formatPersistedTimestamp(timestamp time.Time, subject string) (string, error) {
+	if timestamp.IsZero() {
+		return "", fmt.Errorf("%w: %s timestamp is required", ErrInvalidSession, subject)
 	}
-	return nil
+	formatted := timestamp.Format(time.RFC3339Nano)
+	roundTripped, err := time.Parse(time.RFC3339Nano, formatted)
+	if err != nil || !roundTripped.Equal(timestamp) || roundTripped.Format(time.RFC3339Nano) != formatted {
+		return "", fmt.Errorf("%w: %s timestamp is outside the RFC3339Nano range", ErrInvalidSession, subject)
+	}
+	return formatted, nil
 }
 
 func validatePiHeader(header piHeader) (time.Time, error) {
@@ -422,8 +431,9 @@ func decodeRuntimeMetadata(raw json.RawMessage) (RuntimeMetadata, error) {
 }
 
 func modelMessageToPiEntry(message model.Message, entryID string, parentID *string, header Header) (piEntry, model.Message, error) {
-	if message.CreatedAt.IsZero() {
-		return piEntry{}, model.Message{}, fmt.Errorf("%w: message timestamp is required", ErrInvalidSession)
+	timestamp, err := formatPersistedTimestamp(message.CreatedAt, "message")
+	if err != nil {
+		return piEntry{}, model.Message{}, err
 	}
 	content, err := modelBlocksToPiContent(message.Role, message.Blocks)
 	if err != nil {
@@ -478,7 +488,7 @@ func modelMessageToPiEntry(message model.Message, entryID string, parentID *stri
 			Type:      "message",
 			ID:        entryID,
 			ParentID:  cloneStringPointer(parentID),
-			Timestamp: message.CreatedAt.Format(time.RFC3339Nano),
+			Timestamp: timestamp,
 		},
 		Message: piMessage,
 	}
@@ -751,7 +761,7 @@ func pendingToolCalls(messages []model.Message) ([]model.Block, error) {
 }
 
 func decodePiFileReadOnly(file *os.File) (piFile, error) {
-	finalStart, incomplete, err := incompleteFinalPiRecord(file)
+	finalStart, _, incomplete, err := finalPiRecordState(file)
 	if err != nil {
 		return piFile{}, err
 	}
@@ -767,7 +777,7 @@ func decodePiFileReadOnly(file *os.File) (piFile, error) {
 }
 
 func decodePiFileForOpen(file *os.File, path string) (piFile, []Warning, error) {
-	finalStart, incomplete, err := incompleteFinalPiRecord(file)
+	finalStart, missingLF, incomplete, err := finalPiRecordState(file)
 	if err != nil {
 		return piFile{}, nil, err
 	}
@@ -788,24 +798,37 @@ func decodePiFileForOpen(file *os.File, path string) (piFile, []Warning, error) 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return piFile{}, nil, fmt.Errorf("seek session file: %w", err)
 	}
-	return decodePiFile(file)
+	decoded, warnings, err := decodePiFile(file)
+	if err != nil {
+		return piFile{}, nil, err
+	}
+	if missingLF {
+		if _, _, _, _, err := resolvePiStoreState(decoded); err != nil {
+			return piFile{}, nil, err
+		}
+		if err := appendSessionDelimiter(file); err != nil {
+			return piFile{}, nil, err
+		}
+		warnings = append(warnings, Warning{Message: fmt.Sprintf("repaired missing final session delimiter at %s", path)})
+	}
+	return decoded, warnings, nil
 }
 
-func incompleteFinalPiRecord(file *os.File) (int64, bool, error) {
+func finalPiRecordState(file *os.File) (int64, bool, bool, error) {
 	info, err := file.Stat()
 	if err != nil {
-		return 0, false, fmt.Errorf("stat session file: %w", err)
+		return 0, false, false, fmt.Errorf("stat session file: %w", err)
 	}
 	size := info.Size()
 	if size == 0 {
-		return 0, false, nil
+		return 0, false, false, nil
 	}
 	last := []byte{0}
 	if _, err := file.ReadAt(last, size-1); err != nil {
-		return 0, false, fmt.Errorf("read session tail: %w", err)
+		return 0, false, false, fmt.Errorf("read session tail: %w", err)
 	}
 	if last[0] == '\n' {
-		return 0, false, nil
+		return 0, false, false, nil
 	}
 	window := int64(maxSessionEntryBytes + 1)
 	start := size - window
@@ -814,11 +837,11 @@ func incompleteFinalPiRecord(file *os.File) (int64, bool, error) {
 	}
 	buffer := make([]byte, size-start)
 	if _, err := file.ReadAt(buffer, start); err != nil && !errors.Is(err, io.EOF) {
-		return 0, false, fmt.Errorf("read final session record: %w", err)
+		return 0, false, false, fmt.Errorf("read final session record: %w", err)
 	}
 	separator := bytes.LastIndexByte(buffer, '\n')
 	if separator < 0 && start > 0 {
-		return 0, false, nil
+		return 0, true, false, nil
 	}
 	finalStart := start
 	final := buffer
@@ -826,7 +849,7 @@ func incompleteFinalPiRecord(file *os.File) (int64, bool, error) {
 		finalStart += int64(separator + 1)
 		final = buffer[separator+1:]
 	}
-	return finalStart, isIncompleteJSON(final), nil
+	return finalStart, true, isIncompleteJSON(final), nil
 }
 
 func writePiRecord(writer durableRecordWriter, record any) (int64, error) {
@@ -852,6 +875,23 @@ func writeEncodedPiRecord(writer durableRecordWriter, encoded []byte) (int64, er
 		return 0, fmt.Errorf("sync session file: %w", err)
 	}
 	return int64(written), nil
+}
+
+func appendSessionDelimiter(file *os.File) error {
+	if _, err := file.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("seek session file for delimiter repair: %w", err)
+	}
+	written, err := file.Write([]byte{'\n'})
+	if err != nil {
+		return fmt.Errorf("write session delimiter: %w", err)
+	}
+	if written != 1 {
+		return fmt.Errorf("write session delimiter: %w", io.ErrShortWrite)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync session delimiter: %w", err)
+	}
+	return nil
 }
 
 func truncateSession(file *os.File, size int64) error {

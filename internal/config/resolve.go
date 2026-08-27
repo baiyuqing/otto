@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	defaultMaxTurns       = 20
+	defaultMaxTurns       = 50
 	defaultShellTimeout   = 120 * time.Second
 	defaultMaxOutputBytes = 51200
 )

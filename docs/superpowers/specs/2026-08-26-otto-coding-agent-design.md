@@ -154,7 +154,7 @@ For each user prompt, the agent:
 6. Appends and persists each tool result.
 7. Repeats the provider call until there are no tool calls or the turn limit is reached.
 
-The default limit is 20 model turns per user prompt.
+The default limit is 50 model turns per user prompt.
 
 ### Application events
 
@@ -255,7 +255,7 @@ Default limits:
 
 - Tool output: 50 KiB
 - Shell timeout: 120 seconds
-- Agent turns: 20
+- Agent turns: 50
 
 ## 8. Configuration
 
@@ -273,7 +273,7 @@ Example:
 default_profile = "deepseek"
 
 [agent]
-max_turns = 20
+max_turns = 50
 shell_timeout = "120s"
 max_output_bytes = 51200
 

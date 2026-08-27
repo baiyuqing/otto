@@ -32,7 +32,7 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 		options.NewID = defaultNewID
 	}
 	if options.MaxTurns <= 0 {
-		options.MaxTurns = 20
+		options.MaxTurns = 50
 	}
 	return &Agent{provider: provider, registry: registry, session: memory, options: options}
 }

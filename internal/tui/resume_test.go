@@ -626,6 +626,110 @@ func TestResumeResultFailClosedCancelsActiveListOwnership(t *testing.T) {
 	}
 }
 
+func TestResumeResultStaleSuccessWithUnusableCommittedPathFailsClosed(t *testing.T) {
+	tests := []struct {
+		name          string
+		committedPath string
+	}{
+		{name: "oversized", committedPath: strings.Repeat("/", resumeMaxPathBytes+1)},
+		{name: "control-bearing", committedPath: "/sessions/unsafe\n.jsonl"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			listCtx, cancelList := context.WithCancel(context.Background())
+			backend := &resumeBackend{
+				info:    app.Info{Profile: "profile", Model: "model", SessionID: "old", SessionPath: "/sessions/old.jsonl"},
+				history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}}}},
+				resumeSession: func(context.Context, string) (app.ResumeResult, error) {
+					return app.ResumeResult{
+						SessionPath: tc.committedPath,
+						Warnings:    []session.Warning{{Message: "unsafe warning\n\x1b[31m"}},
+					}, nil
+				},
+			}
+			message := runCommandWithin(t, runSessionResumeCommand(context.Background(), backend, 1, "/sessions/request.jsonl"), time.Second).(sessionResumeResultMsg)
+			if message.result.SessionPath != "" {
+				t.Fatalf("bounded committed path = %q, want empty unsafe-path drop", message.result.SessionPath)
+			}
+			if message.committedPathState != resumeCommittedPathUnusable {
+				t.Fatalf("committedPathState = %v, want %v", message.committedPathState, resumeCommittedPathUnusable)
+			}
+
+			m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
+			m.statusText = "keep status"
+			m.resume = resumePickerState{
+				mode:        resumeLoading,
+				generation:  2,
+				listPending: true,
+				listCancel:  cancelList,
+			}
+			updated, quit := m.Update(message)
+			got := updated.(Model)
+			if quit == nil {
+				t.Fatal("quit command = nil")
+			}
+			if _, ok := quit().(tea.QuitMsg); !ok {
+				t.Fatalf("quit command message = %T, want tea.QuitMsg", quit())
+			}
+			if err := listCtx.Err(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("list context error = %v, want context.Canceled before quit", err)
+			}
+			if got.statusText != errResumeReconciliationUnsafe.Error() {
+				t.Fatalf("status = %q, want %q", got.statusText, errResumeReconciliationUnsafe.Error())
+			}
+			if strings.Contains(got.statusText, tc.committedPath) || strings.Contains(got.statusText, "unsafe warning") {
+				t.Fatalf("status retained unsafe stale payload: %q", got.statusText)
+			}
+			assertResumeSingleLineControlSafe(t, "status", got.statusText)
+			if got.fatalErr == nil {
+				t.Fatal("fatalErr = nil, want fail-closed reconciliation error")
+			}
+			if got.resume.mode != resumeLoading || !got.resume.listPending || got.resume.generation != 2 {
+				t.Fatalf("active list ownership was reset: %#v", got.resume)
+			}
+		})
+	}
+}
+
+func TestResumeResultStaleSuccessWithMissingCommittedPathFailsClosed(t *testing.T) {
+	backend := &resumeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "old", SessionPath: "/sessions/old.jsonl"},
+		resumeSession: func(context.Context, string) (app.ResumeResult, error) {
+			return app.ResumeResult{Warnings: []session.Warning{{Message: "malformed success warning"}}}, nil
+		},
+	}
+	message := runCommandWithin(t, runSessionResumeCommand(context.Background(), backend, 1, "/sessions/request.jsonl"), time.Second).(sessionResumeResultMsg)
+	if message.result.SessionPath != "" {
+		t.Fatalf("bounded committed path = %q, want empty malformed-path payload", message.result.SessionPath)
+	}
+	if message.committedPathState != resumeCommittedPathMissing {
+		t.Fatalf("committedPathState = %v, want %v", message.committedPathState, resumeCommittedPathMissing)
+	}
+
+	m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
+	m.statusText = "old status"
+	m.resume.generation = 2
+	updated, quit := m.Update(message)
+	got := updated.(Model)
+	if quit == nil {
+		t.Fatal("quit command = nil")
+	}
+	if _, ok := quit().(tea.QuitMsg); !ok {
+		t.Fatalf("quit command message = %T, want tea.QuitMsg", quit())
+	}
+	if got.statusText != errResumeReconciliationUnsafe.Error() {
+		t.Fatalf("status = %q, want %q", got.statusText, errResumeReconciliationUnsafe.Error())
+	}
+	if strings.Contains(got.statusText, "malformed success warning") {
+		t.Fatalf("status retained stale warning payload: %q", got.statusText)
+	}
+	assertResumeSingleLineControlSafe(t, "status", got.statusText)
+	if got.fatalErr == nil {
+		t.Fatal("fatalErr = nil, want fail-closed reconciliation error")
+	}
+}
+
 func TestResumeWorkersDetachBoundedPayloadStorage(t *testing.T) {
 	path := hugeBackedResumeString("/sessions/detached.jsonl")
 	id := hugeBackedResumeString("detached-id")

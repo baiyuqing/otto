@@ -66,12 +66,22 @@ type sessionListResultMsg struct {
 	errText    string
 }
 
+type resumeCommittedPathState uint8
+
+const (
+	resumeCommittedPathUnknown resumeCommittedPathState = iota
+	resumeCommittedPathValid
+	resumeCommittedPathMissing
+	resumeCommittedPathUnusable
+)
+
 type sessionResumeResultMsg struct {
-	generation      uint64
-	path            string
-	result          app.ResumeResult
-	warningsSkipped int
-	errText         string
+	generation         uint64
+	path               string
+	result             app.ResumeResult
+	committedPathState resumeCommittedPathState
+	warningsSkipped    int
+	errText            string
 }
 
 func sessionBrowserFromBackend(backend app.Backend) (app.SessionBrowser, bool) {
@@ -103,13 +113,14 @@ func runSessionResumeCommand(ctx context.Context, browser app.SessionBrowser, ge
 			return sessionResumeResultMsg{generation: generation, path: operationPath, errText: boundedResumeError(errors.New("session browser is required"))}
 		}
 		result, err := browser.ResumeSession(rootContext(ctx), operationPath)
-		boundedResult, warningsSkipped := boundedResumeResult(result)
+		boundedResult, committedPathState, warningsSkipped := boundedResumeResult(result)
 		return sessionResumeResultMsg{
-			generation:      generation,
-			path:            operationPath,
-			result:          boundedResult,
-			warningsSkipped: warningsSkipped,
-			errText:         boundedResumeError(err),
+			generation:         generation,
+			path:               operationPath,
+			result:             boundedResult,
+			committedPathState: committedPathState,
+			warningsSkipped:    warningsSkipped,
+			errText:            boundedResumeError(err),
 		}
 	}
 }
@@ -227,7 +238,7 @@ func (m Model) applySessionResumeResult(msg sessionResumeResultMsg) (tea.Model, 
 		m.statusText = errText
 		return m, nil
 	}
-	result, locallySkipped := boundedResumeResult(msg.result)
+	result, _, locallySkipped := boundedResumeResult(msg.result)
 	warningsSkipped := addBoundedCount(nonnegativeCount(msg.warningsSkipped), locallySkipped)
 	status := resumeSuccessStatus(result, warningsSkipped)
 	m.resetSessionViewFromBackend(status)
@@ -241,9 +252,12 @@ func (m Model) reconcileCommittedStaleResume(msg sessionResumeResultMsg) (tea.Mo
 	if boundedResumeErrorText(msg.errText) != "" {
 		return m, nil
 	}
-	result, _ := boundedResumeResult(msg.result)
-	if !validResumeOperationPath(result.SessionPath) {
-		return m, nil
+	result, committedPathState, _ := boundedResumeResult(msg.result)
+	if msg.committedPathState != resumeCommittedPathUnknown {
+		committedPathState = msg.committedPathState
+	}
+	if committedPathState != resumeCommittedPathValid {
+		return m.failClosedStaleResume()
 	}
 	currentPath := infoFromBackend(m.backend).SessionPath
 	if !validResumeOperationPath(currentPath) || currentPath != result.SessionPath {
@@ -252,9 +266,7 @@ func (m Model) reconcileCommittedStaleResume(msg sessionResumeResultMsg) (tea.Mo
 		return m, nil
 	}
 	if m.hasNewerWorkThanStaleResume() {
-		m.fatalErr = errResumeReconciliationUnsafe
-		m.statusText = errResumeReconciliationUnsafe.Error()
-		return m.quit()
+		return m.failClosedStaleResume()
 	}
 
 	// ResumeSession has committed and its canonical result path is still the
@@ -273,6 +285,12 @@ func (m *Model) cancelSessionListWorker() {
 	if m.resume.listCancel != nil {
 		m.resume.listCancel()
 	}
+}
+
+func (m Model) failClosedStaleResume() (tea.Model, tea.Cmd) {
+	m.fatalErr = errResumeReconciliationUnsafe
+	m.statusText = errResumeReconciliationUnsafe.Error()
+	return m.quit()
 }
 
 func (m Model) quit() (tea.Model, tea.Cmd) {
@@ -337,16 +355,26 @@ func detachedResumeTime(value time.Time) time.Time {
 	return value.UTC()
 }
 
-func boundedResumeResult(result app.ResumeResult) (app.ResumeResult, int) {
+func boundedResumeResult(result app.ResumeResult) (app.ResumeResult, resumeCommittedPathState, int) {
 	count := min(len(result.Warnings), resumeMaxWarningCount)
 	bounded := app.ResumeResult{Warnings: make([]session.Warning, count)}
-	if validResumeOperationPath(result.SessionPath) {
-		bounded.SessionPath = strings.Clone(result.SessionPath)
-	}
+	committedPath, committedPathState := boundedResumeCommittedPath(result.SessionPath)
+	bounded.SessionPath = committedPath
 	for index := 0; index < count; index++ {
 		bounded.Warnings[index].Message = boundedSingleLineText(result.Warnings[index].Message, resumeMaxWarningBytes)
 	}
-	return bounded, len(result.Warnings) - count
+	return bounded, committedPathState, len(result.Warnings) - count
+}
+
+func boundedResumeCommittedPath(path string) (string, resumeCommittedPathState) {
+	switch {
+	case path == "":
+		return "", resumeCommittedPathMissing
+	case validResumeOperationPath(path):
+		return strings.Clone(path), resumeCommittedPathValid
+	default:
+		return "", resumeCommittedPathUnusable
+	}
 }
 
 func boundedResumeError(err error) string {

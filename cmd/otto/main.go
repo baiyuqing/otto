@@ -17,11 +17,14 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
 	"github.com/baiyuqing/otto/internal/repl"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
+	"github.com/baiyuqing/otto/internal/tui"
+	"golang.org/x/term"
 )
 
 const systemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
@@ -31,11 +34,23 @@ type interruptSubscription struct {
 	stop    func()
 }
 
+type frontendKind string
+
+const (
+	frontendTUI  frontendKind = "tui"
+	frontendREPL frontendKind = "repl"
+)
+
+type terminalDetector func(io.Reader, io.Writer) bool
+
 type runDependencies struct {
 	subscribeInterrupts func() interruptSubscription
 	readSessionHeader   func(string, string) (session.Header, error)
 	openSession         func(string, string, io.Writer) (session.Session, error)
 	newSession          func(bool, string, string, config.Runtime) (session.Session, error)
+	detectTerminal      terminalDetector
+	runTUI              func(context.Context, io.Reader, io.Writer, app.Backend) error
+	newRunner           app.RunnerFactory
 }
 
 func defaultRunDependencies() runDependencies {
@@ -44,6 +59,8 @@ func defaultRunDependencies() runDependencies {
 		readSessionHeader:   readSessionHeader,
 		openSession:         openSession,
 		newSession:          newSession,
+		detectTerminal:      detectTerminalIO,
+		runTUI:              tui.Run,
 	}
 }
 
@@ -63,6 +80,7 @@ type cliOptions struct {
 	provider       string
 	baseURL        string
 	model          string
+	ui             string
 	maxTurns       int
 	shellTimeout   time.Duration
 	maxOutput      int
@@ -84,6 +102,16 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string, deps runDependencies) int {
+	if deps.detectTerminal == nil {
+		deps.detectTerminal = detectTerminalIO
+	}
+	if deps.runTUI == nil {
+		deps.runTUI = tui.Run
+	}
+	if deps.subscribeInterrupts == nil {
+		deps.subscribeInterrupts = func() interruptSubscription { return interruptSubscription{stop: func() {}} }
+	}
+
 	options, help, err := parseFlags(args, stdout, stderr)
 	if help {
 		return 0
@@ -107,17 +135,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
-	var currentSession session.Session
-	closeCurrent := func() error {
-		if currentSession == nil {
-			return nil
-		}
-		err := currentSession.Close()
-		currentSession = nil
-		return err
-	}
-	defer func() { _ = closeCurrent() }()
-
 	sessionPath := options.resumePath
 	if options.continueLast {
 		sessionPath, err = newestSessionPath(sessionRoot, workspacePath)
@@ -130,6 +147,16 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return fail(stderr, "load config: %v", err)
 	}
+	environment := configEnvironment(configFile, getenv)
+	uiMode, err := config.ResolveUIMode(configFile, environment, options.ui)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	frontend, err := selectFrontend(uiMode, stdin, stdout, deps.detectTerminal)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+
 	defaults := config.SessionDefaults{}
 	if sessionPath != "" {
 		header, headerErr := deps.readSessionHeader(sessionPath, workspacePath)
@@ -142,7 +169,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 			configFile.DefaultProfile = header.Profile
 		}
 	}
-	environment := configEnvironment(configFile, getenv)
 	runtime, err := config.Resolve(configFile, environment, defaults, config.Overrides{
 		Profile:        options.profile,
 		Provider:       options.provider,
@@ -177,14 +203,48 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "create tool registry: %v", err)
 	}
 
+	var initialSession session.Session
 	if sessionPath != "" {
-		currentSession, err = deps.openSession(sessionPath, workspacePath, stderr)
+		initialSession, err = deps.openSession(sessionPath, workspacePath, stderr)
 	} else {
-		currentSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
+		initialSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
 	}
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
+	buildRunner := deps.newRunner
+	if buildRunner == nil {
+		buildRunner = func(current session.Session) app.Runner {
+			client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
+			return agent.New(client, registry, current, agent.Options{
+				Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
+			})
+		}
+	}
+	controller, err := app.New(initialSession, func() (session.Session, error) {
+		return deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
+	}, buildRunner, app.WithRuntimeInfo(app.RuntimeInfo{
+		Provider: runtime.Provider,
+		Profile:  runtime.Profile,
+		Model:    runtime.Model,
+	}))
+	if err != nil {
+		_ = initialSession.Close()
+		return fail(stderr, "%v", err)
+	}
+	controllerClosed := false
+	closeController := func() error {
+		if controllerClosed {
+			return nil
+		}
+		controllerClosed = true
+		return controller.Close()
+	}
+	defer func() {
+		if !controllerClosed {
+			_ = controller.Close()
+		}
+	}()
 
 	processCtx, cancelProcess := context.WithCancel(ctx)
 	defer cancelProcess()
@@ -219,52 +279,49 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		<-signalStopped
 	}()
 
-	input := repl.NewInput(stdin)
-	for {
-		header := currentSession.Header()
-		client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
-		runner := agent.New(client, registry, currentSession, agent.Options{
-			Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
-		})
-		console := repl.NewWithInput(input, stdout, stderr, runner, repl.Info{
-			SessionID: header.ID, SessionPath: currentSession.Path(), Provider: runtime.Provider, Model: runtime.Model,
-		})
+	var runErr error
+	switch frontend {
+	case frontendTUI:
+		runErr = deps.runTUI(processCtx, stdin, stdout, controller)
+	case frontendREPL:
+		input := repl.NewInput(stdin)
+		console := repl.NewWithInput(input, stdout, stderr, controller)
 
 		replMu.Lock()
 		currentREPL = console
 		replMu.Unlock()
-		runErr := console.Run(processCtx)
+		runErr = console.Run(processCtx)
 		replMu.Lock()
 		if currentREPL == console {
 			currentREPL = nil
 		}
 		replMu.Unlock()
-
-		if errors.Is(runErr, repl.ErrNewSession) {
-			if err := closeCurrent(); err != nil {
-				return fail(stderr, "close session: %v", err)
-			}
-			if processCtx.Err() != nil {
-				return 130
-			}
-			currentSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
-			if err != nil {
-				return fail(stderr, "%v", err)
-			}
-			continue
-		}
-
-		if err := closeCurrent(); err != nil {
-			return fail(stderr, "close session: %v", err)
-		}
-		if processCtx.Err() != nil || errors.Is(runErr, context.Canceled) {
-			return 130
-		}
-		if runErr != nil {
-			return fail(stderr, "REPL: %v", runErr)
-		}
-		return 0
+	default:
+		return fail(stderr, "unsupported frontend %q", frontend)
 	}
+
+	processCanceledBeforeFrontendExit := processCtx.Err() != nil
+	frontendCanceled := errors.Is(runErr, context.Canceled)
+	cancelProcess()
+	if err := closeController(); err != nil {
+		return fail(stderr, "close session: %v", err)
+	}
+	if frontend == frontendTUI && errors.Is(runErr, session.ErrFatalPersistence) {
+		return fail(stderr, "TUI: %v", runErr)
+	}
+	if processCanceledBeforeFrontendExit || frontendCanceled {
+		return 130
+	}
+	if frontend == frontendREPL && repl.IsCommandError(runErr, "/new") {
+		return fail(stderr, "%v", runErr)
+	}
+	if runErr != nil {
+		if frontend == frontendTUI {
+			return fail(stderr, "TUI: %v", runErr)
+		}
+		return fail(stderr, "REPL: %v", runErr)
+	}
+	return 0
 }
 
 func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, error) {
@@ -280,6 +337,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.StringVar(&options.provider, "provider", "", "provider override")
 	flags.StringVar(&options.baseURL, "base-url", "", "provider base URL override")
 	flags.StringVar(&options.model, "model", "", "model override")
+	flags.StringVar(&options.ui, "ui", "", "frontend mode: auto, tui, or repl")
 	flags.IntVar(&options.maxTurns, "max-turns", 0, "maximum provider turns")
 	flags.DurationVar(&options.shellTimeout, "shell-timeout", 0, "shell command timeout")
 	flags.IntVar(&options.maxOutput, "max-output-bytes", 0, "maximum tool output bytes")
@@ -341,6 +399,7 @@ Options:
   --provider NAME        provider override
   --base-url URL         provider base URL override
   --model NAME           model override
+  --ui MODE              frontend mode: auto, tui, or repl
   --max-turns N          maximum provider turns
   --shell-timeout D      shell command timeout
   --max-output-bytes N   maximum tool output bytes
@@ -397,6 +456,7 @@ func configEnvironment(file config.File, getenv func(string) string) map[string]
 		"OTTO_PROVIDER": {},
 		"OTTO_MODEL":    {},
 		"OTTO_API_KEY":  {},
+		"OTTO_UI":       {},
 	}
 	for _, profile := range file.Profiles {
 		if profile.APIKeyEnv != "" {
@@ -408,6 +468,41 @@ func configEnvironment(file config.File, getenv func(string) string) map[string]
 		environment[key] = getenv(key)
 	}
 	return environment
+}
+
+func detectTerminalIO(input io.Reader, output io.Writer) bool {
+	inputFile, ok := input.(*os.File)
+	if !ok {
+		return false
+	}
+	outputFile, ok := output.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(inputFile.Fd())) && term.IsTerminal(int(outputFile.Fd()))
+}
+
+func selectFrontend(mode config.UIMode, input io.Reader, output io.Writer, detect terminalDetector) (frontendKind, error) {
+	if detect == nil {
+		detect = func(io.Reader, io.Writer) bool { return false }
+	}
+
+	switch mode {
+	case config.UIAuto:
+		if detect(input, output) {
+			return frontendTUI, nil
+		}
+		return frontendREPL, nil
+	case config.UITUI:
+		if detect(input, output) {
+			return frontendTUI, nil
+		}
+		return "", errors.New("--ui tui requires terminal stdin and stdout; use --ui repl for redirected input")
+	case config.UIRepl:
+		return frontendREPL, nil
+	default:
+		return "", fmt.Errorf("unsupported ui mode %q", mode)
+	}
 }
 
 func validateShell(path string) error {

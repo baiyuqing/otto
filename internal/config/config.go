@@ -12,6 +12,7 @@ import (
 
 type File struct {
 	DefaultProfile string             `toml:"default_profile"`
+	UI             UI                 `toml:"ui"`
 	Agent          Agent              `toml:"agent"`
 	Profiles       map[string]Profile `toml:"profiles"`
 }

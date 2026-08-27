@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -17,16 +19,19 @@ import (
 func TestREPLRunsPromptAndRendersEvents(t *testing.T) {
 	input := strings.NewReader("inspect files\n/exit\n")
 	var output bytes.Buffer
-	runner := &fakeRunner{run: func(_ context.Context, prompt string, emit func(agent.Event)) error {
-		if prompt != "inspect files" {
-			t.Fatalf("prompt = %q", prompt)
-		}
-		emit(agent.Event{Type: agent.EventTextDelta, Text: "done"})
-		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "read", ToolCallID: "call-1"})
-		emit(agent.Event{Type: agent.EventToolCallFinished, ToolName: "read", ToolCallID: "call-1", ToolResult: tool.Result{Content: "read README.md\nfull output must not render"}})
-		return nil
-	}}
-	r := New(input, &output, &output, runner, Info{SessionID: "session-1", SessionPath: "/tmp/session.jsonl", Provider: "openai-compatible", Model: "test"})
+	backend := &fakeBackend{
+		info: app.Info{SessionID: "session-1", SessionPath: "/tmp/session.jsonl", Provider: "openai-compatible", Model: "test"},
+		prompt: func(_ context.Context, prompt string, emit func(agent.Event)) error {
+			if prompt != "inspect files" {
+				t.Fatalf("prompt = %q", prompt)
+			}
+			emit(agent.Event{Type: agent.EventTextDelta, Text: "done"})
+			emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "read", ToolCallID: "call-1"})
+			emit(agent.Event{Type: agent.EventToolCallFinished, ToolName: "read", ToolCallID: "call-1", ToolResult: tool.Result{Content: "read README.md\nfull output must not render"}})
+			return nil
+		},
+	}
+	r := New(input, &output, &output, backend)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -44,12 +49,15 @@ func TestREPLRunsPromptAndRendersEvents(t *testing.T) {
 func TestREPLCommandsAndInputHandling(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	var prompts []string
-	runner := &fakeRunner{run: func(_ context.Context, prompt string, _ func(agent.Event)) error {
-		prompts = append(prompts, prompt)
-		return nil
-	}}
+	backend := &fakeBackend{
+		info: app.Info{SessionID: "s-1", SessionPath: "/sessions/s-1.jsonl", Provider: "openai-compatible", Model: "m-1"},
+		prompt: func(_ context.Context, prompt string, _ func(agent.Event)) error {
+			prompts = append(prompts, prompt)
+			return nil
+		},
+	}
 	input := strings.NewReader("\n/help\n/session\n/unknown\nhello\n/exit\n")
-	r := New(input, &stdout, &stderr, runner, Info{SessionID: "s-1", SessionPath: "/sessions/s-1.jsonl", Provider: "openai-compatible", Model: "m-1"})
+	r := New(input, &stdout, &stderr, backend)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +76,7 @@ func TestREPLCommandsAndInputHandling(t *testing.T) {
 
 func TestREPLReturnsNilAtEOF(t *testing.T) {
 	var output bytes.Buffer
-	r := New(strings.NewReader(""), &output, &output, &fakeRunner{}, Info{})
+	r := New(strings.NewReader(""), &output, &output, &fakeBackend{})
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run() at EOF = %v", err)
 	}
@@ -77,11 +85,20 @@ func TestREPLReturnsNilAtEOF(t *testing.T) {
 	}
 }
 
-func TestREPLReturnsNewSessionSentinel(t *testing.T) {
+func TestREPLNewSessionUsesBackendAndContinuesInput(t *testing.T) {
+	backend := &fakeBackend{info: app.Info{SessionID: "old"}}
+	backend.newSession = func() error {
+		backend.info.SessionID = "new"
+		return nil
+	}
+	input := strings.NewReader("/new\n/session\n/exit\n")
 	var output bytes.Buffer
-	r := New(strings.NewReader("/new\n"), &output, &output, &fakeRunner{}, Info{})
-	if err := r.Run(context.Background()); !errors.Is(err, ErrNewSession) {
-		t.Fatalf("Run() = %v, want %v", err, ErrNewSession)
+	console := New(input, &output, &output, backend)
+	if err := console.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if backend.newCalls != 1 || !strings.Contains(output.String(), "ID: new") {
+		t.Fatalf("newCalls=%d output=%q", backend.newCalls, output.String())
 	}
 }
 
@@ -89,7 +106,7 @@ func TestREPLWritesProviderErrorsToStderrAndContinues(t *testing.T) {
 	providerErr := errors.New("provider unavailable")
 	var stdout, stderr bytes.Buffer
 	calls := 0
-	runner := &fakeRunner{run: func(_ context.Context, _ string, emit func(agent.Event)) error {
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
 		calls++
 		if calls == 1 {
 			emit(agent.Event{Type: agent.EventAgentError, Err: providerErr})
@@ -98,7 +115,7 @@ func TestREPLWritesProviderErrorsToStderrAndContinues(t *testing.T) {
 		emit(agent.Event{Type: agent.EventTextDelta, Text: "recovered"})
 		return nil
 	}}
-	r := New(strings.NewReader("first\nsecond\n/exit\n"), &stdout, &stderr, runner, Info{})
+	r := New(strings.NewReader("first\nsecond\n/exit\n"), &stdout, &stderr, backend)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -114,12 +131,12 @@ func TestREPLTerminatesAfterFatalPersistenceError(t *testing.T) {
 	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected append failure"))
 	var calls int
 	var stdout, stderr bytes.Buffer
-	runner := &fakeRunner{run: func(_ context.Context, _ string, emit func(agent.Event)) error {
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
 		calls++
 		emit(agent.Event{Type: agent.EventAgentError, Err: fatalErr})
 		return fatalErr
 	}}
-	r := New(strings.NewReader("first\nsecond\n/exit\n"), &stdout, &stderr, runner, Info{})
+	r := New(strings.NewReader("first\nsecond\n/exit\n"), &stdout, &stderr, backend)
 	err := r.Run(context.Background())
 	if !errors.Is(err, session.ErrFatalPersistence) {
 		t.Fatalf("Run() error = %v, want fatal persistence", err)
@@ -132,13 +149,13 @@ func TestREPLTerminatesAfterFatalPersistenceError(t *testing.T) {
 func TestREPLAcceptsInputUpToOneMiB(t *testing.T) {
 	prompt := strings.Repeat("x", 1<<20)
 	var output bytes.Buffer
-	runner := &fakeRunner{run: func(_ context.Context, got string, _ func(agent.Event)) error {
+	backend := &fakeBackend{prompt: func(_ context.Context, got string, _ func(agent.Event)) error {
 		if got != prompt {
 			t.Fatalf("prompt length = %d, want %d", len(got), len(prompt))
 		}
 		return nil
 	}}
-	r := New(strings.NewReader(prompt+"\n/exit\n"), &output, &output, runner, Info{})
+	r := New(strings.NewReader(prompt+"\n/exit\n"), &output, &output, backend)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +164,7 @@ func TestREPLAcceptsInputUpToOneMiB(t *testing.T) {
 func TestREPLRejectsInputOverOneMiB(t *testing.T) {
 	var output bytes.Buffer
 	input := strings.NewReader(strings.Repeat("x", (1<<20)+1) + "\n")
-	r := New(input, &output, &output, &fakeRunner{}, Info{})
+	r := New(input, &output, &output, &fakeBackend{})
 	if err := r.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "token too long") {
 		t.Fatalf("Run() = %v, want scanner token-too-long error", err)
 	}
@@ -155,11 +172,11 @@ func TestREPLRejectsInputOverOneMiB(t *testing.T) {
 
 func TestREPLSeparatesTurns(t *testing.T) {
 	var output bytes.Buffer
-	runner := &fakeRunner{run: func(_ context.Context, prompt string, emit func(agent.Event)) error {
+	backend := &fakeBackend{prompt: func(_ context.Context, prompt string, emit func(agent.Event)) error {
 		emit(agent.Event{Type: agent.EventTextDelta, Text: prompt})
 		return nil
 	}}
-	r := New(strings.NewReader("one\ntwo\n/exit\n"), &output, &output, runner, Info{})
+	r := New(strings.NewReader("one\ntwo\n/exit\n"), &output, &output, backend)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +188,7 @@ func TestREPLSeparatesTurns(t *testing.T) {
 func TestREPLInterruptCancelsOnlyActiveTurn(t *testing.T) {
 	started := make(chan struct{})
 	finished := make(chan struct{})
-	runner := &fakeRunner{run: func(ctx context.Context, _ string, emit func(agent.Event)) error {
+	backend := &fakeBackend{prompt: func(ctx context.Context, _ string, emit func(agent.Event)) error {
 		close(started)
 		<-ctx.Done()
 		emit(agent.Event{Type: agent.EventAgentError, Err: ctx.Err()})
@@ -179,7 +196,7 @@ func TestREPLInterruptCancelsOnlyActiveTurn(t *testing.T) {
 		return ctx.Err()
 	}}
 	var stdout, stderr bytes.Buffer
-	r := New(strings.NewReader("wait\n/exit\n"), &stdout, &stderr, runner, Info{})
+	r := New(strings.NewReader("wait\n/exit\n"), &stdout, &stderr, backend)
 	errCh := make(chan error, 1)
 	go func() { errCh <- r.Run(context.Background()) }()
 	select {
@@ -209,7 +226,7 @@ func TestREPLParentCancellationStopsIdleScan(t *testing.T) {
 	defer reader.Close()
 	defer writer.Close()
 	var output bytes.Buffer
-	r := New(reader, &output, &output, &fakeRunner{}, Info{})
+	r := New(reader, &output, &output, &fakeBackend{})
 	errCh := make(chan error, 1)
 	go func() { errCh <- r.Run(ctx) }()
 	cancel()
@@ -223,13 +240,32 @@ func TestREPLParentCancellationStopsIdleScan(t *testing.T) {
 	}
 }
 
-type fakeRunner struct {
-	run func(context.Context, string, func(agent.Event)) error
+type fakeBackend struct {
+	info       app.Info
+	newCalls   int
+	newSession func() error
+	prompt     func(context.Context, string, func(agent.Event)) error
 }
 
-func (f *fakeRunner) Run(ctx context.Context, prompt string, emit func(agent.Event)) error {
-	if f.run == nil {
+func (f *fakeBackend) Prompt(ctx context.Context, prompt string, emit func(agent.Event)) error {
+	if f.prompt == nil {
 		return nil
 	}
-	return f.run(ctx, prompt, emit)
+	return f.prompt(ctx, prompt, emit)
+}
+
+func (f *fakeBackend) NewSession() error {
+	f.newCalls++
+	if f.newSession == nil {
+		return nil
+	}
+	return f.newSession()
+}
+
+func (f *fakeBackend) Info() app.Info {
+	return f.info
+}
+
+func (f *fakeBackend) History() []model.Message {
+	return nil
 }

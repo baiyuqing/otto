@@ -10,23 +10,11 @@ import (
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
 const maxInputBytes = 1 << 20
-
-var ErrNewSession = errors.New("start a new session")
-
-type AgentRunner interface {
-	Run(context.Context, string, func(agent.Event)) error
-}
-
-type Info struct {
-	SessionID   string
-	SessionPath string
-	Provider    string
-	Model       string
-}
 
 type Input struct {
 	scanner *bufio.Scanner
@@ -42,23 +30,40 @@ type REPL struct {
 	input        *Input
 	stdout       io.Writer
 	stderr       io.Writer
-	runner       AgentRunner
-	info         Info
+	backend      app.Backend
 	mu           sync.Mutex
 	activeCancel context.CancelFunc
 }
 
-func New(stdin io.Reader, stdout, stderr io.Writer, runner AgentRunner, info Info) *REPL {
-	return NewWithInput(NewInput(stdin), stdout, stderr, runner, info)
+type commandError struct {
+	command string
+	err     error
 }
 
-func NewWithInput(input *Input, stdout, stderr io.Writer, runner AgentRunner, info Info) *REPL {
-	return &REPL{input: input, stdout: stdout, stderr: stderr, runner: runner, info: info}
+func (e *commandError) Error() string {
+	return e.err.Error()
+}
+
+func (e *commandError) Unwrap() error {
+	return e.err
+}
+
+func IsCommandError(err error, command string) bool {
+	var target *commandError
+	return errors.As(err, &target) && target.command == command
+}
+
+func New(stdin io.Reader, stdout, stderr io.Writer, backend app.Backend) *REPL {
+	return NewWithInput(NewInput(stdin), stdout, stderr, backend)
+}
+
+func NewWithInput(input *Input, stdout, stderr io.Writer, backend app.Backend) *REPL {
+	return &REPL{input: input, stdout: stdout, stderr: stderr, backend: backend}
 }
 
 func (r *REPL) Run(ctx context.Context) error {
-	if r.info.SessionID != "" {
-		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", r.info.SessionID)
+	if info := r.backend.Info(); info.SessionID != "" {
+		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 	}
 	lines := make(chan scanResult)
 	ack := make(chan struct{})
@@ -99,7 +104,7 @@ func (r *REPL) Run(ctx context.Context) error {
 		r.mu.Unlock()
 
 		errorRendered := false
-		err := r.runner.Run(turnCtx, line, func(event agent.Event) {
+		err := r.backend.Prompt(turnCtx, line, func(event agent.Event) {
 			switch event.Type {
 			case agent.EventTextDelta:
 				_, _ = io.WriteString(r.stdout, event.Text)
@@ -152,9 +157,16 @@ func (r *REPL) command(command string) (bool, error) {
 	case "/exit":
 		return true, nil
 	case "/new":
-		return true, ErrNewSession
+		if err := r.backend.NewSession(); err != nil {
+			return false, &commandError{command: command, err: err}
+		}
+		if info := r.backend.Info(); info.SessionID != "" {
+			_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
+		}
+		return false, nil
 	case "/session":
-		_, _ = fmt.Fprintf(r.stdout, "ID: %s\nPath: %s\nProvider: %s\nModel: %s\n", r.info.SessionID, r.info.SessionPath, r.info.Provider, r.info.Model)
+		info := r.backend.Info()
+		_, _ = fmt.Fprintf(r.stdout, "ID: %s\nPath: %s\nProvider: %s\nModel: %s\n", info.SessionID, info.SessionPath, info.Provider, info.Model)
 		return false, nil
 	default:
 		_, _ = fmt.Fprintf(r.stderr, "unknown command: %s\n", command)

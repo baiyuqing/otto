@@ -93,6 +93,8 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 
 		durabilityCtx := context.WithoutCancel(ctx)
 		hadToolCall := false
+		// Tool calls are executed sequentially. At most one tool is active at a
+		// time, which lets frontends reserve bounded delivery for its terminal event.
 		for _, block := range assistant.Blocks {
 			if block.Type != model.BlockToolCall {
 				continue

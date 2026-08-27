@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
@@ -29,13 +31,307 @@ func TestRunHelpDoesNotRequireCredentials(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, text := range []string{"--config", "--cwd", "--continue", "--resume", "--no-session", "WARNING", "unsandboxed", "anything accessible to your macOS user"} {
+	for _, text := range []string{"--config", "--cwd", "--ui", "--continue", "--resume", "--no-session", "WARNING", "unsandboxed", "anything accessible to your macOS user"} {
 		if !strings.Contains(stdout.String(), text) {
 			t.Fatalf("help missing %s: %s", text, stdout.String())
 		}
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("help wrote to stderr: %q", stderr.String())
+	}
+}
+
+func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configUI   string
+		envUI      string
+		cliUI      string
+		isTerminal bool
+		wantTUI    bool
+	}{
+		{name: "auto uses repl for redirected IO", isTerminal: false, wantTUI: false},
+		{name: "auto uses tui for terminal IO", isTerminal: true, wantTUI: true},
+		{name: "config selects tui", configUI: "tui", isTerminal: true, wantTUI: true},
+		{name: "env overrides config", configUI: "repl", envUI: "tui", isTerminal: true, wantTUI: true},
+		{name: "explicit auto overrides env", envUI: "tui", cliUI: "auto", isTerminal: false, wantTUI: false},
+		{name: "cli overrides env and config", configUI: "tui", envUI: "tui", cliUI: "repl", isTerminal: true, wantTUI: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			configPath := writeCLIConfigWithUI(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1", test.configUI)
+
+			deps := defaultRunDependencies()
+			deps.subscribeInterrupts = func() interruptSubscription {
+				return interruptSubscription{stop: func() {}}
+			}
+			deps.detectTerminal = func(io.Reader, io.Writer) bool {
+				return test.isTerminal
+			}
+
+			var tuiCalls atomic.Int32
+			var sessionCalls atomic.Int32
+			var stores []*trackingSession
+			deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+				sessionCalls.Add(1)
+				store := &trackingSession{Session: session.NewMemory(session.Header{
+					Version: 1, ID: fmt.Sprintf("session-%d", sessionCalls.Load()), Workspace: workspace,
+					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+				})}
+				stores = append(stores, store)
+				return store, nil
+			}
+			deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+				tuiCalls.Add(1)
+				if info := backend.Info(); info.SessionID == "" {
+					t.Fatal("tui backend session info is empty")
+				}
+				return nil
+			}
+
+			args := []string{"--config", configPath, "--cwd", workspace}
+			if test.cliUI != "" {
+				args = append(args, "--ui", test.cliUI)
+			}
+			env := map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"}
+			if test.envUI != "" {
+				env["OTTO_UI"] = test.envUI
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), args, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(env), deps)
+			if code != 0 {
+				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if got := tuiCalls.Load(); test.wantTUI && got != 1 {
+				t.Fatalf("tui calls = %d, want 1", got)
+			} else if !test.wantTUI && got != 0 {
+				t.Fatalf("tui calls = %d, want 0", got)
+			}
+			if !test.wantTUI && !strings.Contains(stdout.String(), "Session: ") {
+				t.Fatalf("stdout = %q, want repl session banner", stdout.String())
+			}
+			if sessionCalls.Load() != 1 || len(stores) != 1 {
+				t.Fatalf("session calls = %d stores = %d, want 1", sessionCalls.Load(), len(stores))
+			}
+			if stores[0].closeCalls.Load() != 1 {
+				t.Fatalf("store close calls = %d, want 1", stores[0].closeCalls.Load())
+			}
+		})
+	}
+}
+
+func TestRunTUIProgramErrorReturnsOne(t *testing.T) {
+	programErr := errors.New("injected program failure")
+	for _, test := range []struct {
+		name     string
+		closeErr error
+		want     string
+	}{
+		{name: "program error", want: "otto: TUI: injected program failure\n"},
+		{name: "close error takes precedence", closeErr: errors.New("injected close failure"), want: "otto: close session: injected close failure\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+
+			deps := defaultRunDependencies()
+			deps.subscribeInterrupts = func() interruptSubscription {
+				return interruptSubscription{stop: func() {}}
+			}
+			deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+			store := &trackingSession{Session: session.NewMemory(session.Header{
+				Version: 1, ID: "tui-error", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
+			}), closeErr: test.closeErr}
+			deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+				return store, nil
+			}
+			deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
+				return programErr
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+			}), deps)
+			if code != 1 {
+				t.Fatalf("code = %d, stderr = %q, want 1", code, stderr.String())
+			}
+			if got := stderr.String(); got != test.want {
+				t.Fatalf("stderr = %q, want %q", got, test.want)
+			}
+			if got := store.closeCalls.Load(); got != 1 {
+				t.Fatalf("store close calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestRunTUIFatalPersistenceReturnsOneAndPrintsDiagnostic(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected disk failure"), context.Canceled)
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	store := &trackingSession{Session: session.NewMemory(session.Header{
+		Version: 1, ID: "fatal-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
+	})}
+	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		return store, nil
+	}
+	terminalRestored := false
+	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
+		terminalRestored = true
+		return fatalErr
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 1 {
+		t.Fatalf("code = %d, stderr = %q, want 1", code, stderr.String())
+	}
+	if !terminalRestored {
+		t.Fatal("TUI returned before its terminal-restoration point")
+	}
+	if got, want := stderr.String(), "otto: TUI: fatal session persistence failure\ninjected disk failure\ncontext canceled\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if got := store.closeCalls.Load(); got != 1 {
+		t.Fatalf("store close calls = %d, want 1", got)
+	}
+}
+
+func TestRunTUIProgramErrorCancelsActivePromptBeforeClosing(t *testing.T) {
+	programErr := errors.New("injected program failure")
+	runnerStarted := make(chan struct{})
+	runnerCanceled := make(chan struct{})
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	store := &trackingSession{Session: session.NewMemory(session.Header{
+		Version: 1, ID: "active-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
+	})}
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		return store, nil
+	}
+	deps.newRunner = func(session.Session) app.Runner {
+		return commandRunnerFunc(func(ctx context.Context, _ string, _ func(agent.Event)) error {
+			close(runnerStarted)
+			<-ctx.Done()
+			close(runnerCanceled)
+			return ctx.Err()
+		})
+	}
+	promptDone := make(chan error, 1)
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		go func() {
+			promptDone <- backend.Prompt(ctx, "wait for cancellation", nil)
+		}()
+		select {
+		case <-runnerStarted:
+			return programErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	processCtx, cancelProcess := context.WithCancel(context.Background())
+	defer cancelProcess()
+	var stdout, stderr bytes.Buffer
+	codeDone := make(chan int, 1)
+	go func() {
+		codeDone <- runWithDependencies(processCtx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+		}), deps)
+	}()
+
+	select {
+	case code := <-codeDone:
+		if code != 1 {
+			t.Fatalf("code = %d, stderr = %q, want 1", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		cancelProcess()
+		select {
+		case <-codeDone:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("run did not cancel the active prompt before closing the controller")
+	}
+	if got, want := stderr.String(), "otto: TUI: injected program failure\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	select {
+	case <-runnerCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("active runner context was not canceled")
+	}
+	select {
+	case err := <-promptDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Prompt() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active prompt did not terminate")
+	}
+	if got := store.closeCalls.Load(); got != 1 {
+		t.Fatalf("store close calls = %d, want 1", got)
+	}
+}
+
+func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return false }
+	var newSessionCalls atomic.Int32
+	var openSessionCalls atomic.Int32
+	var tuiCalls atomic.Int32
+	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		newSessionCalls.Add(1)
+		return nil, errors.New("new session should not be called")
+	}
+	deps.openSession = func(string, string, io.Writer) (session.Session, error) {
+		openSessionCalls.Add(1)
+		return nil, errors.New("open session should not be called")
+	}
+	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
+		tuiCalls.Add(1)
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 1 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if got, want := stderr.String(), "otto: --ui tui requires terminal stdin and stdout; use --ui repl for redirected input\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if newSessionCalls.Load() != 0 || openSessionCalls.Load() != 0 || tuiCalls.Load() != 0 {
+		t.Fatalf("new session calls = %d open session calls = %d tui calls = %d, want all zero", newSessionCalls.Load(), openSessionCalls.Load(), tuiCalls.Load())
 	}
 }
 
@@ -59,6 +355,7 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 		{name: "conflicting continue and resume", args: []string{"--continue", "--resume", "anything"}, want: "cannot be used together"},
 		{name: "invalid max turns", args: []string{"--max-turns", "0"}, want: "max-turns must be greater than zero"},
 		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid value"},
+		{name: "invalid ui mode", args: []string{"--ui", "popup"}, want: "must be one of auto, tui, repl"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -184,6 +481,60 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 	}
 }
 
+func TestRunResumeTUIInfoUsesResolvedRuntimeOverrides(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resumed-session")
+	configPath := filepath.Join(t.TempDir(), "otto.toml")
+	content := `default_profile = "active"
+[profiles.active]
+provider = "openai-compatible"
+base_url = "http://127.0.0.1:1"
+model = "profile-model"
+api_key_env = "ACTIVE_KEY"
+[profiles.test]
+provider = "openai-compatible"
+base_url = "http://127.0.0.1:2"
+model = "persisted-model"
+api_key_env = "TEST_KEY"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	var got app.Info
+	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		got = backend.Info()
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath,
+		"--cwd", workspace,
+		"--resume", resumePath,
+		"--profile", "active",
+		"--model", "override-model",
+		"--ui", "tui",
+	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "ACTIVE_KEY": "active-secret", "TEST_KEY": "persisted-secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if got.SessionID != "resumed-session" || got.SessionPath != resumePath || got.Workspace != workspace {
+		t.Fatalf("dynamic session info = %#v", got)
+	}
+	if got.Provider != "openai-compatible" || got.Profile != "active" || got.Model != "override-model" {
+		t.Fatalf("runtime info = %#v, want resolved overrides", got)
+	}
+}
+
 func TestRunResumeUsesPersistedProfileForEndpointAndKey(t *testing.T) {
 	var defaultRequests, resumedRequests atomic.Int32
 	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -265,6 +616,41 @@ func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
 		if err := store.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestRunNewSessionCreationFailureReturnsDirectError(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	var calls int
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		calls++
+		if calls == 2 {
+			return nil, errors.New("create replacement failed")
+		}
+		return session.NewMemory(session.Header{
+			Version: 1, ID: fmt.Sprintf("session-%d", calls), Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 1 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if got, want := stderr.String(), "otto: create replacement failed\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if strings.Contains(stderr.String(), "REPL:") {
+		t.Fatalf("stderr unexpectedly wrapped REPL error: %q", stderr.String())
 	}
 }
 
@@ -481,6 +867,15 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 			stop:    func() { stopCalls.Add(1) },
 		}
 	}
+	var stores []*trackingSession
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		store := &trackingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		})}
+		stores = append(stores, store)
+		return store, nil
+	}
 
 	home := t.TempDir()
 	workspace := t.TempDir()
@@ -515,6 +910,12 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 	if stopCalls.Load() != 1 {
 		t.Fatalf("interrupt subscription stop calls = %d, want 1", stopCalls.Load())
 	}
+	if len(stores) != 1 {
+		t.Fatalf("created stores = %d, want 1", len(stores))
+	}
+	if stores[0].closeCalls.Load() != 1 {
+		t.Fatalf("store close calls = %d, want 1", stores[0].closeCalls.Load())
+	}
 }
 
 func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
@@ -528,6 +929,15 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 			signals: interrupts,
 			stop:    func() { stopCalls.Add(1) },
 		}
+	}
+	var stores []*trackingSession
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		store := &trackingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		})}
+		stores = append(stores, store)
+		return store, nil
 	}
 
 	reader, writer := io.Pipe()
@@ -561,16 +971,110 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	if stopCalls.Load() != 1 {
 		t.Fatalf("interrupt subscription stop calls = %d, want 1", stopCalls.Load())
 	}
+	if len(stores) != 1 {
+		t.Fatalf("created stores = %d, want 1", len(stores))
+	}
+	if stores[0].closeCalls.Load() != 1 {
+		t.Fatalf("store close calls = %d, want 1", stores[0].closeCalls.Load())
+	}
 }
 
-func TestRunClosesSessionsOnReplacementAndREPLError(t *testing.T) {
+func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T) {
+	interrupts := make(chan os.Signal, 1)
+	subscribed := make(chan struct{})
+	var stopCalls atomic.Int32
+	runnerStarted := make(chan struct{})
+	runnerCanceled := make(chan struct{})
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	store := &trackingSession{Session: session.NewMemory(session.Header{
+		Version: 1, ID: "signal-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
+	})}
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		close(subscribed)
+		return interruptSubscription{
+			signals: interrupts,
+			stop:    func() { stopCalls.Add(1) },
+		}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		return store, nil
+	}
+	deps.newRunner = func(session.Session) app.Runner {
+		return commandRunnerFunc(func(ctx context.Context, _ string, _ func(agent.Event)) error {
+			close(runnerStarted)
+			<-ctx.Done()
+			close(runnerCanceled)
+			return ctx.Err()
+		})
+	}
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		promptDone := make(chan error, 1)
+		go func() { promptDone <- backend.Prompt(ctx, "active TUI prompt", nil) }()
+		select {
+		case err := <-promptDone:
+			return err
+		case <-ctx.Done():
+			return <-promptDone
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	codeDone := make(chan int, 1)
+	go func() {
+		codeDone <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+		}), deps)
+	}()
+
+	select {
+	case <-subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("interrupt subscription did not start")
+	}
+	select {
+	case <-runnerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("active TUI prompt did not start")
+	}
+	interrupts <- os.Interrupt
+	select {
+	case code := <-codeDone:
+		if code != 130 {
+			t.Fatalf("code = %d, stderr = %q, want 130", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("TUI signal cancellation did not stop command")
+	}
+	select {
+	case <-runnerCanceled:
+	default:
+		t.Fatal("TUI prompt context was not canceled")
+	}
+	if stopCalls.Load() != 1 {
+		t.Fatalf("interrupt stop calls = %d, want 1", stopCalls.Load())
+	}
+	if store.closeCalls.Load() != 1 {
+		t.Fatalf("session close calls = %d, want 1", store.closeCalls.Load())
+	}
+}
+
+func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected append failure"))
 	for _, test := range []struct {
 		name      string
 		input     string
+		appendErr error
 		wantCode  int
 		wantCount int
 	}{
+		{name: "normal exit", input: "/exit\n", wantCode: 0, wantCount: 1},
 		{name: "replacement", input: "/new\n/exit\n", wantCode: 0, wantCount: 2},
+		{name: "fatal persistence", input: "hello\n", appendErr: fatalErr, wantCode: 1, wantCount: 1},
 		{name: "REPL error", input: strings.Repeat("x", (1<<20)+1) + "\n", wantCode: 1, wantCount: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -586,7 +1090,7 @@ func TestRunClosesSessionsOnReplacementAndREPLError(t *testing.T) {
 				store := &trackingSession{Session: session.NewMemory(session.Header{
 					Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
 					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
-				})}
+				}), appendErr: test.appendErr}
 				stores = append(stores, store)
 				return store, nil
 			}
@@ -622,21 +1126,48 @@ func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
 	}
 }
 
+type commandRunnerFunc func(context.Context, string, func(agent.Event)) error
+
+func (f commandRunnerFunc) Run(ctx context.Context, text string, emit func(agent.Event)) error {
+	return f(ctx, text, emit)
+}
+
 type trackingSession struct {
 	session.Session
+	appendErr  error
+	closeErr   error
 	closeCalls atomic.Int32
+}
+
+func (s *trackingSession) Append(ctx context.Context, message model.Message) error {
+	if s.appendErr != nil {
+		return s.appendErr
+	}
+	return s.Session.Append(ctx, message)
 }
 
 func (s *trackingSession) Close() error {
 	s.closeCalls.Add(1)
-	return s.Session.Close()
+	if err := s.Session.Close(); err != nil {
+		return err
+	}
+	return s.closeErr
 }
 
 func writeCLIConfig(t *testing.T, providerName, keyEnv, baseURL string) string {
+	return writeCLIConfigWithUI(t, providerName, keyEnv, baseURL, "")
+}
+
+func writeCLIConfigWithUI(t *testing.T, providerName, keyEnv, baseURL, uiMode string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "otto.toml")
-	content := fmt.Sprintf(`default_profile = "test"
-[profiles.test]
+	content := "default_profile = \"test\"\n"
+	if uiMode != "" {
+		content += fmt.Sprintf(`[ui]
+mode = %q
+`, uiMode)
+	}
+	content += fmt.Sprintf(`[profiles.test]
 provider = %q
 base_url = %q
 model = "test-model"

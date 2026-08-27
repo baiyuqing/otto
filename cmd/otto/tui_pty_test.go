@@ -5,9 +5,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -29,6 +31,10 @@ const (
 	ctrlCExitStatusText = "Ctrl+C again to exit"
 	contextCanceledText = "context canceled"
 	footerProfileModel  = "pty-profile/pty-model"
+	footerWorkspaceName = "pty-workspace"
+	footerSessionMarker = "resize-session-marker-0123456789"
+	wideFooterMarker    = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0 | " + footerSessionMarker
+	narrowFooterMarker  = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0"
 )
 
 func TestTUIPseudoTerminalLifecycle(t *testing.T) {
@@ -39,24 +45,24 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 
 	collector := newPTYOutputCollector(master)
 	runCtx, cancelRun := context.WithCancel(context.Background())
-	runErrCh := make(chan error, 1)
 	backend := &ptySmokeBackend{
 		promptCh:   make(chan string, 1),
 		canceledCh: make(chan struct{}),
 	}
+	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
 
 	t.Cleanup(func() {
 		cancelRun()
 		_ = slave.Close()
 		_ = master.Close()
 		collector.Wait(t, ptyStepTimeout)
-		select {
-		case err := <-runErrCh:
-			if err != nil && err != context.Canceled {
-				t.Logf("tui.Run cleanup error: %v", err)
-			}
-		case <-time.After(ptyStepTimeout):
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
 			t.Log("tui.Run cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("tui.Run cleanup error: %v", err)
 		}
 	})
 
@@ -64,12 +70,8 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 		t.Fatalf("pty.Setsize(100x30) error = %v", err)
 	}
 
-	go func() {
-		runErrCh <- tui.Run(runCtx, slave, slave, backend)
-	}()
-
 	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
-	waitForSubsequence(t, collector, 0, footerProfileModel)
+	waitForSubsequence(t, collector, 0, wideFooterMarker)
 
 	writePTY(t, master, "lifecycle prompt\r")
 	waitForPrompt(t, backend, "lifecycle prompt")
@@ -82,7 +84,11 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
-	waitForSubsequence(t, collector, max(streamOffset, resizeOffset), footerProfileModel)
+	waitForSubsequence(t, collector, resizeOffset, narrowFooterMarker)
+	resizeOutput := collector.SnapshotFrom(resizeOffset)
+	if strings.Contains(resizeOutput, footerSessionMarker) {
+		t.Fatalf("resize output = %s, want collapsed footer without stale session marker %q", tailTerminalOutput([]byte(resizeOutput)), footerSessionMarker)
+	}
 
 	writePTY(t, master, "\x1b")
 	waitForCancellation(t, backend)
@@ -92,7 +98,7 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	waitForSubsequence(t, collector, 0, ctrlCExitStatusText)
 
 	writePTY(t, master, "\x03")
-	waitForRunReturn(t, runErrCh)
+	waitForRunReturn(t, runResult)
 	waitForSubsequence(t, collector, 0, altScreenExitSeq)
 }
 
@@ -113,7 +119,12 @@ func (b *ptySmokeBackend) Prompt(ctx context.Context, text string, emit func(age
 func (b *ptySmokeBackend) NewSession() error { return nil }
 
 func (b *ptySmokeBackend) Info() app.Info {
-	return app.Info{Profile: "pty-profile", Model: "pty-model", SessionID: "pty-session"}
+	return app.Info{
+		Workspace: "/tmp/" + footerWorkspaceName,
+		Profile:   "pty-profile",
+		Model:     "pty-model",
+		SessionID: footerSessionMarker,
+	}
 }
 
 func (b *ptySmokeBackend) History() []model.Message { return nil }
@@ -139,15 +150,14 @@ func waitForCancellation(t *testing.T, backend *ptySmokeBackend) {
 	}
 }
 
-func waitForRunReturn(t *testing.T, errCh <-chan error) {
+func waitForRunReturn(t *testing.T, run *runResult) {
 	t.Helper()
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("tui.Run() error = %v", err)
-		}
-	case <-time.After(ptyTestTimeout):
+	err, ok := run.Wait(ptyTestTimeout)
+	if !ok {
 		t.Fatal("timed out waiting for tui.Run to return")
+	}
+	if err != nil {
+		t.Fatalf("tui.Run() error = %v", err)
 	}
 }
 
@@ -175,6 +185,48 @@ func waitForSubsequence(t *testing.T, collector *ptyOutputCollector, after int, 
 		t.Fatal(err)
 	}
 	return offset
+}
+
+type runResult struct {
+	done chan struct{}
+	mu   sync.Mutex
+	err  error
+}
+
+func startRunResult(run func() error) *runResult {
+	result := &runResult{done: make(chan struct{})}
+	go func() {
+		err := run()
+		result.mu.Lock()
+		result.err = err
+		result.mu.Unlock()
+		close(result.done)
+	}()
+	return result
+}
+
+func (r *runResult) Finished() bool {
+	select {
+	case <-r.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (r *runResult) Wait(timeout time.Duration) (error, bool) {
+	select {
+	case <-r.done:
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.err, true
+	case <-time.After(timeout):
+		return nil, false
+	}
+}
+
+func isExpectedCleanupRunError(err error) bool {
+	return errors.Is(err, context.Canceled) || strings.Contains(err.Error(), context.Canceled.Error())
 }
 
 type ptyOutputCollector struct {
@@ -213,6 +265,13 @@ func (c *ptyOutputCollector) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.buf)
+}
+
+func (c *ptyOutputCollector) SnapshotFrom(offset int) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	start := min(max(offset, 0), len(c.buf))
+	return string(append([]byte(nil), c.buf[start:]...))
 }
 
 func (c *ptyOutputCollector) WaitFor(after int, want []byte, timeout time.Duration) (int, error) {

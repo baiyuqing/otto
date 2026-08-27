@@ -262,6 +262,160 @@ func TestBuildContextPreservesToolCallResultPairing(t *testing.T) {
 	}
 }
 
+func TestBuildContextAllowsSiblingToolResultsBeforeLaterContext(t *testing.T) {
+	root := testPiUserEntry("61000001", nil, "root")
+	parent := root.ID
+	assistant := testPiToolCallEntry("61000002", &parent,
+		model.Block{ToolCallID: "call-1", ToolName: "read"},
+		model.Block{ToolCallID: "call-2", ToolName: "write"},
+	)
+	parent = assistant.ID
+	secondResult := testPiToolResultEntry("61000003", &parent, "call-2", "write", "second")
+	parent = secondResult.ID
+	firstResult := testPiToolResultEntry("61000004", &parent, "call-1", "read", "first")
+	parent = firstResult.ID
+	visible := testPiEntry("custom_message", "61000005", &parent)
+	visible.CustomMessage = &piCustomMessage{CustomType: "visible.fixture", ContentText: stringPointer("after tools"), Display: true}
+	parent = visible.ID
+	user := testPiUserEntry("61000006", &parent, "continue")
+
+	context, _, err := buildContext([]piEntry{root, assistant, secondResult, firstResult, visible, user}, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMessageTexts(t, context.Messages, []string{"root", "", "", "", "[Custom context: visible.fixture]\nafter tools", "continue"})
+	if context.Messages[2].Blocks[0].Text != "second" || context.Messages[3].Blocks[0].Text != "first" {
+		t.Fatalf("tool-result order = %#v / %#v", context.Messages[2], context.Messages[3])
+	}
+}
+
+func TestBuildContextRejectsInvalidToolResultOrdering(t *testing.T) {
+	tests := map[string]func() ([]piEntry, string){
+		"unmatched result": func() ([]piEntry, string) {
+			root := testPiUserEntry("62000001", nil, "root")
+			parent := root.ID
+			result := testPiToolResultEntry("62000002", &parent, "missing", "read", "result")
+			return []piEntry{root, result}, result.ID
+		},
+		"duplicate result": func() ([]piEntry, string) {
+			root, assistant := testPiSingleToolCall("62000003", "62000004")
+			parent := assistant.ID
+			result := testPiToolResultEntry("62000005", &parent, "call-1", "read", "result")
+			parent = result.ID
+			duplicate := testPiToolResultEntry("62000006", &parent, "call-1", "read", "duplicate")
+			return []piEntry{root, assistant, result, duplicate}, duplicate.ID
+		},
+		"mismatched result name": func() ([]piEntry, string) {
+			root, assistant := testPiSingleToolCall("62000014", "62000015")
+			parent := assistant.ID
+			result := testPiToolResultEntry("62000016", &parent, "call-1", "write", "result")
+			return []piEntry{root, assistant, result}, result.ID
+		},
+		"duplicate call": func() ([]piEntry, string) {
+			root := testPiUserEntry("62000017", nil, "root")
+			parent := root.ID
+			assistant := testPiToolCallEntry("62000018", &parent,
+				model.Block{ToolCallID: "call-1", ToolName: "read"},
+				model.Block{ToolCallID: "call-1", ToolName: "read"},
+			)
+			return []piEntry{root, assistant}, assistant.ID
+		},
+		"interposed context with sibling outstanding": func() ([]piEntry, string) {
+			root := testPiUserEntry("62000007", nil, "root")
+			parent := root.ID
+			assistant := testPiToolCallEntry("62000008", &parent,
+				model.Block{ToolCallID: "call-1", ToolName: "read"},
+				model.Block{ToolCallID: "call-2", ToolName: "write"},
+			)
+			parent = assistant.ID
+			result := testPiToolResultEntry("62000009", &parent, "call-1", "read", "first")
+			parent = result.ID
+			interposed := testPiEntry("custom_message", "6200000a", &parent)
+			interposed.CustomMessage = &piCustomMessage{CustomType: "provider-visible", ContentText: stringPointer("not yet"), Display: false}
+			parent = interposed.ID
+			second := testPiToolResultEntry("6200000b", &parent, "call-2", "write", "second")
+			return []piEntry{root, assistant, result, interposed, second}, second.ID
+		},
+		"interposed user": func() ([]piEntry, string) {
+			root, assistant := testPiSingleToolCall("6200000c", "6200000d")
+			parent := assistant.ID
+			user := testPiUserEntry("6200000e", &parent, "too soon")
+			parent = user.ID
+			result := testPiToolResultEntry("6200000f", &parent, "call-1", "read", "result")
+			return []piEntry{root, assistant, user, result}, result.ID
+		},
+		"interposed assistant": func() ([]piEntry, string) {
+			root, assistant := testPiSingleToolCall("62000010", "62000011")
+			parent := assistant.ID
+			interposed := testPiAssistantEntry("62000012", &parent, "too soon", "openai-compatible", "model", 1, 1, "stop")
+			parent = interposed.ID
+			result := testPiToolResultEntry("62000013", &parent, "call-1", "read", "result")
+			return []piEntry{root, assistant, interposed, result}, result.ID
+		},
+	}
+
+	for name, build := range tests {
+		t.Run(name, func(t *testing.T) {
+			entries, leafID := build()
+			if _, _, err := buildContext(entries, leafID); !errors.Is(err, ErrInvalidSession) {
+				t.Fatalf("error = %v, want ErrInvalidSession", err)
+			}
+		})
+	}
+}
+
+func TestBuildContextAllowsDanglingToolCallsOnlyAtFinalBoundary(t *testing.T) {
+	root := testPiUserEntry("63000001", nil, "root")
+	parent := root.ID
+	assistant := testPiToolCallEntry("63000002", &parent,
+		model.Block{ToolCallID: "call-1", ToolName: "read"},
+		model.Block{ToolCallID: "call-2", ToolName: "write"},
+	)
+	context, _, err := buildContext([]piEntry{root, assistant}, assistant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := pendingToolCalls(context.Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 || pending[0].ToolCallID != "call-1" || pending[1].ToolCallID != "call-2" {
+		t.Fatalf("pending calls = %#v", pending)
+	}
+}
+
+func TestPendingToolCallsPermitsOnlyToolResultBlocks(t *testing.T) {
+	assistant := model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+		{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read"},
+	}}
+	tests := map[string]model.Message{
+		"empty tool message": {Role: model.RoleTool},
+		"non-result block": {
+			Role:   model.RoleTool,
+			Blocks: []model.Block{{Type: model.BlockText, ToolCallID: "call-1", ToolName: "read", Text: "not a result"}},
+		},
+	}
+	for name, toolMessage := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := pendingToolCalls([]model.Message{assistant, toolMessage}); !errors.Is(err, ErrInvalidSession) {
+				t.Fatalf("error = %v, want ErrInvalidSession", err)
+			}
+		})
+	}
+}
+
+func TestBuildContextPreservesSessionInfoNameExactly(t *testing.T) {
+	entry := testPiEntry("session_info", "64000001", nil)
+	entry.SessionInfo = &piSessionInfo{Name: stringPointer("  exact session name\t ")}
+	context, _, err := buildContext([]piEntry{entry}, entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if context.SessionName != "  exact session name\t " {
+		t.Fatalf("session name = %q", context.SessionName)
+	}
+}
+
 func TestBuildContextRejectsPiPendingAssistant(t *testing.T) {
 	pending := testPiAssistantEntry("70000001", nil, "partial", "openai-compatible", "model", 0, 0, "pending")
 	_, _, err := buildContext([]piEntry{pending}, pending.ID)
@@ -371,6 +525,35 @@ func testPiAssistantEntry(id string, parentID *string, text, provider, modelID s
 		ContentBlocks: []piContentBlock{{Type: "text", Text: text}}, Usage: testPiUsage(input, output), Timestamp: 1,
 	}
 	return entry
+}
+
+func testPiToolCallEntry(id string, parentID *string, calls ...model.Block) piEntry {
+	entry := testPiEntry("message", id, parentID)
+	entry.Message = &piMessage{
+		Role: "assistant", Provider: "openai-compatible", Model: "model", StopReason: "toolUse", Usage: testPiUsage(1, 1), Timestamp: 1,
+	}
+	for _, call := range calls {
+		entry.Message.ContentBlocks = append(entry.Message.ContentBlocks, piContentBlock{
+			Type: "toolCall", ID: call.ToolCallID, Name: call.ToolName, Arguments: json.RawMessage(`{}`),
+		})
+	}
+	return entry
+}
+
+func testPiToolResultEntry(id string, parentID *string, callID, toolName, text string) piEntry {
+	entry := testPiEntry("message", id, parentID)
+	isError := false
+	entry.Message = &piMessage{
+		Role: "toolResult", ContentText: stringPointer(text), ToolCallID: callID, ToolName: toolName, IsError: &isError, Timestamp: 1,
+	}
+	return entry
+}
+
+func testPiSingleToolCall(rootID, assistantID string) (piEntry, piEntry) {
+	root := testPiUserEntry(rootID, nil, "root")
+	parent := root.ID
+	assistant := testPiToolCallEntry(assistantID, &parent, model.Block{ToolCallID: "call-1", ToolName: "read"})
+	return root, assistant
 }
 
 func testPiRuntimeEntry(t *testing.T, id string, parentID *string, metadata RuntimeMetadata) piEntry {

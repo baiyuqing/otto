@@ -111,7 +111,7 @@ func buildContext(entries []piEntry, leafID string) (ResolvedContext, []Warning,
 			}
 			resolved.SessionName = ""
 			if entry.SessionInfo.Name != nil {
-				resolved.SessionName = strings.TrimSpace(*entry.SessionInfo.Name)
+				resolved.SessionName = *entry.SessionInfo.Name
 			}
 		default:
 			if !knownPiEntryType(entry.Type) {

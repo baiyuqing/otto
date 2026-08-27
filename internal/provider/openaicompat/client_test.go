@@ -367,11 +367,14 @@ func TestCompleteTranslatesNeutralRequestToChatCompletions(t *testing.T) {
 			{Role: model.RoleAssistant, Blocks: []model.Block{
 				{Type: model.BlockText, Text: "Calling read."},
 				{Type: model.BlockToolCall, ToolCallID: "call-7", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)},
+				{Type: model.BlockToolCall, ToolCallID: "call-8", ToolName: "read", Arguments: json.RawMessage(`{"path":"AGENTS.md"}`)},
 			}},
 			{Role: model.RoleTool, Blocks: []model.Block{
 				{Type: model.BlockToolResult, ToolCallID: "call-7", Text: "contents"},
 				{Type: model.BlockToolResult, ToolCallID: "call-8", Text: "second"},
 			}},
+			{Role: model.RoleContext, Display: false, Blocks: []model.Block{{Type: model.BlockText, Text: "after tools"}}},
+			{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "continue"}}},
 		},
 		Tools: []model.ToolDefinition{{Name: "read", Description: "Read a file", Parameters: parameters}},
 	}, nil)
@@ -385,9 +388,14 @@ func TestCompleteTranslatesNeutralRequestToChatCompletions(t *testing.T) {
 	wantMessages := []chatMessage{
 		{Role: "system", Content: "Be concise."},
 		{Role: "user", Content: "read it"},
-		{Role: "assistant", Content: "Calling read.", ToolCalls: []chatToolCall{{ID: "call-7", Type: "function", Function: chatToolCallFunction{Name: "read", Arguments: `{"path":"README.md"}`}}}},
+		{Role: "assistant", Content: "Calling read.", ToolCalls: []chatToolCall{
+			{ID: "call-7", Type: "function", Function: chatToolCallFunction{Name: "read", Arguments: `{"path":"README.md"}`}},
+			{ID: "call-8", Type: "function", Function: chatToolCallFunction{Name: "read", Arguments: `{"path":"AGENTS.md"}`}},
+		}},
 		{Role: "tool", Content: "contents", ToolCallID: "call-7"},
 		{Role: "tool", Content: "second", ToolCallID: "call-8"},
+		{Role: "user", Content: "after tools"},
+		{Role: "user", Content: "continue"},
 	}
 	if !reflect.DeepEqual(got.Messages, wantMessages) {
 		t.Fatalf("messages mismatch\nwant: %#v\n got: %#v", wantMessages, got.Messages)

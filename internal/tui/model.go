@@ -55,7 +55,9 @@ type Model struct {
 	ctrlCArmedAt      time.Time
 	activeAssistant   int
 	turnErrorSeen     bool
+	turnEventErr      error
 	fatalErr          error
+	turnGeneration    uint64
 	liveEntrySequence int
 }
 
@@ -131,9 +133,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnMsg:
 		return m.updateTurn(msg)
 	case renderStreamingMsg:
+		if msg.generation != m.turnGeneration || !m.running {
+			return m, nil
+		}
 		m.renderTickActive = false
-		if m.dirtyStreaming {
-			m.renderActiveAssistantEntry()
+		if m.dirtyStreaming && m.renderActiveAssistantEntry() {
 			m.dirtyStreaming = false
 			m.refreshViewportContent(!m.autoFollow)
 		}
@@ -215,91 +219,92 @@ func newRootView(m Model, content string) tea.View {
 
 func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(rootContext(m.rootCtx))
-	channel := make(chan turnEnvelope, turnChannelCapacity)
+	stream := newTurnStream()
 
 	m.running = true
 	m.cancel = cancel
 	m.turnErrorSeen = false
+	m.turnEventErr = nil
 	m.dirtyStreaming = false
 	m.renderTickActive = false
 	m.activeAssistant = -1
+	m.turnGeneration++
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
 	m.editor.SetValue("")
 	m.rerenderAndRefreshViewportContent(!m.autoFollow)
 
-	return m, startTurnCommand(ctx, m.backend, text, channel)
+	return m, startTurnCommand(ctx, m.backend, text, stream)
 }
 
-func startTurnCommand(ctx context.Context, backend app.Backend, text string, channel chan turnEnvelope) tea.Cmd {
-	return func() tea.Msg {
-		go runTurnWorker(ctx, backend, text, channel)
-		return waitTurn(channel)()
+func newTurnStream() *turnStream {
+	return &turnStream{
+		channel:    make(chan turnEnvelope, turnChannelCapacity),
+		eventSlots: make(chan struct{}, turnChannelCapacity-1),
 	}
 }
 
-func runTurnWorker(ctx context.Context, backend app.Backend, text string, channel chan turnEnvelope) {
-	defer close(channel)
+func startTurnCommand(ctx context.Context, backend app.Backend, text string, stream *turnStream) tea.Cmd {
+	return func() tea.Msg {
+		go runTurnWorker(ctx, backend, text, stream)
+		return waitTurn(stream)()
+	}
+}
+
+func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream *turnStream) {
 	if backend == nil {
-		sendTurnEnvelope(ctx, channel, turnEnvelope{err: errors.New("backend is required"), done: true})
+		stream.channel <- turnEnvelope{err: errors.New("backend is required"), done: true}
 		return
 	}
 
 	err := backend.Prompt(ctx, text, func(event agent.Event) {
 		eventCopy := event
-		sendTurnEnvelope(ctx, channel, turnEnvelope{event: &eventCopy})
+		sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy})
 	})
-	sendTurnDoneEnvelope(ctx, channel, turnEnvelope{err: err, done: true})
+	stream.channel <- turnEnvelope{err: err, done: true}
 }
 
-func sendTurnEnvelope(ctx context.Context, channel chan<- turnEnvelope, envelope turnEnvelope) bool {
+func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
 	select {
-	case channel <- envelope:
+	case stream.eventSlots <- struct{}{}:
+	case <-ctx.Done():
+		return false
+	}
+	select {
+	case stream.channel <- envelope:
 		return true
 	case <-ctx.Done():
+		<-stream.eventSlots
 		return false
 	}
 }
 
-func sendTurnDoneEnvelope(ctx context.Context, channel chan<- turnEnvelope, envelope turnEnvelope) bool {
-	select {
-	case channel <- envelope:
-		return true
-	default:
-	}
-	select {
-	case channel <- envelope:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func waitTurn(channel <-chan turnEnvelope) tea.Cmd {
+func waitTurn(stream *turnStream) tea.Cmd {
 	return func() tea.Msg {
-		envelope, ok := <-channel
-		if !ok {
-			return turnMsg{channel: channel, value: turnEnvelope{done: true}}
+		envelope := <-stream.channel
+		if envelope.event != nil {
+			<-stream.eventSlots
 		}
-		return turnMsg{channel: channel, value: envelope}
+		return turnMsg{channel: stream.channel, stream: stream, value: envelope}
 	}
 }
 
 func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if msg.value.event != nil {
-		return m.applyTurnEvent(msg.channel, *msg.value.event)
+		return m.applyTurnEvent(msg.stream, *msg.value.event)
 	}
 	if msg.value.done {
 		return m.finishTurn(msg.value.err)
 	}
-	return m, waitTurn(msg.channel)
+	return m, waitTurn(msg.stream)
 }
 
-func (m Model) applyTurnEvent(channel <-chan turnEnvelope, event agent.Event) (tea.Model, tea.Cmd) {
+func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model, tea.Cmd) {
 	switch event.Type {
 	case agent.EventTextDelta:
 		m.applyTextDelta(event.Text)
-		return m, tea.Batch(waitTurn(channel), m.scheduleRenderTick())
+		return m, tea.Batch(waitTurn(stream), m.scheduleRenderTick())
 	case agent.EventToolCallStarted:
+		m.finalizeStreamingRender()
 		m.activeAssistant = -1
 		m.entries = append(m.entries, Entry{
 			ID:         m.nextLiveEntryID("tool"),
@@ -308,28 +313,30 @@ func (m Model) applyTurnEvent(channel <-chan turnEnvelope, event agent.Event) (t
 			ToolName:   event.ToolName,
 		})
 		m.refreshViewportContent(!m.autoFollow)
-		return m, waitTurn(channel)
+		return m, waitTurn(stream)
 	case agent.EventToolCallFinished:
+		m.finalizeStreamingRender()
 		m.activeAssistant = -1
 		m.finishToolEntry(event)
 		m.refreshViewportContent(!m.autoFollow)
-		return m, waitTurn(channel)
+		return m, waitTurn(stream)
 	case agent.EventProviderUsage:
 		m.usage = addUsageTotals(m.usage, &event.Usage)
-		return m, waitTurn(channel)
+		return m, waitTurn(stream)
 	case agent.EventAgentError:
-		m.turnErrorSeen = true
-		return m.handleTurnError(event.Err)
+		m.recordTurnError(event.Err)
+		return m, waitTurn(stream)
 	case agent.EventAgentFinished, agent.EventAgentStarted:
-		return m, waitTurn(channel)
+		return m, waitTurn(stream)
 	default:
-		return m, waitTurn(channel)
+		return m, waitTurn(stream)
 	}
 }
 
 func (m *Model) applyTextDelta(text string) {
 	index := m.ensureActiveAssistantEntry()
 	m.entries[index].Raw += text
+	m.entries[index].RenderWidth = 0
 	m.dirtyStreaming = true
 }
 
@@ -374,43 +381,49 @@ func (m Model) findPendingToolEntry(toolCallID string) int {
 }
 
 func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
-	if err != nil && !m.turnErrorSeen {
-		return m.handleTurnError(err)
+	if err == nil {
+		err = m.turnEventErr
 	}
 	m.finalizeStreamingRender()
+	if err != nil && !m.turnErrorSeen {
+		m.recordTurnError(err)
+	}
 	m.completeTurnState()
+	if errors.Is(err, session.ErrFatalPersistence) {
+		m.fatalErr = err
+		return m, tea.Quit
+	}
 	return m, nil
 }
 
-func (m Model) handleTurnError(err error) (tea.Model, tea.Cmd) {
-	m.finalizeStreamingRender()
-	m.completeTurnState()
-	if err != nil {
-		m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("error"), Kind: EntryError, Raw: err.Error()})
-		m.rerenderAndRefreshViewportContent(!m.autoFollow)
-		if errors.Is(err, session.ErrFatalPersistence) {
-			m.fatalErr = err
-			return m, tea.Quit
-		}
-		return m, nil
+func (m *Model) recordTurnError(err error) {
+	if err == nil || m.turnErrorSeen {
+		return
 	}
-	return m, nil
+	m.turnErrorSeen = true
+	m.turnEventErr = err
+	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("error"), Kind: EntryError, Raw: err.Error()})
+	m.rerenderAndRefreshViewportContent(!m.autoFollow)
 }
 
 func (m *Model) finalizeStreamingRender() {
-	if !m.dirtyStreaming {
+	if m.activeAssistant < 0 || m.activeAssistant >= len(m.entries) {
 		return
 	}
-	m.renderActiveAssistantEntry()
+	m.entries[m.activeAssistant].RenderWidth = 0
+	if !m.renderActiveAssistantEntry() {
+		return
+	}
 	m.dirtyStreaming = false
 	m.refreshViewportContent(!m.autoFollow)
 }
 
-func (m *Model) renderActiveAssistantEntry() {
+func (m *Model) renderActiveAssistantEntry() bool {
 	if m.activeAssistant < 0 || m.activeAssistant >= len(m.entries) {
-		return
+		return false
 	}
 	m.renderEntryAt(m.activeAssistant, m.transcriptWidth())
+	return true
 }
 
 func (m *Model) completeTurnState() {
@@ -421,6 +434,7 @@ func (m *Model) completeTurnState() {
 	m.running = false
 	m.renderTickActive = false
 	m.turnErrorSeen = false
+	m.turnEventErr = nil
 	m.activeAssistant = -1
 }
 
@@ -429,8 +443,9 @@ func (m *Model) scheduleRenderTick() tea.Cmd {
 		return nil
 	}
 	m.renderTickActive = true
+	generation := m.turnGeneration
 	return tea.Tick(streamRenderInterval, func(time.Time) tea.Msg {
-		return renderStreamingMsg{}
+		return renderStreamingMsg{generation: generation}
 	})
 }
 
@@ -444,6 +459,7 @@ func (m Model) transcriptWidth() int {
 }
 
 func (m *Model) refreshViewportContent(preserveOffset bool) {
+	previousYOffset := m.viewport.YOffset()
 	m.editor.SetWidth(max(0, m.width))
 	layout := calculateLayout(m.width, m.height, m.editor)
 	m.editor.SetHeight(layout.editorHeight)
@@ -452,7 +468,6 @@ func (m *Model) refreshViewportContent(preserveOffset bool) {
 
 	transcriptWidth := max(1, layout.transcriptWidth)
 	content := m.transcriptContent(transcriptWidth)
-	previousYOffset := m.viewport.YOffset()
 	m.viewport.SetContent(content)
 	if m.autoFollow && !preserveOffset {
 		m.viewport.GotoBottom()

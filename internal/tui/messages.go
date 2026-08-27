@@ -28,9 +28,17 @@ type turnEnvelope struct {
 	done  bool
 }
 
+type turnStream struct {
+	channel    chan turnEnvelope
+	eventSlots chan struct{}
+}
+
 type turnMsg struct {
 	channel <-chan turnEnvelope
+	stream  *turnStream
 	value   turnEnvelope
 }
 
-type renderStreamingMsg struct{}
+type renderStreamingMsg struct {
+	generation uint64
+}

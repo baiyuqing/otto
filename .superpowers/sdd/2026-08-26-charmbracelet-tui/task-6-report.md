@@ -49,3 +49,59 @@
 
 ## Concerns
 - The guaranteed key/command matrix beyond Enter submit and Esc cancel is still deferred to Task 7, per the task brief.
+
+## Fix Round 1
+
+### Fixes
+- Invalidated the active assistant render cache on every text delta and forced completion/tool transitions to render the full accumulated `Raw` text.
+- Flushed dirty assistant text before both tool-start and tool-result transitions; render ticks only clear dirty state after successfully rendering an active assistant.
+- Kept the turn channel capacity at exactly 64 and reserved one slot for the real completion envelope with a 63-permit event semaphore. Cancellation-aware event sends cannot occupy the completion slot, so the worker can enqueue exactly one ordered completion and exit even if the UI stops consuming.
+- Changed `EventAgentError` handling to record one visible error while keeping the turn running. The done envelope now exclusively completes/cancels lifecycle state and decides fatal quit behavior.
+- Added turn-generation identity to render ticks so a delayed tick from an earlier turn cannot render or clear a later turn's state.
+- Captured viewport Y offset before editor/viewport dimension and content updates, then restored it when auto-follow is disabled.
+
+### Regression tests
+- Added coverage for a real first render tick followed by a later delta and completion.
+- Added text-before-tool-start and text-before-tool-result flush coverage.
+- Added full-channel cancellation coverage asserting exactly one real completion error and worker exit.
+- Strengthened ordinary and fatal agent-error tests to verify error-event-before-done lifecycle and no duplicate error entries.
+- Added stale render-tick generation and exact viewport-offset preservation coverage.
+
+### RED evidence
+Ran before production changes:
+
+```bash
+go test ./internal/tui -run 'Test(StreamingRenderTickThenLaterDeltaCompletesWithFullRaw|ToolTransitionFlushesDirtyAssistantText|CanceledFullTurnChannelDeliversRealCompletion|PromptErrorLeavesModelUsable|FatalPersistenceErrorQuitsAfterCompletion|StaleRenderTickDoesNotMutateNextTurn|ViewportRefreshPreservesOffsetBeforeTemporaryClamp)$' -count=1
+```
+
+Result: `FAIL` (exit 1). The failures showed:
+- completion remained rendered as `"first"` while `Raw` was `"first second"`;
+- tool start left assistant text unrendered and dirty;
+- the canceled full channel delivered zero completion envelopes and lost the backend error;
+- `EventAgentError` made the model idle immediately instead of waiting for done;
+- fatal error handling quit on the event instead of completion;
+- a stale tick rendered turn B and cleared its dirty/tick state.
+
+The viewport-offset test was included in the RED run and already passed against the current Bubbles implementation because its width/height setters do not presently clamp; the production capture was still moved ahead of all potentially clamping operations to enforce the invariant.
+
+### GREEN evidence
+After the minimal fixes:
+
+```bash
+go test ./internal/tui -run 'Test(StreamingRenderTickThenLaterDeltaCompletesWithFullRaw|ToolTransitionFlushesDirtyAssistantText|ToolResultTransitionFlushesDirtyAssistantText|CanceledFullTurnChannelDeliversRealCompletion|PromptErrorLeavesModelUsable|FatalPersistenceErrorQuitsAfterCompletion|StaleRenderTickDoesNotMutateNextTurn|ViewportRefreshPreservesOffsetBeforeTemporaryClamp)$' -count=10
+go test ./internal/tui -count=1
+go test -race ./internal/tui -count=1
+go test ./... -count=1
+go test -race ./... -count=1
+go vet ./...
+go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+test -z "$(gofmt -l .)"
+git diff --check
+go build -trimpath -o ./otto ./cmd/otto
+```
+
+Result: all commands passed.
+
+### Fix Round 1 concerns
+- Task 7 remains out of scope.
+- The completion guarantee assumes `Backend.Prompt` eventually returns after context cancellation; Otto no longer adds a worker leak through blocked event/completion channel sends, but it cannot force a non-cooperative backend function to return.

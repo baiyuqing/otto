@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
+	"unsafe"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
@@ -304,7 +307,10 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 			Blocks: []model.Block{{Type: model.BlockText, Text: "fresh transcript"}},
 			Usage:  &model.Usage{InputTokens: 7, OutputTokens: 9},
 		}}
-		return app.ResumeResult{Warnings: []session.Warning{{Message: "warning: repaired trailing newline"}}}, nil
+		return app.ResumeResult{
+			SessionPath: path,
+			Warnings:    []session.Warning{{Message: "warning: repaired trailing newline"}},
+		}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
 	m.editor.SetValue("draft")
@@ -444,7 +450,10 @@ func TestResumeResultReconcilesCommittedSuccessWithStaleGeneration(t *testing.T)
 	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
 		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new", SessionPath: path}
 		backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "fresh transcript"}}}}
-		return app.ResumeResult{Warnings: []session.Warning{{Message: "stale payload warning"}}}, nil
+		return app.ResumeResult{
+			SessionPath: path,
+			Warnings:    []session.Warning{{Message: "stale payload warning"}},
+		}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
@@ -454,6 +463,7 @@ func TestResumeResultReconcilesCommittedSuccessWithStaleGeneration(t *testing.T)
 	}
 
 	result := runCommandWithin(t, cmd, time.Second)
+	resuming.closeResumePicker()
 	resuming.resume.generation++
 	updated, next := resuming.Update(result)
 	got := updated.(Model)
@@ -468,6 +478,50 @@ func TestResumeResultReconcilesCommittedSuccessWithStaleGeneration(t *testing.T)
 	}
 }
 
+func TestResumeResultReconcilesAliasRequestUsingCanonicalCommittedPath(t *testing.T) {
+	directory := t.TempDir()
+	canonicalPath := filepath.Join(directory, "canonical.jsonl")
+	if err := os.WriteFile(canonicalPath, []byte("session"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliasPath := filepath.Join(directory, "alias.jsonl")
+	if err := os.Symlink(canonicalPath, aliasPath); err != nil {
+		t.Fatal(err)
+	}
+	canonicalPath, err := filepath.EvalSymlinks(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &resumeBackend{
+		info:    app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/old.jsonl"},
+		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}}}},
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		if path != aliasPath {
+			t.Fatalf("resume path = %q, want alias %q", path, aliasPath)
+		}
+		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new", SessionPath: canonicalPath}
+		backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "canonical transcript"}}}}
+		return app.ResumeResult{SessionPath: canonicalPath}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "canonical", Path: aliasPath}}})
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	result := runCommandWithin(t, cmd, time.Second)
+
+	resuming.closeResumePicker()
+	resuming.resume.generation++
+	updated, next := resuming.Update(result)
+	got := updated.(Model)
+	if next != nil || got.resume.mode != resumeClosed || got.statusText != "resumed session" {
+		t.Fatalf("cmd=%v resume=%#v status=%q", next, got.resume, got.statusText)
+	}
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "canonical transcript") {
+		t.Fatalf("view = %q", content)
+	}
+}
+
 func TestResumeResultStaleSuccessSupersededByNewerBackendDoesNotRollbackUI(t *testing.T) {
 	backend := &resumeBackend{
 		info:    app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/old.jsonl"},
@@ -476,7 +530,7 @@ func TestResumeResultStaleSuccessSupersededByNewerBackendDoesNotRollbackUI(t *te
 	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
 		backend.info = app.Info{Profile: "middle-profile", Model: "middle-model", SessionID: "session-middle", SessionPath: path}
 		backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "middle transcript"}}}}
-		return app.ResumeResult{}, nil
+		return app.ResumeResult{SessionPath: path}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "middle", Path: "/sessions/middle.jsonl"}}})
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
@@ -499,7 +553,7 @@ func TestResumeResultStaleSuccessSupersededByNewerBackendDoesNotRollbackUI(t *te
 	}
 }
 
-func TestResumeResultCommittedStaleSuccessFailsClosedDuringNewerResume(t *testing.T) {
+func TestResumeResultCommittedStaleSuccessFailsClosedDuringSamePathNewerResume(t *testing.T) {
 	backend := &resumeBackend{
 		info:    app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/old.jsonl"},
 		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}}}},
@@ -508,16 +562,17 @@ func TestResumeResultCommittedStaleSuccessFailsClosedDuringNewerResume(t *testin
 		backend.info.SessionPath = path
 		backend.info.SessionID = "session-middle"
 		backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "middle transcript"}}}}
-		return app.ResumeResult{}, nil
+		return app.ResumeResult{SessionPath: path}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "middle", Path: "/sessions/middle.jsonl"}}})
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	resuming := updated.(Model)
 	staleResult := runCommandWithin(t, cmd, time.Second)
 
-	resuming.resume.generation++
+	newerGeneration := resuming.resume.generation + 1
+	resuming.resume.generation = newerGeneration
 	resuming.resume.mode = resumeResuming
-	resuming.resume.operationPath = "/sessions/newest.jsonl"
+	resuming.resume.operationPath = "/sessions/middle.jsonl"
 	updated, quit := resuming.Update(staleResult)
 	got := updated.(Model)
 	if quit == nil {
@@ -529,9 +584,100 @@ func TestResumeResultCommittedStaleSuccessFailsClosedDuringNewerResume(t *testin
 	if got.fatalErr == nil {
 		t.Fatal("fatalErr = nil, want fail-closed reconciliation error")
 	}
+	if got.resume.mode != resumeResuming || got.resume.generation != newerGeneration || got.resume.operationPath != "/sessions/middle.jsonl" {
+		t.Fatalf("newer same-path resume was reset or closed: %#v", got.resume)
+	}
 	if content := got.View().Content; strings.Contains(content, "middle transcript") || !strings.Contains(content, "old transcript") {
 		t.Fatalf("view before quit = %q", content)
 	}
+}
+
+func TestResumeResultFailClosedCancelsActiveListOwnership(t *testing.T) {
+	listCtx, cancelList := context.WithCancel(context.Background())
+	backend := &resumeBackend{
+		info:    app.Info{Profile: "profile", Model: "model", SessionID: "committed", SessionPath: "/sessions/committed.jsonl"},
+		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}}}},
+	}
+	m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
+	m.resume = resumePickerState{
+		mode:        resumeLoading,
+		generation:  2,
+		listPending: true,
+		listCancel:  cancelList,
+	}
+
+	updated, quit := m.Update(sessionResumeResultMsg{
+		generation: 1,
+		path:       "/sessions/committed.jsonl",
+		result:     app.ResumeResult{SessionPath: "/sessions/committed.jsonl"},
+	})
+	got := updated.(Model)
+	if quit == nil {
+		t.Fatal("quit command = nil")
+	}
+	if err := listCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("list context error = %v, want context.Canceled before quit", err)
+	}
+	if !got.resume.listPending || got.resume.mode != resumeLoading || got.resume.generation != 2 {
+		t.Fatalf("active list ownership was reset: %#v", got.resume)
+	}
+	if got.fatalErr == nil {
+		t.Fatal("fatalErr = nil, want fail-closed reconciliation error")
+	}
+}
+
+func TestResumeWorkersDetachBoundedPayloadStorage(t *testing.T) {
+	path := hugeBackedResumeString("/sessions/detached.jsonl")
+	id := hugeBackedResumeString("detached-id")
+	cwd := hugeBackedResumeString("/workspace")
+	name := hugeBackedResumeString("detached name")
+	lastUserText := hugeBackedResumeString("detached prompt")
+	profile := hugeBackedResumeString("detached-profile")
+	provider := hugeBackedResumeString("openai-compatible")
+	modelName := hugeBackedResumeString("detached-model")
+	location := time.FixedZone(strings.Repeat("huge-location", 1<<16), 9*60*60)
+	created := time.Date(2026, time.August, 27, 12, 34, 56, 789, location)
+	modified := created.Add(time.Hour)
+	source := session.SessionInfo{
+		Path: path, ID: id, CWD: cwd, Name: name, Created: created, Modified: modified,
+		MessageCount: 7, LastUserText: lastUserText, Profile: profile, Provider: provider, Model: modelName, Current: true,
+	}
+	backend := &resumeBackend{listSessions: func(context.Context, int) (session.ListResult, error) {
+		return session.ListResult{Sessions: []session.SessionInfo{source}}, nil
+	}}
+
+	message := runCommandWithin(t, runSessionListCommand(context.Background(), backend, 91), time.Second).(sessionListResultMsg)
+	if len(message.result.Sessions) != 1 {
+		t.Fatalf("sessions = %#v", message.result.Sessions)
+	}
+	got := message.result.Sessions[0]
+	for name, pair := range map[string][2]string{
+		"Path": {path, got.Path}, "ID": {id, got.ID}, "CWD": {cwd, got.CWD}, "Name": {name, got.Name},
+		"LastUserText": {lastUserText, got.LastUserText}, "Profile": {profile, got.Profile},
+		"Provider": {provider, got.Provider}, "Model": {modelName, got.Model},
+	} {
+		assertDetachedResumeString(t, name, pair[0], pair[1])
+	}
+	if !got.Created.Equal(created) || !got.Modified.Equal(modified) {
+		t.Fatalf("times = created %v modified %v, want instants %v and %v", got.Created, got.Modified, created, modified)
+	}
+	if got.Created.Location() != time.UTC || got.Modified.Location() != time.UTC {
+		t.Fatalf("locations = created %q modified %q, want UTC", got.Created.Location(), got.Modified.Location())
+	}
+
+	operationPath := hugeBackedResumeString("/sessions/operation.jsonl")
+	committedPath := hugeBackedResumeString("/sessions/canonical.jsonl")
+	warningText := hugeBackedResumeString("detached warning")
+	backend.resumeSession = func(context.Context, string) (app.ResumeResult, error) {
+		return app.ResumeResult{
+			SessionPath: committedPath,
+			Warnings:    []session.Warning{{Message: warningText}},
+		}, nil
+	}
+	resumeMessage := runCommandWithin(t, runSessionResumeCommand(context.Background(), backend, 92, operationPath), time.Second).(sessionResumeResultMsg)
+	assertDetachedResumeString(t, "operation path", operationPath, resumeMessage.path)
+	assertDetachedResumeString(t, "committed path", committedPath, resumeMessage.result.SessionPath)
+	assertDetachedResumeString(t, "warning", warningText, resumeMessage.result.Warnings[0].Message)
 }
 
 func TestResumeWorkersBoundUntrustedSessionResultsAndErrors(t *testing.T) {
@@ -633,7 +779,7 @@ func TestResumeWorkerBoundsWarningsErrorsAndStatusSuffix(t *testing.T) {
 	}
 	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
 		backend.info = app.Info{Profile: "profile", Model: "model", SessionID: "fresh", SessionPath: path}
-		return app.ResumeResult{Warnings: warnings}, nil
+		return app.ResumeResult{SessionPath: path, Warnings: warnings}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
@@ -680,6 +826,105 @@ func TestResumeWorkerBoundsWarningsErrorsAndStatusSuffix(t *testing.T) {
 	got = updated.(Model)
 	if got.resume.errText != failure.errText || got.statusText != failure.errText {
 		t.Fatalf("resume error=%q status=%q", got.resume.errText, got.statusText)
+	}
+}
+
+func TestResumeListWorkerSecondCtrlCCancelsBeforeQuit(t *testing.T) {
+	clock := newFakeClock(time.Unix(900, 0))
+	started := make(chan context.Context, 1)
+	workerDone := make(chan struct{})
+	backend := &resumeBackend{
+		listSessions: func(ctx context.Context, _ int) (session.ListResult, error) {
+			started <- ctx
+			<-ctx.Done()
+			close(workerDone)
+			return session.ListResult{}, ctx.Err()
+		},
+	}
+	m := resizeModel(t, NewModel(context.Background(), backend, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.editor.SetValue("/resume")
+	updated, listCmd := m.Update(keyPress(tea.KeyEnter))
+	loading := updated.(Model)
+	resultChannel := make(chan tea.Msg, 1)
+	go func() { resultChannel <- listCmd() }()
+	var workerCtx context.Context
+	select {
+	case workerCtx = <-started:
+	case <-time.After(time.Second):
+		t.Fatal("list worker did not start")
+	}
+
+	updated, armCmd := loading.Update(keyPress('c', tea.ModCtrl))
+	armed := updated.(Model)
+	if armCmd == nil || !armed.ctrlCArmed || workerCtx.Err() != nil {
+		t.Fatalf("first Ctrl+C: cmd=%v armed=%v worker error=%v", armCmd, armed.ctrlCArmed, workerCtx.Err())
+	}
+	updated, quit := armed.Update(keyPress('c', tea.ModCtrl))
+	quitting := updated.(Model)
+	if quit == nil {
+		t.Fatal("second Ctrl+C quit command = nil")
+	}
+	if err := workerCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("worker context error before quit = %v, want context.Canceled", err)
+	}
+	if !quitting.resume.listPending {
+		t.Fatal("quit reset list ownership before worker acknowledgment")
+	}
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked lister did not observe ctx.Done before quit command was run")
+	}
+	if _, ok := quit().(tea.QuitMsg); !ok {
+		t.Fatalf("quit command message = %T, want tea.QuitMsg", quit())
+	}
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("canceled list worker did not return")
+	}
+}
+
+func TestResumeListWorkerDirectExitCancelsBeforeQuit(t *testing.T) {
+	started := make(chan context.Context, 1)
+	backend := &resumeBackend{listSessions: func(ctx context.Context, _ int) (session.ListResult, error) {
+		started <- ctx
+		<-ctx.Done()
+		return session.ListResult{}, ctx.Err()
+	}}
+	m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
+	m.editor.SetValue("/resume")
+	updated, listCmd := m.Update(keyPress(tea.KeyEnter))
+	loading := updated.(Model)
+	resultChannel := make(chan tea.Msg, 1)
+	go func() { resultChannel <- listCmd() }()
+	var workerCtx context.Context
+	select {
+	case workerCtx = <-started:
+	case <-time.After(time.Second):
+		t.Fatal("list worker did not start")
+	}
+
+	updated, quit := loading.handleCommand("/exit")
+	got := updated.(Model)
+	if quit == nil {
+		t.Fatal("direct /exit quit command = nil")
+	}
+	if err := workerCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("worker context error before direct quit = %v, want context.Canceled", err)
+	}
+	if !got.resume.listPending {
+		t.Fatal("direct quit reset list ownership before acknowledgment")
+	}
+	if _, ok := quit().(tea.QuitMsg); !ok {
+		t.Fatalf("quit command message = %T, want tea.QuitMsg", quit())
+	}
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("direct-quit list worker did not return")
 	}
 }
 
@@ -810,7 +1055,7 @@ func TestResumePickerEscapeDoesNotCancelResumeWorker(t *testing.T) {
 		ctxErr <- ctx.Err()
 		backend.info.SessionID = "fresh"
 		backend.info.SessionPath = path
-		return app.ResumeResult{}, nil
+		return app.ResumeResult{SessionPath: path}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
@@ -841,6 +1086,21 @@ func TestResumePickerEscapeDoesNotCancelResumeWorker(t *testing.T) {
 	case <-resultChannel:
 	case <-time.After(time.Second):
 		t.Fatal("resume worker did not return")
+	}
+}
+
+func hugeBackedResumeString(value string) string {
+	backing := strings.Repeat("x", 1<<20) + value
+	return backing[len(backing)-len(value):]
+}
+
+func assertDetachedResumeString(t *testing.T, name, source, got string) {
+	t.Helper()
+	if got != source {
+		t.Fatalf("%s = %q, want %q", name, got, source)
+	}
+	if source != "" && unsafe.StringData(source) == unsafe.StringData(got) {
+		t.Fatalf("%s retained source backing storage", name)
 	}
 }
 

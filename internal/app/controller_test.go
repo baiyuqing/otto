@@ -714,6 +714,9 @@ func TestControllerResumeSwapsSessionRunnerAndRuntimeAtomically(t *testing.T) {
 	if len(result.Warnings) != 1 || result.Warnings[0].Message != warnings[0].Message {
 		t.Fatalf("warnings = %#v", result.Warnings)
 	}
+	if result.SessionPath != canonicalSessionPath(next.Path()) {
+		t.Fatalf("session path = %q, want %q", result.SessionPath, canonicalSessionPath(next.Path()))
+	}
 	result.Warnings[0].Message = "changed"
 	if warnings[0].Message != "repaired dangling tool call" {
 		t.Fatalf("factory warnings mutated: %#v", warnings)
@@ -870,8 +873,43 @@ func TestControllerResumeCurrentCanonicalPathIsNoOp(t *testing.T) {
 	if result.Warnings != nil {
 		t.Fatalf("warnings = %#v, want nil", result.Warnings)
 	}
+	wantPath := canonicalSessionPath(currentPath)
+	if result.SessionPath != wantPath {
+		t.Fatalf("session path = %q, want canonical current path %q", result.SessionPath, wantPath)
+	}
 	if factoryCalls != 0 || old.CloseCalls() != 0 {
 		t.Fatalf("factory calls = %d, old close calls = %d", factoryCalls, old.CloseCalls())
+	}
+}
+
+func TestControllerResumeResultUsesCommittedCanonicalSessionPath(t *testing.T) {
+	directory := t.TempDir()
+	canonicalPath := filepath.Join(directory, "canonical.jsonl")
+	if err := os.WriteFile(canonicalPath, []byte("session"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	aliasPath := filepath.Join(directory, "alias.jsonl")
+	if err := os.Symlink(canonicalPath, aliasPath); err != nil {
+		t.Fatal(err)
+	}
+
+	old := &fakeSession{header: testHeader("old")}
+	next := &fakeSession{header: testHeader("next"), path: aliasPath}
+	controller := newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{Session: next, Runner: &recordingRunner{}}, nil
+		})
+
+	result, err := controller.ResumeSession(context.Background(), aliasPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := canonicalSessionPath(canonicalPath)
+	if result.SessionPath != wantPath {
+		t.Fatalf("session path = %q, want committed canonical path %q", result.SessionPath, wantPath)
+	}
+	if got := controller.Info().SessionPath; got != result.SessionPath {
+		t.Fatalf("Info().SessionPath = %q, result path = %q", got, result.SessionPath)
 	}
 }
 

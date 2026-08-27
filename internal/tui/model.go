@@ -525,7 +525,7 @@ func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
 		if m.running {
 			return m, nil
 		}
-		return m, tea.Quit
+		return m.quit()
 	default:
 		m.statusText = fmt.Sprintf("unknown command: %s", name)
 		return m, nil
@@ -590,7 +590,7 @@ func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
 			if m.cancel != nil {
 				m.cancel()
 			}
-			return m, tea.Quit
+			return m.quit()
 		}
 		m.clearCtrlCArm()
 	}
@@ -976,7 +976,7 @@ func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
 	m.completeTurnState()
 	if errors.Is(err, session.ErrFatalPersistence) {
 		m.fatalErr = err
-		return m, tea.Quit
+		return m.quit()
 	}
 	return m, nil
 }

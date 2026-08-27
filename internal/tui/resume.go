@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -94,18 +94,19 @@ func runSessionListCommand(ctx context.Context, browser app.SessionBrowser, gene
 }
 
 func runSessionResumeCommand(ctx context.Context, browser app.SessionBrowser, generation uint64, path string) tea.Cmd {
+	operationPath := strings.Clone(path)
 	return func() tea.Msg {
-		if !validResumeOperationPath(path) {
+		if !validResumeOperationPath(operationPath) {
 			return sessionResumeResultMsg{generation: generation, errText: "selected session path is invalid"}
 		}
 		if browser == nil {
-			return sessionResumeResultMsg{generation: generation, path: path, errText: boundedResumeError(errors.New("session browser is required"))}
+			return sessionResumeResultMsg{generation: generation, path: operationPath, errText: boundedResumeError(errors.New("session browser is required"))}
 		}
-		result, err := browser.ResumeSession(rootContext(ctx), path)
+		result, err := browser.ResumeSession(rootContext(ctx), operationPath)
 		boundedResult, warningsSkipped := boundedResumeResult(result)
 		return sessionResumeResultMsg{
 			generation:      generation,
-			path:            path,
+			path:            operationPath,
 			result:          boundedResult,
 			warningsSkipped: warningsSkipped,
 			errText:         boundedResumeError(err),
@@ -213,7 +214,8 @@ func (m Model) applySessionListResult(msg sessionListResultMsg) (tea.Model, tea.
 func (m Model) applySessionResumeResult(msg sessionResumeResultMsg) (tea.Model, tea.Cmd) {
 	currentOperation := m.resume.mode == resumeResuming &&
 		msg.generation == m.resume.generation &&
-		sameResumeOperationPath(msg.path, m.resume.operationPath)
+		validResumeOperationPath(msg.path) &&
+		msg.path == m.resume.operationPath
 	if !currentOperation {
 		return m.reconcileCommittedStaleResume(msg)
 	}
@@ -236,39 +238,50 @@ func (m Model) applySessionResumeResult(msg sessionResumeResultMsg) (tea.Model, 
 func (m Model) reconcileCommittedStaleResume(msg sessionResumeResultMsg) (tea.Model, tea.Cmd) {
 	// Failed workers cannot have committed a successful replacement. Their
 	// payload remains guarded by the current generation and mode checks above.
-	if msg.errText != "" || !validResumeOperationPath(msg.path) {
+	if boundedResumeErrorText(msg.errText) != "" {
 		return m, nil
 	}
-	if !sameResumeOperationPath(infoFromBackend(m.backend).SessionPath, msg.path) {
-		// The result was superseded by a different backend session. In particular,
-		// never rebuild the UI from this stale result payload.
+	result, _ := boundedResumeResult(msg.result)
+	if !validResumeOperationPath(result.SessionPath) {
 		return m, nil
 	}
-	if m.hasNewerWorkThanResumePath(msg.path) {
+	currentPath := infoFromBackend(m.backend).SessionPath
+	if !validResumeOperationPath(currentPath) || currentPath != result.SessionPath {
+		// The committed result was superseded by a different backend session. In
+		// particular, never rebuild the UI from this stale result payload.
+		return m, nil
+	}
+	if m.hasNewerWorkThanStaleResume() {
 		m.fatalErr = errResumeReconciliationUnsafe
 		m.statusText = errResumeReconciliationUnsafe.Error()
-		return m, tea.Quit
+		return m.quit()
 	}
 
-	// ResumeSession has committed and the operation path is still the backend's
-	// current identity. Rebuild only from current backend state; stale warnings
+	// ResumeSession has committed and its canonical result path is still the
+	// backend's current identity. Rebuild only from current backend state; stale warnings
 	// and other result payload are intentionally ignored.
 	m.resetSessionViewFromBackend("resumed session")
 	m.closeResumePicker()
 	return m, nil
 }
 
-func (m Model) hasNewerWorkThanResumePath(path string) bool {
-	if m.running || m.newSessionPending || m.resume.listPending {
-		return true
-	}
-	return m.resume.mode == resumeResuming && !sameResumeOperationPath(m.resume.operationPath, path)
+func (m Model) hasNewerWorkThanStaleResume() bool {
+	return m.running || m.newSessionPending || m.resume.listPending || m.resume.active()
 }
 
-func (m *Model) releaseSessionListOwnership() {
+func (m *Model) cancelSessionListWorker() {
 	if m.resume.listCancel != nil {
 		m.resume.listCancel()
 	}
+}
+
+func (m Model) quit() (tea.Model, tea.Cmd) {
+	m.cancelSessionListWorker()
+	return m, tea.Quit
+}
+
+func (m *Model) releaseSessionListOwnership() {
+	m.cancelSessionListWorker()
 	m.resume.listCancel = nil
 	m.resume.listPending = false
 }
@@ -304,21 +317,32 @@ func boundedSessionInfo(info session.SessionInfo) (session.SessionInfo, bool) {
 	if !validResumeOperationPath(info.Path) {
 		return session.SessionInfo{}, false
 	}
-	bounded := info
-	bounded.ID = boundedSingleLineText(info.ID, resumeMaxFieldBytes)
-	bounded.CWD = boundedSingleLineText(info.CWD, resumeMaxFieldBytes)
-	bounded.Name = boundedSingleLineText(info.Name, resumeMaxFieldBytes)
-	bounded.LastUserText = boundedSingleLineText(info.LastUserText, resumeMaxFieldBytes)
-	bounded.Profile = boundedSingleLineText(info.Profile, resumeMaxFieldBytes)
-	bounded.Provider = boundedSingleLineText(info.Provider, resumeMaxFieldBytes)
-	bounded.Model = boundedSingleLineText(info.Model, resumeMaxFieldBytes)
-	bounded.MessageCount = max(0, info.MessageCount)
-	return bounded, true
+	return session.SessionInfo{
+		Path:         strings.Clone(info.Path),
+		ID:           boundedSingleLineText(info.ID, resumeMaxFieldBytes),
+		CWD:          boundedSingleLineText(info.CWD, resumeMaxFieldBytes),
+		Name:         boundedSingleLineText(info.Name, resumeMaxFieldBytes),
+		Created:      detachedResumeTime(info.Created),
+		Modified:     detachedResumeTime(info.Modified),
+		MessageCount: max(0, info.MessageCount),
+		LastUserText: boundedSingleLineText(info.LastUserText, resumeMaxFieldBytes),
+		Profile:      boundedSingleLineText(info.Profile, resumeMaxFieldBytes),
+		Provider:     boundedSingleLineText(info.Provider, resumeMaxFieldBytes),
+		Model:        boundedSingleLineText(info.Model, resumeMaxFieldBytes),
+		Current:      info.Current,
+	}, true
+}
+
+func detachedResumeTime(value time.Time) time.Time {
+	return value.UTC()
 }
 
 func boundedResumeResult(result app.ResumeResult) (app.ResumeResult, int) {
 	count := min(len(result.Warnings), resumeMaxWarningCount)
 	bounded := app.ResumeResult{Warnings: make([]session.Warning, count)}
+	if validResumeOperationPath(result.SessionPath) {
+		bounded.SessionPath = strings.Clone(result.SessionPath)
+	}
 	for index := 0; index < count; index++ {
 		bounded.Warnings[index].Message = boundedSingleLineText(result.Warnings[index].Message, resumeMaxWarningBytes)
 	}
@@ -365,7 +389,7 @@ func boundedSingleLineText(text string, maximumBytes int) string {
 		builder.WriteString(piece)
 		text = text[size:]
 	}
-	return builder.String()
+	return strings.Clone(builder.String())
 }
 
 func validResumeOperationPath(path string) bool {
@@ -378,23 +402,6 @@ func validResumeOperationPath(path string) bool {
 		}
 	}
 	return true
-}
-
-func sameResumeOperationPath(left, right string) bool {
-	leftIdentity, leftOK := resumeOperationPathIdentity(left)
-	rightIdentity, rightOK := resumeOperationPathIdentity(right)
-	return leftOK && rightOK && leftIdentity == rightIdentity
-}
-
-func resumeOperationPathIdentity(path string) (string, bool) {
-	if !validResumeOperationPath(path) {
-		return "", false
-	}
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return filepath.Clean(path), true
-	}
-	return filepath.Clean(absolute), true
 }
 
 func nonnegativeCount(count int) int {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/agent"
@@ -45,7 +46,8 @@ type SessionReplacement struct {
 }
 
 type ResumeResult struct {
-	Warnings []session.Warning
+	SessionPath string
+	Warnings    []session.Warning
 }
 
 type Option func(*Controller)
@@ -258,8 +260,9 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 		return ResumeResult{}, ErrPersistenceDisabled
 	}
 	if requestedPath != "" && requestedPath == c.currentPath {
+		result := ResumeResult{SessionPath: strings.Clone(c.currentPath)}
 		c.mu.Unlock()
-		return ResumeResult{}, nil
+		return result, nil
 	}
 	state := c.beginReplacementLocked(owner)
 	c.mu.Unlock()
@@ -394,7 +397,8 @@ func (c *Controller) runReplacement(
 		return ResumeResult{}, ErrClosed
 	}
 	c.current = replacement.Session
-	c.currentPath = replacementPath
+	c.currentPath = strings.Clone(replacementPath)
+	committedPath := strings.Clone(c.currentPath)
 	c.currentWorkspace = replacementWorkspace
 	c.runner = replacement.Runner
 	if replaceRuntime {
@@ -420,7 +424,7 @@ func (c *Controller) runReplacement(
 	if closed {
 		return ResumeResult{}, ErrClosed
 	}
-	return ResumeResult{Warnings: warnings}, nil
+	return ResumeResult{SessionPath: committedPath, Warnings: warnings}, nil
 }
 
 func (c *Controller) registerReplacement(state *replacementState, replacement session.Session) bool {
@@ -487,6 +491,7 @@ func (c *Controller) releaseReplacementLocked(state *replacementState, replaceme
 func (c *Controller) Info() Info {
 	c.mu.Lock()
 	current := c.current
+	currentPath := strings.Clone(c.currentPath)
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
@@ -499,7 +504,7 @@ func (c *Controller) Info() Info {
 	header := current.Header()
 	info := Info{
 		SessionID:   header.ID,
-		SessionPath: current.Path(),
+		SessionPath: currentPath,
 		Workspace:   header.Workspace,
 		Provider:    header.Provider,
 		Profile:     header.Profile,

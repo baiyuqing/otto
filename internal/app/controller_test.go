@@ -1055,6 +1055,117 @@ func TestControllerResumeFactoryMaySynchronouslyCloseController(t *testing.T) {
 	}
 }
 
+func TestControllerExternalCloseWaitsForReentrantFactoryCloseAndCandidateCleanup(t *testing.T) {
+	factoryCloseDone := make(chan error, 1)
+	releaseFactory := make(chan struct{})
+	cleanupEntered := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	old := &fakeSession{header: testHeader("old")}
+	candidate := &fakeSession{header: testHeader("next"), onClose: func() {
+		close(cleanupEntered)
+		<-releaseCleanup
+	}}
+	var controller *Controller
+	controller = newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			factoryCloseDone <- controller.Close()
+			<-releaseFactory
+			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+		})
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := controller.ResumeSession(context.Background(), candidate.Path())
+		resumeDone <- err
+	}()
+	if err := awaitError(t, factoryCloseDone, "reentrant factory close"); err != nil {
+		t.Fatalf("reentrant factory Close() error = %v", err)
+	}
+
+	externalCloseDone := make(chan error, 1)
+	go func() { externalCloseDone <- controller.Close() }()
+	externalCloseErr, returnedBeforeFactory := pollError(externalCloseDone)
+	externalCloseReceived := returnedBeforeFactory
+
+	close(releaseFactory)
+	awaitSignal(t, cleanupEntered, "candidate cleanup start")
+	returnedBeforeCleanup := false
+	if !externalCloseReceived {
+		externalCloseErr, returnedBeforeCleanup = pollError(externalCloseDone)
+		externalCloseReceived = returnedBeforeCleanup
+	}
+	close(releaseCleanup)
+
+	if err := awaitError(t, resumeDone, "resume after reentrant factory close"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("ResumeSession() error = %v, want ErrClosed", err)
+	}
+	if !externalCloseReceived {
+		externalCloseErr = awaitError(t, externalCloseDone, "external close after candidate cleanup")
+	}
+	if externalCloseErr != nil {
+		t.Fatalf("external Close() error = %v", externalCloseErr)
+	}
+	if returnedBeforeFactory {
+		t.Fatal("external Close() returned before the reentrant factory returned")
+	}
+	if returnedBeforeCleanup {
+		t.Fatal("external Close() returned before candidate cleanup finished")
+	}
+	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
+		t.Fatalf("close calls = old %d, candidate %d; want 1 each", old.CloseCalls(), candidate.CloseCalls())
+	}
+}
+
+func TestControllerExternalCloseWaitsForReentrantCandidateCleanupClose(t *testing.T) {
+	cleanupEntered := make(chan struct{})
+	cleanupCloseDone := make(chan error, 1)
+	releaseCleanup := make(chan struct{})
+	old := &fakeSession{header: testHeader("old")}
+	candidate := &fakeSession{header: testHeader("next")}
+	var controller *Controller
+	candidate.onClose = func() {
+		close(cleanupEntered)
+		cleanupCloseDone <- controller.Close()
+		<-releaseCleanup
+	}
+	buildErr := errors.New("build failed after opening candidate")
+	controller = newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{Session: candidate}, buildErr
+		})
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := controller.ResumeSession(context.Background(), candidate.Path())
+		resumeDone <- err
+	}()
+	awaitSignal(t, cleanupEntered, "candidate cleanup callback start")
+	if err := awaitError(t, cleanupCloseDone, "reentrant candidate cleanup close"); err != nil {
+		t.Fatalf("reentrant candidate cleanup Close() error = %v", err)
+	}
+
+	externalCloseDone := make(chan error, 1)
+	go func() { externalCloseDone <- controller.Close() }()
+	externalCloseErr, returnedBeforeCleanup := pollError(externalCloseDone)
+	close(releaseCleanup)
+
+	if err := awaitError(t, resumeDone, "resume after reentrant candidate cleanup close"); err != buildErr {
+		t.Fatalf("ResumeSession() error = %v, want exact build error", err)
+	}
+	if !returnedBeforeCleanup {
+		externalCloseErr = awaitError(t, externalCloseDone, "external close after reentrant cleanup")
+	}
+	if externalCloseErr != nil {
+		t.Fatalf("external Close() error = %v", externalCloseErr)
+	}
+	if returnedBeforeCleanup {
+		t.Fatal("external Close() returned before reentrant candidate cleanup finished")
+	}
+	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
+		t.Fatalf("close calls = old %d, candidate %d; want 1 each", old.CloseCalls(), candidate.CloseCalls())
+	}
+}
+
 func TestControllerReplacementCallbackCloseIsScopedToReceiver(t *testing.T) {
 	bFactoryEntered := make(chan struct{})
 	releaseBFactory := make(chan struct{})

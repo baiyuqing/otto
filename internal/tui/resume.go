@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/session"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -153,7 +154,11 @@ func (m Model) handleResumeKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bo
 	if !m.resume.active() {
 		return m, nil, false
 	}
-	if isEscapeKey(msg) {
+
+	exactMatch := func(binding key.Binding) bool {
+		return msg.Key().Mod == 0 && key.Matches(msg, binding)
+	}
+	if exactMatch(m.keymap.ResumeClose) {
 		if m.resume.mode == resumeResuming {
 			m.statusText = "resume in progress"
 			return m, nil, true
@@ -164,10 +169,27 @@ func (m Model) handleResumeKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bo
 		m.closeResumePicker()
 		return m, nil, true
 	}
-	if !key.Matches(msg, m.keymap.Submit) {
+	if m.resume.mode == resumeResuming {
 		return m, nil, true
 	}
-	if m.resume.mode != resumeLoaded && m.resume.mode != resumeResumeError {
+	if (m.resume.mode == resumeLoaded || m.resume.mode == resumeResumeError) && len(m.resume.sessions) > 0 {
+		last := len(m.resume.sessions) - 1
+		switch {
+		case exactMatch(m.keymap.ResumeUp):
+			m.resume.selected = clamp(m.resume.selected-1, 0, last)
+			return m, nil, true
+		case exactMatch(m.keymap.ResumeDown):
+			m.resume.selected = clamp(m.resume.selected+1, 0, last)
+			return m, nil, true
+		case exactMatch(m.keymap.ResumePageUp):
+			m.resume.selected = clamp(m.resume.selected-resumeVisibleRows(m.width, m.height), 0, last)
+			return m, nil, true
+		case exactMatch(m.keymap.ResumePageDown):
+			m.resume.selected = clamp(m.resume.selected+resumeVisibleRows(m.width, m.height), 0, last)
+			return m, nil, true
+		}
+	}
+	if !exactMatch(m.keymap.ResumeSelect) || (m.resume.mode != resumeLoaded && m.resume.mode != resumeResumeError) {
 		return m, nil, true
 	}
 	selected, ok := m.resume.currentSelection()
@@ -309,6 +331,160 @@ func (m *Model) closeResumePicker() {
 		generation:  generation,
 		listPending: listPending,
 		listCancel:  listCancel,
+	}
+}
+
+func renderResumePicker(width, height int, state resumePickerState, spinnerText string, now time.Time) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	innerWidth := max(1, width-4)
+	title := "Resume"
+	if len(state.sessions) > 0 {
+		selected := clamp(state.selected, 0, len(state.sessions)-1)
+		title += fmt.Sprintf("  %d/%d", selected+1, len(state.sessions))
+		if state.sessions[selected].Current {
+			title += " · current"
+		}
+	}
+	switch state.mode {
+	case resumeResuming:
+		title += " · Resuming"
+	case resumeResumeError:
+		if state.errText != "" {
+			title += " · Error: " + escapeSingleLineText(state.errText)
+		}
+	}
+	title = clipSingleLineText(title, innerWidth)
+
+	body := make([]string, 0, resumeVisibleRows(width, height))
+	help := "Enter resume · Esc close · ↑/↓ PgUp/PgDn"
+	switch state.mode {
+	case resumeLoading:
+		loading := "Loading sessions"
+		if safeSpinner := clipSingleLineText(spinnerText, innerWidth); safeSpinner != "" {
+			loading = safeSpinner + " " + loading
+		}
+		body = append(body, clipSingleLineText(loading, innerWidth))
+		help = "Esc close"
+	case resumeLoadError:
+		body = append(body, "Unable to load sessions")
+		if state.errText != "" && len(body) < resumeVisibleRows(width, height) {
+			body = append(body, clipSingleLineText(state.errText, innerWidth))
+		}
+		help = "Esc close"
+	case resumeLoaded, resumeResumeError, resumeResuming:
+		if len(state.sessions) == 0 {
+			empty := "No resumable sessions"
+			if state.skipped > 0 {
+				empty += fmt.Sprintf(" (skipped %d)", state.skipped)
+			}
+			body = append(body, clipSingleLineText(empty, innerWidth))
+			help = "Esc close"
+		} else {
+			start, end := resumeVisibleRange(len(state.sessions), state.selected, resumeVisibleRows(width, height))
+			for index := start; index < end; index++ {
+				body = append(body, renderResumeSessionRow(state.sessions[index], index == state.selected, innerWidth, now))
+			}
+		}
+		if state.mode == resumeResuming {
+			help = "Actions disabled · Esc status"
+		}
+	}
+	if len(body) == 0 {
+		body = append(body, "No resumable sessions")
+	}
+
+	lines := make([]string, 0, len(body)+2)
+	lines = append(lines, title)
+	lines = append(lines, body...)
+	lines = append(lines, clipSingleLineText(help, innerWidth))
+	return renderOverlay(width, height, strings.Join(lines, "\n"))
+}
+
+func renderResumeSessionRow(info session.SessionInfo, selected bool, width int, now time.Time) string {
+	cursor := " "
+	if selected {
+		cursor = ">"
+	}
+	current := " "
+	if info.Current {
+		current = "*"
+	}
+	prefix := cursor + current + " "
+
+	at := info.Modified
+	if at.IsZero() {
+		at = info.Created
+	}
+	age := "-"
+	if !at.IsZero() {
+		age = formatRelativeSessionAge(now, at)
+	}
+	prefix += fmt.Sprintf("%-4s ", age)
+	remaining := max(0, width-ansi.StringWidth(prefix))
+
+	metadata := make([]string, 0, 3)
+	if width >= 60 {
+		profileModel := strings.Trim(escapeSingleLineText(info.Profile)+"/"+escapeSingleLineText(info.Model), "/")
+		if profileModel != "" {
+			metadata = append(metadata, ansi.Truncate(profileModel, 18, "…"))
+		}
+	}
+	if width >= 84 && info.Provider != "" {
+		metadata = append(metadata, ansi.Truncate(escapeSingleLineText(info.Provider), 18, "…"))
+	}
+	if width >= 104 {
+		metadata = append(metadata, fmt.Sprintf("%d msgs", max(0, info.MessageCount)))
+	}
+	metadataText := strings.Join(metadata, " · ")
+	if metadataText != "" {
+		metadataText += " · "
+		metadataWidth := ansi.StringWidth(metadataText)
+		if metadataWidth >= remaining {
+			metadataText = ""
+		} else {
+			remaining -= metadataWidth
+		}
+	}
+
+	title := firstResumeDisplayText(info.Name, info.LastUserText, info.ID, info.CWD, info.Path)
+	if info.Name != "" && info.LastUserText != "" && width >= 72 {
+		title = info.Name + " — " + info.LastUserText
+	}
+	if title == "" {
+		title = "(unnamed session)"
+	}
+	return prefix + metadataText + clipSingleLineText(title, remaining)
+}
+
+func firstResumeDisplayText(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func formatRelativeSessionAge(now, at time.Time) string {
+	age := now.Sub(at)
+	if age < time.Minute {
+		return "now"
+	}
+	switch {
+	case age < time.Hour:
+		return fmt.Sprintf("%dm", int(age/time.Minute))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(age/time.Hour))
+	case age < 7*24*time.Hour:
+		return fmt.Sprintf("%dd", int(age/(24*time.Hour)))
+	case age < 30*24*time.Hour:
+		return fmt.Sprintf("%dw", int(age/(7*24*time.Hour)))
+	case age < 365*24*time.Hour:
+		return fmt.Sprintf("%dmo", int(age/(30*24*time.Hour)))
+	default:
+		return fmt.Sprintf("%dy", int(age/(365*24*time.Hour)))
 	}
 }
 

@@ -48,6 +48,26 @@ type Warning struct {
 	Message string
 }
 
+type SessionInfo struct {
+	Path         string
+	ID           string
+	CWD          string
+	Name         string
+	Created      time.Time
+	Modified     time.Time
+	MessageCount int
+	LastUserText string
+	Profile      string
+	Provider     string
+	Model        string
+	Current      bool
+}
+
+type ListResult struct {
+	Sessions []SessionInfo
+	Skipped  int
+}
+
 type Session interface {
 	Header() Header
 	Messages() []model.Message

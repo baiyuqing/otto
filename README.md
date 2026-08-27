@@ -150,7 +150,9 @@ Selection rules:
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Submit the current prompt or slash command |
+| `Enter` | Submit the current prompt or an exact slash command |
+| `Tab` | Complete the selected slash-command suggestion |
+| `↑` / `↓` | Select a slash-command suggestion |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle expanded tool output |
@@ -160,6 +162,8 @@ Selection rules:
 | `Ctrl+C` | Cancel, clear, then quit on a second press within one second |
 
 ### Slash commands
+
+In the TUI, typing `/` opens a filtered command suggestion panel. Use `↑`/`↓` to select a command and `Tab` to complete it; `Enter` executes only an exact command.
 
 Shared commands:
 

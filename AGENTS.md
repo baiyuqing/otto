@@ -16,6 +16,7 @@ Keep responsibilities split along the current Go package layout:
 
 - `cmd/otto`: CLI wiring, flags, process lifecycle, signal handling
 - `internal/agent`: provider/tool orchestration and event emission
+- `internal/app`: shared frontend/backend lifecycle, prompt serialization, session replacement, and exported session info/history access
 - `internal/config`: TOML loading and runtime resolution
 - `internal/model`: provider-neutral message/tool types
 - `internal/provider`: neutral provider contract
@@ -23,6 +24,7 @@ Keep responsibilities split along the current Go package layout:
 - `internal/repl`: line-oriented REPL rendering and commands
 - `internal/session`: in-memory and JSONL session storage
 - `internal/tool`: workspace validation plus `read`/`write`/`edit`/`bash`
+- `internal/tui`: full-screen Bubble Tea frontend, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
 
 Rules:
 
@@ -39,6 +41,7 @@ Primary commands:
 go build -trimpath -o ./otto ./cmd/otto
 go test ./...
 go test -race ./...
+go test ./cmd/otto -run TestTUIPseudoTerminalLifecycle -count=1
 go vet ./...
 go run honnef.co/go/tools/cmd/staticcheck@latest ./...
 test -z "$(gofmt -l .)"
@@ -63,7 +66,8 @@ Do not add production behavior without a failing test first unless the user expl
 
 - Keep tests next to the package they cover.
 - Prefer `testing`, `httptest`, and `t.TempDir()`.
-- Preserve offline default tests; default `go test ./...` must not require network access or real provider credentials.
+- Preserve offline default tests; default `go test ./...` must not require network access, real provider credentials, or a real interactive terminal.
+- TTY-specific coverage must stay offline and automated, for example via the PTY smoke test in `cmd/otto/tui_pty_test.go`.
 - Live provider tests are opt-in only. Gate them behind explicit environment variables and exclude them from the default suite.
 
 ## Secrets and safety

@@ -22,6 +22,29 @@ api_key_env = "TEST_KEY"
 	}
 }
 
+func TestLoadUIDecodesMode(t *testing.T) {
+	path := writeConfig(t, `[ui]
+mode = "auto"
+`)
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := file.UI.Mode; got != "auto" {
+		t.Fatalf("UI.Mode = %q, want auto", got)
+	}
+}
+
+func TestLoadUIRejectsUnknownFields(t *testing.T) {
+	path := writeConfig(t, `[ui]
+mode = "auto"
+unknown = true
+`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
+}
+
 func TestLoadRejectsRawSecretField(t *testing.T) {
 	path := writeConfig(t, `[profiles.bad]
 provider = "openai-compatible"

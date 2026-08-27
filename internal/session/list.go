@@ -2,17 +2,16 @@ package session
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/baiyuqing/otto/internal/model"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -21,30 +20,240 @@ const (
 	maxSkippedSessionCount = int(^uint(0) >> 1)
 )
 
-type listCandidate struct {
-	path     string
-	modified time.Time
-}
-
 func Inspect(ctx context.Context, path string) (SessionInfo, []Warning, error) {
 	if err := ctx.Err(); err != nil {
 		return SessionInfo{}, nil, err
 	}
 
-	info, err := os.Lstat(path)
+	file, info, err := openSessionFileReadOnlyNoFollow(path)
 	if err != nil {
-		return SessionInfo{}, nil, fmt.Errorf("stat session file: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return SessionInfo{}, nil, fmt.Errorf("%w: session file is not a regular file", ErrInvalidSession)
-	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return SessionInfo{}, nil, fmt.Errorf("open session file: %w", err)
+		return SessionInfo{}, nil, err
 	}
 	defer file.Close()
 
+	return inspectOpenedSession(ctx, path, file, info)
+}
+
+func List(ctx context.Context, root, workspace, currentPath string, limit int) (ListResult, error) {
+	if limit < 1 || limit > maxListSessions {
+		return ListResult{}, fmt.Errorf("list limit must be between 1 and %d", maxListSessions)
+	}
+	if err := ctx.Err(); err != nil {
+		return ListResult{}, err
+	}
+
+	workspaceCanonical, err := canonicalWorkspace(workspace)
+	if err != nil {
+		return ListResult{}, err
+	}
+
+	rootDir, err := openSessionRootNoFollow(root)
+	if err != nil {
+		return ListResult{}, err
+	}
+	defer rootDir.Close()
+
+	sessionDir, directory, exists, err := openWorkspaceSessionDirectoryNoFollow(rootDir, root, workspaceCanonical)
+	if err != nil {
+		return ListResult{}, err
+	}
+	if !exists {
+		return ListResult{}, nil
+	}
+	defer sessionDir.Close()
+
+	entries, err := sessionDir.ReadDir(-1)
+	if err != nil {
+		return ListResult{}, fmt.Errorf("read session directory: %w", err)
+	}
+
+	currentCanonical := ""
+	var currentInfo os.FileInfo
+	haveCurrentInfo := false
+	if currentPath != "" {
+		currentCanonical, err = canonicalWorkspace(currentPath)
+		if err != nil {
+			return ListResult{}, err
+		}
+		currentInfo, err = os.Stat(currentPath)
+		if err == nil {
+			haveCurrentInfo = true
+		}
+	}
+
+	result := ListResult{}
+	sessions := make([]SessionInfo, 0, min(limit, len(entries)))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return ListResult{}, err
+		}
+		if filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+
+		file, info, path, err := openSessionFileReadOnlyNoFollowAt(sessionDir, directory, entry.Name())
+		if err != nil {
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+
+		sessionInfo, _, inspectErr := inspectOpenedSession(ctx, path, file, info)
+		closeErr := file.Close()
+		if inspectErr != nil {
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+		if closeErr != nil {
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+
+		candidateWorkspace, err := canonicalWorkspace(sessionInfo.CWD)
+		if err != nil || candidateWorkspace != workspaceCanonical {
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+
+		if currentCanonical != "" {
+			if haveCurrentInfo {
+				sessionInfo.Current = os.SameFile(info, currentInfo)
+			} else {
+				candidateCanonical, err := canonicalWorkspace(path)
+				if err != nil {
+					result.Skipped = incrementSkipped(result.Skipped)
+					continue
+				}
+				sessionInfo.Current = candidateCanonical == currentCanonical
+			}
+		}
+		sessions = append(sessions, sessionInfo)
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		if sessions[i].Modified.Equal(sessions[j].Modified) {
+			return sessions[i].Path > sessions[j].Path
+		}
+		return sessions[i].Modified.After(sessions[j].Modified)
+	})
+	if len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	result.Sessions = sessions
+	return result, nil
+}
+
+func sessionDirectory(root, workspace string) (string, error) {
+	key, err := workspaceKey(workspace)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, key), nil
+}
+
+func openSessionRootNoFollow(root string) (*os.File, error) {
+	file, err := openPathNoFollow(root, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		switch {
+		case err == unix.ELOOP:
+			return nil, fmt.Errorf("%w: session root is a symlink", ErrInvalidSession)
+		case err == unix.ENOTDIR:
+			return nil, fmt.Errorf("%w: session root is not a directory", ErrInvalidSession)
+		default:
+			return nil, fmt.Errorf("open session root: %w", err)
+		}
+	}
+	return file, nil
+}
+
+func openWorkspaceSessionDirectoryNoFollow(rootDir *os.File, root, workspace string) (*os.File, string, bool, error) {
+	key, err := workspaceKey(workspace)
+	if err != nil {
+		return nil, "", false, err
+	}
+	path := filepath.Join(root, key)
+	file, err := openPathAtNoFollow(rootDir, key, unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		switch {
+		case err == unix.ENOENT:
+			return nil, path, false, nil
+		case err == unix.ELOOP:
+			return nil, "", false, fmt.Errorf("%w: session directory is a symlink", ErrInvalidSession)
+		case err == unix.ENOTDIR:
+			return nil, "", false, fmt.Errorf("%w: session directory is not a directory", ErrInvalidSession)
+		default:
+			return nil, "", false, fmt.Errorf("open session directory: %w", err)
+		}
+	}
+	return file, path, true, nil
+}
+
+func openSessionFileReadOnlyNoFollow(path string) (*os.File, os.FileInfo, error) {
+	file, err := openPathNoFollow(path, unix.O_RDONLY, 0)
+	if err != nil {
+		if err == unix.ELOOP {
+			return nil, nil, fmt.Errorf("%w: session file is a symlink", ErrInvalidSession)
+		}
+		return nil, nil, fmt.Errorf("open session file: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("stat session file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("%w: session file is not a regular file", ErrInvalidSession)
+	}
+	return file, info, nil
+}
+
+func openSessionFileReadOnlyNoFollowAt(directory *os.File, directoryPath, name string) (*os.File, os.FileInfo, string, error) {
+	path := filepath.Join(directoryPath, name)
+	file, err := openPathAtNoFollow(directory, name, unix.O_RDONLY, 0)
+	if err != nil {
+		if err == unix.ELOOP {
+			return nil, nil, "", fmt.Errorf("%w: session file is a symlink", ErrInvalidSession)
+		}
+		return nil, nil, "", fmt.Errorf("open session file: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, "", fmt.Errorf("stat session file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, nil, "", fmt.Errorf("%w: session file is not a regular file", ErrInvalidSession)
+	}
+	return file, info, path, nil
+}
+
+func openPathNoFollow(path string, flags int, perm uint32) (*os.File, error) {
+	fd, err := unix.Open(path, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, perm)
+	if err != nil {
+		return nil, err
+	}
+	return fileFromFD(fd, path)
+}
+
+func openPathAtNoFollow(directory *os.File, name string, flags int, perm uint32) (*os.File, error) {
+	fd, err := unix.Openat(int(directory.Fd()), name, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW, perm)
+	if err != nil {
+		return nil, err
+	}
+	return fileFromFD(fd, filepath.Join(directory.Name(), name))
+}
+
+func fileFromFD(fd int, name string) (*os.File, error) {
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("create file handle for %s: invalid descriptor", name)
+	}
+	return file, nil
+}
+
+func inspectOpenedSession(ctx context.Context, path string, file *os.File, info os.FileInfo) (SessionInfo, []Warning, error) {
 	if err := rejectOversizedSessionFile(file); err != nil {
 		return SessionInfo{}, nil, err
 	}
@@ -88,145 +297,6 @@ func Inspect(ctx context.Context, path string) (SessionInfo, []Warning, error) {
 		Provider:     resolved.Runtime.Provider,
 		Model:        resolved.Runtime.Model,
 	}, warnings, nil
-}
-
-func List(ctx context.Context, root, workspace, currentPath string, limit int) (ListResult, error) {
-	if limit < 1 || limit > maxListSessions {
-		return ListResult{}, fmt.Errorf("list limit must be between 1 and %d", maxListSessions)
-	}
-	if err := ctx.Err(); err != nil {
-		return ListResult{}, err
-	}
-
-	workspaceCanonical, err := canonicalWorkspace(workspace)
-	if err != nil {
-		return ListResult{}, err
-	}
-	if err := validateSessionRoot(root); err != nil {
-		return ListResult{}, err
-	}
-	directory, err := sessionDirectory(root, workspaceCanonical)
-	if err != nil {
-		return ListResult{}, err
-	}
-	exists, err := validateWorkspaceSessionDirectory(directory)
-	if err != nil {
-		return ListResult{}, err
-	}
-	if !exists {
-		return ListResult{}, nil
-	}
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return ListResult{}, fmt.Errorf("read session directory: %w", err)
-	}
-
-	currentCanonical := ""
-	if currentPath != "" {
-		currentCanonical, err = canonicalWorkspace(currentPath)
-		if err != nil {
-			return ListResult{}, err
-		}
-	}
-
-	candidates := make([]listCandidate, 0, len(entries))
-	result := ListResult{}
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return ListResult{}, err
-		}
-		if filepath.Ext(entry.Name()) != ".jsonl" {
-			continue
-		}
-		path := filepath.Join(directory, entry.Name())
-		info, err := os.Lstat(path)
-		if err != nil {
-			result.Skipped = incrementSkipped(result.Skipped)
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			result.Skipped = incrementSkipped(result.Skipped)
-			continue
-		}
-		candidates = append(candidates, listCandidate{path: path, modified: info.ModTime()})
-	}
-
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].modified.Equal(candidates[j].modified) {
-			return candidates[i].path > candidates[j].path
-		}
-		return candidates[i].modified.After(candidates[j].modified)
-	})
-
-	result.Sessions = make([]SessionInfo, 0, min(limit, len(candidates)))
-	for _, candidate := range candidates {
-		if err := ctx.Err(); err != nil {
-			return ListResult{}, err
-		}
-		info, _, err := Inspect(ctx, candidate.path)
-		if err != nil {
-			result.Skipped = incrementSkipped(result.Skipped)
-			continue
-		}
-		candidateWorkspace, err := canonicalWorkspace(info.CWD)
-		if err != nil || candidateWorkspace != workspaceCanonical {
-			result.Skipped = incrementSkipped(result.Skipped)
-			continue
-		}
-		info.Modified = candidate.modified
-		if currentCanonical != "" {
-			candidateCanonical, err := canonicalWorkspace(candidate.path)
-			if err != nil {
-				result.Skipped = incrementSkipped(result.Skipped)
-				continue
-			}
-			info.Current = candidateCanonical == currentCanonical
-		}
-		result.Sessions = append(result.Sessions, info)
-		if len(result.Sessions) == limit {
-			break
-		}
-	}
-	return result, nil
-}
-
-func sessionDirectory(root, workspace string) (string, error) {
-	key, err := workspaceKey(workspace)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, key), nil
-}
-
-func validateSessionRoot(root string) error {
-	info, err := os.Lstat(root)
-	if err != nil {
-		return fmt.Errorf("stat session root: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%w: session root is a symlink", ErrInvalidSession)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%w: session root is not a directory", ErrInvalidSession)
-	}
-	return nil
-}
-
-func validateWorkspaceSessionDirectory(path string) (bool, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("stat session directory: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return false, fmt.Errorf("%w: session directory is a symlink", ErrInvalidSession)
-	}
-	if !info.IsDir() {
-		return false, fmt.Errorf("%w: session directory is not a directory", ErrInvalidSession)
-	}
-	return true, nil
 }
 
 func decodePiFileReadOnlyContext(ctx context.Context, file *os.File) (piFile, error) {

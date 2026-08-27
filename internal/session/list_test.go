@@ -151,6 +151,46 @@ func TestListRejectsSymlinkedWorkspaceDirectory(t *testing.T) {
 	}
 }
 
+func TestOpenSessionRootNoFollowRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+
+	directory, err := openSessionRootNoFollow(link)
+	if err == nil {
+		directory.Close()
+		t.Fatal("openSessionRootNoFollow() succeeded on a symlink")
+	}
+}
+
+func TestOpenWorkspaceSessionDirectoryNoFollowRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	workspace := t.TempDir()
+	key, err := workspaceKey(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, key)); err != nil {
+		t.Fatal(err)
+	}
+
+	rootDir, err := openSessionRootNoFollow(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootDir.Close()
+
+	directory, _, exists, err := openWorkspaceSessionDirectoryNoFollow(rootDir, root, workspace)
+	if err == nil || exists {
+		if directory != nil {
+			directory.Close()
+		}
+		t.Fatal("openWorkspaceSessionDirectoryNoFollow() succeeded on a symlink")
+	}
+}
+
 func TestListFailsWhenSessionDirectoryCannotBeRead(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions-root")
 	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {

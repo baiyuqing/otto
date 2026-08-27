@@ -311,9 +311,9 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 		newSessionCalls.Add(1)
 		return nil, errors.New("new session should not be called")
 	}
-	deps.openSession = func(string, string, io.Writer) (session.Session, error) {
+	deps.openSession = func(string, string) (session.Session, []session.Warning, error) {
 		openSessionCalls.Add(1)
-		return nil, errors.New("open session should not be called")
+		return nil, nil, errors.New("open session should not be called")
 	}
 	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
 		tuiCalls.Add(1)
@@ -375,9 +375,9 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resume")
 	deps := defaultRunDependencies()
 	var openCalls atomic.Int32
-	deps.openSession = func(string, string, io.Writer) (session.Session, error) {
+	deps.openSession = func(string, string) (session.Session, []session.Warning, error) {
 		openCalls.Add(1)
-		return nil, errors.New("session must not open")
+		return nil, nil, errors.New("session must not open")
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -408,6 +408,71 @@ func TestRunNoSessionAndExplicitConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".otto", "sessions")); !os.IsNotExist(err) {
 		t.Fatalf("--no-session created persistent root: %v", err)
+	}
+}
+
+func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		browser, ok := backend.(app.SessionBrowser)
+		if !ok {
+			t.Fatal("backend does not expose SessionBrowser")
+		}
+		if _, err := browser.ListSessions(context.Background(), 20); !errors.Is(err, app.ErrPersistenceDisabled) {
+			t.Fatalf("ListSessions() error = %v, want ErrPersistenceDisabled", err)
+		}
+		if _, err := browser.ResumeSession(context.Background(), filepath.Join(workspace, "resume.jsonl")); !errors.Is(err, app.ErrPersistenceDisabled) {
+			t.Fatalf("ResumeSession() error = %v, want ErrPersistenceDisabled", err)
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session", "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "warning-session")
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	var stdout, stderr bytes.Buffer
+	deps.openSession = func(path, workspace string) (session.Session, []session.Warning, error) {
+		store, warnings, err := openSession(path, workspace)
+		if err != nil {
+			return nil, nil, err
+		}
+		return store, append(warnings, session.Warning{Message: "startup warning"}), nil
+	}
+	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, _ app.Backend) error {
+		if !strings.Contains(stderr.String(), "warning: startup warning\n") {
+			t.Fatalf("stderr before TUI = %q", stderr.String())
+		}
+		return nil
+	}
+
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
 }
 
@@ -450,15 +515,14 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".otto", "sessions")
 	oldPath := createCLISession(t, root, workspace, "old-session")
-	time.Sleep(10 * time.Millisecond)
 	newPath := createCLISession(t, root, workspace, "new-session")
+	oldV1Path := writeOldPiV1Session(t, root, workspace, "old-v1")
+	corruptPath := writeCorruptPiSession(t, root, workspace, "corrupt")
 	now := time.Now()
-	if err := os.Chtimes(oldPath, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(newPath, now, now); err != nil {
-		t.Fatal(err)
-	}
+	setCLISessionMTime(t, oldPath, now.Add(-2*time.Hour))
+	setCLISessionMTime(t, newPath, now.Add(-time.Hour))
+	setCLISessionMTime(t, oldV1Path, now.Add(-30*time.Minute))
+	setCLISessionMTime(t, corruptPath, now)
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
@@ -468,13 +532,38 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 		want string
 	}{
 		{name: "resume", args: []string{"--resume", oldPath}, want: "ID: old-session"},
-		{name: "continue", args: []string{"--continue"}, want: "ID: new-session"},
+		{name: "continue skips invalid newer sessions", args: []string{"--continue"}, want: "ID: new-session"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			args := append([]string{"--config", configPath, "--cwd", workspace}, test.args...)
 			code := run(context.Background(), args, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, env)
 			if code != 0 || !strings.Contains(stdout.String(), test.want) {
+				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "old v1", path: writeOldPiV1Session(t, root, workspace, "old-v1"), want: "unsupported session format"},
+		{name: "corrupt", path: writeCorruptPiSession(t, root, workspace, "corrupt"), want: "invalid session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", test.path}, strings.NewReader("/exit\n"), &stdout, &stderr, env)
+			if code == 0 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
 		})
@@ -1206,6 +1295,49 @@ func onlySessionPath(t *testing.T, home string) string {
 		t.Fatalf("session paths = %v, want one", paths)
 	}
 	return paths[0]
+}
+
+func writeOldPiV1Session(t *testing.T, root, workspace, id string) string {
+	t.Helper()
+	path := filepath.Join(cliSessionDirectory(t, root, workspace), id+".jsonl")
+	content := fmt.Sprintf("{\"type\":\"session\",\"version\":1,\"id\":%q,\"timestamp\":\"2026-08-27T12:00:00Z\",\"cwd\":%q}\n", id, workspace)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeCorruptPiSession(t *testing.T, root, workspace, id string) string {
+	t.Helper()
+	path := filepath.Join(cliSessionDirectory(t, root, workspace), id+".jsonl")
+	content := fmt.Sprintf("{\"type\":\"session\",\"version\":3,\"id\":%q,\"timestamp\":\"2026-08-27T12:00:00Z\",\"cwd\":%q}\n{\"type\":\"custom\",\"id\":\"71000001\",\"parentId\":null,\"timestamp\":\"2026-08-27T12:00:01Z\",\"customType\":\"otto.runtime\",\"data\":{\"profile\":\"test\",\"provider\":\"openai-compatible\",\"model\":\"test-model\"}}\n{\"type\":\"message\",\"id\":\"bad-json\n", id, workspace)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func cliSessionDirectory(t *testing.T, root, workspace string) string {
+	t.Helper()
+	store, err := session.Create(root, session.Header{Version: session.CurrentVersion, ID: "directory-probe", Workspace: workspace, Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Dir(store.Path())
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(store.Path()); err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
+func setCLISessionMTime(t *testing.T, path string, modified time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeSSE(w http.ResponseWriter, chunk string) {

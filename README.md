@@ -2,7 +2,7 @@
 
 Otto is a minimal macOS coding agent written in Go.
 
-Stage 1 ships a line-oriented REPL, append-only JSONL sessions, workspace-bound file tools, an unsandboxed `bash` tool, TOML profiles, and an OpenAI-compatible Chat Completions provider.
+Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-oriented REPL), append-only JSONL sessions, workspace-bound file tools, an unsandboxed `bash` tool, TOML profiles, and an OpenAI-compatible Chat Completions provider.
 
 ## Stage 1 status
 
@@ -10,7 +10,9 @@ Stage 1 ships a line-oriented REPL, append-only JSONL sessions, workspace-bound 
 
 - `otto` CLI for macOS
 - OpenAI-compatible provider support only
-- Streaming REPL with `/help`, `/exit`, `/new`, and `/session`
+- Adaptive UI selection: full-screen TUI on terminal stdin/stdout, REPL otherwise
+- Streaming TUI and REPL with `/help`, `/exit`, `/new`, and `/session`
+- Markdown assistant rendering and collapsible tool output in the TUI
 - Built-in `read`, `write`, `edit`, and `bash` tools
 - Persistent JSONL sessions with `--continue` and `--resume`
 - Global TOML configuration at `~/.config/otto/config.toml`
@@ -19,7 +21,6 @@ Stage 1 ships a line-oriented REPL, append-only JSONL sessions, workspace-bound 
 
 - Codex subscription login
 - Claude subscription login
-- TUI/full-screen interface
 - Plugins, skills, or project-local config
 - Windows or Linux support commitments
 
@@ -51,6 +52,9 @@ Create `~/.config/otto/config.toml`:
 
 ```toml
 default_profile = "deepseek"
+
+[ui]
+mode = "auto"
 
 [agent]
 max_turns = 20
@@ -106,6 +110,63 @@ Additional rules:
 - `--continue` and `--resume` reuse the active session's provider/model unless you explicitly select a different profile.
 - `--no-session` cannot be combined with `--continue` or `--resume`.
 - Raw secrets do not belong in TOML.
+
+UI mode precedence:
+
+1. `--ui`
+2. `OTTO_UI`
+3. `[ui].mode` in TOML
+4. built-in `auto`
+
+## Frontends
+
+Examples:
+
+```bash
+otto --ui auto
+otto --ui tui
+otto --ui repl
+OTTO_UI=repl otto
+```
+
+Selection rules:
+
+- `auto` starts the full-screen TUI only when **both** stdin and stdout are terminals.
+- `auto` falls back to the line-oriented REPL for piped input, redirected output, and other non-TTY runs.
+- `tui` forces the full-screen UI and fails fast if stdin or stdout is not a terminal.
+- `repl` forces the line-oriented REPL even from an interactive terminal.
+- In `auto`, non-TTY runs stay in the REPL and do not emit alternate-screen control sequences.
+
+### TUI behavior
+
+- The TUI uses the terminal alternate screen buffer.
+- Assistant responses render as Markdown in the transcript.
+- If Markdown rendering fails, Otto falls back to escaped plain text instead of raw control sequences.
+- Tool calls are collapsed to summary lines by default; `Ctrl+O` toggles expanded tool output.
+- The footer adapts to the available width and shows workspace/profile/model, token totals, and session ID when space allows.
+- If the terminal is smaller than `40x8`, Otto shows a resize message until the window is large enough.
+
+### TUI keys
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Submit the current prompt or slash command |
+| `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
+| `?` | Open the help overlay when the composer is empty |
+| `Ctrl+O` | Toggle expanded tool output |
+| `PgUp` / `PgDn` | Scroll the transcript |
+| `Home` / `End` | Jump to the top or bottom of the transcript |
+| `Esc` | Cancel the active turn or close the current overlay |
+| `Ctrl+C` | Cancel, clear, then quit on a second press within one second |
+
+### Slash commands
+
+Shared commands:
+
+- `/help` shows command help (TUI overlay or REPL text).
+- `/session` shows session details. In the TUI it opens an overlay with the session ID, path, provider, profile, and model.
+- `/new` closes the current session and starts a fresh one in the same process.
+- `/exit` exits when idle. In the REPL, EOF also exits.
 
 ## REPL behavior
 

@@ -70,43 +70,44 @@ type turnHistoryBaseline struct {
 }
 
 type Model struct {
-	rootCtx               context.Context
-	backend               app.Backend
-	entries               []Entry
-	viewport              viewport.Model
-	editor                textarea.Model
-	spinner               spinner.Model
-	keymap                KeyMap
-	width                 int
-	height                int
-	usage                 otmodel.Usage
-	running               bool
-	expandedTools         bool
-	overlay               overlayKind
-	autoFollow            bool
-	renderer              MarkdownRenderer
-	rendererInjected      bool
-	darkBackground        bool
-	clock                 Clock
-	statusText            string
-	supportsModifiedEnter bool
-	dirtyStreaming        bool
-	renderTickActive      bool
-	cancel                context.CancelFunc
-	ctrlCArmed            bool
-	ctrlCArmedAt          time.Time
-	ctrlCArmGeneration    uint64
-	newSessionPending     bool
-	newSessionGeneration  uint64
-	activeTurnChannel     <-chan turnEnvelope
-	activeAssistant       int
-	turnErrorSeen         bool
-	turnEventErr          error
-	fatalErr              error
-	turnGeneration        uint64
-	turnHistoryBaseline   turnHistoryBaseline
-	turnEntryStart        int
-	liveEntrySequence     int
+	rootCtx                context.Context
+	backend                app.Backend
+	entries                []Entry
+	viewport               viewport.Model
+	editor                 textarea.Model
+	spinner                spinner.Model
+	keymap                 KeyMap
+	width                  int
+	height                 int
+	usage                  otmodel.Usage
+	running                bool
+	expandedTools          bool
+	overlay                overlayKind
+	autoFollow             bool
+	renderer               MarkdownRenderer
+	rendererInjected       bool
+	darkBackground         bool
+	clock                  Clock
+	statusText             string
+	supportsModifiedEnter  bool
+	dirtyStreaming         bool
+	renderTickActive       bool
+	cancel                 context.CancelFunc
+	ctrlCArmed             bool
+	ctrlCArmedAt           time.Time
+	ctrlCArmGeneration     uint64
+	newSessionPending      bool
+	newSessionGeneration   uint64
+	activeTurnChannel      <-chan turnEnvelope
+	activeAssistant        int
+	turnErrorSeen          bool
+	turnEventErr           error
+	fatalErr               error
+	turnGeneration         uint64
+	turnHistoryBaseline    turnHistoryBaseline
+	turnEntryStart         int
+	liveEntrySequence      int
+	commandSuggestionIndex int
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
@@ -233,12 +234,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateComponents(msg tea.Msg, previousYOffset, previousEditorHeight int, viewportBefore viewport.Model) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+	previousEditorValue := m.editor.Value()
+	previousSuggestionCount := len(m.commandSuggestions())
 	m.viewport, _ = m.viewport.Update(msg)
 	m.editor, cmd = m.editor.Update(msg)
+	if m.editor.Value() != previousEditorValue {
+		m.commandSuggestionIndex = 0
+	}
 	m.spinner, _ = m.spinner.Update(msg)
 	m.syncAutoFollow(viewportBefore)
 
-	if m.editor.Height() != previousEditorHeight {
+	if m.editor.Height() != previousEditorHeight || len(m.commandSuggestions()) != previousSuggestionCount {
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 	} else if m.viewport.YOffset() != previousYOffset && !m.viewport.AtBottom() {
 		m.autoFollow = false
@@ -252,15 +258,21 @@ func (m Model) updateComponents(msg tea.Msg, previousYOffset, previousEditorHeig
 func (m Model) View() tea.View {
 	_ = m.reservedStateActive()
 
-	layout := calculateLayout(m.width, m.height, m.editor)
+	suggestions := m.commandSuggestions()
+	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions))
 	if layout.tooSmall {
 		return newRootView(m, smallTerminalView(m.width, m.height))
 	}
 
-	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).Render(m.viewport.View())
+	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
 	editor := lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View())
 	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.footerStatus()))
-	content := lipgloss.JoinVertical(lipgloss.Left, transcript, editor, footer)
+	parts := []string{transcript}
+	if layout.suggestionHeight > 0 {
+		parts = append(parts, renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, layout.suggestionHeight))
+	}
+	parts = append(parts, editor, footer)
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	if m.overlay != overlayNone {
 		content = renderOverlay(m.width, m.height, m.overlayContent())
 	}
@@ -330,6 +342,9 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 	if key.Matches(msg, m.keymap.Home) || key.Matches(msg, m.keymap.End) {
 		return m.handleHomeOrEnd(msg, previousEditorHeight)
 	}
+	if updated, cmd, handled := m.handleCommandSuggestionKey(msg); handled {
+		return updated, cmd
+	}
 	if m.shouldInsertNewline(msg) {
 		return m.updateEditorWithKey(normalizeNewlineKey(msg), previousEditorHeight)
 	}
@@ -342,6 +357,36 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 		return m.handleSubmit()
 	}
 	return m.updateComponents(msg, previousYOffset, previousEditorHeight, viewportBefore)
+}
+
+func (m Model) commandSuggestions() []slashCommand {
+	if m.overlay != overlayNone {
+		return nil
+	}
+	return matchingSlashCommands(m.editor.Value())
+}
+
+func (m Model) handleCommandSuggestionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	suggestions := m.commandSuggestions()
+	if len(suggestions) == 0 {
+		return m, nil, false
+	}
+	selected := clamp(m.commandSuggestionIndex, 0, len(suggestions)-1)
+	switch {
+	case key.Matches(msg, m.keymap.SuggestionUp):
+		m.commandSuggestionIndex = (selected - 1 + len(suggestions)) % len(suggestions)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.SuggestionDown):
+		m.commandSuggestionIndex = (selected + 1) % len(suggestions)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Complete):
+		m.editor.SetValue(suggestions[selected].Name)
+		m.commandSuggestionIndex = 0
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
+		return m, nil, true
+	default:
+		return m, nil, false
+	}
 }
 
 func (m Model) handleHomeOrEnd(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd) {
@@ -370,8 +415,13 @@ func (m Model) handleHomeOrEnd(msg tea.KeyPressMsg, previousEditorHeight int) (t
 
 func (m Model) updateEditorWithKey(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+	previousEditorValue := m.editor.Value()
+	previousSuggestionCount := len(m.commandSuggestions())
 	m.editor, cmd = m.editor.Update(msg)
-	if m.editor.Height() != previousEditorHeight {
+	if m.editor.Value() != previousEditorValue {
+		m.commandSuggestionIndex = 0
+	}
+	if m.editor.Height() != previousEditorHeight || len(m.commandSuggestions()) != previousSuggestionCount {
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 	}
 	return m, cmd
@@ -431,19 +481,24 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	return m.startPrompt(prompt)
 }
 
-func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
-	switch command {
-	case "/help":
+func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
+	command, ok := findSlashCommand(name)
+	if !ok {
+		m.statusText = fmt.Sprintf("unknown command: %s", name)
+		return m, nil
+	}
+	switch command.Kind {
+	case slashCommandHelp:
 		m.clearEditor()
 		m.overlay = overlayHelp
 		m.statusText = ""
 		return m, nil
-	case "/session":
+	case slashCommandSession:
 		m.clearEditor()
 		m.overlay = overlaySession
 		m.statusText = ""
 		return m, nil
-	case "/new":
+	case slashCommandNew:
 		if m.running {
 			m.statusText = app.ErrPromptActive.Error()
 			return m, nil
@@ -455,13 +510,13 @@ func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
 		m.newSessionPending = true
 		m.statusText = ""
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
-	case "/exit":
+	case slashCommandExit:
 		if m.running {
 			return m, nil
 		}
 		return m, tea.Quit
 	default:
-		m.statusText = fmt.Sprintf("unknown command: %s", command)
+		m.statusText = fmt.Sprintf("unknown command: %s", name)
 		return m, nil
 	}
 }
@@ -503,6 +558,7 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 	m.liveEntrySequence = 0
 	m.autoFollow = true
 	m.editor.SetValue("")
+	m.commandSuggestionIndex = 0
 	m.rerenderAndRefreshViewportContent(false)
 	return m, nil
 }
@@ -523,8 +579,10 @@ func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
 		return m.armCtrlC(now)
 	}
 	if m.editor.Value() != "" {
+		hadSuggestions := len(m.commandSuggestions()) > 0
 		m.editor.SetValue("")
-		if m.editor.Height() != previousEditorHeight {
+		m.commandSuggestionIndex = 0
+		if m.editor.Height() != previousEditorHeight || hadSuggestions {
 			m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		}
 	}
@@ -566,8 +624,10 @@ func (m Model) now() time.Time {
 
 func (m *Model) clearEditor() {
 	previousEditorHeight := m.editor.Height()
+	hadSuggestions := len(m.commandSuggestions()) > 0
 	m.editor.SetValue("")
-	if m.editor.Height() != previousEditorHeight {
+	m.commandSuggestionIndex = 0
+	if m.editor.Height() != previousEditorHeight || hadSuggestions {
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 	}
 }
@@ -590,6 +650,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.turnEntryStart = len(m.entries)
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
 	m.editor.SetValue("")
+	m.commandSuggestionIndex = 0
 	m.rerenderAndRefreshViewportContent(!m.autoFollow)
 
 	return m, startTurnCommand(ctx, m.backend, text, stream)
@@ -978,13 +1039,13 @@ func (m *Model) rerenderAndRefreshViewportContent(preserveOffset bool) {
 }
 
 func (m Model) transcriptWidth() int {
-	return max(1, calculateLayout(m.width, m.height, m.editor).transcriptWidth)
+	return max(1, calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions())).transcriptWidth)
 }
 
 func (m *Model) refreshViewportContent(preserveOffset bool) {
 	previousYOffset := m.viewport.YOffset()
 	m.editor.SetWidth(max(0, m.width))
-	layout := calculateLayout(m.width, m.height, m.editor)
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()))
 	m.editor.SetHeight(layout.editorHeight)
 	m.viewport.SetWidth(layout.transcriptWidth)
 	m.viewport.SetHeight(max(1, layout.transcriptHeight))

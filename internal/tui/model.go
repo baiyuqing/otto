@@ -22,8 +22,25 @@ import (
 const (
 	turnChannelCapacity  = 64
 	streamRenderInterval = 50 * time.Millisecond
+	ctrlCArmWindow       = time.Second
 	liveEntryIDPrefix    = "live"
+	ctrlCExitStatus      = "press Ctrl+C again to exit"
 )
+
+type Clock interface {
+	Now() time.Time
+	After(time.Duration) <-chan time.Time
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time {
+	return time.Now()
+}
+
+func (realClock) After(d time.Duration) <-chan time.Time {
+	return time.After(d)
+}
 
 type Option func(*Model)
 
@@ -33,32 +50,43 @@ func WithRenderer(renderer MarkdownRenderer) Option {
 	}
 }
 
+func WithClock(clock Clock) Option {
+	return func(model *Model) {
+		if clock != nil {
+			model.clock = clock
+		}
+	}
+}
+
 type Model struct {
-	rootCtx           context.Context
-	backend           app.Backend
-	entries           []Entry
-	viewport          viewport.Model
-	editor            textarea.Model
-	spinner           spinner.Model
-	keymap            KeyMap
-	width             int
-	height            int
-	usage             otmodel.Usage
-	running           bool
-	expandedTools     bool
-	overlay           overlayKind
-	autoFollow        bool
-	renderer          MarkdownRenderer
-	dirtyStreaming    bool
-	renderTickActive  bool
-	cancel            context.CancelFunc
-	ctrlCArmedAt      time.Time
-	activeAssistant   int
-	turnErrorSeen     bool
-	turnEventErr      error
-	fatalErr          error
-	turnGeneration    uint64
-	liveEntrySequence int
+	rootCtx               context.Context
+	backend               app.Backend
+	entries               []Entry
+	viewport              viewport.Model
+	editor                textarea.Model
+	spinner               spinner.Model
+	keymap                KeyMap
+	width                 int
+	height                int
+	usage                 otmodel.Usage
+	running               bool
+	expandedTools         bool
+	overlay               overlayKind
+	autoFollow            bool
+	renderer              MarkdownRenderer
+	clock                 Clock
+	statusText            string
+	supportsModifiedEnter bool
+	dirtyStreaming        bool
+	renderTickActive      bool
+	cancel                context.CancelFunc
+	ctrlCArmedAt          time.Time
+	activeAssistant       int
+	turnErrorSeen         bool
+	turnEventErr          error
+	fatalErr              error
+	turnGeneration        uint64
+	liveEntrySequence     int
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
@@ -72,7 +100,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	editor.DynamicHeight = true
 	editor.SetHeight(minEditorHeight)
 	editor.SetWidth(0)
-	editor.KeyMap.InsertNewline = DefaultKeyMap().InsertNewline
+	editor.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "insert newline"))
 	_ = editor.Focus()
 
 	vp := viewport.New()
@@ -90,6 +118,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 		usage:           usage,
 		autoFollow:      true,
 		renderer:        GlamourRenderer{},
+		clock:           realClock{},
 		activeAssistant: -1,
 	}
 	for _, option := range options {
@@ -114,11 +143,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = max(0, msg.Height)
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
+	case tea.KeyboardEnhancementsMsg:
+		m.supportsModifiedEnter = msg.SupportsKeyDisambiguation()
+		return m, nil
 	case showHelpOverlayMsg:
 		m.overlay = overlayHelp
+		m.statusText = ""
 		return m, nil
 	case showSessionOverlayMsg:
 		m.overlay = overlaySession
+		m.statusText = ""
 		return m, nil
 	case hideOverlayMsg:
 		m.overlay = overlayNone
@@ -129,6 +163,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case scrollViewportMsg:
 		m.scrollViewport(msg.Delta)
+		return m, nil
+	case newSessionResultMsg:
+		return m.applyNewSessionResult(msg)
+	case ctrlCArmExpiredMsg:
+		if !m.ctrlCArmedAt.IsZero() && msg.armedAt.Equal(m.ctrlCArmedAt) {
+			m.ctrlCArmedAt = time.Time{}
+			if m.statusText == ctrlCExitStatus {
+				m.statusText = ""
+			}
+		}
 		return m, nil
 	case turnMsg:
 		return m.updateTurn(msg)
@@ -143,22 +187,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
-		if key.Matches(msg, m.keymap.Submit) {
-			if m.running {
-				return m, nil
-			}
-			prompt := m.editor.Value()
-			if strings.TrimSpace(prompt) == "" {
-				return m, nil
-			}
-			return m.startPrompt(prompt)
-		}
-		if key.Matches(msg, m.keymap.Cancel) && m.running && m.cancel != nil {
-			m.cancel()
-			return m, nil
-		}
+		return m.handleKeyPress(msg, previousYOffset, previousEditorHeight, viewportBefore)
 	}
 
+	return m.updateComponents(msg, previousYOffset, previousEditorHeight, viewportBefore)
+}
+
+func (m Model) updateComponents(msg tea.Msg, previousYOffset, previousEditorHeight int, viewportBefore viewport.Model) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.viewport, _ = m.viewport.Update(msg)
 	m.editor, cmd = m.editor.Update(msg)
@@ -186,7 +221,7 @@ func (m Model) View() tea.View {
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).Render(m.viewport.View())
 	editor := lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View())
-	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage))
+	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.statusText))
 	content := lipgloss.JoinVertical(lipgloss.Left, transcript, editor, footer)
 	if m.overlay != overlayNone {
 		content = renderOverlay(m.width, m.height, m.overlayContent())
@@ -205,6 +240,121 @@ func (m Model) overlayContent() string {
 	}
 }
 
+func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEditorHeight int, viewportBefore viewport.Model) (tea.Model, tea.Cmd) {
+	if m.overlay != overlayNone {
+		if isEscapeKey(msg) {
+			m.overlay = overlayNone
+			return m, nil
+		}
+		if isCtrlCKey(msg) {
+			return m.handleCtrlC(previousEditorHeight)
+		}
+		return m, nil
+	}
+
+	if isCtrlCKey(msg) {
+		return m.handleCtrlC(previousEditorHeight)
+	}
+	if isEscapeKey(msg) {
+		if m.running && m.cancel != nil {
+			m.cancel()
+		}
+		return m, nil
+	}
+	if key.Matches(msg, m.keymap.ToggleTools) {
+		m.expandedTools = !m.expandedTools
+		m.refreshViewportContent(!m.autoFollow)
+		return m, nil
+	}
+	if key.Matches(msg, m.keymap.PageUp) {
+		m.viewport.PageUp()
+		if !m.viewport.AtBottom() {
+			m.autoFollow = false
+		}
+		return m, nil
+	}
+	if key.Matches(msg, m.keymap.PageDown) {
+		m.viewport.PageDown()
+		m.autoFollow = m.viewport.AtBottom()
+		return m, nil
+	}
+	if key.Matches(msg, m.keymap.Home) || key.Matches(msg, m.keymap.End) {
+		return m.handleHomeOrEnd(msg, previousEditorHeight)
+	}
+	if m.shouldInsertNewline(msg) {
+		return m.updateEditorWithKey(normalizeNewlineKey(msg), previousEditorHeight)
+	}
+	if key.Matches(msg, m.keymap.Help) && m.editor.Value() == "" {
+		m.overlay = overlayHelp
+		m.statusText = ""
+		return m, nil
+	}
+	if key.Matches(msg, m.keymap.Submit) {
+		return m.handleSubmit()
+	}
+	return m.updateComponents(msg, previousYOffset, previousEditorHeight, viewportBefore)
+}
+
+func (m Model) handleHomeOrEnd(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd) {
+	beforeLine, beforeColumn := m.editor.Line(), m.editor.Column()
+	beforeScroll := m.editor.ScrollYOffset()
+	beforeStart, beforeEnd, beforeSelection := m.editor.Selection()
+	updatedEditor, cmd := m.editor.Update(msg)
+	afterStart, afterEnd, afterSelection := updatedEditor.Selection()
+	consumed := updatedEditor.Line() != beforeLine || updatedEditor.Column() != beforeColumn || updatedEditor.ScrollYOffset() != beforeScroll || afterSelection != beforeSelection || afterStart != beforeStart || afterEnd != beforeEnd
+	if consumed {
+		m.editor = updatedEditor
+		if m.editor.Height() != previousEditorHeight {
+			m.rerenderAndRefreshViewportContent(!m.autoFollow)
+		}
+		return m, cmd
+	}
+	if key.Matches(msg, m.keymap.Home) {
+		m.viewport.GotoTop()
+		m.autoFollow = false
+		return m, nil
+	}
+	m.viewport.GotoBottom()
+	m.autoFollow = true
+	return m, nil
+}
+
+func (m Model) updateEditorWithKey(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.editor, cmd = m.editor.Update(msg)
+	if m.editor.Height() != previousEditorHeight {
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
+	}
+	return m, cmd
+}
+
+func (m Model) shouldInsertNewline(msg tea.KeyPressMsg) bool {
+	return isAltEnterKey(msg) || (isShiftEnterKey(msg) && m.supportsModifiedEnter)
+}
+
+func normalizeNewlineKey(msg tea.KeyPressMsg) tea.KeyPressMsg {
+	if isShiftEnterKey(msg) {
+		return tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter, Mod: tea.ModAlt})
+	}
+	return msg
+}
+
+func isEscapeKey(msg tea.KeyPressMsg) bool {
+	return msg.Key().Code == tea.KeyEscape || msg.Key().Code == tea.KeyEsc
+}
+
+func isCtrlCKey(msg tea.KeyPressMsg) bool {
+	return msg.String() == "ctrl+c"
+}
+
+func isAltEnterKey(msg tea.KeyPressMsg) bool {
+	return msg.Key().Code == tea.KeyEnter && msg.Key().Mod == tea.ModAlt
+}
+
+func isShiftEnterKey(msg tea.KeyPressMsg) bool {
+	return msg.Key().Code == tea.KeyEnter && msg.Key().Mod == tea.ModShift
+}
+
 func newRootView(m Model, content string) tea.View {
 	view := tea.NewView(content)
 	view.AltScreen = true
@@ -217,6 +367,139 @@ func newRootView(m Model, content string) tea.View {
 	return view
 }
 
+func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
+	prompt := m.editor.Value()
+	trimmed := strings.TrimSpace(prompt)
+	if trimmed == "" {
+		return m, nil
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return m.handleCommand(trimmed)
+	}
+	if m.running {
+		return m, nil
+	}
+	return m.startPrompt(prompt)
+}
+
+func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
+	switch command {
+	case "/help":
+		m.clearEditor()
+		m.overlay = overlayHelp
+		m.statusText = ""
+		return m, nil
+	case "/session":
+		m.clearEditor()
+		m.overlay = overlaySession
+		m.statusText = ""
+		return m, nil
+	case "/new":
+		if m.running {
+			m.statusText = app.ErrPromptActive.Error()
+			return m, nil
+		}
+		return m, runNewSessionCommand(m.backend)
+	case "/exit":
+		if m.running {
+			return m, nil
+		}
+		return m, tea.Quit
+	default:
+		m.statusText = fmt.Sprintf("unknown command: %s", command)
+		return m, nil
+	}
+}
+
+func runNewSessionCommand(backend app.Backend) tea.Cmd {
+	return func() tea.Msg {
+		if backend == nil {
+			return newSessionResultMsg{err: errors.New("backend is required")}
+		}
+		return newSessionResultMsg{err: backend.NewSession()}
+	}
+}
+
+func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.statusText = msg.err.Error()
+		return m, nil
+	}
+	m.entries, m.usage = EntriesFromHistory(historyFromBackend(m.backend))
+	m.overlay = overlayNone
+	m.statusText = ""
+	m.ctrlCArmedAt = time.Time{}
+	m.dirtyStreaming = false
+	m.renderTickActive = false
+	m.activeAssistant = -1
+	m.turnErrorSeen = false
+	m.turnEventErr = nil
+	m.fatalErr = nil
+	m.liveEntrySequence = 0
+	m.autoFollow = true
+	m.editor.SetValue("")
+	m.rerenderAndRefreshViewportContent(false)
+	return m, nil
+}
+
+func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
+	now := m.now()
+	if !m.ctrlCArmedAt.IsZero() {
+		if !now.After(m.ctrlCArmedAt.Add(ctrlCArmWindow)) {
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, tea.Quit
+		}
+		m.ctrlCArmedAt = time.Time{}
+		if m.statusText == ctrlCExitStatus {
+			m.statusText = ""
+		}
+	}
+	if m.running && m.cancel != nil {
+		m.cancel()
+		return m.armCtrlC(now)
+	}
+	if m.editor.Value() != "" {
+		m.editor.SetValue("")
+		if m.editor.Height() != previousEditorHeight {
+			m.rerenderAndRefreshViewportContent(!m.autoFollow)
+		}
+	}
+	return m.armCtrlC(now)
+}
+
+func (m Model) armCtrlC(now time.Time) (tea.Model, tea.Cmd) {
+	m.ctrlCArmedAt = now
+	m.statusText = ctrlCExitStatus
+	return m, waitCtrlCArmExpiry(m.clock, now)
+}
+
+func waitCtrlCArmExpiry(clock Clock, armedAt time.Time) tea.Cmd {
+	return func() tea.Msg {
+		if clock == nil {
+			clock = realClock{}
+		}
+		<-clock.After(ctrlCArmWindow)
+		return ctrlCArmExpiredMsg{armedAt: armedAt}
+	}
+}
+
+func (m Model) now() time.Time {
+	if m.clock == nil {
+		return time.Now()
+	}
+	return m.clock.Now()
+}
+
+func (m *Model) clearEditor() {
+	previousEditorHeight := m.editor.Height()
+	m.editor.SetValue("")
+	if m.editor.Height() != previousEditorHeight {
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
+	}
+}
+
 func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(rootContext(m.rootCtx))
 	stream := newTurnStream()
@@ -225,6 +508,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
+	m.statusText = ""
 	m.dirtyStreaming = false
 	m.renderTickActive = false
 	m.activeAssistant = -1

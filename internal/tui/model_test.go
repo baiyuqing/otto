@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,6 +49,73 @@ type rendererFunc func(string, int) (string, error)
 
 func (f rendererFunc) Render(text string, width int) (string, error) { return f(text, width) }
 
+type fakeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []fakeTimer
+}
+
+type fakeTimer struct {
+	at time.Time
+	ch chan time.Time
+}
+
+func newFakeClock(now time.Time) *fakeClock {
+	return &fakeClock{now: now}
+}
+
+func (f *fakeClock) Now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.now
+}
+
+func (f *fakeClock) After(d time.Duration) <-chan time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	f.timers = append(f.timers, fakeTimer{at: f.now.Add(d), ch: ch})
+	return ch
+}
+
+func (f *fakeClock) Advance(d time.Duration) {
+	f.mu.Lock()
+	f.now = f.now.Add(d)
+	now := f.now
+	due := make([]fakeTimer, 0, len(f.timers))
+	pending := f.timers[:0]
+	for _, timer := range f.timers {
+		if !timer.at.After(now) {
+			due = append(due, timer)
+			continue
+		}
+		pending = append(pending, timer)
+	}
+	f.timers = pending
+	f.mu.Unlock()
+
+	for _, timer := range due {
+		timer.ch <- timer.at
+	}
+}
+
+func (f *fakeClock) WaitForTimers(t *testing.T, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		f.mu.Lock()
+		got := len(f.timers)
+		f.mu.Unlock()
+		if got >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timers = %d, want at least %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func runCommandWithin(t *testing.T, cmd tea.Cmd, timeout time.Duration) tea.Msg {
 	t.Helper()
 	result := make(chan tea.Msg, 1)
@@ -69,7 +137,7 @@ func keyPress(code rune, modifiers ...tea.KeyMod) tea.KeyPressMsg {
 		mod |= modifier
 	}
 	key := tea.Key{Code: code, Mod: mod}
-	if code >= 0x20 && code != tea.KeySpace && mod == 0 {
+	if code >= 0x20 && code < tea.KeyExtended && code != tea.KeySpace && mod == 0 {
 		key.Text = string(code)
 	}
 	return tea.KeyPressMsg(key)
@@ -261,6 +329,494 @@ func TestViewportScrollDisablesAutoFollow(t *testing.T) {
 	got := updated.(Model)
 	if got.autoFollow {
 		t.Fatalf("autoFollow = true, want false after scrolling up")
+	}
+}
+
+func TestEnterSubmitsAndAltEnterAddsNewline(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("one")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter, tea.ModAlt))
+	withNewline := updated.(Model)
+	if cmd == nil || !strings.Contains(withNewline.editor.Value(), "\n") {
+		t.Fatalf("value = %q", withNewline.editor.Value())
+	}
+
+	withNewline.editor.SetValue("send")
+	submitted, promptCmd := withNewline.Update(keyPress(tea.KeyEnter))
+	if promptCmd == nil || !submitted.(Model).running {
+		t.Fatal("enter did not submit")
+	}
+}
+
+func TestShiftEnterRequiresKeyboardEnhancements(t *testing.T) {
+	withoutEnhancements := resizeModel(t, newTestModel(t), 80, 12)
+	withoutEnhancements.editor.SetValue("one")
+	updated, _ := withoutEnhancements.Update(keyPress(tea.KeyEnter, tea.ModShift))
+	if strings.Contains(updated.(Model).editor.Value(), "\n") {
+		t.Fatalf("shift+enter inserted newline without keyboard enhancements: %q", updated.(Model).editor.Value())
+	}
+
+	withEnhancements, _ := withoutEnhancements.Update(tea.KeyboardEnhancementsMsg{Flags: 1})
+	enhanced := withEnhancements.(Model)
+	updated, cmd := enhanced.Update(keyPress(tea.KeyEnter, tea.ModShift))
+	if cmd == nil || !strings.Contains(updated.(Model).editor.Value(), "\n") {
+		t.Fatalf("shift+enter value = %q", updated.(Model).editor.Value())
+	}
+}
+
+func TestCtrlOTogglesToolExpansionKey(t *testing.T) {
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: []model.Message{
+			{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}},
+			{Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-1", ToolName: "read", Text: "tool output line"}}},
+		},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+
+	updated, _ := m.Update(keyPress('o', tea.ModCtrl))
+	got := updated.(Model)
+	if !got.expandedTools || !strings.Contains(got.View().Content, "tool output line") {
+		t.Fatalf("expanded=%v content=%q", got.expandedTools, got.View().Content)
+	}
+}
+
+func TestPageKeysAndHomeEndRouteBetweenViewportAndEditor(t *testing.T) {
+	history := make([]model.Message, 0, 24)
+	for i := range 24 {
+		history = append(history, model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: fmt.Sprintf("entry %02d", i)}}})
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{
+		info:    app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: history,
+	}), 80, 10)
+	m.viewport.SetYOffset(6)
+	m.autoFollow = false
+
+	updated, _ := m.Update(keyPress(tea.KeyPgUp))
+	pageUp := updated.(Model)
+	if pageUp.viewport.YOffset() >= 6 {
+		t.Fatalf("pgup offset = %d, want < 6", pageUp.viewport.YOffset())
+	}
+
+	updated, _ = pageUp.Update(keyPress(tea.KeyPgDown))
+	pageDown := updated.(Model)
+	if pageDown.viewport.YOffset() <= pageUp.viewport.YOffset() {
+		t.Fatalf("pgdn offset = %d, want > %d", pageDown.viewport.YOffset(), pageUp.viewport.YOffset())
+	}
+
+	pageDown.viewport.SetYOffset(4)
+	pageDown.autoFollow = false
+	pageDown.editor.SetValue("abc")
+	updated, _ = pageDown.Update(keyPress(tea.KeyHome))
+	consumedHome := updated.(Model)
+	if consumedHome.editor.Column() != 0 {
+		t.Fatalf("home column = %d, want 0", consumedHome.editor.Column())
+	}
+	if consumedHome.viewport.YOffset() != 4 {
+		t.Fatalf("home consumed viewport offset = %d, want 4", consumedHome.viewport.YOffset())
+	}
+
+	updated, _ = consumedHome.Update(keyPress(tea.KeyHome))
+	transcriptTop := updated.(Model)
+	if transcriptTop.viewport.YOffset() != 0 {
+		t.Fatalf("home transcript offset = %d, want 0", transcriptTop.viewport.YOffset())
+	}
+
+	updated, _ = transcriptTop.Update(keyPress(tea.KeyEnd))
+	consumedEnd := updated.(Model)
+	if consumedEnd.editor.Column() != len("abc") {
+		t.Fatalf("end column = %d, want %d", consumedEnd.editor.Column(), len("abc"))
+	}
+	if consumedEnd.viewport.YOffset() != 0 {
+		t.Fatalf("end consumed viewport offset = %d, want 0", consumedEnd.viewport.YOffset())
+	}
+
+	updated, _ = consumedEnd.Update(keyPress(tea.KeyEnd))
+	transcriptBottom := updated.(Model)
+	if !transcriptBottom.viewport.AtBottom() || !transcriptBottom.autoFollow {
+		t.Fatalf("end did not route to transcript bottom: offset=%d autoFollow=%v", transcriptBottom.viewport.YOffset(), transcriptBottom.autoFollow)
+	}
+}
+
+func TestQuestionMarkOpensHelpOnlyWhenEditorIsEmpty(t *testing.T) {
+	empty := resizeModel(t, newTestModel(t), 80, 12)
+	updated, _ := empty.Update(keyPress('?'))
+	if updated.(Model).overlay != overlayHelp {
+		t.Fatalf("overlay = %v, want help", updated.(Model).overlay)
+	}
+
+	nonEmpty := resizeModel(t, newTestModel(t), 80, 12)
+	nonEmpty.editor.SetValue("hello")
+	updated, _ = nonEmpty.Update(keyPress('?'))
+	got := updated.(Model)
+	if got.overlay != overlayNone || got.editor.Value() != "hello?" {
+		t.Fatalf("overlay=%v value=%q", got.overlay, got.editor.Value())
+	}
+}
+
+func TestSlashCommandsOpenModalOverlaysWithoutPrompting(t *testing.T) {
+	prompted := false
+	backend := &fakeBackend{info: app.Info{
+		Profile:     "profile",
+		Model:       "model",
+		SessionID:   "session-123",
+		SessionPath: "/tmp/session.jsonl",
+		Provider:    "openai-compatible",
+	}, prompt: func(context.Context, string, func(agent.Event)) error {
+		prompted = true
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	m.editor.SetValue("  /help  ")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	help := updated.(Model)
+	if cmd != nil || help.overlay != overlayHelp || help.editor.Value() != "" {
+		t.Fatalf("help overlay=%v editor=%q cmd=%v", help.overlay, help.editor.Value(), cmd)
+	}
+
+	sessionModel := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	sessionModel.editor.SetValue(" /session ")
+	updated, cmd = sessionModel.Update(keyPress(tea.KeyEnter))
+	sessionOverlay := updated.(Model)
+	if cmd != nil || sessionOverlay.overlay != overlaySession || sessionOverlay.editor.Value() != "" {
+		t.Fatalf("session overlay=%v editor=%q cmd=%v", sessionOverlay.overlay, sessionOverlay.editor.Value(), cmd)
+	}
+	if content := sessionOverlay.View().Content; !strings.Contains(content, "session-123") || !strings.Contains(content, "/tmp/session.jsonl") {
+		t.Fatalf("session content = %q", content)
+	}
+	if prompted {
+		t.Fatal("slash command reached backend prompt")
+	}
+}
+
+func TestOverlayIsModalAndEscapeDismissesBeforeCancel(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-ctx.Done()
+		<-release
+		return ctx.Err()
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	turnDone := make(chan tea.Msg, 1)
+	go func() { turnDone <- cmd() }()
+	<-started
+
+	running.editor.SetValue("/help")
+	updated, _ = running.Update(keyPress(tea.KeyEnter))
+	overlay := updated.(Model)
+	if overlay.overlay != overlayHelp || overlay.editor.Value() != "" {
+		t.Fatalf("overlay=%v editor=%q", overlay.overlay, overlay.editor.Value())
+	}
+
+	updated, _ = overlay.Update(keyPress('x'))
+	if got := updated.(Model); got.overlay != overlayHelp || got.editor.Value() != "" {
+		t.Fatalf("modal overlay changed state: overlay=%v editor=%q", got.overlay, got.editor.Value())
+	}
+
+	updated, cancelCmd := overlay.Update(keyPress(tea.KeyEscape))
+	dismissed := updated.(Model)
+	if cancelCmd != nil || dismissed.overlay != overlayNone || !dismissed.running {
+		t.Fatalf("dismiss overlay=%v running=%v cmd=%v", dismissed.overlay, dismissed.running, cancelCmd)
+	}
+
+	updated, cancelCmd = dismissed.Update(keyPress(tea.KeyEscape))
+	cancelled := updated.(Model)
+	if cancelCmd != nil || !cancelled.running {
+		t.Fatalf("cancel running=%v cmd=%v", cancelled.running, cancelCmd)
+	}
+
+	close(release)
+	select {
+	case done := <-turnDone:
+		updated, _ = cancelled.Update(done)
+		if updated.(Model).running {
+			t.Fatal("turn still running after cancellation completion")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled turn did not complete")
+	}
+}
+
+func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session-old"},
+		history: []model.Message{{
+			Role:   model.RoleAssistant,
+			Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}},
+			Usage:  &model.Usage{InputTokens: 1, OutputTokens: 2},
+		}},
+	}
+	backend.newSession = func() error {
+		backend.info.SessionID = "session-new"
+		backend.history = []model.Message{{
+			Role:   model.RoleAssistant,
+			Blocks: []model.Block{{Type: model.BlockText, Text: "fresh transcript"}},
+			Usage:  &model.Usage{InputTokens: 7, OutputTokens: 9},
+		}}
+		return nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("  /new  ")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	waiting := updated.(Model)
+	if cmd == nil || waiting.editor.Value() != "  /new  " || !strings.Contains(waiting.View().Content, "old transcript") {
+		t.Fatalf("waiting editor=%q cmd=%v view=%q", waiting.editor.Value(), cmd, waiting.View().Content)
+	}
+
+	updated, next := waiting.Update(cmd())
+	got := updated.(Model)
+	if next != nil {
+		t.Fatalf("new session result scheduled unexpected cmd %v", next)
+	}
+	if got.editor.Value() != "" || got.usage.InputTokens != 7 || got.usage.OutputTokens != 9 {
+		t.Fatalf("editor=%q usage=%#v", got.editor.Value(), got.usage)
+	}
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") {
+		t.Fatalf("view = %q", content)
+	}
+}
+
+func TestNewCommandFailureRetainsDraftAndState(t *testing.T) {
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: []model.Message{{
+			Role:   model.RoleAssistant,
+			Blocks: []model.Block{{Type: model.BlockText, Text: "keep me"}},
+			Usage:  &model.Usage{InputTokens: 3, OutputTokens: 4},
+		}},
+		newSession: func() error { return errors.New("replacement failed") },
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue(" /new ")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	waiting := updated.(Model)
+	if cmd == nil || waiting.editor.Value() != " /new " {
+		t.Fatalf("waiting editor=%q cmd=%v", waiting.editor.Value(), cmd)
+	}
+
+	updated, next := waiting.Update(cmd())
+	got := updated.(Model)
+	if next != nil {
+		t.Fatalf("failure scheduled unexpected cmd %v", next)
+	}
+	if got.editor.Value() != " /new " || got.usage.InputTokens != 3 || got.usage.OutputTokens != 4 {
+		t.Fatalf("editor=%q usage=%#v", got.editor.Value(), got.usage)
+	}
+	if content := got.View().Content; !strings.Contains(content, "keep me") || !strings.Contains(content, "replacement failed") {
+		t.Fatalf("view = %q", content)
+	}
+}
+
+func TestNewCommandIsRejectedWhileTurnIsActive(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	newSessionCalls := 0
+	backend := &fakeBackend{
+		prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+			close(started)
+			<-release
+			return nil
+		},
+		newSession: func() error {
+			newSessionCalls++
+			return nil
+		},
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	turnDone := make(chan tea.Msg, 1)
+	go func() { turnDone <- cmd() }()
+	<-started
+
+	running.editor.SetValue("/new")
+	updated, rejectCmd := running.Update(keyPress(tea.KeyEnter))
+	got := updated.(Model)
+	if rejectCmd != nil || got.editor.Value() != "/new" || !strings.Contains(got.View().Content, app.ErrPromptActive.Error()) {
+		t.Fatalf("editor=%q cmd=%v view=%q", got.editor.Value(), rejectCmd, got.View().Content)
+	}
+	if newSessionCalls != 0 {
+		t.Fatalf("new session called %d times while turn active", newSessionCalls)
+	}
+
+	close(release)
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("turn command did not complete")
+	}
+}
+
+func TestExitCommandOnlyQuitsWhenIdle(t *testing.T) {
+	idle := resizeModel(t, newTestModel(t), 80, 12)
+	idle.editor.SetValue(" /exit ")
+	updated, quitCmd := idle.Update(keyPress(tea.KeyEnter))
+	if quitCmd == nil {
+		t.Fatal("idle /exit did not return quit command")
+	}
+	if msg := quitCmd(); msg == nil {
+		t.Fatal("idle /exit quit message = nil")
+	}
+	if updated.(Model).editor.Value() != " /exit " {
+		t.Fatalf("idle editor = %q", updated.(Model).editor.Value())
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-release
+		return nil
+	}, info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}
+	runningModel := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	runningModel.editor.SetValue("question")
+	updated, cmd := runningModel.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	turnDone := make(chan tea.Msg, 1)
+	go func() { turnDone <- cmd() }()
+	<-started
+
+	running.editor.SetValue("/exit")
+	updated, quitCmd = running.Update(keyPress(tea.KeyEnter))
+	got := updated.(Model)
+	if quitCmd != nil || got.editor.Value() != "/exit" || !got.running {
+		t.Fatalf("running=%v editor=%q cmd=%v", got.running, got.editor.Value(), quitCmd)
+	}
+
+	close(release)
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("turn command did not complete")
+	}
+}
+
+func TestCtrlCRunningCancelsArmsAndSecondQuits(t *testing.T) {
+	clock := newFakeClock(time.Unix(100, 0))
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		return ctx.Err()
+	}}
+	m := resizeModel(t, NewModel(context.Background(), backend, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	turnDone := make(chan tea.Msg, 1)
+	go func() { turnDone <- cmd() }()
+	<-started
+
+	updated, armCmd := running.Update(keyPress('c', tea.ModCtrl))
+	armed := updated.(Model)
+	if armCmd == nil || !armed.running || armed.ctrlCArmedAt != clock.Now() {
+		t.Fatalf("running=%v armedAt=%v cmd=%v", armed.running, armed.ctrlCArmedAt, armCmd)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("ctrl+c did not cancel active turn")
+	}
+
+	_, quitCmd := armed.Update(keyPress('c', tea.ModCtrl))
+	if quitCmd == nil {
+		t.Fatal("second ctrl+c did not quit")
+	}
+	if msg := quitCmd(); msg == nil {
+		t.Fatal("second ctrl+c quit message = nil")
+	}
+
+	close(release)
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled turn did not complete")
+	}
+}
+
+func TestCtrlCIdleClearsEditorArmsAndSecondQuits(t *testing.T) {
+	clock := newFakeClock(time.Unix(200, 0))
+	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.editor.SetValue("line one\nline two")
+
+	updated, armCmd := m.Update(keyPress('c', tea.ModCtrl))
+	armed := updated.(Model)
+	if armCmd == nil || armed.editor.Value() != "" || armed.ctrlCArmedAt != clock.Now() {
+		t.Fatalf("editor=%q armedAt=%v cmd=%v", armed.editor.Value(), armed.ctrlCArmedAt, armCmd)
+	}
+	if !strings.Contains(armed.View().Content, "press Ctrl+C again to exit") {
+		t.Fatalf("view = %q", armed.View().Content)
+	}
+
+	_, quitCmd := armed.Update(keyPress('c', tea.ModCtrl))
+	if quitCmd == nil {
+		t.Fatal("second ctrl+c did not quit")
+	}
+	if msg := quitCmd(); msg == nil {
+		t.Fatal("second ctrl+c quit message = nil")
+	}
+}
+
+func TestCtrlCArmExpiresAndStaleTickIsIgnored(t *testing.T) {
+	clock := newFakeClock(time.Unix(300, 0))
+	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+
+	updated, armCmd := m.Update(keyPress('c', tea.ModCtrl))
+	armed := updated.(Model)
+	if armCmd == nil || armed.ctrlCArmedAt.IsZero() {
+		t.Fatalf("armedAt=%v cmd=%v", armed.ctrlCArmedAt, armCmd)
+	}
+
+	updated, _ = armed.Update(ctrlCArmExpiredMsg{armedAt: armed.ctrlCArmedAt.Add(-time.Second)})
+	if updated.(Model).ctrlCArmedAt.IsZero() {
+		t.Fatal("stale ctrl+c tick cleared armed state")
+	}
+
+	expired := make(chan tea.Msg, 1)
+	go func() { expired <- armCmd() }()
+	clock.WaitForTimers(t, 1, time.Second)
+	clock.Advance(time.Second)
+	select {
+	case msg := <-expired:
+		updated, _ = armed.Update(msg)
+		cleared := updated.(Model)
+		if !cleared.ctrlCArmedAt.IsZero() {
+			t.Fatalf("armedAt=%v, want cleared", cleared.ctrlCArmedAt)
+		}
+		if strings.Contains(cleared.View().Content, "press Ctrl+C again to exit") {
+			t.Fatalf("view = %q", cleared.View().Content)
+		}
+		updated, rearmCmd := cleared.Update(keyPress('c', tea.ModCtrl))
+		if rearmCmd == nil || updated.(Model).ctrlCArmedAt.IsZero() {
+			t.Fatalf("rearm cmd=%v armedAt=%v", rearmCmd, updated.(Model).ctrlCArmedAt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ctrl+c expiry command did not complete")
 	}
 }
 

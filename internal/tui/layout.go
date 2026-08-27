@@ -60,7 +60,7 @@ func smallTerminalView(width, height int) string {
 	return lipgloss.Place(max(0, width), max(0, height), lipgloss.Center, lipgloss.Center, message)
 }
 
-func renderFooter(width int, info app.Info, usage otmodel.Usage) string {
+func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) string {
 	profileModel := strings.Trim(strings.Trim(info.Profile+"/"+info.Model, "/"), " ")
 	if profileModel == "" {
 		profileModel = "unknown/unknown"
@@ -75,6 +75,9 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage) string {
 	}
 	if info.SessionID != "" && width >= 60 {
 		fields = append(fields, info.SessionID)
+	}
+	if status != "" {
+		fields = append([]string{status}, fields...)
 	}
 
 	for len(fields) > 1 && lipgloss.Width(strings.Join(fields, " | ")) > max(0, width) {
@@ -106,10 +109,12 @@ func helpOverlayContent() string {
 		"Help",
 		"",
 		"Enter submit",
-		"Alt+Enter newline",
+		"Shift+Enter or Alt+Enter newline",
 		"Ctrl+O toggle tool output",
 		"PgUp/PgDn scroll",
+		"Home/End transcript top/bottom",
 		"Esc cancel or close overlay",
+		"Ctrl+C cancel, clear, then quit",
 		"/session show session details",
 		"/new new session",
 		"/exit quit",

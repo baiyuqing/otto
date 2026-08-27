@@ -3,14 +3,18 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/session"
+	"github.com/baiyuqing/otto/internal/tool"
 )
 
 type fakeBackend struct {
@@ -49,7 +53,11 @@ func keyPress(code rune, modifiers ...tea.KeyMod) tea.KeyPressMsg {
 	for _, modifier := range modifiers {
 		mod |= modifier
 	}
-	return tea.KeyPressMsg(tea.Key{Code: code, Mod: mod})
+	key := tea.Key{Code: code, Mod: mod}
+	if code >= 0x20 && code != tea.KeySpace && mod == 0 {
+		key.Text = string(code)
+	}
+	return tea.KeyPressMsg(key)
 }
 
 var _ = keyPress
@@ -238,5 +246,274 @@ func TestViewportScrollDisablesAutoFollow(t *testing.T) {
 	got := updated.(Model)
 	if got.autoFollow {
 		t.Fatalf("autoFollow = true, want false after scrolling up")
+	}
+}
+
+func TestPromptCommandStreamsEventsAndCompletes(t *testing.T) {
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventTextDelta, Text: "hello"})
+		emit(agent.Event{Type: agent.EventTextDelta, Text: " world"})
+		emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 3, OutputTokens: 2}})
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	if !running.running || running.editor.Value() != "" {
+		t.Fatalf("running=%v editor=%q", running.running, running.editor.Value())
+	}
+
+	first := cmd()
+	firstTurn, ok := first.(turnMsg)
+	if !ok {
+		t.Fatalf("first message type = %T, want turnMsg", first)
+	}
+	if cap(firstTurn.channel) != 64 {
+		t.Fatalf("turn channel capacity = %d, want 64", cap(firstTurn.channel))
+	}
+
+	afterFirst, next := running.Update(first)
+	streaming := afterFirst.(Model)
+	if len(streaming.entries) != 2 || streaming.entries[0].Kind != EntryUser || streaming.entries[1].Kind != EntryAssistant {
+		t.Fatalf("entries = %#v", streaming.entries)
+	}
+	if streaming.entries[1].Raw != "hello" || streaming.entries[1].Rendered != "" || !streaming.dirtyStreaming {
+		t.Fatalf("streaming assistant = %#v dirty=%v", streaming.entries[1], streaming.dirtyStreaming)
+	}
+
+	nextMsg := next()
+	batch, ok := nextMsg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("next command = %T %#v, want two-command batch", nextMsg, nextMsg)
+	}
+
+	second := batch[0]()
+	afterSecond, next := streaming.Update(second)
+	more := afterSecond.(Model)
+	if more.entries[1].Raw != "hello world" || !more.renderTickActive {
+		t.Fatalf("second delta state = %#v tick=%v", more.entries[1], more.renderTickActive)
+	}
+
+	usageMsg := next()
+	if _, ok := usageMsg.(tea.BatchMsg); ok {
+		t.Fatalf("second delta scheduled an extra render batch: %#v", usageMsg)
+	}
+	afterUsage, next := more.Update(usageMsg)
+	withUsage := afterUsage.(Model)
+	if withUsage.usage.InputTokens != 3 || withUsage.usage.OutputTokens != 2 {
+		t.Fatalf("usage = %#v", withUsage.usage)
+	}
+
+	done := next()
+	afterDone, doneCmd := withUsage.Update(done)
+	final := afterDone.(Model)
+	if doneCmd != nil || final.running || final.cancel != nil || final.dirtyStreaming || final.renderTickActive {
+		t.Fatalf("final running=%v cancel=%v dirty=%v tick=%v cmd=%v", final.running, final.cancel != nil, final.dirtyStreaming, final.renderTickActive, doneCmd)
+	}
+	if final.entries[1].Rendered != "hello world" || !strings.Contains(final.View().Content, "hello world") {
+		t.Fatalf("final rendered assistant = %#v view=%q", final.entries[1], final.View().Content)
+	}
+}
+
+func TestToolEventsUpdateTranscript(t *testing.T) {
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "read", ToolCallID: "call-1"})
+		emit(agent.Event{Type: agent.EventToolCallFinished, ToolName: "read", ToolCallID: "call-1", ToolResult: tool.Result{Content: "README\nfull output", IsError: true}})
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	first := cmd()
+	afterStart, next := running.Update(first)
+	started := afterStart.(Model)
+	if len(started.entries) != 2 || started.entries[1].Kind != EntryTool || started.entries[1].ToolName != "read" || started.entries[1].ToolDone {
+		t.Fatalf("started entries = %#v", started.entries)
+	}
+
+	finished := next()
+	afterFinish, next := started.Update(finished)
+	result := afterFinish.(Model)
+	if !result.entries[1].ToolDone || !result.entries[1].ToolError || result.entries[1].ToolOutput != "README\nfull output" {
+		t.Fatalf("finished tool entry = %#v", result.entries[1])
+	}
+
+	afterDone, doneCmd := result.Update(next())
+	idle := afterDone.(Model)
+	if doneCmd != nil || idle.running || idle.cancel != nil {
+		t.Fatalf("idle running=%v cancel=%v cmd=%v", idle.running, idle.cancel != nil, doneCmd)
+	}
+}
+
+func TestDraftRemainsEditableWhileRunningAndEnterDoesNotQueue(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-release
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	turnDone := make(chan tea.Msg, 1)
+	go func() { turnDone <- cmd() }()
+	<-started
+
+	typed, _ := running.Update(keyPress('n'))
+	withDraft := typed.(Model)
+	if withDraft.editor.Value() != "n" {
+		t.Fatalf("draft = %q, want editable draft while running", withDraft.editor.Value())
+	}
+
+	submitted, submitCmd := withDraft.Update(keyPress(tea.KeyEnter))
+	stillRunning := submitted.(Model)
+	if submitCmd != nil || stillRunning.editor.Value() != "n" || !stillRunning.running {
+		t.Fatalf("running=%v draft=%q cmd=%v", stillRunning.running, stillRunning.editor.Value(), submitCmd)
+	}
+
+	close(release)
+	select {
+	case <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("turn command did not complete")
+	}
+}
+
+func TestEscapeCancelsActiveTurnAndWaitsForCompletion(t *testing.T) {
+	started := make(chan struct{})
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	turnDone := make(chan tea.Msg, 1)
+	go func() { turnDone <- cmd() }()
+	<-started
+
+	cancelled, cancelCmd := running.Update(keyPress(tea.KeyEscape))
+	stillRunning := cancelled.(Model)
+	if cancelCmd != nil || !stillRunning.running {
+		t.Fatalf("running=%v cmd=%v, want active until done", stillRunning.running, cancelCmd)
+	}
+
+	var done tea.Msg
+	select {
+	case done = <-turnDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled turn did not complete")
+	}
+
+	afterDone, doneCmd := stillRunning.Update(done)
+	idle := afterDone.(Model)
+	if doneCmd != nil || idle.running || idle.cancel != nil {
+		t.Fatalf("idle running=%v cancel=%v cmd=%v", idle.running, idle.cancel != nil, doneCmd)
+	}
+	if len(idle.entries) == 0 || idle.entries[len(idle.entries)-1].Kind != EntryError || !strings.Contains(idle.entries[len(idle.entries)-1].Raw, context.Canceled.Error()) {
+		t.Fatalf("entries = %#v", idle.entries)
+	}
+}
+
+func TestPromptErrorLeavesModelUsable(t *testing.T) {
+	providerErr := errors.New("provider offline")
+	calls := 0
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		calls++
+		if calls == 1 {
+			emit(agent.Event{Type: agent.EventAgentError, Err: providerErr})
+			return providerErr
+		}
+		emit(agent.Event{Type: agent.EventTextDelta, Text: "recovered"})
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("first")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	firstTurn, firstCmd := updated.(Model).Update(cmd())
+	afterErr := firstTurn.(Model)
+	if firstCmd != nil || afterErr.running || afterErr.cancel != nil {
+		t.Fatalf("first error state running=%v cancel=%v cmd=%v", afterErr.running, afterErr.cancel != nil, firstCmd)
+	}
+	if len(afterErr.entries) == 0 || afterErr.entries[len(afterErr.entries)-1].Kind != EntryError || !strings.Contains(afterErr.entries[len(afterErr.entries)-1].Raw, providerErr.Error()) {
+		t.Fatalf("entries = %#v", afterErr.entries)
+	}
+
+	afterErr.editor.SetValue("second")
+	retryUpdated, retryCmd := afterErr.Update(keyPress(tea.KeyEnter))
+	retrying := retryUpdated.(Model)
+	if !retrying.running || retryCmd == nil {
+		t.Fatalf("retry running=%v cmd=%v", retrying.running, retryCmd)
+	}
+}
+
+func TestFatalPersistenceErrorQuits(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventAgentError, Err: fatalErr})
+		return fatalErr
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	afterErr, quitCmd := updated.(Model).Update(cmd())
+	fatalModel := afterErr.(Model)
+	if fatalModel.fatalErr == nil || !errors.Is(fatalModel.fatalErr, session.ErrFatalPersistence) {
+		t.Fatalf("fatalErr = %v", fatalModel.fatalErr)
+	}
+	if quitCmd == nil {
+		t.Fatal("quit command = nil, want tea.Quit")
+	}
+	if msg := quitCmd(); msg == nil {
+		t.Fatalf("quit command message = %T, want non-nil quit message", msg)
+	}
+}
+
+func TestTurnChannelCancellationDoesNotLeakWorker(t *testing.T) {
+	for i := 0; i < 16; i++ {
+		finished := make(chan struct{})
+		backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+			defer close(finished)
+			emit(agent.Event{Type: agent.EventTextDelta, Text: "x"})
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					emit(agent.Event{Type: agent.EventTextDelta, Text: "y"})
+				}
+			}
+		}}
+		m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+		m.editor.SetValue("question")
+
+		updated, cmd := m.Update(keyPress(tea.KeyEnter))
+		running := updated.(Model)
+		first := cmd()
+		afterFirst, next := running.Update(first)
+		nextMsg := next()
+		if batch, ok := nextMsg.(tea.BatchMsg); !ok || len(batch) != 2 {
+			t.Fatalf("iteration %d next command = %#v, want wait+render batch", i, nextMsg)
+		}
+		cancelled, _ := afterFirst.(Model).Update(keyPress(tea.KeyEscape))
+		_ = cancelled.(Model)
+
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Fatalf("iteration %d worker did not exit after cancellation", i)
+		}
 	}
 }

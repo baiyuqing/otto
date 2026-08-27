@@ -2,16 +2,27 @@ package tui
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	otmodel "github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/session"
+)
+
+const (
+	turnChannelCapacity  = 64
+	streamRenderInterval = 50 * time.Millisecond
+	liveEntryIDPrefix    = "live"
 )
 
 type Option func(*Model)
@@ -23,24 +34,29 @@ func WithRenderer(renderer MarkdownRenderer) Option {
 }
 
 type Model struct {
-	rootCtx        context.Context
-	backend        app.Backend
-	entries        []Entry
-	viewport       viewport.Model
-	editor         textarea.Model
-	spinner        spinner.Model
-	keymap         KeyMap
-	width          int
-	height         int
-	usage          otmodel.Usage
-	running        bool
-	expandedTools  bool
-	overlay        overlayKind
-	autoFollow     bool
-	renderer       MarkdownRenderer
-	dirtyStreaming bool
-	cancel         context.CancelFunc
-	ctrlCArmedAt   time.Time
+	rootCtx           context.Context
+	backend           app.Backend
+	entries           []Entry
+	viewport          viewport.Model
+	editor            textarea.Model
+	spinner           spinner.Model
+	keymap            KeyMap
+	width             int
+	height            int
+	usage             otmodel.Usage
+	running           bool
+	expandedTools     bool
+	overlay           overlayKind
+	autoFollow        bool
+	renderer          MarkdownRenderer
+	dirtyStreaming    bool
+	renderTickActive  bool
+	cancel            context.CancelFunc
+	ctrlCArmedAt      time.Time
+	activeAssistant   int
+	turnErrorSeen     bool
+	fatalErr          error
+	liveEntrySequence int
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
@@ -62,21 +78,22 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	vp.SoftWrap = true
 
 	model := Model{
-		rootCtx:    ctx,
-		backend:    backend,
-		entries:    entries,
-		viewport:   vp,
-		editor:     editor,
-		spinner:    spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		keymap:     DefaultKeyMap(),
-		usage:      usage,
-		autoFollow: true,
-		renderer:   GlamourRenderer{},
+		rootCtx:         ctx,
+		backend:         backend,
+		entries:         entries,
+		viewport:        vp,
+		editor:          editor,
+		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		keymap:          DefaultKeyMap(),
+		usage:           usage,
+		autoFollow:      true,
+		renderer:        GlamourRenderer{},
+		activeAssistant: -1,
 	}
 	for _, option := range options {
 		option(&model)
 	}
-	model.refreshViewportContent(false)
+	model.rerenderAndRefreshViewportContent(false)
 	return model
 }
 
@@ -93,7 +110,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = max(0, msg.Width)
 		m.height = max(0, msg.Height)
-		m.refreshViewportContent(!m.autoFollow)
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
 	case showHelpOverlayMsg:
 		m.overlay = overlayHelp
@@ -111,8 +128,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scrollViewportMsg:
 		m.scrollViewport(msg.Delta)
 		return m, nil
+	case turnMsg:
+		return m.updateTurn(msg)
+	case renderStreamingMsg:
+		m.renderTickActive = false
+		if m.dirtyStreaming {
+			m.renderActiveAssistantEntry()
+			m.dirtyStreaming = false
+			m.refreshViewportContent(!m.autoFollow)
+		}
+		return m, nil
 	case tea.KeyPressMsg:
-		if msg.String() == "enter" {
+		if key.Matches(msg, m.keymap.Submit) {
+			if m.running {
+				return m, nil
+			}
+			prompt := m.editor.Value()
+			if strings.TrimSpace(prompt) == "" {
+				return m, nil
+			}
+			return m.startPrompt(prompt)
+		}
+		if key.Matches(msg, m.keymap.Cancel) && m.running && m.cancel != nil {
+			m.cancel()
 			return m, nil
 		}
 	}
@@ -124,7 +162,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.syncAutoFollow(viewportBefore)
 
 	if m.editor.Height() != previousEditorHeight {
-		m.refreshViewportContent(!m.autoFollow)
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 	} else if m.viewport.YOffset() != previousYOffset && !m.viewport.AtBottom() {
 		m.autoFollow = false
 	} else if m.viewport.AtBottom() {
@@ -135,8 +173,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() tea.View {
-	// Reserved state is wired in later tasks; keep it referenced so static
-	// analysis matches the staged implementation plan.
 	_ = m.reservedStateActive()
 
 	layout := calculateLayout(m.width, m.height, m.editor)
@@ -177,6 +213,236 @@ func newRootView(m Model, content string) tea.View {
 	return view
 }
 
+func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
+	ctx, cancel := context.WithCancel(rootContext(m.rootCtx))
+	channel := make(chan turnEnvelope, turnChannelCapacity)
+
+	m.running = true
+	m.cancel = cancel
+	m.turnErrorSeen = false
+	m.dirtyStreaming = false
+	m.renderTickActive = false
+	m.activeAssistant = -1
+	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
+	m.editor.SetValue("")
+	m.rerenderAndRefreshViewportContent(!m.autoFollow)
+
+	return m, startTurnCommand(ctx, m.backend, text, channel)
+}
+
+func startTurnCommand(ctx context.Context, backend app.Backend, text string, channel chan turnEnvelope) tea.Cmd {
+	return func() tea.Msg {
+		go runTurnWorker(ctx, backend, text, channel)
+		return waitTurn(channel)()
+	}
+}
+
+func runTurnWorker(ctx context.Context, backend app.Backend, text string, channel chan turnEnvelope) {
+	defer close(channel)
+	if backend == nil {
+		sendTurnEnvelope(ctx, channel, turnEnvelope{err: errors.New("backend is required"), done: true})
+		return
+	}
+
+	err := backend.Prompt(ctx, text, func(event agent.Event) {
+		eventCopy := event
+		sendTurnEnvelope(ctx, channel, turnEnvelope{event: &eventCopy})
+	})
+	sendTurnDoneEnvelope(ctx, channel, turnEnvelope{err: err, done: true})
+}
+
+func sendTurnEnvelope(ctx context.Context, channel chan<- turnEnvelope, envelope turnEnvelope) bool {
+	select {
+	case channel <- envelope:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sendTurnDoneEnvelope(ctx context.Context, channel chan<- turnEnvelope, envelope turnEnvelope) bool {
+	select {
+	case channel <- envelope:
+		return true
+	default:
+	}
+	select {
+	case channel <- envelope:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func waitTurn(channel <-chan turnEnvelope) tea.Cmd {
+	return func() tea.Msg {
+		envelope, ok := <-channel
+		if !ok {
+			return turnMsg{channel: channel, value: turnEnvelope{done: true}}
+		}
+		return turnMsg{channel: channel, value: envelope}
+	}
+}
+
+func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
+	if msg.value.event != nil {
+		return m.applyTurnEvent(msg.channel, *msg.value.event)
+	}
+	if msg.value.done {
+		return m.finishTurn(msg.value.err)
+	}
+	return m, waitTurn(msg.channel)
+}
+
+func (m Model) applyTurnEvent(channel <-chan turnEnvelope, event agent.Event) (tea.Model, tea.Cmd) {
+	switch event.Type {
+	case agent.EventTextDelta:
+		m.applyTextDelta(event.Text)
+		return m, tea.Batch(waitTurn(channel), m.scheduleRenderTick())
+	case agent.EventToolCallStarted:
+		m.activeAssistant = -1
+		m.entries = append(m.entries, Entry{
+			ID:         m.nextLiveEntryID("tool"),
+			Kind:       EntryTool,
+			ToolCallID: event.ToolCallID,
+			ToolName:   event.ToolName,
+		})
+		m.refreshViewportContent(!m.autoFollow)
+		return m, waitTurn(channel)
+	case agent.EventToolCallFinished:
+		m.activeAssistant = -1
+		m.finishToolEntry(event)
+		m.refreshViewportContent(!m.autoFollow)
+		return m, waitTurn(channel)
+	case agent.EventProviderUsage:
+		m.usage = addUsageTotals(m.usage, &event.Usage)
+		return m, waitTurn(channel)
+	case agent.EventAgentError:
+		m.turnErrorSeen = true
+		return m.handleTurnError(event.Err)
+	case agent.EventAgentFinished, agent.EventAgentStarted:
+		return m, waitTurn(channel)
+	default:
+		return m, waitTurn(channel)
+	}
+}
+
+func (m *Model) applyTextDelta(text string) {
+	index := m.ensureActiveAssistantEntry()
+	m.entries[index].Raw += text
+	m.dirtyStreaming = true
+}
+
+func (m *Model) ensureActiveAssistantEntry() int {
+	if m.activeAssistant >= 0 && m.activeAssistant < len(m.entries) && m.entries[m.activeAssistant].Kind == EntryAssistant {
+		return m.activeAssistant
+	}
+	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("assistant"), Kind: EntryAssistant})
+	m.activeAssistant = len(m.entries) - 1
+	return m.activeAssistant
+}
+
+func (m *Model) finishToolEntry(event agent.Event) {
+	if index := m.findPendingToolEntry(event.ToolCallID); index >= 0 {
+		m.entries[index].ToolDone = true
+		m.entries[index].ToolError = event.ToolResult.IsError
+		m.entries[index].ToolOutput = event.ToolResult.Content
+		if m.entries[index].ToolName == "" {
+			m.entries[index].ToolName = event.ToolName
+		}
+		return
+	}
+	m.entries = append(m.entries, Entry{
+		ID:         m.nextLiveEntryID("tool"),
+		Kind:       EntryTool,
+		ToolCallID: event.ToolCallID,
+		ToolName:   event.ToolName,
+		ToolOutput: event.ToolResult.Content,
+		ToolError:  event.ToolResult.IsError,
+		ToolDone:   true,
+	})
+}
+
+func (m Model) findPendingToolEntry(toolCallID string) int {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		entry := m.entries[i]
+		if entry.Kind == EntryTool && !entry.ToolDone && entry.ToolCallID == toolCallID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
+	if err != nil && !m.turnErrorSeen {
+		return m.handleTurnError(err)
+	}
+	m.finalizeStreamingRender()
+	m.completeTurnState()
+	return m, nil
+}
+
+func (m Model) handleTurnError(err error) (tea.Model, tea.Cmd) {
+	m.finalizeStreamingRender()
+	m.completeTurnState()
+	if err != nil {
+		m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("error"), Kind: EntryError, Raw: err.Error()})
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
+		if errors.Is(err, session.ErrFatalPersistence) {
+			m.fatalErr = err
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *Model) finalizeStreamingRender() {
+	if !m.dirtyStreaming {
+		return
+	}
+	m.renderActiveAssistantEntry()
+	m.dirtyStreaming = false
+	m.refreshViewportContent(!m.autoFollow)
+}
+
+func (m *Model) renderActiveAssistantEntry() {
+	if m.activeAssistant < 0 || m.activeAssistant >= len(m.entries) {
+		return
+	}
+	m.renderEntryAt(m.activeAssistant, m.transcriptWidth())
+}
+
+func (m *Model) completeTurnState() {
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	m.running = false
+	m.renderTickActive = false
+	m.turnErrorSeen = false
+	m.activeAssistant = -1
+}
+
+func (m *Model) scheduleRenderTick() tea.Cmd {
+	if !m.dirtyStreaming || m.renderTickActive {
+		return nil
+	}
+	m.renderTickActive = true
+	return tea.Tick(streamRenderInterval, func(time.Time) tea.Msg {
+		return renderStreamingMsg{}
+	})
+}
+
+func (m *Model) rerenderAndRefreshViewportContent(preserveOffset bool) {
+	m.renderEntries(m.transcriptWidth())
+	m.refreshViewportContent(preserveOffset)
+}
+
+func (m Model) transcriptWidth() int {
+	return max(1, calculateLayout(m.width, m.height, m.editor).transcriptWidth)
+}
+
 func (m *Model) refreshViewportContent(preserveOffset bool) {
 	m.editor.SetWidth(max(0, m.width))
 	layout := calculateLayout(m.width, m.height, m.editor)
@@ -185,7 +451,6 @@ func (m *Model) refreshViewportContent(preserveOffset bool) {
 	m.viewport.SetHeight(max(1, layout.transcriptHeight))
 
 	transcriptWidth := max(1, layout.transcriptWidth)
-	m.renderEntries(transcriptWidth)
 	content := m.transcriptContent(transcriptWidth)
 	previousYOffset := m.viewport.YOffset()
 	m.viewport.SetContent(content)
@@ -198,24 +463,31 @@ func (m *Model) refreshViewportContent(preserveOffset bool) {
 
 func (m *Model) renderEntries(width int) {
 	for i := range m.entries {
-		entry := &m.entries[i]
-		switch entry.Kind {
-		case EntryAssistant:
-			if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
-				continue
-			}
-			rendered, _ := renderMarkdown(m.renderer, entry.Raw, width)
-			entry.Rendered = rendered
-			entry.RenderWidth = width
-		case EntryTool:
-			entry.RenderWidth = width
-		default:
-			if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
-				continue
-			}
-			entry.Rendered = escapePlainText(entry.Raw)
-			entry.RenderWidth = width
+		m.renderEntryAt(i, width)
+	}
+}
+
+func (m *Model) renderEntryAt(index int, width int) {
+	if index < 0 || index >= len(m.entries) {
+		return
+	}
+	entry := &m.entries[index]
+	switch entry.Kind {
+	case EntryAssistant:
+		if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
+			return
 		}
+		rendered, _ := renderMarkdown(m.renderer, entry.Raw, width)
+		entry.Rendered = rendered
+		entry.RenderWidth = width
+	case EntryTool:
+		entry.RenderWidth = width
+	default:
+		if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
+			return
+		}
+		entry.Rendered = escapePlainText(entry.Raw)
+		entry.RenderWidth = width
 	}
 }
 
@@ -317,6 +589,19 @@ func infoFromBackend(backend app.Backend) app.Info {
 	return backend.Info()
 }
 
+func rootContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func (m *Model) nextLiveEntryID(kind string) string {
+	id := fmt.Sprintf("%s-%d", kind, m.liveEntrySequence)
+	m.liveEntrySequence++
+	return liveEntryIDPrefix + "-" + id
+}
+
 func (m Model) reservedStateActive() bool {
-	return m.running || m.dirtyStreaming || m.cancel != nil || !m.ctrlCArmedAt.IsZero()
+	return m.running || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || !m.ctrlCArmedAt.IsZero() || m.fatalErr != nil
 }

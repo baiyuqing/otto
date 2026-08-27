@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,19 +31,20 @@ func Inspect(ctx context.Context, path string) (SessionInfo, []Warning, error) {
 		return SessionInfo{}, nil, err
 	}
 
+	info, err := os.Lstat(path)
+	if err != nil {
+		return SessionInfo{}, nil, fmt.Errorf("stat session file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return SessionInfo{}, nil, fmt.Errorf("%w: session file is not a regular file", ErrInvalidSession)
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return SessionInfo{}, nil, fmt.Errorf("open session file: %w", err)
 	}
 	defer file.Close()
 
-	info, err := file.Stat()
-	if err != nil {
-		return SessionInfo{}, nil, fmt.Errorf("stat session file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return SessionInfo{}, nil, fmt.Errorf("%w: session file is not a regular file", ErrInvalidSession)
-	}
 	if err := rejectOversizedSessionFile(file); err != nil {
 		return SessionInfo{}, nil, err
 	}
@@ -100,15 +102,22 @@ func List(ctx context.Context, root, workspace, currentPath string, limit int) (
 	if err != nil {
 		return ListResult{}, err
 	}
+	if err := validateSessionRoot(root); err != nil {
+		return ListResult{}, err
+	}
 	directory, err := sessionDirectory(root, workspaceCanonical)
 	if err != nil {
 		return ListResult{}, err
 	}
+	exists, err := validateWorkspaceSessionDirectory(directory)
+	if err != nil {
+		return ListResult{}, err
+	}
+	if !exists {
+		return ListResult{}, nil
+	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return ListResult{}, nil
-		}
 		return ListResult{}, fmt.Errorf("read session directory: %w", err)
 	}
 
@@ -189,6 +198,37 @@ func sessionDirectory(root, workspace string) (string, error) {
 	return filepath.Join(root, key), nil
 }
 
+func validateSessionRoot(root string) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return fmt.Errorf("stat session root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: session root is a symlink", ErrInvalidSession)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w: session root is not a directory", ErrInvalidSession)
+	}
+	return nil
+}
+
+func validateWorkspaceSessionDirectory(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat session directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%w: session directory is a symlink", ErrInvalidSession)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%w: session directory is not a directory", ErrInvalidSession)
+	}
+	return true, nil
+}
+
 func decodePiFileReadOnlyContext(ctx context.Context, file *os.File) (piFile, error) {
 	if err := ctx.Err(); err != nil {
 		return piFile{}, err
@@ -237,43 +277,89 @@ func lastUserText(messages []model.Message) string {
 }
 
 func previewText(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
 	var builder strings.Builder
-	builder.Grow(len(text))
-	lastSpace := false
+	builder.Grow(maxSessionPreviewRunes*6 + 3)
+	used := 0
+	wroteContent := false
+	pendingSpace := false
+	truncated := false
+
 	for _, r := range text {
-		switch {
-		case unicode.IsSpace(r):
-			if builder.Len() > 0 && !lastSpace {
-				builder.WriteByte(' ')
-				lastSpace = true
-			}
-		case r < 0x100 && unicode.IsControl(r):
-			builder.WriteString(fmt.Sprintf("\\x%02x", r))
-			lastSpace = false
-		case unicode.IsControl(r):
-			builder.WriteString(fmt.Sprintf("\\u%04x", r))
-			lastSpace = false
-		default:
-			builder.WriteRune(r)
-			lastSpace = false
+		if unicode.IsSpace(r) {
+			pendingSpace = wroteContent
+			continue
 		}
+
+		needed := previewRuneWidth(r)
+		if pendingSpace {
+			needed++
+		}
+		if used+needed > maxSessionPreviewRunes {
+			truncated = true
+			break
+		}
+		if pendingSpace {
+			builder.WriteByte(' ')
+			used++
+			pendingSpace = false
+		}
+		writePreviewRune(&builder, r)
+		used += previewRuneWidth(r)
+		wroteContent = true
 	}
-	preview := strings.TrimSpace(builder.String())
-	if preview == "" {
+
+	if !wroteContent {
 		return ""
 	}
-	count := 0
-	for index := range preview {
-		if count == maxSessionPreviewRunes {
-			return preview[:index] + "..."
-		}
-		count++
+	if !truncated {
+		return builder.String()
 	}
-	return preview
+	return builder.String() + "..."
+}
+
+func previewRuneWidth(r rune) int {
+	switch {
+	case r < 0x100 && unicode.IsControl(r):
+		return 4
+	case unicode.IsControl(r):
+		return 2 + max(4, hexWidth(uint32(r)))
+	default:
+		return 1
+	}
+}
+
+func writePreviewRune(builder *strings.Builder, r rune) {
+	switch {
+	case r < 0x100 && unicode.IsControl(r):
+		builder.WriteString(`\x`)
+		writeHex(builder, uint32(r), 2)
+	case unicode.IsControl(r):
+		builder.WriteString(`\u`)
+		writeHex(builder, uint32(r), max(4, hexWidth(uint32(r))))
+	default:
+		builder.WriteRune(r)
+	}
+}
+
+func hexWidth(value uint32) int {
+	width := 1
+	for value >= 16 {
+		value /= 16
+		width++
+	}
+	return width
+}
+
+func writeHex(builder *strings.Builder, value uint32, width int) {
+	const digits = "0123456789abcdef"
+	var buffer [8]byte
+	for index := width - 1; index >= 0; index-- {
+		buffer[index] = digits[value&0xf]
+		value >>= 4
+	}
+	for _, digit := range buffer[:width] {
+		builder.WriteByte(digit)
+	}
 }
 
 func incrementSkipped(count int) int {

@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestListReturnsRecentValidWorkspaceSessionsWithoutMutation(t *testing.T) {
@@ -120,6 +122,32 @@ func TestListReturnsEmptyWhenWorkspaceDirectoryIsMissing(t *testing.T) {
 	}
 	if len(result.Sessions) != 0 || result.Skipped != 0 {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestListFailsWhenSessionRootIsMissing(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "missing-root")
+
+	_, err := List(context.Background(), root, t.TempDir(), "", 20)
+	if err == nil {
+		t.Fatal("List() succeeded with a missing session root")
+	}
+}
+
+func TestListRejectsSymlinkedWorkspaceDirectory(t *testing.T) {
+	root := t.TempDir()
+	workspace := t.TempDir()
+	key, err := workspaceKey(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, key)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = List(context.Background(), root, workspace, "", 20)
+	if err == nil {
+		t.Fatal("List() succeeded with a symlinked workspace directory")
 	}
 }
 
@@ -251,6 +279,19 @@ func TestInspectLeavesDanglingToolCallUntouched(t *testing.T) {
 	}
 }
 
+func TestInspectRejectsSymlink(t *testing.T) {
+	path := copyPiFixture(t, "linear.jsonl")
+	link := filepath.Join(t.TempDir(), "linked.jsonl")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := Inspect(context.Background(), link)
+	if err == nil {
+		t.Fatal("Inspect() succeeded on a symlink")
+	}
+}
+
 func TestInspectRespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -258,6 +299,40 @@ func TestInspectRespectsContextCancellation(t *testing.T) {
 	_, _, err := Inspect(ctx, copyPiFixture(t, "linear.jsonl"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestPreviewTextExactAndEllipsis(t *testing.T) {
+	exact := strings.Repeat("界", maxSessionPreviewRunes)
+	if got := previewText(exact); got != exact {
+		t.Fatalf("previewText(exact) = %q, want %q", got, exact)
+	}
+
+	ellipsis := strings.Repeat("界", maxSessionPreviewRunes+1)
+	wantEllipsis := strings.Repeat("界", maxSessionPreviewRunes) + "..."
+	if got := previewText(ellipsis); got != wantEllipsis {
+		t.Fatalf("previewText(ellipsis) = %q, want %q", got, wantEllipsis)
+	}
+}
+
+func TestPreviewTextBoundsControlHeavyInput(t *testing.T) {
+	input := strings.Repeat("\x01", 1<<20)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	got := previewText(input)
+
+	runtime.ReadMemStats(&after)
+	want := strings.Repeat(`\x01`, maxSessionPreviewRunes/4) + "..."
+	if got != want {
+		t.Fatalf("previewText(control-heavy) = %q, want %q", got, want)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("previewText(control-heavy) returned invalid UTF-8: %q", got)
+	}
+	if delta := after.TotalAlloc - before.TotalAlloc; delta > 1<<20 {
+		t.Fatalf("previewText(control-heavy) allocated %d bytes, want <= %d", delta, 1<<20)
 	}
 }
 

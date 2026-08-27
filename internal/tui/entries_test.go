@@ -26,6 +26,38 @@ func TestEntriesFromHistoryPairsToolResults(t *testing.T) {
 	}
 }
 
+func TestEntriesFromHistoryPreservesZeroBlockToolMessages(t *testing.T) {
+	history := []model.Message{
+		{ID: "tool-empty", Role: model.RoleTool},
+	}
+
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1 (%#v)", len(entries), entries)
+	}
+	if entries[0].Kind != EntryTool || entries[0].Raw != "" || entries[0].ToolDone {
+		t.Fatalf("entries[0] = %#v, want empty pending tool entry", entries[0])
+	}
+}
+
+func TestEntriesFromHistoryMapsErrorRoleToEntryError(t *testing.T) {
+	history := []model.Message{
+		{ID: "role-error", Role: model.Role("error")},
+		{ID: "role-unknown", Role: model.Role("alien")},
+	}
+
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 2 {
+		t.Fatalf("len(entries) = %d, want 2 (%#v)", len(entries), entries)
+	}
+	if entries[0].Kind != EntryError {
+		t.Fatalf("entries[0] = %#v, want error entry", entries[0])
+	}
+	if entries[1].Kind != EntrySystem {
+		t.Fatalf("entries[1] = %#v, want safe system fallback", entries[1])
+	}
+}
+
 func TestEntriesFromHistoryHandlesZeroBlocksOrphansAndToolErrors(t *testing.T) {
 	history := []model.Message{
 		{ID: "assistant-empty", Role: model.RoleAssistant},

@@ -118,3 +118,36 @@ git diff --check
 
 ## Commit
 - `feat: add TUI transcript rendering`
+
+## Fix Round 1
+
+### Findings
+- Preserved zero-block tool transcript entries instead of dropping them.
+- Mapped `model.Role("error")` to `EntryError` while keeping unknown-role fallback on `EntrySystem`.
+
+### RED
+Command:
+```bash
+go test ./internal/tui -run 'Test(Entries|Markdown)'
+```
+Result:
+```text
+--- FAIL: TestEntriesFromHistoryPreservesZeroBlockToolMessages (0.00s)
+    entries_test.go:36: len(entries) = 0, want 1 ([]tui.Entry{})
+--- FAIL: TestEntriesFromHistoryMapsErrorRoleToEntryError (0.00s)
+    entries_test.go:54: entries[0] = tui.Entry{ID:"message-0-role-error-text-0", Kind:"system", Raw:"", Rendered:"", RenderWidth:0, ToolCallID:"", ToolName:"", ToolArgs:"", ToolOutput:"", ToolError:false, ToolDone:false}, want error entry
+FAIL
+```
+
+### GREEN
+Command:
+```bash
+gofmt -w internal/tui
+go test ./internal/tui
+go test ./...
+```
+Result:
+```text
+ok  github.com/baiyuqing/otto/internal/tui
+ok  github.com/baiyuqing/otto/... (all packages passed)
+```

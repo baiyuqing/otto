@@ -55,9 +55,7 @@ func EntriesFromHistory(history []model.Message) ([]Entry, model.Usage) {
 		}
 
 		if len(message.Blocks) == 0 {
-			if message.Role != model.RoleTool {
-				flushText(true)
-			}
+			flushText(true)
 			continue
 		}
 
@@ -112,6 +110,8 @@ func entryKindForRole(role model.Role) EntryKind {
 		return EntryAssistant
 	case model.RoleTool:
 		return EntryTool
+	case model.Role("error"):
+		return EntryError
 	default:
 		return EntrySystem
 	}

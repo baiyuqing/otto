@@ -113,16 +113,35 @@ func TestSlashCommandModifiedKeysPassThrough(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)
 	m = typeEditorText(t, m, "/")
 
-	updated, _ := m.Update(keyPress(tea.KeyDown, tea.ModShift))
+	shiftDown := keyPress(tea.KeyDown, tea.ModShift)
+	if _, _, handled := m.handleCommandSuggestionKey(shiftDown); handled {
+		t.Fatal("shift+down was handled as suggestion navigation")
+	}
+	updated, _ := m.Update(shiftDown)
 	got := updated.(Model)
 	if got.commandSuggestionIndex != 0 {
 		t.Fatalf("shift+down selected suggestion %d, want unchanged", got.commandSuggestionIndex)
 	}
 
-	updated, _ = got.Update(keyPress(tea.KeyTab, tea.ModShift))
+	shiftTab := keyPress(tea.KeyTab, tea.ModShift)
+	if _, _, handled := got.handleCommandSuggestionKey(shiftTab); handled {
+		t.Fatal("shift+tab was handled as command completion")
+	}
+	updated, _ = got.Update(shiftTab)
 	got = updated.(Model)
 	if got.editor.Value() == "/help" {
 		t.Fatalf("shift+tab completed command: editor=%q", got.editor.Value())
+	}
+}
+
+func TestSlashCommandCompletionClampsStaleSelection(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 16)
+	m = typeEditorText(t, m, "/")
+	m.commandSuggestionIndex = 99
+
+	updated, _ := m.Update(keyPress(tea.KeyTab))
+	if got := updated.(Model).editor.Value(); got != "/exit" {
+		t.Fatalf("clamped completion = %q, want /exit", got)
 	}
 }
 
@@ -174,6 +193,11 @@ func TestSlashCommandMultilineArrowsAndOverlayTransitionsUseUpdate(t *testing.T)
 	if m.editor.Line() != 0 || len(m.commandSuggestions()) != 0 {
 		t.Fatalf("multiline up: line=%d suggestions=%d", m.editor.Line(), len(m.commandSuggestions()))
 	}
+	updated, _ = m.Update(keyPress(tea.KeyDown))
+	m = updated.(Model)
+	if m.editor.Line() != 1 || len(m.commandSuggestions()) != 0 {
+		t.Fatalf("multiline down: line=%d suggestions=%d", m.editor.Line(), len(m.commandSuggestions()))
+	}
 
 	m.editor.SetValue("/s")
 	updated, _ = m.Update(showHelpOverlayMsg{})
@@ -199,6 +223,30 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 		t.Fatalf("suggestion scroll state: offset=%d follow=%v height=%d", m.viewport.YOffset(), m.autoFollow, m.viewport.Height())
 	}
 
+	beforePageUp := m.viewport.YOffset()
+	updated, _ := m.Update(keyPress(tea.KeyPgUp))
+	m = updated.(Model)
+	if m.viewport.YOffset() >= beforePageUp {
+		t.Fatalf("page up offset = %d, want less than %d", m.viewport.YOffset(), beforePageUp)
+	}
+	updated, _ = m.Update(keyPress(tea.KeyPgDown))
+	m = updated.(Model)
+	if m.viewport.YOffset() <= 0 {
+		t.Fatalf("page down offset = %d, want positive", m.viewport.YOffset())
+	}
+	m.editor.CursorStart()
+	updated, _ = m.Update(keyPress(tea.KeyHome))
+	m = updated.(Model)
+	if m.viewport.YOffset() != 0 {
+		t.Fatalf("home offset = %d, want 0", m.viewport.YOffset())
+	}
+	m.editor.CursorEnd()
+	updated, _ = m.Update(keyPress(tea.KeyEnd))
+	m = updated.(Model)
+	if !m.viewport.AtBottom() || !m.autoFollow {
+		t.Fatalf("end state: bottom=%v follow=%v", m.viewport.AtBottom(), m.autoFollow)
+	}
+
 	m = resizeModel(t, m, 40, 8)
 	if m.viewport.Height() != 2 {
 		t.Fatalf("minimum viewport height = %d, want 2", m.viewport.Height())
@@ -209,6 +257,16 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 		t.Fatalf("expanded viewport height = %d, want 14", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 100, 20)
+
+	m.editor.SetValue("")
+	m.commandSuggestionIndex = 0
+	m.rerenderAndRefreshViewportContent(false)
+	m.autoFollow = true
+	m.viewport.GotoBottom()
+	m = typeEditorText(t, m, "/")
+	if !m.autoFollow || !m.viewport.AtBottom() {
+		t.Fatalf("bottom transition: follow=%v bottom=%v", m.autoFollow, m.viewport.AtBottom())
+	}
 }
 
 func TestSlashCommandSuggestionsDoNotOverrideRunningCancellation(t *testing.T) {
@@ -224,7 +282,11 @@ func TestSlashCommandSuggestionsDoNotOverrideRunningCancellation(t *testing.T) {
 	m = updated.(Model)
 	done := make(chan tea.Msg, 1)
 	go func() { done <- start() }()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
 
 	m = typeEditorText(t, m, "/")
 	updated, cmd := m.Update(keyPress(tea.KeyEscape))

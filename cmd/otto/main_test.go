@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
@@ -29,13 +30,134 @@ func TestRunHelpDoesNotRequireCredentials(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, text := range []string{"--config", "--cwd", "--continue", "--resume", "--no-session", "WARNING", "unsandboxed", "anything accessible to your macOS user"} {
+	for _, text := range []string{"--config", "--cwd", "--ui", "--continue", "--resume", "--no-session", "WARNING", "unsandboxed", "anything accessible to your macOS user"} {
 		if !strings.Contains(stdout.String(), text) {
 			t.Fatalf("help missing %s: %s", text, stdout.String())
 		}
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("help wrote to stderr: %q", stderr.String())
+	}
+}
+
+func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configUI   string
+		envUI      string
+		cliUI      string
+		isTerminal bool
+		wantTUI    bool
+	}{
+		{name: "auto uses repl for redirected IO", isTerminal: false, wantTUI: false},
+		{name: "auto uses tui for terminal IO", isTerminal: true, wantTUI: true},
+		{name: "config selects tui", configUI: "tui", isTerminal: true, wantTUI: true},
+		{name: "env overrides config", configUI: "repl", envUI: "tui", isTerminal: true, wantTUI: true},
+		{name: "cli overrides env and config", configUI: "tui", envUI: "tui", cliUI: "repl", isTerminal: true, wantTUI: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			configPath := writeCLIConfigWithUI(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1", test.configUI)
+
+			deps := defaultRunDependencies()
+			deps.subscribeInterrupts = func() interruptSubscription {
+				return interruptSubscription{stop: func() {}}
+			}
+			deps.detectTerminal = func(io.Reader, io.Writer) bool {
+				return test.isTerminal
+			}
+
+			var tuiCalls atomic.Int32
+			var sessionCalls atomic.Int32
+			var stores []*trackingSession
+			deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+				sessionCalls.Add(1)
+				store := &trackingSession{Session: session.NewMemory(session.Header{
+					Version: 1, ID: fmt.Sprintf("session-%d", sessionCalls.Load()), Workspace: workspace,
+					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+				})}
+				stores = append(stores, store)
+				return store, nil
+			}
+			deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+				tuiCalls.Add(1)
+				if info := backend.Info(); info.SessionID == "" {
+					t.Fatal("tui backend session info is empty")
+				}
+				return nil
+			}
+
+			args := []string{"--config", configPath, "--cwd", workspace}
+			if test.cliUI != "" {
+				args = append(args, "--ui", test.cliUI)
+			}
+			env := map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"}
+			if test.envUI != "" {
+				env["OTTO_UI"] = test.envUI
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), args, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(env), deps)
+			if code != 0 {
+				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if got := tuiCalls.Load(); test.wantTUI && got != 1 {
+				t.Fatalf("tui calls = %d, want 1", got)
+			} else if !test.wantTUI && got != 0 {
+				t.Fatalf("tui calls = %d, want 0", got)
+			}
+			if !test.wantTUI && !strings.Contains(stdout.String(), "Session: ") {
+				t.Fatalf("stdout = %q, want repl session banner", stdout.String())
+			}
+			if sessionCalls.Load() != 1 || len(stores) != 1 {
+				t.Fatalf("session calls = %d stores = %d, want 1", sessionCalls.Load(), len(stores))
+			}
+			if stores[0].closeCalls.Load() != 1 {
+				t.Fatalf("store close calls = %d, want 1", stores[0].closeCalls.Load())
+			}
+		})
+	}
+}
+
+func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return false }
+	var newSessionCalls atomic.Int32
+	var openSessionCalls atomic.Int32
+	var tuiCalls atomic.Int32
+	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		newSessionCalls.Add(1)
+		return nil, errors.New("new session should not be called")
+	}
+	deps.openSession = func(string, string, io.Writer) (session.Session, error) {
+		openSessionCalls.Add(1)
+		return nil, errors.New("open session should not be called")
+	}
+	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
+		tuiCalls.Add(1)
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 1 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if got, want := stderr.String(), "otto: --ui tui requires terminal stdin and stdout; use --ui repl for redirected input\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if newSessionCalls.Load() != 0 || openSessionCalls.Load() != 0 || tuiCalls.Load() != 0 {
+		t.Fatalf("new session calls = %d open session calls = %d tui calls = %d, want all zero", newSessionCalls.Load(), openSessionCalls.Load(), tuiCalls.Load())
 	}
 }
 
@@ -59,6 +181,7 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 		{name: "conflicting continue and resume", args: []string{"--continue", "--resume", "anything"}, want: "cannot be used together"},
 		{name: "invalid max turns", args: []string{"--max-turns", "0"}, want: "max-turns must be greater than zero"},
 		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid value"},
+		{name: "invalid ui mode", args: []string{"--ui", "popup"}, want: "must be one of auto, tui, repl"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -710,10 +833,19 @@ func (s *trackingSession) Close() error {
 }
 
 func writeCLIConfig(t *testing.T, providerName, keyEnv, baseURL string) string {
+	return writeCLIConfigWithUI(t, providerName, keyEnv, baseURL, "")
+}
+
+func writeCLIConfigWithUI(t *testing.T, providerName, keyEnv, baseURL, uiMode string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "otto.toml")
-	content := fmt.Sprintf(`default_profile = "test"
-[profiles.test]
+	content := "default_profile = \"test\"\n"
+	if uiMode != "" {
+		content += fmt.Sprintf(`[ui]
+mode = %q
+`, uiMode)
+	}
+	content += fmt.Sprintf(`[profiles.test]
 provider = %q
 base_url = %q
 model = "test-model"

@@ -154,6 +154,82 @@ func TestControllerNewSessionCallbacksMayInspectControllerState(t *testing.T) {
 	}
 }
 
+func TestControllerRunnerFactoryMaySynchronouslyCloseController(t *testing.T) {
+	current := &fakeSession{header: testHeader("old")}
+	replacement := &fakeSession{header: testHeader("new")}
+	var controller *Controller
+	var buildCalls int
+	var callbackErr error
+	var callbackMu sync.Mutex
+
+	recordCallbackErr := func(err error) {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		if callbackErr == nil {
+			callbackErr = err
+		}
+	}
+
+	controller, err := New(current, func() (session.Session, error) {
+		return replacement, nil
+	}, func(s session.Session) Runner {
+		buildCalls++
+		if buildCalls == 1 {
+			return runnerFunc(noopRun)
+		}
+		if s != replacement {
+			recordCallbackErr(fmt.Errorf("replacement build session = %#v, want replacement", s))
+		}
+		if err := controller.Close(); err != nil {
+			recordCallbackErr(fmt.Errorf("Close() error = %v, want nil", err))
+		}
+		return runnerFunc(noopRun)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newSessionDone := make(chan error, 1)
+	go func() { newSessionDone <- controller.NewSession() }()
+
+	select {
+	case err := <-newSessionDone:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("NewSession() error = %v, want ErrClosed", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("NewSession() timed out; synchronous Close likely deadlocked")
+	}
+
+	callbackMu.Lock()
+	err = callbackErr
+	callbackMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if buildCalls != 2 {
+		t.Fatalf("build calls = %d, want 2", buildCalls)
+	}
+	if current.CloseCalls() != 1 {
+		t.Fatalf("old close calls = %d, want 1", current.CloseCalls())
+	}
+	if replacement.CloseCalls() != 1 {
+		t.Fatalf("replacement close calls = %d, want 1", replacement.CloseCalls())
+	}
+	if info := controller.Info(); info.SessionID != "old" {
+		t.Fatalf("info = %#v, want closed old session info", info)
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatalf("Close() after callback close = %v, want nil", err)
+	}
+	if current.CloseCalls() != 1 {
+		t.Fatalf("old close calls after Close = %d, want 1", current.CloseCalls())
+	}
+	if replacement.CloseCalls() != 1 {
+		t.Fatalf("replacement close calls after Close = %d, want 1", replacement.CloseCalls())
+	}
+}
+
 func TestControllerCreatesReplacementBeforeClosingCurrent(t *testing.T) {
 	var order []string
 	current := &fakeSession{header: testHeader("old"), onClose: func() { order = append(order, "close-old") }}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/agent"
@@ -15,6 +16,8 @@ var (
 	ErrPromptActive = errors.New("prompt already active")
 	ErrClosed       = errors.New("controller is closed")
 )
+
+const controllerNewSessionFunc = "github.com/baiyuqing/otto/internal/app.(*Controller).NewSession"
 
 type Runner interface {
 	Run(context.Context, string, func(agent.Event)) error
@@ -40,19 +43,33 @@ type Backend interface {
 	History() []model.Message
 }
 
+type replacementPhase uint8
+
+const (
+	replacementPhaseCreating replacementPhase = iota + 1
+	replacementPhaseBuilding
+	replacementPhaseClosingCurrent
+)
+
+type replacementState struct {
+	done              chan struct{}
+	phase             replacementPhase
+	replacement       session.Session
+	replacementClosed bool
+}
+
 type Controller struct {
-	mu          sync.Mutex
-	current     session.Session
-	runner      Runner
-	create      SessionFactory
-	build       RunnerFactory
-	prompting   bool
-	replacing   bool
-	closed      bool
-	activeDone  chan struct{}
-	replaceDone chan struct{}
-	closeDone   chan struct{}
-	closeErr    error
+	mu         sync.Mutex
+	current    session.Session
+	runner     Runner
+	create     SessionFactory
+	build      RunnerFactory
+	prompting  bool
+	replace    *replacementState
+	closed     bool
+	activeDone chan struct{}
+	closeDone  chan struct{}
+	closeErr   error
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory) (*Controller, error) {
@@ -78,7 +95,7 @@ func (c *Controller) Prompt(ctx context.Context, text string, emit func(agent.Ev
 		c.mu.Unlock()
 		return ErrClosed
 	}
-	if c.prompting || c.replacing {
+	if c.prompting || c.replace != nil {
 		c.mu.Unlock()
 		return ErrPromptActive
 	}
@@ -107,47 +124,106 @@ func (c *Controller) NewSession() error {
 		c.mu.Unlock()
 		return ErrClosed
 	}
-	if c.prompting || c.replacing {
+	if c.prompting || c.replace != nil {
 		c.mu.Unlock()
 		return ErrPromptActive
 	}
-	done := make(chan struct{})
-	c.replacing = true
-	c.replaceDone = done
+	state := &replacementState{done: make(chan struct{}), phase: replacementPhaseCreating}
+	c.replace = state
 	current := c.current
 	c.mu.Unlock()
 
 	replacement, err := c.create()
 	if err != nil {
-		c.finishReplacing(done)
+		c.finishReplacing(state)
 		return err
 	}
 	if replacement == nil {
-		c.finishReplacing(done)
+		c.finishReplacing(state)
 		return errors.New("session factory returned nil session")
 	}
 
+	c.mu.Lock()
+	if c.replace != state {
+		closed := c.closed
+		c.mu.Unlock()
+		_ = replacement.Close()
+		if closed {
+			return ErrClosed
+		}
+		return ErrClosed
+	}
+	state.replacement = replacement
+	state.phase = replacementPhaseBuilding
+	c.mu.Unlock()
+
 	runner := c.build(replacement)
 	if runner == nil {
-		_ = replacement.Close()
-		c.finishReplacing(done)
+		c.mu.Lock()
+		same := c.replace == state
+		replacementClosed := state.replacementClosed
+		closed := c.closed
+		if same {
+			c.finishReplacingLocked(state)
+		}
+		c.mu.Unlock()
+		if !replacementClosed {
+			_ = replacement.Close()
+		}
+		if closed {
+			return ErrClosed
+		}
 		return errors.New("runner factory returned nil runner")
 	}
 
-	if err := current.Close(); err != nil {
-		_ = replacement.Close()
-		c.mu.Lock()
-		c.finishClosedLocked(err)
-		c.finishReplacingLocked(done)
+	c.mu.Lock()
+	if c.replace != state {
+		closed := c.closed
+		replacementClosed := state.replacementClosed
 		c.mu.Unlock()
+		if !replacementClosed {
+			_ = replacement.Close()
+		}
+		if closed {
+			return ErrClosed
+		}
+		return ErrClosed
+	}
+	state.phase = replacementPhaseClosingCurrent
+	c.mu.Unlock()
+
+	if err := current.Close(); err != nil {
+		c.mu.Lock()
+		same := c.replace == state
+		replacementClosed := state.replacementClosed
+		if same {
+			c.finishClosedLocked(err)
+			c.finishReplacingLocked(state)
+		}
+		c.mu.Unlock()
+		if !replacementClosed {
+			_ = replacement.Close()
+		}
 		return err
 	}
 
 	c.mu.Lock()
+	if c.replace != state {
+		closed := c.closed
+		replacementClosed := state.replacementClosed
+		c.mu.Unlock()
+		if !replacementClosed {
+			_ = replacement.Close()
+		}
+		if closed {
+			return ErrClosed
+		}
+		return ErrClosed
+	}
 	c.current = replacement
 	c.runner = runner
 	closed := c.closed
-	c.finishReplacingLocked(done)
+	c.finishReplacingLocked(state)
 	c.mu.Unlock()
 	if closed {
 		return ErrClosed
@@ -199,7 +275,36 @@ func (c *Controller) Close() error {
 	done := make(chan struct{})
 	c.closeDone = done
 	activeDone := c.activeDone
-	replaceDone := c.replaceDone
+
+	if activeDone == nil && c.canFinishReplacementCloseLocked() {
+		replace := c.replace
+		current := c.current
+		replacement := replace.replacement
+		replace.replacementClosed = true
+		c.finishReplacingLocked(replace)
+		c.mu.Unlock()
+
+		err := current.Close()
+		if replacement != nil {
+			if closeErr := replacement.Close(); err == nil {
+				err = closeErr
+			}
+		}
+
+		c.mu.Lock()
+		if c.closeErr == nil {
+			c.closeErr = err
+		}
+		err = c.closeErr
+		close(done)
+		c.mu.Unlock()
+		return err
+	}
+
+	var replaceDone chan struct{}
+	if c.replace != nil {
+		replaceDone = c.replace.done
+	}
 	c.mu.Unlock()
 
 	if activeDone != nil {
@@ -234,6 +339,24 @@ func (c *Controller) Close() error {
 	return err
 }
 
+func (c *Controller) canFinishReplacementCloseLocked() bool {
+	if c.replace == nil || c.replace.phase != replacementPhaseBuilding || c.replace.replacement == nil {
+		return false
+	}
+	pcs := make([]uintptr, 32)
+	n := runtime.Callers(3, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		frame, more := frames.Next()
+		if frame.Function == controllerNewSessionFunc {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
 func (c *Controller) finishClosedLocked(err error) {
 	c.closed = true
 	c.current = nil
@@ -245,18 +368,18 @@ func (c *Controller) finishClosedLocked(err error) {
 	}
 }
 
-func (c *Controller) finishReplacing(done chan struct{}) {
+func (c *Controller) finishReplacing(state *replacementState) {
 	c.mu.Lock()
-	c.finishReplacingLocked(done)
+	c.finishReplacingLocked(state)
 	c.mu.Unlock()
 }
 
-func (c *Controller) finishReplacingLocked(done chan struct{}) {
-	c.replacing = false
-	if c.replaceDone == done {
-		c.replaceDone = nil
-		close(done)
+func (c *Controller) finishReplacingLocked(state *replacementState) {
+	if c.replace != state {
+		return
 	}
+	c.replace = nil
+	close(state.done)
 }
 
 func cloneMessages(messages []model.Message) []model.Message {

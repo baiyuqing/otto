@@ -730,6 +730,65 @@ func TestResumeResultStaleSuccessWithMissingCommittedPathFailsClosed(t *testing.
 	}
 }
 
+func TestResumeResultForgedValidCommittedStateFailsClosedForInvalidCommittedPath(t *testing.T) {
+	tests := []struct {
+		name          string
+		committedPath string
+	}{
+		{name: "empty", committedPath: ""},
+		{name: "oversized", committedPath: strings.Repeat("/", resumeMaxPathBytes+1)},
+		{name: "control-bearing", committedPath: "/sessions/unsafe\n.jsonl"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			listCtx, cancelList := context.WithCancel(context.Background())
+			backend := &resumeBackend{
+				info:    app.Info{Profile: "profile", Model: "model", SessionID: "committed", SessionPath: "/sessions/committed.jsonl"},
+				history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "current transcript"}}}},
+			}
+			m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
+			m.statusText = "keep status"
+			m.resume = resumePickerState{
+				mode:        resumeLoading,
+				generation:  2,
+				listPending: true,
+				listCancel:  cancelList,
+			}
+
+			updated, quit := m.Update(sessionResumeResultMsg{
+				generation:         1,
+				path:               "/sessions/request.jsonl",
+				result:             app.ResumeResult{SessionPath: tc.committedPath, Warnings: []session.Warning{{Message: "forged success warning"}}},
+				committedPathState: resumeCommittedPathValid,
+			})
+			got := updated.(Model)
+			if quit == nil {
+				t.Fatal("quit command = nil")
+			}
+			if _, ok := quit().(tea.QuitMsg); !ok {
+				t.Fatalf("quit command message = %T, want tea.QuitMsg", quit())
+			}
+			if err := listCtx.Err(); !errors.Is(err, context.Canceled) {
+				t.Fatalf("list context error = %v, want context.Canceled before quit", err)
+			}
+			if got.statusText != errResumeReconciliationUnsafe.Error() {
+				t.Fatalf("status = %q, want %q", got.statusText, errResumeReconciliationUnsafe.Error())
+			}
+			if (tc.committedPath != "" && strings.Contains(got.statusText, tc.committedPath)) || strings.Contains(got.statusText, "forged success warning") {
+				t.Fatalf("status retained forged payload: %q", got.statusText)
+			}
+			assertResumeSingleLineControlSafe(t, "status", got.statusText)
+			if got.fatalErr == nil {
+				t.Fatal("fatalErr = nil, want fail-closed reconciliation error")
+			}
+			if got.resume.mode != resumeLoading || !got.resume.listPending || got.resume.generation != 2 {
+				t.Fatalf("active list ownership was reset: %#v", got.resume)
+			}
+		})
+	}
+}
+
 func TestResumeWorkersDetachBoundedPayloadStorage(t *testing.T) {
 	path := hugeBackedResumeString("/sessions/detached.jsonl")
 	id := hugeBackedResumeString("detached-id")

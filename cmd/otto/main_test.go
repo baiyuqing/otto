@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
@@ -53,6 +54,7 @@ func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
 		{name: "auto uses tui for terminal IO", isTerminal: true, wantTUI: true},
 		{name: "config selects tui", configUI: "tui", isTerminal: true, wantTUI: true},
 		{name: "env overrides config", configUI: "repl", envUI: "tui", isTerminal: true, wantTUI: true},
+		{name: "explicit auto overrides env", envUI: "tui", cliUI: "auto", isTerminal: false, wantTUI: false},
 		{name: "cli overrides env and config", configUI: "tui", envUI: "tui", cliUI: "repl", isTerminal: true, wantTUI: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -117,6 +119,137 @@ func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
 				t.Fatalf("store close calls = %d, want 1", stores[0].closeCalls.Load())
 			}
 		})
+	}
+}
+
+func TestRunTUIProgramErrorReturnsOne(t *testing.T) {
+	programErr := errors.New("injected program failure")
+	for _, test := range []struct {
+		name     string
+		closeErr error
+		want     string
+	}{
+		{name: "program error", want: "otto: TUI: injected program failure\n"},
+		{name: "close error takes precedence", closeErr: errors.New("injected close failure"), want: "otto: close session: injected close failure\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+
+			deps := defaultRunDependencies()
+			deps.subscribeInterrupts = func() interruptSubscription {
+				return interruptSubscription{stop: func() {}}
+			}
+			deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+			store := &trackingSession{Session: session.NewMemory(session.Header{
+				Version: 1, ID: "tui-error", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
+			}), closeErr: test.closeErr}
+			deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+				return store, nil
+			}
+			deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
+				return programErr
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+			}), deps)
+			if code != 1 {
+				t.Fatalf("code = %d, stderr = %q, want 1", code, stderr.String())
+			}
+			if got := stderr.String(); got != test.want {
+				t.Fatalf("stderr = %q, want %q", got, test.want)
+			}
+			if got := store.closeCalls.Load(); got != 1 {
+				t.Fatalf("store close calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestRunTUIProgramErrorCancelsActivePromptBeforeClosing(t *testing.T) {
+	programErr := errors.New("injected program failure")
+	runnerStarted := make(chan struct{})
+	runnerCanceled := make(chan struct{})
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	store := &trackingSession{Session: session.NewMemory(session.Header{
+		Version: 1, ID: "active-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
+	})}
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		return store, nil
+	}
+	deps.newRunner = func(session.Session) app.Runner {
+		return commandRunnerFunc(func(ctx context.Context, _ string, _ func(agent.Event)) error {
+			close(runnerStarted)
+			<-ctx.Done()
+			close(runnerCanceled)
+			return ctx.Err()
+		})
+	}
+	promptDone := make(chan error, 1)
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		go func() {
+			promptDone <- backend.Prompt(ctx, "wait for cancellation", nil)
+		}()
+		select {
+		case <-runnerStarted:
+			return programErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	processCtx, cancelProcess := context.WithCancel(context.Background())
+	defer cancelProcess()
+	var stdout, stderr bytes.Buffer
+	codeDone := make(chan int, 1)
+	go func() {
+		codeDone <- runWithDependencies(processCtx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+		}), deps)
+	}()
+
+	select {
+	case code := <-codeDone:
+		if code != 1 {
+			t.Fatalf("code = %d, stderr = %q, want 1", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		cancelProcess()
+		select {
+		case <-codeDone:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("run did not cancel the active prompt before closing the controller")
+	}
+	if got, want := stderr.String(), "otto: TUI: injected program failure\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	select {
+	case <-runnerCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("active runner context was not canceled")
+	}
+	select {
+	case err := <-promptDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Prompt() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active prompt did not terminate")
+	}
+	if got := store.closeCalls.Load(); got != 1 {
+		t.Fatalf("store close calls = %d, want 1", got)
 	}
 }
 
@@ -814,9 +947,16 @@ func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
 	}
 }
 
+type commandRunnerFunc func(context.Context, string, func(agent.Event)) error
+
+func (f commandRunnerFunc) Run(ctx context.Context, text string, emit func(agent.Event)) error {
+	return f(ctx, text, emit)
+}
+
 type trackingSession struct {
 	session.Session
 	appendErr  error
+	closeErr   error
 	closeCalls atomic.Int32
 }
 
@@ -829,7 +969,10 @@ func (s *trackingSession) Append(ctx context.Context, message model.Message) err
 
 func (s *trackingSession) Close() error {
 	s.closeCalls.Add(1)
-	return s.Session.Close()
+	if err := s.Session.Close(); err != nil {
+		return err
+	}
+	return s.closeErr
 }
 
 func writeCLIConfig(t *testing.T, providerName, keyEnv, baseURL string) string {

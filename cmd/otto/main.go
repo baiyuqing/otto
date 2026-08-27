@@ -50,6 +50,7 @@ type runDependencies struct {
 	newSession          func(bool, string, string, config.Runtime) (session.Session, error)
 	detectTerminal      terminalDetector
 	runTUI              func(context.Context, io.Reader, io.Writer, app.Backend) error
+	newRunner           app.RunnerFactory
 }
 
 func defaultRunDependencies() runDependencies {
@@ -211,14 +212,18 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
+	buildRunner := deps.newRunner
+	if buildRunner == nil {
+		buildRunner = func(current session.Session) app.Runner {
+			client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
+			return agent.New(client, registry, current, agent.Options{
+				Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
+			})
+		}
+	}
 	controller, err := app.New(initialSession, func() (session.Session, error) {
 		return deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
-	}, func(current session.Session) app.Runner {
-		client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
-		return agent.New(client, registry, current, agent.Options{
-			Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
-		})
-	})
+	}, buildRunner)
 	if err != nil {
 		_ = initialSession.Close()
 		return fail(stderr, "%v", err)
@@ -291,10 +296,13 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "unsupported frontend %q", frontend)
 	}
 
+	processCanceledBeforeFrontendExit := processCtx.Err() != nil
+	frontendCanceled := errors.Is(runErr, context.Canceled)
+	cancelProcess()
 	if err := closeController(); err != nil {
 		return fail(stderr, "close session: %v", err)
 	}
-	if processCtx.Err() != nil || errors.Is(runErr, context.Canceled) {
+	if processCanceledBeforeFrontendExit || frontendCanceled {
 		return 130
 	}
 	if frontend == frontendREPL && repl.IsCommandError(runErr, "/new") {

@@ -232,7 +232,7 @@ func TestControllerRunnerFactoryMaySynchronouslyCloseController(t *testing.T) {
 	}
 }
 
-func TestControllerInfoUsesActiveRuntimeAndDynamicSessionMetadata(t *testing.T) {
+func TestControllerInfoUsesActiveRuntimeUntilNewSessionRefreshesFromHeader(t *testing.T) {
 	current := &fakeSession{header: session.Header{
 		Version: 1, ID: "old", Workspace: "/old-workspace", Provider: "openai-compatible", Profile: "persisted", Model: "persisted-model",
 	}}
@@ -248,21 +248,78 @@ func TestControllerInfoUsesActiveRuntimeAndDynamicSessionMetadata(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	assertInfo := func(wantID, wantPath, wantWorkspace string) {
+	assertInfo := func(wantID, wantPath, wantWorkspace, wantProfile, wantModel string) {
 		t.Helper()
 		got := controller.Info()
 		if got.SessionID != wantID || got.SessionPath != wantPath || got.Workspace != wantWorkspace {
 			t.Fatalf("dynamic info = %#v", got)
 		}
-		if got.Provider != "openai-compatible" || got.Profile != "active" || got.Model != "active-model" {
-			t.Fatalf("runtime info = %#v, want active resolved values", got)
+		if got.Provider != "openai-compatible" || got.Profile != wantProfile || got.Model != wantModel {
+			t.Fatalf("runtime info = %#v, want profile %q model %q", got, wantProfile, wantModel)
 		}
 	}
-	assertInfo("old", "/sessions/old.jsonl", "/old-workspace")
+	assertInfo("old", "/sessions/old.jsonl", "/old-workspace", "active", "active-model")
 	if err := controller.NewSession(); err != nil {
 		t.Fatal(err)
 	}
-	assertInfo("new", "/sessions/new.jsonl", "/new-workspace")
+	assertInfo("new", "/sessions/new.jsonl", "/new-workspace", "header-next", "header-next-model")
+}
+
+func TestControllerNewSessionAfterResumeResetsRuntimeInfoAndRunnerFromNewHeader(t *testing.T) {
+	initial := &fakeSession{header: session.Header{
+		Version: 1, ID: "initial", Workspace: "/workspace", Provider: "openai-compatible", Profile: "startup", Model: "startup-model",
+	}}
+	resumed := &fakeSession{header: session.Header{
+		Version: 1, ID: "resumed", Workspace: "/workspace", Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model",
+	}}
+	fresh := &fakeSession{header: session.Header{
+		Version: 1, ID: "fresh", Workspace: "/workspace", Provider: "openai-compatible", Profile: "startup", Model: "startup-model",
+	}}
+	initialRunner := &recordingRunner{}
+	resumedRunner := &recordingRunner{}
+	freshRunner := &recordingRunner{}
+	buildCalls := 0
+	controller, err := New(initial, func() (session.Session, error) {
+		return fresh, nil
+	}, func(current session.Session) Runner {
+		buildCalls++
+		switch current {
+		case initial:
+			return initialRunner
+		case fresh:
+			return freshRunner
+		default:
+			return nil
+		}
+	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "startup", Model: "startup-model"}), WithSessionBrowser(nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{
+				Session: resumed, Runner: resumedRunner,
+				RuntimeInfo: RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model"},
+			}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := controller.ResumeSession(context.Background(), resumed.Path()); err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Info(); got.SessionID != "resumed" || got.Profile != "resumed" || got.Model != "resumed-model" {
+		t.Fatalf("info after resume = %#v", got)
+	}
+	if err := controller.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Info(); got.SessionID != "fresh" || got.Provider != fresh.header.Provider || got.Profile != fresh.header.Profile || got.Model != fresh.header.Model {
+		t.Fatalf("info after new = %#v, want fresh header runtime", got)
+	}
+	if err := controller.Prompt(context.Background(), "use startup runner", nil); err != nil {
+		t.Fatal(err)
+	}
+	if initialRunner.Calls() != 0 || resumedRunner.Calls() != 0 || freshRunner.Calls() != 1 || buildCalls != 2 {
+		t.Fatalf("runner calls = initial %d resumed %d fresh %d; builds = %d", initialRunner.Calls(), resumedRunner.Calls(), freshRunner.Calls(), buildCalls)
+	}
 }
 
 func TestControllerCreatesReplacementBeforeClosingCurrent(t *testing.T) {

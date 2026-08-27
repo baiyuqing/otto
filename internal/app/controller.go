@@ -205,8 +205,17 @@ func (c *Controller) NewSession() error {
 		if runner == nil {
 			return SessionReplacement{Session: replacement}, errors.New("runner factory returned nil runner")
 		}
-		return SessionReplacement{Session: replacement, Runner: runner}, nil
-	}, false, false)
+		header := replacement.Header()
+		return SessionReplacement{
+			Session: replacement,
+			Runner:  runner,
+			RuntimeInfo: RuntimeInfo{
+				Provider: header.Provider,
+				Profile:  header.Profile,
+				Model:    header.Model,
+			},
+		}, nil
+	}, true, false)
 	return err
 }
 

@@ -305,15 +305,15 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	}
 	deps.detectTerminal = func(io.Reader, io.Writer) bool { return false }
 	var newSessionCalls atomic.Int32
-	var openSessionCalls atomic.Int32
+	var prepareSessionCalls atomic.Int32
 	var tuiCalls atomic.Int32
 	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
 		newSessionCalls.Add(1)
 		return nil, errors.New("new session should not be called")
 	}
-	deps.openSession = func(string, string) (session.Session, []session.Warning, error) {
-		openSessionCalls.Add(1)
-		return nil, nil, errors.New("open session should not be called")
+	deps.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		prepareSessionCalls.Add(1)
+		return nil, errors.New("prepare session should not be called")
 	}
 	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
 		tuiCalls.Add(1)
@@ -330,8 +330,8 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	if got, want := stderr.String(), "otto: --ui tui requires terminal stdin and stdout; use --ui repl for redirected input\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
 	}
-	if newSessionCalls.Load() != 0 || openSessionCalls.Load() != 0 || tuiCalls.Load() != 0 {
-		t.Fatalf("new session calls = %d open session calls = %d tui calls = %d, want all zero", newSessionCalls.Load(), openSessionCalls.Load(), tuiCalls.Load())
+	if newSessionCalls.Load() != 0 || prepareSessionCalls.Load() != 0 || tuiCalls.Load() != 0 {
+		t.Fatalf("new session calls = %d prepare session calls = %d tui calls = %d, want all zero", newSessionCalls.Load(), prepareSessionCalls.Load(), tuiCalls.Load())
 	}
 }
 
@@ -374,10 +374,21 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "https://example.test/v1?tenant=x")
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resume")
 	deps := defaultRunDependencies()
-	var openCalls atomic.Int32
-	deps.openSession = func(string, string) (session.Session, []session.Warning, error) {
-		openCalls.Add(1)
-		return nil, nil, errors.New("session must not open")
+	var prepareCalls, activateCalls atomic.Int32
+	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+		prepareCalls.Add(1)
+		prepared, err := prepareSession(ctx, path, workspace)
+		if err != nil {
+			return nil, err
+		}
+		return &fakePreparedSession{
+			info: prepared.Info(),
+			activate: func(context.Context) (session.Session, []session.Warning, error) {
+				activateCalls.Add(1)
+				return nil, nil, errors.New("session must not activate")
+			},
+			close: prepared.Close,
+		}, nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -387,8 +398,8 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	if code == 0 || !strings.Contains(stderr.String(), "base_url") {
 		t.Fatalf("code = %d, stderr = %q, want base_url error", code, stderr.String())
 	}
-	if openCalls.Load() != 0 {
-		t.Fatalf("open session calls = %d, want 0", openCalls.Load())
+	if prepareCalls.Load() != 1 || activateCalls.Load() != 0 {
+		t.Fatalf("prepare calls = %d activation calls = %d, want 1 and 0", prepareCalls.Load(), activateCalls.Load())
 	}
 }
 
@@ -454,12 +465,19 @@ func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
 	}
 	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
 	var stdout, stderr bytes.Buffer
-	deps.openSession = func(path, workspace string) (session.Session, []session.Warning, error) {
-		store, warnings, err := openSession(path, workspace)
+	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+		prepared, err := prepareSession(ctx, path, workspace)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return store, append(warnings, session.Warning{Message: "startup warning"}), nil
+		return &fakePreparedSession{
+			info: prepared.Info(),
+			activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
+				store, warnings, err := prepared.Activate(ctx)
+				return store, append(warnings, session.Warning{Message: "startup warning"}), err
+			},
+			close: prepared.Close,
+		}, nil
 	}
 	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, _ app.Backend) error {
 		if !strings.Contains(stderr.String(), "warning: startup warning\n") {
@@ -570,6 +588,66 @@ func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
 	}
 }
 
+func TestRunResumeRejectsAtomicReplacementOfPreparedSessionWithoutMutation(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	resumePath := createCLISession(t, root, workspace, "prepared-startup")
+	replacementPath := createCLISession(t, root, workspace, "path-replacement")
+	replacementBefore, err := os.ReadFile(replacementPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+		prepared, err := prepareSession(ctx, path, workspace)
+		if err != nil {
+			return nil, err
+		}
+		return &fakePreparedSession{
+			info: prepared.Info(),
+			activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
+				if err := os.Rename(replacementPath, resumePath); err != nil {
+					return nil, nil, err
+				}
+				return prepared.Activate(ctx)
+			},
+			close: prepared.Close,
+		}, nil
+	}
+	var tuiCalls atomic.Int32
+	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
+		tuiCalls.Add(1)
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui",
+	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 1 || !strings.Contains(stderr.String(), "identity changed") {
+		t.Fatalf("code = %d, stderr = %q, want prepared identity error", code, stderr.String())
+	}
+	if tuiCalls.Load() != 0 {
+		t.Fatalf("TUI calls = %d, want 0", tuiCalls.Load())
+	}
+	after, err := os.ReadFile(resumePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, replacementBefore) {
+		t.Fatal("failed startup activation mutated the replacement path")
+	}
+}
+
 func TestRunResumeTUIInfoUsesResolvedRuntimeOverrides(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
@@ -669,6 +747,98 @@ api_key_env = "RESUMED_KEY"
 	}
 	if defaultRequests.Load() != 0 || resumedRequests.Load() != 1 || !strings.Contains(stdout.String(), "resumed profile") {
 		t.Fatalf("default requests = %d, resumed requests = %d, stdout = %q", defaultRequests.Load(), resumedRequests.Load(), stdout.String())
+	}
+}
+
+func TestRunNewAfterResumeResetsStartupRuntimeInfoRunnerAndHeader(t *testing.T) {
+	var defaultRequests, resumedRequests atomic.Int32
+	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultRequests.Add(1)
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode default request: %v", err)
+		}
+		if request.Model != "startup-model" || r.Header.Get("Authorization") != "Bearer startup-secret" {
+			t.Errorf("default request model/auth = %q / %q", request.Model, r.Header.Get("Authorization"))
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"startup runner"},"finish_reason":"stop"}]}`)
+	}))
+	defer defaultServer.Close()
+	resumedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resumedRequests.Add(1)
+		writeSSE(w, `{"choices":[{"delta":{"content":"resumed runner"},"finish_reason":"stop"}]}`)
+	}))
+	defer resumedServer.Close()
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	resumedStore, err := session.Create(filepath.Join(home, ".otto", "sessions"), session.Header{
+		Version: session.CurrentVersion, ID: "resumed", Workspace: workspace, Provider: "openai-compatible",
+		Profile: "resumed", Model: "resumed-model", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumePath := resumedStore.Path()
+	if err := resumedStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "otto.toml")
+	configContent := fmt.Sprintf(`default_profile = "startup"
+[profiles.startup]
+provider = "openai-compatible"
+base_url = %q
+model = "startup-model"
+api_key_env = "STARTUP_KEY"
+[profiles.resumed]
+provider = "openai-compatible"
+base_url = %q
+model = "profile-resumed-model"
+api_key_env = "RESUMED_KEY"
+`, defaultServer.URL, resumedServer.URL)
+	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		browser, ok := backend.(app.SessionBrowser)
+		if !ok {
+			t.Fatal("backend does not expose SessionBrowser")
+		}
+		if _, err := browser.ResumeSession(ctx, resumePath); err != nil {
+			return err
+		}
+		if got := backend.Info(); got.SessionID != "resumed" || got.Profile != "resumed" || got.Model != "resumed-model" {
+			t.Fatalf("info after resume = %#v", got)
+		}
+		if err := backend.NewSession(); err != nil {
+			return err
+		}
+		got := backend.Info()
+		if got.SessionID == "resumed" || got.Provider != "openai-compatible" || got.Profile != "startup" || got.Model != "startup-model" {
+			t.Fatalf("info after new = %#v", got)
+		}
+		return backend.Prompt(ctx, "use startup runtime", nil)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath, "--cwd", workspace, "--ui", "tui",
+	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "STARTUP_KEY": "startup-secret", "RESUMED_KEY": "resumed-secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if defaultRequests.Load() != 1 || resumedRequests.Load() != 0 {
+		t.Fatalf("requests = startup %d resumed %d, want 1 and 0", defaultRequests.Load(), resumedRequests.Load())
 	}
 }
 
@@ -856,11 +1026,16 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	}
 }
 
-func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *testing.T) {
+func TestRunKeepsEveryProfileCredentialOutOfBashEventsSessionAndProviderHistory(t *testing.T) {
 	resolvedCredential := fmt.Sprintf("resolved-%d", time.Now().UnixNano())
+	inactiveCredential := fmt.Sprintf("inactive-%d", time.Now().UnixNano())
 	fallbackCredential := fmt.Sprintf("fallback-%d", time.Now().UnixNano())
-	const profileKeyEnv = "OTTO_E2E_PROFILE_KEY"
+	const (
+		profileKeyEnv  = "OTTO_E2E_PROFILE_KEY"
+		inactiveKeyEnv = "OTTO_E2E_INACTIVE_KEY"
+	)
 	t.Setenv(profileKeyEnv, resolvedCredential)
+	t.Setenv(inactiveKeyEnv, inactiveCredential)
 	t.Setenv("OTTO_API_KEY", fallbackCredential)
 	t.Setenv("OTTO_E2E_UNRELATED", "preserved-environment")
 
@@ -891,7 +1066,7 @@ func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *t
 		current := requestCount
 		mu.Unlock()
 		if current == 1 {
-			command := "env; printf 'reconstructed='; cat .credential-part-1 .credential-part-2"
+			command := "env | grep -E '^OTTO_E2E_(.*_KEY|UNRELATED)=' || true; printf 'reconstructed='; cat .credential-part-1 .credential-part-2"
 			writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`, fmt.Sprintf(`{"command":%q}`, command)))
 			return
 		}
@@ -899,10 +1074,25 @@ func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *t
 	}))
 	defer server.Close()
 
-	configPath := writeCLIConfig(t, "openai-compatible", profileKeyEnv, server.URL)
+	configPath := filepath.Join(t.TempDir(), "otto.toml")
+	configContent := fmt.Sprintf(`default_profile = "active"
+[profiles.active]
+provider = "openai-compatible"
+base_url = %q
+model = "test-model"
+api_key_env = %q
+[profiles.inactive]
+provider = "openai-compatible"
+base_url = "https://inactive.example/v1"
+model = "inactive-model"
+api_key_env = %q
+`, server.URL, profileKeyEnv, inactiveKeyEnv)
+	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check credentials\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
-		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, "OTTO_API_KEY": fallbackCredential,
+		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, inactiveKeyEnv: inactiveCredential, "OTTO_API_KEY": fallbackCredential,
 	}))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
@@ -921,7 +1111,7 @@ func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *t
 	for location, content := range map[string]string{
 		"stdout": stdout.String(), "stderr": stderr.String(), "JSONL": string(persisted), "provider request 1": bodies[0], "provider request 2": bodies[1],
 	} {
-		for _, forbidden := range []string{resolvedCredential, fallbackCredential, profileKeyEnv, "OTTO_API_KEY"} {
+		for _, forbidden := range []string{resolvedCredential, inactiveCredential, fallbackCredential, profileKeyEnv, inactiveKeyEnv, "OTTO_API_KEY"} {
 			if strings.Contains(content, forbidden) {
 				t.Fatalf("%s leaked protected credential data %q", location, forbidden)
 			}

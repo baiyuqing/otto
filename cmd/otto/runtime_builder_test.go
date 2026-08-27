@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -54,6 +56,32 @@ func TestRuntimeBuilderResolveSessionIgnoresProcessModelOverrides(t *testing.T) 
 	}
 	if runtime.Provider != "openai-compatible" || runtime.Model != "stored-model" {
 		t.Fatalf("runtime = %#v", redactedRuntime(runtime))
+	}
+}
+
+func TestRuntimeBuilderRejectsBaseURLUserinfoWithBoundedRedactedError(t *testing.T) {
+	username := "userinfo-name"
+	password := "userinfo-" + strings.Repeat("secret", 8<<10)
+	file := config.File{
+		DefaultProfile: "default",
+		Profiles: map[string]config.Profile{
+			"default": {
+				Provider: "openai-compatible", Model: "test-model", APIKeyEnv: "DEFAULT_KEY",
+				BaseURL: "https://" + username + ":" + password + "@example.test/v1",
+			},
+		},
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+
+	_, err := builder.resolveSession(session.RuntimeMetadata{Profile: "default", Provider: "openai-compatible", Model: "stored-model"})
+	if err == nil || !strings.Contains(err.Error(), "invalid base_url") {
+		t.Fatalf("resolveSession() error = %v, want invalid base_url", err)
+	}
+	if strings.Contains(err.Error(), username) || strings.Contains(err.Error(), password) {
+		t.Fatalf("resolveSession() leaked URL userinfo: %.200s", err)
+	}
+	if len(err.Error()) > 512 {
+		t.Fatalf("resolveSession() error length = %d, want <= 512", len(err.Error()))
 	}
 }
 
@@ -121,8 +149,18 @@ func TestRuntimeBuilderOpenReplacementRejectsInvalidRuntimeBeforeOpeningCandidat
 			if tt.environment != nil {
 				builder.environment = tt.environment
 			}
-			builder.openSession = func(string, string) (session.Session, []session.Warning, error) {
-				return nil, nil, errors.New("openSession must not run")
+			builder.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+				prepared, err := prepareSession(ctx, path, workspace)
+				if err != nil {
+					return nil, err
+				}
+				return &fakePreparedSession{
+					info: prepared.Info(),
+					activate: func(context.Context) (session.Session, []session.Warning, error) {
+						return nil, nil, errors.New("activation must not run")
+					},
+					close: prepared.Close,
+				}, nil
 			}
 
 			_, err := builder.openReplacement(context.Background(), tt.path)
@@ -138,18 +176,45 @@ func TestRuntimeBuilderOpenReplacementRejectsInvalidRuntimeBeforeOpeningCandidat
 	}
 }
 
+func TestRuntimeBuilderInvalidRuntimeAbandonsPreparedFileWithoutMutation(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	path := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{
+		Version: session.CurrentVersion, ID: "abandoned-invalid-runtime", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "missing", Model: "stored-model", CreatedAt: time.Now().UTC(),
+	})
+	before := bytes.TrimSuffix(mustReadFile(t, path), []byte{'\n'})
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := builder.openReplacement(context.Background(), path)
+	if err == nil || !strings.Contains(err.Error(), `profile "missing" not found`) {
+		t.Fatalf("openReplacement() error = %v, want missing profile", err)
+	}
+	if after := mustReadFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("invalid runtime activation path mutated repairable session")
+	}
+}
+
 func TestRuntimeBuilderOpenReplacementReturnsWarningsAndRuntimeInfo(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default", "resumed"))
 	path := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{Version: session.CurrentVersion, ID: "resumed-session", Workspace: builder.workspacePath, Provider: "openai-compatible", Profile: "resumed", Model: "stored-model", CreatedAt: time.Now().UTC()})
 	warnings := []session.Warning{{Message: "repaired dangling tool call"}}
 	var captured config.Runtime
 
-	builder.openSession = func(path, workspace string) (session.Session, []session.Warning, error) {
-		store, _, err := openSession(path, workspace)
+	builder.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+		prepared, err := prepareSession(ctx, path, workspace)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return store, warnings, nil
+		return &fakePreparedSession{
+			info: prepared.Info(),
+			activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
+				store, _, err := prepared.Activate(ctx)
+				return store, warnings, err
+			},
+			close: prepared.Close,
+		}, nil
 	}
 	builder.buildRunnerOverride = func(current session.Session, runtime config.Runtime) (app.Runner, error) {
 		captured = runtime
@@ -176,11 +241,82 @@ func TestRuntimeBuilderOpenReplacementReturnsWarningsAndRuntimeInfo(t *testing.T
 	}
 }
 
+func TestRuntimeBuilderActivationErrorClosesReturnedCandidateOnce(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	path := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{
+		Version: session.CurrentVersion, ID: "activate-error", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
+	})
+	candidate := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	activateErr := errors.New("activate failed after returning candidate")
+	builder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		return &fakePreparedSession{
+			info: session.SessionInfo{Path: path, ID: "activate-error", CWD: builder.workspacePath, Profile: "default", Provider: "openai-compatible", Model: "stored-model"},
+			activate: func(context.Context) (session.Session, []session.Warning, error) {
+				return candidate, nil, activateErr
+			},
+		}, nil
+	}
+
+	if _, err := builder.openReplacement(context.Background(), path); !errors.Is(err, activateErr) {
+		t.Fatalf("openReplacement() error = %v, want activation error", err)
+	}
+	if candidate.closeCalls.Load() != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	}
+}
+
+func TestRuntimeBuilderRejectsActivatedSessionMetadataMismatchAndClosesCandidate(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	path := filepath.Join(builder.sessionRoot, "requested.jsonl")
+	candidate := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "different", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "different-model", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	builder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		return &fakePreparedSession{
+			info: session.SessionInfo{Path: path, ID: "expected", CWD: builder.workspacePath, Profile: "default", Provider: "openai-compatible", Model: "stored-model"},
+			activate: func(context.Context) (session.Session, []session.Warning, error) {
+				return candidate, nil, nil
+			},
+		}, nil
+	}
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return nil, errors.New("runner must not build for mismatched metadata")
+	}
+
+	_, err := builder.openReplacement(context.Background(), path)
+	if err == nil || !strings.Contains(err.Error(), "metadata changed") {
+		t.Fatalf("openReplacement() error = %v, want metadata mismatch", err)
+	}
+	if candidate.closeCalls.Load() != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	}
+}
+
 func TestRuntimeBuilderFailureClosesCandidateStore(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 	candidate := &trackedReplacementSession{Session: createOpenPiStore(t, builder.sessionRoot, builder.workspacePath, "candidate"), closed: make(chan struct{})}
-	builder.openSession = func(string, string) (session.Session, []session.Warning, error) {
-		return candidate, nil, nil
+	header := candidate.Header()
+	builder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		return &fakePreparedSession{
+			info: session.SessionInfo{
+				Path: candidate.Path(), ID: header.ID, CWD: header.Workspace,
+				Profile: header.Profile, Provider: header.Provider, Model: header.Model,
+			},
+			activate: func(context.Context) (session.Session, []session.Warning, error) {
+				return candidate, nil, nil
+			},
+		}, nil
 	}
 	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
 		return nil, errors.New("runner failed")
@@ -199,7 +335,97 @@ func TestRuntimeBuilderFailureClosesCandidateStore(t *testing.T) {
 	}
 }
 
-func TestRuntimeBuilderBuildRunnerUsesRuntimeLimitsAndRedaction(t *testing.T) {
+func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *testing.T) {
+	const (
+		activeEnv   = "OTTO_RUNTIME_BUILDER_ACTIVE_KEY"
+		inactiveEnv = "OTTO_RUNTIME_BUILDER_INACTIVE_KEY"
+		activeKey   = "credential-alpha-329847"
+		inactiveKey = "credential-bravo-761205"
+		fallbackKey = "credential-charlie-458913"
+	)
+	t.Setenv(activeEnv, activeKey)
+	t.Setenv(inactiveEnv, inactiveKey)
+	t.Setenv("OTTO_API_KEY", fallbackKey)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+activeKey {
+			t.Errorf("Authorization = %q, want active profile credential", got)
+		}
+		command := fmt.Sprintf("printf 'active=%%s inactive=%%s fallback=%%s' \"$%s\" \"$%s\" \"$OTTO_API_KEY\"; printf ' inactive-stderr=%%s' \"$%s\" >&2; exit 7", activeEnv, inactiveEnv, inactiveEnv)
+		writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
+			fmt.Sprintf(`{"command":%q}`, command)))
+	}))
+	defer server.Close()
+
+	file := config.File{
+		DefaultProfile: "active",
+		Profiles: map[string]config.Profile{
+			"active":   {Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model", APIKeyEnv: activeEnv},
+			"inactive": {Provider: "openai-compatible", BaseURL: "https://inactive.example/v1", Model: "inactive-model", APIKeyEnv: inactiveEnv},
+		},
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.environment = map[string]string{activeEnv: activeKey, inactiveEnv: inactiveKey, "OTTO_API_KEY": fallbackKey}
+	store, err := session.Create(builder.sessionRoot, session.Header{
+		Version: session.CurrentVersion, ID: "all-profile-credentials", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "active", Model: "active-model", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+
+	runner, err := builder.buildRunner(store, config.Runtime{
+		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model",
+		APIKey: activeKey, APIKeyEnv: activeEnv, MaxTurns: 1, ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	var eventText strings.Builder
+	runErr := runner.Run(context.Background(), "check every profile credential", func(event agent.Event) {
+		if event.Err != nil {
+			eventText.WriteString(event.Err.Error())
+		}
+		eventText.WriteString(event.ToolResult.Content)
+	})
+	if !errors.Is(runErr, agent.ErrMaxTurns) {
+		_ = store.Close()
+		t.Fatalf("Run() error = %v, want agent.ErrMaxTurns", runErr)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locations := map[string]string{
+		"runner error": runErr.Error(),
+		"events":       eventText.String(),
+		"messages":     fmt.Sprintf("%#v", messages),
+		"session":      string(persisted),
+	}
+	for location, content := range locations {
+		for _, secret := range []string{activeKey, inactiveKey, fallbackKey} {
+			if strings.Contains(content, secret) {
+				t.Fatalf("%s leaked %q: %s", location, secret, content)
+			}
+		}
+	}
+	toolResult := messages[len(messages)-1].Blocks[0].Text
+	if strings.Contains(toolResult, activeEnv+"=") || strings.Contains(toolResult, inactiveEnv+"=") || strings.Contains(toolResult, "OTTO_API_KEY=") {
+		t.Fatalf("credential environment reached bash: %q", toolResult)
+	}
+	if !strings.Contains(toolResult, "inactive-stderr=") || !strings.Contains(toolResult, "exit_code: 7") {
+		t.Fatalf("tool result = %q", toolResult)
+	}
+}
+
+func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t *testing.T) {
 	const (
 		apiKey          = "runtime-secret"
 		fallbackAPIKey  = "fallback-secret"
@@ -213,7 +439,7 @@ func TestRuntimeBuilderBuildRunnerUsesRuntimeLimitsAndRedaction(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
-		command := fmt.Sprintf("printf \"runtime=%%s fallback=%%s unrelated=%%s literal=%%s\" \"${%s:-missing}\" \"${OTTO_API_KEY:-missing}\" \"${%s:-missing}\" %q", apiKeyEnv, unrelatedEnvKey, apiKey)
+		command := fmt.Sprintf("printf \"runtime=%%s fallback=%%s unrelated=%%s literal=%%s \" \"${%s:-missing}\" \"${OTTO_API_KEY:-missing}\" \"${%s:-missing}\" %q; printf '%%0200d' 0; sleep 1", apiKeyEnv, unrelatedEnvKey, apiKey)
 		writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
 			fmt.Sprintf(`{"command":%q}`, command)))
 	}))
@@ -229,8 +455,8 @@ func TestRuntimeBuilderBuildRunnerUsesRuntimeLimitsAndRedaction(t *testing.T) {
 		APIKey:         apiKey,
 		APIKeyEnv:      apiKeyEnv,
 		MaxTurns:       1,
-		ShellTimeout:   500 * time.Millisecond,
-		MaxOutputBytes: 4096,
+		ShellTimeout:   50 * time.Millisecond,
+		MaxOutputBytes: 96,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +474,7 @@ func TestRuntimeBuilderBuildRunnerUsesRuntimeLimitsAndRedaction(t *testing.T) {
 		t.Fatalf("messages = %#v, want user+assistant+tool", messages)
 	}
 	toolResult := messages[2].Blocks[0].Text
-	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !strings.Contains(toolResult, "literal=[REDACTED]") || !strings.Contains(toolResult, "exit_code: 0") {
+	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !strings.Contains(toolResult, "literal=[REDACTED]") || !strings.Contains(toolResult, "[truncated:") || !strings.Contains(toolResult, "status: timed out after 50ms") {
 		t.Fatalf("tool result = %q", toolResult)
 	}
 	for _, forbidden := range []string{apiKey, fallbackAPIKey} {
@@ -256,6 +482,28 @@ func TestRuntimeBuilderBuildRunnerUsesRuntimeLimitsAndRedaction(t *testing.T) {
 			t.Fatalf("tool result leaked %q: %q", forbidden, toolResult)
 		}
 	}
+}
+
+type fakePreparedSession struct {
+	info       session.SessionInfo
+	activate   func(context.Context) (session.Session, []session.Warning, error)
+	close      func() error
+	closeErr   error
+	closeCalls atomic.Int32
+}
+
+func (p *fakePreparedSession) Info() session.SessionInfo { return p.info }
+
+func (p *fakePreparedSession) Activate(ctx context.Context) (session.Session, []session.Warning, error) {
+	return p.activate(ctx)
+}
+
+func (p *fakePreparedSession) Close() error {
+	p.closeCalls.Add(1)
+	if p.close != nil {
+		return p.close()
+	}
+	return p.closeErr
 }
 
 type trackedReplacementSession struct {
@@ -321,6 +569,15 @@ func environmentForProfiles(file config.File) map[string]string {
 func redactedRuntime(runtime config.Runtime) config.Runtime {
 	runtime.APIKey = "[REDACTED]"
 	return runtime
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contents
 }
 
 func mustCanonicalDirectory(t *testing.T, path string) string {

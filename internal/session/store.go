@@ -142,10 +142,15 @@ func ReadHeader(path string) (Header, error) {
 }
 
 func Open(path string) (*Store, []Warning, error) {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	prepared, err := Prepare(context.Background(), path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open session file: %w", err)
+		return nil, nil, err
 	}
+	return prepared.Activate(context.Background())
+}
+
+// openStoreFromFile consumes file on both success and failure.
+func openStoreFromFile(file *os.File, path string) (*Store, []Warning, error) {
 	closeOnError := func(openErr error) (*Store, []Warning, error) {
 		_ = file.Close()
 		return nil, nil, openErr

@@ -177,6 +177,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = max(0, msg.Width)
 		m.height = max(0, msg.Height)
+		if len(m.resume.sessions) == 0 {
+			m.resume.selected = 0
+		} else {
+			m.resume.selected = clamp(m.resume.selected, 0, len(m.resume.sessions)-1)
+		}
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
 	case tea.KeyboardEnhancementsMsg:
@@ -226,11 +231,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKeyPress(msg, previousYOffset, previousEditorHeight, viewportBefore)
 	case tea.PasteMsg:
-		if m.overlay != overlayNone {
+		if m.resume.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	case tea.MouseMsg:
-		if m.overlay != overlayNone {
+		if m.resume.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	}
@@ -268,6 +273,9 @@ func (m Model) View() tea.View {
 	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions))
 	if layout.tooSmall {
 		return newRootView(m, smallTerminalView(m.width, m.height))
+	}
+	if m.resume.active() {
+		return newRootView(m, renderResumePicker(m.width, m.height, m.resume, m.spinner.View(), m.now()))
 	}
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
@@ -308,22 +316,18 @@ func (m Model) overlayContent() string {
 }
 
 func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEditorHeight int, viewportBefore viewport.Model) (tea.Model, tea.Cmd) {
-	if m.overlay != overlayNone {
-		if isEscapeKey(msg) {
-			m.overlay = overlayNone
-			return m, nil
-		}
-		if isCtrlCKey(msg) {
-			return m.handleCtrlC(previousEditorHeight)
-		}
-		return m, nil
-	}
-
 	if isCtrlCKey(msg) {
 		return m.handleCtrlC(previousEditorHeight)
 	}
 	if updated, cmd, handled := m.handleResumeKeyPress(msg); handled {
 		return updated, cmd
+	}
+	if m.overlay != overlayNone {
+		if isEscapeKey(msg) {
+			m.overlay = overlayNone
+			return m, nil
+		}
+		return m, nil
 	}
 	if isEscapeKey(msg) {
 		if m.running && m.cancel != nil {
@@ -469,8 +473,10 @@ func newRootView(m Model, content string) tea.View {
 	view.MouseMode = tea.MouseModeCellMotion
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
-	if cursor := m.editor.Cursor(); cursor != nil {
-		view.Cursor = cursor
+	if !m.resume.active() {
+		if cursor := m.editor.Cursor(); cursor != nil {
+			view.Cursor = cursor
+		}
 	}
 	return view
 }

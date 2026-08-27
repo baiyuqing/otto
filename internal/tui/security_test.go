@@ -81,6 +81,42 @@ func TestFooterAndSessionOverlayEscapeExternalMetadata(t *testing.T) {
 	}
 }
 
+func TestResumePickerSanitizesAndClipsExternalMetadataWithoutEntityInterpretation(t *testing.T) {
+	m := resizeModel(t, loadedResumeModel(t, 1), 40, 8)
+	payload := "会話🙂" + terminalInjectionPayload + "\nProvider: forged &#27;]52;c;entity&#7; " + strings.Repeat("界🙂", 100)
+	m.resume.sessions[0].Name = payload
+	m.resume.sessions[0].LastUserText = payload
+	m.resume.sessions[0].Profile = payload
+	m.resume.sessions[0].Provider = payload
+	m.resume.sessions[0].Model = payload
+	m.resume.sessions[0].Path = "/secret/" + payload
+	m.resume.errText = payload
+
+	content := m.View().Content
+	assertRenderedBounds(t, content, 40, 8)
+	assertNoRawTerminalControls(t, content)
+	if !strings.Contains(content, "会話🙂") || !strings.Contains(content, `\x1b]52;c;owned`) {
+		t.Fatalf("resume picker = %q, want safe CJK/emoji and escaped controls", content)
+	}
+	if strings.Contains(content, "Provider: forged") {
+		t.Fatalf("resume picker allowed field spoof: %q", content)
+	}
+	if strings.Contains(content, "/secret/") {
+		t.Fatalf("resume picker exposed path despite higher-priority title: %q", content)
+	}
+	if !strings.Contains(content, "…") {
+		t.Fatalf("resume picker did not ellipsis-clip long display-width text: %q", content)
+	}
+
+	m = resizeModel(t, m, 240, 12)
+	content = m.View().Content
+	assertRenderedBounds(t, content, 240, 12)
+	assertNoRawTerminalControls(t, content)
+	if !strings.Contains(content, "&#27;]52;c;entity&#7;") {
+		t.Fatalf("resume picker interpreted or lost inert entity text: %q", content)
+	}
+}
+
 func TestSingleLineSanitizerEscapesAllLineBreakingControls(t *testing.T) {
 	if got, want := escapeSingleLineText("one\ntwo\rthree\tfour"), `one\x0atwo\x0dthree\x09four`; got != want {
 		t.Fatalf("escapeSingleLineText() = %q, want %q", got, want)

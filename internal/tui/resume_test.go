@@ -87,6 +87,252 @@ func loadResumePicker(t *testing.T, backend *resumeBackend, result session.ListR
 	return loaded
 }
 
+func loadedResumeModel(t *testing.T, count int) Model {
+	t.Helper()
+	now := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	sessions := make([]session.SessionInfo, count)
+	for index := range sessions {
+		sessions[index] = session.SessionInfo{
+			ID:           fmt.Sprintf("session-%02d", index+1),
+			Path:         fmt.Sprintf("/sessions/%02d.jsonl", index+1),
+			Name:         fmt.Sprintf("Session %02d", index+1),
+			Modified:     now.Add(-time.Duration(index) * time.Hour),
+			MessageCount: index + 1,
+			Profile:      "default",
+			Provider:     "openai-compatible",
+			Model:        "test-model",
+		}
+	}
+	backend := &resumeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "current"},
+		resumeSession: func(_ context.Context, path string) (app.ResumeResult, error) {
+			return app.ResumeResult{SessionPath: path}, nil
+		},
+	}
+	m := NewModel(context.Background(), backend, WithClock(newFakeClock(now)), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	})))
+	m.resume = resumePickerState{mode: resumeLoaded, sessions: sessions}
+	return m
+}
+
+func updateResumeKey(t *testing.T, model Model, code rune, modifiers ...tea.KeyMod) (Model, tea.Cmd) {
+	t.Helper()
+	updated, cmd := model.Update(keyPress(code, modifiers...))
+	got, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model type = %T, want Model", updated)
+	}
+	return got, cmd
+}
+
+func TestResumePickerAtMinimumSizeShowsSelectionAndControlsWithinBounds(t *testing.T) {
+	m := resizeModel(t, loadedResumeModel(t, 20), 40, 8)
+	content := m.View().Content
+	assertRenderedBounds(t, content, 40, 8)
+	for _, text := range []string{"Resume", "1/20", "Session 01", "Enter", "Esc"} {
+		if !strings.Contains(content, text) {
+			t.Fatalf("view = %q, want %q", content, text)
+		}
+	}
+}
+
+func TestResumePickerNavigationPagesAndKeepsSelectionVisible(t *testing.T) {
+	m := resizeModel(t, loadedResumeModel(t, 20), 80, 12)
+	m, _ = updateResumeKey(t, m, tea.KeyDown)
+	m, _ = updateResumeKey(t, m, tea.KeyPgDown)
+	start, end := resumeVisibleRange(len(m.resume.sessions), m.resume.selected, resumeVisibleRows(m.width, m.height))
+	if m.resume.selected < start || m.resume.selected >= end {
+		t.Fatalf("range=%d:%d selected=%d", start, end, m.resume.selected)
+	}
+	if m.resume.selected != 1+resumeVisibleRows(80, 12) {
+		t.Fatalf("selected = %d, want one page after index 1", m.resume.selected)
+	}
+
+	m, _ = updateResumeKey(t, m, tea.KeyPgUp)
+	m, _ = updateResumeKey(t, m, tea.KeyUp)
+	if m.resume.selected != 0 {
+		t.Fatalf("selected after page/up = %d, want 0", m.resume.selected)
+	}
+}
+
+func TestResumePickerRoutesOnlyExactUnmodifiedModalKeys(t *testing.T) {
+	modified := []struct {
+		name string
+		code rune
+		mod  tea.KeyMod
+	}{
+		{name: "shift down", code: tea.KeyDown, mod: tea.ModShift},
+		{name: "alt up", code: tea.KeyUp, mod: tea.ModAlt},
+		{name: "ctrl page up", code: tea.KeyPgUp, mod: tea.ModCtrl},
+		{name: "ctrl page down", code: tea.KeyPgDown, mod: tea.ModCtrl},
+		{name: "shift enter", code: tea.KeyEnter, mod: tea.ModShift},
+		{name: "alt escape", code: tea.KeyEscape, mod: tea.ModAlt},
+		{name: "tab", code: tea.KeyTab},
+		{name: "text", code: 'x'},
+	}
+	for _, tc := range modified {
+		t.Run(tc.name, func(t *testing.T) {
+			m := resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+			m.editor.SetValue("hidden draft")
+			got, cmd := updateResumeKey(t, m, tc.code, tc.mod)
+			if cmd != nil || got.resume.mode != resumeLoaded || got.resume.selected != 0 || got.editor.Value() != "hidden draft" {
+				t.Fatalf("cmd=%v resume=%#v editor=%q", cmd, got.resume, got.editor.Value())
+			}
+		})
+	}
+
+	m := resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+	m, _ = updateResumeKey(t, m, tea.KeyDown)
+	if m.resume.selected != 1 {
+		t.Fatalf("exact Down selected = %d, want 1", m.resume.selected)
+	}
+	m, _ = updateResumeKey(t, m, tea.KeyEscape)
+	if m.resume.active() {
+		t.Fatalf("exact Escape left picker active: %#v", m.resume)
+	}
+
+	empty := resizeModel(t, loadedResumeModel(t, 0), 80, 12)
+	empty, _ = updateResumeKey(t, empty, tea.KeyUp)
+	if empty.resume.selected != 0 {
+		t.Fatalf("empty picker selected = %d, want clamped 0", empty.resume.selected)
+	}
+
+	m = resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+	m.editor.SetValue("hidden draft")
+	updated, cmd := m.Update(tea.PasteMsg{Content: "pasted"})
+	pasted := updated.(Model)
+	if cmd != nil || pasted.editor.Value() != "hidden draft" || pasted.resume.mode != resumeLoaded {
+		t.Fatalf("modal paste: cmd=%v editor=%q resume=%#v", cmd, pasted.editor.Value(), pasted.resume)
+	}
+}
+
+func TestResumePickerExactEscapeBehaviorInEveryMode(t *testing.T) {
+	for _, mode := range []resumeMode{resumeLoading, resumeLoaded, resumeLoadError, resumeResumeError} {
+		t.Run(fmt.Sprintf("mode-%d", mode), func(t *testing.T) {
+			m := resizeModel(t, loadedResumeModel(t, 1), 80, 12)
+			m.resume.mode = mode
+			got, cmd := updateResumeKey(t, m, tea.KeyEscape)
+			if cmd != nil || got.resume.active() {
+				t.Fatalf("cmd=%v resume=%#v", cmd, got.resume)
+			}
+		})
+	}
+
+	m := resizeModel(t, loadedResumeModel(t, 1), 80, 12)
+	m.resume.mode = resumeResuming
+	got, cmd := updateResumeKey(t, m, tea.KeyEscape)
+	if cmd != nil || got.resume.mode != resumeResuming || got.statusText != "resume in progress" {
+		t.Fatalf("resuming Escape: cmd=%v resume=%#v status=%q", cmd, got.resume, got.statusText)
+	}
+}
+
+func TestResumePickerCtrlCRemainsGlobalFirstPriority(t *testing.T) {
+	m := resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+	got, cmd := updateResumeKey(t, m, 'c', tea.ModCtrl)
+	if cmd == nil || !got.ctrlCArmed || got.resume.mode != resumeLoaded {
+		t.Fatalf("cmd=%v armed=%v resume=%#v", cmd, got.ctrlCArmed, got.resume)
+	}
+}
+
+func TestResumePickerResumingDisablesActionsAndEscapeReportsStatus(t *testing.T) {
+	m := resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+	m.resume.mode = resumeResuming
+	m.resume.selected = 1
+	for _, code := range []rune{tea.KeyUp, tea.KeyDown, tea.KeyPgUp, tea.KeyPgDown, tea.KeyEnter} {
+		got, cmd := updateResumeKey(t, m, code)
+		if cmd != nil || got.resume.mode != resumeResuming || got.resume.selected != 1 {
+			t.Fatalf("key %v: cmd=%v resume=%#v", code, cmd, got.resume)
+		}
+		m = got
+	}
+	got, cmd := updateResumeKey(t, m, tea.KeyEscape)
+	if cmd != nil || got.resume.mode != resumeResuming || got.statusText != "resume in progress" {
+		t.Fatalf("cmd=%v resume=%#v status=%q", cmd, got.resume, got.statusText)
+	}
+}
+
+func TestResumePickerProgressivelyAddsMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		width   int
+		present []string
+		absent  []string
+	}{
+		{width: 40, present: []string{"Session 01"}, absent: []string{"default/test-model", "openai-compatible", "1 msgs"}},
+		{width: 80, present: []string{"default/test-model", "Session 01"}, absent: []string{"openai-compatible", "1 msgs"}},
+		{width: 120, present: []string{"default/test-model", "openai-compatible", "1 msgs", "Session 01"}},
+	} {
+		t.Run(fmt.Sprintf("width-%d", tc.width), func(t *testing.T) {
+			content := resizeModel(t, loadedResumeModel(t, 1), tc.width, 12).View().Content
+			assertRenderedBounds(t, content, tc.width, 12)
+			for _, want := range tc.present {
+				if !strings.Contains(content, want) {
+					t.Fatalf("view = %q, want %q", content, want)
+				}
+			}
+			for _, unwanted := range tc.absent {
+				if strings.Contains(content, unwanted) {
+					t.Fatalf("view = %q, do not want %q", content, unwanted)
+				}
+			}
+		})
+	}
+}
+
+func TestResumePickerRendersLoadingEmptyErrorsCurrentAndResumingStates(t *testing.T) {
+	base := resizeModel(t, loadedResumeModel(t, 1), 80, 12)
+	tests := []struct {
+		name string
+		set  func(*Model)
+		want []string
+	}{
+		{name: "loading", set: func(m *Model) { m.resume = resumePickerState{mode: resumeLoading} }, want: []string{base.spinner.View(), "Loading sessions", "Esc"}},
+		{name: "empty skipped", set: func(m *Model) { m.resume = resumePickerState{mode: resumeLoaded, skipped: 2} }, want: []string{"No resumable sessions", "skipped 2", "Esc"}},
+		{name: "load error", set: func(m *Model) { m.resume = resumePickerState{mode: resumeLoadError, errText: "list failed"} }, want: []string{"Unable to load sessions", "list failed", "Esc"}},
+		{name: "resume error", set: func(m *Model) { m.resume.mode = resumeResumeError; m.resume.errText = "resume failed" }, want: []string{"resume failed", "Enter", "Esc"}},
+		{name: "current", set: func(m *Model) { m.resume.sessions[0].Current = true }, want: []string{"current", "Session 01", "1/1"}},
+		{name: "resuming", set: func(m *Model) { m.resume.mode = resumeResuming }, want: []string{"Resuming", "disabled", "Esc"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base
+			m.resume.sessions = append([]session.SessionInfo(nil), base.resume.sessions...)
+			tc.set(&m)
+			content := m.View().Content
+			assertRenderedBounds(t, content, 80, 12)
+			for _, want := range tc.want {
+				if !strings.Contains(content, want) {
+					t.Fatalf("view = %q, want %q", content, want)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatRelativeSessionAge(t *testing.T) {
+	now := time.Date(2026, time.August, 27, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{name: "zero", at: now, want: "now"},
+		{name: "future", at: now.Add(time.Hour), want: "now"},
+		{name: "minutes", at: now.Add(-5 * time.Minute), want: "5m"},
+		{name: "hours", at: now.Add(-3 * time.Hour), want: "3h"},
+		{name: "days", at: now.Add(-2 * 24 * time.Hour), want: "2d"},
+		{name: "weeks", at: now.Add(-14 * 24 * time.Hour), want: "2w"},
+		{name: "months", at: now.Add(-60 * 24 * time.Hour), want: "2mo"},
+		{name: "years", at: now.Add(-730 * 24 * time.Hour), want: "2y"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatRelativeSessionAge(now, tc.at); got != tc.want {
+				t.Fatalf("formatRelativeSessionAge() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResumeCommandLoadsRecentSessionsAsynchronously(t *testing.T) {
 	backend := &resumeBackend{
 		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
@@ -317,12 +563,12 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	resuming := updated.(Model)
-	if cmd == nil || resuming.resume.mode != resumeResuming || !strings.Contains(resuming.View().Content, "old transcript") {
+	if cmd == nil || resuming.resume.mode != resumeResuming || !strings.Contains(resuming.View().Content, "Resuming") {
 		t.Fatalf("cmd=%v resume=%#v view=%q", cmd, resuming.resume, resuming.View().Content)
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	if content := resuming.View().Content; !strings.Contains(content, "old transcript") || strings.Contains(content, "fresh transcript") {
-		t.Fatalf("resuming view = %q", content)
+	if content := resuming.View().Content; strings.Contains(content, "old transcript") || strings.Contains(content, "fresh transcript") {
+		t.Fatalf("resuming modal leaked transcript = %q", content)
 	}
 	resuming.statusText = "stale"
 	resuming.overlay = overlaySession
@@ -392,8 +638,13 @@ func TestResumeFailureKeepsPickerAndOldUI(t *testing.T) {
 	if got.usage.InputTokens != 3 || got.usage.OutputTokens != 4 {
 		t.Fatalf("usage = %#v", got.usage)
 	}
-	if content := got.View().Content; !strings.Contains(content, "keep transcript") || !strings.Contains(content, "old-profile/old-model") || !strings.Contains(content, "session-old") {
-		t.Fatalf("view = %q", content)
+	if content := got.View().Content; !strings.Contains(content, "resume failed") || strings.Contains(content, "keep transcript") {
+		t.Fatalf("error modal = %q", content)
+	}
+	restored := got
+	restored.closeResumePicker()
+	if content := restored.View().Content; !strings.Contains(content, "keep transcript") || !strings.Contains(content, "old-profile/old-model") || !strings.Contains(content, "session-old") {
+		t.Fatalf("restored view = %q", content)
 	}
 	if got.statusText != "resume failed" {
 		t.Fatalf("status = %q", got.statusText)
@@ -587,8 +838,13 @@ func TestResumeResultCommittedStaleSuccessFailsClosedDuringSamePathNewerResume(t
 	if got.resume.mode != resumeResuming || got.resume.generation != newerGeneration || got.resume.operationPath != "/sessions/middle.jsonl" {
 		t.Fatalf("newer same-path resume was reset or closed: %#v", got.resume)
 	}
-	if content := got.View().Content; strings.Contains(content, "middle transcript") || !strings.Contains(content, "old transcript") {
-		t.Fatalf("view before quit = %q", content)
+	if content := got.View().Content; strings.Contains(content, "middle transcript") || strings.Contains(content, "old transcript") || !strings.Contains(content, "Resuming") {
+		t.Fatalf("modal before quit = %q", content)
+	}
+	restored := got
+	restored.closeResumePicker()
+	if content := restored.View().Content; strings.Contains(content, "middle transcript") || !strings.Contains(content, "old transcript") {
+		t.Fatalf("underlying view before quit = %q", content)
 	}
 }
 

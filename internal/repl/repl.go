@@ -35,6 +35,24 @@ type REPL struct {
 	activeCancel context.CancelFunc
 }
 
+type commandError struct {
+	command string
+	err     error
+}
+
+func (e *commandError) Error() string {
+	return e.err.Error()
+}
+
+func (e *commandError) Unwrap() error {
+	return e.err
+}
+
+func IsCommandError(err error, command string) bool {
+	var target *commandError
+	return errors.As(err, &target) && target.command == command
+}
+
 func New(stdin io.Reader, stdout, stderr io.Writer, backend app.Backend) *REPL {
 	return NewWithInput(NewInput(stdin), stdout, stderr, backend)
 }
@@ -140,7 +158,7 @@ func (r *REPL) command(command string) (bool, error) {
 		return true, nil
 	case "/new":
 		if err := r.backend.NewSession(); err != nil {
-			return false, err
+			return false, &commandError{command: command, err: err}
 		}
 		if info := r.backend.Info(); info.SessionID != "" {
 			_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)

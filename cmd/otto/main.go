@@ -254,6 +254,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if processCtx.Err() != nil || errors.Is(runErr, context.Canceled) {
 		return 130
 	}
+	if repl.IsCommandError(runErr, "/new") {
+		return fail(stderr, "%v", runErr)
+	}
 	if runErr != nil {
 		return fail(stderr, "REPL: %v", runErr)
 	}

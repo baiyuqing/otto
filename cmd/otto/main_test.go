@@ -268,6 +268,41 @@ func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
 	}
 }
 
+func TestRunNewSessionCreationFailureReturnsDirectError(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	var calls int
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		calls++
+		if calls == 2 {
+			return nil, errors.New("create replacement failed")
+		}
+		return session.NewMemory(session.Header{
+			Version: 1, ID: fmt.Sprintf("session-%d", calls), Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 1 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if got, want := stderr.String(), "otto: create replacement failed\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+	if strings.Contains(stderr.String(), "REPL:") {
+		t.Fatalf("stderr unexpectedly wrapped REPL error: %q", stderr.String())
+	}
+}
+
 func TestRunAppliesMaxTurnsAndShellTimeout(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -544,6 +579,15 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 			stop:    func() { stopCalls.Add(1) },
 		}
 	}
+	var stores []*trackingSession
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		store := &trackingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		})}
+		stores = append(stores, store)
+		return store, nil
+	}
 
 	reader, writer := io.Pipe()
 	defer reader.Close()
@@ -575,6 +619,12 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	}
 	if stopCalls.Load() != 1 {
 		t.Fatalf("interrupt subscription stop calls = %d, want 1", stopCalls.Load())
+	}
+	if len(stores) != 1 {
+		t.Fatalf("created stores = %d, want 1", len(stores))
+	}
+	if stores[0].closeCalls.Load() != 1 {
+		t.Fatalf("store close calls = %d, want 1", stores[0].closeCalls.Load())
 	}
 }
 

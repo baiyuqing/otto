@@ -8,7 +8,7 @@ import (
 	"github.com/baiyuqing/otto/internal/model"
 )
 
-const currentVersion = 1
+const CurrentVersion = PiSessionVersion
 
 var ErrFatalPersistence = errors.New("fatal session persistence failure")
 
@@ -28,10 +28,11 @@ func (err *fatalPersistenceError) Is(target error) bool {
 	return target == ErrFatalPersistence
 }
 
-const (
-	recordTypeHeader  = "header"
-	recordTypeMessage = "message"
-)
+type RuntimeMetadata struct {
+	Profile  string `json:"profile,omitempty"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
 
 type Header struct {
 	Version   int       `json:"version"`
@@ -41,12 +42,6 @@ type Header struct {
 	Profile   string    `json:"profile,omitempty"`
 	Model     string    `json:"model"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-type Record struct {
-	Type    string         `json:"type"`
-	Header  *Header        `json:"header,omitempty"`
-	Message *model.Message `json:"message,omitempty"`
 }
 
 type Warning struct {

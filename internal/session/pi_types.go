@@ -12,10 +12,11 @@ const (
 )
 
 var (
-	ErrUnsupportedSessionFormat = errors.New("unsupported session format")
-	ErrInvalidSession           = errors.New("invalid session")
-	ErrSessionEntryTooLarge     = errors.New("session entry too large")
-	ErrSessionFileTooLarge      = errors.New("session file too large")
+	ErrUnsupportedSessionFormat  = errors.New("unsupported session format")
+	ErrInvalidSession            = errors.New("invalid session")
+	ErrSessionEntryTooLarge      = errors.New("session entry too large")
+	ErrSessionFileTooLarge       = errors.New("session file too large")
+	ErrUnsupportedSessionContent = errors.New("unsupported session content")
 )
 
 type piFile struct {

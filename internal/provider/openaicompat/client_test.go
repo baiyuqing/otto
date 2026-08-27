@@ -320,6 +320,20 @@ func TestRequestIncludesEveryFunctionSchemaField(t *testing.T) {
 	}
 }
 
+func TestTranslateRequestMapsContextMessagesToWireUsers(t *testing.T) {
+	request := translateRequest(provider.Request{Messages: []model.Message{
+		{Role: model.RoleContext, Display: true, Blocks: []model.Block{{Type: model.BlockText, Text: "visible context"}}},
+		{Role: model.RoleContext, Display: false, Blocks: []model.Block{{Type: model.BlockText, Text: "hidden context"}}},
+	}})
+	want := []chatMessage{
+		{Role: "user", Content: "visible context"},
+		{Role: "user", Content: "hidden context"},
+	}
+	if !reflect.DeepEqual(request.Messages, want) {
+		t.Fatalf("messages = %#v, want %#v", request.Messages, want)
+	}
+}
+
 func TestCompleteTranslatesNeutralRequestToChatCompletions(t *testing.T) {
 	var got chatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

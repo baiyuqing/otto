@@ -626,8 +626,8 @@ func TestOpenPreservesUnknownPiEntriesAndAppendsBeneathLeaf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %#v", warnings)
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Message, "12345678") {
+		t.Fatalf("warnings = %#v, want active unknown-entry warning", warnings)
 	}
 	if err := reopened.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "after unknown"}}, CreatedAt: time.Unix(3, 0).UTC()}); err != nil {
 		t.Fatal(err)

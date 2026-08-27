@@ -26,6 +26,25 @@ func TestEntriesFromHistoryPairsToolResults(t *testing.T) {
 	}
 }
 
+func TestEntriesFromHistoryHidesHiddenContextAndRendersVisibleContextNeutrally(t *testing.T) {
+	history := []model.Message{
+		{ID: "hidden", Role: model.RoleContext, ContextType: "hidden", Display: false, Blocks: []model.Block{{Type: model.BlockText, Text: "provider only"}}},
+		{ID: "visible", Role: model.RoleContext, ContextType: "visible", Display: true, Blocks: []model.Block{{Type: model.BlockText, Text: "visible context"}}},
+		{ID: "user", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "prompt"}}},
+	}
+
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %#v, want visible context and user only", entries)
+	}
+	if entries[0].Kind != EntrySystem || entries[0].Raw != "visible context" {
+		t.Fatalf("visible context entry = %#v, want neutral system entry", entries[0])
+	}
+	if entries[1].Kind != EntryUser || entries[1].Raw != "prompt" {
+		t.Fatalf("user entry = %#v", entries[1])
+	}
+}
+
 func TestEntriesFromHistoryPreservesZeroBlockToolMessages(t *testing.T) {
 	history := []model.Message{
 		{ID: "tool-empty", Role: model.RoleTool},

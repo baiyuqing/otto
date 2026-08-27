@@ -135,7 +135,7 @@ func ReadHeader(path string) (Header, error) {
 	if err != nil {
 		return Header{}, err
 	}
-	header, _, _, _, err := resolvePiStoreState(decoded)
+	header, _, _, _, _, err := resolvePiStoreState(decoded)
 	if err != nil {
 		return Header{}, err
 	}
@@ -159,10 +159,11 @@ func Open(path string) (*Store, []Warning, error) {
 	if err != nil {
 		return closeOnError(err)
 	}
-	header, messages, entryIDs, leafID, err := resolvePiStoreState(decoded)
+	header, messages, entryIDs, leafID, contextWarnings, err := resolvePiStoreState(decoded)
 	if err != nil {
 		return closeOnError(err)
 	}
+	warnings = append(warnings, contextWarnings...)
 	position, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return closeOnError(fmt.Errorf("seek session file: %w", err))
@@ -291,53 +292,37 @@ func (s *Store) repairDanglingToolCalls() ([]Warning, error) {
 	return warnings, nil
 }
 
-func resolvePiStoreState(decoded piFile) (Header, []model.Message, map[string]struct{}, *string, error) {
+func resolvePiStoreState(decoded piFile) (Header, []model.Message, map[string]struct{}, *string, []Warning, error) {
 	createdAt, err := validatePiHeader(decoded.Header)
 	if err != nil {
-		return Header{}, nil, nil, nil, err
+		return Header{}, nil, nil, nil, nil, err
 	}
 	entryIDs := make(map[string]struct{}, len(decoded.Entries))
-	messages := make([]model.Message, 0)
-	var runtime RuntimeMetadata
-	for index, entry := range decoded.Entries {
-		if err := validatePiEntryBase(entry, entryIDs); err != nil {
-			return Header{}, nil, nil, nil, fmt.Errorf("session entry %d: %w", index+1, err)
-		}
+	for _, entry := range decoded.Entries {
 		entryIDs[entry.ID] = struct{}{}
-
-		if entry.Type == "custom" && entry.Custom != nil && entry.Custom.CustomType == ottoRuntimeCustomType {
-			metadata, err := decodeRuntimeMetadata(entry.Custom.Data)
-			if err != nil {
-				return Header{}, nil, nil, nil, fmt.Errorf("session entry %d: %w", index+1, err)
-			}
-			runtime = metadata
-		}
-		message, supported, err := piEntryToModelMessage(entry)
-		if err != nil {
-			return Header{}, nil, nil, nil, fmt.Errorf("session entry %d: %w", index+1, err)
-		}
-		if supported {
-			messages = append(messages, message)
-		}
-	}
-	if _, err := pendingToolCalls(messages); err != nil {
-		return Header{}, nil, nil, nil, err
-	}
-
-	header := Header{
-		Version:   CurrentVersion,
-		ID:        decoded.Header.ID,
-		Workspace: decoded.Header.CWD,
-		Provider:  runtime.Provider,
-		Profile:   runtime.Profile,
-		Model:     runtime.Model,
-		CreatedAt: createdAt,
 	}
 	var leafID *string
 	if len(decoded.Entries) > 0 {
 		leafID = stringPointer(decoded.Entries[len(decoded.Entries)-1].ID)
 	}
-	return header, messages, entryIDs, leafID, nil
+	leaf := ""
+	if leafID != nil {
+		leaf = *leafID
+	}
+	resolved, warnings, err := buildContext(decoded.Entries, leaf)
+	if err != nil {
+		return Header{}, nil, nil, nil, nil, err
+	}
+	header := Header{
+		Version:   CurrentVersion,
+		ID:        decoded.Header.ID,
+		Workspace: decoded.Header.CWD,
+		Provider:  resolved.Runtime.Provider,
+		Profile:   resolved.Runtime.Profile,
+		Model:     resolved.Runtime.Model,
+		CreatedAt: createdAt,
+	}
+	return header, resolved.Messages, entryIDs, leafID, warnings, nil
 }
 
 func validateDomainHeader(header Header) (string, error) {
@@ -380,30 +365,6 @@ func validatePiHeader(header piHeader) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%w: session header timestamp is invalid", ErrInvalidSession)
 	}
 	return createdAt, nil
-}
-
-func validatePiEntryBase(entry piEntry, priorIDs map[string]struct{}) error {
-	if strings.TrimSpace(entry.Type) == "" {
-		return fmt.Errorf("%w: entry type is required", ErrInvalidSession)
-	}
-	if !piEntryIDPattern.MatchString(entry.ID) {
-		return fmt.Errorf("%w: entry id must be eight lowercase hexadecimal characters", ErrInvalidSession)
-	}
-	if _, duplicate := priorIDs[entry.ID]; duplicate {
-		return fmt.Errorf("%w: duplicate entry id", ErrInvalidSession)
-	}
-	if _, err := time.Parse(time.RFC3339Nano, entry.Timestamp); err != nil {
-		return fmt.Errorf("%w: entry timestamp is invalid", ErrInvalidSession)
-	}
-	if entry.ParentID != nil {
-		if !piEntryIDPattern.MatchString(*entry.ParentID) {
-			return fmt.Errorf("%w: parent id must be eight lowercase hexadecimal characters", ErrInvalidSession)
-		}
-		if _, exists := priorIDs[*entry.ParentID]; !exists {
-			return fmt.Errorf("%w: parent id does not reference a prior entry", ErrInvalidSession)
-		}
-	}
-	return nil
 }
 
 func decodeRuntimeMetadata(raw json.RawMessage) (RuntimeMetadata, error) {
@@ -569,104 +530,6 @@ func modelUsageToPi(usage *model.Usage) (*piUsage, error) {
 	return &piUsage{Input: input, Output: output, TotalTokens: input + output}, nil
 }
 
-func piEntryToModelMessage(entry piEntry) (model.Message, bool, error) {
-	if entry.Type != "message" {
-		return model.Message{}, false, nil
-	}
-	if entry.Message == nil {
-		return model.Message{}, false, fmt.Errorf("%w: message payload is required", ErrInvalidSession)
-	}
-	createdAt, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
-	if err != nil {
-		return model.Message{}, false, fmt.Errorf("%w: message entry timestamp is invalid", ErrInvalidSession)
-	}
-	wire := entry.Message
-	message := model.Message{ID: entry.ID, CreatedAt: createdAt}
-
-	switch wire.Role {
-	case "user":
-		blocks, err := piTextAndToolBlocks(wire, model.RoleUser)
-		if err != nil {
-			return model.Message{}, false, err
-		}
-		if len(blocks) == 0 {
-			return model.Message{}, false, fmt.Errorf("%w: user message content is required", ErrInvalidSession)
-		}
-		message.Role = model.RoleUser
-		message.Blocks = blocks
-	case "assistant":
-		blocks, err := piTextAndToolBlocks(wire, model.RoleAssistant)
-		if err != nil {
-			return model.Message{}, false, err
-		}
-		finishReason, err := piStopReasonToModel(wire.StopReason)
-		if err != nil {
-			return model.Message{}, false, err
-		}
-		if err := validateAssistantToolFinish(blocks, finishReason); err != nil {
-			return model.Message{}, false, err
-		}
-		usage, err := piUsageToModel(wire.Usage)
-		if err != nil {
-			return model.Message{}, false, err
-		}
-		message.Role = model.RoleAssistant
-		message.Blocks = blocks
-		message.FinishReason = finishReason
-		message.Usage = usage
-	case "toolResult":
-		text, err := piTextContent(wire)
-		if err != nil {
-			return model.Message{}, false, err
-		}
-		if strings.TrimSpace(wire.ToolCallID) == "" || strings.TrimSpace(wire.ToolName) == "" || wire.IsError == nil {
-			return model.Message{}, false, fmt.Errorf("%w: tool-result message is malformed", ErrInvalidSession)
-		}
-		message.Role = model.RoleTool
-		message.Blocks = []model.Block{{Type: model.BlockToolResult, Text: text, ToolCallID: wire.ToolCallID, ToolName: wire.ToolName, IsError: *wire.IsError}}
-	default:
-		return model.Message{}, false, nil
-	}
-	return message, true, nil
-}
-
-func piTextAndToolBlocks(message *piMessage, role model.Role) ([]model.Block, error) {
-	if message.ContentText != nil {
-		return []model.Block{{Type: model.BlockText, Text: *message.ContentText}}, nil
-	}
-	blocks := make([]model.Block, 0, len(message.ContentBlocks))
-	for _, block := range message.ContentBlocks {
-		switch block.Type {
-		case "text":
-			blocks = append(blocks, model.Block{Type: model.BlockText, Text: block.Text})
-		case "toolCall":
-			if role != model.RoleAssistant {
-				return nil, fmt.Errorf("%w: tool call is incompatible with message role", ErrInvalidSession)
-			}
-			blocks = append(blocks, model.Block{Type: model.BlockToolCall, ToolCallID: block.ID, ToolName: block.Name, Arguments: cloneRaw(block.Arguments)})
-		case "image", "thinking":
-			return nil, fmt.Errorf("%w: Pi message content is not supported by Otto", ErrInvalidSession)
-		default:
-			return nil, fmt.Errorf("%w: Pi message content type is unsupported", ErrInvalidSession)
-		}
-	}
-	return blocks, nil
-}
-
-func piTextContent(message *piMessage) (string, error) {
-	if message.ContentText != nil {
-		return *message.ContentText, nil
-	}
-	var text strings.Builder
-	for _, block := range message.ContentBlocks {
-		if block.Type != "text" {
-			return "", fmt.Errorf("%w: tool-result content must be text", ErrInvalidSession)
-		}
-		text.WriteString(block.Text)
-	}
-	return text.String(), nil
-}
-
 func piStopReasonToModel(reason string) (model.FinishReason, error) {
 	switch reason {
 	case "stop":
@@ -786,7 +649,7 @@ func decodePiFileForOpen(file *os.File, path string) (piFile, []Warning, error) 
 		if err != nil {
 			return piFile{}, nil, err
 		}
-		if _, _, _, _, err := resolvePiStoreState(decoded); err != nil {
+		if _, _, _, _, _, err := resolvePiStoreState(decoded); err != nil {
 			return piFile{}, nil, err
 		}
 		if err := truncateSession(file, finalStart); err != nil {
@@ -803,7 +666,7 @@ func decodePiFileForOpen(file *os.File, path string) (piFile, []Warning, error) 
 		return piFile{}, nil, err
 	}
 	if missingLF {
-		if _, _, _, _, err := resolvePiStoreState(decoded); err != nil {
+		if _, _, _, _, _, err := resolvePiStoreState(decoded); err != nil {
 			return piFile{}, nil, err
 		}
 		if err := appendSessionDelimiter(file); err != nil {

@@ -38,6 +38,9 @@ func EntriesFromHistory(history []model.Message) ([]Entry, model.Usage) {
 
 	for msgIndex, message := range history {
 		usage = addUsageTotals(usage, message.Usage)
+		if message.Role == model.RoleContext && !message.Display {
+			continue
+		}
 		baseID := messageEntryBaseID(message, msgIndex)
 		textOrdinal := 0
 		var text strings.Builder

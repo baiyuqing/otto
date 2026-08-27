@@ -1236,5 +1236,5 @@ func (m *Model) nextLiveEntryID(kind string) string {
 }
 
 func (m Model) reservedStateActive() bool {
-	return m.running || m.newSessionPending || m.resume.active() || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
 }

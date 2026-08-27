@@ -3,9 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
@@ -433,10 +436,15 @@ func TestResumeCommandDuplicateEnterBlockedWhileResuming(t *testing.T) {
 	}
 }
 
-func TestResumeResultIgnoresStaleResumeGeneration(t *testing.T) {
+func TestResumeResultReconcilesCommittedSuccessWithStaleGeneration(t *testing.T) {
 	backend := &resumeBackend{
-		info:    app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old"},
+		info:    app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/old.jsonl"},
 		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}}}},
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new", SessionPath: path}
+		backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "fresh transcript"}}}}
+		return app.ResumeResult{Warnings: []session.Warning{{Message: "stale payload warning"}}}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
@@ -445,14 +453,402 @@ func TestResumeResultIgnoresStaleResumeGeneration(t *testing.T) {
 		t.Fatal("resume cmd = nil")
 	}
 
-	backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new"}
-	backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "fresh transcript"}}}}
-	updated, _ = resuming.Update(sessionResumeResultMsg{generation: resuming.resume.generation + 1, path: "/sessions/fresh.jsonl", result: app.ResumeResult{Warnings: []session.Warning{{Message: "stale warning"}}}})
+	result := runCommandWithin(t, cmd, time.Second)
+	resuming.resume.generation++
+	updated, next := resuming.Update(result)
 	got := updated.(Model)
-	if got.resume.mode != resumeResuming || got.statusText != "" {
-		t.Fatalf("resume=%#v status=%q", got.resume, got.statusText)
+	if next != nil || got.resume.mode != resumeClosed {
+		t.Fatalf("cmd=%v resume=%#v", next, got.resume)
 	}
-	if content := got.View().Content; !strings.Contains(content, "old transcript") || strings.Contains(content, "fresh transcript") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") {
 		t.Fatalf("view = %q", content)
+	}
+	if got.statusText != "resumed session" || strings.Contains(got.statusText, "stale payload warning") {
+		t.Fatalf("status = %q, want generic reconciled status", got.statusText)
+	}
+}
+
+func TestResumeResultStaleSuccessSupersededByNewerBackendDoesNotRollbackUI(t *testing.T) {
+	backend := &resumeBackend{
+		info:    app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/old.jsonl"},
+		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}}}},
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: "middle-profile", Model: "middle-model", SessionID: "session-middle", SessionPath: path}
+		backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "middle transcript"}}}}
+		return app.ResumeResult{}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "middle", Path: "/sessions/middle.jsonl"}}})
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	staleResult := runCommandWithin(t, cmd, time.Second)
+
+	backend.info = app.Info{Profile: "newest-profile", Model: "newest-model", SessionID: "session-newest", SessionPath: "/sessions/newest.jsonl"}
+	backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "newest transcript"}}}}
+	resuming.resetSessionViewFromBackend("newest status")
+	resuming.closeResumePicker()
+	resuming.resume.generation++
+
+	updated, next := resuming.Update(staleResult)
+	got := updated.(Model)
+	if next != nil || got.statusText != "newest status" {
+		t.Fatalf("cmd=%v status=%q", next, got.statusText)
+	}
+	if content := got.View().Content; strings.Contains(content, "middle transcript") || !strings.Contains(content, "newest transcript") {
+		t.Fatalf("view = %q", content)
+	}
+}
+
+func TestResumeResultCommittedStaleSuccessFailsClosedDuringNewerResume(t *testing.T) {
+	backend := &resumeBackend{
+		info:    app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/old.jsonl"},
+		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}}}},
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		backend.info.SessionPath = path
+		backend.info.SessionID = "session-middle"
+		backend.history = []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "middle transcript"}}}}
+		return app.ResumeResult{}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "middle", Path: "/sessions/middle.jsonl"}}})
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	staleResult := runCommandWithin(t, cmd, time.Second)
+
+	resuming.resume.generation++
+	resuming.resume.mode = resumeResuming
+	resuming.resume.operationPath = "/sessions/newest.jsonl"
+	updated, quit := resuming.Update(staleResult)
+	got := updated.(Model)
+	if quit == nil {
+		t.Fatal("quit command = nil")
+	}
+	if _, ok := quit().(tea.QuitMsg); !ok {
+		t.Fatalf("quit command message = %T, want tea.QuitMsg", quit())
+	}
+	if got.fatalErr == nil {
+		t.Fatal("fatalErr = nil, want fail-closed reconciliation error")
+	}
+	if content := got.View().Content; strings.Contains(content, "middle transcript") || !strings.Contains(content, "old transcript") {
+		t.Fatalf("view before quit = %q", content)
+	}
+}
+
+func TestResumeWorkersBoundUntrustedSessionResultsAndErrors(t *testing.T) {
+	const backendSkipped = 7
+	sessions := make([]session.SessionInfo, resumeListLimit*1000)
+	for index := range sessions {
+		sessions[index] = session.SessionInfo{
+			Path:         fmt.Sprintf("/sessions/%05d.jsonl", index),
+			ID:           "id\n\x1b" + strings.Repeat("界", resumeMaxFieldBytes),
+			CWD:          strings.Repeat("c", resumeMaxFieldBytes+100),
+			Name:         strings.Repeat("n", resumeMaxFieldBytes+100),
+			LastUserText: strings.Repeat("u", resumeMaxFieldBytes+100),
+			Profile:      strings.Repeat("p", resumeMaxFieldBytes+100),
+			Provider:     strings.Repeat("v", resumeMaxFieldBytes+100),
+			Model:        strings.Repeat("m", resumeMaxFieldBytes+100),
+		}
+	}
+	sessions[1].Path = strings.Repeat("/", resumeMaxPathBytes+1)
+	backend := &resumeBackend{
+		listSessions: func(context.Context, int) (session.ListResult, error) {
+			return session.ListResult{Sessions: sessions, Skipped: backendSkipped}, nil
+		},
+	}
+
+	message := runCommandWithin(t, runSessionListCommand(context.Background(), backend, 41), time.Second)
+	result, ok := message.(sessionListResultMsg)
+	if !ok {
+		t.Fatalf("message = %T, want sessionListResultMsg", message)
+	}
+	wantSessions := resumeListLimit - 1 // The overlong path is dropped, not backfilled from unbounded input.
+	if result.errText != "" || len(result.result.Sessions) != wantSessions {
+		t.Fatalf("err=%q sessions=%d, want %d", result.errText, len(result.result.Sessions), wantSessions)
+	}
+	if want := backendSkipped + len(sessions) - wantSessions; result.result.Skipped != want {
+		t.Fatalf("skipped = %d, want %d", result.result.Skipped, want)
+	}
+	for index, info := range result.result.Sessions {
+		fields := map[string]string{
+			"ID": info.ID, "CWD": info.CWD, "Name": info.Name, "LastUserText": info.LastUserText,
+			"Profile": info.Profile, "Provider": info.Provider, "Model": info.Model,
+		}
+		if len(info.Path) > resumeMaxPathBytes {
+			t.Fatalf("session %d path bytes = %d", index, len(info.Path))
+		}
+		assertResumeSingleLineControlSafe(t, fmt.Sprintf("session %d path", index), info.Path)
+		for name, value := range fields {
+			if len(value) > resumeMaxFieldBytes {
+				t.Fatalf("session %d %s bytes = %d", index, name, len(value))
+			}
+			assertResumeSingleLineControlSafe(t, fmt.Sprintf("session %d %s", index, name), value)
+		}
+	}
+
+	presentationBackend := &resumeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}
+	m := resizeModel(t, newTestResumeModel(t, presentationBackend), 80, 12)
+	m.editor.SetValue("/resume")
+	updated, _ := m.Update(keyPress(tea.KeyEnter))
+	loading := updated.(Model)
+	updated, _ = loading.Update(sessionListResultMsg{
+		generation: loading.resume.generation,
+		result:     session.ListResult{Sessions: sessions, Skipped: backendSkipped},
+	})
+	presentedSessions := updated.(Model).resume.sessions
+	if len(presentedSessions) != wantSessions || len(presentedSessions[0].ID) > resumeMaxFieldBytes {
+		t.Fatalf("presented sessions = %#v", presentedSessions)
+	}
+	assertResumeSingleLineControlSafe(t, "presented session ID", presentedSessions[0].ID)
+
+	oversizedError := errors.New("failure\n\x1b[31m" + strings.Repeat("x", resumeMaxErrorBytes*10))
+	backend.listSessions = func(context.Context, int) (session.ListResult, error) {
+		return session.ListResult{}, oversizedError
+	}
+	message = runCommandWithin(t, runSessionListCommand(context.Background(), backend, 42), time.Second)
+	failed := message.(sessionListResultMsg)
+	if failed.errText == "" || len(failed.errText) > resumeMaxErrorBytes {
+		t.Fatalf("bounded error bytes = %d, value=%q", len(failed.errText), failed.errText)
+	}
+	assertResumeSingleLineControlSafe(t, "list error", failed.errText)
+
+	m = resizeModel(t, newTestResumeModel(t, backend), 80, 12)
+	m.editor.SetValue("/resume")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	loading = updated.(Model)
+	updated, _ = loading.Update(runCommandWithin(t, cmd, time.Second))
+	presented := updated.(Model)
+	if presented.resume.errText != failed.errText || presented.statusText != failed.errText || len(presented.statusText) > resumeMaxErrorBytes {
+		t.Fatalf("resume error=%q status=%q", presented.resume.errText, presented.statusText)
+	}
+}
+
+func TestResumeWorkerBoundsWarningsErrorsAndStatusSuffix(t *testing.T) {
+	warningCount := resumeMaxWarningCount * 1000
+	warnings := make([]session.Warning, warningCount)
+	for index := range warnings {
+		warnings[index].Message = "warning\n\x1b" + strings.Repeat("w", resumeMaxWarningBytes*2)
+	}
+	backend := &resumeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "old", SessionPath: "/sessions/old.jsonl"},
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: "profile", Model: "model", SessionID: "fresh", SessionPath: path}
+		return app.ResumeResult{Warnings: warnings}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	message := runCommandWithin(t, cmd, time.Second)
+	result := message.(sessionResumeResultMsg)
+	if result.errText != "" || len(result.result.Warnings) != resumeMaxWarningCount {
+		t.Fatalf("err=%q warnings=%d", result.errText, len(result.result.Warnings))
+	}
+	if result.warningsSkipped != warningCount-resumeMaxWarningCount {
+		t.Fatalf("warningsSkipped = %d, want %d", result.warningsSkipped, warningCount-resumeMaxWarningCount)
+	}
+	for index, warning := range result.result.Warnings {
+		if len(warning.Message) > resumeMaxWarningBytes {
+			t.Fatalf("warning %d bytes = %d", index, len(warning.Message))
+		}
+		assertResumeSingleLineControlSafe(t, fmt.Sprintf("warning %d", index), warning.Message)
+	}
+
+	updated, _ = resuming.Update(result)
+	got := updated.(Model)
+	wantSuffix := fmt.Sprintf("(+%d more warnings)", warningCount-1)
+	if !strings.Contains(got.statusText, wantSuffix) {
+		t.Fatalf("status = %q, want suffix %q", got.statusText, wantSuffix)
+	}
+	if len(got.statusText) > resumeMaxWarningBytes+64 {
+		t.Fatalf("status bytes = %d", len(got.statusText))
+	}
+	assertResumeSingleLineControlSafe(t, "warning status", got.statusText)
+
+	oversizedError := errors.New("resume failed\r\x1b" + strings.Repeat("z", resumeMaxErrorBytes*10))
+	backend.resumeSession = func(context.Context, string) (app.ResumeResult, error) {
+		return app.ResumeResult{}, oversizedError
+	}
+	m = loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "other", Path: "/sessions/other.jsonl"}}})
+	updated, cmd = m.Update(keyPress(tea.KeyEnter))
+	resuming = updated.(Model)
+	failure := runCommandWithin(t, cmd, time.Second).(sessionResumeResultMsg)
+	if failure.errText == "" || len(failure.errText) > resumeMaxErrorBytes {
+		t.Fatalf("resume error bytes = %d, value=%q", len(failure.errText), failure.errText)
+	}
+	assertResumeSingleLineControlSafe(t, "resume error", failure.errText)
+	updated, _ = resuming.Update(failure)
+	got = updated.(Model)
+	if got.resume.errText != failure.errText || got.statusText != failure.errText {
+		t.Fatalf("resume error=%q status=%q", got.resume.errText, got.statusText)
+	}
+}
+
+func TestResumePickerEscapeCancelsLoadingAndWaitsForWorkerAcknowledgment(t *testing.T) {
+	var calls atomic.Int32
+	started := make(chan struct{})
+	cancelObserved := make(chan struct{})
+	backend := &resumeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		listSessions: func(ctx context.Context, _ int) (session.ListResult, error) {
+			if calls.Add(1) == 1 {
+				close(started)
+				<-ctx.Done()
+				close(cancelObserved)
+				return session.ListResult{Sessions: []session.SessionInfo{{ID: "stale", Path: "/sessions/stale.jsonl"}}}, ctx.Err()
+			}
+			return session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}}, nil
+		},
+	}
+	m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
+	m.editor.SetValue("/resume")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	loading := updated.(Model)
+	if cmd == nil || !loading.resume.listPending {
+		t.Fatalf("cmd=%v resume=%#v", cmd, loading.resume)
+	}
+	resultChannel := make(chan tea.Msg, 1)
+	go func() { resultChannel <- cmd() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("list worker did not start")
+	}
+
+	updated, escapeCmd := loading.Update(keyPress(tea.KeyEscape))
+	closed := updated.(Model)
+	if escapeCmd != nil || closed.resume.mode != resumeClosed || !closed.resume.listPending || !closed.reservedStateActive() {
+		t.Fatalf("cmd=%v resume=%#v reserved=%v", escapeCmd, closed.resume, closed.reservedStateActive())
+	}
+	select {
+	case <-cancelObserved:
+	case <-time.After(time.Second):
+		t.Fatal("list worker did not observe picker cancellation")
+	}
+
+	closed.editor.SetValue("/resume")
+	updated, duplicate := closed.Update(keyPress(tea.KeyEnter))
+	blocked := updated.(Model)
+	if duplicate != nil || calls.Load() != 1 || blocked.statusText != app.ErrPromptActive.Error() {
+		t.Fatalf("cmd=%v calls=%d status=%q", duplicate, calls.Load(), blocked.statusText)
+	}
+
+	var canceledResult tea.Msg
+	select {
+	case canceledResult = <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("canceled list worker did not return")
+	}
+	updated, resultCmd := blocked.Update(canceledResult)
+	acknowledged := updated.(Model)
+	if resultCmd != nil || acknowledged.resume.mode != resumeClosed || acknowledged.resume.listPending || len(acknowledged.resume.sessions) != 0 || acknowledged.reservedStateActive() {
+		t.Fatalf("cmd=%v resume=%#v reserved=%v", resultCmd, acknowledged.resume, acknowledged.reservedStateActive())
+	}
+	if acknowledged.statusText != app.ErrPromptActive.Error() {
+		t.Fatalf("stale canceled result changed status to %q", acknowledged.statusText)
+	}
+
+	updated, next := acknowledged.Update(keyPress(tea.KeyEnter))
+	reloading := updated.(Model)
+	if next == nil || reloading.resume.mode != resumeLoading || !reloading.resume.listPending {
+		t.Fatalf("cmd=%v resume=%#v", next, reloading.resume)
+	}
+	message := runCommandWithin(t, next, time.Second).(sessionListResultMsg)
+	if calls.Load() != 2 || len(message.result.Sessions) != 1 || message.result.Sessions[0].ID != "fresh" {
+		t.Fatalf("calls=%d result=%#v", calls.Load(), message.result)
+	}
+}
+
+func TestResumeListWorkerRootCancellationReleasesOwnership(t *testing.T) {
+	rootCtx, cancelRoot := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	backend := &resumeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		listSessions: func(ctx context.Context, _ int) (session.ListResult, error) {
+			close(started)
+			<-ctx.Done()
+			return session.ListResult{}, ctx.Err()
+		},
+	}
+	m := resizeModel(t, NewModel(rootCtx, backend, WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.editor.SetValue("/resume")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	loading := updated.(Model)
+	resultChannel := make(chan tea.Msg, 1)
+	go func() { resultChannel <- cmd() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("list worker did not start")
+	}
+
+	cancelRoot()
+	var result tea.Msg
+	select {
+	case result = <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("root-canceled list worker did not return")
+	}
+	updated, next := loading.Update(result)
+	got := updated.(Model)
+	if next != nil || got.resume.mode != resumeLoadError || got.resume.listPending || got.resume.errText != context.Canceled.Error() {
+		t.Fatalf("cmd=%v resume=%#v", next, got.resume)
+	}
+}
+
+func TestResumePickerEscapeDoesNotCancelResumeWorker(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctxErr := make(chan error, 1)
+	backend := &resumeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "old", SessionPath: "/sessions/old.jsonl"},
+	}
+	backend.resumeSession = func(ctx context.Context, path string) (app.ResumeResult, error) {
+		close(started)
+		<-release
+		ctxErr <- ctx.Err()
+		backend.info.SessionID = "fresh"
+		backend.info.SessionPath = path
+		return app.ResumeResult{}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	resultChannel := make(chan tea.Msg, 1)
+	go func() { resultChannel <- cmd() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("resume worker did not start")
+	}
+
+	updated, escapeCmd := resuming.Update(keyPress(tea.KeyEscape))
+	blocked := updated.(Model)
+	if escapeCmd != nil || blocked.resume.mode != resumeResuming || blocked.statusText != "resume in progress" {
+		t.Fatalf("cmd=%v resume=%#v status=%q", escapeCmd, blocked.resume, blocked.statusText)
+	}
+	close(release)
+	select {
+	case err := <-ctxErr:
+		if err != nil {
+			t.Fatalf("resume context error after Escape = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("resume worker did not report context state")
+	}
+	select {
+	case <-resultChannel:
+	case <-time.After(time.Second):
+		t.Fatal("resume worker did not return")
+	}
+}
+
+func assertResumeSingleLineControlSafe(t *testing.T, name, value string) {
+	t.Helper()
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			t.Fatalf("%s contains control %U: %q", name, r, value)
+		}
 	}
 }

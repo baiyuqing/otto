@@ -51,11 +51,10 @@ func Create(root string, header Header) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	workspaceKey, err := workspaceKey(header.Workspace)
+	directory, err := sessionDirectory(root, header.Workspace)
 	if err != nil {
 		return nil, err
 	}
-	directory := filepath.Join(root, workspaceKey)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create session directory: %w", err)
 	}

@@ -19,11 +19,6 @@ var (
 	ErrPersistenceDisabled = errors.New("session persistence is disabled")
 )
 
-const (
-	controllerNewSessionFunc    = "github.com/baiyuqing/otto/internal/app.(*Controller).NewSession"
-	controllerResumeSessionFunc = "github.com/baiyuqing/otto/internal/app.(*Controller).ResumeSession"
-)
-
 type Runner interface {
 	Run(context.Context, string, func(agent.Event)) error
 }
@@ -100,6 +95,7 @@ const (
 
 type replacementState struct {
 	done              chan struct{}
+	owner             uint64
 	phase             replacementPhase
 	current           session.Session
 	currentWorkspace  string
@@ -109,23 +105,24 @@ type replacementState struct {
 }
 
 type Controller struct {
-	mu               sync.Mutex
-	current          session.Session
-	currentPath      string
-	currentWorkspace string
-	runner           Runner
-	create           SessionFactory
-	build            RunnerFactory
-	listSessions     SessionLister
-	resumeSession    ResumeFactory
-	prompting        bool
-	replace          *replacementState
-	closed           bool
-	activeDone       chan struct{}
-	closeDone        chan struct{}
-	closeComplete    bool
-	closeErr         error
-	runtimeInfo      *RuntimeInfo
+	mu                  sync.Mutex
+	current             session.Session
+	currentPath         string
+	currentWorkspace    string
+	runner              Runner
+	create              SessionFactory
+	build               RunnerFactory
+	listSessions        SessionLister
+	resumeSession       ResumeFactory
+	prompting           bool
+	replace             *replacementState
+	closed              bool
+	activeDone          chan struct{}
+	closeDone           chan struct{}
+	closeComplete       bool
+	closeErr            error
+	reentrantCloseOwner uint64
+	runtimeInfo         *RuntimeInfo
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
@@ -235,6 +232,7 @@ func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListR
 
 func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResult, error) {
 	requestedPath := canonicalSessionPath(path)
+	owner := currentGoroutineID()
 
 	c.mu.Lock()
 	if c.closed {
@@ -250,11 +248,11 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 		c.mu.Unlock()
 		return ResumeResult{}, ErrPersistenceDisabled
 	}
-	if requestedPath == c.currentPath {
+	if requestedPath != "" && requestedPath == c.currentPath {
 		c.mu.Unlock()
 		return ResumeResult{}, nil
 	}
-	state := c.beginReplacementLocked()
+	state := c.beginReplacementLocked(owner)
 	c.mu.Unlock()
 
 	return c.runReplacement(ctx, state, func() (SessionReplacement, error) {
@@ -263,6 +261,7 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 }
 
 func (c *Controller) beginReplacement() (*replacementState, error) {
+	owner := currentGoroutineID()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -271,12 +270,13 @@ func (c *Controller) beginReplacement() (*replacementState, error) {
 	if c.prompting || c.replace != nil {
 		return nil, ErrPromptActive
 	}
-	return c.beginReplacementLocked(), nil
+	return c.beginReplacementLocked(owner), nil
 }
 
-func (c *Controller) beginReplacementLocked() *replacementState {
+func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {
 	state := &replacementState{
 		done:             make(chan struct{}),
+		owner:            owner,
 		phase:            replacementPhaseBuilding,
 		current:          c.current,
 		currentWorkspace: c.currentWorkspace,
@@ -495,10 +495,11 @@ func (c *Controller) History() []model.Message {
 }
 
 func (c *Controller) Close() error {
+	caller := currentGoroutineID()
 	c.mu.Lock()
 	if c.closeDone != nil {
 		done := c.closeDone
-		if c.closeComplete || calledFromReplacement() {
+		if c.closeComplete || caller != 0 && (c.replacementOwnedByLocked(caller) || c.reentrantCloseOwner == caller) {
 			err := c.closeErr
 			c.mu.Unlock()
 			return err
@@ -516,8 +517,9 @@ func (c *Controller) Close() error {
 	c.closeDone = done
 	activeDone := c.activeDone
 
-	if c.replace != nil && calledFromReplacement() {
+	if caller != 0 && c.replace != nil && c.replace.owner == caller {
 		state := c.replace
+		c.reentrantCloseOwner = caller
 		if state.phase == replacementPhaseClosingCurrent {
 			state.closeAfterSwap = true
 			c.mu.Unlock()
@@ -619,19 +621,30 @@ func (c *Controller) finishReplacingLocked(state *replacementState) {
 	close(state.done)
 }
 
-func calledFromReplacement() bool {
-	pcs := make([]uintptr, 32)
-	n := runtime.Callers(3, pcs)
-	frames := runtime.CallersFrames(pcs[:n])
-	for {
-		frame, more := frames.Next()
-		if frame.Function == controllerNewSessionFunc || frame.Function == controllerResumeSessionFunc {
-			return true
-		}
-		if !more {
-			return false
-		}
+func (c *Controller) replacementOwnedByLocked(owner uint64) bool {
+	return c.replace != nil && c.replace.owner == owner
+}
+
+// currentGoroutineID supplies the execution identity needed to distinguish a
+// synchronous replacement callback from another controller's callback. Close
+// cannot accept an ownership token without breaking its public lifecycle API,
+// and the runtime does not expose a supported goroutine-local identity API.
+func currentGoroutineID() uint64 {
+	var stack [64]byte
+	n := runtime.Stack(stack[:], false)
+	const prefix = "goroutine "
+	if n <= len(prefix) || string(stack[:len(prefix)]) != prefix {
+		return 0
 	}
+
+	var id uint64
+	for _, character := range stack[len(prefix):n] {
+		if character < '0' || character > '9' {
+			break
+		}
+		id = id*10 + uint64(character-'0')
+	}
+	return id
 }
 
 func channelClosed(done <-chan struct{}) bool {
@@ -647,6 +660,9 @@ func channelClosed(done <-chan struct{}) bool {
 }
 
 func canonicalSessionPath(path string) string {
+	if path == "" {
+		return ""
+	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return filepath.Clean(path)

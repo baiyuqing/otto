@@ -230,6 +230,8 @@ On load, the last valid entry is the active leaf, matching Pi's append/branch mo
 
 An incomplete final JSON line is truncated only after all previous records validate, followed by `Sync()`, and produces a warning. A complete invalid final entry is never silently removed.
 
+After a successful load, Otto inspects the active branch for assistant tool calls without corresponding tool results. It appends deterministic error `toolResult` entries for those dangling calls and reports warnings, preserving Otto's existing interrupted-tool durability guarantee. Read-only listing never performs this repair.
+
 Unknown valid entries are never rewritten. New entries can safely append beneath them.
 
 ## 10. Context Building
@@ -296,6 +298,11 @@ type SessionReplacement struct {
     Session     session.Session
     Runner      Runner
     RuntimeInfo RuntimeInfo
+    Warnings    []session.Warning
+}
+
+type ResumeResult struct {
+    Warnings []session.Warning
 }
 
 type SessionLister func(context.Context, int) (session.ListResult, error)
@@ -306,7 +313,7 @@ The frontend-facing backend gains:
 
 ```go
 ListSessions(context.Context, int) (session.ListResult, error)
-ResumeSession(context.Context, string) error
+ResumeSession(context.Context, string) (ResumeResult, error)
 ```
 
 `ResumeSession` is transactional:
@@ -481,6 +488,7 @@ Tests cover:
 - Multiple-root and orphan preservation with warnings
 - Incomplete final-line recovery
 - Complete-invalid-line preservation
+- Active-branch dangling tool-call repair and read-only listing non-repair
 - Write and `Sync` failure identity
 - File and directory modes
 - Defensive snapshots

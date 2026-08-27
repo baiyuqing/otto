@@ -598,7 +598,13 @@ func pendingToolCalls(messages []model.Message) ([]model.Block, error) {
 				order = append(order, block.ToolCallID)
 			}
 		case model.RoleTool:
+			if len(message.Blocks) == 0 {
+				return nil, fmt.Errorf("%w: tool message must contain a tool result", ErrInvalidSession)
+			}
 			for _, block := range message.Blocks {
+				if block.Type != model.BlockToolResult {
+					return nil, fmt.Errorf("%w: tool message contains a non-result block", ErrInvalidSession)
+				}
 				call, exists := pending[block.ToolCallID]
 				if !exists {
 					return nil, fmt.Errorf("%w: tool result has no pending call", ErrInvalidSession)

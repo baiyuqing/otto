@@ -607,6 +607,60 @@ func TestOpenValidatesPiEntryBaseBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsActiveUnsupportedContentWithoutMutation(t *testing.T) {
+	for _, finalLF := range []bool{false, true} {
+		t.Run(map[bool]string{false: "missing final LF", true: "final LF"}[finalLF], func(t *testing.T) {
+			content := unsupportedBranchSessionFixture(true)
+			if finalLF {
+				content += "\n"
+			}
+			path := writeFixture(t, content)
+			before := readFile(t, path)
+
+			if _, _, err := Open(path); !errors.Is(err, ErrUnsupportedSessionContent) {
+				t.Fatalf("Open() error = %v, want ErrUnsupportedSessionContent", err)
+			}
+			if after := readFile(t, path); !bytes.Equal(after, before) {
+				t.Fatalf("unsupported active session was mutated:\nbefore: %q\n after: %q", before, after)
+			}
+		})
+	}
+}
+
+func TestOpenPreservesUnsupportedInactiveBranchBytes(t *testing.T) {
+	for _, finalLF := range []bool{false, true} {
+		t.Run(map[bool]string{false: "repairs only delimiter", true: "does not rewrite"}[finalLF], func(t *testing.T) {
+			content := unsupportedBranchSessionFixture(false)
+			if finalLF {
+				content += "\n"
+			}
+			path := writeFixture(t, content)
+			before := readFile(t, path)
+
+			store, warnings, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			want := append([]byte(nil), before...)
+			if !finalLF {
+				want = append(want, '\n')
+				if len(warnings) != 1 || !strings.Contains(warnings[0].Message, "missing final session delimiter") {
+					t.Fatalf("warnings = %#v, want delimiter-repair warning", warnings)
+				}
+			} else if len(warnings) != 0 {
+				t.Fatalf("warnings = %#v, want none", warnings)
+			}
+			if after := readFile(t, path); !bytes.Equal(after, want) {
+				t.Fatalf("inactive branch bytes changed beyond delimiter repair:\nwant: %q\n got: %q", want, after)
+			}
+		})
+	}
+}
+
 func TestOpenPreservesUnknownPiEntriesAndAppendsBeneathLeaf(t *testing.T) {
 	header := testHeader(t)
 	store, err := Create(t.TempDir(), header)
@@ -888,6 +942,19 @@ func piUnknownEntryLine(id string, parent *string) string {
 		parentJSON = `"` + *parent + `"`
 	}
 	return `{"type":"future_entry","id":"` + id + `","parentId":` + parentJSON + `,"timestamp":"1970-01-01T00:00:02Z","futureField":{"preserve":true}}`
+}
+
+func unsupportedBranchSessionFixture(activeUnsupported bool) string {
+	header := `{"type":"session","version":3,"id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"1970-01-01T00:00:01Z","cwd":"/workspace"}`
+	runtime := `{"type":"custom","id":"71000001","parentId":null,"timestamp":"1970-01-01T00:00:02Z","customType":"otto.runtime","data":{"profile":"default","provider":"openai-compatible","model":"model"}}`
+	image := `{"type":"message","id":"71000002","parentId":"71000001","timestamp":"1970-01-01T00:00:03Z","message":{"role":"user","content":[{"type":"image","data":"aW1hZ2U=","mimeType":"image/png"}],"timestamp":3}}`
+	if activeUnsupported {
+		supported := `{"type":"message","id":"71000003","parentId":"71000001","timestamp":"1970-01-01T00:00:04Z","message":{"role":"user","content":"supported branch","timestamp":4}}`
+		image = strings.Replace(image, `"parentId":"71000001"`, `"parentId":"71000003"`, 1)
+		return strings.Join([]string{header, runtime, supported, image}, "\n")
+	}
+	supported := `{"type":"message","id":"71000003","parentId":"71000001","timestamp":"1970-01-01T00:00:04Z","message":{"role":"user","content":"active supported branch","timestamp":4}}`
+	return strings.Join([]string{header, runtime, image, supported}, "\n")
 }
 
 func validTestEntryID(id string) bool {

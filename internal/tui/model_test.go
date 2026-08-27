@@ -1232,6 +1232,9 @@ func TestPromptCommandStreamsEventsAndCompletes(t *testing.T) {
 	if cap(firstTurn.channel) != 64 {
 		t.Fatalf("turn channel capacity = %d, want 64", cap(firstTurn.channel))
 	}
+	if cap(firstTurn.stream.regularEventSlots) != 63 {
+		t.Fatalf("ordinary turn permits = %d, want 63", cap(firstTurn.stream.regularEventSlots))
+	}
 
 	afterFirst, next := running.Update(first)
 	streaming := afterFirst.(Model)
@@ -1645,29 +1648,41 @@ func TestCanceledFullTurnChannelDeliversRealCompletion(t *testing.T) {
 	}
 }
 
-func TestCanceledFullTurnChannelPreservesAllToolFinishesBeforeDone(t *testing.T) {
+func TestCanceledFullTurnChannelReconcilesPersistedToolResultsAfterBaseline(t *testing.T) {
+	preexisting := []model.Message{
+		{ID: "historical-call", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolName: "historical", ToolCallID: "call-1"}}},
+		{ID: "historical-result", Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolName: "historical", ToolCallID: "call-1", Text: "old result", IsError: true}}},
+	}
 	backendFinished := make(chan struct{})
-	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+	backend := &fakeBackend{history: preexisting}
+	backend.prompt = func(ctx context.Context, text string, emit func(agent.Event)) error {
 		defer close(backendFinished)
-		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "bash", ToolCallID: "call-1"})
+		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "wrong callback name", ToolCallID: "call-1"})
 		for i := 0; i < turnChannelCapacity+16; i++ {
 			emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1}})
 		}
 		<-ctx.Done()
-		finishes := []agent.Event{
-			{Type: agent.EventToolCallFinished, ToolName: "bash", ToolCallID: "call-1", ToolResult: tool.Result{Content: "first exact canceled result", IsError: true}},
-			{Type: agent.EventToolCallFinished, ToolName: "write", ToolCallID: "call-2", ToolResult: tool.Result{Content: "second exact canceled result", IsError: true}},
-			{Type: agent.EventToolCallFinished, ToolName: "edit", ToolCallID: "call-3", ToolResult: tool.Result{Content: "third exact canceled result", IsError: true}},
-			{Type: agent.EventToolCallFinished, ToolName: "malformed", ToolCallID: "call-malformed", ToolResult: tool.Result{Content: "malformed exact finish", IsError: true}},
+		for _, event := range []agent.Event{
+			{Type: agent.EventToolCallFinished, ToolName: "wrong callback name", ToolCallID: "call-1", ToolResult: tool.Result{Content: "wrong callback output"}},
+			{Type: agent.EventToolCallStarted, ToolName: "write", ToolCallID: "call-2"},
+			{Type: agent.EventToolCallFinished, ToolName: "write", ToolCallID: "call-2", ToolResult: tool.Result{Content: "wrong second callback output"}},
+			{Type: agent.EventToolCallStarted, ToolName: "edit", ToolCallID: "call-3"},
+			{Type: agent.EventToolCallFinished, ToolName: "edit", ToolCallID: "call-3", ToolResult: tool.Result{Content: "wrong third callback output"}},
+			{Type: agent.EventToolCallFinished, ToolName: "malformed", ToolCallID: "call-malformed", ToolResult: tool.Result{Content: "not persisted", IsError: true}},
+		} {
+			emit(event)
 		}
-		for index, finish := range finishes {
-			if index > 0 && index < 3 {
-				emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: finish.ToolName, ToolCallID: finish.ToolCallID})
-			}
-			emit(finish)
-		}
+		backend.history = append(backend.history,
+			model.Message{ID: "turn-results-1", Role: model.RoleTool, Blocks: []model.Block{
+				{Type: model.BlockToolResult, ToolName: "bash", ToolCallID: "call-1", Text: "first exact persisted result", IsError: true},
+				{Type: model.BlockToolResult, ToolName: "write", ToolCallID: "call-2", Text: "second exact persisted result"},
+			}},
+			model.Message{ID: "turn-results-2", Role: model.RoleTool, Blocks: []model.Block{
+				{Type: model.BlockToolResult, ToolName: "edit", ToolCallID: "call-3", Text: "third exact persisted result", IsError: true},
+			}},
+		)
 		return ctx.Err()
-	}}
+	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
@@ -1680,7 +1695,7 @@ func TestCanceledFullTurnChannelPreservesAllToolFinishesBeforeDone(t *testing.T)
 	}
 	if len(first.channel) < turnChannelCapacity-1 {
 		running.cancel()
-		t.Fatalf("turn channel only filled to %d, want one slot reserved for done", len(first.channel))
+		t.Fatalf("turn channel only filled to %d, want 63 ordinary envelopes", len(first.channel))
 	}
 
 	updated, _ = running.Update(keyPress(tea.KeyEscape))
@@ -1688,7 +1703,14 @@ func TestCanceledFullTurnChannelPreservesAllToolFinishesBeforeDone(t *testing.T)
 	select {
 	case <-backendFinished:
 	case <-time.After(time.Second):
-		t.Fatal("context-canceled callbacks blocked while the UI was not consuming")
+		t.Fatal("canceled callbacks blocked while the UI was not consuming")
+	}
+	deadline = time.Now().Add(time.Second)
+	for len(first.channel) < turnChannelCapacity && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(first.channel); got != turnChannelCapacity {
+		t.Fatalf("full channel with reserved done = %d, want capacity %d", got, turnChannelCapacity)
 	}
 
 	doneCount := 0
@@ -1718,20 +1740,21 @@ func TestCanceledFullTurnChannelPreservesAllToolFinishesBeforeDone(t *testing.T)
 		}
 	}
 	want := []struct {
-		id, output string
+		id, name, output string
+		error            bool
 	}{
-		{id: "call-1", output: "first exact canceled result"},
-		{id: "call-2", output: "second exact canceled result"},
-		{id: "call-3", output: "third exact canceled result"},
-		{id: "call-malformed", output: "malformed exact finish"},
+		{id: "call-1", name: "historical", output: "old result", error: true},
+		{id: "call-1", name: "bash", output: "first exact persisted result", error: true},
+		{id: "call-2", name: "write", output: "second exact persisted result"},
+		{id: "call-3", name: "edit", output: "third exact persisted result", error: true},
 	}
 	if len(toolEntries) != len(want) {
-		t.Fatalf("tool entries = %#v, want %d exact finishes", toolEntries, len(want))
+		t.Fatalf("tool entries = %#v, want historical plus %d persisted results", toolEntries, len(want)-1)
 	}
 	for index, expected := range want {
 		entry := toolEntries[index]
-		if entry.ToolCallID != expected.id || entry.ToolOutput != expected.output || !entry.ToolDone || !entry.ToolError {
-			t.Fatalf("tool entry %d = %#v, want id=%q output=%q done error", index, entry, expected.id, expected.output)
+		if entry.ToolCallID != expected.id || entry.ToolName != expected.name || entry.ToolOutput != expected.output || !entry.ToolDone || entry.ToolError != expected.error {
+			t.Fatalf("tool entry %d = %#v, want %#v", index, entry, expected)
 		}
 	}
 	select {
@@ -1741,6 +1764,36 @@ func TestCanceledFullTurnChannelPreservesAllToolFinishesBeforeDone(t *testing.T)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("turn channel was not closed exactly once after done")
+	}
+}
+
+func TestPersistedToolReconciliationUpdatesDoneEntriesInStoredOrder(t *testing.T) {
+	backend := &fakeBackend{history: []model.Message{{
+		ID: "before-turn", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "old prompt"}},
+	}}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.turnHistoryBaseline = captureTurnHistoryBaseline(backend.History())
+	m.turnEntryStart = len(m.entries)
+	m.entries = append(m.entries,
+		Entry{ID: "later-callback", Kind: EntryTool, ToolCallID: "call-2", ToolName: "wrong-2", ToolOutput: "callback-2", ToolDone: true},
+		Entry{ID: "earlier-callback", Kind: EntryTool, ToolCallID: "call-1", ToolName: "wrong-1", ToolOutput: "callback-1", ToolDone: true},
+	)
+	backend.history = append(backend.history, model.Message{
+		ID: "turn-results", Role: model.RoleTool, Blocks: []model.Block{
+			{Type: model.BlockToolResult, ToolCallID: "call-1", ToolName: "bash", Text: "stored first", IsError: true},
+			{Type: model.BlockToolResult, ToolCallID: "call-2", ToolName: "write", Text: "stored second"},
+		},
+	})
+
+	if !m.reconcilePersistedToolResults() {
+		t.Fatal("reconcilePersistedToolResults() reported no change")
+	}
+	got := m.entries[m.turnEntryStart:]
+	if len(got) != 2 || got[0].ToolCallID != "call-1" || got[0].ToolName != "bash" || got[0].ToolOutput != "stored first" || !got[0].ToolError || !got[0].ToolDone {
+		t.Fatalf("first reconciled entry = %#v", got)
+	}
+	if got[1].ToolCallID != "call-2" || got[1].ToolName != "write" || got[1].ToolOutput != "stored second" || got[1].ToolError || !got[1].ToolDone {
+		t.Fatalf("second reconciled entry = %#v", got)
 	}
 }
 
@@ -1794,6 +1847,25 @@ func TestFinishTurnReconcilesPendingToolEntries(t *testing.T) {
 	got := updated.(Model)
 	if !got.entries[0].ToolDone || !got.entries[0].ToolError || !strings.Contains(got.entries[0].ToolOutput, context.Canceled.Error()) {
 		t.Fatalf("pending tool after finish = %#v", got.entries[0])
+	}
+}
+
+func TestFatalPersistenceWithoutStoredToolResultUsesGenericReconciliation(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("persist tool result: disk full"))
+	backend := &fakeBackend{history: []model.Message{{ID: "assistant", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash"}}}}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.running = true
+	m.cancel = func() {}
+	m.entries = append(m.entries, Entry{Kind: EntryTool, ToolCallID: "call-1", ToolName: "bash"})
+
+	updated, cmd := m.finishTurn(fatalErr)
+	got := updated.(Model)
+	entry := got.entries[len(got.entries)-2]
+	if cmd == nil || !errors.Is(got.fatalErr, session.ErrFatalPersistence) {
+		t.Fatalf("finishTurn() cmd=%v fatalErr=%v, want fatal quit", cmd, got.fatalErr)
+	}
+	if !entry.ToolDone || !entry.ToolError || !strings.Contains(entry.ToolOutput, "disk full") {
+		t.Fatalf("pending tool after failed persistence = %#v", entry)
 	}
 }
 

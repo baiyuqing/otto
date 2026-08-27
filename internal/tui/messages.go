@@ -24,7 +24,6 @@ type scrollViewportMsg struct {
 
 type turnEnvelope struct {
 	event                *agent.Event
-	droppedToolFinishes  []agent.Event
 	err                  error
 	done                 bool
 	usesRegularEventSlot bool

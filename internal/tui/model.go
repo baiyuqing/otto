@@ -2,8 +2,11 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +63,12 @@ func WithClock(clock Clock) Option {
 	}
 }
 
+type turnHistoryBaseline struct {
+	messageCount int
+	digest       [sha256.Size]byte
+	valid        bool
+}
+
 type Model struct {
 	rootCtx               context.Context
 	backend               app.Backend
@@ -95,6 +104,8 @@ type Model struct {
 	turnEventErr          error
 	fatalErr              error
 	turnGeneration        uint64
+	turnHistoryBaseline   turnHistoryBaseline
+	turnEntryStart        int
 	liveEntrySequence     int
 }
 
@@ -487,6 +498,8 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.fatalErr = nil
+	m.turnHistoryBaseline = turnHistoryBaseline{}
+	m.turnEntryStart = 0
 	m.liveEntrySequence = 0
 	m.autoFollow = true
 	m.editor.SetValue("")
@@ -573,6 +586,8 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.activeAssistant = -1
 	m.turnGeneration++
 	m.activeTurnChannel = stream.channel
+	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
+	m.turnEntryStart = len(m.entries)
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
 	m.editor.SetValue("")
 	m.rerenderAndRefreshViewportContent(!m.autoFollow)
@@ -604,7 +619,6 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 
 	var eventMu sync.Mutex
 	acceptingEvents := true
-	var droppedToolFinishes []agent.Event
 	err := backend.Prompt(ctx, text, func(event agent.Event) {
 		eventMu.Lock()
 		defer eventMu.Unlock()
@@ -612,16 +626,12 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 			return
 		}
 		eventCopy := event
-		if sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy}) || event.Type != agent.EventToolCallFinished {
-			return
-		}
-		droppedToolFinishes = append(droppedToolFinishes, eventCopy)
+		sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy})
 	})
 	eventMu.Lock()
 	acceptingEvents = false
-	dropped := append([]agent.Event(nil), droppedToolFinishes...)
 	eventMu.Unlock()
-	stream.channel <- turnEnvelope{droppedToolFinishes: dropped, err: err, done: true}
+	stream.channel <- turnEnvelope{err: err, done: true}
 }
 
 func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
@@ -667,7 +677,9 @@ func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		return m.applyTurnEvent(msg.stream, *msg.value.event)
 	}
 	if msg.value.done {
-		m.applyDroppedToolFinishes(msg.value.droppedToolFinishes)
+		if m.reconcilePersistedToolResults() {
+			m.refreshViewportContent(!m.autoFollow)
+		}
 		return m.finishTurn(msg.value.err)
 	}
 	return m, waitTurn(msg.stream)
@@ -728,18 +740,6 @@ func (m *Model) ensureActiveAssistantEntry() int {
 	return m.activeAssistant
 }
 
-func (m *Model) applyDroppedToolFinishes(events []agent.Event) {
-	if len(events) == 0 {
-		return
-	}
-	m.finalizeStreamingRender()
-	m.activeAssistant = -1
-	for _, event := range events {
-		m.finishToolEntry(event)
-	}
-	m.refreshViewportContent(!m.autoFollow)
-}
-
 func (m *Model) finishToolEntry(event agent.Event) {
 	if index := m.findPendingToolEntry(event.ToolCallID); index >= 0 {
 		m.entries[index].ToolDone = true
@@ -766,6 +766,111 @@ func (m Model) findPendingToolEntry(toolCallID string) int {
 		entry := m.entries[i]
 		if entry.Kind == EntryTool && !entry.ToolDone && entry.ToolCallID == toolCallID {
 			return i
+		}
+	}
+	return -1
+}
+
+func captureTurnHistoryBaseline(history []otmodel.Message) turnHistoryBaseline {
+	digest, valid := historyDigest(history)
+	return turnHistoryBaseline{messageCount: len(history), digest: digest, valid: valid}
+}
+
+func historyDigest(history []otmodel.Message) ([sha256.Size]byte, bool) {
+	hasher := sha256.New()
+	_, _ = fmt.Fprintf(hasher, "%d\n", len(history))
+	encoder := json.NewEncoder(hasher)
+	for _, message := range history {
+		if err := encoder.Encode(message); err != nil {
+			return [sha256.Size]byte{}, false
+		}
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return digest, true
+}
+
+func (m Model) persistedTurnToolResults() []otmodel.Block {
+	baseline := m.turnHistoryBaseline
+	if !baseline.valid {
+		return nil
+	}
+	history := historyFromBackend(m.backend)
+	if len(history) < baseline.messageCount {
+		return nil
+	}
+	digest, valid := historyDigest(history[:baseline.messageCount])
+	if !valid || digest != baseline.digest {
+		return nil
+	}
+
+	var results []otmodel.Block
+	for _, message := range history[baseline.messageCount:] {
+		for _, block := range message.Blocks {
+			if block.Type == otmodel.BlockToolResult {
+				results = append(results, block)
+			}
+		}
+	}
+	return results
+}
+
+func (m *Model) reconcilePersistedToolResults() bool {
+	results := m.persistedTurnToolResults()
+	if len(results) == 0 {
+		return false
+	}
+	m.finalizeStreamingRender()
+	m.activeAssistant = -1
+
+	usedEntries := make(map[int]struct{}, len(results))
+	slots := make([]int, 0, len(results))
+	reconciled := make([]Entry, 0, len(results))
+	changed := false
+	for _, result := range results {
+		entryIndex := m.findTurnToolEntry(result.ToolCallID, usedEntries)
+		var entry Entry
+		if entryIndex >= 0 {
+			entry = m.entries[entryIndex]
+		} else {
+			entry = Entry{ID: m.nextLiveEntryID("tool"), Kind: EntryTool}
+			m.entries = append(m.entries, entry)
+			entryIndex = len(m.entries) - 1
+			changed = true
+		}
+		usedEntries[entryIndex] = struct{}{}
+		slots = append(slots, entryIndex)
+		entry.Kind = EntryTool
+		entry.ToolCallID = result.ToolCallID
+		entry.ToolName = result.ToolName
+		entry.ToolOutput = result.Text
+		entry.ToolError = result.IsError
+		entry.ToolDone = true
+		reconciled = append(reconciled, entry)
+	}
+
+	sort.Ints(slots)
+	for index, slot := range slots {
+		if m.entries[slot] != reconciled[index] {
+			changed = true
+		}
+		m.entries[slot] = reconciled[index]
+	}
+	return changed
+}
+
+func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
+	if toolCallID == "" {
+		return -1
+	}
+	start := max(0, min(m.turnEntryStart, len(m.entries)))
+	for index := start; index < len(m.entries); index++ {
+		entry := m.entries[index]
+		if entry.Kind != EntryTool || entry.ToolCallID != toolCallID {
+			continue
+		}
+		if _, alreadyUsed := used[index]; !alreadyUsed {
+			return index
 		}
 	}
 	return -1
@@ -852,6 +957,8 @@ func (m *Model) completeTurnState() {
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.activeAssistant = -1
+	m.turnHistoryBaseline = turnHistoryBaseline{}
+	m.turnEntryStart = 0
 }
 
 func (m *Model) scheduleRenderTick() tea.Cmd {

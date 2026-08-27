@@ -5,14 +5,16 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	glamour "charm.land/glamour/v2"
 	glamourstyles "charm.land/glamour/v2/styles"
 )
 
 const (
-	markdownFallbackMarker = "[markdown rendering unavailable]"
-	minimumMarkdownWidth   = 20
+	markdownFallbackMarker   = "[markdown rendering unavailable]"
+	minimumMarkdownWidth     = 20
+	maximumSGRParameterBytes = 64
 )
 
 var errNilMarkdownRenderer = errors.New("markdown renderer is nil")
@@ -56,15 +58,13 @@ func renderMarkdown(renderer MarkdownRenderer, markdown string, width int) (stri
 	if renderer == nil {
 		return fallbackMarkdown(safePlainText), errNilMarkdownRenderer
 	}
-	// Glamour HTML-unescapes Markdown text while rendering. Neutralize character
-	// references at this boundary so they cannot recreate terminal controls after
-	// the plain-text sanitizer has run.
-	safeMarkdown := escapeMarkdownCharacterReferences(safePlainText)
-	rendered, err := renderer.Render(safeMarkdown, width)
+	rendered, err := renderer.Render(safePlainText, width)
 	if err != nil {
 		return fallbackMarkdown(safePlainText), err
 	}
-	return strings.TrimSuffix(rendered, "\n"), nil
+	// Goldmark and Glamour can decode character references after the direct-input
+	// sanitizer runs. Trust only the SGR sequences Glamour uses for visual style.
+	return strings.TrimSuffix(filterTerminalOutput(rendered), "\n"), nil
 }
 
 func markdownWidth(width int) int {
@@ -108,59 +108,162 @@ func escapeTextControls(text string, preserveMultilineWhitespace bool) string {
 	return builder.String()
 }
 
-func escapeMarkdownCharacterReferences(markdown string) string {
+func filterTerminalOutput(output string) string {
 	var builder strings.Builder
-	for index := 0; index < len(markdown); {
-		if markdown[index] == '&' && startsHTMLCharacterReference(markdown[index:]) {
-			builder.WriteString("&amp;")
+	builder.Grow(len(output))
+	for index := 0; index < len(output); {
+		value := output[index]
+		switch {
+		case value == 0x1b:
+			end, safeSGR := scanEscapeSequence(output, index)
+			if safeSGR {
+				builder.WriteString(output[index:end])
+			} else if end == index+1 {
+				writeEscapedTerminalControl(&builder, rune(value))
+			} else {
+				writePreservedTerminalWhitespace(&builder, output[index:end])
+			}
+			index = end
+		case value == '\n' || value == '\t':
+			builder.WriteByte(value)
 			index++
-			continue
+		case value < 0x20 || value == 0x7f:
+			writeEscapedTerminalControl(&builder, rune(value))
+			index++
+		case value < utf8.RuneSelf:
+			builder.WriteByte(value)
+			index++
+		default:
+			if value >= 0x80 && value <= 0x9f {
+				if isTerminalStringIntroducer(rune(value)) {
+					end := scanTerminalString(output, index+1)
+					writePreservedTerminalWhitespace(&builder, output[index:end])
+					index = end
+					continue
+				}
+				if value == 0x9b {
+					index, _ = scanCSISequence(output, index+1, false)
+					continue
+				}
+				writeEscapedTerminalControl(&builder, rune(value))
+				index++
+				continue
+			}
+			r, size := utf8.DecodeRuneInString(output[index:])
+			if r == utf8.RuneError && size == 1 {
+				builder.WriteRune(utf8.RuneError)
+				index++
+				continue
+			}
+			if r >= 0x80 && r <= 0x9f {
+				if isTerminalStringIntroducer(r) {
+					end := scanTerminalString(output, index+size)
+					writePreservedTerminalWhitespace(&builder, output[index:end])
+					index = end
+					continue
+				}
+				if r == 0x9b {
+					index, _ = scanCSISequence(output, index+size, false)
+					continue
+				}
+				writeEscapedTerminalControl(&builder, r)
+				index += size
+				continue
+			}
+			builder.WriteString(output[index : index+size])
+			index += size
 		}
-		builder.WriteByte(markdown[index])
-		index++
 	}
 	return builder.String()
 }
 
-func startsHTMLCharacterReference(text string) bool {
-	if len(text) < 2 || text[0] != '&' {
-		return false
+func scanEscapeSequence(output string, start int) (int, bool) {
+	if start+1 >= len(output) {
+		return start + 1, false
 	}
-	if text[1] == '#' {
-		index := 2
-		hexadecimal := false
-		if index < len(text) && (text[index] == 'x' || text[index] == 'X') {
-			hexadecimal = true
-			index++
-		}
-		start := index
-		for index < len(text) && isCharacterReferenceDigit(text[index], hexadecimal) {
-			index++
-		}
-		return index > start
+	switch output[start+1] {
+	case '[':
+		return scanCSISequence(output, start+2, true)
+	case ']', 'P', 'X', '^', '_':
+		return scanTerminalString(output, start+2), false
 	}
 
-	index := 1
-	for index < len(text) && isASCIIAlphaNumeric(text[index]) {
+	next := output[start+1]
+	if next >= 0x30 && next <= 0x7e {
+		return start + 2, false
+	}
+	if next < 0x20 || next >= 0x80 {
+		return start + 1, false
+	}
+	index := start + 1
+	for index < len(output) && output[index] >= 0x20 && output[index] <= 0x2f {
 		index++
 	}
-	if index == 1 {
+	if index < len(output) && output[index] >= 0x30 && output[index] <= 0x7e {
+		return index + 1, false
+	}
+	if index == len(output) {
+		return index, false
+	}
+	return start + 1, false
+}
+
+func scanCSISequence(output string, bodyStart int, allowSGR bool) (int, bool) {
+	validSGR := allowSGR
+	for index := bodyStart; index < len(output); index++ {
+		value := output[index]
+		if value >= 0x40 && value <= 0x7e {
+			return index + 1, validSGR && value == 'm' && index-bodyStart <= maximumSGRParameterBytes
+		}
+		if !((value >= '0' && value <= '9') || value == ';' || value == ':') {
+			validSGR = false
+		}
+		if value < 0x20 || value >= 0x80 {
+			return index, false
+		}
+	}
+	return len(output), false
+}
+
+func scanTerminalString(output string, bodyStart int) int {
+	for index := bodyStart; index < len(output); index++ {
+		switch output[index] {
+		case 0x07, 0x9c:
+			return index + 1
+		case 0x1b:
+			if index+1 < len(output) && output[index+1] == '\\' {
+				return index + 2
+			}
+		case 0xc2:
+			if index+1 < len(output) && output[index+1] == 0x9c {
+				return index + 2
+			}
+		}
+	}
+	return len(output)
+}
+
+func isTerminalStringIntroducer(r rune) bool {
+	switch r {
+	case 0x90, 0x98, 0x9d, 0x9e, 0x9f:
+		return true
+	default:
 		return false
 	}
-	if index < len(text) && text[index] == ';' {
-		return true
-	}
-	name := text[1:index]
-	return (name == "amp" || name == "AMP") && (index == len(text) || !isASCIIAlphaNumeric(text[index]))
 }
 
-func isCharacterReferenceDigit(value byte, hexadecimal bool) bool {
-	if value >= '0' && value <= '9' {
-		return true
+func writePreservedTerminalWhitespace(builder *strings.Builder, sequence string) {
+	for index := 0; index < len(sequence); index++ {
+		if sequence[index] == '\n' || sequence[index] == '\t' {
+			builder.WriteByte(sequence[index])
+		}
 	}
-	return hexadecimal && ((value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F'))
 }
 
-func isASCIIAlphaNumeric(value byte) bool {
-	return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9')
+func writeEscapedTerminalControl(builder *strings.Builder, value rune) {
+	if value < 0x100 {
+		_, _ = fmt.Fprintf(builder, "\\x%02x", value)
+		return
+	}
+	_, _ = fmt.Fprintf(builder, "\\u%04x", value)
 }

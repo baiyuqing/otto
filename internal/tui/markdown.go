@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	markdownFallbackMarker   = "[markdown rendering unavailable]"
-	minimumMarkdownWidth     = 20
-	maximumSGRParameterBytes = 64
+	markdownFallbackMarker      = "[markdown rendering unavailable]"
+	minimumMarkdownWidth        = 20
+	maximumSGRParameterBytes    = 64
+	maximumTerminalStringBytes  = 4096
+	safeTerminalFormattingReset = "\x1b[0m"
 )
 
 var errNilMarkdownRenderer = errors.New("markdown renderer is nil")
@@ -64,7 +66,7 @@ func renderMarkdown(renderer MarkdownRenderer, markdown string, width int) (stri
 	}
 	// Goldmark and Glamour can decode character references after the direct-input
 	// sanitizer runs. Trust only the SGR sequences Glamour uses for visual style.
-	return strings.TrimSuffix(filterTerminalOutput(rendered), "\n"), nil
+	return filterTerminalOutput(strings.TrimSuffix(rendered, "\n")), nil
 }
 
 func markdownWidth(width int) int {
@@ -111,6 +113,7 @@ func escapeTextControls(text string, preserveMultilineWhitespace bool) string {
 func filterTerminalOutput(output string) string {
 	var builder strings.Builder
 	builder.Grow(len(output))
+	retainedSGR := false
 	for index := 0; index < len(output); {
 		value := output[index]
 		switch {
@@ -118,6 +121,7 @@ func filterTerminalOutput(output string) string {
 			end, safeSGR := scanEscapeSequence(output, index)
 			if safeSGR {
 				builder.WriteString(output[index:end])
+				retainedSGR = true
 			} else if end == index+1 {
 				writeEscapedTerminalControl(&builder, rune(value))
 			} else {
@@ -136,7 +140,7 @@ func filterTerminalOutput(output string) string {
 		default:
 			if value >= 0x80 && value <= 0x9f {
 				if isTerminalStringIntroducer(rune(value)) {
-					end := scanTerminalString(output, index+1)
+					end := scanTerminalString(output, index+1, value == 0x9d)
 					writePreservedTerminalWhitespace(&builder, output[index:end])
 					index = end
 					continue
@@ -157,7 +161,7 @@ func filterTerminalOutput(output string) string {
 			}
 			if r >= 0x80 && r <= 0x9f {
 				if isTerminalStringIntroducer(r) {
-					end := scanTerminalString(output, index+size)
+					end := scanTerminalString(output, index+size, r == 0x9d)
 					writePreservedTerminalWhitespace(&builder, output[index:end])
 					index = end
 					continue
@@ -174,6 +178,9 @@ func filterTerminalOutput(output string) string {
 			index += size
 		}
 	}
+	if retainedSGR {
+		builder.WriteString(safeTerminalFormattingReset)
+	}
 	return builder.String()
 }
 
@@ -184,8 +191,10 @@ func scanEscapeSequence(output string, start int) (int, bool) {
 	switch output[start+1] {
 	case '[':
 		return scanCSISequence(output, start+2, true)
-	case ']', 'P', 'X', '^', '_':
-		return scanTerminalString(output, start+2), false
+	case ']':
+		return scanTerminalString(output, start+2, true), false
+	case 'P', 'X', '^', '_':
+		return scanTerminalString(output, start+2, false), false
 	}
 
 	next := output[start+1]
@@ -225,22 +234,32 @@ func scanCSISequence(output string, bodyStart int, allowSGR bool) (int, bool) {
 	return len(output), false
 }
 
-func scanTerminalString(output string, bodyStart int) int {
-	for index := bodyStart; index < len(output); index++ {
+func scanTerminalString(output string, bodyStart int, allowBEL bool) int {
+	limit := min(len(output), bodyStart+maximumTerminalStringBytes)
+	for index := bodyStart; index < limit; index++ {
 		switch output[index] {
-		case 0x07, 0x9c:
+		case 0x07:
+			if allowBEL {
+				return index + 1
+			}
+		case 0x9c:
+			return index + 1
+		case 0x18, 0x1a:
 			return index + 1
 		case 0x1b:
-			if index+1 < len(output) && output[index+1] == '\\' {
+			if index+1 < limit && output[index+1] == '\\' {
 				return index + 2
 			}
+			// A nested ESC that is not ST marks the outer string as malformed.
+			// Resume at the ESC so the normal filter can safely process it.
+			return index
 		case 0xc2:
-			if index+1 < len(output) && output[index+1] == 0x9c {
+			if index+1 < limit && output[index+1] == 0x9c {
 				return index + 2
 			}
 		}
 	}
-	return len(output)
+	return limit
 }
 
 func isTerminalStringIntroducer(r rune) bool {

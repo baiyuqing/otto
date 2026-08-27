@@ -99,14 +99,15 @@ func TestTerminalOutputFilterPreservesOnlySafeFormatting(t *testing.T) {
 		want  string
 	}{
 		{name: "plain whitespace", input: "plain\n\ttext", want: "plain\n\ttext"},
-		{name: "SGR", input: "\x1b[31;1mred\x1b[m \x1b[38:5:252mgray\x1b[0m", want: "\x1b[31;1mred\x1b[m \x1b[38:5:252mgray\x1b[0m"},
+		{name: "SGR", input: "\x1b[31;1mred\x1b[m \x1b[38:5:252mgray\x1b[0m", want: "\x1b[31;1mred\x1b[m \x1b[38:5:252mgray\x1b[0m\x1b[0m"},
 		{name: "OSC BEL", input: "before\x1b]52;c;owned\aafter", want: "beforeafter"},
 		{name: "OSC ST", input: "before\x1b]52;c;owned\x1b\\after", want: "beforeafter"},
 		{name: "OSC multiline whitespace", input: "before\x1b]52;c;hidden\n\tmore\aafter", want: "before\n\tafter"},
 		{name: "C1 OSC ST", input: "before\u009d52;c;owned\u009cafter", want: "beforeafter"},
 		{name: "raw C1 OSC ST", input: "before" + string([]byte{0x9d}) + "52;c;owned" + string([]byte{0x9c}) + "after", want: "beforeafter"},
 		{name: "DCS", input: "before\x1bP1;2|owned\x1b\\after", want: "beforeafter"},
-		{name: "SOS", input: "before\x1bXowned\aafter", want: "beforeafter"},
+		{name: "DCS BEL is payload", input: "before\x1bPhidden\astill-hidden\x1b\\after", want: "beforeafter"},
+		{name: "SOS", input: "before\x1bXowned\x1b\\after", want: "beforeafter"},
 		{name: "PM", input: "before\x1b^owned\u009cafter", want: "beforeafter"},
 		{name: "C1 APC", input: "before\u009fowned\x1b\\after", want: "beforeafter"},
 		{name: "non-SGR CSI", input: "before\x1b[2Jafter\x1b[?25l", want: "beforeafter"},
@@ -129,6 +130,61 @@ func TestTerminalOutputFilterPreservesOnlySafeFormatting(t *testing.T) {
 	if got := filterTerminalOutput(overlong); got != "beforeafter" {
 		t.Fatalf("overlong SGR survived filtering: %q", got)
 	}
+}
+
+func TestTerminalOutputFilterRecoversFromMalformedTerminalStrings(t *testing.T) {
+	const reset = "\x1b[0m"
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "nested ESC reset",
+			input: "\x1b[31mred\x1b]unterminated\x1b[0mplain",
+			want:  "\x1b[31mred\x1b[0mplain" + reset,
+		},
+		{name: "CAN cancels", input: "before\x1b]hidden\x18after", want: "beforeafter"},
+		{name: "SUB cancels", input: "before\x1bPpayload\x1aafter", want: "beforeafter"},
+		{name: "truncated ST recovers ESC", input: "before\x1b]hidden\x1b", want: `before\x1b`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := filterTerminalOutput(test.input); got != test.want {
+				t.Fatalf("filterTerminalOutput() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestTerminalOutputFilterBoundsUnterminatedTerminalStrings(t *testing.T) {
+	input := "before\x1b]" + strings.Repeat("x", maximumTerminalStringBytes) + "VISIBLE"
+	got := filterTerminalOutput(input)
+	if got != "beforeVISIBLE" {
+		t.Fatalf("overlong terminal string swallowed trailing visible text: %q", got)
+	}
+	assertOnlySGRControls(t, got)
+}
+
+func TestTerminalOutputFilterEndsWithResetAfterRetainedSGR(t *testing.T) {
+	got := filterTerminalOutput("\x1b[31mred")
+	if got != "\x1b[31mred\x1b[0m" {
+		t.Fatalf("filterTerminalOutput() = %q, want retained red followed by reset", got)
+	}
+}
+
+func TestMarkdownRecoversFromExactUnterminatedEntityAttack(t *testing.T) {
+	got, err := renderMarkdown(newGlamourRenderer(true), "&#27;[31mred&#27;]unterminated", 100)
+	if err != nil {
+		t.Fatalf("renderMarkdown() error = %v", err)
+	}
+	if !strings.Contains(got, "red") {
+		t.Fatalf("rendered attack lost visible content: %q", got)
+	}
+	if !strings.HasSuffix(got, "\x1b[0m") {
+		t.Fatalf("rendered attack can leave SGR active: %q", got)
+	}
+	assertOnlySGRControls(t, got)
 }
 
 func TestMarkdownFiltersControlsSynthesizedByFormatting(t *testing.T) {

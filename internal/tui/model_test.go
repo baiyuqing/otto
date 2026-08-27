@@ -269,6 +269,29 @@ func TestSmallTerminalShowsResizeMessage(t *testing.T) {
 	}
 }
 
+func TestViewResetsMalformedAssistantStyleBeforeNextEntryAndFooter(t *testing.T) {
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: []model.Message{
+			{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "&#27;[31mred&#27;]unterminated"}}},
+			{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "next entry"}}},
+		},
+	}
+	view := resizeModel(t, NewModel(context.Background(), backend), 100, 30).View().Content
+	red := strings.Index(view, "red")
+	next := strings.Index(view, "next entry")
+	footer := strings.Index(view, "profile/model")
+	if red < 0 || next <= red || footer <= next {
+		t.Fatalf("view does not contain entries and footer in order: %q", view)
+	}
+	if reset := strings.Index(view[red:next], "\x1b[0m"); reset < 0 {
+		t.Fatalf("assistant SGR was not reset before the next entry: %q", view)
+	}
+	if reset := strings.Index(view[red:footer], "\x1b[0m"); reset < 0 {
+		t.Fatalf("assistant SGR was not reset before the footer: %q", view)
+	}
+}
+
 func TestInitialHistoryStartsAtBottom(t *testing.T) {
 	history := make([]model.Message, 0, 12)
 	for i := range 12 {

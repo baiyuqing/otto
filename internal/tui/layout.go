@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/app"
 	otmodel "github.com/baiyuqing/otto/internal/model"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -54,30 +55,32 @@ func editorHeight(editor textarea.Model) int {
 }
 
 func smallTerminalView(width, height int) string {
-	message := lipgloss.NewStyle().Bold(true).Render(
-		fmt.Sprintf("terminal is too small — resize to at least %dx%d", minTerminalWidth, minTerminalHeight),
-	)
-	return lipgloss.Place(max(0, width), max(0, height), lipgloss.Center, lipgloss.Center, message)
+	width = max(0, width)
+	height = max(0, height)
+	message := fmt.Sprintf("terminal is too small — resize to at least %dx%d", minTerminalWidth, minTerminalHeight)
+	message = wrapAndClip(message, width, height)
+	message = lipgloss.NewStyle().Bold(true).MaxWidth(width).MaxHeight(height).Render(message)
+	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, message), width, height)
 }
 
 func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) string {
-	profileModel := strings.Trim(strings.Trim(info.Profile+"/"+info.Model, "/"), " ")
+	profileModel := strings.Trim(strings.Trim(escapePlainText(info.Profile)+"/"+escapePlainText(info.Model), "/"), " ")
 	if profileModel == "" {
 		profileModel = "unknown/unknown"
 	}
 
 	fields := []string{profileModel}
-	if workspace := footerWorkspace(info.Workspace); workspace != "" && width >= 72 {
+	if workspace := escapePlainText(footerWorkspace(info.Workspace)); workspace != "" && width >= 72 {
 		fields = append([]string{workspace}, fields...)
 	}
 	if width >= 48 {
 		fields = append(fields, fmt.Sprintf("tokens %d/%d", max(0, usage.InputTokens), max(0, usage.OutputTokens)))
 	}
 	if info.SessionID != "" && width >= 60 {
-		fields = append(fields, info.SessionID)
+		fields = append(fields, escapePlainText(info.SessionID))
 	}
 	if status != "" {
-		fields = append([]string{status}, fields...)
+		fields = append([]string{escapePlainText(status)}, fields...)
 	}
 
 	for len(fields) > 1 && lipgloss.Width(strings.Join(fields, " | ")) > max(0, width) {
@@ -85,7 +88,8 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 	}
 
 	footer := strings.Join(fields, " | ")
-	return lipgloss.NewStyle().Width(max(0, width)).Render(footer)
+	width = max(0, width)
+	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
 }
 
 func footerWorkspace(workspace string) string {
@@ -100,8 +104,21 @@ func footerWorkspace(workspace string) string {
 }
 
 func renderOverlay(width, height int, content string) string {
-	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).Render(content)
-	return lipgloss.Place(max(0, width), max(0, height), lipgloss.Center, lipgloss.Center, box)
+	width = max(0, width)
+	height = max(0, height)
+	if width < 4 || height < 3 {
+		return fitToBounds(content, width, height)
+	}
+	innerWidth := width - 4 // border plus one cell of horizontal padding per side
+	innerHeight := height - 2
+	content = truncateAndClipLines(content, innerWidth, innerHeight)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		MaxWidth(width).
+		MaxHeight(height).
+		Render(content)
+	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box), width, height)
 }
 
 func helpOverlayContent() string {
@@ -122,12 +139,12 @@ func helpOverlayContent() string {
 }
 
 func sessionOverlayContent(info app.Info) string {
-	lines := []string{"Session", ""}
+	lines := []string{"Session"}
 	appendField := func(name, value string) {
 		if value == "" {
 			return
 		}
-		lines = append(lines, fmt.Sprintf("%s: %s", name, value))
+		lines = append(lines, fmt.Sprintf("%s: %s", name, escapePlainText(value)))
 	}
 	appendField("ID", info.SessionID)
 	appendField("Path", info.SessionPath)
@@ -135,6 +152,43 @@ func sessionOverlayContent(info app.Info) string {
 	appendField("Profile", info.Profile)
 	appendField("Model", info.Model)
 	return strings.Join(lines, "\n")
+}
+
+func wrapAndClip(content string, width, height int) string {
+	if width <= 0 || height <= 0 || content == "" {
+		return ""
+	}
+	wrappedLines := make([]string, 0, min(height, strings.Count(content, "\n")+1))
+	for _, line := range strings.Split(content, "\n") {
+		wrapped := ansi.Wrap(line, width, "")
+		wrappedLines = append(wrappedLines, strings.Split(wrapped, "\n")...)
+		if len(wrappedLines) >= height {
+			wrappedLines = wrappedLines[:height]
+			break
+		}
+	}
+	return strings.Join(wrappedLines, "\n")
+}
+
+func truncateAndClipLines(content string, width, height int) string {
+	if width <= 0 || height <= 0 || content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], width, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fitToBounds(content string, width, height int) string {
+	if width <= 0 || height <= 0 || content == "" {
+		return ""
+	}
+	return lipgloss.NewStyle().MaxWidth(width).MaxHeight(height).Render(content)
 }
 
 func clamp(value, low, high int) int {

@@ -24,6 +24,17 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, backend app.Bac
 		tea.WithOutput(output),
 		tea.WithoutSignalHandler(),
 	)
-	_, err := program.Run()
-	return err
+	finalModel, err := program.Run()
+	if err != nil {
+		return err
+	}
+	switch final := finalModel.(type) {
+	case Model:
+		return final.fatalErr
+	case *Model:
+		if final != nil {
+			return final.fatalErr
+		}
+	}
+	return nil
 }

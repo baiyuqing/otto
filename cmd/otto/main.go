@@ -223,7 +223,11 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	controller, err := app.New(initialSession, func() (session.Session, error) {
 		return deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
-	}, buildRunner)
+	}, buildRunner, app.WithRuntimeInfo(app.RuntimeInfo{
+		Provider: runtime.Provider,
+		Profile:  runtime.Profile,
+		Model:    runtime.Model,
+	}))
 	if err != nil {
 		_ = initialSession.Close()
 		return fail(stderr, "%v", err)

@@ -230,6 +230,39 @@ func TestControllerRunnerFactoryMaySynchronouslyCloseController(t *testing.T) {
 	}
 }
 
+func TestControllerInfoUsesActiveRuntimeAndDynamicSessionMetadata(t *testing.T) {
+	current := &fakeSession{header: session.Header{
+		Version: 1, ID: "old", Workspace: "/old-workspace", Provider: "openai-compatible", Profile: "persisted", Model: "persisted-model",
+	}}
+	next := &fakeSession{header: session.Header{
+		Version: 1, ID: "new", Workspace: "/new-workspace", Provider: "openai-compatible", Profile: "header-next", Model: "header-next-model",
+	}}
+	controller, err := New(current, func() (session.Session, error) {
+		return next, nil
+	}, func(session.Session) Runner {
+		return runnerFunc(noopRun)
+	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "active-model"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertInfo := func(wantID, wantPath, wantWorkspace string) {
+		t.Helper()
+		got := controller.Info()
+		if got.SessionID != wantID || got.SessionPath != wantPath || got.Workspace != wantWorkspace {
+			t.Fatalf("dynamic info = %#v", got)
+		}
+		if got.Provider != "openai-compatible" || got.Profile != "active" || got.Model != "active-model" {
+			t.Fatalf("runtime info = %#v, want active resolved values", got)
+		}
+	}
+	assertInfo("old", "/sessions/old.jsonl", "/old-workspace")
+	if err := controller.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	assertInfo("new", "/sessions/new.jsonl", "/new-workspace")
+}
+
 func TestControllerCreatesReplacementBeforeClosingCurrent(t *testing.T) {
 	var order []string
 	current := &fakeSession{header: testHeader("old"), onClose: func() { order = append(order, "close-old") }}

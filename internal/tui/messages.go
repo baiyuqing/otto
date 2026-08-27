@@ -23,14 +23,16 @@ type scrollViewportMsg struct {
 }
 
 type turnEnvelope struct {
-	event *agent.Event
-	err   error
-	done  bool
+	event                *agent.Event
+	err                  error
+	done                 bool
+	usesRegularEventSlot bool
 }
 
 type turnStream struct {
-	channel    chan turnEnvelope
-	eventSlots chan struct{}
+	channel           chan turnEnvelope
+	regularEventSlots chan struct{}
+	terminalToolSlot  chan struct{}
 }
 
 type turnMsg struct {

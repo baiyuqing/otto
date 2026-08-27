@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
@@ -165,6 +168,80 @@ func resizeModel(t *testing.T, model Model, width, height int) Model {
 		t.Fatalf("updated model type = %T, want tui.Model", updated)
 	}
 	return got
+}
+
+func TestInitRequestsBackgroundColorAndStartsSingleSpinnerTick(t *testing.T) {
+	m := newTestModel(t)
+	initCmd := m.Init()
+	if initCmd == nil {
+		t.Fatal("Init() command = nil")
+	}
+	initMsg := initCmd()
+	batch, ok := initMsg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("Init() message = %T %#v, want two-command batch", initMsg, initMsg)
+	}
+	var requestedBackground, tickedSpinner bool
+	for _, cmd := range batch {
+		msg := cmd()
+		if reflect.TypeOf(msg) == reflect.TypeOf(tea.RequestBackgroundColor()) {
+			requestedBackground = true
+		}
+		if _, ok := msg.(spinner.TickMsg); ok {
+			tickedSpinner = true
+		}
+	}
+	if !requestedBackground || !tickedSpinner {
+		t.Fatalf("background request=%v spinner tick=%v", requestedBackground, tickedSpinner)
+	}
+}
+
+func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
+	m := newTestModelWithBackend(t, &fakeBackend{history: []model.Message{{
+		Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "history"}},
+	}}})
+	// Remove the injected test renderer so this test exercises the production renderer.
+	m.renderer = newGlamourRenderer(true)
+	m.rendererInjected = false
+
+	updated, _ := m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}})
+	light := updated.(Model)
+	lightRenderer, ok := light.renderer.(GlamourRenderer)
+	if !ok || light.darkBackground || lightRenderer.styleName != "light" {
+		t.Fatalf("light renderer = %#v dark=%v", light.renderer, light.darkBackground)
+	}
+
+	updated, _ = light.Update(tea.BackgroundColorMsg{Color: color.RGBA{A: 0xff}})
+	dark := updated.(Model)
+	darkRenderer, ok := dark.renderer.(GlamourRenderer)
+	if !ok || !dark.darkBackground || darkRenderer.styleName != "dark" {
+		t.Fatalf("dark renderer = %#v dark=%v", dark.renderer, dark.darkBackground)
+	}
+}
+
+func TestBackgroundColorMessagePreservesInjectedRenderer(t *testing.T) {
+	injected := rendererFunc(func(text string, _ int) (string, error) { return "injected:" + text, nil })
+	m := NewModel(context.Background(), &fakeBackend{}, WithRenderer(injected))
+	updated, _ := m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}})
+	got := updated.(Model)
+	if _, ok := got.renderer.(rendererFunc); !ok || !got.rendererInjected {
+		t.Fatalf("renderer = %T injected=%v, want injected renderer", got.renderer, got.rendererInjected)
+	}
+}
+
+func TestRunningTurnRendersAndAdvancesSpinnerOneTickAtATime(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("question")
+	updated, _ := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	if content := running.View().Content; !strings.Contains(content, running.spinner.View()) || !strings.Contains(content, "working") {
+		t.Fatalf("running view = %q, want visible spinner status", content)
+	}
+	updated, next := running.Update(running.spinner.Tick())
+	advanced := updated.(Model)
+	if next == nil || advanced.spinner.View() == running.spinner.View() {
+		t.Fatalf("spinner did not advance exactly one frame: before=%q after=%q next=%v", running.spinner.View(), advanced.spinner.View(), next)
+	}
 }
 
 func TestWindowResizeProducesResponsiveLayout(t *testing.T) {
@@ -1526,10 +1603,10 @@ func TestCanceledFullTurnChannelDeliversRealCompletion(t *testing.T) {
 	running := updated.(Model)
 	first := start().(turnMsg)
 	deadline := time.Now().Add(time.Second)
-	for len(first.channel) < turnChannelCapacity-1 && time.Now().Before(deadline) {
+	for len(first.channel) < turnChannelCapacity-2 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if len(first.channel) < turnChannelCapacity-1 {
+	if len(first.channel) < turnChannelCapacity-2 {
 		t.Fatalf("turn channel only filled to %d", len(first.channel))
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -1565,6 +1642,90 @@ func TestCanceledFullTurnChannelDeliversRealCompletion(t *testing.T) {
 	case <-backendFinished:
 	case <-time.After(time.Second):
 		t.Fatal("backend worker did not exit")
+	}
+}
+
+func TestCanceledFullTurnChannelPreservesToolFinishBeforeDone(t *testing.T) {
+	backendFinished := make(chan struct{})
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		defer close(backendFinished)
+		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "bash", ToolCallID: "call-1"})
+		for i := 0; i < turnChannelCapacity+16; i++ {
+			emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1}})
+		}
+		<-ctx.Done()
+		emit(agent.Event{
+			Type:       agent.EventToolCallFinished,
+			ToolName:   "bash",
+			ToolCallID: "call-1",
+			ToolResult: tool.Result{Content: "durable canceled result", IsError: true},
+		})
+		return ctx.Err()
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, start := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	first := runCommandWithin(t, start, time.Second).(turnMsg)
+	deadline := time.Now().Add(time.Second)
+	for len(first.channel) < turnChannelCapacity-2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(first.channel) < turnChannelCapacity-2 {
+		t.Fatalf("turn channel only filled to %d", len(first.channel))
+	}
+
+	updated, _ = running.Update(keyPress(tea.KeyEscape))
+	state := updated.(Model)
+	msg := tea.Msg(first)
+	for state.running {
+		updated, next := state.Update(msg)
+		state = updated.(Model)
+		if !state.running {
+			break
+		}
+		if next == nil {
+			t.Fatal("turn stopped scheduling channel reads before completion")
+		}
+		msg = runCommandWithin(t, next, time.Second)
+	}
+
+	var toolEntry *Entry
+	for i := range state.entries {
+		if state.entries[i].Kind == EntryTool && state.entries[i].ToolCallID == "call-1" {
+			toolEntry = &state.entries[i]
+			break
+		}
+	}
+	if toolEntry == nil || !toolEntry.ToolDone || !toolEntry.ToolError || toolEntry.ToolOutput != "durable canceled result" {
+		t.Fatalf("tool entry = %#v, want preserved durable finish result", toolEntry)
+	}
+	select {
+	case <-backendFinished:
+	case <-time.After(time.Second):
+		t.Fatal("backend worker leaked after cancellation")
+	}
+	select {
+	case _, ok := <-first.channel:
+		if ok {
+			t.Fatal("turn channel contains an envelope after done")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn channel was not closed exactly once after done")
+	}
+}
+
+func TestFinishTurnReconcilesPendingToolEntries(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.running = true
+	m.cancel = func() {}
+	m.entries = []Entry{{Kind: EntryTool, ToolCallID: "call-1", ToolName: "bash"}}
+
+	updated, _ := m.finishTurn(context.Canceled)
+	got := updated.(Model)
+	if !got.entries[0].ToolDone || !got.entries[0].ToolError || !strings.Contains(got.entries[0].ToolOutput, context.Canceled.Error()) {
+		t.Fatalf("pending tool after finish = %#v", got.entries[0])
 	}
 }
 

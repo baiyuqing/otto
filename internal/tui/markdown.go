@@ -3,13 +3,11 @@ package tui
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"unicode"
 
 	glamour "charm.land/glamour/v2"
 	glamourstyles "charm.land/glamour/v2/styles"
-	"charm.land/lipgloss/v2"
 )
 
 const (
@@ -23,13 +21,28 @@ type MarkdownRenderer interface {
 	Render(markdown string, width int) (string, error)
 }
 
-type GlamourRenderer struct{}
+type GlamourRenderer struct {
+	styleName string
+}
 
 var _ MarkdownRenderer = GlamourRenderer{}
 
-func (GlamourRenderer) Render(markdown string, width int) (string, error) {
+func newGlamourRenderer(darkBackground bool) GlamourRenderer {
+	styleName := glamourstyles.LightStyle
+	if darkBackground {
+		styleName = glamourstyles.DarkStyle
+	}
+	return GlamourRenderer{styleName: styleName}
+}
+
+func (g GlamourRenderer) Render(markdown string, width int) (string, error) {
+	styleName := g.styleName
+	if styleName == "" {
+		// Keep standalone zero-value use deterministic and free of terminal I/O.
+		styleName = glamourstyles.DarkStyle
+	}
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle(glamourStyleName()),
+		glamour.WithStandardStyle(styleName),
 		glamour.WithWordWrap(markdownWidth(width)),
 	)
 	if err != nil {
@@ -39,21 +52,15 @@ func (GlamourRenderer) Render(markdown string, width int) (string, error) {
 }
 
 func renderMarkdown(renderer MarkdownRenderer, markdown string, width int) (string, error) {
+	safeMarkdown := escapePlainText(markdown)
 	if renderer == nil {
-		return fallbackMarkdown(markdown), errNilMarkdownRenderer
+		return fallbackMarkdown(safeMarkdown), errNilMarkdownRenderer
 	}
-	rendered, err := renderer.Render(markdown, width)
+	rendered, err := renderer.Render(safeMarkdown, width)
 	if err != nil {
-		return fallbackMarkdown(markdown), err
+		return fallbackMarkdown(safeMarkdown), err
 	}
 	return strings.TrimSuffix(rendered, "\n"), nil
-}
-
-func glamourStyleName() string {
-	if lipgloss.HasDarkBackground(os.Stdin, os.Stdout) {
-		return glamourstyles.DarkStyle
-	}
-	return glamourstyles.LightStyle
 }
 
 func markdownWidth(width int) int {
@@ -63,12 +70,13 @@ func markdownWidth(width int) int {
 	return width
 }
 
-func fallbackMarkdown(markdown string) string {
-	escaped := escapePlainText(markdown)
-	if escaped == "" {
+// fallbackMarkdown receives text already escaped by renderMarkdown. Keeping the
+// sanitization at that boundary avoids escaping the same untrusted input twice.
+func fallbackMarkdown(safeMarkdown string) string {
+	if safeMarkdown == "" {
 		return markdownFallbackMarker
 	}
-	return escaped + "\n\n" + markdownFallbackMarker
+	return safeMarkdown + "\n\n" + markdownFallbackMarker
 }
 
 func escapePlainText(markdown string) string {

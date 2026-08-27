@@ -27,6 +27,21 @@ type SessionFactory func() (session.Session, error)
 
 type RunnerFactory func(session.Session) Runner
 
+type RuntimeInfo struct {
+	Provider string
+	Profile  string
+	Model    string
+}
+
+type Option func(*Controller)
+
+func WithRuntimeInfo(info RuntimeInfo) Option {
+	return func(controller *Controller) {
+		copy := info
+		controller.runtimeInfo = &copy
+	}
+}
+
 type Info struct {
 	SessionID   string
 	SessionPath string
@@ -59,20 +74,21 @@ type replacementState struct {
 }
 
 type Controller struct {
-	mu         sync.Mutex
-	current    session.Session
-	runner     Runner
-	create     SessionFactory
-	build      RunnerFactory
-	prompting  bool
-	replace    *replacementState
-	closed     bool
-	activeDone chan struct{}
-	closeDone  chan struct{}
-	closeErr   error
+	mu          sync.Mutex
+	current     session.Session
+	runner      Runner
+	create      SessionFactory
+	build       RunnerFactory
+	prompting   bool
+	replace     *replacementState
+	closed      bool
+	activeDone  chan struct{}
+	closeDone   chan struct{}
+	closeErr    error
+	runtimeInfo *RuntimeInfo
 }
 
-func New(initial session.Session, create SessionFactory, build RunnerFactory) (*Controller, error) {
+func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
 	if initial == nil {
 		return nil, errors.New("initial session is required")
 	}
@@ -86,7 +102,13 @@ func New(initial session.Session, create SessionFactory, build RunnerFactory) (*
 	if runner == nil {
 		return nil, errors.New("runner factory returned nil runner")
 	}
-	return &Controller{current: initial, runner: runner, create: create, build: build}, nil
+	controller := &Controller{current: initial, runner: runner, create: create, build: build}
+	for _, option := range options {
+		if option != nil {
+			option(controller)
+		}
+	}
+	return controller, nil
 }
 
 func (c *Controller) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {
@@ -234,12 +256,17 @@ func (c *Controller) NewSession() error {
 func (c *Controller) Info() Info {
 	c.mu.Lock()
 	current := c.current
+	var runtimeInfo *RuntimeInfo
+	if c.runtimeInfo != nil {
+		copy := *c.runtimeInfo
+		runtimeInfo = &copy
+	}
 	c.mu.Unlock()
 	if current == nil {
 		return Info{}
 	}
 	header := current.Header()
-	return Info{
+	info := Info{
 		SessionID:   header.ID,
 		SessionPath: current.Path(),
 		Workspace:   header.Workspace,
@@ -247,6 +274,12 @@ func (c *Controller) Info() Info {
 		Profile:     header.Profile,
 		Model:       header.Model,
 	}
+	if runtimeInfo != nil {
+		info.Provider = runtimeInfo.Provider
+		info.Profile = runtimeInfo.Profile
+		info.Model = runtimeInfo.Model
+	}
+	return info
 }
 
 func (c *Controller) History() []model.Message {

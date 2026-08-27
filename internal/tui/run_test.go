@@ -14,6 +14,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/session"
 )
 
 func TestRunBuildsBubbleTeaProgramWithContextAndIO(t *testing.T) {
@@ -73,6 +74,24 @@ func TestRunReturnsProgramError(t *testing.T) {
 	err := Run(context.Background(), strings.NewReader(""), &bytes.Buffer{}, testBackend{})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Run() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRunReturnsFatalPersistenceErrorFromFinalModel(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
+	oldNewProgram := newProgram
+	defer func() { newProgram = oldNewProgram }()
+	newProgram = func(model tea.Model, opts ...tea.ProgramOption) programRunner {
+		return programRunnerFunc(func() (tea.Model, error) {
+			final := model.(Model)
+			final.fatalErr = fatalErr
+			return final, nil
+		})
+	}
+
+	err := Run(context.Background(), strings.NewReader(""), &bytes.Buffer{}, testBackend{})
+	if !errors.Is(err, session.ErrFatalPersistence) || !errors.Is(err, fatalErr) {
+		t.Fatalf("Run() error = %v, want fatal persistence identity", err)
 	}
 }
 

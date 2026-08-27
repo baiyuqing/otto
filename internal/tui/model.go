@@ -47,6 +47,7 @@ type Option func(*Model)
 func WithRenderer(renderer MarkdownRenderer) Option {
 	return func(model *Model) {
 		model.renderer = renderer
+		model.rendererInjected = true
 	}
 }
 
@@ -74,6 +75,8 @@ type Model struct {
 	overlay               overlayKind
 	autoFollow            bool
 	renderer              MarkdownRenderer
+	rendererInjected      bool
+	darkBackground        bool
 	clock                 Clock
 	statusText            string
 	supportsModifiedEnter bool
@@ -122,7 +125,8 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 		keymap:          DefaultKeyMap(),
 		usage:           usage,
 		autoFollow:      true,
-		renderer:        GlamourRenderer{},
+		darkBackground:  true,
+		renderer:        newGlamourRenderer(true),
 		clock:           realClock{},
 		activeAssistant: -1,
 	}
@@ -134,7 +138,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	return tea.Batch(tea.RequestBackgroundColor, m.spinner.Tick)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -143,6 +147,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	viewportBefore := m.viewport
 
 	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		m.darkBackground = msg.IsDark()
+		if !m.rendererInjected {
+			m.renderer = newGlamourRenderer(m.darkBackground)
+			m.invalidateAssistantRenders()
+			m.rerenderAndRefreshViewportContent(!m.autoFollow)
+		}
+		return m, nil
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 	case tea.WindowSizeMsg:
 		m.width = max(0, msg.Width)
 		m.height = max(0, msg.Height)
@@ -231,12 +247,23 @@ func (m Model) View() tea.View {
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).Render(m.viewport.View())
 	editor := lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View())
-	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.statusText))
+	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.footerStatus()))
 	content := lipgloss.JoinVertical(lipgloss.Left, transcript, editor, footer)
 	if m.overlay != overlayNone {
 		content = renderOverlay(m.width, m.height, m.overlayContent())
 	}
 	return newRootView(m, content)
+}
+
+func (m Model) footerStatus() string {
+	if !m.running {
+		return m.statusText
+	}
+	running := m.spinner.View() + " working"
+	if m.statusText == "" {
+		return running
+	}
+	return running + " · " + m.statusText
 }
 
 func (m Model) overlayContent() string {
@@ -366,7 +393,7 @@ func isShiftEnterKey(msg tea.KeyPressMsg) bool {
 }
 
 func newRootView(m Model, content string) tea.View {
-	view := tea.NewView(content)
+	view := tea.NewView(fitToBounds(content, m.width, m.height))
 	view.AltScreen = true
 	view.MouseMode = tea.MouseModeCellMotion
 	view.KeyboardEnhancements.ReportEventTypes = false
@@ -554,8 +581,9 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 
 func newTurnStream() *turnStream {
 	return &turnStream{
-		channel:    make(chan turnEnvelope, turnChannelCapacity),
-		eventSlots: make(chan struct{}, turnChannelCapacity-1),
+		channel:           make(chan turnEnvelope, turnChannelCapacity),
+		regularEventSlots: make(chan struct{}, turnChannelCapacity-2),
+		terminalToolSlot:  make(chan struct{}, 1),
 	}
 }
 
@@ -582,16 +610,41 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 }
 
 func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
+	if sendRegularTurnEvent(ctx, stream, envelope) {
+		return true
+	}
+	if envelope.event == nil || envelope.event.Type != agent.EventToolCallFinished {
+		return false
+	}
+
+	// Agent.Run executes tools sequentially, so cancellation leaves at most one
+	// active tool whose terminal result needs priority over ordinary events.
 	select {
-	case stream.eventSlots <- struct{}{}:
-	case <-ctx.Done():
+	case stream.terminalToolSlot <- struct{}{}:
+	default:
 		return false
 	}
 	select {
 	case stream.channel <- envelope:
 		return true
+	default:
+		<-stream.terminalToolSlot
+		return false
+	}
+}
+
+func sendRegularTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
+	select {
+	case stream.regularEventSlots <- struct{}{}:
 	case <-ctx.Done():
-		<-stream.eventSlots
+		return false
+	}
+	envelope.usesRegularEventSlot = true
+	select {
+	case stream.channel <- envelope:
+		return true
+	case <-ctx.Done():
+		<-stream.regularEventSlots
 		return false
 	}
 }
@@ -601,8 +654,8 @@ func waitTurn(stream *turnStream) tea.Cmd {
 		envelope, ok := <-stream.channel
 		if !ok {
 			envelope = turnEnvelope{done: true, err: errors.New("turn stream closed before completion")}
-		} else if envelope.event != nil {
-			<-stream.eventSlots
+		} else if envelope.usesRegularEventSlot {
+			<-stream.regularEventSlots
 		}
 		return turnMsg{channel: stream.channel, stream: stream, value: envelope}
 	}
@@ -715,6 +768,9 @@ func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
 		err = m.turnEventErr
 	}
 	m.finalizeStreamingRender()
+	if m.reconcilePendingTools(err) {
+		m.refreshViewportContent(!m.autoFollow)
+	}
 	if err != nil && !m.turnErrorSeen {
 		m.recordTurnError(err)
 	}
@@ -724,6 +780,27 @@ func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func (m *Model) reconcilePendingTools(err error) bool {
+	changed := false
+	result := "tool completion was not received"
+	if err != nil {
+		result = err.Error()
+	}
+	for i := range m.entries {
+		entry := &m.entries[i]
+		if entry.Kind != EntryTool || entry.ToolDone {
+			continue
+		}
+		entry.ToolDone = true
+		entry.ToolError = true
+		if entry.ToolOutput == "" {
+			entry.ToolOutput = result
+		}
+		changed = true
+	}
+	return changed
 }
 
 func (m *Model) recordTurnError(err error) {
@@ -813,6 +890,15 @@ func (m *Model) renderEntries(width int) {
 	}
 }
 
+func (m *Model) invalidateAssistantRenders() {
+	for i := range m.entries {
+		if m.entries[i].Kind == EntryAssistant {
+			m.entries[i].RenderWidth = 0
+			m.entries[i].Rendered = ""
+		}
+	}
+}
+
 func (m *Model) renderEntryAt(index int, width int) {
 	if index < 0 || index >= len(m.entries) {
 		return
@@ -870,7 +956,7 @@ func renderMessageBlock(title, body string) string {
 
 func renderToolBlock(entry Entry, width int, expanded bool) string {
 	_ = width
-	name := entry.ToolName
+	name := escapePlainText(entry.ToolName)
 	if name == "" {
 		name = "tool"
 	}
@@ -882,7 +968,7 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 		status = "error"
 	}
 	parts := []string{">", name}
-	if args := strings.TrimSpace(entry.ToolArgs); args != "" {
+	if args := strings.TrimSpace(escapePlainText(entry.ToolArgs)); args != "" {
 		parts = append(parts, args)
 	}
 	parts = append(parts, status)
@@ -891,7 +977,7 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 		return summary
 	}
 	lines := []string{summary}
-	if output := strings.TrimSpace(entry.ToolOutput); output != "" {
+	if output := strings.TrimSpace(escapePlainText(entry.ToolOutput)); output != "" {
 		lines = append(lines, "", output)
 	}
 	return strings.Join(lines, "\n")

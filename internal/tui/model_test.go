@@ -332,6 +332,41 @@ func TestPromptCommandStreamsEventsAndCompletes(t *testing.T) {
 	}
 }
 
+func TestTurnChannelClosesAfterDone(t *testing.T) {
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error { return nil }}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	first := runCommandWithin(t, cmd, time.Second).(turnMsg)
+	afterDone, _ := updated.(Model).Update(first)
+	if got := afterDone.(Model); got.running || got.cancel != nil {
+		t.Fatalf("post-done running=%v cancel=%v", got.running, got.cancel != nil)
+	}
+
+	select {
+	case _, ok := <-first.channel:
+		if ok {
+			t.Fatal("turn channel still open after done")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn channel did not close after done")
+	}
+}
+
+func TestWaitTurnClosedBeforeDoneReturnsError(t *testing.T) {
+	stream := newTurnStream()
+	close(stream.channel)
+
+	msg := runCommandWithin(t, waitTurn(stream), time.Second).(turnMsg)
+	if !msg.value.done {
+		t.Fatal("closed channel did not report completion")
+	}
+	if msg.value.err == nil {
+		t.Fatal("closed channel returned nil error")
+	}
+}
+
 func TestToolEventsUpdateTranscript(t *testing.T) {
 	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
 		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "read", ToolCallID: "call-1"})
@@ -652,9 +687,12 @@ func TestCanceledFullTurnChannelDeliversRealCompletion(t *testing.T) {
 		t.Fatalf("completion count=%d err=%v, want one real %v", doneCount, gotErr, completionErr)
 	}
 	select {
-	case extra := <-first.channel:
-		t.Fatalf("unexpected envelope after completion: %#v", extra)
-	default:
+	case extra, ok := <-first.channel:
+		if ok {
+			t.Fatalf("unexpected envelope after completion: %#v", extra)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("turn channel did not close after completion")
 	}
 	select {
 	case <-backendFinished:

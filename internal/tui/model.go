@@ -251,6 +251,8 @@ func startTurnCommand(ctx context.Context, backend app.Backend, text string, str
 }
 
 func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream *turnStream) {
+	defer close(stream.channel)
+
 	if backend == nil {
 		stream.channel <- turnEnvelope{err: errors.New("backend is required"), done: true}
 		return
@@ -280,8 +282,10 @@ func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelop
 
 func waitTurn(stream *turnStream) tea.Cmd {
 	return func() tea.Msg {
-		envelope := <-stream.channel
-		if envelope.event != nil {
+		envelope, ok := <-stream.channel
+		if !ok {
+			envelope = turnEnvelope{done: true, err: errors.New("turn stream closed before completion")}
+		} else if envelope.event != nil {
 			<-stream.eventSlots
 		}
 		return turnMsg{channel: stream.channel, stream: stream, value: envelope}

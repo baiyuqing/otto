@@ -105,3 +105,42 @@ Result: all commands passed.
 ### Fix Round 1 concerns
 - Task 7 remains out of scope.
 - The completion guarantee assumes `Backend.Prompt` eventually returns after context cancellation; Otto no longer adds a worker leak through blocked event/completion channel sends, but it cannot force a non-cooperative backend function to return.
+
+## Fix Round 2
+
+### Fixes
+- Closed the turn channel exactly once after the guaranteed done envelope in the sole worker goroutine.
+- Made `waitTurn` treat a closed-before-done channel as a completion error instead of fabricating success or looping forever.
+- Kept the reserved completion slot and cancellation behavior unchanged.
+
+### Regression tests
+- Added `TestTurnChannelClosesAfterDone` to consume the done envelope and assert the channel closes within a bounded timeout.
+- Added `TestWaitTurnClosedBeforeDoneReturnsError` to verify closed-before-done returns a terminal error envelope.
+- Kept `TestCanceledFullTurnChannelDeliversRealCompletion` as the full-channel cancellation guard and updated it to expect channel closure after completion.
+
+### RED evidence
+Before the fix:
+
+```bash
+go test ./internal/tui -run 'Test(TurnChannelClosesAfterDone|WaitTurnClosedBeforeDoneReturnsError|CanceledFullTurnChannelDeliversRealCompletion|TurnChannelCancellationDoesNotLeakWorker|PromptCommandStreamsEventsAndCompletes)$' -count=1
+```
+
+Result: `FAIL`.
+
+Failures:
+- `TestTurnChannelClosesAfterDone`: turn channel did not close after done.
+- `TestWaitTurnClosedBeforeDoneReturnsError`: closed channel returned nil error.
+
+### GREEN evidence
+After the fix:
+
+```bash
+go test ./internal/tui -run 'Test(TurnChannelClosesAfterDone|WaitTurnClosedBeforeDoneReturnsError|CanceledFullTurnChannelDeliversRealCompletion|TurnChannelCancellationDoesNotLeakWorker|PromptCommandStreamsEventsAndCompletes)$' -count=1
+go test ./internal/tui
+go test -race ./internal/tui
+go test ./... 
+go test -race ./...
+git diff --check
+```
+
+Result: all passed.

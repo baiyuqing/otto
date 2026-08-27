@@ -733,6 +733,29 @@ func TestControllerListSessionsMarksCurrentOnDefensiveCopy(t *testing.T) {
 	}
 }
 
+func TestControllerListSessionsDoesNotMarkCurrentForInitialMemorySession(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := session.ListResult{Sessions: []session.SessionInfo{
+		{Path: cwd, ID: "cwd", Current: true},
+		{Path: "", ID: "empty", Current: true},
+	}}
+	controller := newControllerWithRunnerAndBrowser(t, session.NewMemory(testHeader("memory")), &recordingRunner{},
+		func(context.Context, int) (session.ListResult, error) { return listed, nil }, nil)
+
+	got, err := controller.ListSessions(context.Background(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range got.Sessions {
+		if info.Current {
+			t.Fatalf("session %q was marked current for memory session: %#v", info.ID, got)
+		}
+	}
+}
+
 func TestControllerListSessionsAndResumeReportPersistenceDisabled(t *testing.T) {
 	controller := newTestController(t, &recordingRunner{})
 	var browser SessionBrowser = controller
@@ -742,6 +765,26 @@ func TestControllerListSessionsAndResumeReportPersistenceDisabled(t *testing.T) 
 	}
 	if _, err := browser.ResumeSession(context.Background(), "/sessions/next.jsonl"); !errors.Is(err, ErrPersistenceDisabled) {
 		t.Fatalf("ResumeSession() error = %v, want ErrPersistenceDisabled", err)
+	}
+}
+
+func TestControllerResumeEmptyPathStillCallsFactoryForMemorySession(t *testing.T) {
+	factoryErr := errors.New("empty path rejected by factory")
+	factoryCalls := 0
+	controller := newControllerWithRunnerAndBrowser(t, session.NewMemory(testHeader("memory")), &recordingRunner{}, nil,
+		func(_ context.Context, path string) (SessionReplacement, error) {
+			factoryCalls++
+			if path != "" {
+				t.Errorf("factory path = %q, want empty", path)
+			}
+			return SessionReplacement{}, factoryErr
+		})
+
+	if _, err := controller.ResumeSession(context.Background(), ""); err != factoryErr {
+		t.Fatalf("ResumeSession() error = %v, want exact factory error", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("factory calls = %d, want 1", factoryCalls)
 	}
 }
 
@@ -1012,6 +1055,123 @@ func TestControllerResumeFactoryMaySynchronouslyCloseController(t *testing.T) {
 	}
 }
 
+func TestControllerReplacementCallbackCloseIsScopedToReceiver(t *testing.T) {
+	bFactoryEntered := make(chan struct{})
+	releaseBFactory := make(chan struct{})
+	bCleanupEntered := make(chan struct{})
+	releaseBCleanup := make(chan struct{})
+	bOld := &fakeSession{header: testHeader("b-old")}
+	bCandidate := &fakeSession{header: testHeader("b-next"), onClose: func() {
+		close(bCleanupEntered)
+		<-releaseBCleanup
+	}}
+	controllerB := newControllerWithRunnerAndBrowser(t, bOld, &recordingRunner{}, nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			close(bFactoryEntered)
+			<-releaseBFactory
+			return SessionReplacement{Session: bCandidate, Runner: &recordingRunner{}}, nil
+		})
+	bResumeDone := make(chan error, 1)
+	go func() {
+		_, err := controllerB.ResumeSession(context.Background(), bCandidate.Path())
+		bResumeDone <- err
+	}()
+	awaitSignal(t, bFactoryEntered, "controller B factory start")
+
+	bCloseReturned := make(chan error, 1)
+	aFactoryEntered := make(chan struct{})
+	aOld := &fakeSession{header: testHeader("a-old")}
+	aCandidate := &fakeSession{header: testHeader("a-next")}
+	controllerA := newControllerWithRunnerAndBrowser(t, aOld, &recordingRunner{}, nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			close(aFactoryEntered)
+			bCloseReturned <- controllerB.Close()
+			return SessionReplacement{Session: aCandidate, Runner: &recordingRunner{}}, nil
+		})
+	aResumeDone := make(chan error, 1)
+	go func() {
+		_, err := controllerA.ResumeSession(context.Background(), aCandidate.Path())
+		aResumeDone <- err
+	}()
+	awaitSignal(t, aFactoryEntered, "controller A factory start")
+
+	bCloseErr, returnedBeforeFactory := pollError(bCloseReturned)
+	bCloseReceived := returnedBeforeFactory
+	close(releaseBFactory)
+	awaitSignal(t, bCleanupEntered, "controller B candidate cleanup start")
+	returnedBeforeCleanup := false
+	if !bCloseReceived {
+		bCloseErr, returnedBeforeCleanup = pollError(bCloseReturned)
+		bCloseReceived = returnedBeforeCleanup
+	}
+	close(releaseBCleanup)
+
+	if err := awaitError(t, bResumeDone, "controller B resume"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("controller B ResumeSession() error = %v, want ErrClosed", err)
+	}
+	if !bCloseReceived {
+		bCloseErr = awaitError(t, bCloseReturned, "controller B close")
+	}
+	if bCloseErr != nil {
+		t.Fatalf("controller B Close() error = %v", bCloseErr)
+	}
+	if err := awaitError(t, aResumeDone, "controller A resume"); err != nil {
+		t.Fatalf("controller A ResumeSession() error = %v", err)
+	}
+	if returnedBeforeFactory {
+		t.Fatal("controller B Close() returned before its factory finished")
+	}
+	if returnedBeforeCleanup {
+		t.Fatal("controller B Close() returned before its candidate cleanup finished")
+	}
+	if bOld.CloseCalls() != 1 || bCandidate.CloseCalls() != 1 {
+		t.Fatalf("controller B close calls = old %d, candidate %d; want 1 each", bOld.CloseCalls(), bCandidate.CloseCalls())
+	}
+	if err := controllerA.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestControllerResumeFactoryDeeplyWrappedCloseIsReentrant(t *testing.T) {
+	old := &fakeSession{header: testHeader("old")}
+	candidate := &fakeSession{header: testHeader("next")}
+	var controller *Controller
+	controller = newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			if err := closeControllerDeeply(controller, 128); err != nil {
+				return SessionReplacement{}, err
+			}
+			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+		})
+
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, err := controller.ResumeSession(context.Background(), candidate.Path())
+		resumeDone <- err
+	}()
+
+	var resumeErr error
+	timedOut := false
+	select {
+	case resumeErr = <-resumeDone:
+	case <-time.After(time.Second):
+		timedOut = true
+		controller.mu.Lock()
+		controller.finishReplacingLocked(controller.replace)
+		controller.mu.Unlock()
+		resumeErr = awaitError(t, resumeDone, "resume after deadlock cleanup")
+	}
+	if timedOut {
+		t.Fatal("ResumeSession() timed out; deeply wrapped synchronous Close deadlocked")
+	}
+	if !errors.Is(resumeErr, ErrClosed) {
+		t.Fatalf("ResumeSession() error = %v, want ErrClosed", resumeErr)
+	}
+	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
+		t.Fatalf("close calls = old %d, candidate %d; want 1 each", old.CloseCalls(), candidate.CloseCalls())
+	}
+}
+
 func TestControllerCloseWaitsForResumeWithoutDeadlock(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	old := &fakeSession{header: testHeader("old")}
@@ -1261,6 +1421,23 @@ func newControllerWithRunnerAndBrowser(t *testing.T, initial session.Session, ru
 		t.Fatal(err)
 	}
 	return controller
+}
+
+//go:noinline
+func closeControllerDeeply(controller *Controller, depth int) error {
+	if depth == 0 {
+		return controller.Close()
+	}
+	return closeControllerDeeply(controller, depth-1)
+}
+
+func pollError(result <-chan error) (error, bool) {
+	select {
+	case err := <-result:
+		return err, true
+	case <-time.After(20 * time.Millisecond):
+		return nil, false
+	}
 }
 
 func awaitSignal(t *testing.T, signal <-chan struct{}, operation string) {

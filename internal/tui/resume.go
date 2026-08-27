@@ -253,9 +253,6 @@ func (m Model) reconcileCommittedStaleResume(msg sessionResumeResultMsg) (tea.Mo
 		return m, nil
 	}
 	result, committedPathState, _ := boundedResumeResult(msg.result)
-	if msg.committedPathState != resumeCommittedPathUnknown {
-		committedPathState = msg.committedPathState
-	}
 	if committedPathState != resumeCommittedPathValid {
 		return m.failClosedStaleResume()
 	}

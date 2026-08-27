@@ -16,7 +16,7 @@
 - Implement only `openai-compatible` in Stage 1; Codex and Claude receive later plans.
 - File tools are workspace-bound after canonical path and symlink validation.
 - `bash` is intentionally unsandboxed and starts in the workspace.
-- Default limits are 20 model turns, a 120-second shell timeout, and 50 KiB tool output.
+- Default limits are 50 model turns, a 120-second shell timeout, and 50 KiB tool output.
 - Configuration defaults to `~/.config/otto/config.toml`; do not load project-local configuration.
 - Raw API keys and OAuth credentials must never appear in TOML or JSONL sessions.
 - Session writes are append-only; persistence failure stops further durable prompt processing.

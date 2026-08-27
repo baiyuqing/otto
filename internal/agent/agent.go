@@ -32,7 +32,7 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 		options.NewID = defaultNewID
 	}
 	if options.MaxTurns <= 0 {
-		options.MaxTurns = 20
+		options.MaxTurns = 50
 	}
 	return &Agent{provider: provider, registry: registry, session: memory, options: options}
 }
@@ -100,7 +100,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 				continue
 			}
 			hadToolCall = true
-			a.emit(emit, Event{Type: EventToolCallStarted, ToolName: block.ToolName, ToolCallID: block.ToolCallID})
+			a.emit(emit, Event{Type: EventToolCallStarted, ToolName: block.ToolName, ToolCallID: block.ToolCallID, ToolArgs: string(block.Arguments)})
 			var result tool.Result
 			if err := ctx.Err(); err != nil {
 				result = tool.Result{Content: err.Error(), IsError: true}

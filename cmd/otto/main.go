@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
 	"github.com/baiyuqing/otto/internal/repl"
@@ -107,17 +108,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
-	var currentSession session.Session
-	closeCurrent := func() error {
-		if currentSession == nil {
-			return nil
-		}
-		err := currentSession.Close()
-		currentSession = nil
-		return err
-	}
-	defer func() { _ = closeCurrent() }()
-
 	sessionPath := options.resumePath
 	if options.continueLast {
 		sessionPath, err = newestSessionPath(sessionRoot, workspacePath)
@@ -177,14 +167,40 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "create tool registry: %v", err)
 	}
 
+	var initialSession session.Session
 	if sessionPath != "" {
-		currentSession, err = deps.openSession(sessionPath, workspacePath, stderr)
+		initialSession, err = deps.openSession(sessionPath, workspacePath, stderr)
 	} else {
-		currentSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
+		initialSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
 	}
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
+	controller, err := app.New(initialSession, func() (session.Session, error) {
+		return deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
+	}, func(current session.Session) app.Runner {
+		client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
+		return agent.New(client, registry, current, agent.Options{
+			Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
+		})
+	})
+	if err != nil {
+		_ = initialSession.Close()
+		return fail(stderr, "%v", err)
+	}
+	controllerClosed := false
+	closeController := func() error {
+		if controllerClosed {
+			return nil
+		}
+		controllerClosed = true
+		return controller.Close()
+	}
+	defer func() {
+		if !controllerClosed {
+			_ = controller.Close()
+		}
+	}()
 
 	processCtx, cancelProcess := context.WithCancel(ctx)
 	defer cancelProcess()
@@ -220,51 +236,28 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}()
 
 	input := repl.NewInput(stdin)
-	for {
-		header := currentSession.Header()
-		client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
-		runner := agent.New(client, registry, currentSession, agent.Options{
-			Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
-		})
-		console := repl.NewWithInput(input, stdout, stderr, runner, repl.Info{
-			SessionID: header.ID, SessionPath: currentSession.Path(), Provider: runtime.Provider, Model: runtime.Model,
-		})
+	console := repl.NewWithInput(input, stdout, stderr, controller)
 
-		replMu.Lock()
-		currentREPL = console
-		replMu.Unlock()
-		runErr := console.Run(processCtx)
-		replMu.Lock()
-		if currentREPL == console {
-			currentREPL = nil
-		}
-		replMu.Unlock()
-
-		if errors.Is(runErr, repl.ErrNewSession) {
-			if err := closeCurrent(); err != nil {
-				return fail(stderr, "close session: %v", err)
-			}
-			if processCtx.Err() != nil {
-				return 130
-			}
-			currentSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
-			if err != nil {
-				return fail(stderr, "%v", err)
-			}
-			continue
-		}
-
-		if err := closeCurrent(); err != nil {
-			return fail(stderr, "close session: %v", err)
-		}
-		if processCtx.Err() != nil || errors.Is(runErr, context.Canceled) {
-			return 130
-		}
-		if runErr != nil {
-			return fail(stderr, "REPL: %v", runErr)
-		}
-		return 0
+	replMu.Lock()
+	currentREPL = console
+	replMu.Unlock()
+	runErr := console.Run(processCtx)
+	replMu.Lock()
+	if currentREPL == console {
+		currentREPL = nil
 	}
+	replMu.Unlock()
+
+	if err := closeController(); err != nil {
+		return fail(stderr, "close session: %v", err)
+	}
+	if processCtx.Err() != nil || errors.Is(runErr, context.Canceled) {
+		return 130
+	}
+	if runErr != nil {
+		return fail(stderr, "REPL: %v", runErr)
+	}
+	return 0
 }
 
 func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, error) {

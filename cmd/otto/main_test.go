@@ -481,6 +481,15 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 			stop:    func() { stopCalls.Add(1) },
 		}
 	}
+	var stores []*trackingSession
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		store := &trackingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		})}
+		stores = append(stores, store)
+		return store, nil
+	}
 
 	home := t.TempDir()
 	workspace := t.TempDir()
@@ -514,6 +523,12 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 	}
 	if stopCalls.Load() != 1 {
 		t.Fatalf("interrupt subscription stop calls = %d, want 1", stopCalls.Load())
+	}
+	if len(stores) != 1 {
+		t.Fatalf("created stores = %d, want 1", len(stores))
+	}
+	if stores[0].closeCalls.Load() != 1 {
+		t.Fatalf("store close calls = %d, want 1", stores[0].closeCalls.Load())
 	}
 }
 
@@ -563,14 +578,18 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	}
 }
 
-func TestRunClosesSessionsOnReplacementAndREPLError(t *testing.T) {
+func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected append failure"))
 	for _, test := range []struct {
 		name      string
 		input     string
+		appendErr error
 		wantCode  int
 		wantCount int
 	}{
+		{name: "normal exit", input: "/exit\n", wantCode: 0, wantCount: 1},
 		{name: "replacement", input: "/new\n/exit\n", wantCode: 0, wantCount: 2},
+		{name: "fatal persistence", input: "hello\n", appendErr: fatalErr, wantCode: 1, wantCount: 1},
 		{name: "REPL error", input: strings.Repeat("x", (1<<20)+1) + "\n", wantCode: 1, wantCount: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -586,7 +605,7 @@ func TestRunClosesSessionsOnReplacementAndREPLError(t *testing.T) {
 				store := &trackingSession{Session: session.NewMemory(session.Header{
 					Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
 					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
-				})}
+				}), appendErr: test.appendErr}
 				stores = append(stores, store)
 				return store, nil
 			}
@@ -624,7 +643,15 @@ func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
 
 type trackingSession struct {
 	session.Session
+	appendErr  error
 	closeCalls atomic.Int32
+}
+
+func (s *trackingSession) Append(ctx context.Context, message model.Message) error {
+	if s.appendErr != nil {
+		return s.appendErr
+	}
+	return s.Session.Append(ctx, message)
 }
 
 func (s *trackingSession) Close() error {

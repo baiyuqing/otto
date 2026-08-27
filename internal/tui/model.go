@@ -98,6 +98,7 @@ type Model struct {
 	ctrlCArmGeneration     uint64
 	newSessionPending      bool
 	newSessionGeneration   uint64
+	resume                 resumePickerState
 	activeTurnChannel      <-chan turnEnvelope
 	activeAssistant        int
 	turnErrorSeen          bool
@@ -201,6 +202,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case newSessionResultMsg:
 		return m.applyNewSessionResult(msg)
+	case sessionListResultMsg:
+		return m.applySessionListResult(msg)
+	case sessionResumeResultMsg:
+		return m.applySessionResumeResult(msg)
 	case ctrlCArmExpiredMsg:
 		if m.ctrlCArmed && msg.generation == m.ctrlCArmGeneration {
 			m.clearCtrlCArm()
@@ -316,6 +321,9 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 
 	if isCtrlCKey(msg) {
 		return m.handleCtrlC(previousEditorHeight)
+	}
+	if updated, cmd, handled := m.handleResumeKeyPress(msg); handled {
+		return updated, cmd
 	}
 	if isEscapeKey(msg) {
 		if m.running && m.cancel != nil {
@@ -511,6 +519,8 @@ func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
 		m.newSessionPending = true
 		m.statusText = ""
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
+	case slashCommandResume:
+		return m.handleResumeCommand()
 	case slashCommandExit:
 		if m.running {
 			return m, nil
@@ -543,9 +553,19 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 	if m.running {
 		return m, nil
 	}
+	m.resetSessionViewFromBackend("")
+	return m, nil
+}
+
+func (m *Model) resetSessionViewFromBackend(status string) {
 	m.entries, m.usage = EntriesFromHistory(historyFromBackend(m.backend))
 	m.overlay = overlayNone
-	m.statusText = ""
+	m.statusText = status
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	m.running = false
 	m.clearCtrlCArm()
 	m.dirtyStreaming = false
 	m.renderTickActive = false
@@ -561,7 +581,6 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 	m.editor.SetValue("")
 	m.commandSuggestionIndex = 0
 	m.rerenderAndRefreshViewportContent(false)
-	return m, nil
 }
 
 func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
@@ -1217,5 +1236,5 @@ func (m *Model) nextLiveEntryID(kind string) string {
 }
 
 func (m Model) reservedStateActive() bool {
-	return m.running || m.newSessionPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.resume.active() || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
 }

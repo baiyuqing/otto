@@ -342,7 +342,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 	if key.Matches(msg, m.keymap.Home) || key.Matches(msg, m.keymap.End) {
 		return m.handleHomeOrEnd(msg, previousEditorHeight)
 	}
-	if updated, cmd, handled := m.handleCommandSuggestionKey(msg, previousEditorHeight); handled {
+	if updated, cmd, handled := m.handleCommandSuggestionKey(msg); handled {
 		return updated, cmd
 	}
 	if m.shouldInsertNewline(msg) {
@@ -366,20 +366,20 @@ func (m Model) commandSuggestions() []slashCommand {
 	return matchingSlashCommands(m.editor.Value())
 }
 
-func (m Model) handleCommandSuggestionKey(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd, bool) {
+func (m Model) handleCommandSuggestionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	suggestions := m.commandSuggestions()
 	if len(suggestions) == 0 {
 		return m, nil, false
 	}
 	selected := clamp(m.commandSuggestionIndex, 0, len(suggestions)-1)
-	switch msg.Key().Code {
-	case tea.KeyUp:
+	switch {
+	case key.Matches(msg, m.keymap.SuggestionUp):
 		m.commandSuggestionIndex = (selected - 1 + len(suggestions)) % len(suggestions)
 		return m, nil, true
-	case tea.KeyDown:
+	case key.Matches(msg, m.keymap.SuggestionDown):
 		m.commandSuggestionIndex = (selected + 1) % len(suggestions)
 		return m, nil, true
-	case tea.KeyTab:
+	case key.Matches(msg, m.keymap.Complete):
 		m.editor.SetValue(suggestions[selected].Name)
 		m.commandSuggestionIndex = 0
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)

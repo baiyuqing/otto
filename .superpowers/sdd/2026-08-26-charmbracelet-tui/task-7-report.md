@@ -46,3 +46,42 @@
 
 ## Concerns
 - none
+
+---
+
+## Fix Round 1
+
+### Status
+- done
+
+### Commit
+- `fix: harden TUI modal state races`
+
+### RED
+- Added focused regression tests for pending and stale `/new` results, prompt whitespace, modal paste/mouse input, generation-safe `Ctrl+C` expiry and deadline boundaries, and stale turn envelopes.
+- Ran:
+  - `go test ./internal/tui -run 'Test(Whitespace|NewCommandPending|NewCommandIgnores|ExitStill|OverlaySwallows|CtrlCArmsAtZero|CtrlCExpiryUsesGeneration|CtrlCSecondPressWindow|StaleTurnMessages)'`
+- Initial RED result:
+  - FAIL: `Model` had no `/new` pending/request-generation state.
+  - FAIL: `newSessionResultMsg` had no generation token.
+
+### GREEN
+- Added pending/request-generation validation for `/new`; prompts and duplicate `/new` calls are blocked while pending, stale results are ignored, and `/exit` remains available.
+- Made overlays swallow paste and all Bubble Tea mouse message variants while internal/system messages continue through the normal update loop.
+- Replaced timestamp-only `Ctrl+C` arming with explicit armed state and monotonic generations; the second press quits only strictly before the one-second deadline.
+- Added active turn-channel identity validation and continued draining stale streams without applying their envelopes.
+
+### Tests
+- `go test ./internal/tui -run 'Test(Whitespace|NewCommand|ExitStill|OverlaySwallows|CtrlCArmsAtZero|CtrlCExpiryUsesGeneration|CtrlCSecondPressWindow|StaleTurnMessages)'`
+- `go test ./internal/tui`
+- `go test -race ./internal/tui`
+- `go test ./...`
+- `go test -race ./...`
+- `go build -trimpath -o ./otto ./cmd/otto`
+- `go vet ./...`
+- `go run honnef.co/go/tools/cmd/staticcheck@latest ./...`
+- `test -z "$(gofmt -l .)"`
+- `git diff --check`
+
+### Concerns
+- none

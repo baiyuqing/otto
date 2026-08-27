@@ -80,7 +80,12 @@ type Model struct {
 	dirtyStreaming        bool
 	renderTickActive      bool
 	cancel                context.CancelFunc
+	ctrlCArmed            bool
 	ctrlCArmedAt          time.Time
+	ctrlCArmGeneration    uint64
+	newSessionPending     bool
+	newSessionGeneration  uint64
+	activeTurnChannel     <-chan turnEnvelope
 	activeAssistant       int
 	turnErrorSeen         bool
 	turnEventErr          error
@@ -167,11 +172,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case newSessionResultMsg:
 		return m.applyNewSessionResult(msg)
 	case ctrlCArmExpiredMsg:
-		if !m.ctrlCArmedAt.IsZero() && msg.armedAt.Equal(m.ctrlCArmedAt) {
-			m.ctrlCArmedAt = time.Time{}
-			if m.statusText == ctrlCExitStatus {
-				m.statusText = ""
-			}
+		if m.ctrlCArmed && msg.generation == m.ctrlCArmGeneration {
+			m.clearCtrlCArm()
 		}
 		return m, nil
 	case turnMsg:
@@ -188,6 +190,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKeyPress(msg, previousYOffset, previousEditorHeight, viewportBefore)
+	case tea.PasteMsg:
+		if m.overlay != overlayNone {
+			return m, nil
+		}
+	case tea.MouseMsg:
+		if m.overlay != overlayNone {
+			return m, nil
+		}
 	}
 
 	return m.updateComponents(msg, previousYOffset, previousEditorHeight, viewportBefore)
@@ -376,7 +386,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(trimmed, "/") {
 		return m.handleCommand(trimmed)
 	}
-	if m.running {
+	if m.running || m.newSessionPending {
 		return m, nil
 	}
 	return m.startPrompt(prompt)
@@ -399,7 +409,13 @@ func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
 			m.statusText = app.ErrPromptActive.Error()
 			return m, nil
 		}
-		return m, runNewSessionCommand(m.backend)
+		if m.newSessionPending {
+			return m, nil
+		}
+		m.newSessionGeneration++
+		m.newSessionPending = true
+		m.statusText = ""
+		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
 	case "/exit":
 		if m.running {
 			return m, nil
@@ -411,26 +427,34 @@ func (m Model) handleCommand(command string) (tea.Model, tea.Cmd) {
 	}
 }
 
-func runNewSessionCommand(backend app.Backend) tea.Cmd {
+func runNewSessionCommand(backend app.Backend, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		if backend == nil {
-			return newSessionResultMsg{err: errors.New("backend is required")}
+			return newSessionResultMsg{generation: generation, err: errors.New("backend is required")}
 		}
-		return newSessionResultMsg{err: backend.NewSession()}
+		return newSessionResultMsg{generation: generation, err: backend.NewSession()}
 	}
 }
 
 func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cmd) {
+	if !m.newSessionPending || msg.generation != m.newSessionGeneration {
+		return m, nil
+	}
+	m.newSessionPending = false
 	if msg.err != nil {
 		m.statusText = msg.err.Error()
+		return m, nil
+	}
+	if m.running {
 		return m, nil
 	}
 	m.entries, m.usage = EntriesFromHistory(historyFromBackend(m.backend))
 	m.overlay = overlayNone
 	m.statusText = ""
-	m.ctrlCArmedAt = time.Time{}
+	m.clearCtrlCArm()
 	m.dirtyStreaming = false
 	m.renderTickActive = false
+	m.activeTurnChannel = nil
 	m.activeAssistant = -1
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
@@ -444,17 +468,14 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 
 func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
 	now := m.now()
-	if !m.ctrlCArmedAt.IsZero() {
-		if !now.After(m.ctrlCArmedAt.Add(ctrlCArmWindow)) {
+	if m.ctrlCArmed {
+		if now.Before(m.ctrlCArmedAt.Add(ctrlCArmWindow)) {
 			if m.cancel != nil {
 				m.cancel()
 			}
 			return m, tea.Quit
 		}
-		m.ctrlCArmedAt = time.Time{}
-		if m.statusText == ctrlCExitStatus {
-			m.statusText = ""
-		}
+		m.clearCtrlCArm()
 	}
 	if m.running && m.cancel != nil {
 		m.cancel()
@@ -470,18 +491,28 @@ func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) armCtrlC(now time.Time) (tea.Model, tea.Cmd) {
+	m.ctrlCArmed = true
 	m.ctrlCArmedAt = now
+	m.ctrlCArmGeneration++
 	m.statusText = ctrlCExitStatus
-	return m, waitCtrlCArmExpiry(m.clock, now)
+	return m, waitCtrlCArmExpiry(m.clock, m.ctrlCArmGeneration)
 }
 
-func waitCtrlCArmExpiry(clock Clock, armedAt time.Time) tea.Cmd {
+func (m *Model) clearCtrlCArm() {
+	m.ctrlCArmed = false
+	m.ctrlCArmedAt = time.Time{}
+	if m.statusText == ctrlCExitStatus {
+		m.statusText = ""
+	}
+}
+
+func waitCtrlCArmExpiry(clock Clock, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		if clock == nil {
 			clock = realClock{}
 		}
 		<-clock.After(ctrlCArmWindow)
-		return ctrlCArmExpiredMsg{armedAt: armedAt}
+		return ctrlCArmExpiredMsg{generation: generation}
 	}
 }
 
@@ -513,6 +544,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.renderTickActive = false
 	m.activeAssistant = -1
 	m.turnGeneration++
+	m.activeTurnChannel = stream.channel
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
 	m.editor.SetValue("")
 	m.rerenderAndRefreshViewportContent(!m.autoFollow)
@@ -577,6 +609,12 @@ func waitTurn(stream *turnStream) tea.Cmd {
 }
 
 func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
+	if !m.isActiveTurnMessage(msg) {
+		if msg.value.done || msg.stream == nil {
+			return m, nil
+		}
+		return m, waitTurn(msg.stream)
+	}
 	if msg.value.event != nil {
 		return m.applyTurnEvent(msg.stream, *msg.value.event)
 	}
@@ -584,6 +622,10 @@ func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		return m.finishTurn(msg.value.err)
 	}
 	return m, waitTurn(msg.stream)
+}
+
+func (m Model) isActiveTurnMessage(msg turnMsg) bool {
+	return m.running && m.activeTurnChannel != nil && msg.channel == m.activeTurnChannel && msg.stream != nil && msg.stream.channel == m.activeTurnChannel
 }
 
 func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model, tea.Cmd) {
@@ -720,6 +762,7 @@ func (m *Model) completeTurnState() {
 		m.cancel = nil
 	}
 	m.running = false
+	m.activeTurnChannel = nil
 	m.renderTickActive = false
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
@@ -906,5 +949,5 @@ func (m *Model) nextLiveEntryID(kind string) string {
 }
 
 func (m Model) reservedStateActive() bool {
-	return m.running || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || !m.ctrlCArmedAt.IsZero() || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
 }

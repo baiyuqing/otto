@@ -492,6 +492,30 @@ func TestSlashCommandsOpenModalOverlaysWithoutPrompting(t *testing.T) {
 	}
 }
 
+func TestOverlaySwallowsPasteAndMouseInput(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("draft")
+	m.viewport.SetContent(strings.Repeat("line\n", 40))
+	m.viewport.SetYOffset(10)
+	m.overlay = overlayHelp
+
+	inputs := []tea.Msg{
+		tea.PasteMsg{Content: " pasted"},
+		tea.MouseClickMsg(tea.Mouse{X: 2, Y: 2, Button: tea.MouseLeft}),
+		tea.MouseWheelMsg(tea.Mouse{X: 2, Y: 2, Button: tea.MouseWheelUp}),
+		tea.MouseMotionMsg(tea.Mouse{X: 3, Y: 3, Button: tea.MouseNone}),
+		tea.MouseReleaseMsg(tea.Mouse{X: 3, Y: 3, Button: tea.MouseLeft}),
+	}
+	for _, input := range inputs {
+		updated, cmd := m.Update(input)
+		got := updated.(Model)
+		if cmd != nil || got.overlay != overlayHelp || got.editor.Value() != "draft" || got.viewport.YOffset() != 10 {
+			t.Fatalf("input %T changed modal state: cmd=%v overlay=%v editor=%q offset=%d", input, cmd, got.overlay, got.editor.Value(), got.viewport.YOffset())
+		}
+		m = got
+	}
+}
+
 func TestOverlayIsModalAndEscapeDismissesBeforeCancel(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -543,6 +567,173 @@ func TestOverlayIsModalAndEscapeDismissesBeforeCancel(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("canceled turn did not complete")
+	}
+}
+
+func TestWhitespaceOnlyPromptIsRejectedAndOrdinaryWhitespaceIsPreserved(t *testing.T) {
+	var prompted string
+	backend := &fakeBackend{prompt: func(_ context.Context, text string, _ func(agent.Event)) error {
+		prompted = text
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue(" \t\n ")
+	whitespaceDraft := m.editor.Value()
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	rejected := updated.(Model)
+	if cmd != nil || rejected.running || rejected.editor.Value() != whitespaceDraft || len(rejected.entries) != 0 {
+		t.Fatalf("whitespace submit: cmd=%v running=%v editor=%q entries=%#v", cmd, rejected.running, rejected.editor.Value(), rejected.entries)
+	}
+
+	const prompt = "  keep this whitespace \n "
+	rejected.editor.SetValue(prompt)
+	updated, cmd = rejected.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	if cmd == nil || !running.running || len(running.entries) != 1 || running.entries[0].Raw != prompt {
+		t.Fatalf("ordinary submit: cmd=%v running=%v entries=%#v", cmd, running.running, running.entries)
+	}
+	_ = runCommandWithin(t, cmd, time.Second)
+	if prompted != prompt {
+		t.Fatalf("backend prompt = %q, want %q", prompted, prompt)
+	}
+}
+
+func TestNewCommandPendingBlocksPromptsAndDuplicateRequests(t *testing.T) {
+	newSessionCalls := 0
+	promptCalls := 0
+	newSessionStarted := make(chan struct{})
+	releaseNewSession := make(chan struct{})
+	backend := &fakeBackend{
+		newSession: func() error {
+			newSessionCalls++
+			close(newSessionStarted)
+			<-releaseNewSession
+			return nil
+		},
+		prompt: func(context.Context, string, func(agent.Event)) error {
+			promptCalls++
+			return nil
+		},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("/new")
+
+	updated, firstCmd := m.Update(keyPress(tea.KeyEnter))
+	pending := updated.(Model)
+	if firstCmd == nil || !pending.newSessionPending || pending.newSessionGeneration != 1 {
+		t.Fatalf("first /new: cmd=%v pending=%v generation=%d", firstCmd, pending.newSessionPending, pending.newSessionGeneration)
+	}
+
+	resultCh := make(chan tea.Msg, 1)
+	go func() { resultCh <- firstCmd() }()
+	select {
+	case <-newSessionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first /new backend call did not start")
+	}
+
+	pending.editor.SetValue(" /new ")
+	updated, duplicateCmd := pending.Update(keyPress(tea.KeyEnter))
+	duplicate := updated.(Model)
+	if duplicateCmd != nil || !duplicate.newSessionPending || newSessionCalls != 1 {
+		t.Fatalf("duplicate /new: cmd=%v pending=%v calls=%d", duplicateCmd, duplicate.newSessionPending, newSessionCalls)
+	}
+
+	duplicate.editor.SetValue("  ordinary prompt  ")
+	updated, promptCmd := duplicate.Update(keyPress(tea.KeyEnter))
+	blocked := updated.(Model)
+	if promptCmd != nil || blocked.running || blocked.editor.Value() != "  ordinary prompt  " || promptCalls != 0 {
+		t.Fatalf("pending prompt: cmd=%v running=%v editor=%q calls=%d", promptCmd, blocked.running, blocked.editor.Value(), promptCalls)
+	}
+
+	close(releaseNewSession)
+	var result tea.Msg
+	select {
+	case result = <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("first /new backend call did not complete")
+	}
+	updated, _ = blocked.Update(result)
+	if got := updated.(Model); got.newSessionPending || newSessionCalls != 1 {
+		t.Fatalf("completed /new: pending=%v calls=%d", got.newSessionPending, newSessionCalls)
+	}
+}
+
+func TestNewCommandResultCannotResetNewerActiveTurn(t *testing.T) {
+	backend := &fakeBackend{
+		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "replacement history"}}}},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("/new")
+	updated, _ := m.Update(keyPress(tea.KeyEnter))
+	pending := updated.(Model)
+	generation := pending.newSessionGeneration
+
+	updated, _ = pending.startPrompt("newer active prompt")
+	active := updated.(Model)
+	activeChannel := active.activeTurnChannel
+	updated, cmd := active.Update(newSessionResultMsg{generation: generation})
+	got := updated.(Model)
+	if cmd != nil || !got.running || got.activeTurnChannel != activeChannel || got.newSessionPending || len(got.entries) != 2 || got.entries[len(got.entries)-1].Raw != "newer active prompt" {
+		t.Fatalf("/new result reset active turn: cmd=%v running=%v pending=%v entries=%#v", cmd, got.running, got.newSessionPending, got.entries)
+	}
+}
+
+func TestNewCommandIgnoresStaleResults(t *testing.T) {
+	backend := &fakeBackend{
+		history: []model.Message{{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "keep transcript"}}}},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("/new")
+	updated, firstCmd := m.Update(keyPress(tea.KeyEnter))
+	first := updated.(Model)
+	firstGeneration := first.newSessionGeneration
+
+	updated, _ = first.Update(newSessionResultMsg{generation: firstGeneration + 1})
+	stillPending := updated.(Model)
+	if !stillPending.newSessionPending || stillPending.editor.Value() != "/new" || !strings.Contains(stillPending.View().Content, "keep transcript") {
+		t.Fatalf("mismatched result changed state: pending=%v editor=%q view=%q", stillPending.newSessionPending, stillPending.editor.Value(), stillPending.View().Content)
+	}
+
+	updated, _ = stillPending.Update(newSessionResultMsg{generation: firstGeneration, err: errors.New("first failed")})
+	failed := updated.(Model)
+	if failed.newSessionPending {
+		t.Fatal("matching failure left /new pending")
+	}
+	failed.editor.SetValue("/new")
+	updated, secondCmd := failed.Update(keyPress(tea.KeyEnter))
+	second := updated.(Model)
+	if secondCmd == nil || second.newSessionGeneration <= firstGeneration {
+		t.Fatalf("second /new: cmd=%v generation=%d, first=%d", secondCmd, second.newSessionGeneration, firstGeneration)
+	}
+
+	second.editor.SetValue("newer draft")
+	updated, _ = second.Update(newSessionResultMsg{generation: firstGeneration})
+	got := updated.(Model)
+	if !got.newSessionPending || got.editor.Value() != "newer draft" || !strings.Contains(got.View().Content, "keep transcript") {
+		t.Fatalf("stale success reset newer state: pending=%v editor=%q view=%q", got.newSessionPending, got.editor.Value(), got.View().Content)
+	}
+
+	_ = firstCmd
+}
+
+func TestExitStillQuitsWhileNewSessionIsPending(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("/new")
+	updated, newCmd := m.Update(keyPress(tea.KeyEnter))
+	pending := updated.(Model)
+	if newCmd == nil || !pending.newSessionPending {
+		t.Fatalf("/new cmd=%v pending=%v", newCmd, pending.newSessionPending)
+	}
+
+	pending.editor.SetValue("/exit")
+	_, quitCmd := pending.Update(keyPress(tea.KeyEnter))
+	if quitCmd == nil {
+		t.Fatal("/exit did not quit while /new was pending")
+	}
+	if msg := runCommandWithin(t, quitCmd, time.Second); msg == nil {
+		t.Fatal("/exit quit message = nil")
 	}
 }
 
@@ -705,6 +896,84 @@ func TestExitCommandOnlyQuitsWhenIdle(t *testing.T) {
 	}
 }
 
+func TestCtrlCArmsAtZeroTime(t *testing.T) {
+	clock := newFakeClock(time.Time{})
+	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+
+	updated, armCmd := m.Update(keyPress('c', tea.ModCtrl))
+	armed := updated.(Model)
+	if armCmd == nil || !armed.ctrlCArmed || !armed.ctrlCArmedAt.IsZero() || armed.ctrlCArmGeneration != 1 {
+		t.Fatalf("armed=%v armedAt=%v generation=%d cmd=%v", armed.ctrlCArmed, armed.ctrlCArmedAt, armed.ctrlCArmGeneration, armCmd)
+	}
+	_, quitCmd := armed.Update(keyPress('c', tea.ModCtrl))
+	if quitCmd == nil {
+		t.Fatal("second Ctrl+C at zero clock did not quit")
+	}
+}
+
+func TestCtrlCExpiryUsesGenerationWhenTwoArmsShareClock(t *testing.T) {
+	clock := newFakeClock(time.Time{})
+	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+
+	updated, _ := m.Update(keyPress('c', tea.ModCtrl))
+	first := updated.(Model)
+	firstGeneration := first.ctrlCArmGeneration
+	updated, _ = first.Update(ctrlCArmExpiredMsg{generation: firstGeneration})
+	cleared := updated.(Model)
+	if cleared.ctrlCArmed {
+		t.Fatal("matching expiry did not clear first arm")
+	}
+
+	updated, _ = cleared.Update(keyPress('c', tea.ModCtrl))
+	second := updated.(Model)
+	if !second.ctrlCArmed || second.ctrlCArmGeneration <= firstGeneration || second.ctrlCArmedAt != first.ctrlCArmedAt {
+		t.Fatalf("second arm: armed=%v generation=%d armedAt=%v", second.ctrlCArmed, second.ctrlCArmGeneration, second.ctrlCArmedAt)
+	}
+	updated, _ = second.Update(ctrlCArmExpiredMsg{generation: firstGeneration})
+	if !updated.(Model).ctrlCArmed {
+		t.Fatal("stale first expiry cleared second arm at same clock time")
+	}
+}
+
+func TestCtrlCSecondPressWindowHasStrictDeadline(t *testing.T) {
+	tests := []struct {
+		name     string
+		advance  time.Duration
+		wantQuit bool
+	}{
+		{name: "just below", advance: time.Second - time.Nanosecond, wantQuit: true},
+		{name: "exact", advance: time.Second, wantQuit: false},
+		{name: "above", advance: time.Second + time.Nanosecond, wantQuit: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := newFakeClock(time.Unix(500, 0))
+			m := resizeModel(t, NewModel(context.Background(), &fakeBackend{}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+				return text, nil
+			}))), 80, 12)
+			updated, _ := m.Update(keyPress('c', tea.ModCtrl))
+			first := updated.(Model)
+			clock.Advance(tt.advance)
+
+			updated, cmd := first.Update(keyPress('c', tea.ModCtrl))
+			got := updated.(Model)
+			if tt.wantQuit {
+				if cmd == nil || runCommandWithin(t, cmd, time.Second) == nil {
+					t.Fatal("second Ctrl+C did not quit strictly before deadline")
+				}
+				return
+			}
+			if cmd == nil || !got.ctrlCArmed || got.ctrlCArmGeneration != first.ctrlCArmGeneration+1 {
+				t.Fatalf("deadline press did not rearm: cmd=%v armed=%v generation=%d first=%d", cmd, got.ctrlCArmed, got.ctrlCArmGeneration, first.ctrlCArmGeneration)
+			}
+		})
+	}
+}
+
 func TestCtrlCRunningCancelsArmsAndSecondQuits(t *testing.T) {
 	clock := newFakeClock(time.Unix(100, 0))
 	started := make(chan struct{})
@@ -792,8 +1061,8 @@ func TestCtrlCArmExpiresAndStaleTickIsIgnored(t *testing.T) {
 		t.Fatalf("armedAt=%v cmd=%v", armed.ctrlCArmedAt, armCmd)
 	}
 
-	updated, _ = armed.Update(ctrlCArmExpiredMsg{armedAt: armed.ctrlCArmedAt.Add(-time.Second)})
-	if updated.(Model).ctrlCArmedAt.IsZero() {
+	updated, _ = armed.Update(ctrlCArmExpiredMsg{generation: armed.ctrlCArmGeneration - 1})
+	if !updated.(Model).ctrlCArmed {
 		t.Fatal("stale ctrl+c tick cleared armed state")
 	}
 
@@ -805,18 +1074,60 @@ func TestCtrlCArmExpiresAndStaleTickIsIgnored(t *testing.T) {
 	case msg := <-expired:
 		updated, _ = armed.Update(msg)
 		cleared := updated.(Model)
-		if !cleared.ctrlCArmedAt.IsZero() {
-			t.Fatalf("armedAt=%v, want cleared", cleared.ctrlCArmedAt)
+		if cleared.ctrlCArmed {
+			t.Fatalf("armed=%v armedAt=%v, want cleared", cleared.ctrlCArmed, cleared.ctrlCArmedAt)
 		}
 		if strings.Contains(cleared.View().Content, "press Ctrl+C again to exit") {
 			t.Fatalf("view = %q", cleared.View().Content)
 		}
 		updated, rearmCmd := cleared.Update(keyPress('c', tea.ModCtrl))
-		if rearmCmd == nil || updated.(Model).ctrlCArmedAt.IsZero() {
-			t.Fatalf("rearm cmd=%v armedAt=%v", rearmCmd, updated.(Model).ctrlCArmedAt)
+		if rearmCmd == nil || !updated.(Model).ctrlCArmed {
+			t.Fatalf("rearm cmd=%v armed=%v armedAt=%v", rearmCmd, updated.(Model).ctrlCArmed, updated.(Model).ctrlCArmedAt)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ctrl+c expiry command did not complete")
+	}
+}
+
+func TestStaleTurnMessagesCannotMutateActiveOrCompletedTurn(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("active")
+	updated, _ := m.Update(keyPress(tea.KeyEnter))
+	active := updated.(Model)
+
+	staleStream := newTurnStream()
+	staleStream.channel <- turnEnvelope{done: true}
+	close(staleStream.channel)
+	staleEvent := agent.Event{Type: agent.EventTextDelta, Text: "stale text"}
+	updated, drainCmd := active.Update(turnMsg{
+		channel: staleStream.channel,
+		stream:  staleStream,
+		value:   turnEnvelope{event: &staleEvent},
+	})
+	unchanged := updated.(Model)
+	if drainCmd == nil || len(unchanged.entries) != 1 || unchanged.entries[0].Raw != "active" || !unchanged.running {
+		t.Fatalf("stale active envelope mutated state: cmd=%v running=%v entries=%#v", drainCmd, unchanged.running, unchanged.entries)
+	}
+	staleDone := runCommandWithin(t, drainCmd, time.Second)
+	updated, next := unchanged.Update(staleDone)
+	if next != nil || len(updated.(Model).entries) != 1 || !updated.(Model).running {
+		t.Fatalf("stale drain completion changed active turn: cmd=%v running=%v entries=%#v", next, updated.(Model).running, updated.(Model).entries)
+	}
+
+	completedModel := resizeModel(t, newTestModel(t), 80, 12)
+	completedModel.editor.SetValue("completed")
+	started, startCmd := completedModel.Update(keyPress(tea.KeyEnter))
+	doneMsg := runCommandWithin(t, startCmd, time.Second).(turnMsg)
+	finished, _ := started.(Model).Update(doneMsg)
+	idle := finished.(Model)
+	updated, drainCmd = idle.Update(turnMsg{channel: doneMsg.channel, stream: doneMsg.stream, value: turnEnvelope{event: &staleEvent}})
+	if drainCmd == nil || updated.(Model).running || len(updated.(Model).entries) != 1 {
+		t.Fatalf("completed stale envelope mutated state: cmd=%v running=%v entries=%#v", drainCmd, updated.(Model).running, updated.(Model).entries)
+	}
+	closedDone := runCommandWithin(t, drainCmd, time.Second)
+	updated, next = updated.(Model).Update(closedDone)
+	if next != nil || updated.(Model).running || len(updated.(Model).entries) != 1 {
+		t.Fatalf("closed stale drain changed completed state: cmd=%v running=%v entries=%#v", next, updated.(Model).running, updated.(Model).entries)
 	}
 }
 

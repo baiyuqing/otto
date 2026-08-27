@@ -1,10 +1,6 @@
 package tui
 
-import (
-	"time"
-
-	"github.com/baiyuqing/otto/internal/agent"
-)
+import "github.com/baiyuqing/otto/internal/agent"
 
 type overlayKind uint8
 
@@ -48,9 +44,10 @@ type renderStreamingMsg struct {
 }
 
 type newSessionResultMsg struct {
-	err error
+	generation uint64
+	err        error
 }
 
 type ctrlCArmExpiredMsg struct {
-	armedAt time.Time
+	generation uint64
 }

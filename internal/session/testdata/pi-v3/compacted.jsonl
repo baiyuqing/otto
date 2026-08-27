@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"750e8400-e29b-41d4-a716-446655440000","timestamp":"2026-08-27T10:00:00Z","cwd":"/workspace"}
+{"type":"message","id":"c0000001","parentId":null,"timestamp":"2026-08-27T10:00:01Z","message":{"role":"user","content":"old","timestamp":1787824801000}}
+{"type":"message","id":"c0000002","parentId":"c0000001","timestamp":"2026-08-27T10:00:02Z","message":{"role":"user","content":"legacy retained","timestamp":1787824802000}}
+{"type":"compaction","id":"c0000003","parentId":"c0000002","timestamp":"2026-08-27T10:00:03Z","summary":"legacy summary","firstKeptEntryId":"c0000002","tokensBefore":100}
+{"type":"compaction","id":"c0000004","parentId":"c0000003","timestamp":"2026-08-27T10:00:04Z","summary":"summary","tokensBefore":120,"retainedTail":[{"role":"user","content":"retained","timestamp":1787824803500}],"usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":16,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"details":{"readFiles":["README.md"],"modifiedFiles":[]},"fromHook":false}
+{"type":"message","id":"c0000005","parentId":"c0000004","timestamp":"2026-08-27T10:00:05Z","message":{"role":"user","content":[{"type":"text","text":"after"}],"timestamp":1787824805000}}

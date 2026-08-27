@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"850e8400-e29b-41d4-a716-446655440000","timestamp":"2026-08-27T11:00:00Z","cwd":"/workspace","futureHeaderField":{"enabled":true}}
+{"type":"custom","id":"d0000001","parentId":null,"timestamp":"2026-08-27T11:00:01Z","customType":"fixture.state","data":{"count":1},"futureCustomField":["preserve-me"]}
+{"type":"future_entry","id":"d0000002","parentId":"d0000001","timestamp":"2026-08-27T11:00:02Z","futureField":{"nested":[1,true,"value"]}}
+{"type":"model_change","id":"d0000003","parentId":"d0000002","timestamp":"2026-08-27T11:00:03Z","provider":"openai-compatible","modelId":"future-model","futureModelOption":{"mode":"preserve-me"}}

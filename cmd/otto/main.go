@@ -41,7 +41,7 @@ type terminalDetector func(io.Reader, io.Writer) bool
 
 type runDependencies struct {
 	subscribeInterrupts func() interruptSubscription
-	openSession         func(string, string) (session.Session, []session.Warning, error)
+	prepareSession      func(context.Context, string, string) (preparedSession, error)
 	newSession          func(bool, string, string, config.Runtime) (session.Session, error)
 	detectTerminal      terminalDetector
 	runTUI              func(context.Context, io.Reader, io.Writer, app.Backend) error
@@ -51,7 +51,7 @@ type runDependencies struct {
 func defaultRunDependencies() runDependencies {
 	return runDependencies{
 		subscribeInterrupts: subscribeOSInterrupts,
-		openSession:         openSession,
+		prepareSession:      prepareSession,
 		newSession:          newSession,
 		detectTerminal:      detectTerminalIO,
 		runTUI:              tui.Run,
@@ -155,13 +155,25 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "%v", err)
 	}
 
-	var metadata *session.RuntimeMetadata
+	shell := getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
+
+	var (
+		metadata        *session.RuntimeMetadata
+		preparedInitial preparedSession
+		preparedInfo    session.SessionInfo
+	)
 	if sessionPath != "" {
-		info, inspectErr := inspectSession(ctx, sessionPath, workspacePath)
-		if inspectErr != nil {
-			return fail(stderr, "%v", inspectErr)
+		preparedInitial, err = builder.prepare(ctx, sessionPath)
+		if err != nil {
+			return fail(stderr, "%v", builder.redactError(err, nil))
 		}
-		metadata = &session.RuntimeMetadata{Profile: info.Profile, Provider: info.Provider, Model: info.Model}
+		defer preparedInitial.Close()
+		preparedInfo = preparedInitial.Info()
+		metadata = &session.RuntimeMetadata{Profile: preparedInfo.Profile, Provider: preparedInfo.Provider, Model: preparedInfo.Model}
 	}
 	overrides := config.Overrides{
 		Profile:        options.profile,
@@ -174,25 +186,18 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	runtime, err := resolveInitialRuntime(configFile, environment, metadata, overrides)
 	if err != nil {
-		return fail(stderr, "%v", err)
-	}
-
-	shell := getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
+		return fail(stderr, "%v", builder.redactError(err, nil))
 	}
 	if err := validateShell(shell); err != nil {
 		return fail(stderr, "%v", err)
 	}
 
-	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
-
 	var (
 		initialSession  session.Session
 		startupWarnings []session.Warning
 	)
-	if sessionPath != "" {
-		initialSession, startupWarnings, err = builder.openSession(sessionPath, workspacePath)
+	if preparedInitial != nil {
+		initialSession, startupWarnings, err = builder.activatePrepared(ctx, preparedInitial, preparedInfo, &runtime)
 	} else {
 		initialSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
 	}

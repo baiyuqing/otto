@@ -266,7 +266,7 @@ func TestCompleteDoesNotRetryUnauthorizedAndRedactsBoundedError(t *testing.T) {
 }
 
 func TestNewRejectsInvalidBaseURLs(t *testing.T) {
-	for _, baseURL := range []string{"", "ftp://example.test/v1", "http:///v1", "https://example.test/v1?tenant=x", "https://example.test/v1?", "https://example.test/v1#fragment"} {
+	for _, baseURL := range []string{"", "ftp://example.test/v1", "http:///v1", "https://example.test/v1?tenant=x", "https://example.test/v1?", "https://example.test/v1#fragment", "https://username@example.test/v1", "https://username:password@example.test/v1"} {
 		t.Run(baseURL, func(t *testing.T) {
 			_, err := New(baseURL, "key", nil).Complete(context.Background(), provider.Request{Model: "model"}, nil)
 			if err == nil || !strings.Contains(err.Error(), "invalid OpenAI-compatible base URL") {

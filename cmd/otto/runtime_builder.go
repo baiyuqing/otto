@@ -16,6 +16,32 @@ import (
 	"github.com/baiyuqing/otto/internal/tool"
 )
 
+type preparedSession interface {
+	Info() session.SessionInfo
+	Activate(context.Context) (session.Session, []session.Warning, error)
+	Close() error
+}
+
+type preparedStore struct {
+	prepared *session.Prepared
+}
+
+func (p *preparedStore) Info() session.SessionInfo {
+	return p.prepared.Info()
+}
+
+func (p *preparedStore) Activate(ctx context.Context) (session.Session, []session.Warning, error) {
+	store, warnings, err := p.prepared.Activate(ctx)
+	if store == nil {
+		return nil, warnings, err
+	}
+	return store, warnings, err
+}
+
+func (p *preparedStore) Close() error {
+	return p.prepared.Close()
+}
+
 type runtimeBuilder struct {
 	config              config.File
 	environment         map[string]string
@@ -26,31 +52,31 @@ type runtimeBuilder struct {
 	noSession           bool
 	stderr              io.Writer
 	deps                runDependencies
-	openSession         func(path, workspace string) (session.Session, []session.Warning, error)
+	prepareSession      func(context.Context, string, string) (preparedSession, error)
 	buildRunnerOverride func(session.Session, config.Runtime) (app.Runner, error)
 	runtimeOverrides    config.Overrides
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
 	builder := runtimeBuilder{
-		config:        configFile,
-		environment:   environment,
-		workspace:     workspace,
-		workspacePath: workspacePath,
-		sessionRoot:   sessionRoot,
-		shell:         shell,
-		noSession:     options.noSession,
-		stderr:        stderr,
-		deps:          deps,
-		openSession:   deps.openSession,
+		config:         configFile,
+		environment:    environment,
+		workspace:      workspace,
+		workspacePath:  workspacePath,
+		sessionRoot:    sessionRoot,
+		shell:          shell,
+		noSession:      options.noSession,
+		stderr:         stderr,
+		deps:           deps,
+		prepareSession: deps.prepareSession,
 		runtimeOverrides: config.Overrides{
 			MaxTurns:       options.maxTurns,
 			ShellTimeout:   options.shellTimeout,
 			MaxOutputBytes: options.maxOutput,
 		},
 	}
-	if builder.openSession == nil {
-		builder.openSession = openSession
+	if builder.prepareSession == nil {
+		builder.prepareSession = prepareSession
 	}
 	if builder.buildRunnerOverride == nil && deps.newRunner != nil {
 		builder.buildRunnerOverride = func(current session.Session, _ config.Runtime) (app.Runner, error) {
@@ -84,8 +110,8 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 		tool.NewWriteTool(b.workspace),
 		tool.NewEditTool(b.workspace),
 		tool.NewBashTool(b.workspace, b.shell, runtime.ShellTimeout, runtime.MaxOutputBytes, tool.BashSecurity{
-			RemoveEnv:    []string{"OTTO_API_KEY", runtime.APIKeyEnv},
-			RedactValues: []string{runtime.APIKey},
+			RemoveEnv:    b.credentialEnvironmentNames(runtime.APIKeyEnv),
+			RedactValues: b.secretValues(&runtime),
 		}),
 	)
 	if err != nil {
@@ -98,10 +124,13 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 }
 
 func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.SessionReplacement, error) {
-	info, err := inspectSession(ctx, path, b.workspacePath)
+	prepared, err := b.prepare(ctx, path)
 	if err != nil {
 		return app.SessionReplacement{}, b.redactError(err, nil)
 	}
+	defer prepared.Close()
+
+	info := prepared.Info()
 	runtime, err := b.resolveSession(session.RuntimeMetadata{
 		Profile:  info.Profile,
 		Provider: info.Provider,
@@ -110,13 +139,9 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 	if err != nil {
 		return app.SessionReplacement{}, err
 	}
-	opener := b.openSession
-	if opener == nil {
-		opener = openSession
-	}
-	candidate, warnings, err := opener(path, b.workspacePath)
+	candidate, warnings, err := b.activatePrepared(ctx, prepared, info, &runtime)
 	if err != nil {
-		return app.SessionReplacement{}, b.redactError(err, &runtime)
+		return app.SessionReplacement{}, err
 	}
 	runner, err := b.buildRunner(candidate, runtime)
 	if err != nil {
@@ -135,6 +160,48 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 		},
 		Warnings: cloneWarnings(warnings),
 	}, nil
+}
+
+func (b runtimeBuilder) prepare(ctx context.Context, path string) (preparedSession, error) {
+	prepare := b.prepareSession
+	if prepare == nil {
+		prepare = prepareSession
+	}
+	prepared, err := prepare(ctx, path, b.workspacePath)
+	if err != nil {
+		if prepared != nil {
+			if closeErr := prepared.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+		}
+		return nil, err
+	}
+	if prepared == nil {
+		return nil, errors.New("session prepare returned nil handle")
+	}
+	return prepared, nil
+}
+
+func (b runtimeBuilder) activatePrepared(ctx context.Context, prepared preparedSession, info session.SessionInfo, runtime *config.Runtime) (session.Session, []session.Warning, error) {
+	candidate, warnings, err := prepared.Activate(ctx)
+	if err != nil {
+		return nil, nil, b.cleanupCandidate(candidate, err, runtime)
+	}
+	if candidate == nil {
+		return nil, nil, b.redactError(errors.New("session activation returned nil session"), runtime)
+	}
+	if !activatedSessionMatchesPrepared(info, candidate.Header()) {
+		return nil, nil, b.cleanupCandidate(candidate, fmt.Errorf("%w: prepared session metadata changed during activation", session.ErrInvalidSession), runtime)
+	}
+	return candidate, cloneWarnings(warnings), nil
+}
+
+func activatedSessionMatchesPrepared(info session.SessionInfo, header session.Header) bool {
+	return info.ID == header.ID &&
+		info.CWD == header.Workspace &&
+		info.Profile == header.Profile &&
+		info.Provider == header.Provider &&
+		info.Model == header.Model
 }
 
 func (b runtimeBuilder) cleanupCandidate(candidate session.Session, err error, runtime *config.Runtime) error {
@@ -175,6 +242,27 @@ func (b runtimeBuilder) redactError(err error, runtime *config.Runtime) error {
 		return err
 	}
 	return errors.New(message)
+}
+
+func (b runtimeBuilder) credentialEnvironmentNames(runtimeAPIKeyEnv string) []string {
+	seen := make(map[string]struct{}, len(b.config.Profiles)+2)
+	names := make([]string, 0, len(b.config.Profiles)+2)
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	add("OTTO_API_KEY")
+	add(runtimeAPIKeyEnv)
+	for _, profile := range b.config.Profiles {
+		add(profile.APIKeyEnv)
+	}
+	return names
 }
 
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
@@ -274,27 +362,18 @@ func cloneProfiles(profiles map[string]config.Profile) map[string]config.Profile
 	return copy
 }
 
-func inspectSession(ctx context.Context, path, workspace string) (session.SessionInfo, error) {
-	info, _, err := session.Inspect(ctx, path)
+func prepareSession(ctx context.Context, path, workspace string) (preparedSession, error) {
+	prepared, err := session.Prepare(ctx, path)
 	if err != nil {
-		return session.SessionInfo{}, err
+		return nil, err
 	}
-	if err := validateSessionWorkspace(info.CWD, workspace); err != nil {
-		return session.SessionInfo{}, err
+	if err := validateSessionWorkspace(prepared.Info().CWD, workspace); err != nil {
+		if closeErr := prepared.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+		return nil, err
 	}
-	return info, nil
-}
-
-func openSession(path, workspace string) (session.Session, []session.Warning, error) {
-	store, warnings, err := session.Open(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := validateSessionWorkspace(store.Header().Workspace, workspace); err != nil {
-		_ = store.Close()
-		return nil, nil, err
-	}
-	return store, cloneWarnings(warnings), nil
+	return &preparedStore{prepared: prepared}, nil
 }
 
 func validateSessionWorkspace(sessionWorkspace, workspace string) error {

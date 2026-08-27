@@ -7,6 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.9
 	charm.land/glamour/v2 v2.0.1
 	charm.land/lipgloss/v2 v2.0.6
+	github.com/creack/pty v1.1.24
 	github.com/pelletier/go-toml/v2 v2.2.4
 	golang.org/x/term v0.45.0
 )

@@ -41,16 +41,18 @@ type Backend interface {
 }
 
 type Controller struct {
-	mu         sync.Mutex
-	current    session.Session
-	runner     Runner
-	create     SessionFactory
-	build      RunnerFactory
-	prompting  bool
-	closed     bool
-	activeDone chan struct{}
-	closeDone  chan struct{}
-	closeErr   error
+	mu          sync.Mutex
+	current     session.Session
+	runner      Runner
+	create      SessionFactory
+	build       RunnerFactory
+	prompting   bool
+	replacing   bool
+	closed      bool
+	activeDone  chan struct{}
+	replaceDone chan struct{}
+	closeDone   chan struct{}
+	closeErr    error
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory) (*Controller, error) {
@@ -76,7 +78,7 @@ func (c *Controller) Prompt(ctx context.Context, text string, emit func(agent.Ev
 		c.mu.Unlock()
 		return ErrClosed
 	}
-	if c.prompting {
+	if c.prompting || c.replacing {
 		c.mu.Unlock()
 		return ErrPromptActive
 	}
@@ -101,36 +103,55 @@ func (c *Controller) Prompt(ctx context.Context, text string, emit func(agent.Ev
 
 func (c *Controller) NewSession() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.closed {
+		c.mu.Unlock()
 		return ErrClosed
 	}
-	if c.prompting {
+	if c.prompting || c.replacing {
+		c.mu.Unlock()
 		return ErrPromptActive
 	}
+	done := make(chan struct{})
+	c.replacing = true
+	c.replaceDone = done
+	current := c.current
+	c.mu.Unlock()
 
 	replacement, err := c.create()
 	if err != nil {
+		c.finishReplacing(done)
 		return err
 	}
 	if replacement == nil {
+		c.finishReplacing(done)
 		return errors.New("session factory returned nil session")
 	}
-	if err := c.current.Close(); err != nil {
-		_ = replacement.Close()
-		c.finishClosedLocked(err)
-		return err
-	}
+
 	runner := c.build(replacement)
 	if runner == nil {
 		_ = replacement.Close()
-		err := errors.New("runner factory returned nil runner")
+		c.finishReplacing(done)
+		return errors.New("runner factory returned nil runner")
+	}
+
+	if err := current.Close(); err != nil {
+		_ = replacement.Close()
+		c.mu.Lock()
 		c.finishClosedLocked(err)
+		c.finishReplacingLocked(done)
+		c.mu.Unlock()
 		return err
 	}
+
+	c.mu.Lock()
 	c.current = replacement
 	c.runner = runner
+	closed := c.closed
+	c.finishReplacingLocked(done)
+	c.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
 	return nil
 }
 
@@ -178,12 +199,25 @@ func (c *Controller) Close() error {
 	done := make(chan struct{})
 	c.closeDone = done
 	activeDone := c.activeDone
-	current := c.current
+	replaceDone := c.replaceDone
 	c.mu.Unlock()
 
 	if activeDone != nil {
 		<-activeDone
 	}
+	if replaceDone != nil {
+		<-replaceDone
+	}
+
+	c.mu.Lock()
+	if c.current == nil && c.closeErr != nil {
+		err := c.closeErr
+		close(done)
+		c.mu.Unlock()
+		return err
+	}
+	current := c.current
+	c.mu.Unlock()
 
 	var err error
 	if current != nil {
@@ -191,7 +225,10 @@ func (c *Controller) Close() error {
 	}
 
 	c.mu.Lock()
-	c.closeErr = err
+	if c.closeErr == nil {
+		c.closeErr = err
+	}
+	err = c.closeErr
 	close(done)
 	c.mu.Unlock()
 	return err
@@ -199,10 +236,26 @@ func (c *Controller) Close() error {
 
 func (c *Controller) finishClosedLocked(err error) {
 	c.closed = true
+	c.current = nil
+	c.runner = nil
 	c.closeErr = err
 	if c.closeDone == nil {
 		c.closeDone = make(chan struct{})
 		close(c.closeDone)
+	}
+}
+
+func (c *Controller) finishReplacing(done chan struct{}) {
+	c.mu.Lock()
+	c.finishReplacingLocked(done)
+	c.mu.Unlock()
+}
+
+func (c *Controller) finishReplacingLocked(done chan struct{}) {
+	c.replacing = false
+	if c.replaceDone == done {
+		c.replaceDone = nil
+		close(done)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -13,6 +14,54 @@ import (
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 )
+
+func TestNewValidatesRequiredDependencies(t *testing.T) {
+	tests := []struct {
+		name    string
+		initial session.Session
+		create  SessionFactory
+		build   RunnerFactory
+		wantErr string
+	}{
+		{
+			name:    "nil initial session",
+			create:  func() (session.Session, error) { return &fakeSession{header: testHeader("next")}, nil },
+			build:   func(session.Session) Runner { return runnerFunc(noopRun) },
+			wantErr: "initial session is required",
+		},
+		{
+			name:    "nil session factory",
+			initial: &fakeSession{header: testHeader("initial")},
+			build:   func(session.Session) Runner { return runnerFunc(noopRun) },
+			wantErr: "session factory is required",
+		},
+		{
+			name:    "nil runner factory",
+			initial: &fakeSession{header: testHeader("initial")},
+			create:  func() (session.Session, error) { return &fakeSession{header: testHeader("next")}, nil },
+			wantErr: "runner factory is required",
+		},
+		{
+			name:    "nil initial runner",
+			initial: &fakeSession{header: testHeader("initial")},
+			create:  func() (session.Session, error) { return &fakeSession{header: testHeader("next")}, nil },
+			build:   func(session.Session) Runner { return nil },
+			wantErr: "runner factory returned nil runner",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, err := New(tt.initial, tt.create, tt.build)
+			if controller != nil {
+				t.Fatalf("controller = %#v, want nil", controller)
+			}
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("New() error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
 
 func TestControllerRejectsConcurrentPrompt(t *testing.T) {
 	started := make(chan struct{})
@@ -32,6 +81,76 @@ func TestControllerRejectsConcurrentPrompt(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestControllerNewSessionCallbacksMayInspectControllerState(t *testing.T) {
+	current := &fakeSession{header: testHeader("old"), messages: []model.Message{{ID: "m1", Role: model.RoleUser}}}
+	next := &fakeSession{header: testHeader("new")}
+	var controller *Controller
+	var buildCalls int
+	var callbackErr error
+	var callbackMu sync.Mutex
+
+	recordCallbackErr := func(err error) {
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		if callbackErr == nil {
+			callbackErr = err
+		}
+	}
+	checkCurrent := func(where string) {
+		info := controller.Info()
+		if info.SessionID != "old" {
+			recordCallbackErr(fmt.Errorf("%s info session id = %q, want old", where, info.SessionID))
+		}
+		history := controller.History()
+		if len(history) != 1 || history[0].ID != "m1" {
+			recordCallbackErr(fmt.Errorf("%s history = %#v, want old history", where, history))
+		}
+	}
+
+	current.onClose = func() {
+		checkCurrent("close")
+	}
+	controller, err := New(current, func() (session.Session, error) {
+		checkCurrent("create")
+		return next, nil
+	}, func(s session.Session) Runner {
+		buildCalls++
+		if buildCalls == 1 {
+			return runnerFunc(noopRun)
+		}
+		if s != next {
+			recordCallbackErr(fmt.Errorf("replacement build session = %#v, want next", s))
+		}
+		checkCurrent("build")
+		return runnerFunc(noopRun)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- controller.NewSession() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("NewSession() error = %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("NewSession() timed out; callback likely ran under controller lock")
+	}
+
+	callbackMu.Lock()
+	err = callbackErr
+	callbackMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info := controller.Info(); info.SessionID != "new" {
+		t.Fatalf("info = %#v, want new session info", info)
 	}
 }
 
@@ -79,6 +198,61 @@ func TestControllerNewSessionCreationFailureKeepsCurrent(t *testing.T) {
 	}
 }
 
+func TestControllerNewSessionRejectsNilReplacementSessionAndKeepsCurrent(t *testing.T) {
+	current := &fakeSession{header: testHeader("old")}
+	controller, err := New(current, func() (session.Session, error) {
+		return nil, nil
+	}, func(session.Session) Runner { return runnerFunc(noopRun) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.NewSession(); err == nil || err.Error() != "session factory returned nil session" {
+		t.Fatalf("NewSession() error = %v, want nil session error", err)
+	}
+	if current.CloseCalls() != 0 {
+		t.Fatalf("old close calls = %d, want 0", current.CloseCalls())
+	}
+	if info := controller.Info(); info.SessionID != "old" {
+		t.Fatalf("info = %#v", info)
+	}
+	if err := controller.Prompt(context.Background(), "still-open", func(agent.Event) {}); err != nil {
+		t.Fatalf("Prompt() after nil session = %v", err)
+	}
+}
+
+func TestControllerNewSessionRejectsNilReplacementRunnerAndKeepsCurrent(t *testing.T) {
+	current := &fakeSession{header: testHeader("old")}
+	replacement := &fakeSession{header: testHeader("new")}
+	var buildCalls int
+	controller, err := New(current, func() (session.Session, error) {
+		return replacement, nil
+	}, func(session.Session) Runner {
+		buildCalls++
+		if buildCalls == 1 {
+			return runnerFunc(noopRun)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.NewSession(); err == nil || err.Error() != "runner factory returned nil runner" {
+		t.Fatalf("NewSession() error = %v, want nil runner error", err)
+	}
+	if current.CloseCalls() != 0 {
+		t.Fatalf("old close calls = %d, want 0", current.CloseCalls())
+	}
+	if replacement.CloseCalls() != 1 {
+		t.Fatalf("replacement close calls = %d, want 1", replacement.CloseCalls())
+	}
+	if info := controller.Info(); info.SessionID != "old" {
+		t.Fatalf("info = %#v", info)
+	}
+	if err := controller.Prompt(context.Background(), "still-open", func(agent.Event) {}); err != nil {
+		t.Fatalf("Prompt() after nil runner = %v", err)
+	}
+}
+
 func TestControllerRejectsNewSessionWhilePrompting(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -97,6 +271,55 @@ func TestControllerRejectsNewSessionWhilePrompting(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestControllerCloseWaitsForInProgressReplacement(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	current := &fakeSession{header: testHeader("old")}
+	replacement := &fakeSession{header: testHeader("new")}
+	var buildCalls int
+	controller, err := New(current, func() (session.Session, error) {
+		close(started)
+		<-release
+		return replacement, nil
+	}, func(session.Session) Runner {
+		buildCalls++
+		return runnerFunc(noopRun)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newSessionDone := make(chan error, 1)
+	go func() { newSessionDone <- controller.NewSession() }()
+	<-started
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- controller.Close() }()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close() returned early: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-newSessionDone; !errors.Is(err, ErrClosed) {
+		t.Fatalf("NewSession() error = %v, want ErrClosed", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+	if buildCalls != 2 {
+		t.Fatalf("build calls = %d, want 2", buildCalls)
+	}
+	if current.CloseCalls() != 1 {
+		t.Fatalf("old close calls = %d, want 1", current.CloseCalls())
+	}
+	if replacement.CloseCalls() != 1 {
+		t.Fatalf("replacement close calls = %d, want 1", replacement.CloseCalls())
 	}
 }
 

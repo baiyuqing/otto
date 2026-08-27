@@ -25,6 +25,7 @@ import (
 const (
 	ptyTestTimeout      = 5 * time.Second
 	ptyStepTimeout      = 2 * time.Second
+	ptyQuietWindow      = 50 * time.Millisecond
 	altScreenEnterSeq   = "\x1b[?1049h"
 	altScreenExitSeq    = "\x1b[?1049l"
 	assistantStreamText = "stream visible from pty smoke backend"
@@ -84,8 +85,7 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
-	waitForSubsequence(t, collector, resizeOffset, narrowFooterMarker)
-	resizeOutput := collector.SnapshotFrom(resizeOffset)
+	resizeOutput := waitForStableSnapshot(t, collector, resizeOffset, narrowFooterMarker)
 	if strings.Contains(resizeOutput, footerSessionMarker) {
 		t.Fatalf("resize output = %s, want collapsed footer without stale session marker %q", tailTerminalOutput([]byte(resizeOutput)), footerSessionMarker)
 	}
@@ -187,6 +187,15 @@ func waitForSubsequence(t *testing.T, collector *ptyOutputCollector, after int, 
 	return offset
 }
 
+func waitForStableSnapshot(t *testing.T, collector *ptyOutputCollector, after int, want string) string {
+	t.Helper()
+	snapshot, err := collector.WaitForStableSnapshot(after, []byte(want), ptyQuietWindow, ptyStepTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
 type runResult struct {
 	done chan struct{}
 	mu   sync.Mutex
@@ -267,13 +276,6 @@ func (c *ptyOutputCollector) Len() int {
 	return len(c.buf)
 }
 
-func (c *ptyOutputCollector) SnapshotFrom(offset int) string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	start := min(max(offset, 0), len(c.buf))
-	return string(append([]byte(nil), c.buf[start:]...))
-}
-
 func (c *ptyOutputCollector) WaitFor(after int, want []byte, timeout time.Duration) (int, error) {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -300,6 +302,47 @@ func (c *ptyOutputCollector) WaitFor(after int, want []byte, timeout time.Durati
 	}
 }
 
+func (c *ptyOutputCollector) WaitForStableSnapshot(after int, want []byte, quietWindow, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	stableSince := time.Time{}
+	lastLen := -1
+	for {
+		c.mu.Lock()
+		start := min(max(after, 0), len(c.buf))
+		index := bytes.Index(c.buf[start:], want)
+		if index >= 0 {
+			if len(c.buf) != lastLen {
+				lastLen = len(c.buf)
+				stableSince = time.Now()
+			} else if !stableSince.IsZero() && time.Since(stableSince) >= quietWindow {
+				snapshot := string(append([]byte(nil), c.buf[start:]...))
+				c.mu.Unlock()
+				return snapshot, nil
+			}
+		}
+		snapshot := append([]byte(nil), c.buf...)
+		readErr := c.err
+		closed := false
+		select {
+		case <-c.done:
+			closed = true
+		default:
+		}
+		c.mu.Unlock()
+
+		if closed {
+			if index >= 0 {
+				return string(snapshot[start:]), nil
+			}
+			return "", fmt.Errorf("output closed while waiting for stable %q: %v\nlast output: %s", want, readErr, tailTerminalOutput(snapshot))
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timed out waiting for stable %q\nlast output: %s", want, tailTerminalOutput(snapshot))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (c *ptyOutputCollector) Wait(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	select {
@@ -315,4 +358,28 @@ func tailTerminalOutput(output []byte) string {
 		output = output[len(output)-maxTail:]
 	}
 	return fmt.Sprintf("%q", output)
+}
+
+func TestPTYOutputCollectorWaitForStableSnapshotIncludesTrailingFooterBytes(t *testing.T) {
+	collector := &ptyOutputCollector{done: make(chan struct{})}
+
+	go func() {
+		collector.mu.Lock()
+		collector.buf = append(collector.buf, []byte(narrowFooterMarker)...)
+		collector.mu.Unlock()
+
+		time.Sleep(10 * time.Millisecond)
+
+		collector.mu.Lock()
+		collector.buf = append(collector.buf, []byte(" | "+footerSessionMarker)...)
+		collector.mu.Unlock()
+	}()
+
+	snapshot, err := collector.WaitForStableSnapshot(0, []byte(narrowFooterMarker), 20*time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatalf("WaitForStableSnapshot() error = %v", err)
+	}
+	if !strings.Contains(snapshot, footerSessionMarker) {
+		t.Fatalf("snapshot = %s, want trailing footer marker %q", tailTerminalOutput([]byte(snapshot)), footerSessionMarker)
+	}
 }

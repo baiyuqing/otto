@@ -252,6 +252,8 @@ func decodePiMessage(raw []byte, path string) (*piMessage, error) {
 		if err == nil {
 			_, err = requiredInt64(object, "tokensBefore", path+".tokensBefore")
 		}
+	default:
+		err = invalidField(path+".role", "a supported message role")
 	}
 	if err != nil {
 		return nil, err
@@ -339,10 +341,10 @@ func validateBashExecutionMessage(object map[string]json.RawMessage, path string
 			return err
 		}
 	}
-	if raw, ok := object["exitCode"]; ok && !isJSONNull(raw) {
+	if raw, ok := object["exitCode"]; ok {
 		var exitCode int
-		if json.Unmarshal(raw, &exitCode) != nil {
-			return invalidField(path+".exitCode", "an integer or null")
+		if isJSONNull(raw) || json.Unmarshal(raw, &exitCode) != nil {
+			return invalidField(path+".exitCode", "an integer")
 		}
 	}
 	if _, err := optionalString(object, "fullOutputPath", path+".fullOutputPath", false); err != nil {
@@ -658,6 +660,8 @@ func decodeContent(raw []byte, path string, allowString bool) (*string, []piCont
 			if _, err := decodeObject(arguments, blockPath+".arguments"); err != nil {
 				return nil, nil, err
 			}
+		default:
+			return nil, nil, invalidField(blockPath+".type", "a supported content block type")
 		}
 		blocks[i] = block
 	}

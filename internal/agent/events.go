@@ -25,6 +25,7 @@ type Event struct {
 	Text       string
 	ToolName   string
 	ToolCallID string
+	ToolArgs   string
 	ToolResult tool.Result
 	Usage      model.Usage
 	Err        error

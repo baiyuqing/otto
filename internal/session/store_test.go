@@ -234,6 +234,28 @@ func TestReadHeaderLeavesIncompleteTailForOpenRecovery(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsTimestampOutsideRFC3339NanoRange(t *testing.T) {
+	root := t.TempDir()
+	header := testHeader(t)
+	header.CreatedAt = time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	store, err := Create(root, header)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("Create() succeeded with an out-of-range timestamp")
+	}
+	if !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("Create() error = %v, want ErrInvalidSession", err)
+	}
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Create() wrote session state before rejecting timestamp: %#v", entries)
+	}
+}
+
 func TestCreateUsesExpectedPermissionsAndPath(t *testing.T) {
 	root := t.TempDir()
 	workspaceRoot := t.TempDir()
@@ -281,6 +303,48 @@ func TestCreateUsesExpectedPermissionsAndPath(t *testing.T) {
 	}
 }
 
+func TestAppendRejectsTimestampOutsideRFC3339NanoRange(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	defer store.Close()
+	before := readFile(t, path)
+
+	message := model.Message{
+		Role:      model.RoleUser,
+		Blocks:    []model.Block{{Type: model.BlockText, Text: "out of range"}},
+		CreatedAt: time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC),
+	}
+	err = store.Append(context.Background(), message)
+	if !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("Append() error = %v, want ErrInvalidSession", err)
+	}
+	if after := readFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("Append() wrote an out-of-range timestamp")
+	}
+	if got := store.Messages(); len(got) != 0 {
+		t.Fatalf("Messages() = %#v, want no rejected message", got)
+	}
+
+	valid := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "valid"}}, CreatedAt: time.Unix(2, 0).UTC()}
+	if err := store.Append(context.Background(), valid); err != nil {
+		t.Fatalf("Append() after timestamp rejection = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 || len(reopened.Messages()) != 1 || reopened.Messages()[0].Text() != "valid" {
+		t.Fatalf("reopened state: warnings=%#v messages=%#v", warnings, reopened.Messages())
+	}
+}
+
 func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -315,12 +379,18 @@ func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
 			writes, syncs := writer.writes, writer.syncs
 
 			secondErr := store.Append(context.Background(), message)
+			if secondErr != firstErr {
+				t.Fatalf("second Append() error = %p, want original fatal error %p", secondErr, firstErr)
+			}
 			if !errors.Is(secondErr, ErrFatalPersistence) || !errors.Is(secondErr, injected) {
 				t.Fatalf("second Append() error = %v, want poisoned fatal persistence error", secondErr)
 			}
 			canceledCtx, cancel := context.WithCancel(context.Background())
 			cancel()
 			canceledErr := store.Append(canceledCtx, message)
+			if canceledErr != firstErr {
+				t.Fatalf("canceled Append() error = %p, want original fatal error %p", canceledErr, firstErr)
+			}
 			if !errors.Is(canceledErr, ErrFatalPersistence) || !errors.Is(canceledErr, injected) {
 				t.Fatalf("canceled Append() after poison = %v, want fatal persistence error", canceledErr)
 			}
@@ -343,6 +413,80 @@ func TestWritePiRecordUsesLFAndSync(t *testing.T) {
 	}
 	if writer.syncs != 1 || written != int64(len(writer.data)) || !bytes.HasSuffix(writer.data, []byte{'\n'}) || bytes.Contains(writer.data, []byte{'\r'}) {
 		t.Fatalf("write result: syncs=%d written=%d data=%q", writer.syncs, written, writer.data)
+	}
+}
+
+func TestOpenRepairsMissingFinalLFBeforeAppend(t *testing.T) {
+	header := testHeader(t)
+	store, err := Create(t.TempDir(), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstMessage := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "first"}}, CreatedAt: time.Unix(2, 0).UTC()}
+	if err := store.Append(context.Background(), firstMessage); err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	complete := readFile(t, path)
+	if !bytes.HasSuffix(complete, []byte{'\n'}) {
+		t.Fatalf("created session is not LF terminated: %q", complete)
+	}
+	withoutFinalLF := append([]byte(nil), complete[:len(complete)-1]...)
+	if err := os.WriteFile(path, withoutFinalLF, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	gotHeader, err := ReadHeader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHeader != header {
+		t.Fatalf("ReadHeader() = %#v, want %#v", gotHeader, header)
+	}
+	if afterRead := readFile(t, path); !bytes.Equal(afterRead, withoutFinalLF) {
+		t.Fatal("ReadHeader repaired the missing final LF")
+	}
+
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterOpen := readFile(t, path)
+	fileBytesAfterOpen := reopened.fileBytes
+	secondMessage := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "second"}}, CreatedAt: time.Unix(3, 0).UTC()}
+	if err := reopened.Append(context.Background(), secondMessage); err != nil {
+		_ = reopened.Close()
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopenedAgain, secondWarnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopenedAgain.Close()
+	if len(secondWarnings) != 0 {
+		t.Fatalf("warnings after delimiter repair and append = %#v", secondWarnings)
+	}
+	if got := reopenedAgain.Messages(); len(got) != 2 || got[0].Text() != "first" || got[1].Text() != "second" {
+		t.Fatalf("reopened Messages() = %#v", got)
+	}
+
+	wantAfterOpen := append(append([]byte(nil), withoutFinalLF...), '\n')
+	if !bytes.Equal(afterOpen, wantAfterOpen) {
+		t.Fatalf("Open() repair = %q, want exactly one appended LF", afterOpen)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Message, "missing final session delimiter") {
+		t.Fatalf("Open() warnings = %#v, want missing-delimiter repair warning", warnings)
+	}
+	if fileBytesAfterOpen != int64(len(afterOpen)) {
+		t.Fatalf("fileBytes after repair = %d, want %d", fileBytesAfterOpen, len(afterOpen))
 	}
 }
 

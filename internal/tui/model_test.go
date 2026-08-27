@@ -397,18 +397,26 @@ func TestToolExpansionToggle(t *testing.T) {
 		},
 	}
 	model := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
-	collapsed := model.View().Content
-	if strings.Contains(collapsed, "tool output line") {
-		t.Fatalf("collapsed content = %q, want tool output hidden by default", collapsed)
+	expandedByDefault := model.View().Content
+	if !strings.Contains(expandedByDefault, "tool output line") {
+		t.Fatalf("default content = %q, want tool output visible by default", expandedByDefault)
 	}
 
 	updated, _ := model.Update(toggleToolsMsg{})
-	expanded := updated.(Model)
-	if !expanded.expandedTools {
-		t.Fatalf("expandedTools = false, want true")
+	collapsed := updated.(Model)
+	if collapsed.expandedTools {
+		t.Fatalf("expandedTools = true after toggle, want false")
 	}
-	if content := expanded.View().Content; !strings.Contains(content, "tool output line") {
-		t.Fatalf("expanded content = %q, want tool output shown", content)
+	if content := collapsed.View().Content; strings.Contains(content, "tool output line") {
+		t.Fatalf("collapsed content = %q, want tool output hidden", content)
+	}
+
+	toggledBack, _ := collapsed.Update(toggleToolsMsg{})
+	if !toggledBack.(Model).expandedTools {
+		t.Fatalf("expandedTools = false after second toggle, want true")
+	}
+	if content := toggledBack.View().Content; !strings.Contains(content, "tool output line") {
+		t.Fatalf("re-expanded content = %q, want tool output shown", content)
 	}
 }
 
@@ -474,11 +482,20 @@ func TestCtrlOTogglesToolExpansionKey(t *testing.T) {
 		},
 	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	if !m.expandedTools || !strings.Contains(m.View().Content, "tool output line") {
+		t.Fatalf("default expanded=%v content=%q, want output visible by default", m.expandedTools, m.View().Content)
+	}
 
 	updated, _ := m.Update(keyPress('o', tea.ModCtrl))
-	got := updated.(Model)
+	collapsed := updated.(Model)
+	if collapsed.expandedTools || strings.Contains(collapsed.View().Content, "tool output line") {
+		t.Fatalf("after ctrl+o expanded=%v content=%q, want output hidden", collapsed.expandedTools, collapsed.View().Content)
+	}
+
+	toggledBack, _ := collapsed.Update(keyPress('o', tea.ModCtrl))
+	got := toggledBack.(Model)
 	if !got.expandedTools || !strings.Contains(got.View().Content, "tool output line") {
-		t.Fatalf("expanded=%v content=%q", got.expandedTools, got.View().Content)
+		t.Fatalf("after second ctrl+o expanded=%v content=%q", got.expandedTools, got.View().Content)
 	}
 }
 
@@ -1339,7 +1356,7 @@ func TestWaitTurnClosedBeforeDoneReturnsError(t *testing.T) {
 
 func TestToolEventsUpdateTranscript(t *testing.T) {
 	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
-		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "read", ToolCallID: "call-1"})
+		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "read", ToolCallID: "call-1", ToolArgs: `{"path":"README.md"}`})
 		emit(agent.Event{Type: agent.EventToolCallFinished, ToolName: "read", ToolCallID: "call-1", ToolResult: tool.Result{Content: "README\nfull output", IsError: true}})
 		return nil
 	}}
@@ -1354,6 +1371,9 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 	if len(started.entries) != 2 || started.entries[1].Kind != EntryTool || started.entries[1].ToolName != "read" || started.entries[1].ToolDone {
 		t.Fatalf("started entries = %#v", started.entries)
 	}
+	if started.entries[1].ToolArgs != `{"path":"README.md"}` {
+		t.Fatalf("started tool args = %q, want live args carried from event", started.entries[1].ToolArgs)
+	}
 
 	finished := next()
 	afterFinish, next := started.Update(finished)
@@ -1366,6 +1386,12 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 	idle := afterDone.(Model)
 	if doneCmd != nil || idle.running || idle.cancel != nil {
 		t.Fatalf("idle running=%v cancel=%v cmd=%v", idle.running, idle.cancel != nil, doneCmd)
+	}
+
+	collapsed, _ := idle.Update(toggleToolsMsg{})
+	content := collapsed.View().Content
+	if !strings.Contains(content, "read") || !strings.Contains(content, "README.md") {
+		t.Fatalf("collapsed tool summary = %q, want args visible", content)
 	}
 }
 

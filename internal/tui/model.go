@@ -137,6 +137,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		keymap:          DefaultKeyMap(),
 		usage:           usage,
+		expandedTools:   true,
 		autoFollow:      true,
 		darkBackground:  true,
 		renderer:        newGlamourRenderer(true),
@@ -763,6 +764,7 @@ func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model,
 			Kind:       EntryTool,
 			ToolCallID: event.ToolCallID,
 			ToolName:   event.ToolName,
+			ToolArgs:   event.ToolArgs,
 		})
 		m.refreshViewportContent(!m.autoFollow)
 		return m, waitTurn(stream)
@@ -809,6 +811,9 @@ func (m *Model) finishToolEntry(event agent.Event) {
 		if m.entries[index].ToolName == "" {
 			m.entries[index].ToolName = event.ToolName
 		}
+		if m.entries[index].ToolArgs == "" {
+			m.entries[index].ToolArgs = event.ToolArgs
+		}
 		return
 	}
 	m.entries = append(m.entries, Entry{
@@ -816,6 +821,7 @@ func (m *Model) finishToolEntry(event agent.Event) {
 		Kind:       EntryTool,
 		ToolCallID: event.ToolCallID,
 		ToolName:   event.ToolName,
+		ToolArgs:   event.ToolArgs,
 		ToolOutput: event.ToolResult.Content,
 		ToolError:  event.ToolResult.IsError,
 		ToolDone:   true,

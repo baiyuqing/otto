@@ -57,7 +57,7 @@ default_profile = "deepseek"
 mode = "auto"
 
 [agent]
-max_turns = 20
+max_turns = 50
 shell_timeout = "120s"
 max_output_bytes = 51200
 
@@ -221,7 +221,7 @@ It starts in the selected workspace, but commands run as your current macOS user
 
 Default limits:
 
-- 20 model turns per user prompt
+- 50 model turns per user prompt
 - 120 second shell timeout
 - 50 KiB tool output cap
 

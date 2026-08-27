@@ -16,6 +16,7 @@ type Memory struct {
 }
 
 func NewMemory(header Header) *Memory {
+	header.Version = CurrentVersion
 	return &Memory{header: header}
 }
 

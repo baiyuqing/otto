@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -16,17 +18,103 @@ import (
 	"github.com/baiyuqing/otto/internal/model"
 )
 
-func TestStoreRoundTrip(t *testing.T) {
-	root := t.TempDir()
-	header := Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Profile: "local", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}
-	store, err := Create(root, header)
+func TestCreateWritesPiV3HeaderAndOttoRuntimeEntry(t *testing.T) {
+	header := testHeader(t)
+	store, err := Create(t.TempDir(), header)
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}
-	if err := store.Append(context.Background(), message); err != nil {
+	defer store.Close()
+
+	lines := readJSONLines(t, store.Path())
+	if len(lines) != 2 {
+		t.Fatalf("line count = %d, want 2", len(lines))
+	}
+	assertJSONEqual(t, lines[0], map[string]any{
+		"type":      "session",
+		"version":   float64(3),
+		"id":        header.ID,
+		"timestamp": header.CreatedAt.Format(time.RFC3339Nano),
+		"cwd":       header.Workspace,
+	})
+
+	var runtimeEntry struct {
+		Type       string          `json:"type"`
+		ID         string          `json:"id"`
+		ParentID   *string         `json:"parentId"`
+		Timestamp  string          `json:"timestamp"`
+		CustomType string          `json:"customType"`
+		Data       RuntimeMetadata `json:"data"`
+	}
+	if err := json.Unmarshal(lines[1], &runtimeEntry); err != nil {
 		t.Fatal(err)
 	}
+	if runtimeEntry.Type != "custom" || !validTestEntryID(runtimeEntry.ID) || runtimeEntry.ParentID != nil ||
+		runtimeEntry.Timestamp != header.CreatedAt.Format(time.RFC3339Nano) || runtimeEntry.CustomType != "otto.runtime" {
+		t.Fatalf("runtime entry = %#v", runtimeEntry)
+	}
+	if want := (RuntimeMetadata{Profile: header.Profile, Provider: header.Provider, Model: header.Model}); runtimeEntry.Data != want {
+		t.Fatalf("runtime metadata = %#v, want %#v", runtimeEntry.Data, want)
+	}
+
+	contents, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(contents, []byte{'\n'}) || bytes.Contains(contents, []byte{'\r'}) {
+		t.Fatalf("session is not LF-delimited: %q", contents)
+	}
+}
+
+func TestOpenRejectsOldOttoV1WithoutMutation(t *testing.T) {
+	path := writeFixture(t, `{"type":"header","header":{"version":1}}`+"\n")
+	before := readFile(t, path)
+
+	if _, _, err := Open(path); !errors.Is(err, ErrUnsupportedSessionFormat) {
+		t.Fatalf("Open() error = %v, want ErrUnsupportedSessionFormat", err)
+	}
+	if after := readFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("old file mutated by Open")
+	}
+	if _, err := ReadHeader(path); !errors.Is(err, ErrUnsupportedSessionFormat) {
+		t.Fatalf("ReadHeader() error = %v, want ErrUnsupportedSessionFormat", err)
+	}
+	if after := readFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("old file mutated by ReadHeader")
+	}
+}
+
+func TestStoreRoundTripsPiMessagesAndParentChain(t *testing.T) {
+	header := testHeader(t)
+	store, err := Create(t.TempDir(), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []model.Message{
+		{ID: "domain-user", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 123456789).UTC()},
+		{ID: "domain-assistant", Role: model.RoleAssistant, Blocks: []model.Block{
+			{Type: model.BlockText, Text: "reading"},
+			{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)},
+		}, CreatedAt: time.Unix(3, 0).UTC(), FinishReason: model.FinishToolCalls, Usage: &model.Usage{InputTokens: 7, OutputTokens: 2}},
+		{ID: "domain-tool", Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, Text: "contents", ToolCallID: "call-1", ToolName: "read"}}, CreatedAt: time.Unix(4, 0).UTC()},
+		{ID: "domain-final", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}, CreatedAt: time.Unix(5, 0).UTC(), FinishReason: model.FinishStop},
+	}
+	for _, message := range messages {
+		if err := store.Append(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	persistedMessages := store.Messages()
+	if len(persistedMessages) != len(messages) {
+		t.Fatalf("Messages() = %#v", persistedMessages)
+	}
+	for i := range persistedMessages {
+		if !validTestEntryID(persistedMessages[i].ID) {
+			t.Fatalf("message %d ID = %q, want generated entry ID", i, persistedMessages[i].ID)
+		}
+		messages[i].ID = persistedMessages[i].ID
+	}
+
 	path := store.Path()
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -36,60 +124,113 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if len(warnings) != 0 || !reflect.DeepEqual(reopened.Messages(), []model.Message{message}) {
-		t.Fatalf("unexpected reopen result: warnings=%v messages=%#v", warnings, reopened.Messages())
+	if len(warnings) != 0 || !reflect.DeepEqual(reopened.Messages(), messages) {
+		t.Fatalf("unexpected reopen result: warnings=%v messages=%#v want=%#v", warnings, reopened.Messages(), messages)
+	}
+	if reopened.Header() != header {
+		t.Fatalf("Header() = %#v, want %#v", reopened.Header(), header)
+	}
+
+	decoded := decodeFixture(t, path)
+	if len(decoded.Entries) != 5 {
+		t.Fatalf("entry count = %d, want 5", len(decoded.Entries))
+	}
+	for i, entry := range decoded.Entries {
+		if !validTestEntryID(entry.ID) {
+			t.Fatalf("entry %d ID = %q", i, entry.ID)
+		}
+		if i == 0 {
+			if entry.ParentID != nil {
+				t.Fatalf("first parent = %v, want nil", entry.ParentID)
+			}
+		} else if entry.ParentID == nil || *entry.ParentID != decoded.Entries[i-1].ID {
+			t.Fatalf("entry %d parent = %v, want %q", i, entry.ParentID, decoded.Entries[i-1].ID)
+		}
+	}
+	if got := decoded.Entries[2].Message; got == nil || got.Role != "assistant" || got.StopReason != "toolUse" || got.Provider != header.Provider || got.Model != header.Model || got.Usage == nil || got.Usage.Input != 7 || got.Usage.Output != 2 {
+		t.Fatalf("assistant Pi message = %#v", got)
+	}
+	if got := decoded.Entries[3].Message; got == nil || got.Role != "toolResult" || got.ToolCallID != "call-1" || got.IsError == nil || *got.IsError {
+		t.Fatalf("tool-result Pi message = %#v", got)
 	}
 }
 
-func TestOpenRoundTripsZeroBlockAssistantMessage(t *testing.T) {
-	root := t.TempDir()
-	header := Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}
-	store, err := Create(root, header)
-	if err != nil {
-		t.Fatal(err)
-	}
-	message := model.Message{ID: "assistant-1", Role: model.RoleAssistant, Blocks: []model.Block{}, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishUnknown}
-	if err := store.Append(context.Background(), message); err != nil {
-		t.Fatal(err)
-	}
-	path := store.Path()
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	reopened, warnings, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	if len(warnings) != 0 || !reflect.DeepEqual(reopened.Messages(), []model.Message{message}) {
-		t.Fatalf("unexpected reopen result: warnings=%v messages=%#v", warnings, reopened.Messages())
-	}
-}
-
-func TestOpenRepairsDanglingToolCall(t *testing.T) {
-	path := createSessionWithDanglingCall(t)
+func TestOpenReadsSupportedExternalPiMessages(t *testing.T) {
+	path := filepath.Join("testdata", "pi-v3", "linear.jsonl")
 	store, warnings, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
 	messages := store.Messages()
-	last := messages[len(messages)-1]
-	if len(warnings) != 1 || last.Role != model.RoleTool || !last.Blocks[0].IsError || last.Blocks[0].ToolCallID != "call-1" {
-		t.Fatalf("dangling call was not repaired: warnings=%v last=%#v", warnings, last)
+	if got, want := len(messages), 4; got != want {
+		t.Fatalf("message count = %d, want %d", got, want)
+	}
+	if messages[0].Role != model.RoleUser || messages[0].Text() != "run the check" ||
+		messages[1].Role != model.RoleAssistant || messages[1].FinishReason != model.FinishToolCalls ||
+		messages[2].Role != model.RoleTool || messages[2].Blocks[0].ToolCallID != "call-1" ||
+		messages[3].FinishReason != model.FinishStop {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestReadHeaderDerivesOttoRuntimeMetadata(t *testing.T) {
+	header := testHeader(t)
+	store, err := Create(t.TempDir(), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 
-	reopened, reopenedWarnings, err := Open(path)
+	got, err := ReadHeader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != header {
+		t.Fatalf("ReadHeader() = %#v, want %#v", got, header)
+	}
+}
+
+func TestReadHeaderLeavesIncompleteTailForOpenRecovery(t *testing.T) {
+	header := testHeader(t)
+	store, err := Create(t.TempDir(), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	appendFixture(t, path, `{"type":"message","id":"12345678","parentId":`)
+	before := readFile(t, path)
+
+	got, err := ReadHeader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != header {
+		t.Fatalf("ReadHeader() = %#v, want %#v", got, header)
+	}
+	if after := readFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("ReadHeader mutated incomplete tail")
+	}
+
+	reopened, warnings, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if len(reopenedWarnings) != 0 {
-		t.Fatalf("repair was not durable: warnings=%v", reopenedWarnings)
-	}
-	if got, want := len(reopened.Messages()), len(messages); got != want {
-		t.Fatalf("reopened message count = %d, want %d", got, want)
+	if len(warnings) != 1 {
+		t.Fatalf("Open() warnings = %#v, want recovery warning", warnings)
 	}
 }
 
@@ -105,7 +246,9 @@ func TestCreateUsesExpectedPermissionsAndPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := Create(root, Header{Version: 1, ID: "session-1", Workspace: symlinkWorkspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
+	header := testHeader(t)
+	header.Workspace = symlinkWorkspace
+	store, err := Create(root, header)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +260,7 @@ func TestCreateUsesExpectedPermissionsAndPath(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(resolvedWorkspace))
 	workspaceKey := hex.EncodeToString(sum[:])[:16]
-	wantPath := filepath.Join(root, workspaceKey, "session-1.jsonl")
+	wantPath := filepath.Join(root, workspaceKey, header.ID+".jsonl")
 	if got := store.Path(); got != wantPath {
 		t.Fatalf("Path() = %q, want %q", got, wantPath)
 	}
@@ -129,7 +272,6 @@ func TestCreateUsesExpectedPermissionsAndPath(t *testing.T) {
 	if got := dirInfo.Mode().Perm(); got != 0o700 {
 		t.Fatalf("directory mode = %o, want %o", got, 0o700)
 	}
-
 	fileInfo, err := os.Stat(wantPath)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +291,7 @@ func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
 		{name: "sync failure", syncFail: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, err := Create(t.TempDir(), Header{Version: 1, ID: "session-1", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
+			store, err := Create(t.TempDir(), testHeader(t))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -165,7 +307,7 @@ func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
 			}
 			store.writer = writer
 
-			message := model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}
+			message := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}
 			firstErr := store.Append(context.Background(), message)
 			if !errors.Is(firstErr, ErrFatalPersistence) || !errors.Is(firstErr, injected) {
 				t.Fatalf("first Append() error = %v, want fatal persistence wrapping injected failure", firstErr)
@@ -183,7 +325,7 @@ func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
 				t.Fatalf("canceled Append() after poison = %v, want fatal persistence error", canceledErr)
 			}
 			if writer.writes != writes || writer.syncs != syncs {
-				t.Fatalf("poisoned store attempted another durable append: writes %d->%d syncs %d->%d", writes, writer.writes, syncs, writer.syncs)
+				t.Fatalf("poisoned store attempted another append: writes %d->%d syncs %d->%d", writes, writer.writes, syncs, writer.syncs)
 			}
 			if got := store.Messages(); len(got) != 0 {
 				t.Fatalf("Messages() = %#v, want no committed messages", got)
@@ -192,51 +334,52 @@ func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
 	}
 }
 
-func TestOpenTruncatesMalformedFinalLineWithWarning(t *testing.T) {
-	root := t.TempDir()
-	store, err := Create(root, Header{Version: 1, ID: "session-1", Workspace: root, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
+func TestWritePiRecordUsesLFAndSync(t *testing.T) {
+	writer := &recordingDurableWriter{}
+	header := piHeader{Type: "session", Version: PiSessionVersion, ID: "550e8400-e29b-41d4-a716-446655440000", Timestamp: time.Unix(1, 0).UTC().Format(time.RFC3339Nano), CWD: "/workspace"}
+	written, err := writePiRecord(writer, header)
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}
+	if writer.syncs != 1 || written != int64(len(writer.data)) || !bytes.HasSuffix(writer.data, []byte{'\n'}) || bytes.Contains(writer.data, []byte{'\r'}) {
+		t.Fatalf("write result: syncs=%d written=%d data=%q", writer.syncs, written, writer.data)
+	}
+}
+
+func TestOpenTruncatesIncompleteFinalLineWithWarning(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}
 	if err := store.Append(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
+	wantMessages := store.Messages()
 	path := store.Path()
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.WriteString(`{"type":"message","message":`); err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
+	appendFixture(t, path, `{"type":"message","id":"12345678","parentId":`)
 
 	reopened, warnings, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened.Close()
 	if len(warnings) != 1 {
-		t.Fatalf("warnings = %v, want 1 warning", warnings)
+		t.Fatalf("warnings = %v, want 1", warnings)
 	}
-	if got := reopened.Messages(); !reflect.DeepEqual(got, []model.Message{message}) {
-		t.Fatalf("Messages() = %#v, want %#v", got, []model.Message{message})
+	if got := reopened.Messages(); !reflect.DeepEqual(got, wantMessages) {
+		t.Fatalf("Messages() = %#v, want %#v", got, wantMessages)
 	}
-
-	content, err := os.ReadFile(path)
-	if err != nil {
+	if err := reopened.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(content), "\n") != 2 || !strings.HasSuffix(string(content), "\n") {
-		t.Fatalf("session file was not truncated to two complete records: %q", string(content))
-	}
 
+	contents := readFile(t, path)
+	if bytes.Count(contents, []byte{'\n'}) != 3 || !bytes.HasSuffix(contents, []byte{'\n'}) {
+		t.Fatalf("session file was not truncated to complete records: %q", contents)
+	}
 	reopenedAgain, secondWarnings, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -247,189 +390,167 @@ func TestOpenTruncatesMalformedFinalLineWithWarning(t *testing.T) {
 	}
 }
 
-func TestOpenFailsMalformedNonFinalLine(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "session.jsonl")
-	content := strings.Join([]string{
-		marshalLine(t, Record{Type: "header", Header: &Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}}),
-		"not-json",
-		marshalLine(t, Record{Type: "message", Message: &model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()}}),
-	}, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, _, err := Open(path); err == nil {
-		t.Fatal("expected malformed non-final line to fail")
-	}
-}
-
-func TestOpenRejectsUnsupportedHeaderVersion(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "session.jsonl")
-	content := marshalLine(t, Record{Type: "header", Header: &Header{Version: 2, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}}) + "\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, _, err := Open(path); err == nil {
-		t.Fatal("expected unsupported header version to fail")
-	}
-}
-
-func TestOpenRejectsMalformedHeaderEvenWhenFinal(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "session.jsonl")
-	if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, _, err := Open(path); err == nil {
-		t.Fatal("expected malformed header to fail")
-	}
-}
-
-func TestOpenRejectsCompleteMalformedFinalJSONWithoutMutation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "session.jsonl")
-	header := marshalLine(t, Record{Type: recordTypeHeader, Header: &Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}})
-	content := header + "\nnot-json"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := Open(path); err == nil {
-		t.Fatal("expected complete malformed final JSON to fail")
-	}
-	after, err := os.ReadFile(path)
+func TestOpenRejectsMalformedNonFinalLineWithoutMutation(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(after) != content {
-		t.Fatalf("invalid complete final record was mutated: %q", after)
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	appendFixture(t, path, "not-json\n"+piUnknownEntryLine("12345678", nil)+"\n")
+	before := readFile(t, path)
+
+	if _, _, err := Open(path); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("Open() error = %v, want ErrInvalidSession", err)
+	}
+	if after := readFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("malformed non-final line was mutated")
 	}
 }
 
-func TestOpenRejectsInvalidPersistedFixturesBeforeMutation(t *testing.T) {
-	const timestamp = "1970-01-01T00:00:01Z"
-	validHeader := `{"type":"header","header":{"version":1,"id":"session-1","workspace":"/tmp/project","provider":"openai-compatible","model":"test-model","created_at":"` + timestamp + `"}}`
-	validUser := `{"type":"message","message":{"id":"user-1","role":"user","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `"}}`
-	cases := map[string]string{
-		"unknown record field":        strings.Replace(validHeader, `"type":"header"`, `"type":"header","extra":true`, 1),
-		"unknown header field":        strings.Replace(validHeader, `"version":1`, `"version":1,"extra":true`, 1),
-		"missing header version":      strings.Replace(validHeader, `"version":1,`, "", 1),
-		"missing header id":           strings.Replace(validHeader, `"id":"session-1",`, "", 1),
-		"missing header workspace":    strings.Replace(validHeader, `"workspace":"/tmp/project",`, "", 1),
-		"missing header provider":     strings.Replace(validHeader, `"provider":"openai-compatible",`, "", 1),
-		"missing header model":        strings.Replace(validHeader, `"model":"test-model",`, "", 1),
-		"zero header timestamp":       strings.Replace(validHeader, `"created_at":"`+timestamp+`"`, `"created_at":"0001-01-01T00:00:00Z"`, 1),
-		"header with message payload": strings.TrimSuffix(validHeader, "}") + `,"message":{"id":"unexpected"}}`,
-		"unknown message field":       validHeader + "\n" + strings.Replace(validUser, `"id":"user-1"`, `"id":"user-1","extra":true`, 1),
-		"missing message id":          validHeader + "\n" + strings.Replace(validUser, `"id":"user-1",`, "", 1),
-		"invalid message role":        validHeader + "\n" + strings.Replace(validUser, `"role":"user"`, `"role":"system"`, 1),
-		"zero message timestamp":      validHeader + "\n" + strings.Replace(validUser, `"created_at":"`+timestamp+`"`, `"created_at":"0001-01-01T00:00:00Z"`, 1),
-		"empty user message blocks":   validHeader + "\n" + strings.Replace(validUser, `[{"type":"text","text":"hello"}]`, `[]`, 1),
-		"empty tool message blocks":   validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[],"created_at":"` + timestamp + `"}}`,
-		"unknown block field":         validHeader + "\n" + strings.Replace(validUser, `"text":"hello"`, `"text":"hello","extra":true`, 1),
-		"user tool-call block":        validHeader + "\n" + strings.Replace(validUser, `{"type":"text","text":"hello"}`, `{"type":"tool_call","tool_call_id":"call-1","tool_name":"read","arguments":{}}`, 1),
-		"assistant tool-result block": validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_result","tool_call_id":"call-1","tool_name":"read"}],"created_at":"` + timestamp + `","finish_reason":"stop"}}`,
-		"tool text block":             validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"text","text":"bad"}],"created_at":"` + timestamp + `"}}`,
-		"invalid finish reason":       validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `","finish_reason":"bad"}}`,
-		"missing assistant finish":    validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `"}}`,
-		"negative usage":              validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `","finish_reason":"stop","usage":{"input_tokens":-1,"output_tokens":0}}}`,
-		"unknown usage field":         validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"text","text":"hello"}],"created_at":"` + timestamp + `","finish_reason":"stop","usage":{"input_tokens":1,"output_tokens":0,"extra":true}}}`,
-		"missing tool-call id":        validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_name":"read","arguments":{}}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
-		"missing tool-call name":      validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"call-1","arguments":{}}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
-		"null tool-call arguments":    validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"call-1","tool_name":"read","arguments":null}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
-		"non-object tool arguments":   validHeader + "\n" + `{"type":"message","message":{"id":"assistant-1","role":"assistant","blocks":[{"type":"tool_call","tool_call_id":"call-1","tool_name":"read","arguments":"not-an-object"}],"created_at":"` + timestamp + `","finish_reason":"tool_calls"}}`,
-		"missing tool-result id":      validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"tool_result","tool_name":"read"}],"created_at":"` + timestamp + `"}}`,
-		"missing tool-result name":    validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"tool_result","tool_call_id":"call-1"}],"created_at":"` + timestamp + `"}}`,
-		"orphan tool result":          validHeader + "\n" + `{"type":"message","message":{"id":"tool-1","role":"tool","blocks":[{"type":"tool_result","tool_call_id":"call-1","tool_name":"read"}],"created_at":"` + timestamp + `"}}`,
-		"message with header payload": validHeader + "\n" + strings.TrimSuffix(validUser, "}") + `,"header":{"version":1}}`,
-		"header after first line":     validHeader + "\n" + validHeader,
+func TestOpenRejectsCompleteInvalidFinalJSONWithoutMutation(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
 	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	appendFixture(t, path, "not-json")
+	before := readFile(t, path)
 
-	for name, content := range cases {
+	if _, _, err := Open(path); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("Open() error = %v, want ErrInvalidSession", err)
+	}
+	if after := readFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("complete invalid final record was mutated")
+	}
+}
+
+func TestOpenValidatesPiEntryBaseBeforeMutation(t *testing.T) {
+	validHeader := `{"type":"session","version":3,"id":"550e8400-e29b-41d4-a716-446655440000","timestamp":"1970-01-01T00:00:01Z","cwd":"/workspace"}`
+	cases := map[string][]string{
+		"invalid entry id": {
+			`{"type":"future_entry","id":"NOT-HEX!","parentId":null,"timestamp":"1970-01-01T00:00:02Z"}`,
+		},
+		"duplicate entry id": {
+			`{"type":"future_entry","id":"11111111","parentId":null,"timestamp":"1970-01-01T00:00:02Z"}`,
+			`{"type":"future_entry","id":"11111111","parentId":"11111111","timestamp":"1970-01-01T00:00:03Z"}`,
+		},
+		"invalid entry timestamp": {
+			`{"type":"future_entry","id":"11111111","parentId":null,"timestamp":"not-a-time"}`,
+		},
+		"forward parent": {
+			`{"type":"future_entry","id":"11111111","parentId":"22222222","timestamp":"1970-01-01T00:00:02Z"}`,
+			`{"type":"future_entry","id":"22222222","parentId":null,"timestamp":"1970-01-01T00:00:03Z"}`,
+		},
+	}
+	for name, entries := range cases {
 		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "session.jsonl")
-			original := content + "\n"
-			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
-				t.Fatal(err)
+			content := validHeader + "\n" + strings.Join(entries, "\n") + "\n"
+			path := writeFixture(t, content)
+			before := readFile(t, path)
+			if _, _, err := Open(path); !errors.Is(err, ErrInvalidSession) {
+				t.Fatalf("Open() error = %v, want ErrInvalidSession", err)
 			}
-			if _, _, err := Open(path); err == nil {
-				t.Fatal("expected invalid persisted fixture to fail")
-			}
-			after, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(after) != original {
-				t.Fatalf("invalid fixture was mutated: before=%q after=%q", original, after)
+			if after := readFile(t, path); !bytes.Equal(after, before) {
+				t.Fatal("invalid session was mutated")
 			}
 		})
 	}
 }
 
-func TestOpenRejectsSemanticallyInvalidFinalRecord(t *testing.T) {
-	header := marshalLine(t, Record{Type: recordTypeHeader, Header: &Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}})
-	cases := map[string]string{
-		"missing message payload": `{"type":"message"}`,
-		"unsupported record type": `{"type":"warning"}`,
+func TestOpenPreservesUnknownPiEntriesAndAppendsBeneathLeaf(t *testing.T) {
+	header := testHeader(t)
+	store, err := Create(t.TempDir(), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	decoded := decodeFixture(t, path)
+	parent := decoded.Entries[0].ID
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unknown := piUnknownEntryLine("12345678", &parent)
+	appendFixture(t, path, unknown+"\n")
+
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if err := reopened.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "after unknown"}}, CreatedAt: time.Unix(3, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
 	}
 
-	for name, finalLine := range cases {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "session.jsonl")
-			content := header + "\n" + finalLine + "\n"
-			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			if _, _, err := Open(path); err == nil {
-				t.Fatal("expected semantically invalid final record to fail")
-			}
-		})
+	after := readFile(t, path)
+	if !bytes.Contains(after, []byte(unknown)) {
+		t.Fatal("unknown entry was not preserved")
+	}
+	decoded = decodeFixture(t, path)
+	last := decoded.Entries[len(decoded.Entries)-1]
+	if last.ParentID == nil || *last.ParentID != "12345678" {
+		t.Fatalf("appended parent = %v, want unknown leaf", last.ParentID)
 	}
 }
 
-func TestPersistenceWireSchemaIsExplicitAllowlist(t *testing.T) {
-	recordType := reflect.TypeOf(persistedRecord{})
-	if field, ok := recordType.FieldByName("Header"); !ok {
-		t.Fatal("persistedRecord.Header missing")
-	} else if field.Type == reflect.TypeOf((*Header)(nil)) {
-		t.Fatal("persistedRecord.Header must not embed session.Header directly")
+func TestOpenRepairsDanglingToolCallDurably(t *testing.T) {
+	path := createSessionWithDanglingCall(t)
+	store, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if field, ok := recordType.FieldByName("Message"); !ok {
-		t.Fatal("persistedRecord.Message missing")
-	} else if field.Type == reflect.TypeOf((*model.Message)(nil)) {
-		t.Fatal("persistedRecord.Message must not embed model.Message directly")
+	messages := store.Messages()
+	last := messages[len(messages)-1]
+	if len(warnings) != 1 || last.Role != model.RoleTool || len(last.Blocks) != 1 || !last.Blocks[0].IsError || last.Blocks[0].ToolCallID != "call-1" {
+		t.Fatalf("dangling call was not repaired: warnings=%v last=%#v", warnings, last)
 	}
-	assertJSONTags(t, recordType, "type", "header,omitempty", "message,omitempty")
-	assertJSONTags(t, reflect.TypeOf(persistedHeader{}), "version", "id", "workspace", "provider", "profile,omitempty", "model", "created_at")
-	assertJSONTags(t, reflect.TypeOf(persistedMessage{}), "id", "role", "blocks", "created_at", "finish_reason,omitempty", "usage,omitempty")
-	assertJSONTags(t, reflect.TypeOf(persistedBlock{}), "type", "text,omitempty", "tool_call_id,omitempty", "tool_name,omitempty", "arguments,omitempty", "is_error,omitempty")
-	assertJSONTags(t, reflect.TypeOf(persistedUsage{}), "input_tokens", "output_tokens")
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	messageType := reflect.TypeOf(persistedMessage{})
-	if field, ok := messageType.FieldByName("Blocks"); !ok {
-		t.Fatal("persistedMessage.Blocks missing")
-	} else if field.Type == reflect.TypeOf([]model.Block(nil)) {
-		t.Fatal("persistedMessage.Blocks must not embed model.Block directly")
+	reopened, reopenedWarnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if field, ok := messageType.FieldByName("Usage"); !ok {
-		t.Fatal("persistedMessage.Usage missing")
-	} else if field.Type == reflect.TypeOf((*model.Usage)(nil)) {
-		t.Fatal("persistedMessage.Usage must not embed model.Usage directly")
+	defer reopened.Close()
+	if len(reopenedWarnings) != 0 {
+		t.Fatalf("repair was not durable: warnings=%v", reopenedWarnings)
+	}
+	if got, want := len(reopened.Messages()), len(messages); got != want {
+		t.Fatalf("reopened message count = %d, want %d", got, want)
+	}
+	decoded := decodeFixture(t, path)
+	repair := decoded.Entries[len(decoded.Entries)-1].Message
+	if repair == nil || repair.Role != "toolResult" || repair.IsError == nil || !*repair.IsError {
+		t.Fatalf("persisted repair = %#v", repair)
 	}
 }
 
 func TestStoreAppendAfterCloseFails(t *testing.T) {
-	store, err := Create(t.TempDir(), Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
+	store, err := Create(t.TempDir(), testHeader(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close() = %v", err)
+	}
 
-	err = store.Append(context.Background(), model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()})
-	if err == nil {
-		t.Fatal("expected append after close to fail")
+	err = store.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()})
+	if !errors.Is(err, errSessionClosed) {
+		t.Fatalf("Append() error = %v, want errSessionClosed", err)
 	}
 	if got := store.Messages(); len(got) != 0 {
 		t.Fatalf("Messages() after failed append = %#v, want empty", got)
@@ -437,7 +558,7 @@ func TestStoreAppendAfterCloseFails(t *testing.T) {
 }
 
 func TestStoreAppendHonorsCanceledContext(t *testing.T) {
-	store, err := Create(t.TempDir(), Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()})
+	store, err := Create(t.TempDir(), testHeader(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,18 +566,31 @@ func TestStoreAppendHonorsCanceledContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err = store.Append(ctx, model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()})
+	err = store.Append(ctx, model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC()})
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Append() error = %v, want %v", err, context.Canceled)
+		t.Fatalf("Append() error = %v, want context.Canceled", err)
 	}
 	if got := store.Messages(); len(got) != 0 {
 		t.Fatalf("Messages() after canceled append = %#v, want empty", got)
 	}
 }
 
+func TestNewMemoryUsesCurrentVersion(t *testing.T) {
+	header := testHeader(t)
+	header.Version = 0
+	store := NewMemory(header)
+	defer store.Close()
+	if got := store.Header().Version; got != CurrentVersion {
+		t.Fatalf("Header().Version = %d, want %d", got, CurrentVersion)
+	}
+}
+
 func TestMessagesReturnsIndependentSlices(t *testing.T) {
-	header := Header{Version: 1, ID: "session-1", Workspace: "/tmp/project", Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Unix(1, 0).UTC()}
-	message := model.Message{ID: "msg-1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(2, 0).UTC(), Usage: &model.Usage{InputTokens: 1, OutputTokens: 2}}
+	header := testHeader(t)
+	message := model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+		{Type: model.BlockText, Text: "hello"},
+		{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)},
+	}, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishToolCalls, Usage: &model.Usage{InputTokens: 1, OutputTokens: 2}}
 
 	cases := map[string]func(t *testing.T) Session{
 		"memory": func(t *testing.T) Session {
@@ -487,18 +621,22 @@ func TestMessagesReturnsIndependentSlices(t *testing.T) {
 
 			first := store.Messages()
 			first[0].Blocks[0].Text = "mutated"
+			first[0].Blocks[1].Arguments[0] = '['
 			first[0].Usage.InputTokens = 99
-			_ = append(first, model.Message{ID: "msg-2"})
+			_ = append(first, model.Message{})
 
 			second := store.Messages()
 			if got, want := len(second), 1; got != want {
 				t.Fatalf("len(Messages()) = %d, want %d", got, want)
 			}
 			if got := second[0].Blocks[0].Text; got != "hello" {
-				t.Fatalf("Blocks[0].Text = %q, want %q", got, "hello")
+				t.Fatalf("Blocks[0].Text = %q, want hello", got)
+			}
+			if got := string(second[0].Blocks[1].Arguments); got != `{"path":"README.md"}` {
+				t.Fatalf("Arguments = %q", got)
 			}
 			if got := second[0].Usage.InputTokens; got != 1 {
-				t.Fatalf("Usage.InputTokens = %d, want %d", got, 1)
+				t.Fatalf("Usage.InputTokens = %d, want 1", got)
 			}
 		})
 	}
@@ -506,11 +644,11 @@ func TestMessagesReturnsIndependentSlices(t *testing.T) {
 
 func createSessionWithDanglingCall(t *testing.T) string {
 	t.Helper()
-	store, err := Create(t.TempDir(), Header{Version: 1, ID: "dangling", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: time.Unix(1, 0).UTC()})
+	store, err := Create(t.TempDir(), testHeader(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assistant := model.Message{ID: "assistant-1", Role: model.RoleAssistant, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishToolCalls, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}}
+	assistant := model.Message{Role: model.RoleAssistant, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishToolCalls, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}}
 	if err := store.Append(context.Background(), assistant); err != nil {
 		t.Fatal(err)
 	}
@@ -521,13 +659,95 @@ func createSessionWithDanglingCall(t *testing.T) string {
 	return path
 }
 
-func marshalLine(t *testing.T, record Record) string {
+func testHeader(t *testing.T) Header {
 	t.Helper()
-	encoded, err := json.Marshal(record)
+	return Header{
+		Version: CurrentVersion, ID: "550e8400-e29b-41d4-a716-446655440000",
+		Workspace: t.TempDir(), Provider: "openai-compatible", Profile: "local",
+		Model: "test-model", CreatedAt: time.Unix(1, 0).UTC(),
+	}
+}
+
+func readJSONLines(t *testing.T, path string) [][]byte {
+	t.Helper()
+	contents := readFile(t, path)
+	if len(contents) == 0 || contents[len(contents)-1] != '\n' {
+		t.Fatalf("file is not LF terminated: %q", contents)
+	}
+	return bytes.Split(bytes.TrimSuffix(contents, []byte{'\n'}), []byte{'\n'})
+}
+
+func assertJSONEqual(t *testing.T, raw []byte, want any) {
+	t.Helper()
+	var got any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("JSON = %#v, want %#v; raw=%s", got, want, raw)
+	}
+}
+
+func writeFixture(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func appendFixture(t *testing.T, path, content string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(encoded)
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contents
+}
+
+func decodeFixture(t *testing.T, path string) piFile {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	decoded, warnings, err := decodePiFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	return decoded
+}
+
+func piUnknownEntryLine(id string, parent *string) string {
+	parentJSON := "null"
+	if parent != nil {
+		parentJSON = `"` + *parent + `"`
+	}
+	return `{"type":"future_entry","id":"` + id + `","parentId":` + parentJSON + `,"timestamp":"1970-01-01T00:00:02Z","futureField":{"preserve":true}}`
+}
+
+func validTestEntryID(id string) bool {
+	return regexp.MustCompile(`^[0-9a-f]{8}$`).MatchString(id)
 }
 
 type faultingDurableWriter struct {
@@ -554,13 +774,17 @@ func (w *faultingDurableWriter) Sync() error {
 	return w.file.Sync()
 }
 
-func assertJSONTags(t *testing.T, typ reflect.Type, want ...string) {
-	t.Helper()
-	got := make([]string, 0, typ.NumField())
-	for i := 0; i < typ.NumField(); i++ {
-		got = append(got, typ.Field(i).Tag.Get("json"))
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("%s json tags = %v, want %v", typ.Name(), got, want)
-	}
+type recordingDurableWriter struct {
+	data  []byte
+	syncs int
+}
+
+func (w *recordingDurableWriter) Write(data []byte) (int, error) {
+	w.data = append(w.data, data...)
+	return len(data), nil
+}
+
+func (w *recordingDurableWriter) Sync() error {
+	w.syncs++
+	return nil
 }

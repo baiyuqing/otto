@@ -588,7 +588,7 @@ func newSession(memory bool, root, workspace string, runtime config.Runtime) (se
 		return nil, fmt.Errorf("create session id: %w", err)
 	}
 	header := session.Header{
-		Version: 1, ID: id, Workspace: workspace, Provider: runtime.Provider,
+		Version: session.CurrentVersion, ID: id, Workspace: workspace, Provider: runtime.Provider,
 		Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 	}
 	if memory {

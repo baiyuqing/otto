@@ -1185,7 +1185,7 @@ func testGetenv(values map[string]string) func(string) string {
 
 func createCLISession(t *testing.T, root, workspace, id string) string {
 	t.Helper()
-	store, err := session.Create(root, session.Header{Version: 1, ID: id, Workspace: workspace, Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC()})
+	store, err := session.Create(root, session.Header{Version: session.CurrentVersion, ID: id, Workspace: workspace, Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}

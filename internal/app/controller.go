@@ -101,7 +101,7 @@ type replacementState struct {
 	currentWorkspace  string
 	replacement       session.Session
 	replacementClosed bool
-	closeAfterSwap    bool
+	closeRequested    bool
 }
 
 type Controller struct {
@@ -336,20 +336,12 @@ func (c *Controller) runReplacement(
 	c.mu.Lock()
 	switch {
 	case c.replace != state || c.closed:
-		shouldClose := c.releaseReplacementLocked(state, replacement.Session)
 		c.mu.Unlock()
-		if shouldClose {
-			_ = replacement.Session.Close()
-			c.finishReplacing(state)
-		}
+		c.abortReplacement(state, replacement.Session)
 		return ResumeResult{}, ErrClosed
 	case cancelErr != nil || channelClosed(cancelDone):
-		shouldClose := c.releaseReplacementLocked(state, replacement.Session)
 		c.mu.Unlock()
-		if shouldClose {
-			_ = replacement.Session.Close()
-			c.finishReplacing(state)
-		}
+		c.abortReplacement(state, replacement.Session)
 		if cancelErr == nil {
 			cancelErr = ctx.Err()
 			if cancelErr == nil {
@@ -364,7 +356,7 @@ func (c *Controller) runReplacement(
 
 	if err := state.current.Close(); err != nil {
 		c.mu.Lock()
-		deferredClose := state.closeAfterSwap
+		deferredClose := state.closeRequested
 		shouldClose := c.releaseReplacementLocked(state, replacement.Session)
 		closeDone, completeClose := c.finishClosedLocked(err, deferredClose)
 		c.mu.Unlock()
@@ -401,7 +393,7 @@ func (c *Controller) runReplacement(
 		c.runtimeInfo = &runtimeInfo
 	}
 	closed := c.closed
-	deferredClose := state.closeAfterSwap
+	deferredClose := state.closeRequested
 	closeDone := c.closeDone
 	if deferredClose {
 		state.replacementClosed = true
@@ -434,12 +426,40 @@ func (c *Controller) registerReplacement(state *replacementState, replacement se
 
 func (c *Controller) abortReplacement(state *replacementState, replacement session.Session) {
 	c.mu.Lock()
-	shouldClose := c.releaseReplacementLocked(state, replacement)
+	shouldClose := replacement != nil && !state.replacementClosed
+	if shouldClose {
+		state.replacementClosed = true
+		if c.replace == state {
+			state.phase = replacementPhaseCleaning
+		}
+	}
 	c.mu.Unlock()
+
 	if shouldClose {
 		_ = replacement.Close()
-		c.finishReplacing(state)
 	}
+
+	c.mu.Lock()
+	if c.replace != state {
+		c.mu.Unlock()
+		return
+	}
+	if !state.closeRequested {
+		c.finishReplacingLocked(state)
+		c.mu.Unlock()
+		return
+	}
+	state.phase = replacementPhaseClosingCurrent
+	current := state.current
+	closeDone := c.closeDone
+	c.mu.Unlock()
+
+	var closeErr error
+	if current != nil {
+		closeErr = current.Close()
+	}
+	c.finishReplacing(state)
+	c.completeClose(closeDone, closeErr)
 }
 
 func (c *Controller) releaseReplacementLocked(state *replacementState, replacement session.Session) bool {
@@ -517,48 +537,26 @@ func (c *Controller) Close() error {
 	c.closeDone = done
 	activeDone := c.activeDone
 
-	if caller != 0 && c.replace != nil && c.replace.owner == caller {
-		state := c.replace
-		c.reentrantCloseOwner = caller
-		if state.phase == replacementPhaseClosingCurrent {
-			state.closeAfterSwap = true
-			c.mu.Unlock()
-			return nil
-		}
-
-		current := c.current
-		replacement := state.replacement
-		cleaning := state.phase == replacementPhaseCleaning
-		if replacement != nil {
-			state.replacementClosed = true
-		}
-		c.finishReplacingLocked(state)
-		c.mu.Unlock()
-
-		var err error
-		if current != nil {
-			err = current.Close()
-		}
-		if replacement != nil && !cleaning {
-			if closeErr := replacement.Close(); err == nil {
-				err = closeErr
-			}
-		}
-		c.completeClose(done, err)
-		return err
-	}
-
-	var replaceDone chan struct{}
 	if c.replace != nil {
-		replaceDone = c.replace.done
+		state := c.replace
+		state.closeRequested = true
+		if caller != 0 && state.owner == caller {
+			c.reentrantCloseOwner = caller
+			err := c.closeErr
+			c.mu.Unlock()
+			return err
+		}
+		c.mu.Unlock()
+		<-done
+		c.mu.Lock()
+		err := c.closeErr
+		c.mu.Unlock()
+		return err
 	}
 	c.mu.Unlock()
 
 	if activeDone != nil {
 		<-activeDone
-	}
-	if replaceDone != nil {
-		<-replaceDone
 	}
 
 	c.mu.Lock()

@@ -25,10 +25,11 @@ type layoutState struct {
 	transcriptWidth  int
 	transcriptHeight int
 	editorHeight     int
+	suggestionHeight int
 	footerHeight     int
 }
 
-func calculateLayout(width, height int, editor textarea.Model) layoutState {
+func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight int) layoutState {
 	layout := layoutState{
 		transcriptWidth: max(0, width),
 		editorHeight:    clamp(editorHeight(editor), minEditorHeight, maxEditorHeight),
@@ -39,7 +40,9 @@ func calculateLayout(width, height int, editor textarea.Model) layoutState {
 		layout.transcriptHeight = max(0, height)
 		return layout
 	}
-	transcriptHeight := height - layout.editorHeight - layout.footerHeight
+	availableHeight := height - layout.editorHeight - layout.footerHeight
+	layout.suggestionHeight = min(max(0, requestedSuggestionHeight), max(0, availableHeight-1))
+	transcriptHeight := availableHeight - layout.suggestionHeight
 	if transcriptHeight <= 0 {
 		layout.tooSmall = true
 		layout.transcriptHeight = max(0, height)
@@ -103,6 +106,28 @@ func footerWorkspace(workspace string) string {
 	return base
 }
 
+func renderCommandSuggestions(width int, suggestions []slashCommand, selected, height int) string {
+	if width <= 0 || height <= 0 || len(suggestions) == 0 {
+		return ""
+	}
+	selected = clamp(selected, 0, len(suggestions)-1)
+	start := 0
+	if selected >= height {
+		start = selected - height + 1
+	}
+	end := min(len(suggestions), start+height)
+	lines := make([]string, 0, end-start)
+	for index := start; index < end; index++ {
+		marker := "  "
+		if index == selected {
+			marker = "> "
+		}
+		line := fmt.Sprintf("%s%-10s %s", marker, suggestions[index].Name, suggestions[index].Description)
+		lines = append(lines, lipgloss.NewStyle().Width(max(0, width)).MaxWidth(max(0, width)).MaxHeight(1).Render(line))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderOverlay(width, height int, content string) string {
 	width = max(0, width)
 	height = max(0, height)
@@ -132,9 +157,11 @@ func helpOverlayContent(width, height int) string {
 		"Home/End transcript top/bottom",
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
-		"/session show session details",
-		"/new new session",
-		"/exit quit",
+	}
+	commandNames := make([]string, 0, len(slashCommands))
+	for _, command := range slashCommands {
+		full = append(full, command.Name+" "+command.Description)
+		commandNames = append(commandNames, command.Name)
 	}
 	if height-2 >= len(full) {
 		return strings.Join(full, "\n")
@@ -145,7 +172,7 @@ func helpOverlayContent(width, height int) string {
 		"Ctrl+O tools | PgUp/PgDn scroll",
 		"Home/End top/bot | Esc cancel/close",
 		"Ctrl+C cancel/clear/quit",
-		"/session info | /new session | /exit",
+		strings.Join(commandNames, " "),
 	}
 	innerWidth := max(0, width-4)
 	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, max(0, height-2))

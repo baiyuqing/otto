@@ -170,7 +170,7 @@ func TestRunTUIProgramErrorReturnsOne(t *testing.T) {
 }
 
 func TestRunTUIFatalPersistenceReturnsOneAndPrintsDiagnostic(t *testing.T) {
-	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected disk failure"))
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected disk failure"), context.Canceled)
 	home := t.TempDir()
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
@@ -202,7 +202,7 @@ func TestRunTUIFatalPersistenceReturnsOneAndPrintsDiagnostic(t *testing.T) {
 	if !terminalRestored {
 		t.Fatal("TUI returned before its terminal-restoration point")
 	}
-	if got, want := stderr.String(), "otto: TUI: fatal session persistence failure\ninjected disk failure\n"; got != want {
+	if got, want := stderr.String(), "otto: TUI: fatal session persistence failure\ninjected disk failure\ncontext canceled\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 	if got := store.closeCalls.Load(); got != 1 {

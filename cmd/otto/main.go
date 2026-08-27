@@ -306,6 +306,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err := closeController(); err != nil {
 		return fail(stderr, "close session: %v", err)
 	}
+	if frontend == frontendTUI && errors.Is(runErr, session.ErrFatalPersistence) {
+		return fail(stderr, "TUI: %v", runErr)
+	}
 	if processCanceledBeforeFrontendExit || frontendCanceled {
 		return 130
 	}

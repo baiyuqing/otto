@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -269,7 +270,7 @@ func (m Model) footerStatus() string {
 func (m Model) overlayContent() string {
 	switch m.overlay {
 	case overlayHelp:
-		return helpOverlayContent()
+		return helpOverlayContent(m.width, m.height)
 	case overlaySession:
 		return sessionOverlayContent(infoFromBackend(m.backend))
 	default:
@@ -582,8 +583,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 func newTurnStream() *turnStream {
 	return &turnStream{
 		channel:           make(chan turnEnvelope, turnChannelCapacity),
-		regularEventSlots: make(chan struct{}, turnChannelCapacity-2),
-		terminalToolSlot:  make(chan struct{}, 1),
+		regularEventSlots: make(chan struct{}, turnChannelCapacity-1),
 	}
 }
 
@@ -602,35 +602,30 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 		return
 	}
 
+	var eventMu sync.Mutex
+	acceptingEvents := true
+	var droppedToolFinishes []agent.Event
 	err := backend.Prompt(ctx, text, func(event agent.Event) {
+		eventMu.Lock()
+		defer eventMu.Unlock()
+		if !acceptingEvents {
+			return
+		}
 		eventCopy := event
-		sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy})
+		if sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy}) || event.Type != agent.EventToolCallFinished {
+			return
+		}
+		droppedToolFinishes = append(droppedToolFinishes, eventCopy)
 	})
-	stream.channel <- turnEnvelope{err: err, done: true}
+	eventMu.Lock()
+	acceptingEvents = false
+	dropped := append([]agent.Event(nil), droppedToolFinishes...)
+	eventMu.Unlock()
+	stream.channel <- turnEnvelope{droppedToolFinishes: dropped, err: err, done: true}
 }
 
 func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
-	if sendRegularTurnEvent(ctx, stream, envelope) {
-		return true
-	}
-	if envelope.event == nil || envelope.event.Type != agent.EventToolCallFinished {
-		return false
-	}
-
-	// Agent.Run executes tools sequentially, so cancellation leaves at most one
-	// active tool whose terminal result needs priority over ordinary events.
-	select {
-	case stream.terminalToolSlot <- struct{}{}:
-	default:
-		return false
-	}
-	select {
-	case stream.channel <- envelope:
-		return true
-	default:
-		<-stream.terminalToolSlot
-		return false
-	}
+	return sendRegularTurnEvent(ctx, stream, envelope)
 }
 
 func sendRegularTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
@@ -672,6 +667,7 @@ func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		return m.applyTurnEvent(msg.stream, *msg.value.event)
 	}
 	if msg.value.done {
+		m.applyDroppedToolFinishes(msg.value.droppedToolFinishes)
 		return m.finishTurn(msg.value.err)
 	}
 	return m, waitTurn(msg.stream)
@@ -730,6 +726,18 @@ func (m *Model) ensureActiveAssistantEntry() int {
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("assistant"), Kind: EntryAssistant})
 	m.activeAssistant = len(m.entries) - 1
 	return m.activeAssistant
+}
+
+func (m *Model) applyDroppedToolFinishes(events []agent.Event) {
+	if len(events) == 0 {
+		return
+	}
+	m.finalizeStreamingRender()
+	m.activeAssistant = -1
+	for _, event := range events {
+		m.finishToolEntry(event)
+	}
+	m.refreshViewportContent(!m.autoFollow)
 }
 
 func (m *Model) finishToolEntry(event agent.Event) {
@@ -956,7 +964,7 @@ func renderMessageBlock(title, body string) string {
 
 func renderToolBlock(entry Entry, width int, expanded bool) string {
 	_ = width
-	name := escapePlainText(entry.ToolName)
+	name := escapeSingleLineText(entry.ToolName)
 	if name == "" {
 		name = "tool"
 	}

@@ -95,6 +95,44 @@ func TestRunReturnsFatalPersistenceErrorFromFinalModel(t *testing.T) {
 	}
 }
 
+func TestRunInspectsEveryFinalModelWhenProgramReturnsError(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
+	programErr := errors.New("program failed")
+	tests := []struct {
+		name      string
+		final     func(Model) tea.Model
+		wantFatal bool
+	}{
+		{name: "value", final: func(model Model) tea.Model { model.fatalErr = fatalErr; return model }, wantFatal: true},
+		{name: "pointer", final: func(model Model) tea.Model { model.fatalErr = fatalErr; return &model }, wantFatal: true},
+		{name: "nil pointer", final: func(Model) tea.Model { return (*Model)(nil) }},
+		{name: "nil interface", final: func(Model) tea.Model { return nil }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			oldNewProgram := newProgram
+			defer func() { newProgram = oldNewProgram }()
+			newProgram = func(model tea.Model, opts ...tea.ProgramOption) programRunner {
+				return programRunnerFunc(func() (tea.Model, error) {
+					return test.final(model.(Model)), programErr
+				})
+			}
+
+			err := Run(context.Background(), strings.NewReader(""), &bytes.Buffer{}, testBackend{})
+			if !errors.Is(err, programErr) {
+				t.Fatalf("Run() error = %v, want program error identity", err)
+			}
+			if got := errors.Is(err, session.ErrFatalPersistence); got != test.wantFatal {
+				t.Fatalf("Run() fatal persistence identity = %v, want %v: %v", got, test.wantFatal, err)
+			}
+			if !test.wantFatal && err != programErr {
+				t.Fatalf("Run() error = %#v, want sole program error %#v", err, programErr)
+			}
+		})
+	}
+}
+
 type programRunnerFunc func() (tea.Model, error)
 
 func (f programRunnerFunc) Run() (tea.Model, error) {

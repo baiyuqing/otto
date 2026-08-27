@@ -64,23 +64,23 @@ func smallTerminalView(width, height int) string {
 }
 
 func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) string {
-	profileModel := strings.Trim(strings.Trim(escapePlainText(info.Profile)+"/"+escapePlainText(info.Model), "/"), " ")
+	profileModel := strings.Trim(strings.Trim(escapeSingleLineText(info.Profile)+"/"+escapeSingleLineText(info.Model), "/"), " ")
 	if profileModel == "" {
 		profileModel = "unknown/unknown"
 	}
 
 	fields := []string{profileModel}
-	if workspace := escapePlainText(footerWorkspace(info.Workspace)); workspace != "" && width >= 72 {
+	if workspace := escapeSingleLineText(footerWorkspace(info.Workspace)); workspace != "" && width >= 72 {
 		fields = append([]string{workspace}, fields...)
 	}
 	if width >= 48 {
 		fields = append(fields, fmt.Sprintf("tokens %d/%d", max(0, usage.InputTokens), max(0, usage.OutputTokens)))
 	}
 	if info.SessionID != "" && width >= 60 {
-		fields = append(fields, escapePlainText(info.SessionID))
+		fields = append(fields, escapeSingleLineText(info.SessionID))
 	}
 	if status != "" {
-		fields = append([]string{escapePlainText(status)}, fields...)
+		fields = append([]string{escapeSingleLineText(status)}, fields...)
 	}
 
 	for len(fields) > 1 && lipgloss.Width(strings.Join(fields, " | ")) > max(0, width) {
@@ -121,9 +121,9 @@ func renderOverlay(width, height int, content string) string {
 	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box), width, height)
 }
 
-func helpOverlayContent() string {
-	return strings.Join([]string{
-		"Help",
+func helpOverlayContent(width, height int) string {
+	full := []string{
+		"Help (? or /help)",
 		"",
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
@@ -135,7 +135,20 @@ func helpOverlayContent() string {
 		"/session show session details",
 		"/new new session",
 		"/exit quit",
-	}, "\n")
+	}
+	if height-2 >= len(full) {
+		return strings.Join(full, "\n")
+	}
+	compact := []string{
+		"Help (? /help) | Enter submit",
+		"Shift+Enter/Alt+Enter newline",
+		"Ctrl+O tools | PgUp/PgDn scroll",
+		"Home/End top/bot | Esc cancel/close",
+		"Ctrl+C cancel/clear/quit",
+		"/session info | /new session | /exit",
+	}
+	innerWidth := max(0, width-4)
+	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, max(0, height-2))
 }
 
 func sessionOverlayContent(info app.Info) string {
@@ -144,7 +157,7 @@ func sessionOverlayContent(info app.Info) string {
 		if value == "" {
 			return
 		}
-		lines = append(lines, fmt.Sprintf("%s: %s", name, escapePlainText(value)))
+		lines = append(lines, fmt.Sprintf("%s: %s", name, escapeSingleLineText(value)))
 	}
 	appendField("ID", info.SessionID)
 	appendField("Path", info.SessionPath)

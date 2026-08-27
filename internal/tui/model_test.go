@@ -1645,7 +1645,7 @@ func TestCanceledFullTurnChannelDeliversRealCompletion(t *testing.T) {
 	}
 }
 
-func TestCanceledFullTurnChannelPreservesToolFinishBeforeDone(t *testing.T) {
+func TestCanceledFullTurnChannelPreservesAllToolFinishesBeforeDone(t *testing.T) {
 	backendFinished := make(chan struct{})
 	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
 		defer close(backendFinished)
@@ -1654,12 +1654,18 @@ func TestCanceledFullTurnChannelPreservesToolFinishBeforeDone(t *testing.T) {
 			emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1}})
 		}
 		<-ctx.Done()
-		emit(agent.Event{
-			Type:       agent.EventToolCallFinished,
-			ToolName:   "bash",
-			ToolCallID: "call-1",
-			ToolResult: tool.Result{Content: "durable canceled result", IsError: true},
-		})
+		finishes := []agent.Event{
+			{Type: agent.EventToolCallFinished, ToolName: "bash", ToolCallID: "call-1", ToolResult: tool.Result{Content: "first exact canceled result", IsError: true}},
+			{Type: agent.EventToolCallFinished, ToolName: "write", ToolCallID: "call-2", ToolResult: tool.Result{Content: "second exact canceled result", IsError: true}},
+			{Type: agent.EventToolCallFinished, ToolName: "edit", ToolCallID: "call-3", ToolResult: tool.Result{Content: "third exact canceled result", IsError: true}},
+			{Type: agent.EventToolCallFinished, ToolName: "malformed", ToolCallID: "call-malformed", ToolResult: tool.Result{Content: "malformed exact finish", IsError: true}},
+		}
+		for index, finish := range finishes {
+			if index > 0 && index < 3 {
+				emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: finish.ToolName, ToolCallID: finish.ToolCallID})
+			}
+			emit(finish)
+		}
 		return ctx.Err()
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
@@ -1669,17 +1675,28 @@ func TestCanceledFullTurnChannelPreservesToolFinishBeforeDone(t *testing.T) {
 	running := updated.(Model)
 	first := runCommandWithin(t, start, time.Second).(turnMsg)
 	deadline := time.Now().Add(time.Second)
-	for len(first.channel) < turnChannelCapacity-2 && time.Now().Before(deadline) {
+	for len(first.channel) < turnChannelCapacity-1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if len(first.channel) < turnChannelCapacity-2 {
-		t.Fatalf("turn channel only filled to %d", len(first.channel))
+	if len(first.channel) < turnChannelCapacity-1 {
+		running.cancel()
+		t.Fatalf("turn channel only filled to %d, want one slot reserved for done", len(first.channel))
 	}
 
 	updated, _ = running.Update(keyPress(tea.KeyEscape))
 	state := updated.(Model)
+	select {
+	case <-backendFinished:
+	case <-time.After(time.Second):
+		t.Fatal("context-canceled callbacks blocked while the UI was not consuming")
+	}
+
+	doneCount := 0
 	msg := tea.Msg(first)
 	for state.running {
+		if turn, ok := msg.(turnMsg); ok && turn.value.done {
+			doneCount++
+		}
 		updated, next := state.Update(msg)
 		state = updated.(Model)
 		if !state.running {
@@ -1690,21 +1707,32 @@ func TestCanceledFullTurnChannelPreservesToolFinishBeforeDone(t *testing.T) {
 		}
 		msg = runCommandWithin(t, next, time.Second)
 	}
+	if doneCount != 1 {
+		t.Fatalf("done envelopes applied = %d, want 1", doneCount)
+	}
 
-	var toolEntry *Entry
-	for i := range state.entries {
-		if state.entries[i].Kind == EntryTool && state.entries[i].ToolCallID == "call-1" {
-			toolEntry = &state.entries[i]
-			break
+	var toolEntries []Entry
+	for _, entry := range state.entries {
+		if entry.Kind == EntryTool {
+			toolEntries = append(toolEntries, entry)
 		}
 	}
-	if toolEntry == nil || !toolEntry.ToolDone || !toolEntry.ToolError || toolEntry.ToolOutput != "durable canceled result" {
-		t.Fatalf("tool entry = %#v, want preserved durable finish result", toolEntry)
+	want := []struct {
+		id, output string
+	}{
+		{id: "call-1", output: "first exact canceled result"},
+		{id: "call-2", output: "second exact canceled result"},
+		{id: "call-3", output: "third exact canceled result"},
+		{id: "call-malformed", output: "malformed exact finish"},
 	}
-	select {
-	case <-backendFinished:
-	case <-time.After(time.Second):
-		t.Fatal("backend worker leaked after cancellation")
+	if len(toolEntries) != len(want) {
+		t.Fatalf("tool entries = %#v, want %d exact finishes", toolEntries, len(want))
+	}
+	for index, expected := range want {
+		entry := toolEntries[index]
+		if entry.ToolCallID != expected.id || entry.ToolOutput != expected.output || !entry.ToolDone || !entry.ToolError {
+			t.Fatalf("tool entry %d = %#v, want id=%q output=%q done error", index, entry, expected.id, expected.output)
+		}
 	}
 	select {
 	case _, ok := <-first.channel:
@@ -1713,6 +1741,46 @@ func TestCanceledFullTurnChannelPreservesToolFinishBeforeDone(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("turn channel was not closed exactly once after done")
+	}
+}
+
+func TestLateMalformedFinishCallbackCannotSendOnClosedTurnStream(t *testing.T) {
+	releaseLateCallback := make(chan struct{})
+	callbackPanic := make(chan any, 1)
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		go func() {
+			<-releaseLateCallback
+			func() {
+				defer func() { callbackPanic <- recover() }()
+				emit(agent.Event{
+					Type:       agent.EventToolCallFinished,
+					ToolName:   "malformed",
+					ToolCallID: "late-call",
+					ToolResult: tool.Result{Content: "too late", IsError: true},
+				})
+			}()
+		}()
+		return nil
+	}}
+	stream := newTurnStream()
+	runTurnWorker(context.Background(), backend, "question", stream)
+
+	close(releaseLateCallback)
+	select {
+	case panicValue := <-callbackPanic:
+		if panicValue != nil {
+			t.Fatalf("late malformed callback panicked after stream close: %v", panicValue)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late malformed callback leaked")
+	}
+
+	envelope, ok := <-stream.channel
+	if !ok || !envelope.done {
+		t.Fatalf("completion envelope = %#v, open=%v, want done before close", envelope, ok)
+	}
+	if _, ok := <-stream.channel; ok {
+		t.Fatal("turn stream remained open after its one completion envelope")
 	}
 }
 

@@ -24,6 +24,7 @@ type scrollViewportMsg struct {
 
 type turnEnvelope struct {
 	event                *agent.Event
+	droppedToolFinishes  []agent.Event
 	err                  error
 	done                 bool
 	usesRegularEventSlot bool
@@ -32,7 +33,6 @@ type turnEnvelope struct {
 type turnStream struct {
 	channel           chan turnEnvelope
 	regularEventSlots chan struct{}
-	terminalToolSlot  chan struct{}
 }
 
 type turnMsg struct {

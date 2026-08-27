@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	tea "charm.land/bubbletea/v2"
@@ -24,10 +25,18 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, backend app.Bac
 		tea.WithOutput(output),
 		tea.WithoutSignalHandler(),
 	)
-	finalModel, err := program.Run()
-	if err != nil {
-		return err
+	finalModel, programErr := program.Run()
+	fatalErr := fatalErrorFromModel(finalModel)
+	if fatalErr != nil && programErr != nil {
+		return errors.Join(fatalErr, programErr)
 	}
+	if fatalErr != nil {
+		return fatalErr
+	}
+	return programErr
+}
+
+func fatalErrorFromModel(finalModel tea.Model) error {
 	switch final := finalModel.(type) {
 	case Model:
 		return final.fatalErr

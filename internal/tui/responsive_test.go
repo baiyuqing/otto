@@ -24,13 +24,30 @@ func TestVerySmallTerminalViewsStayWithinBounds(t *testing.T) {
 	}
 }
 
-func TestHelpOverlayAtMinimumTerminalStaysWithinBounds(t *testing.T) {
+func TestHelpOverlayAtMinimumTerminalShowsEveryControlWithinBounds(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 40, 8)
 	m.overlay = overlayHelp
 	content := m.View().Content
 	assertRenderedBounds(t, content, 40, 8)
-	if !strings.Contains(content, "Help") {
-		t.Fatalf("help overlay = %q, want title", content)
+	for _, control := range []string{
+		"Help",
+		"?",
+		"/help",
+		"Enter",
+		"Shift+Enter",
+		"Alt+Enter",
+		"Ctrl+O",
+		"PgUp/PgDn",
+		"Home/End",
+		"Esc",
+		"Ctrl+C",
+		"/session",
+		"/new",
+		"/exit",
+	} {
+		if !strings.Contains(content, control) {
+			t.Fatalf("help overlay = %q, want accessible %q control", content, control)
+		}
 	}
 }
 

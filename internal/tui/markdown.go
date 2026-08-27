@@ -52,13 +52,17 @@ func (g GlamourRenderer) Render(markdown string, width int) (string, error) {
 }
 
 func renderMarkdown(renderer MarkdownRenderer, markdown string, width int) (string, error) {
-	safeMarkdown := escapePlainText(markdown)
+	safePlainText := escapePlainText(markdown)
 	if renderer == nil {
-		return fallbackMarkdown(safeMarkdown), errNilMarkdownRenderer
+		return fallbackMarkdown(safePlainText), errNilMarkdownRenderer
 	}
+	// Glamour HTML-unescapes Markdown text while rendering. Neutralize character
+	// references at this boundary so they cannot recreate terminal controls after
+	// the plain-text sanitizer has run.
+	safeMarkdown := escapeMarkdownCharacterReferences(safePlainText)
 	rendered, err := renderer.Render(safeMarkdown, width)
 	if err != nil {
-		return fallbackMarkdown(safeMarkdown), err
+		return fallbackMarkdown(safePlainText), err
 	}
 	return strings.TrimSuffix(rendered, "\n"), nil
 }
@@ -70,8 +74,8 @@ func markdownWidth(width int) int {
 	return width
 }
 
-// fallbackMarkdown receives text already escaped by renderMarkdown. Keeping the
-// sanitization at that boundary avoids escaping the same untrusted input twice.
+// fallbackMarkdown receives plain text already escaped by renderMarkdown.
+// Keeping sanitization at that boundary avoids double-escaping untrusted input.
 func fallbackMarkdown(safeMarkdown string) string {
 	if safeMarkdown == "" {
 		return markdownFallbackMarker
@@ -79,11 +83,19 @@ func fallbackMarkdown(safeMarkdown string) string {
 	return safeMarkdown + "\n\n" + markdownFallbackMarker
 }
 
-func escapePlainText(markdown string) string {
+func escapePlainText(text string) string {
+	return escapeTextControls(text, true)
+}
+
+func escapeSingleLineText(text string) string {
+	return escapeTextControls(text, false)
+}
+
+func escapeTextControls(text string, preserveMultilineWhitespace bool) string {
 	var builder strings.Builder
-	for _, r := range markdown {
+	for _, r := range text {
 		switch {
-		case r == '\n' || r == '\t':
+		case preserveMultilineWhitespace && (r == '\n' || r == '\t'):
 			builder.WriteRune(r)
 		case r < 0x100 && unicode.IsControl(r):
 			builder.WriteString(fmt.Sprintf("\\x%02x", r))
@@ -94,4 +106,61 @@ func escapePlainText(markdown string) string {
 		}
 	}
 	return builder.String()
+}
+
+func escapeMarkdownCharacterReferences(markdown string) string {
+	var builder strings.Builder
+	for index := 0; index < len(markdown); {
+		if markdown[index] == '&' && startsHTMLCharacterReference(markdown[index:]) {
+			builder.WriteString("&amp;")
+			index++
+			continue
+		}
+		builder.WriteByte(markdown[index])
+		index++
+	}
+	return builder.String()
+}
+
+func startsHTMLCharacterReference(text string) bool {
+	if len(text) < 2 || text[0] != '&' {
+		return false
+	}
+	if text[1] == '#' {
+		index := 2
+		hexadecimal := false
+		if index < len(text) && (text[index] == 'x' || text[index] == 'X') {
+			hexadecimal = true
+			index++
+		}
+		start := index
+		for index < len(text) && isCharacterReferenceDigit(text[index], hexadecimal) {
+			index++
+		}
+		return index > start
+	}
+
+	index := 1
+	for index < len(text) && isASCIIAlphaNumeric(text[index]) {
+		index++
+	}
+	if index == 1 {
+		return false
+	}
+	if index < len(text) && text[index] == ';' {
+		return true
+	}
+	name := text[1:index]
+	return (name == "amp" || name == "AMP") && (index == len(text) || !isASCIIAlphaNumeric(text[index]))
+}
+
+func isCharacterReferenceDigit(value byte, hexadecimal bool) bool {
+	if value >= '0' && value <= '9' {
+		return true
+	}
+	return hexadecimal && ((value >= 'a' && value <= 'f') || (value >= 'A' && value <= 'F'))
+}
+
+func isASCIIAlphaNumeric(value byte) bool {
+	return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9')
 }

@@ -694,7 +694,11 @@ api_key_env = "TEST_KEY"
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	if got.SessionID != "resumed-session" || got.SessionPath != resumePath || got.Workspace != workspace {
+	canonicalResumePath, err := filepath.EvalSymlinks(resumePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID != "resumed-session" || got.SessionPath != canonicalResumePath || got.Workspace != workspace {
 		t.Fatalf("dynamic session info = %#v", got)
 	}
 	if got.Provider != "openai-compatible" || got.Profile != "active" || got.Model != "override-model" {

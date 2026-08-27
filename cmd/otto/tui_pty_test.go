@@ -309,13 +309,15 @@ func (c *ptyOutputCollector) WaitForStableSnapshot(after int, want []byte, quiet
 	for {
 		c.mu.Lock()
 		start := min(max(after, 0), len(c.buf))
-		index := bytes.Index(c.buf[start:], want)
+		index := bytes.LastIndex(c.buf[start:], want)
+		matchOffset := -1
 		if index >= 0 {
+			matchOffset = start + index
 			if len(c.buf) != lastLen {
 				lastLen = len(c.buf)
 				stableSince = time.Now()
 			} else if !stableSince.IsZero() && time.Since(stableSince) >= quietWindow {
-				snapshot := string(append([]byte(nil), c.buf[start:]...))
+				snapshot := string(append([]byte(nil), c.buf[matchOffset:]...))
 				c.mu.Unlock()
 				return snapshot, nil
 			}
@@ -332,7 +334,7 @@ func (c *ptyOutputCollector) WaitForStableSnapshot(after int, want []byte, quiet
 
 		if closed {
 			if index >= 0 {
-				return string(snapshot[start:]), nil
+				return string(snapshot[matchOffset:]), nil
 			}
 			return "", fmt.Errorf("output closed while waiting for stable %q: %v\nlast output: %s", want, readErr, tailTerminalOutput(snapshot))
 		}
@@ -381,5 +383,32 @@ func TestPTYOutputCollectorWaitForStableSnapshotIncludesTrailingFooterBytes(t *t
 	}
 	if !strings.Contains(snapshot, footerSessionMarker) {
 		t.Fatalf("snapshot = %s, want trailing footer marker %q", tailTerminalOutput([]byte(snapshot)), footerSessionMarker)
+	}
+}
+
+func TestPTYOutputCollectorWaitForStableSnapshotStartsAtMatchedMarker(t *testing.T) {
+	collector := &ptyOutputCollector{done: make(chan struct{})}
+
+	go func() {
+		collector.mu.Lock()
+		collector.buf = append(collector.buf, []byte("wide redraw before match: "+wideFooterMarker+" | ")...)
+		collector.mu.Unlock()
+
+		time.Sleep(10 * time.Millisecond)
+
+		collector.mu.Lock()
+		collector.buf = append(collector.buf, []byte(narrowFooterMarker)...)
+		collector.mu.Unlock()
+	}()
+
+	snapshot, err := collector.WaitForStableSnapshot(0, []byte(narrowFooterMarker), 20*time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatalf("WaitForStableSnapshot() error = %v", err)
+	}
+	if !strings.HasPrefix(snapshot, narrowFooterMarker) {
+		t.Fatalf("snapshot = %s, want prefix %q", tailTerminalOutput([]byte(snapshot)), narrowFooterMarker)
+	}
+	if strings.Contains(snapshot, wideFooterMarker) {
+		t.Fatalf("snapshot = %s, want to exclude pre-match wide footer %q", tailTerminalOutput([]byte(snapshot)), wideFooterMarker)
 	}
 }

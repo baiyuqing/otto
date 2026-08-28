@@ -506,7 +506,7 @@ func TestRunCanonicalizesCWDBeforeCreatingSession(t *testing.T) {
 	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", link}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", link}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1015,34 +1015,52 @@ func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n/session\n/exit\nmust not run\n"), &stdout, &stderr, testGetenv(map[string]string{
+	// The startup session is lazy (no file until a user prompt). /new swaps it
+	// for another lazy session; the prompt "hello" is what materializes a file.
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\nhello\n/exit\nmust not run\n"), &stdout, &stderr, testGetenv(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "ID: ") {
-		t.Fatalf("/session after /new was not executed: stdout = %q", stdout.String())
+	if !strings.Contains(stdout.String(), "Session: ") {
+		t.Fatalf("/new did not print a new session: stdout = %q", stdout.String())
 	}
 	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(paths) != 2 {
-		t.Fatalf("session files = %v, want two", paths)
+	if len(paths) != 1 {
+		t.Fatalf("session files = %v, want one (only the post-/new prompt materializes a file)", paths)
 	}
-	for _, path := range paths {
-		store, _, err := session.Open(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if messages := store.Messages(); len(messages) != 0 {
-			_ = store.Close()
-			t.Fatalf("/exit after /new did not stop later input: messages = %#v", messages)
-		}
-		if err := store.Close(); err != nil {
-			t.Fatal(err)
-		}
+	store, _, err := session.Open(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	messages := store.Messages()
+	if len(messages) != 1 || messages[0].Text() != "hello" {
+		t.Fatalf("messages = %#v, want the single /new prompt", messages)
+	}
+}
+
+func TestRunIdleWithoutPromptLeavesNoSessionFile(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/help\n/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("session files = %v, want none for an idle run", paths)
 	}
 }
 

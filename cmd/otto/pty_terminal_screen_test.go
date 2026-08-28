@@ -21,6 +21,7 @@ type ptyTerminalScreen struct {
 	cells         [][]rune
 	pending       []byte
 	homePending   bool
+	cursorVisible bool
 	fullRedraws   int
 	acceptedCSI   map[string]struct{}
 }
@@ -59,6 +60,13 @@ func (s *ptyTerminalScreen) Write(p []byte) (int, error) {
 
 func (s *ptyTerminalScreen) consume() (int, bool, error) {
 	if s.pending[0] == '\x1b' {
+		if len(s.pending) < 2 {
+			return 0, false, nil
+		}
+		if s.pending[1] == 'M' {
+			s.reverseIndex()
+			return 2, true, nil
+		}
 		return s.consumeCSI()
 	}
 
@@ -146,8 +154,10 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 			return err
 		}
 	case 'h', 'l':
-		// No mode toggles occur in either captured post-resize PTY slice.
-		return fmt.Errorf("unsupported terminal mode %q", rawParams)
+		if rawParams != "?25" {
+			return fmt.Errorf("unsupported terminal mode %q", rawParams)
+		}
+		s.cursorVisible = final == 'h'
 	case 'H', 'f':
 		params, err := parsePTYCSIParams(rawParams, 2, true)
 		if err != nil {
@@ -230,7 +240,7 @@ func validatePTYSGRParams(raw string) error {
 
 	// These are the exact SGR forms observed in both post-resize PTY slices.
 	switch raw {
-	case "", "1", "37;40", "38;5;240;27", "38;5;252", "39", "39;7", "40":
+	case "", "1", "37;40", "38;5;240", "38;5;240;27", "38;5;252", "39", "39;7", "40":
 		return nil
 	default:
 		return fmt.Errorf("unobserved SGR params %q", raw)
@@ -334,6 +344,20 @@ func (s *ptyTerminalScreen) insertLines(count int) {
 	}
 }
 
+func (s *ptyTerminalScreen) reverseIndex() {
+	s.homePending = false
+	if s.y > 0 {
+		s.y--
+		return
+	}
+	for row := s.height - 1; row > 0; row-- {
+		copy(s.cells[row], s.cells[row-1])
+	}
+	if s.height > 0 {
+		s.cells[0] = blankPTYRow(s.width)
+	}
+}
+
 func (s *ptyTerminalScreen) eraseRow(row, from, to int) {
 	if row < 0 || row >= s.height || s.width == 0 {
 		return
@@ -346,6 +370,10 @@ func (s *ptyTerminalScreen) eraseRow(row, from, to int) {
 
 func (s *ptyTerminalScreen) FullRedraws() int {
 	return s.fullRedraws
+}
+
+func (s *ptyTerminalScreen) Cursor() (x, y int, visible bool) {
+	return s.x, s.y, s.cursorVisible
 }
 
 func (s *ptyTerminalScreen) AcceptedCSI() []string {

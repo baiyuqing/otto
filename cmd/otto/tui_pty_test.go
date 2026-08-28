@@ -133,6 +133,9 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if resumeScreen.width != 140 || resumeScreen.height != 34 {
 		t.Fatalf("post-resize terminal screen = %dx%d, want 140x34", resumeScreen.width, resumeScreen.height)
 	}
+	if x, y, visible := resumeScreen.Cursor(); !visible || x != 2 || y != 32 {
+		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (2,32) visible", x, y, visible)
+	}
 	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains transcript+session ID and no Resume modal; accepted sequences=%q", bubbleTeaFullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
 
 	writePTY(t, master, "/exit\r")
@@ -269,6 +272,9 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 			strings.Contains(content, narrowFooterMarker) &&
 			!strings.Contains(content, footerSessionMarker)
 	})
+	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 2 || y != 22 {
+		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (2,22) visible", x, y, visible)
+	}
 	t.Logf("PTY lifecycle accepted sequences=%q", lifecycleScreen.AcceptedCSI())
 
 	writePTY(t, master, "\x1b")
@@ -554,6 +560,22 @@ func tailTerminalOutput(output []byte) string {
 	return fmt.Sprintf("%q", output)
 }
 
+func TestPTYTerminalScreenTracksObservedCursorVisibility(t *testing.T) {
+	screen := newPTYTerminalScreen(80, 24)
+	if _, err := screen.Write([]byte("\x1b[?25h")); err != nil {
+		t.Fatalf("show cursor: %v", err)
+	}
+	if _, _, visible := screen.Cursor(); !visible {
+		t.Fatal("cursor visible = false after show sequence")
+	}
+	if _, err := screen.Write([]byte("\x1b[?25l")); err != nil {
+		t.Fatalf("hide cursor: %v", err)
+	}
+	if _, _, visible := screen.Cursor(); visible {
+		t.Fatal("cursor visible = true after hide sequence")
+	}
+}
+
 func TestPTYTerminalScreenRejectsUnsupportedControlsAndCSI(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -567,7 +589,6 @@ func TestPTYTerminalScreenRejectsUnsupportedControlsAndCSI(t *testing.T) {
 		{name: "alternate screen enter", sequence: "\x1b[?1049h"},
 		{name: "alternate screen exit", sequence: "\x1b[?1049l"},
 		{name: "unknown private mode", sequence: "\x1b[?9999h"},
-		{name: "unobserved cursor mode", sequence: "\x1b[?25h"},
 		{name: "unobserved synchronized-output mode", sequence: "\x1b[?2026l"},
 		{name: "unknown public mode", sequence: "\x1b[20l"},
 		{name: "unobserved SGR", sequence: "\x1b[8m"},

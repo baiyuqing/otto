@@ -353,7 +353,6 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 		{name: "unsupported provider", args: []string{"--config", unsupported, "--cwd", workspace}, want: "unsupported provider"},
 		{name: "missing resume", args: []string{"--config", valid, "--cwd", workspace, "--resume", filepath.Join(t.TempDir(), "missing.jsonl")}, want: "open session file"},
 		{name: "conflicting continue and resume", args: []string{"--continue", "--resume", "anything"}, want: "cannot be used together"},
-		{name: "invalid max turns", args: []string{"--max-turns", "0"}, want: "max-turns must be greater than zero"},
 		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid value"},
 		{name: "invalid ui mode", args: []string{"--ui", "popup"}, want: "must be one of auto, tui, repl"},
 	}
@@ -1082,33 +1081,16 @@ func TestRunNewSessionCreationFailureReturnsDirectError(t *testing.T) {
 	}
 }
 
-func TestRunAppliesMaxTurnsAndShellTimeout(t *testing.T) {
-	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
-		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"sleep 0.2\"}"}}]},"finish_reason":"tool_calls"}]}`)
-	}))
-	defer server.Close()
-
+func TestRunRejectsUnknownMaxTurnsFlag(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
-	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1", "--shell-timeout", "10ms"}, strings.NewReader("run slowly\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1"}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
-	if code != 0 {
-		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
-	}
-	if requests.Load() != 1 || !strings.Contains(stderr.String(), "agent max turns exceeded") {
-		t.Fatalf("requests = %d, stderr = %q", requests.Load(), stderr.String())
-	}
-	content, err := os.ReadFile(onlySessionPath(t, home))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(content), "timed out after 10ms") {
-		t.Fatalf("session missing timed-out tool result: %s", content)
+	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -max-turns") {
+		t.Fatalf("code = %d, stderr = %q, want unknown flag rejection", code, stderr.String())
 	}
 }
 

@@ -34,12 +34,10 @@ type Event struct {
 type Options struct {
 	Model        string
 	SystemPrompt string
-	MaxTurns     int
 	Now          func() time.Time
 	NewID        func() string
 }
 
 var (
-	ErrMaxTurns      = errors.New("agent max turns exceeded")
 	ErrEmptyUserText = errors.New("user text is required")
 )

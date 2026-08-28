@@ -77,13 +77,11 @@ type cliOptions struct {
 	baseURL        string
 	model          string
 	ui             string
-	maxTurns       int
 	shellTimeout   time.Duration
 	maxOutput      int
 	noSession      bool
 	continueLast   bool
 	resumePath     string
-	maxTurnsSet    bool
 	shellTimeSet   bool
 	maxOutputSet   bool
 	explicitConfig bool
@@ -188,7 +186,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		Provider:       options.provider,
 		BaseURL:        options.baseURL,
 		Model:          options.model,
-		MaxTurns:       options.maxTurns,
 		ShellTimeout:   options.shellTimeout,
 		MaxOutputBytes: options.maxOutput,
 	}
@@ -358,7 +355,6 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.StringVar(&options.baseURL, "base-url", "", "provider base URL override")
 	flags.StringVar(&options.model, "model", "", "model override")
 	flags.StringVar(&options.ui, "ui", "", "frontend mode: auto, tui, or repl")
-	flags.IntVar(&options.maxTurns, "max-turns", 0, "maximum provider turns")
 	flags.DurationVar(&options.shellTimeout, "shell-timeout", 0, "shell command timeout")
 	flags.IntVar(&options.maxOutput, "max-output-bytes", 0, "maximum tool output bytes")
 	flags.BoolVar(&options.noSession, "no-session", false, "use an in-memory session")
@@ -379,7 +375,6 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	visited := make(map[string]bool)
 	flags.Visit(func(item *flag.Flag) { visited[item.Name] = true })
 	options.explicitConfig = visited["config"]
-	options.maxTurnsSet = visited["max-turns"]
 	options.shellTimeSet = visited["shell-timeout"]
 	options.maxOutputSet = visited["max-output-bytes"]
 	if options.continueLast && options.resumePath != "" {
@@ -389,10 +384,6 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	if options.noSession && (options.continueLast || options.resumePath != "") {
 		_, _ = fmt.Fprintln(stderr, "otto: --no-session cannot be used with --continue or --resume")
 		return options, false, errors.New("conflicting session flags")
-	}
-	if options.maxTurnsSet && options.maxTurns <= 0 {
-		_, _ = fmt.Fprintln(stderr, "otto: --max-turns must be greater than zero")
-		return options, false, errors.New("invalid max turns")
 	}
 	if options.shellTimeSet && options.shellTimeout <= 0 {
 		_, _ = fmt.Fprintln(stderr, "otto: --shell-timeout must be greater than zero")
@@ -420,7 +411,6 @@ Options:
   --base-url URL         provider base URL override
   --model NAME           model override
   --ui MODE              frontend mode: auto, tui, or repl
-  --max-turns N          maximum provider turns
   --shell-timeout D      shell command timeout
   --max-output-bytes N   maximum tool output bytes
   --no-session           use an in-memory session

@@ -86,7 +86,6 @@ func (r *Redactor) RedactError(err error) error {
 		canceled:         errors.Is(err, context.Canceled),
 		deadlineExceeded: errors.Is(err, context.DeadlineExceeded),
 		fatalPersistence: errors.Is(err, session.ErrFatalPersistence),
-		maxTurns:         errors.Is(err, ErrMaxTurns),
 		emptyUserText:    errors.Is(err, ErrEmptyUserText),
 	}
 }
@@ -96,7 +95,6 @@ type redactedBoundaryError struct {
 	canceled         bool
 	deadlineExceeded bool
 	fatalPersistence bool
-	maxTurns         bool
 	emptyUserText    bool
 }
 
@@ -105,7 +103,6 @@ func (e *redactedBoundaryError) Is(target error) bool {
 	return target == context.Canceled && e.canceled ||
 		target == context.DeadlineExceeded && e.deadlineExceeded ||
 		target == session.ErrFatalPersistence && e.fatalPersistence ||
-		target == ErrMaxTurns && e.maxTurns ||
 		target == ErrEmptyUserText && e.emptyUserText
 }
 

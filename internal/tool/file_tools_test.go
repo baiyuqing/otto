@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -273,7 +274,8 @@ func TestEditRejectsAmbiguousMatch(t *testing.T) {
 	workspace := mustWorkspace(t, root)
 	edit := NewEditTool(workspace)
 	result := edit.Execute(context.Background(), json.RawMessage(`{"path":"sample.txt","old_text":"same","new_text":"new"}`))
-	if !result.IsError || !strings.Contains(result.Content, "2 occurrences") {
+	want := "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique"
+	if !result.IsError || result.Content != want {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 }
@@ -285,7 +287,47 @@ func TestEditRejectsAbsentMatch(t *testing.T) {
 	}
 	workspace := mustWorkspace(t, root)
 	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{"path":"sample.txt","old_text":"missing","new_text":"new"}`))
-	if !result.IsError || !strings.Contains(result.Content, "0 occurrences") {
+	want := "edit failed: old_text was not found in sample.txt"
+	if !result.IsError || result.Content != want {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestEditErrorsDoNotEchoLargeOldText(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("dup\ndup\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	edit := NewEditTool(workspace)
+
+	large, err := json.Marshal(map[string]string{
+		"path":     "sample.txt",
+		"old_text": strings.Repeat("ZQX marker ", 2000),
+		"new_text": "new",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notFound := edit.Execute(context.Background(), json.RawMessage(large))
+	if !notFound.IsError || strings.Contains(notFound.Content, "ZQX") || len(notFound.Content) > 200 {
+		t.Fatalf("not-found error echoes old_text or is oversized: len=%d %#v", len(notFound.Content), notFound)
+	}
+
+	ambiguous := edit.Execute(context.Background(), json.RawMessage(`{"path":"sample.txt","old_text":"dup","new_text":"new"}`))
+	if !ambiguous.IsError || strings.Contains(ambiguous.Content, "dup") || len(ambiguous.Content) > 200 {
+		t.Fatalf("ambiguous error echoes old_text or is oversized: len=%d %#v", len(ambiguous.Content), ambiguous)
+	}
+}
+
+func TestEditRejectsBinaryFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "binary"), []byte{'a', 0, 'b'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{"path":"binary","old_text":"a","new_text":"c"}`))
+	if !result.IsError || !strings.Contains(result.Content, "binary") {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 }
@@ -308,11 +350,86 @@ func TestEditSucceedsWithExactSingleMatch(t *testing.T) {
 	if got, want := string(data), "hello there\n"; got != want {
 		t.Fatalf("content = %q, want %q", got, want)
 	}
-	if !strings.Contains(result.Content, "sample.txt") || !strings.Contains(result.Content, "5") {
-		t.Fatalf("unexpected result: %#v", result)
+	if !strings.Contains(result.Content, "sample.txt") {
+		t.Fatalf("result does not name the file: %#v", result)
 	}
-	if strings.Contains(result.Content, "hello there") || strings.Contains(result.Content, "hello world") {
-		t.Fatalf("result leaked file content: %#v", result)
+	if !strings.Contains(result.Content, "-hello world") || !strings.Contains(result.Content, "+hello there") {
+		t.Fatalf("result lacks a diff of the change: %#v", result)
+	}
+}
+
+func TestEditResultDiffIsCompactWithContext(t *testing.T) {
+	root := t.TempDir()
+	var lines []string
+	for i := 1; i <= 40; i++ {
+		lines = append(lines, "line "+strconv.Itoa(i))
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{"path":"sample.txt","old_text":"line 20\n","new_text":"changed 20\n"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %#v", result)
+	}
+	for _, want := range []string{"@@ -17,7 +17,7 @@", "-line 20", "+changed 20", " line 17", " line 23"} {
+		if !strings.Contains(result.Content, want) {
+			t.Fatalf("diff missing %q: %#v", want, result)
+		}
+	}
+	for _, absent := range []string{"line 13", "line 27", "line 40"} {
+		if strings.Contains(result.Content, absent) {
+			t.Fatalf("diff includes far-away line %q: %#v", absent, result)
+		}
+	}
+}
+
+func TestEditDiffTrimsUnchangedLinesInsideOldText(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{"path":"sample.txt","old_text":"alpha\nbeta\ngamma\n","new_text":"alpha\nCHANGED\ngamma\n"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %#v", result)
+	}
+	if !strings.Contains(result.Content, "-beta") || !strings.Contains(result.Content, "+CHANGED") {
+		t.Fatalf("diff missing changed line: %#v", result)
+	}
+	if strings.Contains(result.Content, "-alpha") || strings.Contains(result.Content, "-gamma") {
+		t.Fatalf("diff marks unchanged lines as removed: %#v", result)
+	}
+}
+
+func TestEditTruncatesOversizedDiff(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.txt"), []byte("target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	arguments, err := json.Marshal(map[string]string{
+		"path":     "sample.txt",
+		"old_text": "target\n",
+		"new_text": strings.Repeat("replacement line\n", 2000),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(arguments))
+	if result.IsError {
+		t.Fatalf("unexpected error: %#v", result)
+	}
+	if !strings.Contains(result.Content, "truncated") || len(result.Content) > 8192 {
+		t.Fatalf("diff not truncated: len=%d", len(result.Content))
+	}
+	data, err := os.ReadFile(filepath.Join(root, "sample.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(data), len("replacement line\n")*2000; got != want {
+		t.Fatalf("file length = %d, want %d", got, want)
 	}
 }
 

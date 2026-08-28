@@ -511,7 +511,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := json.RawMessage(fmt.Sprintf(`{"value":%q,"nested":[%q]}`, credential, "Bearer "+credential))
+	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q}}`, credential, credential, "prefix-"+credential, "Bearer "+credential))
 	stream := []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "text "}}
 	for _, character := range credential {
 		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string(character)})

@@ -34,6 +34,24 @@ type RuntimeMetadata struct {
 	Model    string `json:"model"`
 }
 
+type CompactionDetails struct {
+	ReadFiles            []string `json:"readFiles,omitempty"`
+	ModifiedFiles        []string `json:"modifiedFiles,omitempty"`
+	OmittedReadFiles     int      `json:"omittedReadFiles,omitempty"`
+	OmittedModifiedFiles int      `json:"omittedModifiedFiles,omitempty"`
+}
+
+type CompactionMetadata struct {
+	ID                           string
+	Summary                      string
+	FirstKeptEntryID             string
+	TokensBefore                 int
+	Usage                        *model.Usage
+	Details                      CompactionDetails
+	RetainedTailOnly             bool
+	FirstPostCheckpointMessageID string
+}
+
 type Header struct {
 	Version   int       `json:"version"`
 	ID        string    `json:"id"`

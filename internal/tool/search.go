@@ -108,12 +108,31 @@ func resolveSearchLimit(value *int, defaultValue, maximum int) (int, error) {
 	return *value, nil
 }
 
-func searchRootInsideGit(workspace *Workspace, root string) (bool, error) {
-	relative, err := workspaceRelativePath(workspace, root)
+func searchRootInsideGit(workspace *Workspace, requestedPath, resolvedRoot string) (bool, error) {
+	resolvedRelative, err := workspaceRelativePath(workspace, resolvedRoot)
 	if err != nil {
 		return false, err
 	}
-	return relative == ".git" || strings.HasPrefix(relative, ".git/"), nil
+	if pathHasGitSegment(resolvedRelative) {
+		return true, nil
+	}
+	requestedRelative, err := filepath.Rel(workspace.root, filepath.Clean(workspace.candidatePath(requestedPath)))
+	if err != nil {
+		return false, err
+	}
+	if requestedRelative == ".." || strings.HasPrefix(requestedRelative, ".."+string(filepath.Separator)) {
+		return false, nil
+	}
+	return pathHasGitSegment(filepath.ToSlash(requestedRelative)), nil
+}
+
+func pathHasGitSegment(relative string) bool {
+	for _, segment := range strings.Split(filepath.ToSlash(relative), "/") {
+		if segment == ".git" {
+			return true
+		}
+	}
+	return false
 }
 
 func validatedGlobSegments(pattern string) ([]string, error) {

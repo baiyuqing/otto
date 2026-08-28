@@ -122,6 +122,37 @@ func TestFindDoesNotSearchWhenRootIsInsideGitDirectory(t *testing.T) {
 	}
 }
 
+func TestRecursiveSearchSkipsGitFilesAndDirectGitAliases(t *testing.T) {
+	root := t.TempDir()
+	writeSearchFile(t, root, ".git", "match metadata\n")
+	writeSearchFile(t, root, "normal.txt", "match public\n")
+	workspace := mustWorkspace(t, root)
+
+	find := NewFindTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"**"}`))
+	if find.IsError || find.Content != "normal.txt\n" {
+		t.Fatalf("Find() = %#v, want .git metadata file skipped", find)
+	}
+	grep := NewGrepTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"match"}`))
+	if grep.IsError || grep.Content != "normal.txt:1:match public\n" {
+		t.Fatalf("Grep() = %#v, want .git metadata file skipped", grep)
+	}
+
+	if err := os.Remove(filepath.Join(root, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	writeSearchFile(t, root, "metadata/config", "match alias\n")
+	if err := os.Symlink(filepath.Join(root, "metadata"), filepath.Join(root, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	for _, searchPath := range []string{".git", ".git/config"} {
+		find := NewFindTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"**","path":"`+searchPath+`"}`))
+		grep := NewGrepTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"match","path":"`+searchPath+`"}`))
+		if find.IsError || find.Content != "" || grep.IsError || grep.Content != "" {
+			t.Fatalf("direct alias path %q: Find=%#v Grep=%#v, want empty", searchPath, find, grep)
+		}
+	}
+}
+
 func TestFindCapsOutputWithValidTruncationMarker(t *testing.T) {
 	root := t.TempDir()
 	writeSearchFile(t, root, "long-file-name.go", "x")

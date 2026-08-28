@@ -538,7 +538,9 @@ func newSession(memory bool, root, workspace string, runtime config.Runtime) (se
 	if memory {
 		return session.NewMemory(header), nil
 	}
-	store, err := session.Create(root, header)
+	// CreateLazy defers file creation until the first user message, so
+	// starting Otto and quitting without any prompt leaves no session file.
+	store, err := session.CreateLazy(root, header)
 	if err != nil {
 		return nil, err
 	}

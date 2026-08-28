@@ -304,6 +304,114 @@ func TestCreateUsesExpectedPermissionsAndPath(t *testing.T) {
 	}
 }
 
+func TestCreateLazyDefersFileUntilFirstAppend(t *testing.T) {
+	root := t.TempDir()
+	header := testHeader(t)
+	store, err := CreateLazy(root, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if got := store.Path(); got != "" {
+		t.Fatalf("Path() before first write = %q, want empty", got)
+	}
+	paths, err := filepath.Glob(filepath.Join(root, "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("session files before first write = %v, want none", paths)
+	}
+
+	message := model.Message{
+		Role:      model.RoleUser,
+		Blocks:    []model.Block{{Type: model.BlockText, Text: "first prompt"}},
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.Append(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+
+	path := store.Path()
+	if path == "" {
+		t.Fatal("Path() after first append is empty, want a real path")
+	}
+	lines := readJSONLines(t, path)
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3 (header + runtime + user message)", len(lines))
+	}
+	assertJSONEqual(t, lines[0], map[string]any{
+		"type":      "session",
+		"version":   float64(3),
+		"id":        header.ID,
+		"timestamp": header.CreatedAt.Format(time.RFC3339Nano),
+		"cwd":       header.Workspace,
+	})
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("file mode = %o, want %o", got, 0o600)
+	}
+}
+
+func TestCreateLazyCloseWithoutWriteLeavesNoFile(t *testing.T) {
+	root := t.TempDir()
+	store, err := CreateLazy(root, testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := filepath.Glob(filepath.Join(root, "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("session files after close without writes = %v, want none", paths)
+	}
+}
+
+func TestCreateLazyRoundTripsThroughOpen(t *testing.T) {
+	root := t.TempDir()
+	header := testHeader(t)
+	store, err := CreateLazy(root, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), model.Message{
+		Role:      model.RoleUser,
+		Blocks:    []model.Block{{Type: model.BlockText, Text: "round trip"}},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if reopened.Header().ID != header.ID {
+		t.Fatalf("reopened ID = %q, want %q", reopened.Header().ID, header.ID)
+	}
+	messages := reopened.Messages()
+	if len(messages) != 1 || messages[0].Text() != "round trip" {
+		t.Fatalf("reopened messages = %#v, want the appended prompt", messages)
+	}
+}
+
 func TestAppendRejectsTimestampOutsideRFC3339NanoRange(t *testing.T) {
 	store, err := Create(t.TempDir(), testHeader(t))
 	if err != nil {

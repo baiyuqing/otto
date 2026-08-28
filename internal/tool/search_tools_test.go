@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -150,6 +151,41 @@ func TestRecursiveSearchSkipsGitFilesAndDirectGitAliases(t *testing.T) {
 		if find.IsError || find.Content != "" || grep.IsError || grep.Content != "" {
 			t.Fatalf("direct alias path %q: Find=%#v Grep=%#v, want empty", searchPath, find, grep)
 		}
+	}
+}
+
+func TestSearchSkipsAbsoluteGitAliasThroughLexicalWorkspaceSymlink(t *testing.T) {
+	parent := t.TempDir()
+	realRoot := filepath.Join(parent, "real")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSearchFile(t, realRoot, "metadata/config", "match alias\n")
+	if err := os.Symlink(filepath.Join(realRoot, "metadata"), filepath.Join(realRoot, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := filepath.Join(parent, "workspace-link")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, aliasRoot)
+	absoluteAlias := filepath.Join(aliasRoot, ".git")
+
+	find := NewFindTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"**","path":`+strconv.Quote(absoluteAlias)+`}`))
+	grep := NewGrepTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"match","path":`+strconv.Quote(absoluteAlias)+`}`))
+	if find.IsError || find.Content != "" || grep.IsError || grep.Content != "" {
+		t.Fatalf("absolute .git alias: Find=%#v Grep=%#v, want empty", find, grep)
+	}
+}
+
+func TestSearchAllowsWorkspaceRootNamedGit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".git")
+	writeSearchFile(t, root, "normal.txt", "match public\n")
+	workspace := mustWorkspace(t, root)
+	find := NewFindTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"**"}`))
+	grep := NewGrepTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"match"}`))
+	if find.IsError || find.Content != "normal.txt\n" || grep.IsError || grep.Content != "normal.txt:1:match public\n" {
+		t.Fatalf("workspace named .git: Find=%#v Grep=%#v", find, grep)
 	}
 }
 

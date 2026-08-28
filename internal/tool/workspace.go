@@ -8,7 +8,8 @@ import (
 )
 
 type Workspace struct {
-	root string
+	root        string
+	lexicalRoot string
 }
 
 func NewWorkspace(root string) (*Workspace, error) {
@@ -21,7 +22,7 @@ func NewWorkspace(root string) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Workspace{root: resolved}, nil
+	return &Workspace{root: resolved, lexicalRoot: clean}, nil
 }
 
 func (w *Workspace) ResolveExisting(path string) (string, error) {

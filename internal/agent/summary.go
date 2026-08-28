@@ -251,7 +251,14 @@ func validateStructuredSummary(message model.Message) (string, error) {
 }
 
 func validateTurnSummary(message model.Message) (string, error) {
-	return validateSummaryMessage(message, turnSummaryMaximumBytes)
+	summary, err := validateSummaryMessage(message, turnSummaryMaximumBytes)
+	if err != nil {
+		return "", err
+	}
+	if err := validateTurnSummaryHeadings(summary); err != nil {
+		return "", err
+	}
+	return summary, nil
 }
 
 func validateSummaryMessage(message model.Message, maximumBytes int) (string, error) {
@@ -308,6 +315,27 @@ func validateSummaryHeadings(summary string) error {
 	return nil
 }
 
+func validateTurnSummaryHeadings(summary string) error {
+	fenceCharacter := byte(0)
+	fenceLength := 0
+	normalized := strings.ReplaceAll(summary, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
+		if marker, length, closing := summaryFenceMarker(line, fenceCharacter, fenceLength); marker != 0 {
+			if fenceCharacter == 0 && !closing {
+				fenceCharacter, fenceLength = marker, length
+			} else if fenceCharacter == marker && closing {
+				fenceCharacter, fenceLength = 0, 0
+			}
+			continue
+		}
+		if fenceCharacter == 0 && isLevelTwoOrThreeHeading(line) {
+			return errors.New("turn compaction summary contains a level-2 or level-3 heading")
+		}
+	}
+	return nil
+}
+
 func summaryFenceMarker(line string, active byte, activeLength int) (byte, int, bool) {
 	trimmed := line
 	spaces := 0
@@ -352,6 +380,11 @@ func isFenceClosingRemainder(remainder string) bool {
 }
 
 func isLevelTwoOrThreeHeading(line string) bool {
+	spaces := 0
+	for spaces < len(line) && spaces < 3 && line[spaces] == ' ' {
+		spaces++
+	}
+	line = line[spaces:]
 	return line == "##" || strings.HasPrefix(line, "## ") || strings.HasPrefix(line, "##\t") ||
 		line == "###" || strings.HasPrefix(line, "### ") || strings.HasPrefix(line, "###\t")
 }

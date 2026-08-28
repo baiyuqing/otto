@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/tool"
 )
 
@@ -43,6 +44,7 @@ type Options struct {
 	Model        string
 	SystemPrompt string
 	Thinking     string
+	RequestSizer provider.RequestSizer
 	Compaction   CompactionSettings
 	Now          func() time.Time
 	NewID        func() string

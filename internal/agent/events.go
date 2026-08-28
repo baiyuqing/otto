@@ -34,6 +34,7 @@ type Event struct {
 type Options struct {
 	Model        string
 	SystemPrompt string
+	Thinking     string
 	Now          func() time.Time
 	NewID        func() string
 }

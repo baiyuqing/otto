@@ -46,6 +46,44 @@ func TestREPLRunsPromptAndRendersEvents(t *testing.T) {
 	}
 }
 
+func TestRunOnceRunsSinglePromptWithoutBannerOrPrompts(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{
+		info: app.Info{SessionID: "session-1"},
+		prompt: func(_ context.Context, prompt string, emit func(agent.Event)) error {
+			if prompt != "line one\nline two" {
+				t.Fatalf("prompt = %q", prompt)
+			}
+			emit(agent.Event{Type: agent.EventTextDelta, Text: "done"})
+			return nil
+		},
+	}
+	r := New(strings.NewReader(""), &stdout, &stderr, backend)
+	if err := r.RunOnce(context.Background(), "line one\nline two"); err != nil {
+		t.Fatal(err)
+	}
+	rendered := stdout.String()
+	if !strings.Contains(rendered, "done") || strings.Contains(rendered, "> ") || strings.Contains(rendered, "session-1") {
+		t.Fatalf("stdout = %q", rendered)
+	}
+}
+
+func TestRunOnceReturnsPromptErrorAfterRenderingItOnce(t *testing.T) {
+	providerErr := errors.New("provider unavailable")
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventAgentError, Err: providerErr})
+		return providerErr
+	}}
+	r := New(strings.NewReader(""), &stdout, &stderr, backend)
+	if err := r.RunOnce(context.Background(), "boom"); !errors.Is(err, providerErr) {
+		t.Fatalf("err = %v, want provider error", err)
+	}
+	if strings.Count(stderr.String(), providerErr.Error()) != 1 {
+		t.Fatalf("stderr should contain one provider error: %q", stderr.String())
+	}
+}
+
 func TestREPLCommandsAndInputHandling(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	var prompts []string

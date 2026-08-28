@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type frontendKind string
 const (
 	frontendTUI  frontendKind = "tui"
 	frontendREPL frontendKind = "repl"
+	frontendOnce frontendKind = "once"
 )
 
 type terminalDetector func(io.Reader, io.Writer) bool
@@ -76,6 +78,8 @@ type cliOptions struct {
 	provider       string
 	baseURL        string
 	model          string
+	thinking       string
+	approve        string
 	ui             string
 	shellTimeout   time.Duration
 	maxOutput      int
@@ -84,6 +88,7 @@ type cliOptions struct {
 	resumePath     string
 	shellTimeSet   bool
 	maxOutputSet   bool
+	approveSet     bool
 	explicitConfig bool
 }
 
@@ -112,6 +117,15 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	if err != nil {
 		return 2
+	}
+
+	approvePrompt := options.approve
+	if options.approveSet && strings.HasPrefix(approvePrompt, "@") {
+		data, err := os.ReadFile(strings.TrimPrefix(approvePrompt, "@"))
+		if err != nil {
+			return fail(stderr, "read approve prompt: %v", err)
+		}
+		approvePrompt = string(data)
 	}
 
 	workspacePath, err := canonicalDirectory(options.cwd)
@@ -152,9 +166,12 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
-	frontend, err := selectFrontend(uiMode, stdin, stdout, deps.detectTerminal)
-	if err != nil {
-		return fail(stderr, "%v", err)
+	frontend := frontendOnce
+	if !options.approveSet {
+		frontend, err = selectFrontend(uiMode, stdin, stdout, deps.detectTerminal)
+		if err != nil {
+			return fail(stderr, "%v", err)
+		}
 	}
 
 	shell := getenv("SHELL")
@@ -186,6 +203,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		Provider:       options.provider,
 		BaseURL:        options.baseURL,
 		Model:          options.model,
+		Thinking:       options.thinking,
 		ShellTimeout:   options.shellTimeout,
 		MaxOutputBytes: options.maxOutput,
 	}
@@ -300,6 +318,17 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	switch frontend {
 	case frontendTUI:
 		runErr = deps.runTUI(processCtx, stdin, stdout, controller)
+	case frontendOnce:
+		console := repl.New(strings.NewReader(""), stdout, stderr, controller)
+		replMu.Lock()
+		currentREPL = console
+		replMu.Unlock()
+		runErr = console.RunOnce(processCtx, approvePrompt)
+		replMu.Lock()
+		if currentREPL == console {
+			currentREPL = nil
+		}
+		replMu.Unlock()
 	case frontendREPL:
 		input := repl.NewInput(stdin)
 		console := repl.NewWithInput(input, stdout, stderr, controller)
@@ -329,6 +358,10 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if processCanceledBeforeFrontendExit || frontendCanceled {
 		return 130
 	}
+	if frontend == frontendOnce && runErr != nil {
+		// RunOnce already rendered the error to stderr.
+		return 1
+	}
 	if frontend == frontendREPL && repl.IsCommandError(runErr, "/new") {
 		return fail(stderr, "%v", runErr)
 	}
@@ -354,6 +387,8 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.StringVar(&options.provider, "provider", "", "provider override")
 	flags.StringVar(&options.baseURL, "base-url", "", "provider base URL override")
 	flags.StringVar(&options.model, "model", "", "model override")
+	flags.StringVar(&options.thinking, "thinking", "", "model thinking effort: low, medium, high, xhigh, or max")
+	flags.StringVar(&options.approve, "approve", "", "run PROMPT (or @FILE) without interaction and exit")
 	flags.StringVar(&options.ui, "ui", "", "frontend mode: auto, tui, or repl")
 	flags.DurationVar(&options.shellTimeout, "shell-timeout", 0, "shell command timeout")
 	flags.IntVar(&options.maxOutput, "max-output-bytes", 0, "maximum tool output bytes")
@@ -377,6 +412,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	options.explicitConfig = visited["config"]
 	options.shellTimeSet = visited["shell-timeout"]
 	options.maxOutputSet = visited["max-output-bytes"]
+	options.approveSet = visited["approve"]
 	if options.continueLast && options.resumePath != "" {
 		_, _ = fmt.Fprintln(stderr, "otto: --continue and --resume cannot be used together")
 		return options, false, errors.New("conflicting session flags")
@@ -392,6 +428,20 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	if options.maxOutputSet && options.maxOutput <= 0 {
 		_, _ = fmt.Fprintln(stderr, "otto: --max-output-bytes must be greater than zero")
 		return options, false, errors.New("invalid max output")
+	}
+	switch options.thinking {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		_, _ = fmt.Fprintln(stderr, "otto: --thinking must be one of low, medium, high, xhigh, max")
+		return options, false, errors.New("invalid thinking level")
+	}
+	if options.approveSet && strings.TrimSpace(options.approve) == "" {
+		_, _ = fmt.Fprintln(stderr, "otto: --approve requires a non-empty prompt")
+		return options, false, errors.New("empty approve prompt")
+	}
+	if options.approveSet && options.ui == "tui" {
+		_, _ = fmt.Fprintln(stderr, "otto: --approve cannot be used with --ui tui")
+		return options, false, errors.New("conflicting frontend flags")
 	}
 	return options, false, nil
 }
@@ -410,6 +460,8 @@ Options:
   --provider NAME        provider override
   --base-url URL         provider base URL override
   --model NAME           model override
+  --thinking LEVEL       model thinking effort: low, medium, high, xhigh, or max
+  --approve PROMPT       run PROMPT (or @FILE) without interaction and exit
   --ui MODE              frontend mode: auto, tui, or repl
   --shell-timeout D      shell command timeout
   --max-output-bytes N   maximum tool output bytes

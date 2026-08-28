@@ -63,6 +63,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		response, err := a.provider.Complete(ctx, provider.Request{
 			Model:        a.options.Model,
 			SystemPrompt: a.options.SystemPrompt,
+			Thinking:     a.options.Thinking,
 			Messages:     cloneMessages(a.session.Messages()),
 			Tools:        cloneTools(a.registry.Definitions()),
 		}, func(event provider.StreamEvent) {

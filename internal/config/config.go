@@ -40,6 +40,7 @@ type Overrides struct {
 	Provider       string
 	BaseURL        string
 	Model          string
+	Thinking       string
 	ShellTimeout   time.Duration
 	MaxOutputBytes int
 }
@@ -49,6 +50,7 @@ type Runtime struct {
 	Provider       string
 	BaseURL        string
 	Model          string
+	Thinking       string
 	APIKey         string
 	APIKeyEnv      string
 	ShellTimeout   time.Duration

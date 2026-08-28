@@ -82,20 +82,22 @@ func (r *Redactor) RedactError(err error) error {
 		return err
 	}
 	return &redactedBoundaryError{
-		message:          message,
-		canceled:         errors.Is(err, context.Canceled),
-		deadlineExceeded: errors.Is(err, context.DeadlineExceeded),
-		fatalPersistence: errors.Is(err, session.ErrFatalPersistence),
-		emptyUserText:    errors.Is(err, ErrEmptyUserText),
+		message:                  message,
+		canceled:                 errors.Is(err, context.Canceled),
+		deadlineExceeded:         errors.Is(err, context.DeadlineExceeded),
+		fatalPersistence:         errors.Is(err, session.ErrFatalPersistence),
+		emptyUserText:            errors.Is(err, ErrEmptyUserText),
+		invalidCompactionSummary: errors.Is(err, ErrInvalidCompactionSummary),
 	}
 }
 
 type redactedBoundaryError struct {
-	message          string
-	canceled         bool
-	deadlineExceeded bool
-	fatalPersistence bool
-	emptyUserText    bool
+	message                  string
+	canceled                 bool
+	deadlineExceeded         bool
+	fatalPersistence         bool
+	emptyUserText            bool
+	invalidCompactionSummary bool
 }
 
 func (e *redactedBoundaryError) Error() string { return e.message }
@@ -103,7 +105,8 @@ func (e *redactedBoundaryError) Is(target error) bool {
 	return target == context.Canceled && e.canceled ||
 		target == context.DeadlineExceeded && e.deadlineExceeded ||
 		target == session.ErrFatalPersistence && e.fatalPersistence ||
-		target == ErrEmptyUserText && e.emptyUserText
+		target == ErrEmptyUserText && e.emptyUserText ||
+		target == ErrInvalidCompactionSummary && e.invalidCompactionSummary
 }
 
 type jsonObject []jsonMember

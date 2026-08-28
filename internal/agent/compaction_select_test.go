@@ -268,6 +268,206 @@ func TestSelectCompactionEnforcesHardRetainedBudget(t *testing.T) {
 	assertSelectIDs(t, selection.Retained, "latest-u", "latest-a")
 }
 
+func TestSelectCompactionRetainedTailAssistantAnchorSplitsAtPriorUser(t *testing.T) {
+	messages := []model.Message{
+		selectCompactionMessage("checkpoint", "[Compaction summary]\nprior"),
+		selectTextMessage("history-u", model.RoleUser, "historical request"),
+		selectTextMessage("history-a", model.RoleAssistant, "historical answer"),
+		selectTextMessage("turn-u", model.RoleUser, "turn request"),
+		selectTextMessage("post-assistant", model.RoleAssistant, "genuine retained answer"),
+		selectTextMessage("post-u", model.RoleUser, "later request"),
+	}
+	latest := session.CompactionMetadata{
+		ID:                           "checkpoint",
+		RetainedTailOnly:             true,
+		FirstPostCheckpointMessageID: "post-assistant",
+	}
+
+	selection, err := selectCompaction(messages, latest, true, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSelectIDs(t, selection.HistoricalSource, "history-u", "history-a")
+	assertSelectIDs(t, selection.TurnPrefixSource, "turn-u")
+	assertSelectIDs(t, selection.Retained, "post-assistant", "post-u")
+	if selection.FirstKeptID != "post-assistant" {
+		t.Fatalf("first kept ID = %q, want fixed assistant anchor", selection.FirstKeptID)
+	}
+	if !selection.SplitTurn {
+		t.Fatal("fixed assistant anchor was not marked as a split turn")
+	}
+}
+
+func TestSelectCompactionContextEdgeCases(t *testing.T) {
+	t.Run("context only is a no-op", func(t *testing.T) {
+		messages := []model.Message{
+			selectContextMessage("ctx-1", "branch_summary", "first"),
+			selectContextMessage("ctx-2", "custom", "second"),
+		}
+		if _, err := selectCompaction(messages, session.CompactionMetadata{}, false, 1, 0); !errors.Is(err, ErrNothingToCompact) {
+			t.Fatalf("error = %v, want ErrNothingToCompact", err)
+		}
+	})
+
+	t.Run("consecutive contexts attach forward", func(t *testing.T) {
+		messages := []model.Message{
+			selectTextMessage("old-u", model.RoleUser, "old request"),
+			selectTextMessage("old-a", model.RoleAssistant, "old answer"),
+			selectContextMessage("ctx-1", "branch_summary", "first"),
+			selectContextMessage("ctx-2", "custom", "second"),
+			selectTextMessage("latest-u", model.RoleUser, "latest request"),
+		}
+		selection, err := selectCompaction(messages, session.CompactionMetadata{}, false, 1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSelectIDs(t, selection.HistoricalSource, "old-u", "old-a")
+		assertSelectIDs(t, selection.Retained, "ctx-1", "ctx-2", "latest-u")
+	})
+
+	t.Run("trailing contexts are a forced suffix not a prior atom", func(t *testing.T) {
+		messages := []model.Message{
+			selectTextMessage("old-u", model.RoleUser, "old request"),
+			selectTextMessage("old-a", model.RoleAssistant, "old answer"),
+			selectTextMessage("latest-u", model.RoleUser, "latest request"),
+			selectTextMessage("latest-a", model.RoleAssistant, "latest answer"),
+			selectContextMessage("ctx-1", "branch_summary", "first trailing context"),
+			selectContextMessage("ctx-2", "custom", "second trailing context"),
+		}
+		groups, err := groupCompactionMessages(messages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := groups[len(groups)-1].end; got != 4 {
+			t.Fatalf("last atom ends at %d, want 4 before trailing forced suffix", got)
+		}
+
+		selection, err := selectCompaction(messages, session.CompactionMetadata{}, false, 1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSelectIDs(t, selection.Retained, "latest-u", "latest-a", "ctx-1", "ctx-2")
+		if selection.FirstKeptID != "latest-u" {
+			t.Fatalf("first kept ID = %q, want latest-u", selection.FirstKeptID)
+		}
+		forced := selectMessageEstimate(messages[2:])
+		if _, err := selectCompaction(messages, session.CompactionMetadata{}, false, 1, forced-1); !errors.Is(err, ErrCurrentTurnTooLarge) {
+			t.Fatalf("error = %v, want trailing suffix included in forced retained budget", err)
+		}
+	})
+}
+
+func TestSelectCompactionUsesLatestOfRepeatedCompactionContexts(t *testing.T) {
+	messages := []model.Message{
+		selectCompactionMessage("checkpoint-1", "[Compaction summary]\nolder summary"),
+		selectTextMessage("old-u", model.RoleUser, "old request"),
+		selectTextMessage("old-a", model.RoleAssistant, "old answer"),
+		selectCompactionMessage("checkpoint-2", "[Compaction summary]\nlatest summary"),
+		selectTextMessage("latest-u", model.RoleUser, "latest request"),
+	}
+	latest := session.CompactionMetadata{ID: "checkpoint-2", Summary: "metadata fallback"}
+
+	selection, err := selectCompaction(messages, latest, true, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.PreviousSummary != "latest summary" {
+		t.Fatalf("previous summary = %q, want latest summary", selection.PreviousSummary)
+	}
+	assertSelectIDs(t, selection.HistoricalSource, "old-u", "old-a")
+	assertSelectIDs(t, selection.Retained, "latest-u")
+}
+
+func TestSelectCompactionRejectsEmptySelectedFirstKeptID(t *testing.T) {
+	tests := []struct {
+		name      string
+		messages  []model.Message
+		latest    session.CompactionMetadata
+		hasLatest bool
+		keep      int
+	}{
+		{
+			name: "ordinary",
+			messages: []model.Message{
+				selectTextMessage("old-u", model.RoleUser, "old request"),
+				selectTextMessage("old-a", model.RoleAssistant, "old answer"),
+				selectTextMessage("", model.RoleUser, "latest request"),
+			},
+			keep: 1,
+		},
+		{
+			name: "dual form",
+			messages: []model.Message{
+				selectCompactionMessage("checkpoint", "[Compaction summary]\nprior"),
+				selectTextMessage("real-u", model.RoleUser, "real retained request"),
+				selectTextMessage("", model.RoleAssistant, "real retained answer"),
+				selectTextMessage("post-u", model.RoleUser, "post-checkpoint request"),
+			},
+			latest: session.CompactionMetadata{
+				ID:                           "checkpoint",
+				FirstKeptEntryID:             "real-u",
+				FirstPostCheckpointMessageID: "post-u",
+			},
+			hasLatest: true,
+			keep:      20,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := selectCompaction(test.messages, test.latest, test.hasLatest, test.keep, 0); !errors.Is(err, ErrNothingToCompact) {
+				t.Fatalf("error = %v, want ErrNothingToCompact", err)
+			}
+		})
+	}
+}
+
+func TestSelectCompactionAnchorZeroChecksHardBudgetBeforeNoop(t *testing.T) {
+	messages := []model.Message{selectTextMessage("post-u", model.RoleUser, selectLongText(180))}
+	latest := session.CompactionMetadata{
+		RetainedTailOnly:             true,
+		FirstPostCheckpointMessageID: "post-u",
+	}
+
+	if _, err := selectCompaction(messages, latest, true, 1, estimateMessage(messages[0])-1); !errors.Is(err, ErrCurrentTurnTooLarge) {
+		t.Fatalf("error = %v, want ErrCurrentTurnTooLarge", err)
+	}
+}
+
+func TestSelectCompactionDeepClonesEverySelectedPartition(t *testing.T) {
+	messages := []model.Message{
+		selectTextMessage("history-u", model.RoleUser, "historical request"),
+		selectTextMessage("history-a", model.RoleAssistant, "historical answer"),
+		selectTextMessage("turn-u", model.RoleUser, "turn request"),
+		selectTextMessage("turn-early", model.RoleAssistant, selectLongText(240)),
+		selectTextMessage("turn-late", model.RoleAssistant, "late progress"),
+		selectTextMessage("latest-u", model.RoleUser, "follow-up"),
+	}
+	for index := range messages {
+		messages[index].Blocks[0].Arguments = []byte(`{"index":1}`)
+		messages[index].Usage = &model.Usage{InputTokens: index + 1}
+	}
+	original := cloneMessages(messages)
+	keep := estimateMessage(messages[4]) + estimateMessage(messages[5])
+
+	selection, err := selectCompaction(messages, session.CompactionMetadata{}, false, keep, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partitions := [][]model.Message{selection.HistoricalSource, selection.TurnPrefixSource, selection.Retained}
+	for _, partition := range partitions {
+		if len(partition) == 0 {
+			t.Fatal("test fixture did not populate every selected partition")
+		}
+		partition[0].Blocks[0].Text = "mutated"
+		partition[0].Blocks[0].Arguments[0] = 'X'
+		partition[0].Usage.InputTokens = 999
+	}
+	if !reflect.DeepEqual(messages, original) {
+		t.Fatal("mutating selection changed nested input message data")
+	}
+}
+
 func selectToolConversationFixture() []model.Message {
 	return []model.Message{
 		selectTextMessage("u1", model.RoleUser, "use both tools"),

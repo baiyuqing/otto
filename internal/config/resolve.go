@@ -8,7 +8,6 @@ import (
 )
 
 const (
-	defaultMaxTurns       = 50
 	defaultShellTimeout   = 120 * time.Second
 	defaultMaxOutputBytes = 51200
 )
@@ -88,14 +87,6 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 	}
 	baseURL = normalizedBaseURL
 
-	maxTurns := defaultMaxTurns
-	if file.Agent.MaxTurns > 0 {
-		maxTurns = file.Agent.MaxTurns
-	}
-	if overrides.MaxTurns > 0 {
-		maxTurns = overrides.MaxTurns
-	}
-
 	shellTimeout := defaultShellTimeout
 	if file.Agent.ShellTimeout != "" {
 		duration, err := time.ParseDuration(file.Agent.ShellTimeout)
@@ -131,7 +122,6 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		Model:          model,
 		APIKey:         apiKey,
 		APIKeyEnv:      apiKeyEnv,
-		MaxTurns:       maxTurns,
 		ShellTimeout:   shellTimeout,
 		MaxOutputBytes: maxOutputBytes,
 	}, nil

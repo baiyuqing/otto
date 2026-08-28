@@ -8,11 +8,12 @@ import (
 )
 
 type chatRequest struct {
-	Model         string        `json:"model"`
-	Messages      []chatMessage `json:"messages"`
-	Tools         []chatTool    `json:"tools,omitempty"`
-	Stream        bool          `json:"stream"`
-	StreamOptions streamOptions `json:"stream_options"`
+	Model           string        `json:"model"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
+	Messages        []chatMessage `json:"messages"`
+	Tools           []chatTool    `json:"tools,omitempty"`
+	Stream          bool          `json:"stream"`
+	StreamOptions   streamOptions `json:"stream_options"`
 }
 
 type streamOptions struct {
@@ -71,9 +72,10 @@ type chatUsage struct {
 
 func translateRequest(request provider.Request) chatRequest {
 	translated := chatRequest{
-		Model:         request.Model,
-		Stream:        true,
-		StreamOptions: streamOptions{IncludeUsage: true},
+		Model:           request.Model,
+		ReasoningEffort: request.Thinking,
+		Stream:          true,
+		StreamOptions:   streamOptions{IncludeUsage: true},
 	}
 	if request.SystemPrompt != "" {
 		translated.Messages = append(translated.Messages, chatMessage{Role: "system", Content: request.SystemPrompt})

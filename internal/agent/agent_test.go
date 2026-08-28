@@ -105,6 +105,22 @@ func TestRunForwardsTextDeltas(t *testing.T) {
 	}
 }
 
+func TestRunSendsThinkingToProvider(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{
+		response: provider.Response{
+			Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}},
+			FinishReason: model.FinishStop,
+		},
+	}}}
+	runner := New(fakeProvider, nil, session.NewMemory(testHeader(t)), Options{Model: "test", Thinking: "high", Now: fixedClock, NewID: fixedIDs()})
+	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 1 || fakeProvider.requests[0].Thinking != "high" {
+		t.Fatalf("provider requests = %#v, want Thinking high", fakeProvider.requests)
+	}
+}
+
 func TestRunEmitsToolCallEvents(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{

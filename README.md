@@ -16,6 +16,8 @@ Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-orie
 - Built-in `read`, `write`, `edit`, and `bash` tools
 - Persistent JSONL sessions with `--continue` and `--resume`
 - Global TOML configuration at `~/.config/otto/config.toml`
+- `--thinking` pass-through for model reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
+- `--approve` headless mode for non-interactive single-prompt runs
 
 ### Excluded in Stage 1
 
@@ -83,6 +85,20 @@ OTTO_API_KEY=your-key ./otto \
   --base-url https://api.deepseek.com/v1 \
   --model deepseek-chat \
   --no-session
+```
+
+Set model thinking effort with `--thinking`:
+
+```bash
+./otto --thinking high
+```
+
+Run a single prompt headless with `--approve` and exit:
+
+```bash
+./otto --approve "summarize TODOs in this repo"
+./otto --approve @prompt.txt --no-session
+./otto --approve "explain main.go" --thinking max --continue
 ```
 
 ## Configuration and precedence

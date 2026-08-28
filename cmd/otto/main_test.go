@@ -762,6 +762,115 @@ api_key_env = "TEST_KEY"
 	}
 }
 
+func TestRunResumeAndContinuePersistEffectiveRuntimeOverrides(t *testing.T) {
+	for _, selector := range []string{"resume", "continue"} {
+		t.Run(selector, func(t *testing.T) {
+			var requestModel, authorization string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				authorization = r.Header.Get("Authorization")
+				var request struct {
+					Model string `json:"model"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				requestModel = request.Model
+				writeSSE(w, `{"choices":[{"delta":{"content":"effective answer"},"finish_reason":"stop"}]}`)
+			}))
+			defer server.Close()
+
+			home := t.TempDir()
+			workspace := t.TempDir()
+			root := filepath.Join(home, ".otto", "sessions")
+			store, err := session.Create(root, session.Header{
+				Version: session.CurrentVersion, ID: selector + "-runtime", Workspace: workspace,
+				Provider: "openai-compatible", Profile: "stored", Model: "stored-model", CreatedAt: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := store.Path()
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			configPath := filepath.Join(t.TempDir(), "otto.toml")
+			configText := fmt.Sprintf(`default_profile = "stored"
+[profiles.stored]
+provider = "openai-compatible"
+base_url = %q
+model = "stored-profile-model"
+api_key_env = "STORED_KEY"
+[profiles.override]
+provider = "openai-compatible"
+base_url = %q
+model = "override-profile-model"
+api_key_env = "OVERRIDE_KEY"
+`, server.URL, server.URL)
+			if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{
+				"--config", configPath, "--cwd", workspace,
+				"--profile", "override", "--provider", "openai-compatible", "--model", "effective-model",
+			}
+			if selector == "resume" {
+				args = append(args, "--resume", path)
+			} else {
+				args = append(args, "--continue")
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), args, strings.NewReader("use effective runtime\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+				"HOME": home, "SHELL": "/bin/sh", "STORED_KEY": "stored-secret", "OVERRIDE_KEY": "override-secret",
+			}))
+			if code != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if requestModel != "effective-model" || authorization != "Bearer override-secret" {
+				t.Fatalf("request model/auth = %q / %q", requestModel, authorization)
+			}
+
+			reopened, warnings, err := session.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(warnings) != 0 {
+				_ = reopened.Close()
+				t.Fatalf("warnings = %#v", warnings)
+			}
+			header := reopened.Header()
+			if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if header.Profile != "override" || header.Provider != "openai-compatible" || header.Model != "effective-model" {
+				t.Fatalf("reopened Header() = %#v", header)
+			}
+
+			lines := bytes.Split(bytes.TrimSpace(mustReadFile(t, path)), []byte{'\n'})
+			var assistantProvider, assistantModel string
+			for _, line := range lines {
+				var record struct {
+					Type    string `json:"type"`
+					Message struct {
+						Role     string `json:"role"`
+						Provider string `json:"provider"`
+						Model    string `json:"model"`
+					} `json:"message"`
+				}
+				if err := json.Unmarshal(line, &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Type == "message" && record.Message.Role == "assistant" {
+					assistantProvider, assistantModel = record.Message.Provider, record.Message.Model
+				}
+			}
+			if assistantProvider != "openai-compatible" || assistantModel != "effective-model" {
+				t.Fatalf("persisted assistant provider/model = %q/%q", assistantProvider, assistantModel)
+			}
+		})
+	}
+}
+
 func TestRunResumeUsesPersistedProfileForEndpointAndKey(t *testing.T) {
 	var defaultRequests, resumedRequests atomic.Int32
 	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1555,6 +1664,14 @@ type trackingSession struct {
 	appendErr  error
 	closeErr   error
 	closeCalls atomic.Int32
+}
+
+func (s *trackingSession) UpdateRuntime(ctx context.Context, metadata session.RuntimeMetadata) error {
+	updater, ok := s.Session.(session.RuntimeUpdater)
+	if !ok {
+		return errors.New("wrapped session does not support runtime updates")
+	}
+	return updater.UpdateRuntime(ctx, metadata)
 }
 
 func (s *trackingSession) Append(ctx context.Context, message model.Message) error {

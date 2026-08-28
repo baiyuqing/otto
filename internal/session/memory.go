@@ -32,6 +32,24 @@ func (m *Memory) Messages() []model.Message {
 	return cloneMessages(m.messages)
 }
 
+func (m *Memory) UpdateRuntime(ctx context.Context, runtime RuntimeMetadata) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return errSessionClosed
+	}
+	if runtime.Provider == "" || runtime.Model == "" {
+		return ErrInvalidSession
+	}
+	m.header.Profile = runtime.Profile
+	m.header.Provider = runtime.Provider
+	m.header.Model = runtime.Model
+	return nil
+}
+
 func (m *Memory) Append(ctx context.Context, message model.Message) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -388,6 +388,86 @@ func TestStoreRetainsFullActivePathAggregateUsageAcrossCompactionAndAppend(t *te
 	}
 }
 
+func TestStoreUpdateRuntimePersistsEffectiveAssistantProvenanceAndNoopsUnchanged(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	before := readFile(t, path)
+	unchanged := RuntimeMetadata{Profile: store.Header().Profile, Provider: store.Header().Provider, Model: store.Header().Model}
+	if err := store.UpdateRuntime(context.Background(), unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("unchanged runtime appended a session record")
+	}
+
+	effective := RuntimeMetadata{Profile: "override", Provider: "openai-compatible", Model: "effective-model"}
+	if err := store.UpdateRuntime(context.Background(), effective); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Header(); got.Profile != effective.Profile || got.Provider != effective.Provider || got.Model != effective.Model {
+		t.Fatalf("Header() after runtime update = %#v", got)
+	}
+	if err := store.Append(context.Background(), model.Message{
+		Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "effective answer"}},
+		CreatedAt: time.Now().UTC(), FinishReason: model.FinishStop,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	decoded := decodeFixture(t, path)
+	if len(decoded.Entries) != 3 || decoded.Entries[1].Custom == nil || decoded.Entries[1].Custom.CustomType != ottoRuntimeCustomType {
+		t.Fatalf("runtime update entries = %#v", decoded.Entries)
+	}
+	assistant := decoded.Entries[2].Message
+	if assistant == nil || assistant.Provider != effective.Provider || assistant.Model != effective.Model {
+		t.Fatalf("assistant provenance = %#v, want %#v", assistant, effective)
+	}
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if got := reopened.Header(); got.Profile != effective.Profile || got.Provider != effective.Provider || got.Model != effective.Model {
+		t.Fatalf("reopened Header() = %#v", got)
+	}
+}
+
+func TestStoreRuntimeUpdateFailurePoisonsFurtherAppends(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	injected := errors.New("runtime update write failed")
+	writer := &faultingDurableWriter{file: store.file, writeErr: injected}
+	store.writer = writer
+
+	runtimeErr := store.UpdateRuntime(context.Background(), RuntimeMetadata{
+		Profile: "override", Provider: "openai-compatible", Model: "effective-model",
+	})
+	if !errors.Is(runtimeErr, ErrFatalPersistence) || !errors.Is(runtimeErr, injected) {
+		t.Fatalf("UpdateRuntime() error = %v", runtimeErr)
+	}
+	appendErr := store.Append(context.Background(), model.Message{
+		Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "must not append"}}, CreatedAt: time.Now().UTC(),
+	})
+	if appendErr != runtimeErr {
+		t.Fatalf("Append() error = %p, want original runtime fatal error %p", appendErr, runtimeErr)
+	}
+	if writer.writes != 1 {
+		t.Fatalf("writes = %d, want no write after runtime failure", writer.writes)
+	}
+}
+
 func TestStorePoisonedAfterDurableAppendFailure(t *testing.T) {
 	for _, test := range []struct {
 		name      string

@@ -61,6 +61,9 @@ func selectCompaction(
 		start = len(groups) - 1
 	}
 	retainedTokens := groupTokenSum(groups[start:])
+	if trailingStart := groups[len(groups)-1].end; trailingStart < len(transcript) {
+		retainedTokens = saturatingEstimateAdd(retainedTokens, selectMessageEstimate(transcript[trailingStart:]))
+	}
 	if hardInputBudget > 0 && retainedTokens > hardInputBudget {
 		return compactionSelection{}, ErrCurrentTurnTooLarge
 	}
@@ -80,19 +83,7 @@ func selectCompaction(
 	retainedStart := groups[start].start
 	selection.Retained = cloneSelectionMessages(transcript[retainedStart:])
 	selection.FirstKeptID = selection.Retained[0].ID
-
-	if transcript[groups[start].primary].Role == model.RoleAssistant {
-		if turnStart := precedingUserGroup(transcript, groups, start); turnStart >= 0 {
-			turnStartMessage := groups[turnStart].start
-			selection.HistoricalSource = cloneSelectionMessages(transcript[:turnStartMessage])
-			selection.TurnPrefixSource = cloneSelectionMessages(transcript[turnStartMessage:retainedStart])
-			selection.SplitTurn = len(selection.TurnPrefixSource) != 0
-		} else {
-			selection.HistoricalSource = cloneSelectionMessages(transcript[:retainedStart])
-		}
-	} else {
-		selection.HistoricalSource = cloneSelectionMessages(transcript[:retainedStart])
-	}
+	selection = partitionCompactionSource(transcript, groups, start, retainedStart, selection)
 
 	if len(selection.HistoricalSource) == 0 && len(selection.TurnPrefixSource) == 0 {
 		return compactionSelection{}, ErrNothingToCompact
@@ -122,6 +113,9 @@ func selectAfterRetainedTail(
 	if anchor < 0 {
 		return compactionSelection{}, ErrNothingToCompact
 	}
+	if hardInputBudget > 0 && selectMessageEstimate(transcript[anchor:]) > hardInputBudget {
+		return compactionSelection{}, ErrCurrentTurnTooLarge
+	}
 	if anchor == 0 {
 		return compactionSelection{}, ErrNothingToCompact
 	}
@@ -130,27 +124,44 @@ func selectAfterRetainedTail(
 	if err != nil {
 		return compactionSelection{}, err
 	}
-	validAnchor := false
-	for _, group := range groups {
+	anchorGroup := -1
+	for index, group := range groups {
 		if group.start == anchor && group.primary == anchor {
-			validAnchor = true
+			anchorGroup = index
 			break
 		}
 	}
-	if !validAnchor {
+	if anchorGroup < 0 {
 		return compactionSelection{}, fmt.Errorf("select compaction: first post-checkpoint message is not a protocol-safe cut")
 	}
 
-	selection.HistoricalSource = cloneSelectionMessages(transcript[:anchor])
 	selection.Retained = cloneSelectionMessages(transcript[anchor:])
 	selection.FirstKeptID = latest.FirstPostCheckpointMessageID
-	if hardInputBudget > 0 && selectMessageEstimate(selection.Retained) > hardInputBudget {
-		return compactionSelection{}, ErrCurrentTurnTooLarge
-	}
+	selection = partitionCompactionSource(transcript, groups, anchorGroup, anchor, selection)
 	if err := validateCompactionSelection(selection); err != nil {
 		return compactionSelection{}, err
 	}
 	return selection, nil
+}
+
+func partitionCompactionSource(
+	transcript []model.Message,
+	groups []compactionMessageGroup,
+	startGroup int,
+	retainedStart int,
+	selection compactionSelection,
+) compactionSelection {
+	if transcript[groups[startGroup].primary].Role == model.RoleAssistant {
+		if turnStart := precedingUserGroup(transcript, groups, startGroup); turnStart >= 0 {
+			turnStartMessage := groups[turnStart].start
+			selection.HistoricalSource = cloneSelectionMessages(transcript[:turnStartMessage])
+			selection.TurnPrefixSource = cloneSelectionMessages(transcript[turnStartMessage:retainedStart])
+			selection.SplitTurn = len(selection.TurnPrefixSource) != 0
+			return selection
+		}
+	}
+	selection.HistoricalSource = cloneSelectionMessages(transcript[:retainedStart])
+	return selection
 }
 
 func compactionTranscript(messages []model.Message, latest session.CompactionMetadata, hasLatest bool) ([]model.Message, string) {
@@ -208,14 +219,6 @@ func groupCompactionMessages(messages []model.Message) ([]compactionMessageGroup
 		index = end
 	}
 
-	if pendingContext >= 0 {
-		if len(groups) == 0 {
-			return nil, nil
-		}
-		last := &groups[len(groups)-1]
-		last.end = len(messages)
-		last.tokens = selectMessageEstimate(messages[last.start:last.end])
-	}
 	return groups, nil
 }
 
@@ -274,6 +277,9 @@ func validateCompactionSelection(selection compactionSelection) error {
 	}
 	if len(selection.Retained) == 0 || selection.Retained[0].Role == model.RoleTool {
 		return fmt.Errorf("select compaction: retained context has no protocol-safe start")
+	}
+	if selection.FirstKeptID == "" {
+		return ErrNothingToCompact
 	}
 	return nil
 }
@@ -340,8 +346,5 @@ func validateRetainedToolPairs(messages []model.Message) error {
 }
 
 func cloneSelectionMessages(messages []model.Message) []model.Message {
-	if len(messages) == 0 {
-		return nil
-	}
-	return append([]model.Message(nil), messages...)
+	return cloneMessages(messages)
 }

@@ -1,0 +1,196 @@
+package agent
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"sort"
+	"strings"
+	"unicode/utf8"
+)
+
+const redactionMarker = "[REDACTED]"
+
+// Redactor removes resolved secret values at the provider-neutral agent
+// boundary. Its source values remain encapsulated and are never exposed
+// through agent options or errors.
+type Redactor struct {
+	values []string
+}
+
+func NewRedactor(values []string) *Redactor {
+	seen := make(map[string]struct{}, len(values))
+	redactor := &Redactor{}
+	for _, value := range values {
+		if value == "" || !utf8.ValidString(value) {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		redactor.values = append(redactor.values, strings.Clone(value))
+	}
+	sort.Slice(redactor.values, func(i, j int) bool {
+		return len(redactor.values[i]) > len(redactor.values[j])
+	})
+	return redactor
+}
+
+func (r *Redactor) RedactString(text string) string {
+	if r == nil || len(r.values) == 0 || text == "" {
+		return text
+	}
+	for _, value := range r.values {
+		text = strings.ReplaceAll(text, value, redactionMarker)
+	}
+	return text
+}
+
+func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
+	if r == nil || len(r.values) == 0 || len(raw) == 0 {
+		return append(json.RawMessage(nil), raw...)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return json.RawMessage(r.RedactString(string(raw)))
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return json.RawMessage(r.RedactString(string(raw)))
+	}
+	redactJSONValueStrings(r, value)
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage(r.RedactString(string(raw)))
+	}
+	return json.RawMessage(encoded)
+}
+
+func (r *Redactor) RedactError(err error) error {
+	if err == nil || r == nil || len(r.values) == 0 {
+		return err
+	}
+	message := r.RedactString(err.Error())
+	if message == err.Error() {
+		return err
+	}
+	return &redactedBoundaryError{message: message, original: err}
+}
+
+type redactedBoundaryError struct {
+	message  string
+	original error
+}
+
+func (e *redactedBoundaryError) Error() string { return e.message }
+func (e *redactedBoundaryError) Is(target error) bool {
+	return errors.Is(e.original, target)
+}
+
+func redactJSONValueStrings(redactor *Redactor, value any) {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			if text, ok := item.(string); ok {
+				value[key] = redactor.RedactString(text)
+				continue
+			}
+			redactJSONValueStrings(redactor, item)
+		}
+	case []any:
+		for index, item := range value {
+			if text, ok := item.(string); ok {
+				value[index] = redactor.RedactString(text)
+				continue
+			}
+			redactJSONValueStrings(redactor, item)
+		}
+	}
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+type streamRedactor struct {
+	redactor *Redactor
+	pending  string
+}
+
+func (r *Redactor) newStream() *streamRedactor {
+	return &streamRedactor{redactor: r}
+}
+
+func (s *streamRedactor) Write(text string) string {
+	if text == "" {
+		return ""
+	}
+	if s == nil || s.redactor == nil || len(s.redactor.values) == 0 {
+		return text
+	}
+	s.pending += text
+	var output strings.Builder
+	for len(s.pending) > 0 {
+		index, secret := s.firstSecret()
+		if index >= 0 {
+			output.WriteString(s.pending[:index])
+			output.WriteString(redactionMarker)
+			s.pending = s.pending[index+len(secret):]
+			continue
+		}
+		held := s.partialSecretSuffixBytes()
+		output.WriteString(s.pending[:len(s.pending)-held])
+		s.pending = s.pending[len(s.pending)-held:]
+		break
+	}
+	return output.String()
+}
+
+func (s *streamRedactor) Flush() string {
+	if s == nil || s.pending == "" {
+		return ""
+	}
+	pending := s.pending
+	s.pending = ""
+	return s.redactor.RedactString(pending)
+}
+
+func (s *streamRedactor) firstSecret() (int, string) {
+	first := -1
+	matched := ""
+	for _, secret := range s.redactor.values {
+		index := strings.Index(s.pending, secret)
+		if index < 0 || first >= 0 && index > first {
+			continue
+		}
+		if first < 0 || index < first || len(secret) > len(matched) {
+			first = index
+			matched = secret
+		}
+	}
+	return first, matched
+}
+
+func (s *streamRedactor) partialSecretSuffixBytes() int {
+	held := 0
+	for _, secret := range s.redactor.values {
+		maximum := min(len(s.pending), len(secret)-1)
+		for size := maximum; size > held; size-- {
+			if strings.HasSuffix(s.pending, secret[:size]) {
+				held = size
+				break
+			}
+		}
+	}
+	return held
+}

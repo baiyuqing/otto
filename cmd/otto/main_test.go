@@ -1086,6 +1086,85 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	}
 }
 
+func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArguments(t *testing.T) {
+	credential := fmt.Sprintf("provider-echo-secret-%d", time.Now().UnixNano())
+	authorization := "Bearer " + credential
+	home := t.TempDir()
+	workspace := t.TempDir()
+
+	var requestBodies []string
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		requestBodies = append(requestBodies, string(body))
+		requestCount++
+		if got := r.Header.Get("Authorization"); got != authorization {
+			t.Errorf("Authorization = %q, want resolved credential", got)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requestCount == 1 {
+			textSplit := len(authorization) - 3
+			arguments := fmt.Sprintf(`{"path":"credential.txt","content":%q}`, authorization)
+			argumentSplit := strings.Index(arguments, credential) + len(credential)/2
+			chunks := []string{
+				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "authorization="+authorization[:textSplit]),
+				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, authorization[textSplit:]),
+				fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write","arguments":%q}}]}}]}`, arguments[:argumentSplit]),
+				fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":%q}}]},"finish_reason":"tool_calls"}]}`, arguments[argumentSplit:]),
+			}
+			for _, chunk := range chunks {
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+			}
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"credential remained private"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check provider output\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": credential,
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if requestCount != 2 {
+		t.Fatalf("provider requests = %d, want 2", requestCount)
+	}
+
+	persisted, err := os.ReadFile(onlySessionPath(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executed, err := os.ReadFile(filepath.Join(workspace, "credential.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	locations := map[string]string{
+		"stdout events":            stdout.String(),
+		"stderr":                   stderr.String(),
+		"executed write arguments": string(executed),
+		"provider follow-up":       requestBodies[1],
+		"session JSONL":            string(persisted),
+	}
+	for location, content := range locations {
+		if strings.Contains(content, credential) || strings.Contains(content, authorization) {
+			t.Fatalf("%s leaked successful provider credential echo: %q", location, content)
+		}
+	}
+	for _, location := range []string{"stdout events", "executed write arguments", "provider follow-up", "session JSONL"} {
+		if !strings.Contains(locations[location], "[REDACTED]") {
+			t.Fatalf("%s did not retain a redaction marker: %q", location, locations[location])
+		}
+	}
+}
+
 func TestRunKeepsEveryProfileCredentialOutOfBashEventsSessionAndProviderHistory(t *testing.T) {
 	resolvedCredential := fmt.Sprintf("resolved-%d", time.Now().UnixNano())
 	inactiveCredential := fmt.Sprintf("inactive-%d", time.Now().UnixNano())

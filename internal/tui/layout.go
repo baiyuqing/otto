@@ -152,7 +152,8 @@ func helpOverlayContent(width, height int) string {
 		"",
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
-		"Ctrl+O toggle tool output",
+		"Ctrl+O toggle tool arguments/output",
+		"Shift+drag select terminal text",
 		"PgUp/PgDn scroll",
 		"Home/End transcript top/bottom",
 		"Esc cancel or close overlay",
@@ -169,9 +170,9 @@ func helpOverlayContent(width, height int) string {
 	compact := []string{
 		"Help (? /help) | Enter submit",
 		"Shift+Enter/Alt+Enter newline",
-		"Ctrl+O tools | PgUp/PgDn scroll",
-		"Home/End top/bot | Esc cancel/close",
-		"Ctrl+C cancel/clear/quit",
+		"Ctrl+O args/output | Shift+drag",
+		"PgUp/PgDn scroll | Home/End top/bot",
+		"Esc close | Ctrl+C cancel/clear/quit",
 		strings.Join(commandNames, " "),
 	}
 	innerWidth := max(0, width-4)

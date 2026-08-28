@@ -139,7 +139,8 @@ Selection rules:
 - The TUI uses the terminal alternate screen buffer.
 - Assistant responses render as Markdown in the transcript.
 - If Markdown rendering fails, Otto falls back to escaped plain text instead of raw control sequences.
-- Tool calls are collapsed to summary lines by default; `Ctrl+O` toggles expanded tool output.
+- Tool calls are collapsed to bounded one-line summaries by default; `Ctrl+O` toggles complete arguments and tool output.
+- Mouse-wheel transcript scrolling remains enabled. Hold `Shift` while dragging to select visible terminal text, then use the terminal's normal copy command.
 - The footer adapts to the available width and shows workspace/profile/model, token totals, and session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message until the window is large enough.
 
@@ -152,8 +153,9 @@ Selection rules:
 | `↑` / `↓` | Select a slash-command suggestion |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
-| `Ctrl+O` | Toggle expanded tool output |
-| `PgUp` / `PgDn` | Scroll the transcript |
+| `Ctrl+O` | Toggle complete tool arguments and output |
+| `Shift`+drag | Select visible terminal text while mouse reporting is active |
+| Mouse wheel or `PgUp` / `PgDn` | Scroll the transcript |
 | `Home` / `End` | Jump to the top or bottom of the transcript |
 | `Esc` | Cancel the active turn or close the current overlay |
 | `Ctrl+C` | Cancel, clear, then quit on a second press within one second |

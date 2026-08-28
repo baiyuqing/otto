@@ -500,6 +500,70 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 	}
 }
 
+func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing.T) {
+	credential := fmt.Sprintf("agent-boundary-secret-%d", time.Now().UnixNano())
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(_ context.Context, arguments json.RawMessage) tool.Result {
+		recorder.calls = append(recorder.calls, string(arguments))
+		return tool.Result{Content: "tool returned " + credential}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := json.RawMessage(fmt.Sprintf(`{"value":%q,"nested":[%q]}`, credential, "Bearer "+credential))
+	stream := []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "text "}}
+	for _, character := range credential {
+		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string(character)})
+	}
+	stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: " done"})
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: stream,
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "text " + credential + " done"},
+					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: arguments},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "finished"}}}, FinishReason: model.FinishStop}},
+	}}
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()}, NewRedactor([]string{credential}))
+
+	var events []Event
+	if err := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.calls) != 1 || strings.Contains(recorder.calls[0], credential) || !strings.Contains(recorder.calls[0], "[REDACTED]") {
+		t.Fatalf("executed arguments = %#v", recorder.calls)
+	}
+	for index, event := range events {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), credential) {
+			t.Fatalf("event %d leaked credential: %s", index, encoded)
+		}
+	}
+	for location, value := range map[string]any{
+		"messages":       memory.Messages(),
+		"follow-up":      fakeProvider.requests[1],
+		"tool execution": recorder.calls,
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), credential) || !strings.Contains(string(encoded), "[REDACTED]") {
+			t.Fatalf("%s was not redacted: %s", location, encoded)
+		}
+	}
+}
+
 func TestRunClassifiesFatalPersistenceAtEveryDurableBoundary(t *testing.T) {
 	for _, test := range []struct {
 		name          string

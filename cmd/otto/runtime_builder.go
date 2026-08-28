@@ -118,9 +118,10 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
 	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
+	redactor := agent.NewRedactor(b.secretValues(&runtime))
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
-	}), nil
+	}, redactor), nil
 }
 
 func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.SessionReplacement, error) {

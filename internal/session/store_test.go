@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -342,6 +343,48 @@ func TestAppendRejectsTimestampOutsideRFC3339NanoRange(t *testing.T) {
 	defer reopened.Close()
 	if len(warnings) != 0 || len(reopened.Messages()) != 1 || reopened.Messages()[0].Text() != "valid" {
 		t.Fatalf("reopened state: warnings=%#v messages=%#v", warnings, reopened.Messages())
+	}
+}
+
+func TestStoreRetainsFullActivePathAggregateUsageAcrossCompactionAndAppend(t *testing.T) {
+	usageJSON := func(input, output int) string {
+		return fmt.Sprintf(`{"input":%d,"output":%d,"cacheRead":0,"cacheWrite":0,"totalTokens":%d,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, input, output, input+output)
+	}
+	path := writeFixture(t, strings.Join([]string{
+		`{"type":"session","version":3,"id":"usage-session","timestamp":"2026-08-27T12:00:00Z","cwd":"/workspace"}`,
+		`{"type":"custom","id":"91000001","parentId":null,"timestamp":"2026-08-27T12:00:01Z","customType":"otto.runtime","data":{"profile":"default","provider":"openai-compatible","model":"model"}}`,
+		fmt.Sprintf(`{"type":"message","id":"91000002","parentId":"91000001","timestamp":"2026-08-27T12:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"old"}],"api":"openai-completions","provider":"openai-compatible","model":"model","usage":%s,"stopReason":"stop","timestamp":2}}`, usageJSON(10, 3)),
+		fmt.Sprintf(`{"type":"branch_summary","id":"91000003","parentId":"91000002","timestamp":"2026-08-27T12:00:03Z","fromId":"91000002","summary":"branch","usage":%s}`, usageJSON(4, 2)),
+		fmt.Sprintf(`{"type":"compaction","id":"91000004","parentId":"91000003","timestamp":"2026-08-27T12:00:04Z","summary":"compact","tokensBefore":17,"retainedTail":[],"usage":%s}`, usageJSON(6, 1)),
+	}, "\n")+"\n")
+
+	store, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if got := store.Messages(); len(got) != 1 || got[0].ContextType != compactionContextType {
+		t.Fatalf("selected messages = %#v, want only empty-tail compaction checkpoint", got)
+	}
+	usageSource, ok := any(store).(UsageProvider)
+	if !ok {
+		t.Fatal("Store does not expose aggregate usage")
+	}
+	if usage, present := usageSource.AggregateUsage(); !present || usage != (model.Usage{InputTokens: 20, OutputTokens: 6}) {
+		t.Fatalf("AggregateUsage() = %#v, %v", usage, present)
+	}
+
+	if err := store.Append(context.Background(), model.Message{
+		Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "new"}}, CreatedAt: time.Now().UTC(),
+		FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 2, OutputTokens: 3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if usage, present := usageSource.AggregateUsage(); !present || usage != (model.Usage{InputTokens: 22, OutputTokens: 9}) {
+		t.Fatalf("AggregateUsage() after append = %#v, %v", usage, present)
 	}
 }
 

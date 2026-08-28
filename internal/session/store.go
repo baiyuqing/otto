@@ -31,18 +31,20 @@ type durableRecordWriter interface {
 }
 
 type Store struct {
-	mu        sync.Mutex
-	header    Header
-	messages  []model.Message
-	entries   []piEntry
-	entryIDs  map[string]struct{}
-	leafID    *string
-	path      string
-	file      *os.File
-	writer    durableRecordWriter
-	fileBytes int64
-	fatalErr  error
-	closed    bool
+	mu             sync.Mutex
+	header         Header
+	messages       []model.Message
+	aggregateUsage model.Usage
+	usagePresent   bool
+	entries        []piEntry
+	entryIDs       map[string]struct{}
+	leafID         *string
+	path           string
+	file           *os.File
+	writer         durableRecordWriter
+	fileBytes      int64
+	fatalErr       error
+	closed         bool
 }
 
 func Create(root string, header Header) (*Store, error) {
@@ -134,11 +136,11 @@ func ReadHeader(path string) (Header, error) {
 	if err != nil {
 		return Header{}, err
 	}
-	header, _, _, _, _, err := resolvePiStoreState(decoded)
+	state, err := resolvePiStoreState(decoded)
 	if err != nil {
 		return Header{}, err
 	}
-	return header, nil
+	return state.header, nil
 }
 
 func Open(path string) (*Store, []Warning, error) {
@@ -163,26 +165,28 @@ func openStoreFromFile(file *os.File, path string) (*Store, []Warning, error) {
 	if err != nil {
 		return closeOnError(err)
 	}
-	header, messages, entryIDs, leafID, contextWarnings, err := resolvePiStoreState(decoded)
+	state, err := resolvePiStoreState(decoded)
 	if err != nil {
 		return closeOnError(err)
 	}
-	warnings = append(warnings, contextWarnings...)
+	warnings = append(warnings, state.warnings...)
 	position, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
 		return closeOnError(fmt.Errorf("seek session file: %w", err))
 	}
 
 	store := &Store{
-		header:    header,
-		messages:  messages,
-		entries:   append([]piEntry(nil), decoded.Entries...),
-		entryIDs:  entryIDs,
-		leafID:    cloneStringPointer(leafID),
-		path:      path,
-		file:      file,
-		writer:    file,
-		fileBytes: position,
+		header:         state.header,
+		messages:       state.messages,
+		aggregateUsage: state.aggregateUsage,
+		usagePresent:   state.usagePresent,
+		entries:        append([]piEntry(nil), decoded.Entries...),
+		entryIDs:       state.entryIDs,
+		leafID:         cloneStringPointer(state.leafID),
+		path:           path,
+		file:           file,
+		writer:         file,
+		fileBytes:      position,
 	}
 	repairWarnings, err := store.repairDanglingToolCalls()
 	if err != nil {
@@ -205,6 +209,12 @@ func (s *Store) Messages() []model.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneMessages(s.messages)
+}
+
+func (s *Store) AggregateUsage() (model.Usage, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.aggregateUsage, s.usagePresent
 }
 
 func (s *Store) Append(ctx context.Context, message model.Message) error {
@@ -250,6 +260,10 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 	s.leafID = stringPointer(entryID)
 	s.fileBytes += recordBytes
 	s.messages = append(s.messages, cloneMessage(persistedMessage))
+	if persistedMessage.Role == model.RoleAssistant {
+		s.aggregateUsage = addResolvedUsage(s.aggregateUsage, persistedMessage.Usage)
+		s.usagePresent = true
+	}
 	return nil
 }
 
@@ -296,10 +310,20 @@ func (s *Store) repairDanglingToolCalls() ([]Warning, error) {
 	return warnings, nil
 }
 
-func resolvePiStoreState(decoded piFile) (Header, []model.Message, map[string]struct{}, *string, []Warning, error) {
+type resolvedPiStoreState struct {
+	header         Header
+	messages       []model.Message
+	aggregateUsage model.Usage
+	usagePresent   bool
+	entryIDs       map[string]struct{}
+	leafID         *string
+	warnings       []Warning
+}
+
+func resolvePiStoreState(decoded piFile) (resolvedPiStoreState, error) {
 	createdAt, err := validatePiHeader(decoded.Header)
 	if err != nil {
-		return Header{}, nil, nil, nil, nil, err
+		return resolvedPiStoreState{}, err
 	}
 	entryIDs := make(map[string]struct{}, len(decoded.Entries))
 	for _, entry := range decoded.Entries {
@@ -315,20 +339,21 @@ func resolvePiStoreState(decoded piFile) (Header, []model.Message, map[string]st
 	}
 	resolved, warnings, err := buildContext(decoded.Entries, leaf)
 	if err != nil {
-		return Header{}, nil, nil, nil, nil, err
+		return resolvedPiStoreState{}, err
 	}
-	header := Header{
-		Version:   CurrentVersion,
-		ID:        decoded.Header.ID,
-		Workspace: decoded.Header.CWD,
-		Provider:  resolved.Runtime.Provider,
-		Profile:   resolved.Runtime.Profile,
-		Model:     resolved.Runtime.Model,
-		CreatedAt: createdAt,
-	}
-	return header, resolved.Messages, entryIDs, leafID, warnings, nil
+	return resolvedPiStoreState{
+		header: Header{
+			Version: CurrentVersion, ID: decoded.Header.ID, Workspace: decoded.Header.CWD,
+			Provider: resolved.Runtime.Provider, Profile: resolved.Runtime.Profile, Model: resolved.Runtime.Model, CreatedAt: createdAt,
+		},
+		messages:       resolved.Messages,
+		aggregateUsage: resolved.Usage,
+		usagePresent:   resolved.UsagePresent,
+		entryIDs:       entryIDs,
+		leafID:         leafID,
+		warnings:       warnings,
+	}, nil
 }
-
 func validateDomainHeader(header Header) (string, error) {
 	if strings.TrimSpace(header.ID) == "" || strings.ContainsAny(header.ID, `/\\`) || header.ID == "." || header.ID == ".." {
 		return "", fmt.Errorf("%w: session id is invalid", ErrInvalidSession)
@@ -659,7 +684,7 @@ func decodePiFileForOpen(file *os.File, path string) (piFile, []Warning, error) 
 		if err != nil {
 			return piFile{}, nil, err
 		}
-		if _, _, _, _, _, err := resolvePiStoreState(decoded); err != nil {
+		if _, err := resolvePiStoreState(decoded); err != nil {
 			return piFile{}, nil, err
 		}
 		if err := truncateSession(file, finalStart); err != nil {
@@ -676,7 +701,7 @@ func decodePiFileForOpen(file *os.File, path string) (piFile, []Warning, error) 
 		return piFile{}, nil, err
 	}
 	if missingLF {
-		if _, _, _, _, _, err := resolvePiStoreState(decoded); err != nil {
+		if _, err := resolvePiStoreState(decoded); err != nil {
 			return piFile{}, nil, err
 		}
 		if err := appendSessionDelimiter(file); err != nil {

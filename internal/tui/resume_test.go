@@ -665,7 +665,10 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 		if path != "/sessions/fresh.jsonl" {
 			t.Fatalf("path = %q, want fresh session path", path)
 		}
-		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new"}
+		backend.info = app.Info{
+			Profile: "new-profile", Model: "new-model", SessionID: "session-new",
+			Usage: model.Usage{InputTokens: 20, OutputTokens: 6}, UsagePresent: true,
+		}
 		backend.history = []model.Message{{
 			Role:   model.RoleAssistant,
 			Blocks: []model.Block{{Type: model.BlockText, Text: "fresh transcript"}},
@@ -714,7 +717,7 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	if got.resume.mode != resumeClosed || got.editor.Value() != "" || got.overlay != overlayNone || got.running || got.dirtyStreaming || got.renderTickActive || got.cancel != nil || got.ctrlCArmed || got.activeTurnChannel != nil || got.activeAssistant != -1 || got.turnErrorSeen || got.turnEventErr != nil || got.fatalErr != nil || got.turnHistoryBaseline != (turnHistoryBaseline{}) || got.turnEntryStart != 0 || got.liveEntrySequence != 0 || !got.autoFollow {
 		t.Fatalf("reset state = %#v", got)
 	}
-	if got.usage.InputTokens != 7 || got.usage.OutputTokens != 9 {
+	if got.usage.InputTokens != 20 || got.usage.OutputTokens != 6 {
 		t.Fatalf("usage = %#v", got.usage)
 	}
 	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") {

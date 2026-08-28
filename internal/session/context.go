@@ -24,6 +24,7 @@ type ResolvedContext struct {
 	Messages      []model.Message
 	Runtime       RuntimeMetadata
 	Usage         model.Usage
+	UsagePresent  bool
 	SessionName   string
 	ThinkingLevel string
 }
@@ -65,6 +66,7 @@ func buildContext(entries []piEntry, leafID string) (ResolvedContext, []Warning,
 					return ResolvedContext{}, collector.warnings, err
 				}
 				resolved.Usage = addResolvedUsage(resolved.Usage, usage)
+				resolved.UsagePresent = true
 			}
 		case "model_change":
 			if entry.ModelChange == nil {
@@ -85,6 +87,9 @@ func buildContext(entries []piEntry, leafID string) (ResolvedContext, []Warning,
 				return ResolvedContext{}, collector.warnings, err
 			}
 			resolved.Usage = addResolvedUsage(resolved.Usage, usage)
+			if entry.Compaction.Usage != nil {
+				resolved.UsagePresent = true
+			}
 		case "branch_summary":
 			if entry.BranchSummary == nil {
 				return ResolvedContext{}, collector.warnings, fmt.Errorf("%w: branch_summary payload is required", ErrInvalidSession)
@@ -94,6 +99,9 @@ func buildContext(entries []piEntry, leafID string) (ResolvedContext, []Warning,
 				return ResolvedContext{}, collector.warnings, err
 			}
 			resolved.Usage = addResolvedUsage(resolved.Usage, usage)
+			if entry.BranchSummary.Usage != nil {
+				resolved.UsagePresent = true
+			}
 		case "custom":
 			if entry.Custom == nil {
 				return ResolvedContext{}, collector.warnings, fmt.Errorf("%w: custom payload is required", ErrInvalidSession)

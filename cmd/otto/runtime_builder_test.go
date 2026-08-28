@@ -303,6 +303,76 @@ func TestRuntimeBuilderRejectsActivatedSessionMetadataMismatchAndClosesCandidate
 	}
 }
 
+func TestRuntimeBuilderListedResumeRejectsWorkspaceDirectorySymlinkSwapAndKeepsCurrent(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	listedPath := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{
+		Version: session.CurrentVersion, ID: "listed", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "test-model", CreatedAt: time.Now().UTC(),
+	})
+	listed, err := session.List(context.Background(), builder.sessionRoot, builder.workspacePath, "", 20)
+	if err != nil || len(listed.Sessions) != 1 || listed.Sessions[0].Path != listedPath {
+		t.Fatalf("List() = %#v, %v", listed, err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsidePath := createStoredSession(t, outsideRoot, builder.workspacePath, session.Header{
+		Version: session.CurrentVersion, ID: "listed", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "test-model", CreatedAt: time.Now().UTC(),
+	})
+	outsideBefore := mustReadFile(t, outsidePath)
+	listedDirectory := filepath.Dir(listedPath)
+	if err := os.Rename(listedDirectory, listedDirectory+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(outsidePath), listedDirectory); err != nil {
+		t.Fatal(err)
+	}
+
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+	current := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "current", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "test-model", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	var oldRunnerCalls atomic.Int32
+	oldRunner := commandRunnerFunc(func(context.Context, string, func(agent.Event)) error {
+		oldRunnerCalls.Add(1)
+		return nil
+	})
+	controller, err := app.New(current, func() (session.Session, error) { return nil, errors.New("unused") }, func(session.Session) app.Runner {
+		return oldRunner
+	}, app.WithSessionBrowser(func(context.Context, int) (session.ListResult, error) {
+		return listed, nil
+	}, builder.openReplacement))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	if _, err := controller.ResumeSession(context.Background(), listedPath); !errors.Is(err, session.ErrInvalidSession) {
+		t.Fatalf("ResumeSession() error = %v, want ErrInvalidSession", err)
+	}
+	if got := controller.Info(); got.SessionID != "current" {
+		t.Fatalf("current session changed after rejected listed candidate: %#v", got)
+	}
+	if current.closeCalls.Load() != 0 {
+		t.Fatalf("current close calls = %d, want 0", current.closeCalls.Load())
+	}
+	if err := controller.Prompt(context.Background(), "still usable", nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldRunnerCalls.Load() != 1 {
+		t.Fatalf("old runner calls = %d, want 1", oldRunnerCalls.Load())
+	}
+	if after := mustReadFile(t, outsidePath); !bytes.Equal(after, outsideBefore) {
+		t.Fatal("rejected resume mutated the outside session")
+	}
+}
+
 func TestRuntimeBuilderFailureClosesCandidateStore(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 	candidate := &trackedReplacementSession{Session: createOpenPiStore(t, builder.sessionRoot, builder.workspacePath, "candidate"), closed: make(chan struct{})}

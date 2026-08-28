@@ -160,6 +160,36 @@ func TestPreparedCloseAbandonsDescriptorAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPrepareListedRejectsWorkspaceDirectoryRenameAndSymlinkReplacement(t *testing.T) {
+	root := t.TempDir()
+	workspace := t.TempDir()
+	listedPath := createPreparedTestSession(t, root, workspace, "listed")
+	listedDirectory := filepath.Dir(listedPath)
+
+	outsideRoot := t.TempDir()
+	outsidePath := createPreparedTestSession(t, outsideRoot, workspace, "listed")
+	outsideBefore := readFile(t, outsidePath)
+	movedDirectory := listedDirectory + ".moved"
+	if err := os.Rename(listedDirectory, movedDirectory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Dir(outsidePath), listedDirectory); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := PrepareListed(context.Background(), root, workspace, listedPath)
+	if prepared != nil {
+		_ = prepared.Close()
+		t.Fatal("PrepareListed() returned an outside session handle")
+	}
+	if !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("PrepareListed() error = %v, want ErrInvalidSession", err)
+	}
+	if after := readFile(t, outsidePath); !bytes.Equal(after, outsideBefore) {
+		t.Fatal("rejected listed preparation mutated the outside session")
+	}
+}
+
 func TestPrepareRejectsSymlink(t *testing.T) {
 	path := createPreparedTestSession(t, t.TempDir(), t.TempDir(), "target")
 	link := filepath.Join(t.TempDir(), "linked.jsonl")

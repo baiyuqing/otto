@@ -40,21 +40,23 @@ const (
 type terminalDetector func(io.Reader, io.Writer) bool
 
 type runDependencies struct {
-	subscribeInterrupts func() interruptSubscription
-	prepareSession      func(context.Context, string, string) (preparedSession, error)
-	newSession          func(bool, string, string, config.Runtime) (session.Session, error)
-	detectTerminal      terminalDetector
-	runTUI              func(context.Context, io.Reader, io.Writer, app.Backend) error
-	newRunner           app.RunnerFactory
+	subscribeInterrupts  func() interruptSubscription
+	prepareSession       func(context.Context, string, string) (preparedSession, error)
+	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
+	newSession           func(bool, string, string, config.Runtime) (session.Session, error)
+	detectTerminal       terminalDetector
+	runTUI               func(context.Context, io.Reader, io.Writer, app.Backend) error
+	newRunner            app.RunnerFactory
 }
 
 func defaultRunDependencies() runDependencies {
 	return runDependencies{
-		subscribeInterrupts: subscribeOSInterrupts,
-		prepareSession:      prepareSession,
-		newSession:          newSession,
-		detectTerminal:      detectTerminalIO,
-		runTUI:              tui.Run,
+		subscribeInterrupts:  subscribeOSInterrupts,
+		prepareSession:       prepareSession,
+		prepareListedSession: prepareListedSession,
+		newSession:           newSession,
+		detectTerminal:       detectTerminalIO,
+		runTUI:               tui.Run,
 	}
 }
 
@@ -130,6 +132,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
 	sessionPath := options.resumePath
+	listedSessionPath := false
 	if options.continueLast {
 		listed, listErr := session.List(ctx, sessionRoot, workspacePath, "", 1)
 		if listErr != nil {
@@ -139,6 +142,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 			return fail(stderr, "no session found for workspace %s", workspacePath)
 		}
 		sessionPath = listed.Sessions[0].Path
+		listedSessionPath = true
 	}
 
 	configFile, err := loadConfig(options, home)
@@ -167,7 +171,11 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		preparedInfo    session.SessionInfo
 	)
 	if sessionPath != "" {
-		preparedInitial, err = builder.prepare(ctx, sessionPath)
+		if listedSessionPath {
+			preparedInitial, err = builder.prepareListed(ctx, sessionPath)
+		} else {
+			preparedInitial, err = builder.prepare(ctx, sessionPath)
+		}
 		if err != nil {
 			return fail(stderr, "%v", builder.redactError(err, nil))
 		}

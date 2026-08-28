@@ -528,6 +528,49 @@ func TestRunCanonicalizesCWDBeforeCreatingSession(t *testing.T) {
 	}
 }
 
+func TestRunContinueSkipsOldOttoSessions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"unused"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	home := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	olderValidPath := createCLISession(t, root, workspace, "older-valid-v3")
+	newestValidPath := createCLISession(t, root, workspace, "newest-valid-v3")
+	oldV1Path := writeOldPiV1Session(t, root, workspace, "newer-old-otto-v1")
+	corruptPath := writeCorruptPiSession(t, root, workspace, "newest-corrupt")
+	oldV1Before, err := os.ReadFile(oldV1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	setCLISessionMTime(t, olderValidPath, now.Add(-4*time.Hour))
+	setCLISessionMTime(t, newestValidPath, now.Add(-3*time.Hour))
+	setCLISessionMTime(t, oldV1Path, now.Add(-2*time.Hour))
+	setCLISessionMTime(t, corruptPath, now.Add(-time.Hour))
+
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--continue"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "offline-test-key",
+	}))
+	if code != 0 || !strings.Contains(stdout.String(), "ID: newest-valid-v3") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "newer-old-otto-v1") || strings.Contains(stdout.String(), "newest-corrupt") {
+		t.Fatalf("--continue selected an invalid newer file: %q", stdout.String())
+	}
+	oldV1After, err := os.ReadFile(oldV1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(oldV1After, oldV1Before) {
+		t.Fatal("old Otto v1 session was modified")
+	}
+}
+
 func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()

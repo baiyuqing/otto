@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,8 +21,10 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tui"
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -37,6 +42,127 @@ const (
 	wideFooterMarker    = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0 | " + footerSessionMarker
 	narrowFooterMarker  = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0"
 )
+
+func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"unused"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "pty-resume-workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".otto", "sessions")
+	currentPath := createPTYSession(t, root, workspace, "pty-current-session", "current transcript marker")
+	selectedPath := createPTYSession(t, root, workspace, "pty-selected-session", "selected transcript marker")
+	now := time.Now()
+	setCLISessionMTime(t, currentPath, now)
+	setCLISessionMTime(t, selectedPath, now.Add(-time.Hour))
+	configPath := writeCLIConfig(t, "openai-compatible", "PTY_TEST_KEY", server.URL)
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open() error = %v", err)
+	}
+	initialMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read initial terminal mode: %v", err)
+	}
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 120, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize(120x30) error = %v", err)
+	}
+
+	collector := newPTYOutputCollector(master)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	var stderr bytes.Buffer
+	runResult := startRunResult(func() error {
+		code := run(runCtx, []string{"--config", configPath, "--cwd", workspace, "--resume", currentPath, "--ui", "tui"}, slave, slave, &stderr, testGetenv(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "PTY_TEST_KEY": "offline-test-key",
+		}))
+		if code != 0 {
+			return fmt.Errorf("run exit code %d: %s", code, stderr.String())
+		}
+		return nil
+	})
+
+	t.Cleanup(func() {
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("forced TUI cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("forced TUI cleanup error: %v", err)
+		}
+	})
+
+	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
+	waitForSubsequence(t, collector, 0, "current transcript marker")
+	writePTY(t, master, "/resume\r")
+	waitForSubsequence(t, collector, 0, "Resume Session")
+	waitForSubsequence(t, collector, 0, "selected transcript marker")
+
+	writePTY(t, master, "\x1b[B\r")
+	selectedOffset := collector.Len()
+	waitForSubsequence(t, collector, selectedOffset, "selected transcript marker")
+	waitForSubsequence(t, collector, selectedOffset, "pty-selected-session")
+
+	resizeOffset := collector.Len()
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 82, Rows: 24}); err != nil {
+		t.Fatalf("pty.Ptysize(82x24) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("SIGWINCH error = %v", err)
+	}
+	waitForSubsequence(t, collector, resizeOffset, filepath.Base(workspace))
+
+	writePTY(t, master, "/exit\r")
+	waitForRunReturn(t, runResult)
+	waitForSubsequence(t, collector, 0, altScreenExitSeq)
+
+	output := collector.Snapshot()
+	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
+	if enters != 1 || exits != 1 {
+		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
+	}
+	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read restored terminal mode: %v", err)
+	}
+	const interactiveMode = unix.ICANON | unix.ECHO
+	if restoredMode.Lflag&interactiveMode != initialMode.Lflag&interactiveMode {
+		t.Fatalf("terminal mode leaked: initial lflag=%#x restored lflag=%#x", initialMode.Lflag, restoredMode.Lflag)
+	}
+	t.Logf("PTY escape evidence: alt-screen enter=%d exit=%d; ICANON|ECHO initial=%#x restored=%#x", enters, exits, initialMode.Lflag&interactiveMode, restoredMode.Lflag&interactiveMode)
+}
+
+func createPTYSession(t *testing.T, root, workspace, id, transcript string) string {
+	t.Helper()
+	store, err := session.Create(root, session.Header{
+		Version: session.CurrentVersion, ID: id, Workspace: workspace, Provider: "openai-compatible",
+		Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), model.Message{
+		Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: transcript}}, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	master, slave, err := pty.Open()
@@ -274,6 +400,12 @@ func (c *ptyOutputCollector) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.buf)
+}
+
+func (c *ptyOutputCollector) Snapshot() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.buf...)
 }
 
 func (c *ptyOutputCollector) WaitFor(after int, want []byte, timeout time.Duration) (int, error) {

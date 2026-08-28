@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
@@ -15,14 +16,15 @@ import (
 )
 
 type Agent struct {
-	provider provider.Provider
-	registry *tool.Registry
-	session  session.Session
-	options  Options
-	redactor *Redactor
+	operationMu sync.Mutex
+	provider    provider.Provider
+	registry    *tool.Registry
+	session     session.Session
+	options     Options
+	redactor    *Redactor
 }
 
-func New(provider provider.Provider, registry *tool.Registry, memory session.Session, options Options, redactors ...*Redactor) *Agent {
+func New(completionProvider provider.Provider, registry *tool.Registry, memory session.Session, options Options, redactors ...*Redactor) *Agent {
 	if registry == nil {
 		registry, _ = tool.NewRegistry()
 	}
@@ -32,6 +34,11 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 	if options.NewID == nil {
 		options.NewID = defaultNewID
 	}
+	if options.RequestSizer == nil {
+		if requestSizer, ok := completionProvider.(provider.RequestSizer); ok {
+			options.RequestSizer = requestSizer
+		}
+	}
 	var redactor *Redactor
 	if len(redactors) > 0 {
 		redactor = redactors[0]
@@ -39,10 +46,13 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 	if redactor == nil {
 		redactor = NewRedactor(nil)
 	}
-	return &Agent{provider: provider, registry: registry, session: memory, options: options, redactor: redactor}
+	return &Agent{provider: completionProvider, registry: registry, session: memory, options: options, redactor: redactor}
 }
 
 func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) error {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+
 	if text := trimSpace(userText); text == "" {
 		return a.fail(emit, ErrEmptyUserText)
 	}

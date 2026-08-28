@@ -9,6 +9,7 @@ import (
 type Request struct {
 	Model        string
 	SystemPrompt string
+	Thinking     string
 	Messages     []model.Message
 	Tools        []model.ToolDefinition
 }

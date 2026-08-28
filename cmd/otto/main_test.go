@@ -1112,6 +1112,19 @@ func TestRunRejectsUnknownMaxTurnsFlag(t *testing.T) {
 	}
 }
 
+func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "banana"}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 2 || !strings.Contains(stderr.String(), "--thinking must be one of low, medium, high, xhigh, max") {
+		t.Fatalf("code = %d, stderr = %q, want invalid thinking rejection", code, stderr.String())
+	}
+}
+
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
 	var requestCount int
@@ -1127,12 +1140,16 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 					Name string `json:"name"`
 				} `json:"function"`
 			} `json:"tools"`
+			ReasoningEffort string `json:"reasoning_effort"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
 		if len(payload.Messages) == 0 || payload.Messages[0].Role != "system" || payload.Messages[0].Content != expectedSystemPrompt {
 			t.Errorf("system message = %#v", payload.Messages)
+		}
+		if payload.ReasoningEffort != "xhigh" {
+			t.Errorf("reasoning_effort = %q, want xhigh", payload.ReasoningEffort)
 		}
 		if requestCount == 1 {
 			var names []string
@@ -1153,7 +1170,7 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "xhigh"}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "smoke-secret",
 	}))
 	if code != 0 {

@@ -72,6 +72,7 @@ func newRuntimeBuilder(configFile config.File, environment map[string]string, wo
 		prepareSession:       deps.prepareSession,
 		prepareListedSession: deps.prepareListedSession,
 		runtimeOverrides: config.Overrides{
+			Thinking:       options.thinking,
 			ShellTimeout:   options.shellTimeout,
 			MaxOutputBytes: options.maxOutput,
 		},
@@ -121,7 +122,7 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
 	redactor := agent.NewRedactor(b.secretValues(&runtime))
 	return agent.New(client, registry, current, agent.Options{
-		Model: runtime.Model, SystemPrompt: systemPrompt,
+		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
 	}, redactor), nil
 }
 

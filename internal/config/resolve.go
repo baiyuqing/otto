@@ -120,6 +120,7 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		Provider:       provider,
 		BaseURL:        baseURL,
 		Model:          model,
+		Thinking:       overrides.Thinking,
 		APIKey:         apiKey,
 		APIKeyEnv:      apiKeyEnv,
 		ShellTimeout:   shellTimeout,

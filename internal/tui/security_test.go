@@ -117,6 +117,51 @@ func TestResumePickerSanitizesAndClipsExternalMetadataWithoutEntityInterpretatio
 	}
 }
 
+func TestResumePickerSanitizesInjectionInRenderedErrorModesAndPathFallback(t *testing.T) {
+	payload := "safe" + terminalInjectionPayload + "\n> * forged-row"
+	assertSafePicker := func(t *testing.T, m Model, want string) {
+		t.Helper()
+		content := m.View().Content
+		assertRenderedBounds(t, content, m.width, m.height)
+		assertNoRawTerminalControls(t, content)
+		if !strings.Contains(content, want) || !strings.Contains(content, `\x1b]52;c;owned`) || !strings.Contains(content, `\x0a> * forged-row`) {
+			t.Fatalf("resume picker = %q, want escaped single-line payload and %q", content, want)
+		}
+		for _, line := range strings.Split(content, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "> * forged-row") {
+				t.Fatalf("resume picker created spoofed row: %q", content)
+			}
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		mode resumeMode
+		want string
+	}{
+		{name: "load error", mode: resumeLoadError, want: "Unable to load sessions"},
+		{name: "resume error", mode: resumeResumeError, want: "Error: safe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := resizeModel(t, loadedResumeModel(t, 1), 200, 12)
+			m.resume.mode = tc.mode
+			m.resume.errText = payload
+			assertSafePicker(t, m, tc.want)
+		})
+	}
+
+	t.Run("canonical path fallback", func(t *testing.T) {
+		m := resizeModel(t, loadedResumeModel(t, 1), 200, 12)
+		info := &m.resume.sessions[0]
+		info.Name = ""
+		info.LastUserText = ""
+		info.ID = ""
+		info.CWD = ""
+		info.Path = "/fallback/" + payload
+		assertSafePicker(t, m, "/fallback/safe")
+	})
+}
+
 func TestSingleLineSanitizerEscapesAllLineBreakingControls(t *testing.T) {
 	if got, want := escapeSingleLineText("one\ntwo\rthree\tfour"), `one\x0atwo\x0dthree\x09four`; got != want {
 		t.Fatalf("escapeSingleLineText() = %q, want %q", got, want)

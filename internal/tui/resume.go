@@ -339,9 +339,12 @@ func renderResumePicker(width, height int, state resumePickerState, spinnerText 
 		return ""
 	}
 	innerWidth := max(1, width-4)
+	selected := 0
+	if len(state.sessions) > 0 {
+		selected = clamp(state.selected, 0, len(state.sessions)-1)
+	}
 	title := "Resume"
 	if len(state.sessions) > 0 {
-		selected := clamp(state.selected, 0, len(state.sessions)-1)
 		title += fmt.Sprintf("  %d/%d", selected+1, len(state.sessions))
 		if state.sessions[selected].Current {
 			title += " · current"
@@ -382,9 +385,9 @@ func renderResumePicker(width, height int, state resumePickerState, spinnerText 
 			body = append(body, clipSingleLineText(empty, innerWidth))
 			help = "Esc close"
 		} else {
-			start, end := resumeVisibleRange(len(state.sessions), state.selected, resumeVisibleRows(width, height))
+			start, end := resumeVisibleRange(len(state.sessions), selected, resumeVisibleRows(width, height))
 			for index := start; index < end; index++ {
-				body = append(body, renderResumeSessionRow(state.sessions[index], index == state.selected, innerWidth, now))
+				body = append(body, renderResumeSessionRow(state.sessions[index], index == selected, innerWidth, now))
 			}
 		}
 		if state.mode == resumeResuming {

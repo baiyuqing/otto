@@ -42,6 +42,45 @@ func TestBuildContextUsesRetainedTailCompactionCheckpoint(t *testing.T) {
 	}
 }
 
+func TestBuildContextPrefersRealFirstKeptEntryIDInDualForm(t *testing.T) {
+	context := contextFromFixture(t, "compaction-dual-form.jsonl")
+	assertMessageTexts(t, context.Messages, []string{
+		"[Compaction summary]\ndual summary",
+		"real retained path",
+		"after dual checkpoint",
+	})
+	if context.Messages[0].ContextTokensBefore != 140 {
+		t.Fatalf("ContextTokensBefore = %d, want 140", context.Messages[0].ContextTokensBefore)
+	}
+	for _, message := range context.Messages {
+		if strings.Contains(message.ID, "-tail-") || strings.Contains(message.Text(), "synthetic must lose") {
+			t.Fatalf("synthetic retained tail won over real active path: %#v", context.Messages)
+		}
+	}
+}
+
+func TestBuildContextFallsBackToRetainedTailWhenNoRealFirstKeptEntryExists(t *testing.T) {
+	context := contextFromFixture(t, "compaction-retained-tail-only.jsonl")
+	assertMessageTexts(t, context.Messages, []string{
+		"[Compaction summary]\nretained-tail summary",
+		"synthetic retained tail",
+	})
+	if context.Messages[0].ContextTokensBefore != 120 {
+		t.Fatalf("ContextTokensBefore = %d, want 120", context.Messages[0].ContextTokensBefore)
+	}
+}
+
+func TestBuildContextCarriesTokensBeforeFromCompactionSummaryMessage(t *testing.T) {
+	entry := mustDecodeContextEntry(t, `{"type":"message","id":"cf000001","parentId":null,"timestamp":"2026-08-28T10:00:00Z","message":{"role":"compactionSummary","summary":"message summary","tokensBefore":321,"timestamp":1787911200000}}`)
+	context, _, err := buildContext([]piEntry{entry}, entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(context.Messages) != 1 || context.Messages[0].ContextTokensBefore != 321 {
+		t.Fatalf("compaction summary message = %#v", context.Messages)
+	}
+}
+
 func TestBuildContextUsesLegacyFirstKeptEntryID(t *testing.T) {
 	file := readPiFixture(t, "compacted.jsonl")
 	context, warnings, err := buildContext(file.Entries, "c0000003")

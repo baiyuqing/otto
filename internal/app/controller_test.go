@@ -1607,6 +1607,14 @@ func (f *fakeSession) Messages() []model.Message {
 
 func (f *fakeSession) Append(context.Context, model.Message) error { return nil }
 
+func (f *fakeSession) AppendCompaction(context.Context, session.CompactionCheckpoint) (session.CompactionMetadata, error) {
+	return session.CompactionMetadata{}, nil
+}
+
+func (f *fakeSession) LatestCompaction() (session.CompactionMetadata, bool) {
+	return session.CompactionMetadata{}, false
+}
+
 func (f *fakeSession) Path() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

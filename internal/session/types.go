@@ -41,6 +41,15 @@ type CompactionDetails struct {
 	OmittedModifiedFiles int      `json:"omittedModifiedFiles,omitempty"`
 }
 
+type CompactionCheckpoint struct {
+	Summary          string
+	FirstKeptEntryID string
+	TokensBefore     int
+	Usage            *model.Usage
+	Details          CompactionDetails
+	CreatedAt        time.Time
+}
+
 type CompactionMetadata struct {
 	ID                           string
 	Summary                      string
@@ -98,6 +107,8 @@ type Session interface {
 	Header() Header
 	Messages() []model.Message
 	Append(context.Context, model.Message) error
+	AppendCompaction(context.Context, CompactionCheckpoint) (CompactionMetadata, error)
+	LatestCompaction() (CompactionMetadata, bool)
 	Path() string
 	Close() error
 }

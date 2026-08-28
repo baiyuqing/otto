@@ -9,12 +9,14 @@ import (
 )
 
 type Memory struct {
-	mu             sync.Mutex
-	header         Header
-	messages       []model.Message
-	aggregateUsage model.Usage
-	usagePresent   bool
-	closed         bool
+	mu                  sync.Mutex
+	header              Header
+	messages            []model.Message
+	aggregateUsage      model.Usage
+	usagePresent        bool
+	latestCompaction    CompactionMetadata
+	hasLatestCompaction bool
+	closed              bool
 }
 
 func NewMemory(header Header) *Memory {
@@ -73,6 +75,9 @@ func (m *Memory) Append(ctx context.Context, message model.Message) error {
 	if cloned.Role == model.RoleAssistant && hasMeaningfulUsage(cloned.Usage) {
 		m.aggregateUsage = addResolvedUsage(m.aggregateUsage, cloned.Usage)
 		m.usagePresent = true
+	}
+	if m.hasLatestCompaction && m.latestCompaction.FirstPostCheckpointMessageID == "" {
+		m.latestCompaction.FirstPostCheckpointMessageID = cloned.ID
 	}
 	return nil
 }

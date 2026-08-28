@@ -213,3 +213,12 @@ func TestRedactorOverlappingJSONKeySecretsDoNotDependOnConfigurationOrder(t *tes
 		t.Fatalf("overlapping key output depends on credential order: %s != %s", forward, reverse)
 	}
 }
+
+func TestRedactorJSONOutputDoesNotAliasCompactionToolArguments(t *testing.T) {
+	raw := json.RawMessage(`{"path":"secret.go"}`)
+	got := NewRedactor([]string{"secret"}).RedactJSONStrings(raw)
+	got[0] = '['
+	if string(raw) != `{"path":"secret.go"}` {
+		t.Fatalf("redacted output aliases source tool arguments: %s", raw)
+	}
+}

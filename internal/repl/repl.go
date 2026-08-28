@@ -98,36 +98,7 @@ func (r *REPL) Run(ctx context.Context) error {
 			continue
 		}
 
-		turnCtx, cancel := context.WithCancel(ctx)
-		r.mu.Lock()
-		r.activeCancel = cancel
-		r.mu.Unlock()
-
-		errorRendered := false
-		err := r.backend.Prompt(turnCtx, line, func(event agent.Event) {
-			switch event.Type {
-			case agent.EventTextDelta:
-				_, _ = io.WriteString(r.stdout, event.Text)
-			case agent.EventToolCallStarted:
-				_, _ = fmt.Fprintf(r.stdout, "\n[tool] %s (%s)\n", event.ToolName, event.ToolCallID)
-			case agent.EventToolCallFinished:
-				_, _ = fmt.Fprintf(r.stdout, "[tool result] %s\n", firstLine(event.ToolResult.Content))
-			case agent.EventAgentError:
-				errorRendered = true
-				if event.Err != nil {
-					_, _ = fmt.Fprintln(r.stderr, event.Err)
-				}
-			}
-		})
-
-		r.mu.Lock()
-		r.activeCancel = nil
-		r.mu.Unlock()
-		cancel()
-		if err != nil && !errorRendered {
-			_, _ = fmt.Fprintln(r.stderr, err)
-		}
-		_, _ = fmt.Fprintln(r.stdout)
+		err := r.prompt(ctx, line)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -136,6 +107,49 @@ func (r *REPL) Run(ctx context.Context) error {
 		}
 		sendAck(ack, stop)
 	}
+}
+
+// RunOnce executes a single prompt with the same rendering as Run and returns
+// the turn's error without the interactive banner, prompt marker, or loop.
+func (r *REPL) RunOnce(ctx context.Context, prompt string) error {
+	return r.prompt(ctx, prompt)
+}
+
+func (r *REPL) prompt(ctx context.Context, line string) error {
+	turnCtx, cancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.activeCancel = cancel
+	r.mu.Unlock()
+
+	errorRendered := false
+	err := r.backend.Prompt(turnCtx, line, func(event agent.Event) {
+		switch event.Type {
+		case agent.EventTextDelta:
+			_, _ = io.WriteString(r.stdout, event.Text)
+		case agent.EventToolCallStarted:
+			_, _ = fmt.Fprintf(r.stdout, "\n[tool] %s (%s)\n", event.ToolName, event.ToolCallID)
+		case agent.EventToolCallFinished:
+			_, _ = fmt.Fprintf(r.stdout, "[tool result] %s\n", firstLine(event.ToolResult.Content))
+		case agent.EventAgentError:
+			errorRendered = true
+			if event.Err != nil {
+				_, _ = fmt.Fprintln(r.stderr, event.Err)
+			}
+		}
+	})
+
+	r.mu.Lock()
+	r.activeCancel = nil
+	r.mu.Unlock()
+	cancel()
+	if err != nil && !errorRendered {
+		_, _ = fmt.Fprintln(r.stderr, err)
+	}
+	_, _ = fmt.Fprintln(r.stdout)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 func (r *REPL) Interrupt() bool {

@@ -134,6 +134,15 @@ Selection rules:
 - `repl` forces the line-oriented REPL even from an interactive terminal.
 - In `auto`, non-TTY runs stay in the REPL and do not emit alternate-screen control sequences.
 
+### Headless mode
+
+`--approve` runs a single prompt without interaction and exits: `0` on success, `1` on error, `130` on interrupt. The value is the prompt text, or `@PATH` to read the prompt from a file. Output uses the REPL's line-oriented rendering without the banner or input prompts. Otto's tools never require interactive approval; `--approve` only supplies the prompt and removes the interactive loop. It cannot be combined with `--ui tui`, and it composes with `--continue`, `--resume`, and `--no-session`.
+
+```bash
+otto --approve "summarize TODOs in this repo"
+otto --approve @prompt.txt --no-session
+```
+
 ### TUI behavior
 
 - The TUI uses the terminal alternate screen buffer.

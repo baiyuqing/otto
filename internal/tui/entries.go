@@ -173,6 +173,7 @@ func addUsageTotals(total model.Usage, usage *model.Usage) model.Usage {
 	}
 	total.InputTokens = saturatingAddNonNegative(total.InputTokens, usage.InputTokens)
 	total.OutputTokens = saturatingAddNonNegative(total.OutputTokens, usage.OutputTokens)
+	total.CachedInputTokens = saturatingAddNonNegative(total.CachedInputTokens, usage.CachedInputTokens)
 	return total
 }
 

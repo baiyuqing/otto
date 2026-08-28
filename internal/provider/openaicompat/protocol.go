@@ -66,8 +66,21 @@ type chatDelta struct {
 }
 
 type chatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens         int                  `json:"prompt_tokens"`
+	CompletionTokens     int                  `json:"completion_tokens"`
+	PromptTokensDetails  *promptTokensDetails `json:"prompt_tokens_details"`
+	PromptCacheHitTokens int                  `json:"prompt_cache_hit_tokens"`
+}
+
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+func (u chatUsage) cachedTokens() int {
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return u.PromptCacheHitTokens
 }
 
 func translateRequest(request provider.Request) chatRequest {

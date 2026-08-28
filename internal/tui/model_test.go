@@ -257,11 +257,78 @@ func TestWindowResizeProducesResponsiveLayout(t *testing.T) {
 	}
 }
 
+func TestViewPositionsRealCursorAtEditorLocation(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("hello")
+	m.editor.CursorEnd()
+
+	cursor := m.View().Cursor
+	if cursor == nil {
+		t.Fatal("view cursor = nil, want a real terminal cursor for IME positioning")
+	}
+	if cursor.X != 7 || cursor.Y != 10 {
+		t.Fatalf("view cursor = (%d,%d), want (7,10) at the visible editor", cursor.X, cursor.Y)
+	}
+}
+
+func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("/")
+	m.editor.CursorEnd()
+	m.rerenderAndRefreshViewportContent(false)
+	if len(m.commandSuggestions()) == 0 {
+		t.Fatal("test setup has no slash-command suggestions")
+	}
+
+	cursor := m.View().Cursor
+	if cursor == nil || cursor.X != 3 || cursor.Y != 10 {
+		t.Fatalf("suggestion view cursor = %#v, want (3,10) at the editor", cursor)
+	}
+}
+
+func TestViewTracksRealCursorAcrossMultilineEditorRows(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.editor.SetValue("first\nsecond")
+	m.rerenderAndRefreshViewportContent(false)
+
+	m.editor.CursorUp()
+	m.editor.CursorStart()
+	first := m.View().Cursor
+	if first == nil || first.Y != 9 {
+		t.Fatalf("first-line cursor = %#v, want row 9", first)
+	}
+
+	m.editor.CursorDown()
+	m.editor.CursorEnd()
+	last := m.View().Cursor
+	if last == nil || last.Y != 10 {
+		t.Fatalf("last-line cursor = %#v, want row 10", last)
+	}
+}
+
+func TestOverlayHidesRealCursor(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.overlay = overlayHelp
+
+	if cursor := m.View().Cursor; cursor != nil {
+		t.Fatalf("help overlay cursor = (%d,%d), want hidden", cursor.X, cursor.Y)
+	}
+
+	m.overlay = overlaySession
+	if cursor := m.View().Cursor; cursor != nil {
+		t.Fatalf("session overlay cursor = (%d,%d), want hidden", cursor.X, cursor.Y)
+	}
+}
+
 func TestSmallTerminalShowsResizeMessage(t *testing.T) {
 	model := newTestModel(t)
 	got := resizeModel(t, model, 30, 6)
-	if content := got.View().Content; !strings.Contains(content, "terminal is too small") {
-		t.Fatalf("content = %q", content)
+	view := got.View()
+	if !strings.Contains(view.Content, "terminal is too small") {
+		t.Fatalf("content = %q", view.Content)
+	}
+	if cursor := view.Cursor; cursor != nil {
+		t.Fatalf("small-terminal cursor = (%d,%d), want hidden", cursor.X, cursor.Y)
 	}
 
 	restored := resizeModel(t, got, 100, 30)
@@ -510,9 +577,9 @@ func TestEnterSubmitsAndAltEnterAddsNewline(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
 	m.editor.SetValue("one")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter, tea.ModAlt))
+	updated, _ := m.Update(keyPress(tea.KeyEnter, tea.ModAlt))
 	withNewline := updated.(Model)
-	if cmd == nil || !strings.Contains(withNewline.editor.Value(), "\n") {
+	if !strings.Contains(withNewline.editor.Value(), "\n") {
 		t.Fatalf("value = %q", withNewline.editor.Value())
 	}
 
@@ -533,8 +600,8 @@ func TestShiftEnterRequiresKeyboardEnhancements(t *testing.T) {
 
 	withEnhancements, _ := withoutEnhancements.Update(tea.KeyboardEnhancementsMsg{Flags: 1})
 	enhanced := withEnhancements.(Model)
-	updated, cmd := enhanced.Update(keyPress(tea.KeyEnter, tea.ModShift))
-	if cmd == nil || !strings.Contains(updated.(Model).editor.Value(), "\n") {
+	updated, _ = enhanced.Update(keyPress(tea.KeyEnter, tea.ModShift))
+	if !strings.Contains(updated.(Model).editor.Value(), "\n") {
 		t.Fatalf("shift+enter value = %q", updated.(Model).editor.Value())
 	}
 }

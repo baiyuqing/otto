@@ -33,6 +33,7 @@ type durableRecordWriter interface {
 type Store struct {
 	mu             sync.Mutex
 	header         Header
+	root           string
 	messages       []model.Message
 	aggregateUsage model.Usage
 	usagePresent   bool
@@ -48,41 +49,79 @@ type Store struct {
 }
 
 func Create(root string, header Header) (*Store, error) {
+	store, err := newPendingStore(root, header)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.ensureFile(); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// CreateLazy returns a store that does not create its session file until the
+// first durable write. A session that is created and closed without any user
+// message never touches disk.
+func CreateLazy(root string, header Header) (*Store, error) {
+	return newPendingStore(root, header)
+}
+
+func newPendingStore(root string, header Header) (*Store, error) {
 	header.Version = CurrentVersion
 	createdAt, err := validateDomainHeader(header)
 	if err != nil {
 		return nil, err
 	}
-	directory, err := sessionDirectory(root, header.Workspace)
+	_ = createdAt
+	return &Store{
+		header:   header,
+		root:     root,
+		entryIDs: make(map[string]struct{}),
+	}, nil
+}
+
+// ensureFile creates the session directory and file and writes the header and
+// runtime entries. It is a no-op once the file exists.
+func (s *Store) ensureFile() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ensureFileLocked()
+}
+
+func (s *Store) ensureFileLocked() error {
+	if s.file != nil {
+		return nil
+	}
+	directory, err := sessionDirectory(s.root, s.header.Workspace)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, fmt.Errorf("create session directory: %w", err)
+		return fmt.Errorf("create session directory: %w", err)
 	}
 	if err := os.Chmod(directory, 0o700); err != nil {
-		return nil, fmt.Errorf("chmod session directory: %w", err)
+		return fmt.Errorf("chmod session directory: %w", err)
 	}
 
-	path := filepath.Join(directory, header.ID+".jsonl")
+	path := filepath.Join(directory, s.header.ID+".jsonl")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("create session file: %w", err)
+		return fmt.Errorf("create session file: %w", err)
 	}
-	cleanup := func(writeErr error) (*Store, error) {
+	cleanup := func(writeErr error) error {
 		_ = file.Close()
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return nil, errors.Join(writeErr, fmt.Errorf("remove incomplete session file: %w", removeErr))
+			return errors.Join(writeErr, fmt.Errorf("remove incomplete session file: %w", removeErr))
 		}
-		return nil, writeErr
+		return writeErr
 	}
 
 	piHeaderRecord := piHeader{
 		Type:      "session",
 		Version:   PiSessionVersion,
-		ID:        header.ID,
-		Timestamp: createdAt,
-		CWD:       header.Workspace,
+		ID:        s.header.ID,
+		Timestamp: s.header.CreatedAt.Format(time.RFC3339Nano),
+		CWD:       s.header.Workspace,
 	}
 	fileBytes, err := writePiRecord(file, piHeaderRecord)
 	if err != nil {
@@ -94,12 +133,12 @@ func Create(root string, header Header) (*Store, error) {
 	if err != nil {
 		return cleanup(fmt.Errorf("generate runtime entry id: %w", err))
 	}
-	runtimeData, err := json.Marshal(RuntimeMetadata{Profile: header.Profile, Provider: header.Provider, Model: header.Model})
+	runtimeData, err := json.Marshal(RuntimeMetadata{Profile: s.header.Profile, Provider: s.header.Provider, Model: s.header.Model})
 	if err != nil {
 		return cleanup(fmt.Errorf("encode runtime metadata: %w", err))
 	}
 	runtimeEntry := piEntry{
-		piEntryBase: piEntryBase{Type: "custom", ID: runtimeID, ParentID: nil, Timestamp: createdAt},
+		piEntryBase: piEntryBase{Type: "custom", ID: runtimeID, ParentID: nil, Timestamp: s.header.CreatedAt.Format(time.RFC3339Nano)},
 		Custom:      &piCustom{CustomType: ottoRuntimeCustomType, Data: runtimeData},
 	}
 	written, err := writePiRecord(file, runtimeEntry)
@@ -110,16 +149,14 @@ func Create(root string, header Header) (*Store, error) {
 	entryIDs[runtimeID] = struct{}{}
 	leafID := runtimeID
 
-	return &Store{
-		header:    header,
-		entries:   []piEntry{runtimeEntry},
-		entryIDs:  entryIDs,
-		leafID:    &leafID,
-		path:      path,
-		file:      file,
-		writer:    file,
-		fileBytes: fileBytes,
-	}, nil
+	s.path = path
+	s.file = file
+	s.writer = file
+	s.fileBytes = fileBytes
+	s.entries = []piEntry{runtimeEntry}
+	s.entryIDs = entryIDs
+	s.leafID = &leafID
+	return nil
 }
 
 func ReadHeader(path string) (Header, error) {
@@ -235,6 +272,10 @@ func (s *Store) UpdateRuntime(ctx context.Context, runtime RuntimeMetadata) erro
 	if s.header.Profile == runtime.Profile && s.header.Provider == runtime.Provider && s.header.Model == runtime.Model {
 		return nil
 	}
+	if err := s.ensureFileLocked(); err != nil {
+		s.fatalErr = &fatalPersistenceError{cause: err}
+		return s.fatalErr
+	}
 
 	timestamp, err := formatPersistedTimestamp(time.Now().UTC(), "runtime update")
 	if err != nil {
@@ -287,6 +328,10 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := s.ensureFileLocked(); err != nil {
+		s.fatalErr = &fatalPersistenceError{cause: err}
+		return s.fatalErr
+	}
 
 	entryID, err := newPiEntryID(s.entryIDs)
 	if err != nil {
@@ -336,6 +381,9 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
+	if s.file == nil {
+		return nil
+	}
 	if err := s.file.Close(); err != nil {
 		return fmt.Errorf("close session file: %w", err)
 	}

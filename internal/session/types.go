@@ -68,6 +68,10 @@ type ListResult struct {
 	Skipped  int
 }
 
+type UsageProvider interface {
+	AggregateUsage() (model.Usage, bool)
+}
+
 type Session interface {
 	Header() Header
 	Messages() []model.Message

@@ -510,6 +510,29 @@ func TestControllerForwardsEvents(t *testing.T) {
 	}
 }
 
+func TestControllerInfoExposesOptionalAggregateUsageDefensively(t *testing.T) {
+	current := &aggregateUsageSession{
+		Session: session.NewMemory(testHeader("usage")),
+		usage:   model.Usage{InputTokens: 20, OutputTokens: 6},
+		present: true,
+	}
+	controller, err := New(current, func() (session.Session, error) {
+		return session.NewMemory(testHeader("next")), nil
+	}, func(session.Session) Runner { return runnerFunc(noopRun) })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := controller.Info()
+	if !info.UsagePresent || info.Usage != current.usage {
+		t.Fatalf("Info() = %#v", info)
+	}
+	info.Usage.InputTokens = 99
+	if got := controller.Info(); got.Usage != current.usage {
+		t.Fatalf("mutating Info usage changed controller state: %#v", got)
+	}
+}
+
 func TestControllerHistoryReturnsDefensiveSnapshot(t *testing.T) {
 	current := &fakeSession{header: testHeader("history"), messages: []model.Message{{
 		ID:        "m1",
@@ -1547,6 +1570,16 @@ func (r *recordingRunner) Calls() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
+}
+
+type aggregateUsageSession struct {
+	session.Session
+	usage   model.Usage
+	present bool
+}
+
+func (s *aggregateUsageSession) AggregateUsage() (model.Usage, bool) {
+	return s.usage, s.present
 }
 
 type fakeSession struct {

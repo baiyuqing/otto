@@ -112,7 +112,7 @@ type Model struct {
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
-	entries, usage := EntriesFromHistory(historyFromBackend(backend))
+	entries, usage := entriesAndUsageFromBackend(backend)
 	editor := textarea.New()
 	editor.ShowLineNumbers = false
 	editor.Prompt = "> "
@@ -564,7 +564,7 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 }
 
 func (m *Model) resetSessionViewFromBackend(status string) {
-	m.entries, m.usage = EntriesFromHistory(historyFromBackend(m.backend))
+	m.entries, m.usage = entriesAndUsageFromBackend(m.backend)
 	m.overlay = overlayNone
 	m.statusText = status
 	if m.cancel != nil {
@@ -1212,6 +1212,16 @@ func (m *Model) syncAutoFollow(before viewport.Model) {
 	if m.viewport.YOffset() < before.YOffset() {
 		m.autoFollow = false
 	}
+}
+
+func entriesAndUsageFromBackend(backend app.Backend) ([]Entry, otmodel.Usage) {
+	entries, fallback := EntriesFromHistory(historyFromBackend(backend))
+	info := infoFromBackend(backend)
+	if !info.UsagePresent {
+		return entries, fallback
+	}
+	aggregate := addUsageTotals(otmodel.Usage{}, &info.Usage)
+	return entries, aggregate
 }
 
 func historyFromBackend(backend app.Backend) []otmodel.Message {

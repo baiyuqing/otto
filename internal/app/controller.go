@@ -67,12 +67,14 @@ func WithSessionBrowser(list SessionLister, resume ResumeFactory) Option {
 }
 
 type Info struct {
-	SessionID   string
-	SessionPath string
-	Workspace   string
-	Provider    string
-	Profile     string
-	Model       string
+	SessionID    string
+	SessionPath  string
+	Workspace    string
+	Provider     string
+	Profile      string
+	Model        string
+	Usage        model.Usage
+	UsagePresent bool
 }
 
 type Backend interface {
@@ -514,6 +516,9 @@ func (c *Controller) Info() Info {
 		info.Provider = runtimeInfo.Provider
 		info.Profile = runtimeInfo.Profile
 		info.Model = runtimeInfo.Model
+	}
+	if usageSource, ok := current.(session.UsageProvider); ok {
+		info.Usage, info.UsagePresent = usageSource.AggregateUsage()
 	}
 	return info
 }

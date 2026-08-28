@@ -58,22 +58,17 @@ func (r *Redactor) RedactString(text string) string {
 }
 
 func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
-	if r == nil || len(r.values) == 0 || len(raw) == 0 {
+	if r == nil || len(r.values) == 0 {
 		return append(json.RawMessage(nil), raw...)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		return json.RawMessage(r.RedactString(string(raw)))
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
-		return json.RawMessage(r.RedactString(string(raw)))
+	value, err := decodePairPreservingJSON(raw)
+	if err != nil {
+		return json.RawMessage("null")
 	}
 	value = redactJSONValueStrings(r, value)
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return json.RawMessage(r.RedactString(string(raw)))
+		return json.RawMessage("null")
 	}
 	return json.RawMessage(encoded)
 }
@@ -114,27 +109,114 @@ func (e *redactedBoundaryError) Is(target error) bool {
 		target == ErrEmptyUserText && e.emptyUserText
 }
 
+type jsonObject []jsonMember
+
+type jsonMember struct {
+	key   string
+	value any
+}
+
+const maximumJSONDepth = 10_000
+
+func decodePairPreservingJSON(raw json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	value, err := decodeJSONValue(decoder, 0)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func decodeJSONValue(decoder *json.Decoder, depth int) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delimiter, isDelimiter := token.(json.Delim)
+	if !isDelimiter {
+		return token, nil
+	}
+	if depth >= maximumJSONDepth {
+		return nil, errors.New("maximum JSON depth exceeded")
+	}
+
+	switch delimiter {
+	case '{':
+		object := make(jsonObject, 0)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, errors.New("JSON object member name is not a string")
+			}
+			value, err := decodeJSONValue(decoder, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			object = append(object, jsonMember{key: key, value: value})
+		}
+		if err := consumeJSONDelimiter(decoder, '}'); err != nil {
+			return nil, err
+		}
+		return object, nil
+	case '[':
+		array := make([]any, 0)
+		for decoder.More() {
+			value, err := decodeJSONValue(decoder, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, value)
+		}
+		if err := consumeJSONDelimiter(decoder, ']'); err != nil {
+			return nil, err
+		}
+		return array, nil
+	default:
+		return nil, errors.New("unexpected closing JSON delimiter")
+	}
+}
+
+func consumeJSONDelimiter(decoder *json.Decoder, want json.Delim) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != want {
+		return errors.New("unexpected JSON delimiter")
+	}
+	return nil
+}
+
 func redactJSONValueStrings(redactor *Redactor, value any) any {
 	switch value := value.(type) {
 	case string:
 		return redactor.RedactString(value)
-	case map[string]any:
-		keys := make([]string, 0, len(value))
-		for key := range value {
-			keys = append(keys, key)
+	case jsonObject:
+		redactedMembers := make(jsonObject, len(value))
+		for index, member := range value {
+			redactedMembers[index] = jsonMember{
+				key:   redactor.RedactString(member.key),
+				value: redactJSONValueStrings(redactor, member.value),
+			}
 		}
-		sort.Strings(keys)
 
-		redacted := make(map[string]any, len(value))
-		for _, key := range keys {
-			redactedKey := redactor.RedactString(key)
-			if _, collision := redacted[redactedKey]; collision {
-				// Redaction can collapse distinct member names. Discard both
-				// meanings rather than selecting one based on map iteration order.
-				redacted[redactedKey] = nil
+		redacted := make(map[string]any, len(redactedMembers))
+		for _, member := range redactedMembers {
+			if _, collision := redacted[member.key]; collision {
+				// Raw duplicates, normalized aliases, and redaction collisions all
+				// lose their values rather than selecting an attacker-controlled winner.
+				redacted[member.key] = nil
 				continue
 			}
-			redacted[redactedKey] = redactJSONValueStrings(redactor, value[key])
+			redacted[member.key] = member.value
 		}
 		return redacted
 	case []any:

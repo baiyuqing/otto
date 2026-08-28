@@ -1217,7 +1217,7 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requestCount == 1 {
 			textSplit := len(authorization) - 3
-			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"}}`, credential, authorization, "prefix-"+credential)
+			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, authorization, "prefix-"+credential, credential)
 			argumentSplit := strings.Index(arguments, credential) + len(credential)/2
 			chunks := []string{
 				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "authorization="+authorization[:textSplit]),
@@ -1261,8 +1261,8 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 		"session JSONL":      string(persisted),
 	}
 	for location, content := range locations {
-		if strings.Contains(content, credential) || strings.Contains(content, authorization) {
-			t.Fatalf("%s leaked successful provider credential echo: %q", location, content)
+		if strings.Contains(content, credential) || strings.Contains(content, authorization) || strings.Contains(content, "attacker-") {
+			t.Fatalf("%s leaked successful provider credential echo or colliding tool value: %q", location, content)
 		}
 	}
 	for _, location := range []string{"stdout events", "provider follow-up", "session JSONL"} {

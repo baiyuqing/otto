@@ -511,7 +511,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q}}`, credential, credential, "prefix-"+credential, "Bearer "+credential))
+	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, credential, "prefix-"+credential, "Bearer "+credential, credential))
 	stream := []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "text "}}
 	for _, character := range credential {
 		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string(character)})
@@ -538,7 +538,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 	if err := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(recorder.calls) != 1 || strings.Contains(recorder.calls[0], credential) || !strings.Contains(recorder.calls[0], redactor.marker) {
+	if len(recorder.calls) != 1 || strings.Contains(recorder.calls[0], credential) || strings.Contains(recorder.calls[0], "attacker-") || !strings.Contains(recorder.calls[0], redactor.marker) || !json.Valid([]byte(recorder.calls[0])) {
 		t.Fatalf("executed arguments = %#v", recorder.calls)
 	}
 	for index, event := range events {
@@ -546,8 +546,8 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(encoded), credential) {
-			t.Fatalf("event %d leaked credential: %s", index, encoded)
+		if strings.Contains(string(encoded), credential) || strings.Contains(string(encoded), "attacker-") {
+			t.Fatalf("event %d leaked credential or colliding value: %s", index, encoded)
 		}
 	}
 	for location, value := range map[string]any{
@@ -559,8 +559,8 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(encoded), credential) || !strings.Contains(string(encoded), redactor.marker) {
-			t.Fatalf("%s was not redacted: %s", location, encoded)
+		if strings.Contains(string(encoded), credential) || strings.Contains(string(encoded), "attacker-") || !strings.Contains(string(encoded), redactor.marker) {
+			t.Fatalf("%s was not redacted or retained a colliding value: %s", location, encoded)
 		}
 	}
 }

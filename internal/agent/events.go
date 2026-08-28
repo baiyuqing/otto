@@ -31,10 +31,19 @@ type Event struct {
 	Err        error
 }
 
+type CompactionSettings struct {
+	Auto             bool
+	HardInputWindow  int
+	WorkingWindow    int
+	ReserveTokens    int
+	KeepRecentTokens int
+}
+
 type Options struct {
 	Model        string
 	SystemPrompt string
 	Thinking     string
+	Compaction   CompactionSettings
 	Now          func() time.Time
 	NewID        func() string
 }

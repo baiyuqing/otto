@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -507,8 +508,8 @@ func TestMemoryAndStoreExposeMatchingAggregateUsageAfterAssistantAppends(t *test
 	defer store.Close()
 
 	messages := []model.Message{
-		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "first"}}, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 100, OutputTokens: 9, CachedInputTokens: 40}},
-		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "second"}}, CreatedAt: time.Unix(3, 0).UTC(), FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 20, OutputTokens: 3, CachedInputTokens: 5}},
+		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "first"}}, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: math.MaxInt - 1, OutputTokens: 1, CachedInputTokens: math.MaxInt - 1}},
+		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "second"}}, CreatedAt: time.Unix(3, 0).UTC(), FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 1, OutputTokens: math.MaxInt - 1, CachedInputTokens: 1}},
 	}
 	for _, message := range messages {
 		if err := memory.Append(context.Background(), message); err != nil {
@@ -527,12 +528,32 @@ func TestMemoryAndStoreExposeMatchingAggregateUsageAfterAssistantAppends(t *test
 	if !ok {
 		t.Fatal("Store does not expose aggregate usage")
 	}
-	want := model.Usage{InputTokens: 120, OutputTokens: 12, CachedInputTokens: 45}
+	want := model.Usage{InputTokens: math.MaxInt, OutputTokens: math.MaxInt, CachedInputTokens: math.MaxInt}
 	if usage, present := memoryUsage.AggregateUsage(); !present || usage != want {
 		t.Fatalf("memory AggregateUsage() = %#v, %v", usage, present)
 	}
 	if usage, present := storeUsage.AggregateUsage(); !present || usage != want {
 		t.Fatalf("store AggregateUsage() = %#v, %v", usage, present)
+	}
+
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", warnings)
+	}
+	reopenedUsage, ok := any(reopened).(UsageProvider)
+	if !ok {
+		t.Fatal("reopened Store does not expose aggregate usage")
+	}
+	if usage, present := reopenedUsage.AggregateUsage(); !present || usage != want {
+		t.Fatalf("reopened AggregateUsage() = %#v, %v", usage, present)
 	}
 }
 

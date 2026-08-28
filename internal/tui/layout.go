@@ -77,7 +77,11 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 		fields = append([]string{workspace}, fields...)
 	}
 	if width >= 48 {
-		fields = append(fields, fmt.Sprintf("tokens %d/%d", max(0, usage.InputTokens), max(0, usage.OutputTokens)))
+		if usage.CachedInputTokens > 0 {
+			fields = append(fields, fmt.Sprintf("tokens %d/%d (cached %d)", max(0, usage.InputTokens), max(0, usage.OutputTokens), usage.CachedInputTokens))
+		} else {
+			fields = append(fields, fmt.Sprintf("tokens %d/%d", max(0, usage.InputTokens), max(0, usage.OutputTokens)))
+		}
 	}
 	if info.SessionID != "" && width >= 60 {
 		fields = append(fields, escapeSingleLineText(info.SessionID))

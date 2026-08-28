@@ -239,7 +239,7 @@ All file tools are enabled by default and restricted to the initial workspace:
 - `write` writes a complete file atomically.
 - `edit` requires exactly one exact text match.
 
-Recursive `grep` and `find` skip `.git` and discovered symbolic links but include other dotfiles. Binary and invalid UTF-8 files are skipped by `grep`. Search and listing output respects the configured tool-output cap.
+Recursive `grep` and `find` skip `.git` and discovered symbolic links but include other dotfiles. Binary files, invalid UTF-8 files, and files containing lines larger than 1 MiB are skipped by `grep`. Search and listing output respects the configured tool-output cap.
 
 Otto canonicalizes input paths, resolves symlinks, and rejects workspace escapes.
 

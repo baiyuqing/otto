@@ -27,7 +27,7 @@ type findTool struct {
 type findArgs struct {
 	Pattern string `json:"pattern"`
 	Path    string `json:"path,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Limit   *int   `json:"limit,omitempty"`
 }
 
 func NewFindTool(workspace *Workspace, maxOutputBytes int) Tool {
@@ -37,7 +37,7 @@ func NewFindTool(workspace *Workspace, maxOutputBytes int) Tool {
 func (t *findTool) Definition() model.ToolDefinition {
 	return model.ToolDefinition{
 		Name:        "find",
-		Description: "Find workspace files by glob pattern",
+		Description: "Find workspace files by glob pattern (read-only)",
 		Parameters: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
@@ -77,6 +77,13 @@ func (t *findTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	root, err := t.workspace.ResolveExisting(searchPath)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
+	}
+	insideGit, err := searchRootInsideGit(t.workspace, root)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
+	if insideGit {
+		return Result{}
 	}
 
 	matches := make([]string, 0, min(limit, 128))

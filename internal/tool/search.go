@@ -61,6 +61,18 @@ func cappedTextResult(content string, maxOutputBytes int) Result {
 	return Result{Content: fmt.Sprintf("%s\n[truncated: %d bytes omitted]", string(safe), omitted)}
 }
 
+func cappedCollectorResult(collector *cappedByteCollector, marker string) Result {
+	safe := validUTF8Prefix(collector.Bytes())
+	content := string(safe)
+	if marker != "" {
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		content += marker + "\n"
+	}
+	return Result{Content: content}
+}
+
 func workspaceRelativePath(workspace *Workspace, filePath string) (string, error) {
 	relative, err := filepath.Rel(workspace.root, filePath)
 	if err != nil {
@@ -83,17 +95,25 @@ func searchRelativePath(root, filePath string) (string, error) {
 	return filepath.ToSlash(relative), nil
 }
 
-func resolveSearchLimit(value, defaultValue, maximum int) (int, error) {
-	if value < 0 {
-		return 0, fmt.Errorf("limit must be >= 0")
-	}
-	if value == 0 {
+func resolveSearchLimit(value *int, defaultValue, maximum int) (int, error) {
+	if value == nil {
 		return defaultValue, nil
 	}
-	if value > maximum {
+	if *value < 1 {
+		return 0, fmt.Errorf("limit must be >= 1")
+	}
+	if *value > maximum {
 		return 0, fmt.Errorf("limit must be <= %d", maximum)
 	}
-	return value, nil
+	return *value, nil
+}
+
+func searchRootInsideGit(workspace *Workspace, root string) (bool, error) {
+	relative, err := workspaceRelativePath(workspace, root)
+	if err != nil {
+		return false, err
+	}
+	return relative == ".git" || strings.HasPrefix(relative, ".git/"), nil
 }
 
 func validatedGlobSegments(pattern string) ([]string, error) {

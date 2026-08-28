@@ -343,7 +343,7 @@ func renderResumePicker(width, height int, state resumePickerState, spinnerText 
 	if len(state.sessions) > 0 {
 		selected = clamp(state.selected, 0, len(state.sessions)-1)
 	}
-	title := "Resume"
+	title := "Resume Session"
 	if len(state.sessions) > 0 {
 		title += fmt.Sprintf("  %d/%d", selected+1, len(state.sessions))
 		if state.sessions[selected].Current {

@@ -21,6 +21,7 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	otmodel "github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -138,7 +139,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		keymap:          DefaultKeyMap(),
 		usage:           usage,
-		expandedTools:   true,
+		expandedTools:   false,
 		autoFollow:      true,
 		darkBackground:  true,
 		renderer:        newGlamourRenderer(true),
@@ -1162,7 +1163,6 @@ func renderMessageBlock(title, body string) string {
 }
 
 func renderToolBlock(entry Entry, width int, expanded bool) string {
-	_ = width
 	name := escapeSingleLineText(entry.ToolName)
 	if name == "" {
 		name = "tool"
@@ -1174,20 +1174,40 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	if entry.ToolError {
 		status = "error"
 	}
-	parts := []string{">", name}
-	if args := strings.TrimSpace(escapePlainText(entry.ToolArgs)); args != "" {
-		parts = append(parts, args)
-	}
-	parts = append(parts, status)
-	summary := strings.Join(parts, " ")
+	args := strings.TrimSpace(escapePlainText(entry.ToolArgs))
+	summary := renderToolSummary(name, args, status, width)
 	if !expanded {
 		return summary
 	}
 	lines := []string{summary}
+	if args != "" {
+		lines = append(lines, "", "Arguments:", args)
+	}
 	if output := strings.TrimSpace(escapePlainText(entry.ToolOutput)); output != "" {
-		lines = append(lines, "", output)
+		lines = append(lines, "", "Output:", output)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func renderToolSummary(name, args, status string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	const prefix = "> "
+	suffix := " " + status
+	minimum := prefix + name + suffix
+	if ansi.StringWidth(minimum) > width {
+		nameWidth := max(1, width-ansi.StringWidth(prefix)-ansi.StringWidth(suffix))
+		name = ansi.Truncate(name, nameWidth, "…")
+	}
+
+	base := prefix + name
+	remaining := width - ansi.StringWidth(base) - ansi.StringWidth(suffix)
+	preview := strings.Join(strings.Fields(args), " ")
+	if preview != "" && remaining > 1 {
+		base += " " + ansi.Truncate(preview, remaining-1, "…")
+	}
+	return ansi.Truncate(base+suffix, width, "")
 }
 
 func (m *Model) scrollViewport(delta int) {

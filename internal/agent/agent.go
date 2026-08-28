@@ -165,12 +165,13 @@ func (a *Agent) fail(emit func(Event), err error) error {
 
 func (a *Agent) redactMessage(message model.Message) model.Message {
 	redacted := cloneMessage(message)
+	redacted.ID = a.redactor.RedactString(redacted.ID)
 	for index := range redacted.Blocks {
 		block := &redacted.Blocks[index]
-		switch block.Type {
-		case model.BlockText, model.BlockToolResult:
-			block.Text = a.redactor.RedactString(block.Text)
-		case model.BlockToolCall:
+		block.Text = a.redactor.RedactString(block.Text)
+		block.ToolCallID = a.redactor.RedactString(block.ToolCallID)
+		block.ToolName = a.redactor.RedactString(block.ToolName)
+		if block.Type == model.BlockToolCall {
 			block.Arguments = a.redactor.RedactJSONStrings(block.Arguments)
 		}
 	}

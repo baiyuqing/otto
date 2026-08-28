@@ -43,32 +43,34 @@ func (p *preparedStore) Close() error {
 }
 
 type runtimeBuilder struct {
-	config              config.File
-	environment         map[string]string
-	workspace           *tool.Workspace
-	workspacePath       string
-	sessionRoot         string
-	shell               string
-	noSession           bool
-	stderr              io.Writer
-	deps                runDependencies
-	prepareSession      func(context.Context, string, string) (preparedSession, error)
-	buildRunnerOverride func(session.Session, config.Runtime) (app.Runner, error)
-	runtimeOverrides    config.Overrides
+	config               config.File
+	environment          map[string]string
+	workspace            *tool.Workspace
+	workspacePath        string
+	sessionRoot          string
+	shell                string
+	noSession            bool
+	stderr               io.Writer
+	deps                 runDependencies
+	prepareSession       func(context.Context, string, string) (preparedSession, error)
+	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
+	buildRunnerOverride  func(session.Session, config.Runtime) (app.Runner, error)
+	runtimeOverrides     config.Overrides
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
 	builder := runtimeBuilder{
-		config:         configFile,
-		environment:    environment,
-		workspace:      workspace,
-		workspacePath:  workspacePath,
-		sessionRoot:    sessionRoot,
-		shell:          shell,
-		noSession:      options.noSession,
-		stderr:         stderr,
-		deps:           deps,
-		prepareSession: deps.prepareSession,
+		config:               configFile,
+		environment:          environment,
+		workspace:            workspace,
+		workspacePath:        workspacePath,
+		sessionRoot:          sessionRoot,
+		shell:                shell,
+		noSession:            options.noSession,
+		stderr:               stderr,
+		deps:                 deps,
+		prepareSession:       deps.prepareSession,
+		prepareListedSession: deps.prepareListedSession,
 		runtimeOverrides: config.Overrides{
 			MaxTurns:       options.maxTurns,
 			ShellTimeout:   options.shellTimeout,
@@ -125,7 +127,7 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 }
 
 func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.SessionReplacement, error) {
-	prepared, err := b.prepare(ctx, path)
+	prepared, err := b.prepareListed(ctx, path)
 	if err != nil {
 		return app.SessionReplacement{}, b.redactError(err, nil)
 	}
@@ -168,7 +170,22 @@ func (b runtimeBuilder) prepare(ctx context.Context, path string) (preparedSessi
 	if prepare == nil {
 		prepare = prepareSession
 	}
-	prepared, err := prepare(ctx, path, b.workspacePath)
+	return checkedPreparedSession(prepare(ctx, path, b.workspacePath))
+}
+
+func (b runtimeBuilder) prepareListed(ctx context.Context, path string) (preparedSession, error) {
+	if b.prepareListedSession != nil {
+		return checkedPreparedSession(b.prepareListedSession(ctx, b.sessionRoot, b.workspacePath, path))
+	}
+	// Preserve the narrow injected preparation seam used by construction tests.
+	// Production builders always install the restricted listed preparer.
+	if b.prepareSession != nil {
+		return checkedPreparedSession(b.prepareSession(ctx, path, b.workspacePath))
+	}
+	return checkedPreparedSession(prepareListedSession(ctx, b.sessionRoot, b.workspacePath, path))
+}
+
+func checkedPreparedSession(prepared preparedSession, err error) (preparedSession, error) {
 	if err != nil {
 		if prepared != nil {
 			if closeErr := prepared.Close(); closeErr != nil {
@@ -372,6 +389,14 @@ func prepareSession(ctx context.Context, path, workspace string) (preparedSessio
 		if closeErr := prepared.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
 		}
+		return nil, err
+	}
+	return &preparedStore{prepared: prepared}, nil
+}
+
+func prepareListedSession(ctx context.Context, root, workspace, path string) (preparedSession, error) {
+	prepared, err := session.PrepareListed(ctx, root, workspace, path)
+	if err != nil {
 		return nil, err
 	}
 	return &preparedStore{prepared: prepared}, nil

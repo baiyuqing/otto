@@ -13,7 +13,7 @@ Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-orie
 - Adaptive UI selection: full-screen TUI on terminal stdin/stdout, REPL otherwise
 - Streaming TUI and REPL with `/help`, `/exit`, `/new`, and `/session`; the TUI also provides `/resume`
 - Markdown assistant rendering and collapsible tool output in the TUI
-- Built-in `read`, `write`, `edit`, and `bash` tools
+- Built-in `read`, `grep`, `find`, `ls`, `write`, `edit`, and `bash` tools
 - Persistent JSONL sessions with `--continue` and `--resume`
 - Global TOML configuration at `~/.config/otto/config.toml`
 - `--thinking` pass-through for model reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
@@ -256,9 +256,18 @@ The environment variable is an explicit opt-in marker for operators; the script 
 
 ### File tools
 
-- `read`, `write`, and `edit` are restricted to the initial workspace.
-- Otto canonicalizes paths, resolves symlinks, and rejects workspace escapes.
+All file tools are enabled by default and restricted to the initial workspace:
+
+- `read` reads UTF-8 text with optional line offsets and limits.
+- `grep` searches file contents with Go RE2 regular expressions. It supports case-insensitive matching, optional `**` glob filtering, and up to 100 matches by default (1000 maximum).
+- `find` returns sorted regular-file paths matching `**` globs, up to 1000 results by default (10000 maximum).
+- `ls` lists one directory level in sorted order; directories end in `/` and symbolic links in `@`.
+- `write` writes a complete file atomically.
 - `edit` requires exactly one exact text match.
+
+Recursive `grep` and `find` skip `.git` and discovered symbolic links but include other dotfiles. Binary files, invalid UTF-8 files, and files containing lines larger than 1 MiB are skipped by `grep`. Search and listing output respects the configured tool-output cap.
+
+Otto canonicalizes input paths, resolves symlinks, and rejects workspace escapes.
 
 ### `bash` warning
 

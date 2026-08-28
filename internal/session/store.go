@@ -31,21 +31,23 @@ type durableRecordWriter interface {
 }
 
 type Store struct {
-	mu             sync.Mutex
-	header         Header
-	root           string
-	messages       []model.Message
-	aggregateUsage model.Usage
-	usagePresent   bool
-	entries        []piEntry
-	entryIDs       map[string]struct{}
-	leafID         *string
-	path           string
-	file           *os.File
-	writer         durableRecordWriter
-	fileBytes      int64
-	fatalErr       error
-	closed         bool
+	mu                  sync.Mutex
+	header              Header
+	root                string
+	messages            []model.Message
+	aggregateUsage      model.Usage
+	usagePresent        bool
+	latestCompaction    CompactionMetadata
+	hasLatestCompaction bool
+	entries             []piEntry
+	entryIDs            map[string]struct{}
+	leafID              *string
+	path                string
+	file                *os.File
+	writer              durableRecordWriter
+	fileBytes           int64
+	fatalErr            error
+	closed              bool
 }
 
 func Create(root string, header Header) (*Store, error) {
@@ -213,17 +215,19 @@ func openStoreFromFile(file *os.File, path string) (*Store, []Warning, error) {
 	}
 
 	store := &Store{
-		header:         state.header,
-		messages:       state.messages,
-		aggregateUsage: state.aggregateUsage,
-		usagePresent:   state.usagePresent,
-		entries:        append([]piEntry(nil), decoded.Entries...),
-		entryIDs:       state.entryIDs,
-		leafID:         cloneStringPointer(state.leafID),
-		path:           path,
-		file:           file,
-		writer:         file,
-		fileBytes:      position,
+		header:              state.header,
+		messages:            state.messages,
+		aggregateUsage:      state.aggregateUsage,
+		usagePresent:        state.usagePresent,
+		latestCompaction:    cloneCompactionMetadata(state.latestCompaction),
+		hasLatestCompaction: state.hasLatestCompaction,
+		entries:             append([]piEntry(nil), decoded.Entries...),
+		entryIDs:            state.entryIDs,
+		leafID:              cloneStringPointer(state.leafID),
+		path:                path,
+		file:                file,
+		writer:              file,
+		fileBytes:           position,
 	}
 	repairWarnings, err := store.repairDanglingToolCalls()
 	if err != nil {
@@ -367,6 +371,9 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 		s.aggregateUsage = addResolvedUsage(s.aggregateUsage, persistedMessage.Usage)
 		s.usagePresent = true
 	}
+	if s.hasLatestCompaction && s.latestCompaction.FirstPostCheckpointMessageID == "" {
+		s.latestCompaction.FirstPostCheckpointMessageID = persistedMessage.ID
+	}
 	return nil
 }
 
@@ -417,13 +424,15 @@ func (s *Store) repairDanglingToolCalls() ([]Warning, error) {
 }
 
 type resolvedPiStoreState struct {
-	header         Header
-	messages       []model.Message
-	aggregateUsage model.Usage
-	usagePresent   bool
-	entryIDs       map[string]struct{}
-	leafID         *string
-	warnings       []Warning
+	header              Header
+	messages            []model.Message
+	aggregateUsage      model.Usage
+	usagePresent        bool
+	latestCompaction    CompactionMetadata
+	hasLatestCompaction bool
+	entryIDs            map[string]struct{}
+	leafID              *string
+	warnings            []Warning
 }
 
 func resolvePiStoreState(decoded piFile) (resolvedPiStoreState, error) {
@@ -447,17 +456,23 @@ func resolvePiStoreState(decoded piFile) (resolvedPiStoreState, error) {
 	if err != nil {
 		return resolvedPiStoreState{}, err
 	}
+	latestCompaction, hasLatestCompaction, err := latestCompactionMetadata(decoded.Entries, leaf)
+	if err != nil {
+		return resolvedPiStoreState{}, err
+	}
 	return resolvedPiStoreState{
 		header: Header{
 			Version: CurrentVersion, ID: decoded.Header.ID, Workspace: decoded.Header.CWD,
 			Provider: resolved.Runtime.Provider, Profile: resolved.Runtime.Profile, Model: resolved.Runtime.Model, CreatedAt: createdAt,
 		},
-		messages:       resolved.Messages,
-		aggregateUsage: resolved.Usage,
-		usagePresent:   resolved.UsagePresent,
-		entryIDs:       entryIDs,
-		leafID:         leafID,
-		warnings:       warnings,
+		messages:            resolved.Messages,
+		aggregateUsage:      resolved.Usage,
+		usagePresent:        resolved.UsagePresent,
+		latestCompaction:    latestCompaction,
+		hasLatestCompaction: hasLatestCompaction,
+		entryIDs:            entryIDs,
+		leafID:              leafID,
+		warnings:            warnings,
 	}, nil
 }
 func validateDomainHeader(header Header) (string, error) {
@@ -535,7 +550,14 @@ func modelMessageToPiEntry(message model.Message, entryID string, parentID *stri
 	if err != nil {
 		return piEntry{}, model.Message{}, err
 	}
-	piMessage := &piMessage{Role: string(message.Role), Content: content, Timestamp: message.CreatedAt.UnixMilli()}
+	_, contentBlocks, err := decodeContent(content, "message content", false)
+	if err != nil {
+		return piEntry{}, model.Message{}, err
+	}
+	piMessage := &piMessage{
+		Role: string(message.Role), Content: content, ContentBlocks: contentBlocks,
+		Timestamp: message.CreatedAt.UnixMilli(),
+	}
 
 	switch message.Role {
 	case model.RoleUser:

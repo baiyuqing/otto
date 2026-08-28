@@ -34,14 +34,15 @@ type Block struct {
 }
 
 type Message struct {
-	ID           string       `json:"id"`
-	Role         Role         `json:"role"`
-	Blocks       []Block      `json:"blocks"`
-	CreatedAt    time.Time    `json:"created_at"`
-	FinishReason FinishReason `json:"finish_reason,omitempty"`
-	Usage        *Usage       `json:"usage,omitempty"`
-	ContextType  string       `json:"context_type,omitempty"`
-	Display      bool         `json:"display,omitempty"`
+	ID                  string       `json:"id"`
+	Role                Role         `json:"role"`
+	Blocks              []Block      `json:"blocks"`
+	CreatedAt           time.Time    `json:"created_at"`
+	FinishReason        FinishReason `json:"finish_reason,omitempty"`
+	Usage               *Usage       `json:"usage,omitempty"`
+	ContextType         string       `json:"context_type,omitempty"`
+	ContextTokensBefore int          `json:"context_tokens_before,omitempty"`
+	Display             bool         `json:"display,omitempty"`
 }
 
 func (m Message) Text() string {

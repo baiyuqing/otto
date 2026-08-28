@@ -84,6 +84,23 @@ func TestDecodePiV3CompactionFixture(t *testing.T) {
 	}
 }
 
+func TestDecodePiV3CompactionBoundaryFixtures(t *testing.T) {
+	retained := readPiFixture(t, "compaction-retained-tail-only.jsonl")
+	checkpoint := retained.Entries[len(retained.Entries)-1].Compaction
+	if checkpoint == nil || checkpoint.FirstKeptEntryID != nil || len(checkpoint.RetainedTail) != 1 || checkpoint.RetainedTail[0].Role != "user" {
+		t.Fatalf("retained-tail-only checkpoint = %#v", checkpoint)
+	}
+	if !bytes.Contains(checkpoint.Details, []byte(`"readFiles":"malformed"`)) {
+		t.Fatalf("malformed external details were not preserved: %s", checkpoint.Details)
+	}
+
+	dual := readPiFixture(t, "compaction-dual-form.jsonl")
+	checkpoint = dual.Entries[3].Compaction
+	if checkpoint == nil || checkpoint.FirstKeptEntryID == nil || *checkpoint.FirstKeptEntryID != "e0000003" || len(checkpoint.RetainedTail) != 1 {
+		t.Fatalf("dual-form checkpoint = %#v", checkpoint)
+	}
+}
+
 func TestDecodePiV3PreservesUnknownEntryRawJSON(t *testing.T) {
 	decoded := readPiFixture(t, "unknown-entry.jsonl")
 	entry := decoded.Entries[1]
@@ -251,8 +268,8 @@ func TestDecodePiV3FixturesAreExactLFDelimitedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 4 {
-		t.Fatalf("fixture count = %d, want 4", len(files))
+	if len(files) != 6 {
+		t.Fatalf("fixture count = %d, want 6", len(files))
 	}
 	for _, path := range files {
 		t.Run(filepath.Base(path), func(t *testing.T) {

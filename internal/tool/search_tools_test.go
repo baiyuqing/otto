@@ -177,11 +177,15 @@ func TestSearchSkipsAbsoluteGitAliasThroughLexicalWorkspaceSymlink(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	separator := string(filepath.Separator)
 	for _, searchPath := range []string{
 		filepath.Join(aliasRoot, ".git"),
 		filepath.Join(realRoot, ".git"),
 		filepath.Join(siblingAlias, ".git"),
 		relativeSibling,
+		".git" + separator + ".." + separator + "metadata",
+		aliasRoot + separator + ".git" + separator + ".." + separator + "metadata",
+		siblingAlias + separator + ".git" + separator + ".." + separator + "metadata",
 	} {
 		find := NewFindTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"**","path":`+strconv.Quote(searchPath)+`}`))
 		grep := NewGrepTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"match","path":`+strconv.Quote(searchPath)+`}`))

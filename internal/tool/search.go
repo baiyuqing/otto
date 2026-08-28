@@ -124,7 +124,6 @@ func requestedGitAliasInsideWorkspace(workspace *Workspace, requestedPath string
 	if !filepath.IsAbs(candidate) {
 		candidate = workspace.candidatePath(candidate)
 	}
-	candidate = filepath.Clean(candidate)
 	volume := filepath.VolumeName(candidate)
 	remainder := strings.TrimPrefix(candidate[len(volume):], string(filepath.Separator))
 	prefix := volume

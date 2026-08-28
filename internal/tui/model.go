@@ -123,6 +123,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	editor.DynamicHeight = true
 	editor.SetHeight(minEditorHeight)
 	editor.SetWidth(0)
+	editor.SetVirtualCursor(false)
 	editor.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "insert newline"))
 	_ = editor.Focus()
 
@@ -474,8 +475,10 @@ func newRootView(m Model, content string) tea.View {
 	view.MouseMode = tea.MouseModeCellMotion
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
-	if !m.resume.active() {
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()))
+	if !layout.tooSmall && !m.resume.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
+			cursor.Y += layout.transcriptHeight + layout.suggestionHeight
 			view.Cursor = cursor
 		}
 	}

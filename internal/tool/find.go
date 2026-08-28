@@ -95,7 +95,7 @@ func (t *findTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.Name() == ".git" {
+		if filePath != root && entry.Name() == ".git" {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}

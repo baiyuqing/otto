@@ -116,7 +116,11 @@ func searchRootInsideGit(workspace *Workspace, requestedPath, resolvedRoot strin
 	if pathHasGitSegment(resolvedRelative) {
 		return true, nil
 	}
-	requestedRelative, err := filepath.Rel(workspace.root, filepath.Clean(workspace.candidatePath(requestedPath)))
+	requestedCandidate := requestedPath
+	if !filepath.IsAbs(requestedCandidate) {
+		requestedCandidate = filepath.Join(workspace.lexicalRoot, requestedCandidate)
+	}
+	requestedRelative, err := filepath.Rel(workspace.lexicalRoot, filepath.Clean(requestedCandidate))
 	if err != nil {
 		return false, err
 	}

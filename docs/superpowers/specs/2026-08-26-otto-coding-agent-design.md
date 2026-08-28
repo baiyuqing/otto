@@ -350,7 +350,7 @@ The format is append-only and contains:
 - Tool results
 - Usage, timestamps, and stable record IDs
 
-Partial streamed responses are not persisted. If loading finds a completed assistant tool call without a matching result, the loader appends a synthetic result stating that execution was interrupted. A malformed trailing record caused by an interrupted append is reported and recoverable only when it is the final record; corruption earlier in the file fails safely.
+New sessions are created lazily: the JSONL file is materialized on the first user message, so starting Otto and quitting without a prompt leaves no file behind. Partial streamed responses are not persisted. If loading finds a completed assistant tool call without a matching result, the loader appends a synthetic result stating that execution was interrupted. A malformed trailing record caused by an interrupted append is reported and recoverable only when it is the final record; corruption earlier in the file fails safely.
 
 The MVP history is linear. Stable IDs permit a later schema version to add parent IDs and branching.
 

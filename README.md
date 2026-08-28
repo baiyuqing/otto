@@ -194,6 +194,8 @@ Otto writes append-only JSONL in the **Pi session format version 3**, compatible
 
 It does not write under Pi's `~/.pi/agent/sessions` root.
 
+A new session file is created lazily: starting Otto reserves a session, but the JSONL file is only written on the first user prompt. Starting and quitting without a prompt leaves no session file behind.
+
 Examples:
 
 ```bash
@@ -210,6 +212,7 @@ Notes:
 - `/resume` is TUI-only and shows at most the recent 20 sessions in the current workspace; controls are documented above.
 - `/session` shows the exact session path.
 - `--no-session` keeps history in memory only.
+- Session files are created lazily on the first user prompt; `/new` closes the current session (writing nothing if it had no prompts) and the replacement also stays lazy until its first prompt.
 - Session files contain sensitive prompt text, assistant responses, tool calls, tool arguments, and tool results. Protect them like source data. Session records do not contain API-key, OAuth-token, or authorization-header fields.
 - Stage 1 has no session tree/fork UI, naming, deletion, or search.
 
@@ -243,6 +246,15 @@ Default limits:
 - 50 KiB tool output cap
 
 ## Build and test commands
+
+A `Makefile` wraps the same gates. `make build` compiles the binary and `make check` runs every CI gate (fmt, vet, lint, test, race, diff check). See `make help` for all targets.
+
+```bash
+make check
+make build
+```
+
+The underlying commands are:
 
 ```bash
 test -z "$(gofmt -l .)"

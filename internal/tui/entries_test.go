@@ -144,8 +144,8 @@ func TestEntriesFromHistoryDefensivelyCopiesAndSaturatesUsageTotals(t *testing.T
 	maxInt := int(^uint(0) >> 1)
 	args := json.RawMessage(`{"path":"README.md"}`)
 	history := []model.Message{
-		{Role: model.RoleUser, Usage: &model.Usage{InputTokens: maxInt - 1, OutputTokens: 3}, Blocks: []model.Block{{Type: model.BlockText, Text: "before"}}},
-		{Role: model.RoleAssistant, Usage: &model.Usage{InputTokens: 10, OutputTokens: -5}, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: args}}},
+		{Role: model.RoleUser, Usage: &model.Usage{InputTokens: maxInt - 1, OutputTokens: 3, CachedInputTokens: 2}, Blocks: []model.Block{{Type: model.BlockText, Text: "before"}}},
+		{Role: model.RoleAssistant, Usage: &model.Usage{InputTokens: 10, OutputTokens: -5, CachedInputTokens: 4}, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: args}}},
 	}
 
 	entries, usage := EntriesFromHistory(history)
@@ -160,7 +160,7 @@ func TestEntriesFromHistoryDefensivelyCopiesAndSaturatesUsageTotals(t *testing.T
 	if entries[1].ToolArgs != `{"path":"README.md"}` {
 		t.Fatalf("entries[1].ToolArgs = %q, want defensive copy", entries[1].ToolArgs)
 	}
-	if usage.InputTokens != maxInt || usage.OutputTokens != 3 {
+	if usage.InputTokens != maxInt || usage.OutputTokens != 3 || usage.CachedInputTokens != 6 {
 		t.Fatalf("usage = %#v, want saturated nonnegative totals", usage)
 	}
 }

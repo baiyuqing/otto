@@ -191,6 +191,40 @@ func TestCompleteMapsUnknownFinishReason(t *testing.T) {
 	}
 }
 
+func TestCompleteParsesOpenAICachedTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":64}}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	response, err := New(server.URL, "key", server.Client()).Complete(context.Background(), provider.Request{Model: "model"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Usage != (model.Usage{InputTokens: 100, OutputTokens: 7, CachedInputTokens: 64}) {
+		t.Fatalf("usage = %#v", response.Usage)
+	}
+}
+
+func TestCompleteParsesDeepSeekCachedTokens(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":7,\"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":20}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	response, err := New(server.URL, "key", server.Client()).Complete(context.Background(), provider.Request{Model: "model"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Usage != (model.Usage{InputTokens: 100, OutputTokens: 7, CachedInputTokens: 80}) {
+		t.Fatalf("usage = %#v", response.Usage)
+	}
+}
+
 func TestCompletePropagatesCancellation(t *testing.T) {
 	started := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

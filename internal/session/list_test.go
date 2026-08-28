@@ -51,6 +51,40 @@ func TestListReturnsRecentValidWorkspaceSessionsWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestListStopsInspectingAfterLimitAndIgnoresOlderPoisonCandidates(t *testing.T) {
+	root := t.TempDir()
+	workspace := t.TempDir()
+	base := time.Unix(10_000, 0).UTC()
+	for index := 0; index < 20; index++ {
+		path := createListSession(t, root, workspace, fmt.Sprintf("recent-%02d", index))
+		setListMTime(t, path, base.Add(time.Duration(index)*time.Minute))
+	}
+
+	corrupt := writeCorruptJSONLSession(t, root, workspace, "older-corrupt-poison")
+	setListMTime(t, corrupt, base.Add(-time.Hour))
+	oversized := filepath.Join(listSessionDirectory(t, root, workspace), "oldest-oversize-poison.jsonl")
+	file, err := os.OpenFile(oversized, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(int64(maxSessionFileBytes) + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	setListMTime(t, oversized, base.Add(-2*time.Hour))
+
+	result, err := List(context.Background(), root, workspace, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Sessions) != 20 || result.Skipped != 0 {
+		t.Fatalf("List() = %#v, want 20 recent sessions and no inspection of older poison files", result)
+	}
+}
+
 func TestListRejectsSymlinksAndOtherWorkspaces(t *testing.T) {
 	root := t.TempDir()
 	workspace := t.TempDir()

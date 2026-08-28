@@ -20,6 +20,12 @@ const (
 	maxSkippedSessionCount = int(^uint(0) >> 1)
 )
 
+type listCandidate struct {
+	name string
+	path string
+	info os.FileInfo
+}
+
 func Inspect(ctx context.Context, path string) (SessionInfo, []Warning, error) {
 	if err := ctx.Err(); err != nil {
 		return SessionInfo{}, nil, err
@@ -82,7 +88,7 @@ func List(ctx context.Context, root, workspace, currentPath string, limit int) (
 	}
 
 	result := ListResult{}
-	sessions := make([]SessionInfo, 0, min(limit, len(entries)))
+	candidates := make([]listCandidate, 0, len(entries))
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return ListResult{}, err
@@ -90,20 +96,48 @@ func List(ctx context.Context, root, workspace, currentPath string, limit int) (
 		if filepath.Ext(entry.Name()) != ".jsonl" {
 			continue
 		}
-
 		file, info, path, err := openSessionFileReadOnlyNoFollowAt(sessionDir, directory, entry.Name())
 		if err != nil {
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+		candidates = append(candidates, listCandidate{name: entry.Name(), path: path, info: info})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.info.ModTime().Equal(right.info.ModTime()) {
+			return left.path > right.path
+		}
+		return left.info.ModTime().After(right.info.ModTime())
+	})
+
+	sessions := make([]SessionInfo, 0, min(limit, len(candidates)))
+	for _, candidate := range candidates {
+		if len(sessions) == limit {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return ListResult{}, err
+		}
+		file, info, path, err := openSessionFileReadOnlyNoFollowAt(sessionDir, directory, candidate.name)
+		if err != nil {
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+		if !sameListCandidateMetadata(candidate.info, info) {
+			_ = file.Close()
 			result.Skipped = incrementSkipped(result.Skipped)
 			continue
 		}
 
 		sessionInfo, _, inspectErr := inspectOpenedSession(ctx, path, file, info)
 		closeErr := file.Close()
-		if inspectErr != nil {
-			result.Skipped = incrementSkipped(result.Skipped)
-			continue
-		}
-		if closeErr != nil {
+		if inspectErr != nil || closeErr != nil {
 			result.Skipped = incrementSkipped(result.Skipped)
 			continue
 		}
@@ -129,15 +163,6 @@ func List(ctx context.Context, root, workspace, currentPath string, limit int) (
 		sessions = append(sessions, sessionInfo)
 	}
 
-	sort.Slice(sessions, func(i, j int) bool {
-		if sessions[i].Modified.Equal(sessions[j].Modified) {
-			return sessions[i].Path > sessions[j].Path
-		}
-		return sessions[i].Modified.After(sessions[j].Modified)
-	})
-	if len(sessions) > limit {
-		sessions = sessions[:limit]
-	}
 	result.Sessions = sessions
 	return result, nil
 }
@@ -430,6 +455,14 @@ func writeHex(builder *strings.Builder, value uint32, width int) {
 	for _, digit := range buffer[:width] {
 		builder.WriteByte(digit)
 	}
+}
+
+func sameListCandidateMetadata(expected, current os.FileInfo) bool {
+	return expected != nil && current != nil &&
+		os.SameFile(expected, current) &&
+		expected.Mode() == current.Mode() &&
+		expected.Size() == current.Size() &&
+		expected.ModTime().Equal(current.ModTime())
 }
 
 func incrementSkipped(count int) int {

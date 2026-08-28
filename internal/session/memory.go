@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/model"
@@ -71,6 +73,11 @@ func (m *Memory) Append(ctx context.Context, message model.Message) error {
 		return errSessionClosed
 	}
 	cloned := cloneMessage(message)
+	if m.hasLatestCompaction && m.latestCompaction.FirstPostCheckpointMessageID == "" {
+		if err := m.validateFirstPostCheckpointMessage(cloned); err != nil {
+			return err
+		}
+	}
 	m.messages = append(m.messages, cloned)
 	if cloned.Role == model.RoleAssistant && hasMeaningfulUsage(cloned.Usage) {
 		m.aggregateUsage = addResolvedUsage(m.aggregateUsage, cloned.Usage)
@@ -78,6 +85,25 @@ func (m *Memory) Append(ctx context.Context, message model.Message) error {
 	}
 	if m.hasLatestCompaction && m.latestCompaction.FirstPostCheckpointMessageID == "" {
 		m.latestCompaction.FirstPostCheckpointMessageID = cloned.ID
+	}
+	return nil
+}
+
+func (m *Memory) validateFirstPostCheckpointMessage(message model.Message) error {
+	if strings.TrimSpace(message.ID) == "" {
+		return fmt.Errorf("%w: first post-checkpoint message id is required", ErrInvalidSession)
+	}
+	switch message.Role {
+	case model.RoleUser, model.RoleAssistant, model.RoleTool:
+	default:
+		return fmt.Errorf("%w: first post-checkpoint message must have a normal role", ErrInvalidSession)
+	}
+	if _, _, err := modelMessageToPiEntry(message, "00000000", nil, m.header); err != nil {
+		return err
+	}
+	candidate := append(cloneMessages(m.messages), message)
+	if _, err := pendingToolCalls(candidate); err != nil {
+		return err
 	}
 	return nil
 }

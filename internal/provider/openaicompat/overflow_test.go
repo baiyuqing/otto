@@ -20,6 +20,7 @@ func TestContextOverflowClassifierAcceptsAllowlistedStructuredEvidence(t *testin
 		{name: "root code", body: `{"code":"context_window_exceeded"}`, code: "context_window_exceeded"},
 		{name: "nested type", body: `{"error":{"type":"max_context_length"}}`, code: "max_context_length"},
 		{name: "root type case folded", body: `{"type":"CONTEXT_LENGTH_EXCEEDED"}`, code: "context_length_exceeded"},
+		{name: "allowlisted code with output param", body: `{"error":{"code":"context_length_exceeded","param":"max_tokens"}}`, code: "context_length_exceeded"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -44,6 +45,9 @@ func TestContextOverflowClassifierAcceptsOnlyNarrowMessages(t *testing.T) {
 		{name: "context window exceeded with newline", body: `{"message":"the CONTEXT WINDOW\nwas exceeded"}`, want: true},
 		{name: "input tokens exceed context", body: `{"error":{"message":"Input tokens in this request exceed the available context size"}}`, want: true},
 		{name: "output max tokens", body: `{"error":{"code":"max_tokens","message":"max_tokens exceeds the maximum context length; requested 5000 output tokens"}}`},
+		{name: "nested output max tokens param", body: `{"error":{"param":"max_tokens","message":"maximum context length is 128000 tokens"}}`},
+		{name: "root output max tokens param", body: `{"param":"max_tokens","message":"maximum context length is 128000 tokens"}`},
+		{name: "non-string output param", body: `{"error":{"param":123,"message":"maximum context length is 128000 tokens"}}`, want: true},
 		{name: "generic context", body: `{"error":{"message":"context is too large"}}`},
 		{name: "window without exceeded", body: `{"message":"context window is available"}`},
 		{name: "output tokens", body: `{"message":"output tokens exceed the context window"}`},
@@ -135,6 +139,7 @@ func TestContextOverflowClassifierRejectsStatusesMalformedAndDuplicateJSON(t *te
 		`{"error":{"code":"other","code":"context_length_exceeded"}}`,
 		`{"error":{"code":"other","\u0063ode":"context_length_exceeded"}}`,
 		`{"message":"safe","message":"maximum context length"}`,
+		`{"param":"other","param":"max_tokens","message":"maximum context length"}`,
 		`{"code":"context_length_exceeded"} {}`,
 	} {
 		t.Run(body, func(t *testing.T) {

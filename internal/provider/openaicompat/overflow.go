@@ -51,6 +51,7 @@ func classifyContextOverflow(status int, body []byte) *provider.ContextOverflowE
 	objects = append(objects, root)
 
 	code := ""
+	outputTokenParam := false
 	messages := make([]string, 0, len(objects))
 	for _, object := range objects {
 		if code == "" {
@@ -58,6 +59,9 @@ func classifyContextOverflow(status int, body []byte) *provider.ContextOverflowE
 		}
 		if code == "" {
 			code = recognizedOverflowValue(object["type"])
+		}
+		if param, ok := jsonString(object["param"]); ok && param == "max_tokens" {
+			outputTokenParam = true
 		}
 		if message, ok := jsonString(object["message"]); ok {
 			messages = append(messages, message)
@@ -71,7 +75,7 @@ func classifyContextOverflow(status int, body []byte) *provider.ContextOverflowE
 			break
 		}
 	}
-	if code == "" && !messageMatch {
+	if code == "" && (outputTokenParam || !messageMatch) {
 		return nil
 	}
 

@@ -170,7 +170,7 @@ func TestResolveAppliesAgentDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtime.MaxTurns != 50 || runtime.ShellTimeout != 120*time.Second || runtime.MaxOutputBytes != 51200 {
+	if runtime.ShellTimeout != 120*time.Second || runtime.MaxOutputBytes != 51200 {
 		t.Fatalf("unexpected defaults: %#v", runtime)
 	}
 }

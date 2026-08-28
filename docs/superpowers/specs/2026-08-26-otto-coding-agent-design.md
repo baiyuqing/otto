@@ -152,9 +152,7 @@ For each user prompt, the agent:
 4. Appends and persists the completed assistant message.
 5. If the assistant requested tools, validates and executes each call sequentially.
 6. Appends and persists each tool result.
-7. Repeats the provider call until there are no tool calls or the turn limit is reached.
-
-The default limit is 50 model turns per user prompt.
+7. Repeats the provider call until the provider stops requesting tools.
 
 ### Application events
 
@@ -255,7 +253,6 @@ Default limits:
 
 - Tool output: 50 KiB
 - Shell timeout: 120 seconds
-- Agent turns: 50
 
 ## 8. Configuration
 
@@ -273,7 +270,6 @@ Example:
 default_profile = "deepseek"
 
 [agent]
-max_turns = 50
 shell_timeout = "120s"
 max_output_bytes = 51200
 
@@ -319,7 +315,6 @@ Principal flags include:
 - `--continue`
 - `--resume <file>`
 - `--no-session`
-- `--max-turns <n>`
 - `--shell-timeout <duration>`
 
 `OTTO_PROVIDER` and `OTTO_MODEL` provide environment-level overrides. `OTTO_API_KEY` is the fallback API-key variable when an OpenAI-compatible profile does not specify `api_key_env`.
@@ -375,7 +370,7 @@ Error formatting and diagnostic logging redact authorization headers, API keys, 
 
 ### Unit and contract tests
 
-- Scripted fake providers and tools verify agent sequencing, turn limits, cancellation, and recovery.
+- Scripted fake providers and tools verify agent sequencing, cancellation, and recovery.
 - Local HTTP/SSE servers verify fragmented stream handling, tool-call assembly, malformed payloads, status codes, and retries.
 - Temporary workspaces verify path traversal rejection, symlink escape prevention, exact edits, atomic writes, and output limits.
 - Process tests verify shell timeout, cancellation, and process-group termination on macOS.

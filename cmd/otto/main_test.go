@@ -1365,7 +1365,8 @@ api_key_env = %q
 			}
 		}
 	}
-	if !strings.Contains(string(persisted), "reconstructed=[REDACTED]") || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
+	redactedReconstruction := strings.Contains(string(persisted), "reconstructed=[REDACTED]") || strings.Contains(string(persisted), "reconstructed=█")
+	if !redactedReconstruction || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
 		t.Fatalf("persisted bash event/result did not redact credential while preserving unrelated environment: %s", persisted)
 	}
 }

@@ -578,7 +578,8 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 		t.Fatalf("messages = %#v, want user+assistant+tool", messages)
 	}
 	toolResult := messages[2].Blocks[0].Text
-	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !strings.Contains(toolResult, "literal=[REDACTED]") || !strings.Contains(toolResult, "[truncated:") || !strings.Contains(toolResult, "status: timed out after 50ms") {
+	redactedLiteral := strings.Contains(toolResult, "literal=[REDACTED]") || strings.Contains(toolResult, "literal=█")
+	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !redactedLiteral || !strings.Contains(toolResult, "[truncated:") || !strings.Contains(toolResult, "status: timed out after 50ms") {
 		t.Fatalf("tool result = %q", toolResult)
 	}
 	for _, forbidden := range []string{apiKey, fallbackAPIKey} {

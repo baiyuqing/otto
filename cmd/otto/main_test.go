@@ -1220,7 +1220,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 }
 
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
-	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
+	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, grep, find, ls, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
@@ -1250,7 +1250,7 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 			for _, item := range payload.Tools {
 				names = append(names, item.Function.Name)
 			}
-			if !reflect.DeepEqual(names, []string{"read", "write", "edit", "bash"}) {
+			if !reflect.DeepEqual(names, []string{"read", "grep", "find", "ls", "write", "edit", "bash"}) {
 				t.Errorf("tool names = %v", names)
 			}
 			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write","arguments":"{\"path\":\"created.txt\",\"content\":\"hello\"}"}}]},"finish_reason":"tool_calls"}]}`)

@@ -109,6 +109,9 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 	}
 	registry, err := tool.NewRegistry(
 		tool.NewReadTool(b.workspace, runtime.MaxOutputBytes),
+		tool.NewGrepTool(b.workspace, runtime.MaxOutputBytes),
+		tool.NewFindTool(b.workspace, runtime.MaxOutputBytes),
+		tool.NewLSTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewWriteTool(b.workspace),
 		tool.NewEditTool(b.workspace),
 		tool.NewBashTool(b.workspace, b.shell, runtime.ShellTimeout, runtime.MaxOutputBytes, tool.BashSecurity{

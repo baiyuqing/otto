@@ -1174,7 +1174,7 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	if entry.ToolError {
 		status = "error"
 	}
-	args := strings.TrimSpace(escapePlainText(entry.ToolArgs))
+	args := escapePlainText(entry.ToolArgs)
 	summary := renderToolSummary(name, args, status, width)
 	if !expanded {
 		return summary
@@ -1183,7 +1183,7 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	if args != "" {
 		lines = append(lines, "", "Arguments:", args)
 	}
-	if output := strings.TrimSpace(escapePlainText(entry.ToolOutput)); output != "" {
+	if output := escapePlainText(entry.ToolOutput); output != "" {
 		lines = append(lines, "", "Output:", output)
 	}
 	return strings.Join(lines, "\n")

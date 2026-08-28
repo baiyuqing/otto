@@ -76,18 +76,25 @@ func (a *Agent) compact(ctx context.Context, reason CompactionReason, focus stri
 		return CompactionResult{}, invalidCompactionSummaryError(err)
 	}
 
-	structured := len(preparedSelection.HistoricalSource) != 0
+	structured := len(preparedSelection.HistoricalSource) != 0 ||
+		len(preparedSelection.TurnPrefixSource) != 0 && preparedSelection.PreviousSummary == ""
 	firstMaximumBytes := summaryMaximumBytes
 	if !structured {
 		firstMaximumBytes = turnSummaryMaximumBytes
 	}
-	historical, historicalUsage, historicalUsagePresent, err := a.executeSummaryRequest(ctx, prepared.Request, firstMaximumBytes, structured)
+	generated, generatedUsage, generatedUsagePresent, err := a.executeSummaryRequest(ctx, prepared.Request, firstMaximumBytes, structured)
 	if err != nil {
 		return CompactionResult{}, err
 	}
-	finalSummary := historical
-	usage := historicalUsage
-	usagePresent := historicalUsagePresent
+	finalSummary := generated
+	usage := generatedUsage
+	usagePresent := generatedUsagePresent
+	if len(preparedSelection.HistoricalSource) == 0 && preparedSelection.PreviousSummary != "" {
+		finalSummary, err = combineSummary(preparedSelection.PreviousSummary, generated)
+		if err != nil {
+			return CompactionResult{}, invalidCompactionSummaryError(err)
+		}
+	}
 	details := prepared.Details
 
 	if hasTurn {
@@ -95,7 +102,7 @@ func (a *Agent) compact(ctx context.Context, reason CompactionReason, focus stri
 		if err != nil {
 			return CompactionResult{}, err
 		}
-		finalSummary, err = combineSummary(historical, turn)
+		finalSummary, err = combineSummary(generated, turn)
 		if err != nil {
 			return CompactionResult{}, invalidCompactionSummaryError(err)
 		}
@@ -184,7 +191,11 @@ func (a *Agent) prepareSummaryRequests(
 	if hasLatest {
 		previousDetails = latest.Details
 	}
-	prepared, err := buildSummaryRequest(a.options, selection, focus, previousDetails)
+	requestSelection := selection
+	if len(selection.HistoricalSource) == 0 && len(selection.TurnPrefixSource) != 0 && selection.PreviousSummary == "" {
+		requestSelection = compactionSelection{HistoricalSource: cloneMessages(selection.TurnPrefixSource)}
+	}
+	prepared, err := buildSummaryRequest(a.options, requestSelection, focus, previousDetails)
 	if err != nil {
 		return summaryRequest{}, summaryRequest{}, false, err
 	}
@@ -240,7 +251,10 @@ func (a *Agent) executeSummaryRequest(
 	}
 
 	message := response.Message
-	if response.FinishReason != "" {
+	if message.FinishReason != "" && response.FinishReason != "" && message.FinishReason != response.FinishReason {
+		return "", model.Usage{}, false, invalidCompactionSummaryError(errors.New("response finish reasons contradict"))
+	}
+	if message.FinishReason == "" {
 		message.FinishReason = response.FinishReason
 	}
 	if err := validateRawSummaryResponseBound(message, maximumBytes); err != nil {
@@ -349,13 +363,16 @@ func estimateCompactedContext(options Options, tools []model.ToolDefinition, sum
 		}},
 	})
 	messages = append(messages, cloneMessages(retained)...)
+	// This request is a synthetic post-checkpoint candidate. An empty active
+	// checkpoint floor forces content fallback instead of trusting usage on a
+	// retained assistant message from the pre-compaction prompt.
 	return estimateRequest(provider.Request{
 		Model:        options.Model,
 		SystemPrompt: options.SystemPrompt,
 		Thinking:     options.Thinking,
 		Messages:     messages,
 		Tools:        cloneTools(tools),
-	}, session.CompactionMetadata{}, false)
+	}, session.CompactionMetadata{}, true)
 }
 
 func (a *Agent) emitCompaction(emit func(Event), eventType EventType, result CompactionResult) {

@@ -271,6 +271,19 @@ func TestValidateStructuredSummaryAcceptsExactByteLimit(t *testing.T) {
 }
 
 func TestValidateTurnSummaryAndCombineSummaryBounds(t *testing.T) {
+	for _, heading := range []string{"## injected", "### injected", "   ## indented", "   ### indented"} {
+		if _, err := validateTurnSummary(summaryMessage("turn context\n" + heading)); err == nil {
+			t.Fatalf("turn summary heading %q accepted", heading)
+		}
+		if _, err := combineSummary(validStructuredSummary, "turn context\n"+heading); err == nil {
+			t.Fatalf("combined summary heading %q accepted", heading)
+		}
+	}
+	fencedHeadings := "```md\n## backtick fenced\n```\n\n~~~md\n### tilde fenced\n~~~"
+	if got, err := validateTurnSummary(summaryMessage(fencedHeadings)); err != nil || got != fencedHeadings {
+		t.Fatalf("fenced turn headings rejected: %q, %v", got, err)
+	}
+
 	turn := strings.Repeat("界", 21_845) + "x"
 	if len(turn) != turnSummaryMaximumBytes {
 		t.Fatalf("bad exact turn setup: %d", len(turn))
@@ -292,6 +305,9 @@ func TestValidateTurnSummaryAndCombineSummaryBounds(t *testing.T) {
 		}
 	}
 
+	if _, err := combineSummary("unstructured base", "turn state"); err == nil {
+		t.Fatal("combined summary accepted an invalid structured base")
+	}
 	combined, err := combineSummary(validStructuredSummary, "turn state")
 	want := validStructuredSummary + "\n\n---\n\n**Turn Context (split turn):**\n\nturn state"
 	if err != nil || combined != want {

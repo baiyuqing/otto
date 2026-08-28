@@ -49,5 +49,7 @@ type Options struct {
 }
 
 var (
-	ErrEmptyUserText = errors.New("user text is required")
+	ErrEmptyUserText       = errors.New("user text is required")
+	ErrNothingToCompact    = errors.New("nothing to compact")
+	ErrCurrentTurnTooLarge = errors.New("current turn exceeds the retained input budget")
 )

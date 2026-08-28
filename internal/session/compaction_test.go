@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -194,6 +196,294 @@ func TestMemoryAndStoreCompactionPreserveExplicitZeroUsage(t *testing.T) {
 			messages := current.Messages()
 			if metadata.Usage == nil || *metadata.Usage != (model.Usage{}) || messages[0].Usage == nil || *messages[0].Usage != (model.Usage{}) {
 				t.Fatalf("explicit zero usage was lost: metadata=%#v message=%#v", metadata.Usage, messages[0].Usage)
+			}
+		})
+	}
+}
+
+func TestAppendCompactionEnforcesSummaryAndDetailsBoundsBeforeMutation(t *testing.T) {
+	invalidUTF8 := string([]byte{0xff})
+	tooManyPaths := make([]string, 1_025)
+	for index := range tooManyPaths {
+		tooManyPaths[index] = fmt.Sprintf("path-%04d", index)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*CompactionCheckpoint)
+		want   error
+	}{
+		{name: "summary above byte bound", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Summary = strings.Repeat("s", 128*1024+1)
+		}, want: ErrSessionEntryTooLarge},
+		{name: "invalid UTF-8 summary", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Summary = invalidUTF8
+		}, want: ErrInvalidSession},
+		{name: "negative omitted reads", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.OmittedReadFiles = -1
+		}, want: ErrInvalidSession},
+		{name: "negative omitted modifications", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.OmittedModifiedFiles = -1
+		}, want: ErrInvalidSession},
+		{name: "path count above bound", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = tooManyPaths
+		}, want: ErrSessionEntryTooLarge},
+		{name: "path text above byte bound", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ModifiedFiles = []string{strings.Repeat("m", 64*1024+1)}
+		}, want: ErrSessionEntryTooLarge},
+		{name: "empty path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{""}
+		}, want: ErrInvalidSession},
+		{name: "invalid UTF-8 path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{invalidUTF8}
+		}, want: ErrInvalidSession},
+		{name: "C0 control path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{"bad\npath"}
+		}, want: ErrInvalidSession},
+		{name: "DEL control path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{"bad\x7fpath"}
+		}, want: ErrInvalidSession},
+		{name: "C1 control path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{"bad\u0085path"}
+		}, want: ErrInvalidSession},
+		{name: "unclean path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{"dir/../file.go"}
+		}, want: ErrInvalidSession},
+		{name: "duplicate read path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{"same.go", "same.go"}
+		}, want: ErrInvalidSession},
+		{name: "duplicate modified path", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ModifiedFiles = []string{"same.go", "same.go"}
+		}, want: ErrInvalidSession},
+		{name: "read modified overlap", mutate: func(checkpoint *CompactionCheckpoint) {
+			checkpoint.Details.ReadFiles = []string{"same.go"}
+			checkpoint.Details.ModifiedFiles = []string{"same.go"}
+		}, want: ErrInvalidSession},
+	}
+
+	factories := map[string]func(*testing.T) compactionTestSession{
+		"memory": func(t *testing.T) compactionTestSession { return createConversationMemory(t) },
+		"lazy store": func(t *testing.T) compactionTestSession {
+			store, err := CreateLazy(t.TempDir(), testHeader(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for factoryName, factory := range factories {
+		for _, test := range tests {
+			t.Run(factoryName+"/"+test.name, func(t *testing.T) {
+				current := factory(t)
+				defer current.Close()
+				beforeMessages := current.Messages()
+				beforeUsage, beforePresent := current.AggregateUsage()
+				checkpoint := CompactionCheckpoint{
+					Summary: testCompactionSummary, FirstKeptEntryID: "ffffffff", TokensBefore: 1,
+					CreatedAt: time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC),
+				}
+				if len(beforeMessages) >= 3 {
+					checkpoint.FirstKeptEntryID = beforeMessages[2].ID
+				}
+				test.mutate(&checkpoint)
+
+				if _, err := current.AppendCompaction(context.Background(), checkpoint); !errors.Is(err, test.want) {
+					t.Fatalf("AppendCompaction() error = %v, want %v", err, test.want)
+				}
+				if !reflect.DeepEqual(current.Messages(), beforeMessages) {
+					t.Fatalf("rejected checkpoint changed messages: %#v", current.Messages())
+				}
+				if got, present := current.AggregateUsage(); present != beforePresent || got != beforeUsage {
+					t.Fatalf("rejected checkpoint changed usage: %#v, %v", got, present)
+				}
+				if _, ok := current.LatestCompaction(); ok {
+					t.Fatal("rejected checkpoint became latest")
+				}
+				if store, ok := current.(*Store); ok {
+					if store.Path() != "" {
+						t.Fatalf("rejected lazy checkpoint created %q", store.Path())
+					}
+					paths, err := filepath.Glob(filepath.Join(store.root, "*", "*.jsonl"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(paths) != 0 {
+						t.Fatalf("rejected lazy checkpoint created files: %v", paths)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestAppendCompactionAcceptsExactSummaryAndDetailsBounds(t *testing.T) {
+	details := exactBoundedCompactionDetails()
+	if got := compactionPathTextBytes(details); got != 64*1024 {
+		t.Fatalf("test details bytes = %d", got)
+	}
+	if got := len(details.ReadFiles) + len(details.ModifiedFiles); got != 1_024 {
+		t.Fatalf("test details paths = %d", got)
+	}
+
+	factories := map[string]func(*testing.T) compactionTestSession{
+		"memory": func(t *testing.T) compactionTestSession { return createConversationMemory(t) },
+		"store":  func(t *testing.T) compactionTestSession { return createConversationStore(t) },
+	}
+	for name, factory := range factories {
+		t.Run(name, func(t *testing.T) {
+			current := factory(t)
+			defer current.Close()
+			checkpoint := validCheckpointFor(current)
+			checkpoint.Summary = strings.Repeat("s", 128*1024)
+			checkpoint.Details = details
+			metadata, err := current.AppendCompaction(context.Background(), checkpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(metadata.Summary) != 128*1024 || !reflect.DeepEqual(metadata.Details, details) {
+				t.Fatalf("metadata exceeded/lost exact bounds: summary=%d details=%#v", len(metadata.Summary), metadata.Details)
+			}
+		})
+	}
+}
+
+func TestOpenCompactionDetailsRejectsDuplicateKeysAndMalformedKnownFieldsLazily(t *testing.T) {
+	tests := map[string]string{
+		"duplicate JSON key": `{"readFiles":["first.go"],"readFiles":["second.go"]}`,
+		"non-object":         `[]`,
+		"read files shape":   `{"readFiles":"README.md"}`,
+		"read path shape":    `{"readFiles":["README.md",1]}`,
+		"modified shape":     `{"modifiedFiles":{}}`,
+		"omitted shape":      `{"omittedReadFiles":"1"}`,
+		"omitted range":      `{"omittedModifiedFiles":9223372036854775808}`,
+	}
+	for name, rawDetails := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := externalCompactionDetailsFixture(t, rawDetails)
+			store, warnings, err := Open(path)
+			if err != nil {
+				t.Fatalf("Open() rejected optional external details: %v", err)
+			}
+			defer store.Close()
+			if len(warnings) != 0 {
+				t.Fatalf("warnings = %#v", warnings)
+			}
+			metadata, ok := store.LatestCompaction()
+			if !ok || !reflect.DeepEqual(metadata.Details, CompactionDetails{}) {
+				t.Fatalf("LatestCompaction() = %#v, %v; want empty details", metadata, ok)
+			}
+		})
+	}
+}
+
+func TestOpenCompactionDetailsSanitizesPathsAndClonesMetadata(t *testing.T) {
+	rawDetails := `{
+		"readFiles":["z.go","bad\u0000.go","dup.go","dup.go","both.go","dir/../unclean.go","a.go","bad\u007f.go","bad\u0085.go"],
+		"modifiedFiles":["m.go","both.go","m.go","./unclean.go"],
+		"omittedReadFiles":2,
+		"omittedModifiedFiles":3,
+		"unknown":{"nested":true}
+	}`
+	path := externalCompactionDetailsFixture(t, rawDetails)
+	store, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	want := CompactionDetails{
+		ReadFiles: []string{"a.go", "dup.go", "z.go"}, ModifiedFiles: []string{"both.go", "m.go"},
+		OmittedReadFiles: 2, OmittedModifiedFiles: 3,
+	}
+	metadata, ok := store.LatestCompaction()
+	if !ok || !reflect.DeepEqual(metadata.Details, want) {
+		t.Fatalf("LatestCompaction() = %#v, %v; want details %#v", metadata, ok, want)
+	}
+	metadata.Details.ReadFiles[0] = "mutated"
+	again, ok := store.LatestCompaction()
+	if !ok || !reflect.DeepEqual(again.Details, want) {
+		t.Fatalf("LatestCompaction() aliases external details: %#v, %v", again, ok)
+	}
+}
+
+func TestOpenCompactionDetailsBoundsOversizedExternalMetadata(t *testing.T) {
+	details := CompactionDetails{OmittedReadFiles: math.MaxInt - 10, OmittedModifiedFiles: math.MaxInt - 50}
+	for index := 0; index < 1_100; index++ {
+		details.ModifiedFiles = append(details.ModifiedFiles, fixedWidthCompactionPath("m", index))
+	}
+	for index := 0; index < 20; index++ {
+		details.ReadFiles = append(details.ReadFiles, fixedWidthCompactionPath("r", index))
+	}
+	rawDetails, err := json.Marshal(details)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := externalCompactionDetailsFixture(t, string(rawDetails))
+	store, warnings, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() rejected oversized optional details: %v", err)
+	}
+	defer store.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	metadata, ok := store.LatestCompaction()
+	if !ok {
+		t.Fatal("LatestCompaction() missing")
+	}
+	got := metadata.Details
+	if len(got.ModifiedFiles) != 1_024 || len(got.ReadFiles) != 0 || compactionPathTextBytes(got) != 64*1024 {
+		t.Fatalf("unbounded external details: modified=%d read=%d bytes=%d", len(got.ModifiedFiles), len(got.ReadFiles), compactionPathTextBytes(got))
+	}
+	if got.OmittedModifiedFiles != math.MaxInt || got.OmittedReadFiles != math.MaxInt {
+		t.Fatalf("omitted counts did not saturate: %#v", got)
+	}
+	if !sort.StringsAreSorted(got.ModifiedFiles) {
+		t.Fatalf("modified paths are not sorted: %#v", got.ModifiedFiles[:3])
+	}
+}
+
+func TestMemoryCompactionRejectsInvalidFirstPostCheckpointMessageWithoutAppending(t *testing.T) {
+	tests := []struct {
+		name    string
+		message model.Message
+	}{
+		{name: "empty ID", message: model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "missing id"}}}},
+		{name: "context role", message: model.Message{ID: "context-post", Role: model.RoleContext, Blocks: []model.Block{{Type: model.BlockText, Text: "context"}}}},
+		{name: "malformed normal message", message: model.Message{ID: "malformed-post", Role: model.RoleUser}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			memory := createConversationMemory(t)
+			defer memory.Close()
+			metadata, err := memory.AppendCompaction(context.Background(), validCheckpointFor(memory))
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := memory.Messages()
+			test.message.CreatedAt = time.Date(2026, 8, 28, 12, 1, 0, 0, time.UTC)
+			if err := memory.Append(context.Background(), test.message); !errors.Is(err, ErrInvalidSession) {
+				t.Fatalf("Append() error = %v, want ErrInvalidSession", err)
+			}
+			if !reflect.DeepEqual(memory.Messages(), before) {
+				t.Fatalf("invalid first-post message was appended: %#v", memory.Messages())
+			}
+			assertLatestCompaction(t, memory, metadata)
+
+			valid := model.Message{
+				ID: "real-first-post", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "valid post"}},
+				CreatedAt: test.message.CreatedAt.Add(time.Second),
+			}
+			if err := memory.Append(context.Background(), valid); err != nil {
+				t.Fatal(err)
+			}
+			metadata.FirstPostCheckpointMessageID = valid.ID
+			assertLatestCompaction(t, memory, metadata)
+			messages := memory.Messages()
+			if len(messages) != len(before)+1 || messages[len(messages)-1].ID != valid.ID {
+				t.Fatalf("valid first-post provenance = %#v", messages)
 			}
 		})
 	}
@@ -703,6 +993,71 @@ func validCheckpointFor(current interface{ Messages() []model.Message }) Compact
 		Details:   CompactionDetails{ReadFiles: []string{"README.md"}},
 		CreatedAt: time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC),
 	}
+}
+
+func exactBoundedCompactionDetails() CompactionDetails {
+	details := CompactionDetails{ReadFiles: make([]string, 1_024)}
+	totalBytes := 0
+	for index := range details.ReadFiles {
+		details.ReadFiles[index] = fmt.Sprintf("path-%04d", index)
+		totalBytes += len(details.ReadFiles[index])
+	}
+	details.ReadFiles[len(details.ReadFiles)-1] += strings.Repeat("x", 64*1024-totalBytes)
+	return details
+}
+
+func fixedWidthCompactionPath(prefix string, index int) string {
+	return fmt.Sprintf("%s%04d-%s", prefix, index, strings.Repeat("x", 58))
+}
+
+func compactionPathTextBytes(details CompactionDetails) int {
+	total := 0
+	for _, path := range details.ModifiedFiles {
+		total += len(path)
+	}
+	for _, path := range details.ReadFiles {
+		total += len(path)
+	}
+	return total
+}
+
+func externalCompactionDetailsFixture(t *testing.T, rawDetails string) string {
+	t.Helper()
+	store := createConversationStore(t)
+	checkpoint := validCheckpointFor(store)
+	checkpoint.Details = CompactionDetails{}
+	if _, err := store.AppendCompaction(context.Background(), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	contents := bytes.TrimSuffix(readFile(t, path), []byte{'\n'})
+	lines := bytes.Split(contents, []byte{'\n'})
+	last := lines[len(lines)-1]
+	if len(last) == 0 || last[len(last)-1] != '}' {
+		t.Fatalf("invalid generated checkpoint fixture: %s", last)
+	}
+	var compactDetails bytes.Buffer
+	if err := json.Compact(&compactDetails, []byte(rawDetails)); err != nil {
+		t.Fatalf("compact crafted external details: %v", err)
+	}
+	injected := make([]byte, 0, len(last)+compactDetails.Len()+11)
+	injected = append(injected, last[:len(last)-1]...)
+	injected = append(injected, `,"details":`...)
+	injected = append(injected, compactDetails.Bytes()...)
+	injected = append(injected, '}')
+	if !json.Valid(injected) {
+		t.Fatalf("crafted external checkpoint is invalid JSON: %s", injected)
+	}
+	lines[len(lines)-1] = injected
+	updated := append(bytes.Join(lines, []byte{'\n'}), '\n')
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func assertCompactedConversation(t *testing.T, messages []model.Message, checkpointID, keptID string, createdAt time.Time, tokensBefore int) {

@@ -1,14 +1,24 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
+	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
+)
+
+const (
+	compactionSummaryMaximumBytes = 128 * 1024
+	compactionDetailsMaximumPaths = 1_024
+	compactionDetailsMaximumBytes = 64 * 1024
 )
 
 func (m *Memory) AppendCompaction(ctx context.Context, checkpoint CompactionCheckpoint) (CompactionMetadata, error) {
@@ -227,6 +237,9 @@ func validateCompactionCheckpoint(checkpoint CompactionCheckpoint) error {
 	if strings.TrimSpace(checkpoint.Summary) == "" || !utf8.ValidString(checkpoint.Summary) {
 		return fmt.Errorf("%w: compaction summary must be nonempty UTF-8", ErrInvalidSession)
 	}
+	if len(checkpoint.Summary) > compactionSummaryMaximumBytes {
+		return sizeError(ErrSessionEntryTooLarge, compactionSummaryMaximumBytes)
+	}
 	if strings.TrimSpace(checkpoint.FirstKeptEntryID) == "" {
 		return fmt.Errorf("%w: compaction first-kept entry id is required", ErrInvalidSession)
 	}
@@ -241,17 +254,48 @@ func validateCompactionCheckpoint(checkpoint CompactionCheckpoint) error {
 			return fmt.Errorf("%w: %v", ErrInvalidSession, err)
 		}
 	}
-	if checkpoint.Details.OmittedReadFiles < 0 || checkpoint.Details.OmittedModifiedFiles < 0 {
+	return validateCompactionDetails(checkpoint.Details)
+}
+
+func validateCompactionDetails(details CompactionDetails) error {
+	if details.OmittedReadFiles < 0 || details.OmittedModifiedFiles < 0 {
 		return fmt.Errorf("%w: compaction omitted file counts must be nonnegative", ErrInvalidSession)
 	}
-	for _, paths := range [][]string{checkpoint.Details.ReadFiles, checkpoint.Details.ModifiedFiles} {
+	if len(details.ReadFiles) > compactionDetailsMaximumPaths ||
+		len(details.ModifiedFiles) > compactionDetailsMaximumPaths-len(details.ReadFiles) {
+		return fmt.Errorf("%w: compaction file details maximum is %d paths", ErrSessionEntryTooLarge, compactionDetailsMaximumPaths)
+	}
+	pathCount := len(details.ReadFiles) + len(details.ModifiedFiles)
+	seen := make(map[string]struct{}, pathCount)
+	pathBytes := 0
+	for _, paths := range [][]string{details.ReadFiles, details.ModifiedFiles} {
 		for _, path := range paths {
-			if !utf8.ValidString(path) {
-				return fmt.Errorf("%w: compaction file details must be UTF-8", ErrInvalidSession)
+			if !validCompactionDetailPath(path) {
+				return fmt.Errorf("%w: compaction file detail path is invalid", ErrInvalidSession)
 			}
+			if _, duplicate := seen[path]; duplicate {
+				return fmt.Errorf("%w: compaction file detail paths must be unique and disjoint", ErrInvalidSession)
+			}
+			seen[path] = struct{}{}
+			if len(path) > compactionDetailsMaximumBytes-pathBytes {
+				return sizeError(ErrSessionEntryTooLarge, compactionDetailsMaximumBytes)
+			}
+			pathBytes += len(path)
 		}
 	}
 	return nil
+}
+
+func validCompactionDetailPath(path string) bool {
+	if path == "" || !utf8.ValidString(path) || filepath.Clean(path) != path {
+		return false
+	}
+	for _, character := range path {
+		if character <= 0x1f || character >= 0x7f && character <= 0x9f {
+			return false
+		}
+	}
+	return true
 }
 
 func compactionUsageToPi(usage *model.Usage) (*piUsage, error) {
@@ -330,20 +374,163 @@ func resolveCompactionBoundary(path []piEntry, checkpointIndex int) (string, boo
 }
 
 func decodeCompactionDetails(raw json.RawMessage) CompactionDetails {
-	if len(raw) == 0 {
+	if len(raw) == 0 || !uniqueJSONObject(raw) {
 		return CompactionDetails{}
 	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return CompactionDetails{}
+	}
+	for _, field := range []string{"readFiles", "modifiedFiles"} {
+		if value, ok := object[field]; ok {
+			var paths []string
+			if !isJSONArray(value) || json.Unmarshal(value, &paths) != nil {
+				return CompactionDetails{}
+			}
+		}
+	}
+	for _, field := range []string{"omittedReadFiles", "omittedModifiedFiles"} {
+		if value, ok := object[field]; ok {
+			var count int
+			if isJSONNull(value) || json.Unmarshal(value, &count) != nil {
+				return CompactionDetails{}
+			}
+		}
+	}
+
 	var details CompactionDetails
 	if err := json.Unmarshal(raw, &details); err != nil {
 		return CompactionDetails{}
 	}
-	if details.OmittedReadFiles < 0 {
-		details.OmittedReadFiles = 0
+	return sanitizeCompactionDetails(details)
+}
+
+func uniqueJSONObject(raw []byte) bool {
+	if !utf8.Valid(raw) {
+		return false
 	}
-	if details.OmittedModifiedFiles < 0 {
-		details.OmittedModifiedFiles = 0
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil {
+		return false
 	}
-	return cloneCompactionDetails(details)
+	opening, ok := token.(json.Delim)
+	if !ok || opening != '{' || !consumeUniqueJSONContainer(decoder, opening) {
+		return false
+	}
+	_, err = decoder.Token()
+	return err == io.EOF
+}
+
+func consumeUniqueJSONValue(decoder *json.Decoder) bool {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	if opening, ok := token.(json.Delim); ok {
+		return consumeUniqueJSONContainer(decoder, opening)
+	}
+	return true
+}
+
+func consumeUniqueJSONContainer(decoder *json.Decoder, opening json.Delim) bool {
+	switch opening {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return false
+			}
+			key, ok := token.(string)
+			if !ok {
+				return false
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return false
+			}
+			seen[key] = struct{}{}
+			if !consumeUniqueJSONValue(decoder) {
+				return false
+			}
+		}
+		token, err := decoder.Token()
+		return err == nil && token == json.Delim('}')
+	case '[':
+		for decoder.More() {
+			if !consumeUniqueJSONValue(decoder) {
+				return false
+			}
+		}
+		token, err := decoder.Token()
+		return err == nil && token == json.Delim(']')
+	default:
+		return false
+	}
+}
+
+func sanitizeCompactionDetails(details CompactionDetails) CompactionDetails {
+	modifiedSet := make(map[string]struct{}, len(details.ModifiedFiles))
+	for _, path := range details.ModifiedFiles {
+		if validCompactionDetailPath(path) {
+			modifiedSet[path] = struct{}{}
+		}
+	}
+	readSet := make(map[string]struct{}, len(details.ReadFiles))
+	for _, path := range details.ReadFiles {
+		if !validCompactionDetailPath(path) {
+			continue
+		}
+		if _, modified := modifiedSet[path]; modified {
+			continue
+		}
+		readSet[path] = struct{}{}
+	}
+
+	modified := sortedCompactionDetailPaths(modifiedSet)
+	reads := sortedCompactionDetailPaths(readSet)
+	result := CompactionDetails{
+		OmittedReadFiles:     max(details.OmittedReadFiles, 0),
+		OmittedModifiedFiles: max(details.OmittedModifiedFiles, 0),
+	}
+	remainingPaths := compactionDetailsMaximumPaths
+	remainingBytes := compactionDetailsMaximumBytes
+	for _, path := range modified {
+		if remainingPaths == 0 || len(path) > remainingBytes {
+			result.OmittedModifiedFiles = saturatingCompactionDetailCount(result.OmittedModifiedFiles)
+			continue
+		}
+		result.ModifiedFiles = append(result.ModifiedFiles, path)
+		remainingPaths--
+		remainingBytes -= len(path)
+	}
+	for _, path := range reads {
+		if remainingPaths == 0 || len(path) > remainingBytes {
+			result.OmittedReadFiles = saturatingCompactionDetailCount(result.OmittedReadFiles)
+			continue
+		}
+		result.ReadFiles = append(result.ReadFiles, path)
+		remainingPaths--
+		remainingBytes -= len(path)
+	}
+	return result
+}
+
+func sortedCompactionDetailPaths(paths map[string]struct{}) []string {
+	result := make([]string, 0, len(paths))
+	for path := range paths {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func saturatingCompactionDetailCount(count int) int {
+	if count >= math.MaxInt {
+		return math.MaxInt
+	}
+	return count + 1
 }
 
 func safeContextTokenCount(tokens int64) int {

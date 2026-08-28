@@ -224,6 +224,34 @@ func truncateAndClipLines(content string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+func resumeVisibleRows(width, height int) int {
+	_ = width
+	// A bounded picker reserves two border rows, one title row, and one help row.
+	return max(1, height-4)
+}
+
+func resumeVisibleRange(sessionCount, selected, visibleRows int) (int, int) {
+	if sessionCount <= 0 {
+		return 0, 0
+	}
+	selected = clamp(selected, 0, sessionCount-1)
+	visibleRows = clamp(visibleRows, 1, sessionCount)
+	start := (selected / visibleRows) * visibleRows
+	end := min(sessionCount, start+visibleRows)
+	return start, end
+}
+
+func clipSingleLineText(text string, width int) string {
+	if width <= 0 || text == "" {
+		return ""
+	}
+	safe := escapeSingleLineText(text)
+	if ansi.StringWidth(safe) <= width {
+		return safe
+	}
+	return ansi.Truncate(safe, width, "…")
+}
+
 func fitToBounds(content string, width, height int) string {
 	if width <= 0 || height <= 0 || content == "" {
 		return ""

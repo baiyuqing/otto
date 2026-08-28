@@ -1,0 +1,11 @@
+{"type":"session","version":3,"id":"650e8400-e29b-41d4-a716-446655440000","timestamp":"2026-08-27T09:00:00Z","cwd":"/workspace","parentSession":"/workspace/parent.jsonl"}
+{"type":"custom","id":"a0000001","parentId":null,"timestamp":"2026-08-27T09:00:01Z","customType":"otto.runtime","data":{"profile":"default","provider":"openai-compatible","model":"test-model"}}
+{"type":"message","id":"a0000002","parentId":"a0000001","timestamp":"2026-08-27T09:00:02Z","message":{"role":"user","content":"root","timestamp":1787821202000}}
+{"type":"message","id":"a0000003","parentId":"a0000002","timestamp":"2026-08-27T09:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"inactive branch"}],"api":"openai-completions","provider":"openai-compatible","model":"test-model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1787821203000}}
+{"type":"custom_message","id":"a0000004","parentId":"a0000003","timestamp":"2026-08-27T09:00:04Z","customType":"inactive.context","content":"inactive custom context","display":false}
+{"type":"model_change","id":"a0000005","parentId":"a0000002","timestamp":"2026-08-27T09:00:05Z","provider":"openai-compatible","modelId":"test-model-2"}
+{"type":"thinking_level_change","id":"a0000006","parentId":"a0000005","timestamp":"2026-08-27T09:00:06Z","thinkingLevel":"high"}
+{"type":"branch_summary","id":"a0000007","parentId":"a0000006","timestamp":"2026-08-27T09:00:07Z","fromId":"a0000003","summary":"inactive work was abandoned","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}
+{"type":"label","id":"a0000008","parentId":"a0000007","timestamp":"2026-08-27T09:00:08Z","targetId":"a0000002","label":"root-label"}
+{"type":"session_info","id":"a0000009","parentId":"a0000008","timestamp":"2026-08-27T09:00:09Z","name":"Fixture tree"}
+{"type":"message","id":"a000000a","parentId":"a0000009","timestamp":"2026-08-27T09:00:10Z","message":{"role":"user","content":[{"type":"text","text":"active branch"}],"timestamp":1787821210000}}

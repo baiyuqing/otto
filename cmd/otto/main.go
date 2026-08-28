@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -12,14 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 
-	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
-	"github.com/baiyuqing/otto/internal/provider/openaicompat"
 	"github.com/baiyuqing/otto/internal/repl"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
@@ -44,23 +40,23 @@ const (
 type terminalDetector func(io.Reader, io.Writer) bool
 
 type runDependencies struct {
-	subscribeInterrupts func() interruptSubscription
-	readSessionHeader   func(string, string) (session.Header, error)
-	openSession         func(string, string, io.Writer) (session.Session, error)
-	newSession          func(bool, string, string, config.Runtime) (session.Session, error)
-	detectTerminal      terminalDetector
-	runTUI              func(context.Context, io.Reader, io.Writer, app.Backend) error
-	newRunner           app.RunnerFactory
+	subscribeInterrupts  func() interruptSubscription
+	prepareSession       func(context.Context, string, string) (preparedSession, error)
+	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
+	newSession           func(bool, string, string, config.Runtime) (session.Session, error)
+	detectTerminal       terminalDetector
+	runTUI               func(context.Context, io.Reader, io.Writer, app.Backend) error
+	newRunner            app.RunnerFactory
 }
 
 func defaultRunDependencies() runDependencies {
 	return runDependencies{
-		subscribeInterrupts: subscribeOSInterrupts,
-		readSessionHeader:   readSessionHeader,
-		openSession:         openSession,
-		newSession:          newSession,
-		detectTerminal:      detectTerminalIO,
-		runTUI:              tui.Run,
+		subscribeInterrupts:  subscribeOSInterrupts,
+		prepareSession:       prepareSession,
+		prepareListedSession: prepareListedSession,
+		newSession:           newSession,
+		detectTerminal:       detectTerminalIO,
+		runTUI:               tui.Run,
 	}
 }
 
@@ -136,11 +132,17 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
 	sessionPath := options.resumePath
+	listedSessionPath := false
 	if options.continueLast {
-		sessionPath, err = newestSessionPath(sessionRoot, workspacePath)
-		if err != nil {
-			return fail(stderr, "%v", err)
+		listed, listErr := session.List(ctx, sessionRoot, workspacePath, "", 1)
+		if listErr != nil {
+			return fail(stderr, "%v", listErr)
 		}
+		if len(listed.Sessions) == 0 {
+			return fail(stderr, "no session found for workspace %s", workspacePath)
+		}
+		sessionPath = listed.Sessions[0].Path
+		listedSessionPath = true
 	}
 
 	configFile, err := loadConfig(options, home)
@@ -157,19 +159,31 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "%v", err)
 	}
 
-	defaults := config.SessionDefaults{}
-	if sessionPath != "" {
-		header, headerErr := deps.readSessionHeader(sessionPath, workspacePath)
-		if headerErr != nil {
-			return fail(stderr, "%v", headerErr)
-		}
-		defaults.Provider = header.Provider
-		defaults.Model = header.Model
-		if options.profile == "" && header.Profile != "" {
-			configFile.DefaultProfile = header.Profile
-		}
+	shell := getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
 	}
-	runtime, err := config.Resolve(configFile, environment, defaults, config.Overrides{
+	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
+
+	var (
+		metadata        *session.RuntimeMetadata
+		preparedInitial preparedSession
+		preparedInfo    session.SessionInfo
+	)
+	if sessionPath != "" {
+		if listedSessionPath {
+			preparedInitial, err = builder.prepareListed(ctx, sessionPath)
+		} else {
+			preparedInitial, err = builder.prepare(ctx, sessionPath)
+		}
+		if err != nil {
+			return fail(stderr, "%v", builder.redactError(err, nil))
+		}
+		defer preparedInitial.Close()
+		preparedInfo = preparedInitial.Info()
+		metadata = &session.RuntimeMetadata{Profile: preparedInfo.Profile, Provider: preparedInfo.Provider, Model: preparedInfo.Model}
+	}
+	overrides := config.Overrides{
 		Profile:        options.profile,
 		Provider:       options.provider,
 		BaseURL:        options.baseURL,
@@ -177,57 +191,63 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		MaxTurns:       options.maxTurns,
 		ShellTimeout:   options.shellTimeout,
 		MaxOutputBytes: options.maxOutput,
-	})
-	if err != nil {
-		return fail(stderr, "%v", err)
 	}
-
-	shell := getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
+	runtime, err := resolveInitialRuntime(configFile, environment, metadata, overrides)
+	if err != nil {
+		return fail(stderr, "%v", builder.redactError(err, nil))
 	}
 	if err := validateShell(shell); err != nil {
 		return fail(stderr, "%v", err)
 	}
 
-	registry, err := tool.NewRegistry(
-		tool.NewReadTool(workspace, runtime.MaxOutputBytes),
-		tool.NewWriteTool(workspace),
-		tool.NewEditTool(workspace),
-		tool.NewBashTool(workspace, shell, runtime.ShellTimeout, runtime.MaxOutputBytes, tool.BashSecurity{
-			RemoveEnv:    []string{"OTTO_API_KEY", runtime.APIKeyEnv},
-			RedactValues: []string{runtime.APIKey},
-		}),
+	var (
+		initialSession  session.Session
+		startupWarnings []session.Warning
 	)
-	if err != nil {
-		return fail(stderr, "create tool registry: %v", err)
-	}
-
-	var initialSession session.Session
-	if sessionPath != "" {
-		initialSession, err = deps.openSession(sessionPath, workspacePath, stderr)
+	if preparedInitial != nil {
+		initialSession, startupWarnings, err = builder.activatePrepared(ctx, preparedInitial, preparedInfo, &runtime)
 	} else {
 		initialSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
 	}
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
-	buildRunner := deps.newRunner
-	if buildRunner == nil {
-		buildRunner = func(current session.Session) app.Runner {
-			client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
-			return agent.New(client, registry, current, agent.Options{
-				Model: runtime.Model, SystemPrompt: systemPrompt, MaxTurns: runtime.MaxTurns,
-			})
-		}
+	printWarnings(stderr, startupWarnings)
+
+	initialRunner, err := builder.buildRunner(initialSession, runtime)
+	if err != nil {
+		_ = initialSession.Close()
+		return fail(stderr, "%v", builder.redactError(err, &runtime))
 	}
-	controller, err := app.New(initialSession, func() (session.Session, error) {
-		return deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
-	}, buildRunner, app.WithRuntimeInfo(app.RuntimeInfo{
+	if err := updateSessionRuntime(ctx, initialSession, runtime); err != nil {
+		_ = initialSession.Close()
+		return fail(stderr, "%v", builder.redactError(err, &runtime))
+	}
+	initialRunnerPending := true
+	buildRunner := func(current session.Session) app.Runner {
+		if initialRunnerPending {
+			initialRunnerPending = false
+			return initialRunner
+		}
+		runner, buildErr := builder.buildRunner(current, runtime)
+		if buildErr != nil {
+			return nil
+		}
+		return runner
+	}
+	controllerOptions := []app.Option{app.WithRuntimeInfo(app.RuntimeInfo{
 		Provider: runtime.Provider,
 		Profile:  runtime.Profile,
 		Model:    runtime.Model,
-	}))
+	})}
+	if !options.noSession {
+		controllerOptions = append(controllerOptions, app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
+			return session.List(ctx, sessionRoot, workspacePath, "", limit)
+		}, builder.openReplacement))
+	}
+	controller, err := app.New(initialSession, func() (session.Session, error) {
+		return deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)
+	}, buildRunner, controllerOptions...)
 	if err != nil {
 		_ = initialSession.Close()
 		return fail(stderr, "%v", err)
@@ -516,79 +536,13 @@ func validateShell(path string) error {
 	return nil
 }
 
-func readSessionHeader(path, workspace string) (session.Header, error) {
-	header, err := session.ReadHeader(path)
-	if err != nil {
-		return session.Header{}, err
-	}
-	headerWorkspace, err := canonicalDirectory(header.Workspace)
-	if err != nil {
-		return session.Header{}, fmt.Errorf("resolve session workspace: %w", err)
-	}
-	if headerWorkspace != workspace {
-		return session.Header{}, fmt.Errorf("session workspace %q does not match cwd", headerWorkspace)
-	}
-	return header, nil
-}
-
-func openSession(path, workspace string, stderr io.Writer) (session.Session, error) {
-	store, warnings, err := session.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	headerWorkspace, err := canonicalDirectory(store.Header().Workspace)
-	if err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("resolve session workspace: %w", err)
-	}
-	if headerWorkspace != workspace {
-		_ = store.Close()
-		return nil, fmt.Errorf("session workspace %q does not match cwd", headerWorkspace)
-	}
-	for _, warning := range warnings {
-		_, _ = fmt.Fprintf(stderr, "warning: %s\n", warning.Message)
-	}
-	return store, nil
-}
-
-func newestSessionPath(root, workspace string) (string, error) {
-	sum := sha256.Sum256([]byte(workspace))
-	key := hex.EncodeToString(sum[:])[:16]
-	paths, err := filepath.Glob(filepath.Join(root, key, "*.jsonl"))
-	if err != nil {
-		return "", fmt.Errorf("find sessions: %w", err)
-	}
-	type candidate struct {
-		path     string
-		modified time.Time
-	}
-	candidates := make([]candidate, 0, len(paths))
-	for _, path := range paths {
-		info, statErr := os.Stat(path)
-		if statErr != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		candidates = append(candidates, candidate{path: path, modified: info.ModTime()})
-	}
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("no session found for workspace %s", workspace)
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].modified.Equal(candidates[j].modified) {
-			return candidates[i].path > candidates[j].path
-		}
-		return candidates[i].modified.After(candidates[j].modified)
-	})
-	return candidates[0].path, nil
-}
-
 func newSession(memory bool, root, workspace string, runtime config.Runtime) (session.Session, error) {
 	id, err := randomID()
 	if err != nil {
 		return nil, fmt.Errorf("create session id: %w", err)
 	}
 	header := session.Header{
-		Version: 1, ID: id, Workspace: workspace, Provider: runtime.Provider,
+		Version: session.CurrentVersion, ID: id, Workspace: workspace, Provider: runtime.Provider,
 		Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 	}
 	if memory {

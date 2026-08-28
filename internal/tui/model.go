@@ -98,6 +98,7 @@ type Model struct {
 	ctrlCArmGeneration     uint64
 	newSessionPending      bool
 	newSessionGeneration   uint64
+	resume                 resumePickerState
 	activeTurnChannel      <-chan turnEnvelope
 	activeAssistant        int
 	turnErrorSeen          bool
@@ -111,7 +112,7 @@ type Model struct {
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
-	entries, usage := EntriesFromHistory(historyFromBackend(backend))
+	entries, usage := entriesAndUsageFromBackend(backend)
 	editor := textarea.New()
 	editor.ShowLineNumbers = false
 	editor.Prompt = "> "
@@ -176,6 +177,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = max(0, msg.Width)
 		m.height = max(0, msg.Height)
+		if len(m.resume.sessions) == 0 {
+			m.resume.selected = 0
+		} else {
+			m.resume.selected = clamp(m.resume.selected, 0, len(m.resume.sessions)-1)
+		}
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
 	case tea.KeyboardEnhancementsMsg:
@@ -201,6 +207,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case newSessionResultMsg:
 		return m.applyNewSessionResult(msg)
+	case sessionListResultMsg:
+		return m.applySessionListResult(msg)
+	case sessionResumeResultMsg:
+		return m.applySessionResumeResult(msg)
 	case ctrlCArmExpiredMsg:
 		if m.ctrlCArmed && msg.generation == m.ctrlCArmGeneration {
 			m.clearCtrlCArm()
@@ -221,11 +231,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKeyPress(msg, previousYOffset, previousEditorHeight, viewportBefore)
 	case tea.PasteMsg:
-		if m.overlay != overlayNone {
+		if m.resume.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	case tea.MouseMsg:
-		if m.overlay != overlayNone {
+		if m.resume.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	}
@@ -263,6 +273,9 @@ func (m Model) View() tea.View {
 	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions))
 	if layout.tooSmall {
 		return newRootView(m, smallTerminalView(m.width, m.height))
+	}
+	if m.resume.active() {
+		return newRootView(m, renderResumePicker(m.width, m.height, m.resume, m.spinner.View(), m.now()))
 	}
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
@@ -303,19 +316,18 @@ func (m Model) overlayContent() string {
 }
 
 func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEditorHeight int, viewportBefore viewport.Model) (tea.Model, tea.Cmd) {
+	if isCtrlCKey(msg) {
+		return m.handleCtrlC(previousEditorHeight)
+	}
+	if updated, cmd, handled := m.handleResumeKeyPress(msg); handled {
+		return updated, cmd
+	}
 	if m.overlay != overlayNone {
 		if isEscapeKey(msg) {
 			m.overlay = overlayNone
 			return m, nil
 		}
-		if isCtrlCKey(msg) {
-			return m.handleCtrlC(previousEditorHeight)
-		}
 		return m, nil
-	}
-
-	if isCtrlCKey(msg) {
-		return m.handleCtrlC(previousEditorHeight)
 	}
 	if isEscapeKey(msg) {
 		if m.running && m.cancel != nil {
@@ -461,8 +473,10 @@ func newRootView(m Model, content string) tea.View {
 	view.MouseMode = tea.MouseModeCellMotion
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
-	if cursor := m.editor.Cursor(); cursor != nil {
-		view.Cursor = cursor
+	if !m.resume.active() {
+		if cursor := m.editor.Cursor(); cursor != nil {
+			view.Cursor = cursor
+		}
 	}
 	return view
 }
@@ -511,11 +525,13 @@ func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
 		m.newSessionPending = true
 		m.statusText = ""
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
+	case slashCommandResume:
+		return m.handleResumeCommand()
 	case slashCommandExit:
 		if m.running {
 			return m, nil
 		}
-		return m, tea.Quit
+		return m.quit()
 	default:
 		m.statusText = fmt.Sprintf("unknown command: %s", name)
 		return m, nil
@@ -543,9 +559,19 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 	if m.running {
 		return m, nil
 	}
-	m.entries, m.usage = EntriesFromHistory(historyFromBackend(m.backend))
+	m.resetSessionViewFromBackend("")
+	return m, nil
+}
+
+func (m *Model) resetSessionViewFromBackend(status string) {
+	m.entries, m.usage = entriesAndUsageFromBackend(m.backend)
 	m.overlay = overlayNone
-	m.statusText = ""
+	m.statusText = status
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	m.running = false
 	m.clearCtrlCArm()
 	m.dirtyStreaming = false
 	m.renderTickActive = false
@@ -561,7 +587,6 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 	m.editor.SetValue("")
 	m.commandSuggestionIndex = 0
 	m.rerenderAndRefreshViewportContent(false)
-	return m, nil
 }
 
 func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
@@ -571,7 +596,7 @@ func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
 			if m.cancel != nil {
 				m.cancel()
 			}
-			return m, tea.Quit
+			return m.quit()
 		}
 		m.clearCtrlCArm()
 	}
@@ -957,7 +982,7 @@ func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
 	m.completeTurnState()
 	if errors.Is(err, session.ErrFatalPersistence) {
 		m.fatalErr = err
-		return m, tea.Quit
+		return m.quit()
 	}
 	return m, nil
 }
@@ -1189,6 +1214,16 @@ func (m *Model) syncAutoFollow(before viewport.Model) {
 	}
 }
 
+func entriesAndUsageFromBackend(backend app.Backend) ([]Entry, otmodel.Usage) {
+	entries, fallback := EntriesFromHistory(historyFromBackend(backend))
+	info := infoFromBackend(backend)
+	if !info.UsagePresent {
+		return entries, fallback
+	}
+	aggregate := addUsageTotals(otmodel.Usage{}, &info.Usage)
+	return entries, aggregate
+}
+
 func historyFromBackend(backend app.Backend) []otmodel.Message {
 	if backend == nil {
 		return nil
@@ -1217,5 +1252,5 @@ func (m *Model) nextLiveEntryID(kind string) string {
 }
 
 func (m Model) reservedStateActive() bool {
-	return m.running || m.newSessionPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
 }

@@ -32,6 +32,28 @@ func TestMessageJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestContextMessageJSONRoundTrip(t *testing.T) {
+	original := Message{
+		ID:          "context-1",
+		Role:        RoleContext,
+		Blocks:      []Block{{Type: BlockText, Text: "[Custom context: fixture]\ntext"}},
+		CreatedAt:   time.Unix(20, 0).UTC(),
+		ContextType: "fixture",
+		Display:     true,
+	}
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Message
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(original, decoded) {
+		t.Fatalf("round trip mismatch\nwant: %#v\n got: %#v", original, decoded)
+	}
+}
+
 func TestMessageTextJoinsOnlyTextBlocks(t *testing.T) {
 	message := Message{Blocks: []Block{
 		{Type: BlockText, Text: "one"},

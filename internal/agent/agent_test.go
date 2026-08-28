@@ -500,6 +500,71 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 	}
 }
 
+func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing.T) {
+	credential := fmt.Sprintf("agent-boundary-secret-%d", time.Now().UnixNano())
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(_ context.Context, arguments json.RawMessage) tool.Result {
+		recorder.calls = append(recorder.calls, string(arguments))
+		return tool.Result{Content: "tool returned " + credential}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, credential, "prefix-"+credential, "Bearer "+credential, credential))
+	stream := []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "text "}}
+	for _, character := range credential {
+		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string(character)})
+	}
+	stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: " done"})
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: stream,
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "text " + credential + " done"},
+					{Type: model.BlockToolCall, ToolCallID: "call-" + credential, ToolName: "echo", Arguments: arguments},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "finished"}}}, FinishReason: model.FinishStop}},
+	}}
+	memory := session.NewMemory(testHeader(t))
+	redactor := NewRedactor([]string{credential})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()}, redactor)
+
+	var events []Event
+	if err := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.calls) != 1 || strings.Contains(recorder.calls[0], credential) || strings.Contains(recorder.calls[0], "attacker-") || !strings.Contains(recorder.calls[0], redactor.marker) || !json.Valid([]byte(recorder.calls[0])) {
+		t.Fatalf("executed arguments = %#v", recorder.calls)
+	}
+	for index, event := range events {
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), credential) || strings.Contains(string(encoded), "attacker-") {
+			t.Fatalf("event %d leaked credential or colliding value: %s", index, encoded)
+		}
+	}
+	for location, value := range map[string]any{
+		"messages":       memory.Messages(),
+		"follow-up":      fakeProvider.requests[1],
+		"tool execution": recorder.calls,
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), credential) || strings.Contains(string(encoded), "attacker-") || !strings.Contains(string(encoded), redactor.marker) {
+			t.Fatalf("%s was not redacted or retained a colliding value: %s", location, encoded)
+		}
+	}
+}
+
 func TestRunClassifiesFatalPersistenceAtEveryDurableBoundary(t *testing.T) {
 	for _, test := range []struct {
 		name          string

@@ -12,6 +12,7 @@ const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
 	RoleTool      Role = "tool"
+	RoleContext   Role = "context"
 )
 
 type BlockType string
@@ -38,6 +39,8 @@ type Message struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 	Usage        *Usage       `json:"usage,omitempty"`
+	ContextType  string       `json:"context_type,omitempty"`
+	Display      bool         `json:"display,omitempty"`
 }
 
 func (m Message) Text() string {

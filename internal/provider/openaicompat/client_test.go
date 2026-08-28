@@ -266,7 +266,7 @@ func TestCompleteDoesNotRetryUnauthorizedAndRedactsBoundedError(t *testing.T) {
 }
 
 func TestNewRejectsInvalidBaseURLs(t *testing.T) {
-	for _, baseURL := range []string{"", "ftp://example.test/v1", "http:///v1", "https://example.test/v1?tenant=x", "https://example.test/v1?", "https://example.test/v1#fragment"} {
+	for _, baseURL := range []string{"", "ftp://example.test/v1", "http:///v1", "https://example.test/v1?tenant=x", "https://example.test/v1?", "https://example.test/v1#fragment", "https://username@example.test/v1", "https://username:password@example.test/v1"} {
 		t.Run(baseURL, func(t *testing.T) {
 			_, err := New(baseURL, "key", nil).Complete(context.Background(), provider.Request{Model: "model"}, nil)
 			if err == nil || !strings.Contains(err.Error(), "invalid OpenAI-compatible base URL") {
@@ -320,6 +320,20 @@ func TestRequestIncludesEveryFunctionSchemaField(t *testing.T) {
 	}
 }
 
+func TestTranslateRequestMapsContextMessagesToWireUsers(t *testing.T) {
+	request := translateRequest(provider.Request{Messages: []model.Message{
+		{Role: model.RoleContext, Display: true, Blocks: []model.Block{{Type: model.BlockText, Text: "visible context"}}},
+		{Role: model.RoleContext, Display: false, Blocks: []model.Block{{Type: model.BlockText, Text: "hidden context"}}},
+	}})
+	want := []chatMessage{
+		{Role: "user", Content: "visible context"},
+		{Role: "user", Content: "hidden context"},
+	}
+	if !reflect.DeepEqual(request.Messages, want) {
+		t.Fatalf("messages = %#v, want %#v", request.Messages, want)
+	}
+}
+
 func TestCompleteTranslatesNeutralRequestToChatCompletions(t *testing.T) {
 	var got chatRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -353,11 +367,14 @@ func TestCompleteTranslatesNeutralRequestToChatCompletions(t *testing.T) {
 			{Role: model.RoleAssistant, Blocks: []model.Block{
 				{Type: model.BlockText, Text: "Calling read."},
 				{Type: model.BlockToolCall, ToolCallID: "call-7", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)},
+				{Type: model.BlockToolCall, ToolCallID: "call-8", ToolName: "read", Arguments: json.RawMessage(`{"path":"AGENTS.md"}`)},
 			}},
 			{Role: model.RoleTool, Blocks: []model.Block{
 				{Type: model.BlockToolResult, ToolCallID: "call-7", Text: "contents"},
 				{Type: model.BlockToolResult, ToolCallID: "call-8", Text: "second"},
 			}},
+			{Role: model.RoleContext, Display: false, Blocks: []model.Block{{Type: model.BlockText, Text: "after tools"}}},
+			{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "continue"}}},
 		},
 		Tools: []model.ToolDefinition{{Name: "read", Description: "Read a file", Parameters: parameters}},
 	}, nil)
@@ -371,9 +388,14 @@ func TestCompleteTranslatesNeutralRequestToChatCompletions(t *testing.T) {
 	wantMessages := []chatMessage{
 		{Role: "system", Content: "Be concise."},
 		{Role: "user", Content: "read it"},
-		{Role: "assistant", Content: "Calling read.", ToolCalls: []chatToolCall{{ID: "call-7", Type: "function", Function: chatToolCallFunction{Name: "read", Arguments: `{"path":"README.md"}`}}}},
+		{Role: "assistant", Content: "Calling read.", ToolCalls: []chatToolCall{
+			{ID: "call-7", Type: "function", Function: chatToolCallFunction{Name: "read", Arguments: `{"path":"README.md"}`}},
+			{ID: "call-8", Type: "function", Function: chatToolCallFunction{Name: "read", Arguments: `{"path":"AGENTS.md"}`}},
+		}},
 		{Role: "tool", Content: "contents", ToolCallID: "call-7"},
 		{Role: "tool", Content: "second", ToolCallID: "call-8"},
+		{Role: "user", Content: "after tools"},
+		{Role: "user", Content: "continue"},
 	}
 	if !reflect.DeepEqual(got.Messages, wantMessages) {
 		t.Fatalf("messages mismatch\nwant: %#v\n got: %#v", wantMessages, got.Messages)

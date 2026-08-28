@@ -116,6 +116,8 @@ func TestResolveRejectsBaseURLsRejectedByOpenAIClient(t *testing.T) {
 		"https://example.com/v1?tenant=x",
 		"https://example.com/v1?",
 		"https://example.com/v1#fragment",
+		"https://username@example.com/v1",
+		"https://username:password@example.com/v1",
 		"ftp://example.com/v1",
 		"http:///v1",
 		"http://[::1",

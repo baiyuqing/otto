@@ -22,6 +22,57 @@ api_key_env = "TEST_KEY"
 	}
 }
 
+func TestLoadCompactionPreservesAbsentAndExplicitValues(t *testing.T) {
+	path := writeConfig(t, `[agent.compaction]
+auto = false
+reserve_tokens = 0
+keep_recent_tokens = -1
+
+[profiles.local]
+context_window = 0
+compaction_window = -2
+`)
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Agent.Compaction.Auto == nil || *file.Agent.Compaction.Auto {
+		t.Fatalf("compaction auto = %#v, want explicit false", file.Agent.Compaction.Auto)
+	}
+	if file.Agent.Compaction.ReserveTokens == nil || *file.Agent.Compaction.ReserveTokens != 0 {
+		t.Fatalf("reserve_tokens = %#v, want explicit zero", file.Agent.Compaction.ReserveTokens)
+	}
+	if file.Agent.Compaction.KeepRecentTokens == nil || *file.Agent.Compaction.KeepRecentTokens != -1 {
+		t.Fatalf("keep_recent_tokens = %#v, want explicit negative", file.Agent.Compaction.KeepRecentTokens)
+	}
+	profile := file.Profiles["local"]
+	if profile.ContextWindow == nil || *profile.ContextWindow != 0 {
+		t.Fatalf("context_window = %#v, want explicit zero", profile.ContextWindow)
+	}
+	if profile.CompactionWindow == nil || *profile.CompactionWindow != -2 {
+		t.Fatalf("compaction_window = %#v, want explicit negative", profile.CompactionWindow)
+	}
+
+	path = writeConfig(t, "")
+	file, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Agent.Compaction.Auto != nil || file.Agent.Compaction.ReserveTokens != nil ||
+		file.Agent.Compaction.KeepRecentTokens != nil {
+		t.Fatalf("absent compaction values = %#v, want nil pointers", file.Agent.Compaction)
+	}
+}
+
+func TestLoadCompactionRejectsUnknownFields(t *testing.T) {
+	path := writeConfig(t, `[agent.compaction]
+unknown = true
+`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
+}
+
 func TestLoadUIDecodesMode(t *testing.T) {
 	path := writeConfig(t, `[ui]
 mode = "auto"

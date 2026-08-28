@@ -1217,7 +1217,7 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requestCount == 1 {
 			textSplit := len(authorization) - 3
-			arguments := fmt.Sprintf(`{"path":"credential.txt","content":%q}`, authorization)
+			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"}}`, credential, authorization, "prefix-"+credential)
 			argumentSplit := strings.Index(arguments, credential) + len(credential)/2
 			chunks := []string{
 				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "authorization="+authorization[:textSplit]),
@@ -1251,23 +1251,21 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 	if err != nil {
 		t.Fatal(err)
 	}
-	executed, err := os.ReadFile(filepath.Join(workspace, "credential.txt"))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(workspace, "credential.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("credential-bearing unknown key should conservatively prevent write, stat error = %v", err)
 	}
 	locations := map[string]string{
-		"stdout events":            stdout.String(),
-		"stderr":                   stderr.String(),
-		"executed write arguments": string(executed),
-		"provider follow-up":       requestBodies[1],
-		"session JSONL":            string(persisted),
+		"stdout events":      stdout.String(),
+		"stderr":             stderr.String(),
+		"provider follow-up": requestBodies[1],
+		"session JSONL":      string(persisted),
 	}
 	for location, content := range locations {
 		if strings.Contains(content, credential) || strings.Contains(content, authorization) {
 			t.Fatalf("%s leaked successful provider credential echo: %q", location, content)
 		}
 	}
-	for _, location := range []string{"stdout events", "executed write arguments", "provider follow-up", "session JSONL"} {
+	for _, location := range []string{"stdout events", "provider follow-up", "session JSONL"} {
 		if !strings.Contains(locations[location], "█") {
 			t.Fatalf("%s did not retain a redaction marker: %q", location, locations[location])
 		}

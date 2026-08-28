@@ -38,7 +38,10 @@ func NewRedactor(values []string) *Redactor {
 		redactor.values = append(redactor.values, strings.Clone(value))
 	}
 	sort.Slice(redactor.values, func(i, j int) bool {
-		return len(redactor.values[i]) > len(redactor.values[j])
+		if len(redactor.values[i]) != len(redactor.values[j]) {
+			return len(redactor.values[i]) > len(redactor.values[j])
+		}
+		return redactor.values[i] < redactor.values[j]
 	})
 	redactor.marker = safeRedactionMarker(redactor.values)
 	return redactor
@@ -116,9 +119,24 @@ func redactJSONValueStrings(redactor *Redactor, value any) any {
 	case string:
 		return redactor.RedactString(value)
 	case map[string]any:
-		for key, item := range value {
-			value[key] = redactJSONValueStrings(redactor, item)
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
 		}
+		sort.Strings(keys)
+
+		redacted := make(map[string]any, len(value))
+		for _, key := range keys {
+			redactedKey := redactor.RedactString(key)
+			if _, collision := redacted[redactedKey]; collision {
+				// Redaction can collapse distinct member names. Discard both
+				// meanings rather than selecting one based on map iteration order.
+				redacted[redactedKey] = nil
+				continue
+			}
+			redacted[redactedKey] = redactJSONValueStrings(redactor, value[key])
+		}
+		return redacted
 	case []any:
 		for index, item := range value {
 			value[index] = redactJSONValueStrings(redactor, item)

@@ -1112,6 +1112,100 @@ func TestRunRejectsUnknownMaxTurnsFlag(t *testing.T) {
 	}
 }
 
+func newApproveCaptureServer(t *testing.T, userContents *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		for _, message := range payload.Messages {
+			if message.Role == "user" {
+				*userContents = append(*userContents, message.Content)
+			}
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"headless done"},"finish_reason":"stop"}]}`)
+	}))
+}
+
+func TestRunApproveRunsPromptHeadlessAndExits(t *testing.T) {
+	var userContents []string
+	server := newApproveCaptureServer(t, &userContents)
+	defer server.Close()
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "do the thing"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if !reflect.DeepEqual(userContents, []string{"do the thing"}) {
+		t.Fatalf("user messages = %q", userContents)
+	}
+	if !strings.Contains(stdout.String(), "headless done") || strings.Contains(stdout.String(), "> ") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunApproveReadsMultilinePromptFromFile(t *testing.T) {
+	var userContents []string
+	server := newApproveCaptureServer(t, &userContents)
+	defer server.Close()
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	promptPath := filepath.Join(t.TempDir(), "prompt.txt")
+	if err := os.WriteFile(promptPath, []byte("line one\nline two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "@" + promptPath}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if !reflect.DeepEqual(userContents, []string{"line one\nline two"}) {
+		t.Fatalf("user messages = %q, want single multiline prompt", userContents)
+	}
+}
+
+func TestRunApproveFlagValidation(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	environment := map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"}
+	cases := []struct {
+		name   string
+		args   []string
+		code   int
+		stderr string
+	}{
+		{"empty prompt", []string{"--approve", "   "}, 2, "--approve requires a non-empty prompt"},
+		{"tui conflict", []string{"--approve", "x", "--ui", "tui"}, 2, "--approve cannot be used with --ui tui"},
+		{"missing file", []string{"--approve", "@" + filepath.Join(workspace, "missing.txt")}, 1, "read approve prompt"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), append([]string{"--config", configPath, "--cwd", workspace}, testCase.args...), strings.NewReader(""), &stdout, &stderr, testGetenv(environment))
+			if code != testCase.code || !strings.Contains(stderr.String(), testCase.stderr) {
+				t.Fatalf("code = %d, stderr = %q, want %d containing %q", code, stderr.String(), testCase.code, testCase.stderr)
+			}
+		})
+	}
+}
+
 func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()

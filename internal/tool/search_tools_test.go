@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -88,6 +89,7 @@ func TestFindEnforcesArgumentsLimitsCancellationAndWorkspace(t *testing.T) {
 	for _, arguments := range []string{
 		`{}`,
 		`{"pattern":"[broken"}`,
+		`{"pattern":"**","limit":0}`,
 		`{"pattern":"**","limit":-1}`,
 		`{"pattern":"**","limit":10001}`,
 		`{"pattern":"**","extra":true}`,
@@ -105,6 +107,18 @@ func TestFindEnforcesArgumentsLimitsCancellationAndWorkspace(t *testing.T) {
 	canceled := find.Execute(ctx, json.RawMessage(`{"pattern":"**"}`))
 	if !canceled.IsError || !strings.Contains(canceled.Content, context.Canceled.Error()) {
 		t.Fatalf("canceled Find() = %#v", canceled)
+	}
+}
+
+func TestFindDoesNotSearchWhenRootIsInsideGitDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeSearchFile(t, root, ".git/config", "secret")
+	find := NewFindTool(mustWorkspace(t, root), 51200)
+	for _, searchPath := range []string{".git", ".git/config"} {
+		result := find.Execute(context.Background(), json.RawMessage(`{"pattern":"**","path":"`+searchPath+`"}`))
+		if result.IsError || result.Content != "" {
+			t.Fatalf("Find(path=%q) = %#v, want empty result", searchPath, result)
+		}
 	}
 }
 
@@ -230,6 +244,7 @@ func TestGrepEnforcesArgumentsLimitsCancellationAndWorkspace(t *testing.T) {
 		`{}`,
 		`{"pattern":"("}`,
 		`{"pattern":"match","glob":"[broken"}`,
+		`{"pattern":"match","limit":0}`,
 		`{"pattern":"match","limit":-1}`,
 		`{"pattern":"match","limit":1001}`,
 		`{"pattern":"match","extra":true}`,
@@ -250,6 +265,38 @@ func TestGrepEnforcesArgumentsLimitsCancellationAndWorkspace(t *testing.T) {
 	}
 }
 
+func TestGrepDoesNotSearchWhenRootIsInsideGitDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeSearchFile(t, root, ".git/config", "match secret\n")
+	grep := NewGrepTool(mustWorkspace(t, root), 51200)
+	for _, searchPath := range []string{".git", ".git/config"} {
+		result := grep.Execute(context.Background(), json.RawMessage(`{"pattern":"match","path":"`+searchPath+`"}`))
+		if result.IsError || result.Content != "" {
+			t.Fatalf("Grep(path=%q) = %#v, want empty result", searchPath, result)
+		}
+	}
+}
+
+func TestScanGrepReaderCancelsBetweenBoundedReads(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &cancelingReader{cancel: cancel, content: []byte("match first\nmatch second\n")}
+	_, err := scanGrepReader(ctx, reader, regexp.MustCompile("match"), 100, 51200)
+	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("scanGrepReader() error = %v, want cancellation", err)
+	}
+	if reader.reads != 1 {
+		t.Fatalf("reader reads = %d, want cancellation after first bounded read", reader.reads)
+	}
+}
+
+func TestScanGrepReaderSkipsFileWithOversizedLine(t *testing.T) {
+	content := strings.Repeat("x", (1<<20)+1) + "\nmatch later\n"
+	scan, err := scanGrepReader(context.Background(), strings.NewReader(content), regexp.MustCompile("match"), 100, 51200)
+	if err != nil || scan.textFile || scan.matchOverflow || scan.byteOverflow || len(scan.matches) != 0 {
+		t.Fatalf("scanGrepReader() = (%#v, %v), want skipped oversized file", scan, err)
+	}
+}
+
 func TestGrepCapsOutputWithValidTruncationMarker(t *testing.T) {
 	root := t.TempDir()
 	writeSearchFile(t, root, "file.txt", "matching long output line\n")
@@ -257,6 +304,22 @@ func TestGrepCapsOutputWithValidTruncationMarker(t *testing.T) {
 	if result.IsError || !strings.Contains(result.Content, "truncated") || len(result.Content) > 80 {
 		t.Fatalf("Grep() = %#v, want bounded truncation", result)
 	}
+}
+
+type cancelingReader struct {
+	cancel  context.CancelFunc
+	content []byte
+	reads   int
+}
+
+func (r *cancelingReader) Read(destination []byte) (int, error) {
+	r.reads++
+	if r.reads > 1 {
+		return 0, context.Canceled
+	}
+	n := copy(destination, r.content)
+	r.cancel()
+	return n, nil
 }
 
 func writeSearchFile(t *testing.T, root, name, content string) {

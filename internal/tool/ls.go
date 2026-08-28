@@ -26,7 +26,7 @@ func NewLSTool(workspace *Workspace, maxOutputBytes int) Tool {
 func (t *lsTool) Definition() model.ToolDefinition {
 	return model.ToolDefinition{
 		Name:        "ls",
-		Description: "List one level of a workspace directory",
+		Description: "List one level of a workspace directory (read-only)",
 		Parameters: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,

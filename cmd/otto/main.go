@@ -76,6 +76,7 @@ type cliOptions struct {
 	provider       string
 	baseURL        string
 	model          string
+	thinking       string
 	ui             string
 	shellTimeout   time.Duration
 	maxOutput      int
@@ -186,6 +187,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		Provider:       options.provider,
 		BaseURL:        options.baseURL,
 		Model:          options.model,
+		Thinking:       options.thinking,
 		ShellTimeout:   options.shellTimeout,
 		MaxOutputBytes: options.maxOutput,
 	}
@@ -354,6 +356,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.StringVar(&options.provider, "provider", "", "provider override")
 	flags.StringVar(&options.baseURL, "base-url", "", "provider base URL override")
 	flags.StringVar(&options.model, "model", "", "model override")
+	flags.StringVar(&options.thinking, "thinking", "", "model thinking effort: low, medium, high, xhigh, or max")
 	flags.StringVar(&options.ui, "ui", "", "frontend mode: auto, tui, or repl")
 	flags.DurationVar(&options.shellTimeout, "shell-timeout", 0, "shell command timeout")
 	flags.IntVar(&options.maxOutput, "max-output-bytes", 0, "maximum tool output bytes")
@@ -393,6 +396,12 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 		_, _ = fmt.Fprintln(stderr, "otto: --max-output-bytes must be greater than zero")
 		return options, false, errors.New("invalid max output")
 	}
+	switch options.thinking {
+	case "", "low", "medium", "high", "xhigh", "max":
+	default:
+		_, _ = fmt.Fprintln(stderr, "otto: --thinking must be one of low, medium, high, xhigh, max")
+		return options, false, errors.New("invalid thinking level")
+	}
 	return options, false, nil
 }
 
@@ -410,6 +419,7 @@ Options:
   --provider NAME        provider override
   --base-url URL         provider base URL override
   --model NAME           model override
+  --thinking LEVEL       model thinking effort: low, medium, high, xhigh, or max
   --ui MODE              frontend mode: auto, tui, or repl
   --shell-timeout D      shell command timeout
   --max-output-bytes N   maximum tool output bytes

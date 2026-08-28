@@ -1268,7 +1268,7 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 		}
 	}
 	for _, location := range []string{"stdout events", "executed write arguments", "provider follow-up", "session JSONL"} {
-		if !strings.Contains(locations[location], "[REDACTED]") {
+		if !strings.Contains(locations[location], "█") {
 			t.Fatalf("%s did not retain a redaction marker: %q", location, locations[location])
 		}
 	}

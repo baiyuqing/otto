@@ -531,13 +531,14 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "finished"}}}, FinishReason: model.FinishStop}},
 	}}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()}, NewRedactor([]string{credential}))
+	redactor := NewRedactor([]string{credential})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()}, redactor)
 
 	var events []Event
 	if err := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) }); err != nil {
 		t.Fatal(err)
 	}
-	if len(recorder.calls) != 1 || strings.Contains(recorder.calls[0], credential) || !strings.Contains(recorder.calls[0], "[REDACTED]") {
+	if len(recorder.calls) != 1 || strings.Contains(recorder.calls[0], credential) || !strings.Contains(recorder.calls[0], redactor.marker) {
 		t.Fatalf("executed arguments = %#v", recorder.calls)
 	}
 	for index, event := range events {
@@ -558,7 +559,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(encoded), credential) || !strings.Contains(string(encoded), "[REDACTED]") {
+		if strings.Contains(string(encoded), credential) || !strings.Contains(string(encoded), redactor.marker) {
 			t.Fatalf("%s was not redacted: %s", location, encoded)
 		}
 	}

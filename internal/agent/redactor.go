@@ -8,12 +8,13 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/session"
 )
 
-const redactionMarker = "[REDACTED]"
+const redactionMarker = "█"
 
 // Redactor removes resolved secret values at the provider-neutral agent
 // boundary. Its source values remain encapsulated and are never exposed
@@ -127,13 +128,19 @@ func redactJSONValueStrings(redactor *Redactor, value any) any {
 }
 
 func safeRedactionMarker(values []string) string {
-	if markerExcludesSecrets(redactionMarker, values) {
+	if markerRuneAbsent(redactionMarker, values) {
 		return redactionMarker
 	}
-	for candidate := rune(utf8.RuneError); candidate <= utf8.MaxRune; candidate++ {
-		if utf8.ValidRune(candidate) {
+	for candidate := rune(0xE000); candidate <= 0xF8FF; candidate++ {
+		marker := string(candidate)
+		if markerRuneAbsent(marker, values) {
+			return marker
+		}
+	}
+	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
+		if utf8.ValidRune(candidate) && !unicode.IsControl(candidate) {
 			marker := string(candidate)
-			if markerExcludesSecrets(marker, values) {
+			if markerRuneAbsent(marker, values) {
 				return marker
 			}
 		}
@@ -141,9 +148,9 @@ func safeRedactionMarker(values []string) string {
 	return ""
 }
 
-func markerExcludesSecrets(marker string, values []string) bool {
+func markerRuneAbsent(marker string, values []string) bool {
 	for _, value := range values {
-		if strings.Contains(marker, value) {
+		if strings.Contains(value, marker) {
 			return false
 		}
 	}

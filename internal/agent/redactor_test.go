@@ -22,6 +22,32 @@ func TestRedactorNeverUsesAReplacementThatContainsTheCredential(t *testing.T) {
 	}
 }
 
+func TestRedactorReplacementCannotSynthesizeAnotherCredential(t *testing.T) {
+	const source = "source-secret"
+	const synthesized = "a["
+	redactor := NewRedactor([]string{source, synthesized})
+
+	got := redactor.RedactString("a" + source)
+	for _, credential := range []string{source, synthesized} {
+		if strings.Contains(got, credential) {
+			t.Fatalf("RedactString() = %q, synthesized credential %q", got, credential)
+		}
+	}
+
+	stream := redactor.newStream()
+	var streamed strings.Builder
+	streamed.WriteString(stream.Write("a"))
+	for _, character := range source {
+		streamed.WriteString(stream.Write(string(character)))
+	}
+	streamed.WriteString(stream.Flush())
+	for _, credential := range []string{source, synthesized} {
+		if strings.Contains(streamed.String(), credential) {
+			t.Fatalf("stream output = %q, synthesized credential %q", streamed.String(), credential)
+		}
+	}
+}
+
 func TestRedactorRedactsRootAndNestedJSONStrings(t *testing.T) {
 	const credential = "json-root-secret"
 	redactor := NewRedactor([]string{credential})

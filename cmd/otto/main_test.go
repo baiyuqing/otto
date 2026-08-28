@@ -918,24 +918,24 @@ api_key_env = "RESUMED_KEY"
 	}
 }
 
-func TestRunNewAfterResumeResetsStartupRuntimeInfoRunnerAndHeader(t *testing.T) {
+func TestRunNewAfterResumeUsesCurrentRuntimeInfoRunnerAndHeader(t *testing.T) {
 	var defaultRequests, resumedRequests atomic.Int32
-	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		defaultRequests.Add(1)
+		http.Error(w, "startup runtime must not be reused", http.StatusInternalServerError)
+	}))
+	defer defaultServer.Close()
+	resumedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resumedRequests.Add(1)
 		var request struct {
 			Model string `json:"model"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Errorf("decode default request: %v", err)
+			t.Errorf("decode resumed request: %v", err)
 		}
-		if request.Model != "startup-model" || r.Header.Get("Authorization") != "Bearer startup-secret" {
-			t.Errorf("default request model/auth = %q / %q", request.Model, r.Header.Get("Authorization"))
+		if request.Model != "resumed-model" || r.Header.Get("Authorization") != "Bearer resumed-secret" {
+			t.Errorf("resumed request model/auth = %q / %q", request.Model, r.Header.Get("Authorization"))
 		}
-		writeSSE(w, `{"choices":[{"delta":{"content":"startup runner"},"finish_reason":"stop"}]}`)
-	}))
-	defer defaultServer.Close()
-	resumedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		resumedRequests.Add(1)
 		writeSSE(w, `{"choices":[{"delta":{"content":"resumed runner"},"finish_reason":"stop"}]}`)
 	}))
 	defer resumedServer.Close()
@@ -990,10 +990,10 @@ api_key_env = "RESUMED_KEY"
 			return err
 		}
 		got := backend.Info()
-		if got.SessionID == "resumed" || got.Provider != "openai-compatible" || got.Profile != "startup" || got.Model != "startup-model" {
+		if got.SessionID == "resumed" || got.Provider != "openai-compatible" || got.Profile != "resumed" || got.Model != "resumed-model" {
 			t.Fatalf("info after new = %#v", got)
 		}
-		return backend.Prompt(ctx, "use startup runtime", nil)
+		return backend.Prompt(ctx, "use resumed runtime", nil)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1005,8 +1005,8 @@ api_key_env = "RESUMED_KEY"
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	if defaultRequests.Load() != 1 || resumedRequests.Load() != 0 {
-		t.Fatalf("requests = startup %d resumed %d, want 1 and 0", defaultRequests.Load(), resumedRequests.Load())
+	if defaultRequests.Load() != 0 || resumedRequests.Load() != 1 {
+		t.Fatalf("requests = startup %d resumed %d, want 0 and 1", defaultRequests.Load(), resumedRequests.Load())
 	}
 }
 
@@ -1767,6 +1767,10 @@ type commandRunnerFunc func(context.Context, string, func(agent.Event)) error
 
 func (f commandRunnerFunc) Run(ctx context.Context, text string, emit func(agent.Event)) error {
 	return f(ctx, text, emit)
+}
+
+func (f commandRunnerFunc) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
 }
 
 type trackingSession struct {

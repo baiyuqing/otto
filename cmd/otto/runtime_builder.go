@@ -126,7 +126,64 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 	redactor := agent.NewRedactor(b.secretValues(&runtime))
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
+		Compaction: agent.CompactionSettings{
+			Auto:             runtime.Compaction.Auto,
+			HardInputWindow:  runtime.Compaction.HardInputWindow,
+			WorkingWindow:    runtime.Compaction.WorkingWindow,
+			ReserveTokens:    runtime.Compaction.ReserveTokens,
+			KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
+		},
 	}, redactor), nil
+}
+
+func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, err
+	}
+	runtime, err := b.resolveSession(session.RuntimeMetadata{
+		Profile: current.Profile, Provider: current.Provider, Model: current.Model,
+	})
+	if err != nil {
+		return app.SessionReplacement{}, err
+	}
+
+	create := b.deps.newSession
+	if create == nil {
+		create = newSession
+	}
+	candidate, err := create(b.noSession, b.sessionRoot, b.workspacePath, runtime)
+	if err != nil {
+		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+	}
+	if candidate == nil {
+		return app.SessionReplacement{}, b.redactError(errors.New("session factory returned nil session"), &runtime)
+	}
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+	}
+
+	runner, err := b.buildRunner(candidate, runtime)
+	if err != nil {
+		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+	}
+	if runner == nil {
+		return app.SessionReplacement{}, b.cleanupCandidate(candidate, errors.New("runner factory returned nil runner"), &runtime)
+	}
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+	}
+	if err := updateSessionRuntime(ctx, candidate, runtime); err != nil {
+		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+	}
+	return app.SessionReplacement{
+		Session: candidate,
+		Runner:  runner,
+		RuntimeInfo: app.RuntimeInfo{
+			Provider: runtime.Provider,
+			Profile:  runtime.Profile,
+			Model:    runtime.Model,
+		},
+	}, nil
 }
 
 func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.SessionReplacement, error) {

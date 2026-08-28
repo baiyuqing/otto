@@ -303,6 +303,10 @@ func (b *ptySmokeBackend) Prompt(ctx context.Context, text string, emit func(age
 	return ctx.Err()
 }
 
+func (b *ptySmokeBackend) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
 func (b *ptySmokeBackend) NewSession() error { return nil }
 
 func (b *ptySmokeBackend) Info() app.Info {

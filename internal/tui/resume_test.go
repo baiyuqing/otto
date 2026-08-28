@@ -37,6 +37,10 @@ func (b *resumeBackend) Prompt(ctx context.Context, text string, emit func(agent
 	return b.prompt(ctx, text, emit)
 }
 
+func (b *resumeBackend) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
 func (b *resumeBackend) NewSession() error {
 	if b.newSession == nil {
 		return nil

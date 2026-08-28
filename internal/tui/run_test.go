@@ -142,9 +142,12 @@ func (f programRunnerFunc) Run() (tea.Model, error) {
 type testBackend struct{}
 
 func (testBackend) Prompt(context.Context, string, func(agent.Event)) error { return nil }
-func (testBackend) NewSession() error                                       { return nil }
-func (testBackend) Info() app.Info                                          { return app.Info{} }
-func (testBackend) History() []model.Message                                { return nil }
+func (testBackend) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+func (testBackend) NewSession() error        { return nil }
+func (testBackend) Info() app.Info           { return app.Info{} }
+func (testBackend) History() []model.Message { return nil }
 
 func unexportedProgramField[T any](t *testing.T, program *tea.Program, name string) T {
 	t.Helper()

@@ -1509,6 +1509,414 @@ func TestControllerResumeAndCloseAfterOldCloseStartsFinishOwnership(t *testing.T
 	}
 }
 
+func TestControllerPromptCompactReplacementAndCloseLifecycleMatrix(t *testing.T) {
+	tests := []struct {
+		name  string
+		start func(*Controller, context.Context, func(agent.Event)) <-chan error
+	}{
+		{
+			name: "prompt active",
+			start: func(controller *Controller, ctx context.Context, emit func(agent.Event)) <-chan error {
+				done := make(chan error, 1)
+				go func() { done <- controller.Prompt(ctx, "prompt", emit) }()
+				return done
+			},
+		},
+		{
+			name: "compact active",
+			start: func(controller *Controller, ctx context.Context, emit func(agent.Event)) <-chan error {
+				done := make(chan error, 1)
+				go func() {
+					_, err := controller.Compact(ctx, "focus", emit)
+					done <- err
+				}()
+				return done
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			runner := &lifecycleRunner{
+				run: func(context.Context, string, func(agent.Event)) error {
+					close(entered)
+					<-release
+					return nil
+				},
+				compact: func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+					close(entered)
+					<-release
+					return agent.CompactionResult{CheckpointID: "checkpoint"}, nil
+				},
+			}
+			current := &fakeSession{header: testHeader("current")}
+			controller := newControllerWithRunnerAndBrowser(t, current, runner, nil,
+				func(context.Context, string) (SessionReplacement, error) {
+					return SessionReplacement{}, errors.New("must not run")
+				})
+
+			firstDone := test.start(controller, context.Background(), nil)
+			awaitSignal(t, entered, test.name)
+			if err := controller.Prompt(context.Background(), "second", nil); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("Prompt() error = %v, want ErrPromptActive", err)
+			}
+			if _, err := controller.Compact(context.Background(), "second", nil); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("Compact() error = %v, want ErrPromptActive", err)
+			}
+			if err := controller.NewSession(); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("NewSession() error = %v, want ErrPromptActive", err)
+			}
+			if _, err := controller.ResumeSession(context.Background(), "/sessions/next.jsonl"); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("ResumeSession() error = %v, want ErrPromptActive", err)
+			}
+
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- controller.Close() }()
+			awaitControllerClosed(t, controller)
+			select {
+			case err := <-closeDone:
+				t.Fatalf("Close() returned before active operation: %v", err)
+			default:
+			}
+			close(release)
+			if err := awaitError(t, firstDone, test.name); err != nil {
+				t.Fatal(err)
+			}
+			if err := awaitError(t, closeDone, "close"); err != nil {
+				t.Fatal(err)
+			}
+			if current.CloseCalls() != 1 {
+				t.Fatalf("current close calls = %d, want 1", current.CloseCalls())
+			}
+		})
+	}
+}
+
+func TestControllerReplacementRejectsPromptCompactNewAndResume(t *testing.T) {
+	for _, replacementKind := range []string{"new", "resume"} {
+		t.Run(replacementKind, func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			current := &fakeSession{header: testHeader("current")}
+			candidate := &fakeSession{header: testHeader("candidate")}
+			controller, err := New(current, func() (session.Session, error) {
+				if replacementKind != "new" {
+					return nil, errors.New("must not run")
+				}
+				close(entered)
+				<-release
+				return candidate, nil
+			}, func(session.Session) Runner { return &recordingRunner{} }, WithSessionBrowser(nil,
+				func(context.Context, string) (SessionReplacement, error) {
+					if replacementKind != "resume" {
+						return SessionReplacement{}, errors.New("must not run")
+					}
+					close(entered)
+					<-release
+					return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+				}))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			replacementDone := make(chan error, 1)
+			if replacementKind == "new" {
+				go func() { replacementDone <- controller.NewSession() }()
+			} else {
+				go func() {
+					_, resumeErr := controller.ResumeSession(context.Background(), candidate.Path())
+					replacementDone <- resumeErr
+				}()
+			}
+			awaitSignal(t, entered, replacementKind+" replacement")
+
+			if err := controller.Prompt(context.Background(), "prompt", nil); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("Prompt() error = %v, want ErrPromptActive", err)
+			}
+			if _, err := controller.Compact(context.Background(), "focus", nil); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("Compact() error = %v, want ErrPromptActive", err)
+			}
+			if err := controller.NewSession(); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("NewSession() error = %v, want ErrPromptActive", err)
+			}
+			if _, err := controller.ResumeSession(context.Background(), "/sessions/other.jsonl"); !errors.Is(err, ErrPromptActive) {
+				t.Fatalf("ResumeSession() error = %v, want ErrPromptActive", err)
+			}
+
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- controller.Close() }()
+			awaitControllerClosed(t, controller)
+			select {
+			case closeErr := <-closeDone:
+				t.Fatalf("Close() returned before replacement: %v", closeErr)
+			default:
+			}
+			close(release)
+			if replacementErr := awaitError(t, replacementDone, replacementKind); !errors.Is(replacementErr, ErrClosed) {
+				t.Fatalf("replacement error = %v, want ErrClosed", replacementErr)
+			}
+			if closeErr := awaitError(t, closeDone, "close"); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if current.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
+				t.Fatalf("close calls = current %d candidate %d, want 1 each", current.CloseCalls(), candidate.CloseCalls())
+			}
+		})
+	}
+}
+
+func TestControllerOperationCancellationReleasesLifecycle(t *testing.T) {
+	for _, operation := range []string{"prompt", "compact"} {
+		t.Run(operation, func(t *testing.T) {
+			entered := make(chan struct{})
+			runner := &lifecycleRunner{
+				run: func(ctx context.Context, _ string, _ func(agent.Event)) error {
+					close(entered)
+					<-ctx.Done()
+					return ctx.Err()
+				},
+				compact: func(ctx context.Context, _ string, _ func(agent.Event)) (agent.CompactionResult, error) {
+					close(entered)
+					<-ctx.Done()
+					return agent.CompactionResult{}, ctx.Err()
+				},
+			}
+			controller := newTestController(t, runner)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			if operation == "prompt" {
+				go func() { done <- controller.Prompt(ctx, "prompt", nil) }()
+			} else {
+				go func() {
+					_, err := controller.Compact(ctx, "focus", nil)
+					done <- err
+				}()
+			}
+			awaitSignal(t, entered, operation)
+			cancel()
+			if err := awaitError(t, done, operation); !errors.Is(err, context.Canceled) {
+				t.Fatalf("operation error = %v, want context.Canceled", err)
+			}
+			if err := controller.NewSession(); err != nil {
+				t.Fatalf("NewSession() after cancellation = %v", err)
+			}
+			if err := controller.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestControllerCloseFromPromptAndCompactionCallbacksDoesNotDeadlock(t *testing.T) {
+	for _, operation := range []string{"prompt", "compact"} {
+		t.Run(operation, func(t *testing.T) {
+			current := &fakeSession{header: testHeader(operation)}
+			var controller *Controller
+			runner := &lifecycleRunner{
+				run: func(_ context.Context, _ string, emit func(agent.Event)) error {
+					emit(agent.Event{Type: agent.EventAgentStarted})
+					return nil
+				},
+				compact: func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
+					emit(agent.Event{Type: agent.EventCompactionStarted})
+					return agent.CompactionResult{CheckpointID: "checkpoint"}, nil
+				},
+			}
+			var err error
+			controller, err = New(current, func() (session.Session, error) {
+				return &fakeSession{header: testHeader("next")}, nil
+			}, func(session.Session) Runner { return runner })
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			done := make(chan error, 1)
+			emit := func(agent.Event) { done <- controller.Close() }
+			operationDone := make(chan error, 1)
+			go func() {
+				if operation == "prompt" {
+					operationDone <- controller.Prompt(context.Background(), "prompt", emit)
+					return
+				}
+				_, compactErr := controller.Compact(context.Background(), "focus", emit)
+				operationDone <- compactErr
+			}()
+			if closeErr := awaitError(t, done, "reentrant close"); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if operationErr := awaitError(t, operationDone, operation); operationErr != nil {
+				t.Fatal(operationErr)
+			}
+			if current.CloseCalls() != 1 {
+				t.Fatalf("close calls = %d, want 1", current.CloseCalls())
+			}
+			if err := controller.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestControllerExternalCloseWaitsForReentrantOperationClose(t *testing.T) {
+	for _, operation := range []string{"prompt", "compact"} {
+		t.Run(operation, func(t *testing.T) {
+			reentrantDone := make(chan error, 1)
+			emitted := make(chan struct{})
+			release := make(chan struct{})
+			current := &fakeSession{header: testHeader(operation)}
+			var controller *Controller
+			runner := &lifecycleRunner{
+				run: func(_ context.Context, _ string, emit func(agent.Event)) error {
+					emit(agent.Event{Type: agent.EventAgentStarted})
+					close(emitted)
+					<-release
+					return nil
+				},
+				compact: func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
+					emit(agent.Event{Type: agent.EventCompactionStarted})
+					close(emitted)
+					<-release
+					return agent.CompactionResult{}, nil
+				},
+			}
+			var err error
+			controller, err = New(current, func() (session.Session, error) { return nil, errors.New("unused") }, func(session.Session) Runner { return runner })
+			if err != nil {
+				t.Fatal(err)
+			}
+			emit := func(agent.Event) { reentrantDone <- controller.Close() }
+			operationDone := make(chan error, 1)
+			go func() {
+				if operation == "prompt" {
+					operationDone <- controller.Prompt(context.Background(), "prompt", emit)
+				} else {
+					_, compactErr := controller.Compact(context.Background(), "focus", emit)
+					operationDone <- compactErr
+				}
+			}()
+			awaitSignal(t, emitted, operation+" event")
+			if closeErr := awaitError(t, reentrantDone, "reentrant close"); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			externalDone := make(chan error, 1)
+			go func() { externalDone <- controller.Close() }()
+			select {
+			case closeErr := <-externalDone:
+				t.Fatalf("external Close() returned before operation finalization: %v", closeErr)
+			case <-time.After(20 * time.Millisecond):
+			}
+			close(release)
+			if operationErr := awaitError(t, operationDone, operation); operationErr != nil {
+				t.Fatal(operationErr)
+			}
+			if closeErr := awaitError(t, externalDone, "external close"); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if current.CloseCalls() != 1 {
+				t.Fatalf("close calls = %d, want 1", current.CloseCalls())
+			}
+		})
+	}
+}
+
+func TestControllerCompactForwardsResultEventsAndErrorIdentity(t *testing.T) {
+	compactErr := errors.New("compact failed")
+	wantResult := agent.CompactionResult{CheckpointID: "checkpoint", TokensBefore: 42}
+	wantEvents := []agent.Event{{Type: agent.EventCompactionStarted}, {Type: agent.EventCompactionCompleted}}
+	controller := newTestController(t, &lifecycleRunner{compact: func(_ context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
+		if focus != "focus" {
+			t.Fatalf("focus = %q, want focus", focus)
+		}
+		for _, event := range wantEvents {
+			emit(event)
+		}
+		return wantResult, compactErr
+	}})
+	var gotEvents []agent.Event
+	gotResult, err := controller.Compact(context.Background(), "focus", func(event agent.Event) { gotEvents = append(gotEvents, event) })
+	if err != compactErr || gotResult != wantResult {
+		t.Fatalf("Compact() = %#v, %v; want %#v, exact error", gotResult, err, wantResult)
+	}
+	if !reflect.DeepEqual(gotEvents, wantEvents) {
+		t.Fatalf("events = %#v, want %#v", gotEvents, wantEvents)
+	}
+}
+
+func TestControllerNewSessionBuilderUsesRuntimeAfterResumeAndCommitsReadyReplacement(t *testing.T) {
+	initial := &fakeSession{header: testHeader("initial")}
+	resumed := &fakeSession{header: testHeader("resumed")}
+	fresh := &fakeSession{header: testHeader("fresh")}
+	initialRunner := &recordingRunner{}
+	resumedRunner := &recordingRunner{}
+	freshRunner := &recordingRunner{}
+	resumedRuntime := RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model"}
+	var gotRuntime RuntimeInfo
+	legacyCreateCalls := 0
+	legacyBuildCalls := 0
+	controller, err := New(initial, func() (session.Session, error) {
+		legacyCreateCalls++
+		return nil, errors.New("legacy create must not run")
+	}, func(session.Session) Runner {
+		legacyBuildCalls++
+		return initialRunner
+	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "startup", Model: "startup-model"}),
+		WithSessionBrowser(nil, func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{Session: resumed, Runner: resumedRunner, RuntimeInfo: resumedRuntime}, nil
+		}),
+		WithNewSessionBuilder(func(_ context.Context, current RuntimeInfo) (SessionReplacement, error) {
+			gotRuntime = current
+			return SessionReplacement{Session: fresh, Runner: freshRunner, RuntimeInfo: current}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.ResumeSession(context.Background(), resumed.Path()); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	if gotRuntime != resumedRuntime {
+		t.Fatalf("new-session runtime = %#v, want resumed %#v", gotRuntime, resumedRuntime)
+	}
+	if legacyCreateCalls != 0 || legacyBuildCalls != 1 {
+		t.Fatalf("legacy calls = create %d build %d, want 0 and initial build only", legacyCreateCalls, legacyBuildCalls)
+	}
+	if got := controller.Info(); got.SessionID != "fresh" || got.Profile != "resumed" || got.Model != "resumed-model" {
+		t.Fatalf("Info() after new = %#v", got)
+	}
+	if err := controller.Prompt(context.Background(), "fresh", nil); err != nil {
+		t.Fatal(err)
+	}
+	if initialRunner.Calls() != 0 || resumedRunner.Calls() != 0 || freshRunner.Calls() != 1 {
+		t.Fatalf("runner calls = initial %d resumed %d fresh %d", initialRunner.Calls(), resumedRunner.Calls(), freshRunner.Calls())
+	}
+}
+
+func TestControllerClosedMethodIdentitiesIncludeCompactAndResume(t *testing.T) {
+	controller := newTestController(t, &recordingRunner{})
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Prompt(context.Background(), "prompt", nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Prompt() error = %v, want ErrClosed", err)
+	}
+	if _, err := controller.Compact(context.Background(), "focus", nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Compact() error = %v, want ErrClosed", err)
+	}
+	if err := controller.NewSession(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("NewSession() error = %v, want ErrClosed", err)
+	}
+	if _, err := controller.ResumeSession(context.Background(), "/sessions/next.jsonl"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("ResumeSession() error = %v, want ErrClosed", err)
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
 func TestControllerResumeAndCloseRaceDoesNotLeakOrDoubleClose(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		old := &fakeSession{header: testHeader(fmt.Sprintf("old-%d", i))}
@@ -1548,7 +1956,32 @@ func (f runnerFunc) Run(ctx context.Context, text string, emit func(agent.Event)
 	return f(ctx, text, emit)
 }
 
+func (f runnerFunc) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
 func noopRun(context.Context, string, func(agent.Event)) error { return nil }
+
+// lifecycleRunner gives lifecycle tests independent blocking prompt and compact
+// entry points while remaining a complete app.Runner test double.
+type lifecycleRunner struct {
+	run     func(context.Context, string, func(agent.Event)) error
+	compact func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
+}
+
+func (r *lifecycleRunner) Run(ctx context.Context, text string, emit func(agent.Event)) error {
+	if r.run == nil {
+		return nil
+	}
+	return r.run(ctx, text, emit)
+}
+
+func (r *lifecycleRunner) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
+	if r.compact == nil {
+		return agent.CompactionResult{Noop: true}, nil
+	}
+	return r.compact(ctx, focus, emit)
+}
 
 func testHeader(id string) session.Header {
 	return session.Header{Version: 1, ID: id, Workspace: "/workspace", Provider: "openai-compatible", Profile: "test", Model: "model", CreatedAt: time.Unix(1, 0).UTC()}
@@ -1564,6 +1997,13 @@ func (r *recordingRunner) Run(context.Context, string, func(agent.Event)) error 
 	r.calls++
 	r.mu.Unlock()
 	return nil
+}
+
+func (r *recordingRunner) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	return agent.CompactionResult{}, nil
 }
 
 func (r *recordingRunner) Calls() int {

@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unsafe"
 
+	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
@@ -126,6 +127,39 @@ func updateResumeKey(t *testing.T, model Model, code rune, modifiers ...tea.KeyM
 	return got, cmd
 }
 
+func resumeRowForLabel(t *testing.T, content, label string) string {
+	t.Helper()
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, label) {
+			return line
+		}
+	}
+	t.Fatalf("view = %q, want row labeled %q", content, label)
+	return ""
+}
+
+func assertResumeRowMarkers(t *testing.T, content, label string, selected, current bool) {
+	t.Helper()
+	row := resumeRowForLabel(t, content, label)
+	if got := strings.Contains(row, ">"); got != selected {
+		t.Fatalf("row %q selected marker = %v, want %v", row, got, selected)
+	}
+	if got := strings.Contains(row, "*"); got != current {
+		t.Fatalf("row %q current marker = %v, want %v", row, got, current)
+	}
+}
+
+func TestResumePickerClampsMalformedSelectionForTitleRangeAndRowMarker(t *testing.T) {
+	m := resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+	m.resume.selected = 99
+	content := m.View().Content
+	if !strings.Contains(content, "3/3") {
+		t.Fatalf("view = %q, want clamped title count", content)
+	}
+	assertResumeRowMarkers(t, content, "Session 03", true, false)
+	assertResumeRowMarkers(t, content, "Session 01", false, false)
+}
+
 func TestResumePickerAtMinimumSizeShowsSelectionAndControlsWithinBounds(t *testing.T) {
 	m := resizeModel(t, loadedResumeModel(t, 20), 40, 8)
 	content := m.View().Content
@@ -140,6 +174,8 @@ func TestResumePickerAtMinimumSizeShowsSelectionAndControlsWithinBounds(t *testi
 func TestResumePickerNavigationPagesAndKeepsSelectionVisible(t *testing.T) {
 	m := resizeModel(t, loadedResumeModel(t, 20), 80, 12)
 	m, _ = updateResumeKey(t, m, tea.KeyDown)
+	assertResumeRowMarkers(t, m.View().Content, "Session 02", true, false)
+
 	m, _ = updateResumeKey(t, m, tea.KeyPgDown)
 	start, end := resumeVisibleRange(len(m.resume.sessions), m.resume.selected, resumeVisibleRows(m.width, m.height))
 	if m.resume.selected < start || m.resume.selected >= end {
@@ -148,11 +184,84 @@ func TestResumePickerNavigationPagesAndKeepsSelectionVisible(t *testing.T) {
 	if m.resume.selected != 1+resumeVisibleRows(80, 12) {
 		t.Fatalf("selected = %d, want one page after index 1", m.resume.selected)
 	}
+	assertResumeRowMarkers(t, m.View().Content, m.resume.sessions[m.resume.selected].Name, true, false)
 
 	m, _ = updateResumeKey(t, m, tea.KeyPgUp)
+	assertResumeRowMarkers(t, m.View().Content, "Session 02", true, false)
 	m, _ = updateResumeKey(t, m, tea.KeyUp)
 	if m.resume.selected != 0 {
 		t.Fatalf("selected after page/up = %d, want 0", m.resume.selected)
+	}
+	assertResumeRowMarkers(t, m.View().Content, "Session 01", true, false)
+}
+
+type resumeEditorSnapshot struct {
+	value                        string
+	line, column                 int
+	selectionStart, selectionEnd [2]int
+	hasSelection                 bool
+	selectedText                 string
+	scrollOffset                 int
+}
+
+func snapshotResumeEditor(editor textarea.Model) resumeEditorSnapshot {
+	start, end, selected := editor.Selection()
+	return resumeEditorSnapshot{
+		value:          editor.Value(),
+		line:           editor.Line(),
+		column:         editor.Column(),
+		selectionStart: [2]int{start.Row, start.Col},
+		selectionEnd:   [2]int{end.Row, end.Col},
+		hasSelection:   selected,
+		selectedText:   editor.SelectedText(),
+		scrollOffset:   editor.ScrollYOffset(),
+	}
+}
+
+func modalEditorModel(t *testing.T) Model {
+	t.Helper()
+	m := resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+	m.editor.SetValue(strings.Repeat("hidden draft line\n", 10) + "final")
+	m.editor.CursorEnd()
+	m.editor.SelectAll()
+	if !m.editor.HasSelection() {
+		t.Fatal("modal editor fixture has no selection")
+	}
+	return m
+}
+
+func TestResumePickerModalInputsPreserveCompleteEditorStateAndHideCursor(t *testing.T) {
+	inputs := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{name: "shift down", msg: keyPress(tea.KeyDown, tea.ModShift)},
+		{name: "alt up", msg: keyPress(tea.KeyUp, tea.ModAlt)},
+		{name: "ctrl page up", msg: keyPress(tea.KeyPgUp, tea.ModCtrl)},
+		{name: "ctrl page down", msg: keyPress(tea.KeyPgDown, tea.ModCtrl)},
+		{name: "shift enter", msg: keyPress(tea.KeyEnter, tea.ModShift)},
+		{name: "alt escape", msg: keyPress(tea.KeyEscape, tea.ModAlt)},
+		{name: "tab", msg: keyPress(tea.KeyTab)},
+		{name: "text", msg: keyPress('x')},
+		{name: "paste", msg: tea.PasteMsg{Content: "pasted"}},
+		{name: "mouse", msg: tea.MouseClickMsg(tea.Mouse{X: 2, Y: 2, Button: tea.MouseLeft})},
+	}
+	for _, tc := range inputs {
+		t.Run(tc.name, func(t *testing.T) {
+			m := modalEditorModel(t)
+			before := snapshotResumeEditor(m.editor)
+			updated, cmd := m.Update(tc.msg)
+			got := updated.(Model)
+			if after := snapshotResumeEditor(got.editor); after != before {
+				t.Fatalf("editor state changed:\n before=%#v\n after=%#v", before, after)
+			}
+			if cmd != nil || got.resume.mode != resumeLoaded || got.resume.selected != 0 {
+				t.Fatalf("cmd=%v resume=%#v", cmd, got.resume)
+			}
+			if cursor := got.View().Cursor; cursor != nil {
+				t.Fatalf("modal view cursor = %#v, want nil", cursor)
+			}
+		})
 	}
 }
 
@@ -277,6 +386,15 @@ func TestResumePickerProgressivelyAddsMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResumePickerRendersSelectedAndCurrentMarkersOnIdentifiedRows(t *testing.T) {
+	m := resizeModel(t, loadedResumeModel(t, 3), 80, 12)
+	m.resume.sessions[0].Current = true
+	m, _ = updateResumeKey(t, m, tea.KeyDown)
+	content := m.View().Content
+	assertResumeRowMarkers(t, content, "Session 01", false, true)
+	assertResumeRowMarkers(t, content, "Session 02", true, false)
 }
 
 func TestResumePickerRendersLoadingEmptyErrorsCurrentAndResumingStates(t *testing.T) {

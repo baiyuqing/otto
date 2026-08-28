@@ -84,6 +84,7 @@ func TestResumePickerResizeClampsSelectionAndRestoresTranscriptOnClose(t *testin
 	m.entries = []Entry{{Kind: EntryAssistant, Raw: "underlying transcript", Rendered: "underlying transcript"}}
 	m = resizeModel(t, m, 100, 20)
 	m.resume.selected = 19
+	m.resume.sessions[18].Current = true
 
 	m = resizeModel(t, m, 40, 8)
 	start, end := resumeVisibleRange(len(m.resume.sessions), m.resume.selected, resumeVisibleRows(m.width, m.height))
@@ -92,6 +93,8 @@ func TestResumePickerResizeClampsSelectionAndRestoresTranscriptOnClose(t *testin
 	}
 	content := m.View().Content
 	assertRenderedBounds(t, content, 40, 8)
+	assertResumeRowMarkers(t, content, "Session 20", true, false)
+	assertResumeRowMarkers(t, content, "Session 19", false, true)
 	if strings.Contains(content, "underlying transcript") {
 		t.Fatalf("modal leaked transcript: %q", content)
 	}
@@ -101,6 +104,9 @@ func TestResumePickerResizeClampsSelectionAndRestoresTranscriptOnClose(t *testin
 	if m.resume.selected != 19 {
 		t.Fatalf("resized selected = %d, want clamped 19", m.resume.selected)
 	}
+	content = m.View().Content
+	assertResumeRowMarkers(t, content, "Session 20", true, false)
+	assertResumeRowMarkers(t, content, "Session 19", false, true)
 	m, _ = updateResumeKey(t, m, tea.KeyEscape)
 	content = m.View().Content
 	assertRenderedBounds(t, content, 100, 20)

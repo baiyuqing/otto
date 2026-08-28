@@ -99,7 +99,7 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
-	insideGit, err := searchRootInsideGit(t.workspace, root)
+	insideGit, err := searchRootInsideGit(t.workspace, searchPath, root)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
@@ -117,10 +117,13 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			if entry.Name() == ".git" {
+		if entry.Name() == ".git" {
+			if entry.IsDir() {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {

@@ -19,6 +19,7 @@ import (
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type fakeBackend struct {
@@ -251,8 +252,8 @@ func TestWindowResizeProducesResponsiveLayout(t *testing.T) {
 		t.Fatalf("viewport = %dx%d", got.viewport.Width(), got.viewport.Height())
 	}
 	view := got.View()
-	if !view.AltScreen || !strings.Contains(view.Content, "profile/model") {
-		t.Fatalf("view = %#v", view)
+	if !view.AltScreen || view.MouseMode != tea.MouseModeCellMotion || !strings.Contains(view.Content, "profile/model") {
+		t.Fatalf("view = %#v, want alternate screen with mouse-wheel reporting", view)
 	}
 }
 
@@ -398,8 +399,8 @@ func TestOverlayContentIncludesHelpAndSession(t *testing.T) {
 
 	updated, _ := model.Update(showHelpOverlayMsg{})
 	help := updated.(Model).View().Content
-	if !strings.Contains(help, "Ctrl+O") || !strings.Contains(help, "/session") {
-		t.Fatalf("help overlay = %q", help)
+	if !strings.Contains(help, "Ctrl+O") || !strings.Contains(help, "Shift+drag") || !strings.Contains(help, "/session") {
+		t.Fatalf("help overlay = %q, want tool and terminal-selection guidance", help)
 	}
 
 	updated, _ = updated.(Model).Update(showSessionOverlayMsg{})
@@ -418,26 +419,52 @@ func TestToolExpansionToggle(t *testing.T) {
 		},
 	}
 	model := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
-	expandedByDefault := model.View().Content
-	if !strings.Contains(expandedByDefault, "tool output line") {
-		t.Fatalf("default content = %q, want tool output visible by default", expandedByDefault)
+	collapsedByDefault := model.View().Content
+	if model.expandedTools || strings.Contains(collapsedByDefault, "tool output line") {
+		t.Fatalf("default expanded=%v content=%q, want tool output folded", model.expandedTools, collapsedByDefault)
 	}
 
 	updated, _ := model.Update(toggleToolsMsg{})
-	collapsed := updated.(Model)
-	if collapsed.expandedTools {
-		t.Fatalf("expandedTools = true after toggle, want false")
+	expanded := updated.(Model)
+	if !expanded.expandedTools {
+		t.Fatalf("expandedTools = false after toggle, want true")
 	}
-	if content := collapsed.View().Content; strings.Contains(content, "tool output line") {
-		t.Fatalf("collapsed content = %q, want tool output hidden", content)
+	if content := expanded.View().Content; !strings.Contains(content, "tool output line") || !strings.Contains(content, `{"path":"README.md"}`) {
+		t.Fatalf("expanded content = %q, want full arguments and output", content)
 	}
 
-	toggledBack, _ := collapsed.Update(toggleToolsMsg{})
-	if !toggledBack.(Model).expandedTools {
-		t.Fatalf("expandedTools = false after second toggle, want true")
+	toggledBack, _ := expanded.Update(toggleToolsMsg{})
+	if toggledBack.(Model).expandedTools {
+		t.Fatalf("expandedTools = true after second toggle, want false")
 	}
-	if content := toggledBack.View().Content; !strings.Contains(content, "tool output line") {
-		t.Fatalf("re-expanded content = %q, want tool output shown", content)
+	if content := toggledBack.View().Content; strings.Contains(content, "tool output line") {
+		t.Fatalf("re-collapsed content = %q, want tool output hidden", content)
+	}
+}
+
+func TestCollapsedToolSummaryIsSingleLineBoundedAndExpandable(t *testing.T) {
+	entry := Entry{
+		Kind:       EntryTool,
+		ToolName:   "write",
+		ToolArgs:   "{\"path\":\"README.md\",\n\"content\":\"long argument SECOND-TAIL\"}",
+		ToolOutput: "complete output THIRD-TAIL",
+		ToolDone:   true,
+	}
+
+	const width = 40
+	collapsed := renderToolBlock(entry, width, false)
+	if strings.Contains(collapsed, "\n") || ansi.StringWidth(collapsed) > width {
+		t.Fatalf("collapsed summary = %q width=%d, want one bounded line", collapsed, ansi.StringWidth(collapsed))
+	}
+	if !strings.Contains(collapsed, "write") || !strings.Contains(collapsed, "complete") || strings.Contains(collapsed, "SECOND-TAIL") || strings.Contains(collapsed, "THIRD-TAIL") {
+		t.Fatalf("collapsed summary = %q, want concise name/argument preview/status without full details", collapsed)
+	}
+
+	expanded := renderToolBlock(entry, width, true)
+	for _, want := range []string{`{"path":"README.md",`, `"content":"long argument SECOND-TAIL"}`, "complete output THIRD-TAIL"} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded tool = %q, want %q", expanded, want)
+		}
 	}
 }
 
@@ -503,20 +530,20 @@ func TestCtrlOTogglesToolExpansionKey(t *testing.T) {
 		},
 	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
-	if !m.expandedTools || !strings.Contains(m.View().Content, "tool output line") {
-		t.Fatalf("default expanded=%v content=%q, want output visible by default", m.expandedTools, m.View().Content)
+	if m.expandedTools || strings.Contains(m.View().Content, "tool output line") {
+		t.Fatalf("default expanded=%v content=%q, want output folded", m.expandedTools, m.View().Content)
 	}
 
 	updated, _ := m.Update(keyPress('o', tea.ModCtrl))
-	collapsed := updated.(Model)
-	if collapsed.expandedTools || strings.Contains(collapsed.View().Content, "tool output line") {
-		t.Fatalf("after ctrl+o expanded=%v content=%q, want output hidden", collapsed.expandedTools, collapsed.View().Content)
+	expanded := updated.(Model)
+	if !expanded.expandedTools || !strings.Contains(expanded.View().Content, "tool output line") {
+		t.Fatalf("after ctrl+o expanded=%v content=%q, want output visible", expanded.expandedTools, expanded.View().Content)
 	}
 
-	toggledBack, _ := collapsed.Update(keyPress('o', tea.ModCtrl))
+	toggledBack, _ := expanded.Update(keyPress('o', tea.ModCtrl))
 	got := toggledBack.(Model)
-	if !got.expandedTools || !strings.Contains(got.View().Content, "tool output line") {
-		t.Fatalf("after second ctrl+o expanded=%v content=%q", got.expandedTools, got.View().Content)
+	if got.expandedTools || strings.Contains(got.View().Content, "tool output line") {
+		t.Fatalf("after second ctrl+o expanded=%v content=%q, want output folded", got.expandedTools, got.View().Content)
 	}
 }
 
@@ -1409,10 +1436,14 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 		t.Fatalf("idle running=%v cancel=%v cmd=%v", idle.running, idle.cancel != nil, doneCmd)
 	}
 
-	collapsed, _ := idle.Update(toggleToolsMsg{})
-	content := collapsed.View().Content
-	if !strings.Contains(content, "read") || !strings.Contains(content, "README.md") {
-		t.Fatalf("collapsed tool summary = %q, want args visible", content)
+	content := idle.View().Content
+	if idle.expandedTools || !strings.Contains(content, "read") || !strings.Contains(content, "README.md") || strings.Contains(content, "full output") {
+		t.Fatalf("default tool summary expanded=%v content=%q, want concise argument preview", idle.expandedTools, content)
+	}
+
+	expanded, _ := idle.Update(toggleToolsMsg{})
+	if content := expanded.View().Content; !strings.Contains(content, "full output") {
+		t.Fatalf("expanded tool content = %q, want full output", content)
 	}
 }
 

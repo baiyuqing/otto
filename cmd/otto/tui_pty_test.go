@@ -28,19 +28,21 @@ import (
 )
 
 const (
-	ptyTestTimeout      = 5 * time.Second
-	ptyStepTimeout      = 2 * time.Second
-	ptyQuietWindow      = 50 * time.Millisecond
-	altScreenEnterSeq   = "\x1b[?1049h"
-	altScreenExitSeq    = "\x1b[?1049l"
-	assistantStreamText = "stream visible from pty smoke backend"
-	ctrlCExitStatusText = "Ctrl+C again to exit"
-	contextCanceledText = "context canceled"
-	footerProfileModel  = "pty-profile/pty-model"
-	footerWorkspaceName = "pty-workspace"
-	footerSessionMarker = "resize-session-marker-0123456789"
-	wideFooterMarker    = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0 | " + footerSessionMarker
-	narrowFooterMarker  = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0"
+	ptyTestTimeout              = 5 * time.Second
+	ptyStepTimeout              = 2 * time.Second
+	ptyQuietWindow              = 50 * time.Millisecond
+	altScreenEnterSeq           = "\x1b[?1049h"
+	altScreenExitSeq            = "\x1b[?1049l"
+	assistantStreamText         = "stream visible from pty smoke backend"
+	ctrlCExitStatusText         = "Ctrl+C again to exit"
+	contextCanceledText         = "context canceled"
+	footerProfileModel          = "pty-profile/pty-model"
+	footerWorkspaceName         = "pty-workspace"
+	footerSessionMarker         = "resize-session-marker-0123456789"
+	selectedResumeSessionID     = "pty-selected-session"
+	selectedAssistantTranscript = "assistant-only selected resume transcript marker"
+	wideFooterMarker            = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0 | " + footerSessionMarker
+	narrowFooterMarker          = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0"
 )
 
 func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
@@ -55,8 +57,8 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Join(home, ".otto", "sessions")
-	currentPath := createPTYSession(t, root, workspace, "pty-current-session", "current transcript marker")
-	selectedPath := createPTYSession(t, root, workspace, "pty-selected-session", "selected transcript marker")
+	currentPath := createPTYSession(t, root, workspace, "pty-current-session", "current transcript marker", "")
+	selectedPath := createPTYSession(t, root, workspace, selectedResumeSessionID, "selected picker label", selectedAssistantTranscript)
 	now := time.Now()
 	setCLISessionMTime(t, currentPath, now)
 	setCLISessionMTime(t, selectedPath, now.Add(-time.Hour))
@@ -106,26 +108,38 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	waitForSubsequence(t, collector, 0, "current transcript marker")
 	writePTY(t, master, "/resume\r")
 	waitForSubsequence(t, collector, 0, "Resume Session")
-	waitForSubsequence(t, collector, 0, "selected transcript marker")
+	waitForSubsequence(t, collector, 0, "selected picker label")
 
-	writePTY(t, master, "\x1b[B\r")
 	selectedOffset := collector.Len()
-	waitForSubsequence(t, collector, selectedOffset, "selected transcript marker")
-	waitForSubsequence(t, collector, selectedOffset, "pty-selected-session")
+	writePTY(t, master, "\x1b[B\r")
+	waitForSubsequence(t, collector, selectedOffset, selectedAssistantTranscript)
+	// The selected ID is not rendered in the picker, so seeing it after Enter
+	// proves that the replacement session committed rather than merely that its
+	// picker row was selected.
+	waitForSubsequence(t, collector, selectedOffset, selectedResumeSessionID)
 
 	resizeOffset := collector.Len()
-	if err := pty.Setsize(slave, &pty.Winsize{Cols: 82, Rows: 24}); err != nil {
-		t.Fatalf("pty.Ptysize(82x24) error = %v", err)
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 140, Rows: 34}); err != nil {
+		t.Fatalf("pty.Ptysize(140x34) error = %v", err)
 	}
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
-	waitForSubsequence(t, collector, resizeOffset, filepath.Base(workspace))
+	redraw := waitForStableSnapshot(t, collector, resizeOffset, selectedAssistantTranscript)
+	if !strings.Contains(redraw, selectedResumeSessionID) {
+		t.Fatalf("post-resume redraw = %s, want selected session ID %q in the same redraw as transcript marker %q", tailTerminalOutput([]byte(redraw)), selectedResumeSessionID, selectedAssistantTranscript)
+	}
+	if strings.Contains(redraw, "Resume Session") {
+		t.Fatalf("post-resume redraw = %s, want no active Resume modal", tailTerminalOutput([]byte(redraw)))
+	}
 
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
 	waitForSubsequence(t, collector, 0, altScreenExitSeq)
 
+	if !runResult.Finished() {
+		t.Fatal("run process was still active before terminal restoration check")
+	}
 	output := collector.Snapshot()
 	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
 	if enters != 1 || exits != 1 {
@@ -135,14 +149,44 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read restored terminal mode: %v", err)
 	}
-	const interactiveMode = unix.ICANON | unix.ECHO
-	if restoredMode.Lflag&interactiveMode != initialMode.Lflag&interactiveMode {
-		t.Fatalf("terminal mode leaked: initial lflag=%#x restored lflag=%#x", initialMode.Lflag, restoredMode.Lflag)
+	if *restoredMode != *initialMode {
+		t.Fatalf("terminal mode leaked after process exit: %s", diffTermios(*initialMode, *restoredMode))
 	}
-	t.Logf("PTY escape evidence: alt-screen enter=%d exit=%d; ICANON|ECHO initial=%#x restored=%#x", enters, exits, initialMode.Lflag&interactiveMode, restoredMode.Lflag&interactiveMode)
+	t.Logf("PTY escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
 }
 
-func createPTYSession(t *testing.T, root, workspace, id, transcript string) string {
+func diffTermios(initial, restored unix.Termios) string {
+	var diffs []string
+	if initial.Iflag != restored.Iflag {
+		diffs = append(diffs, fmt.Sprintf("Iflag %#x -> %#x", initial.Iflag, restored.Iflag))
+	}
+	if initial.Oflag != restored.Oflag {
+		diffs = append(diffs, fmt.Sprintf("Oflag %#x -> %#x", initial.Oflag, restored.Oflag))
+	}
+	if initial.Cflag != restored.Cflag {
+		diffs = append(diffs, fmt.Sprintf("Cflag %#x -> %#x", initial.Cflag, restored.Cflag))
+	}
+	if initial.Lflag != restored.Lflag {
+		diffs = append(diffs, fmt.Sprintf("Lflag %#x -> %#x", initial.Lflag, restored.Lflag))
+	}
+	for index := range initial.Cc {
+		if initial.Cc[index] != restored.Cc[index] {
+			diffs = append(diffs, fmt.Sprintf("Cc[%d] %#x -> %#x", index, initial.Cc[index], restored.Cc[index]))
+		}
+	}
+	if initial.Ispeed != restored.Ispeed {
+		diffs = append(diffs, fmt.Sprintf("Ispeed %d -> %d", initial.Ispeed, restored.Ispeed))
+	}
+	if initial.Ospeed != restored.Ospeed {
+		diffs = append(diffs, fmt.Sprintf("Ospeed %d -> %d", initial.Ospeed, restored.Ospeed))
+	}
+	if len(diffs) == 0 {
+		return "no field differences"
+	}
+	return strings.Join(diffs, ", ")
+}
+
+func createPTYSession(t *testing.T, root, workspace, id, userTranscript, assistantTranscript string) string {
 	t.Helper()
 	store, err := session.Create(root, session.Header{
 		Version: session.CurrentVersion, ID: id, Workspace: workspace, Provider: "openai-compatible",
@@ -151,11 +195,17 @@ func createPTYSession(t *testing.T, root, workspace, id, transcript string) stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Append(context.Background(), model.Message{
-		Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: transcript}}, CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		_ = store.Close()
-		t.Fatal(err)
+	for _, message := range []model.Message{
+		{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: userTranscript}}, CreatedAt: time.Now().UTC()},
+		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: assistantTranscript}}, CreatedAt: time.Now().UTC(), FinishReason: model.FinishStop},
+	} {
+		if message.Text() == "" {
+			continue
+		}
+		if err := store.Append(context.Background(), message); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
 	}
 	path := store.Path()
 	if err := store.Close(); err != nil {

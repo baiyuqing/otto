@@ -96,21 +96,17 @@ Default path:
 ~/.config/otto/config.toml
 ```
 
-Resolution rules:
+Startup resolution is field-specific:
 
-1. CLI flags, including an explicit `--profile`
-2. Environment variables: `OTTO_PROVIDER`, `OTTO_MODEL`
-3. Provider/model stored in a resumed session
-4. `default_profile` from TOML
-5. Built-in defaults for agent limits
+- **Profile:** explicit `--profile` selects a profile. Otherwise a startup `--continue` or `--resume` uses the session's stored profile when present; a new session (or an external Pi session without an Otto profile) uses `default_profile`.
+- **Provider and model:** explicit `--provider` / `--model` override `OTTO_PROVIDER` / `OTTO_MODEL`. Those environment variables override the selected profile and any provider/model stored in a startup-resumed session. Without direct or environment overrides, startup resume uses the stored provider/model; however, explicit `--profile` makes that profile's provider/model the baseline instead. An explicit profile does **not** outrank `OTTO_PROVIDER` or `OTTO_MODEL`.
+- **Endpoint:** `--base-url` overrides the selected profile's `base_url`. There is no base-URL environment override, and session files do not supply an endpoint.
+- **API key:** the selected profile determines `api_key_env`. A nonempty value from that environment variable wins; `OTTO_API_KEY` is its fallback. API keys have no CLI flag and must not be stored in TOML.
+- **Agent limits:** direct `--max-turns`, `--shell-timeout`, and `--max-output-bytes` values override `[agent]` values, which override built-in defaults. Profiles and resumed sessions do not contain these limits.
 
-Additional rules:
+Startup `--continue` / `--resume` therefore restores session provider/model only as defaults: direct flags and `OTTO_PROVIDER` / `OTTO_MODEL` can override them as described above. In contrast, an in-process TUI `/resume` restores the selected session's stored provider/model and ignores the process's provider/model/profile/base-URL overrides and `OTTO_PROVIDER` / `OTTO_MODEL`; its stored profile selects the endpoint and key environment. Agent-limit overrides remain in effect. `/new` returns to the runtime resolved at process startup.
 
-- `--base-url` overrides the profile base URL.
-- The API key comes from the selected profile's `api_key_env`, with `OTTO_API_KEY` as fallback.
-- `--continue` and `--resume` reuse the active session's provider/model unless you explicitly select a different profile.
-- `--no-session` cannot be combined with `--continue` or `--resume`.
-- Raw secrets do not belong in TOML.
+`--no-session` cannot be combined with `--continue` or `--resume`.
 
 UI mode precedence:
 

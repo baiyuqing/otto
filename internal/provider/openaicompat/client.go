@@ -26,7 +26,10 @@ type Client struct {
 	sleep      func(context.Context, time.Duration) error
 }
 
-var _ provider.Provider = (*Client)(nil)
+var (
+	_ provider.Provider     = (*Client)(nil)
+	_ provider.RequestSizer = (*Client)(nil)
+)
 
 func New(baseURL, apiKey string, httpClient *http.Client) *Client {
 	client := &Client{
@@ -49,6 +52,14 @@ func NormalizeBaseURL(baseURL string) (string, error) {
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 	parsed.RawPath = strings.TrimSuffix(parsed.RawPath, "/")
 	return parsed.String(), nil
+}
+
+func (c *Client) SerializedRequestSize(request provider.Request) (int, error) {
+	payload, err := json.Marshal(translateRequest(request))
+	if err != nil {
+		return 0, fmt.Errorf("encode chat completion request: %w", err)
+	}
+	return len(payload), nil
 }
 
 func (c *Client) Complete(ctx context.Context, request provider.Request, emit func(provider.StreamEvent)) (provider.Response, error) {

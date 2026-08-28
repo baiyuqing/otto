@@ -376,6 +376,32 @@ func TestCompleteClosesEveryResponseBody(t *testing.T) {
 	}
 }
 
+func TestSerializedRequestSizeMatchesExactWirePayload(t *testing.T) {
+	request := provider.Request{
+		Model:        "model\\\"界",
+		SystemPrompt: "system\n\t\\\"界",
+		Thinking:     "high",
+		Messages: []model.Message{{
+			Role: model.RoleUser,
+			Blocks: []model.Block{{
+				Type: model.BlockText,
+				Text: "escape-heavy: \\ \" \n \t 界 <>&",
+			}},
+		}},
+	}
+	payload, err := json.Marshal(translateRequest(request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := New("https://example.test/v1", "key", nil).SerializedRequestSize(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != len(payload) {
+		t.Fatalf("SerializedRequestSize() = %d, want exact wire payload size %d: %s", got, len(payload), payload)
+	}
+}
+
 func TestRequestIncludesEveryFunctionSchemaField(t *testing.T) {
 	payload, err := json.Marshal(translateRequest(provider.Request{
 		Model: "model",

@@ -125,7 +125,14 @@ func buildSummaryRequest(options Options, selection compactionSelection, focus s
 		}},
 		Tools: nil,
 	}
-	if summaryRequestTextBytes(request) > summaryRequestMaximumBytes {
+	if options.RequestSizer == nil {
+		return summaryRequest{}, errors.New("invalid compaction summary request: request sizing is unavailable")
+	}
+	serializedBytes, err := options.RequestSizer.SerializedRequestSize(request)
+	if err != nil || serializedBytes < 0 {
+		return summaryRequest{}, errors.New("invalid compaction summary request: request sizing failed")
+	}
+	if serializedBytes > summaryRequestMaximumBytes {
 		return summaryRequest{}, fmt.Errorf("compaction summary request exceeds %d bytes", summaryRequestMaximumBytes)
 	}
 	if options.Compaction.HardInputWindow > 0 {
@@ -232,32 +239,6 @@ func truncateToolResultForSummary(text string) string {
 	return text[:end] + "\n" + toolResultTruncationMarker
 }
 
-func summaryRequestTextBytes(request provider.Request) int {
-	total := saturatingByteAdd(0, len(request.Model))
-	total = saturatingByteAdd(total, len(request.SystemPrompt))
-	total = saturatingByteAdd(total, len(request.Thinking))
-	for _, message := range request.Messages {
-		total = saturatingByteAdd(total, len(message.Role))
-		for _, block := range message.Blocks {
-			total = saturatingByteAdd(total, len(block.Text))
-			total = saturatingByteAdd(total, len(block.ToolCallID))
-			total = saturatingByteAdd(total, len(block.ToolName))
-			total = saturatingByteAdd(total, len(block.Arguments))
-		}
-	}
-	return total
-}
-
-func saturatingByteAdd(total, delta int) int {
-	if delta <= 0 {
-		return total
-	}
-	if total > math.MaxInt-delta {
-		return math.MaxInt
-	}
-	return total + delta
-}
-
 func validateStructuredSummary(message model.Message) (string, error) {
 	summary, err := validateSummaryMessage(message, summaryMaximumBytes)
 	if err != nil {
@@ -302,8 +283,9 @@ func validateSummaryHeadings(summary string) error {
 	expected := 0
 	fenceCharacter := byte(0)
 	fenceLength := 0
-	for _, rawLine := range strings.Split(summary, "\n") {
-		line := strings.TrimSuffix(rawLine, "\r")
+	normalized := strings.ReplaceAll(summary, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
 		if marker, length, closing := summaryFenceMarker(line, fenceCharacter, fenceLength); marker != 0 {
 			if fenceCharacter == 0 && !closing {
 				fenceCharacter, fenceLength = marker, length
@@ -347,13 +329,26 @@ func summaryFenceMarker(line string, active byte, activeLength int) (byte, int, 
 	if length < 3 {
 		return 0, 0, false
 	}
+	remainder := trimmed[length:]
 	if active == 0 {
+		if marker == '`' && strings.ContainsRune(remainder, '`') {
+			return 0, 0, false
+		}
 		return marker, length, false
 	}
-	if marker == active && length >= activeLength && strings.TrimSpace(trimmed[length:]) == "" {
+	if marker == active && length >= activeLength && isFenceClosingRemainder(remainder) {
 		return marker, length, true
 	}
 	return 0, 0, false
+}
+
+func isFenceClosingRemainder(remainder string) bool {
+	for index := range len(remainder) {
+		if remainder[index] != ' ' && remainder[index] != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 func isLevelTwoOrThreeHeading(line string) bool {

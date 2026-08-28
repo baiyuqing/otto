@@ -4,8 +4,10 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
@@ -20,10 +22,11 @@ type ptyTerminalScreen struct {
 	pending       []byte
 	homePending   bool
 	fullRedraws   int
+	acceptedCSI   map[string]struct{}
 }
 
 func newPTYTerminalScreen(width, height int) *ptyTerminalScreen {
-	screen := &ptyTerminalScreen{width: width, height: height}
+	screen := &ptyTerminalScreen{width: width, height: height, acceptedCSI: make(map[string]struct{})}
 	screen.cells = make([][]rune, height)
 	for row := range screen.cells {
 		screen.cells[row] = blankPTYRow(width)
@@ -77,9 +80,10 @@ func (s *ptyTerminalScreen) consume() (int, bool, error) {
 		return 1, true, nil
 	}
 	if s.pending[0] < utf8.RuneSelf {
-		if s.pending[0] >= ' ' && s.pending[0] != 0x7f {
-			s.putRune(rune(s.pending[0]))
+		if s.pending[0] < ' ' || s.pending[0] == 0x7f {
+			return 0, false, fmt.Errorf("unsupported terminal control 0x%02x", s.pending[0])
 		}
+		s.putRune(rune(s.pending[0]))
 		return 1, true, nil
 	}
 	if !utf8.FullRune(s.pending) {
@@ -89,9 +93,18 @@ func (s *ptyTerminalScreen) consume() (int, bool, error) {
 	if r == utf8.RuneError && size == 1 {
 		return 0, false, fmt.Errorf("invalid UTF-8 in terminal output")
 	}
+	if unicode.IsControl(r) {
+		return 0, false, fmt.Errorf("unsupported Unicode terminal control U+%04X", r)
+	}
 	s.putRune(r)
 	return size, true, nil
 }
+
+const (
+	maxPTYCSISequence = 128
+	maxPTYCSIParams   = 16
+	maxPTYCSIParam    = 1_000_000
+)
 
 func (s *ptyTerminalScreen) consumeCSI() (int, bool, error) {
 	if len(s.pending) < 2 {
@@ -101,14 +114,24 @@ func (s *ptyTerminalScreen) consumeCSI() (int, bool, error) {
 		return 0, false, fmt.Errorf("unsupported terminal escape %q", s.pending[:2])
 	}
 	for index := 2; index < len(s.pending); index++ {
-		if s.pending[index] < 0x40 || s.pending[index] > 0x7e {
-			continue
+		current := s.pending[index]
+		switch {
+		case current >= 0x30 && current <= 0x3f:
+			// Parameter bytes are validated for each supported final below.
+		case current >= 0x40 && current <= 0x7e:
+			sequence := string(s.pending[:index+1])
+			if err := s.applyCSI(string(s.pending[2:index]), current); err != nil {
+				return 0, false, fmt.Errorf("%w in %q", err, sequence)
+			}
+			return index + 1, true, nil
+		case current >= 0x20 && current <= 0x2f:
+			return 0, false, fmt.Errorf("unsupported CSI intermediate 0x%02x", current)
+		default:
+			return 0, false, fmt.Errorf("invalid CSI byte 0x%02x", current)
 		}
-		sequence := string(s.pending[:index+1])
-		if err := s.applyCSI(string(s.pending[2:index]), s.pending[index]); err != nil {
-			return 0, false, fmt.Errorf("%w in %q", err, sequence)
+		if index+1 >= maxPTYCSISequence {
+			return 0, false, fmt.Errorf("CSI sequence exceeds %d bytes", maxPTYCSISequence)
 		}
-		return index + 1, true, nil
 	}
 	return 0, false, nil
 }
@@ -118,26 +141,53 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 	s.homePending = false
 
 	switch final {
-	case 'm', 'h', 'l': // Styling and terminal modes do not change cells.
-		return nil
+	case 'm':
+		if err := validatePTYSGRParams(rawParams); err != nil {
+			return err
+		}
+	case 'h', 'l':
+		// No mode toggles occur in either captured post-resize PTY slice.
+		return fmt.Errorf("unsupported terminal mode %q", rawParams)
 	case 'H', 'f':
-		row := ptyCSIParam(rawParams, 0, 1) - 1
-		column := ptyCSIParam(rawParams, 1, 1) - 1
+		params, err := parsePTYCSIParams(rawParams, 2, true)
+		if err != nil {
+			return err
+		}
+		row := ptyCSIParam(params, 0, 1) - 1
+		column := ptyCSIParam(params, 1, 1) - 1
 		s.moveTo(column, row)
 		s.homePending = s.x == 0 && s.y == 0
 	case 'd':
-		s.moveTo(s.x, ptyCSIParam(rawParams, 0, 1)-1)
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		s.moveTo(s.x, ptyCSIParam(params, 0, 1)-1)
+	case 'G':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		s.moveTo(ptyCSIParam(params, 0, 1)-1, s.y)
 	case 'J':
-		if mode := ptyCSIParam(rawParams, 0, 0); mode == 2 {
-			s.clear()
-			if wasHome {
-				s.fullRedraws++
-			}
-		} else {
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		mode := ptyCSIParam(params, 0, 0)
+		if mode != 2 {
 			return fmt.Errorf("unsupported erase-display mode %d", mode)
 		}
+		s.clear()
+		if wasHome {
+			s.fullRedraws++
+		}
 	case 'K':
-		mode := ptyCSIParam(rawParams, 0, 0)
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		mode := ptyCSIParam(params, 0, 0)
 		if mode != 0 && mode != 2 {
 			return fmt.Errorf("unsupported erase-line mode %d", mode)
 		}
@@ -147,30 +197,82 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 		}
 		s.eraseRow(s.y, from, s.width-1)
 	case 'X':
-		count := max(ptyCSIParam(rawParams, 0, 1), 1)
-		s.eraseRow(s.y, s.x, min(s.x+count-1, s.width-1))
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		count := min(ptyCSIParam(params, 0, 1), max(s.width-s.x, 0))
+		s.eraseRow(s.y, s.x, s.x+count-1)
 	case 'L':
-		s.insertLines(max(ptyCSIParam(rawParams, 0, 1), 1))
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		count := min(ptyCSIParam(params, 0, 1), max(s.height-s.y, 0))
+		s.insertLines(count)
 	default:
-		return fmt.Errorf("unsupported terminal CSI")
+		return fmt.Errorf("unsupported terminal CSI final %q", final)
 	}
+	s.acceptedCSI[fmt.Sprintf("CSI %s%c", rawParams, final)] = struct{}{}
 	return nil
 }
 
-func ptyCSIParam(raw string, index, fallback int) int {
-	raw = strings.TrimLeft(raw, "?><!")
+func validatePTYSGRParams(raw string) error {
+	if raw != "" {
+		params, err := parsePTYCSIParams(raw, maxPTYCSIParams, false)
+		if err != nil {
+			return fmt.Errorf("invalid SGR params: %w", err)
+		}
+		if len(params) == 0 {
+			return fmt.Errorf("invalid empty SGR params")
+		}
+	}
+
+	// These are the exact SGR forms observed in both post-resize PTY slices.
+	switch raw {
+	case "", "1", "37;40", "38;5;240;27", "38;5;252", "39", "39;7", "40":
+		return nil
+	default:
+		return fmt.Errorf("unobserved SGR params %q", raw)
+	}
+}
+
+func parsePTYCSIParams(raw string, maxFields int, allowEmpty bool) ([]int, error) {
+	if raw == "" {
+		return nil, nil
+	}
 	parts := strings.Split(raw, ";")
-	if index >= len(parts) || parts[index] == "" {
+	if len(parts) > maxFields {
+		return nil, fmt.Errorf("too many CSI params: got %d, max %d", len(parts), maxFields)
+	}
+	params := make([]int, len(parts))
+	for index, part := range parts {
+		if part == "" {
+			if !allowEmpty {
+				return nil, fmt.Errorf("empty CSI param %d", index+1)
+			}
+			params[index] = -1
+			continue
+		}
+		for _, digit := range part {
+			if digit < '0' || digit > '9' {
+				return nil, fmt.Errorf("malformed CSI param %q", part)
+			}
+		}
+		value, err := strconv.ParseUint(part, 10, 32)
+		if err != nil || value > maxPTYCSIParam {
+			return nil, fmt.Errorf("CSI param %q out of range", part)
+		}
+		params[index] = int(value)
+	}
+	return params, nil
+}
+
+func ptyCSIParam(params []int, index, fallback int) int {
+	if index >= len(params) || params[index] < 0 || (params[index] == 0 && fallback == 1) {
 		return fallback
 	}
-	value, err := strconv.Atoi(parts[index])
-	if err != nil {
-		return fallback
-	}
-	if value == 0 && fallback == 1 {
-		return fallback
-	}
-	return value
+	return params[index]
 }
 
 func (s *ptyTerminalScreen) moveTo(x, y int) {
@@ -244,6 +346,15 @@ func (s *ptyTerminalScreen) eraseRow(row, from, to int) {
 
 func (s *ptyTerminalScreen) FullRedraws() int {
 	return s.fullRedraws
+}
+
+func (s *ptyTerminalScreen) AcceptedCSI() []string {
+	sequences := make([]string, 0, len(s.acceptedCSI))
+	for sequence := range s.acceptedCSI {
+		sequences = append(sequences, sequence)
+	}
+	sort.Strings(sequences)
+	return sequences
 }
 
 func (s *ptyTerminalScreen) Complete() bool {

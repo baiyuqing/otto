@@ -133,7 +133,7 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if resumeScreen.width != 140 || resumeScreen.height != 34 {
 		t.Fatalf("post-resize terminal screen = %dx%d, want 140x34", resumeScreen.width, resumeScreen.height)
 	}
-	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains transcript+session ID and no Resume modal", bubbleTeaFullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height)
+	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains transcript+session ID and no Resume modal; accepted sequences=%q", bubbleTeaFullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
 
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
@@ -263,12 +263,13 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
-	waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
+	lifecycleScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
 		return screen.FullRedraws() > 0 && screen.Complete() &&
 			strings.Contains(content, narrowFooterMarker) &&
 			!strings.Contains(content, footerSessionMarker)
 	})
+	t.Logf("PTY lifecycle accepted sequences=%q", lifecycleScreen.AcceptedCSI())
 
 	writePTY(t, master, "\x1b")
 	waitForCancellation(t, backend)
@@ -551,6 +552,51 @@ func tailTerminalOutput(output []byte) string {
 		output = output[len(output)-maxTail:]
 	}
 	return fmt.Sprintf("%q", output)
+}
+
+func TestPTYTerminalScreenRejectsUnsupportedControlsAndCSI(t *testing.T) {
+	tests := []struct {
+		name     string
+		sequence string
+	}{
+		{name: "NUL", sequence: "\x00"},
+		{name: "unsupported C0", sequence: "\x01"},
+		{name: "DEL", sequence: "\x7f"},
+		{name: "Unicode control", sequence: "\u0085"},
+		{name: "insert mode", sequence: "\x1b[4h"},
+		{name: "alternate screen enter", sequence: "\x1b[?1049h"},
+		{name: "alternate screen exit", sequence: "\x1b[?1049l"},
+		{name: "unknown private mode", sequence: "\x1b[?9999h"},
+		{name: "unobserved cursor mode", sequence: "\x1b[?25h"},
+		{name: "unobserved synchronized-output mode", sequence: "\x1b[?2026l"},
+		{name: "unknown public mode", sequence: "\x1b[20l"},
+		{name: "unobserved SGR", sequence: "\x1b[8m"},
+		{name: "malformed params", sequence: "\x1b[1,2m"},
+		{name: "overflow param", sequence: "\x1b[999999999999999999999999L"},
+		{name: "negative param", sequence: "\x1b[-1L"},
+		{name: "unexpected private prefix", sequence: "\x1b[>1m"},
+		{name: "extra params", sequence: "\x1b[1;2;3H"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := newPTYTerminalScreen(140, 34)
+			validEvidence := bubbleTeaFullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID
+			if _, err := screen.Write([]byte(validEvidence)); err != nil {
+				t.Fatalf("write valid evidence: %v", err)
+			}
+			if !ptyScreenHasResumeEvidence(screen) {
+				t.Fatal("valid setup did not satisfy evidence predicate")
+			}
+
+			if _, err := screen.Write([]byte(test.sequence)); err == nil {
+				t.Fatalf("screen.Write(%q) error = nil, want rejection", test.sequence)
+			}
+			if ptyScreenHasResumeEvidence(screen) {
+				t.Fatalf("evidence predicate accepted screen after rejected sequence %q", test.sequence)
+			}
+		})
+	}
 }
 
 func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.T) {

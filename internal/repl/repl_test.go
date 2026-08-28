@@ -292,6 +292,10 @@ func (f *fakeBackend) Prompt(ctx context.Context, prompt string, emit func(agent
 	return f.prompt(ctx, prompt, emit)
 }
 
+func (f *fakeBackend) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
 func (f *fakeBackend) NewSession() error {
 	f.newCalls++
 	if f.newSession == nil {

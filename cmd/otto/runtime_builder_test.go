@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -435,6 +436,166 @@ func TestRuntimeBuilderFailureClosesCandidateStore(t *testing.T) {
 	case <-candidate.closed:
 	case <-time.After(time.Second):
 		t.Fatal("candidate was not closed")
+	}
+	if candidate.closeCalls.Load() != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	}
+}
+
+func TestRuntimeBuilderBuildRunnerMapsResolvedCompactionAndKeepsClientRequestSizer(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "compaction-options", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "gpt-5.3-codex-spark", CreatedAt: time.Now().UTC(),
+	})
+	runtime := config.Runtime{
+		Profile: "default", Provider: "openai-compatible", BaseURL: "https://default.example/v1",
+		Model: "gpt-5.3-codex-spark", APIKey: "secret", APIKeyEnv: "DEFAULT_KEY",
+		ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+		Compaction: config.CompactionRuntime{
+			Auto: true, ContextWindow: 128_000, HardInputWindow: 111_000, WorkingWindow: 99_000,
+			MaxOutputTokens: 32_000, ReserveTokens: 12_345, KeepRecentTokens: 23_456,
+		},
+	}
+
+	runner, err := builder.buildRunner(current, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := reflect.ValueOf(runner)
+	if value.Kind() != reflect.Pointer || value.Elem().Type().PkgPath() != "github.com/baiyuqing/otto/internal/agent" {
+		t.Fatalf("runner type = %T, want *agent.Agent", runner)
+	}
+	options := value.Elem().FieldByName("options")
+	if !options.IsValid() {
+		t.Fatal("agent options field not found")
+	}
+	compaction := options.FieldByName("Compaction")
+	got := agent.CompactionSettings{
+		Auto:             compaction.FieldByName("Auto").Bool(),
+		HardInputWindow:  int(compaction.FieldByName("HardInputWindow").Int()),
+		WorkingWindow:    int(compaction.FieldByName("WorkingWindow").Int()),
+		ReserveTokens:    int(compaction.FieldByName("ReserveTokens").Int()),
+		KeepRecentTokens: int(compaction.FieldByName("KeepRecentTokens").Int()),
+	}
+	want := agent.CompactionSettings{
+		Auto: true, HardInputWindow: 111_000, WorkingWindow: 99_000,
+		ReserveTokens: 12_345, KeepRecentTokens: 23_456,
+	}
+	if got != want {
+		t.Fatalf("agent compaction settings = %#v, want %#v", got, want)
+	}
+	if requestSizer := options.FieldByName("RequestSizer"); !requestSizer.IsValid() || requestSizer.IsNil() {
+		t.Fatal("OpenAI-compatible client was not retained as automatic RequestSizer")
+	}
+}
+
+func TestRuntimeBuilderBuildNewReplacementResolvesCurrentSessionRuntimeTransactionally(t *testing.T) {
+	contextWindow := 65_536
+	compactionWindow := 49_152
+	reserve := 9_000
+	keep := 12_000
+	file := configWithProfiles("startup", "resumed")
+	profile := file.Profiles["resumed"]
+	profile.ContextWindow = &contextWindow
+	profile.CompactionWindow = &compactionWindow
+	file.Profiles["resumed"] = profile
+	file.Agent.Compaction.ReserveTokens = &reserve
+	file.Agent.Compaction.KeepRecentTokens = &keep
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.noSession = false
+
+	var createdRuntime config.Runtime
+	var runnerRuntime config.Runtime
+	builder.deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		createdRuntime = runtime
+		return session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "fresh", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), nil
+	}
+	builder.buildRunnerOverride = func(_ session.Session, runtime config.Runtime) (app.Runner, error) {
+		runnerRuntime = runtime
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	current := app.RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "gpt-5.3-codex-spark"}
+	replacement, err := builder.buildNewReplacement(context.Background(), current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Session.Close()
+	if replacement.RuntimeInfo != current {
+		t.Fatalf("runtime info = %#v, want current %#v", replacement.RuntimeInfo, current)
+	}
+	if !reflect.DeepEqual(createdRuntime, runnerRuntime) {
+		t.Fatalf("create runtime = %#v, runner runtime = %#v", redactedRuntime(createdRuntime), redactedRuntime(runnerRuntime))
+	}
+	if createdRuntime.Profile != "resumed" || createdRuntime.Model != "gpt-5.3-codex-spark" || createdRuntime.APIKey != "resumed-secret" {
+		t.Fatalf("resolved runtime = %#v", redactedRuntime(createdRuntime))
+	}
+	wantCompaction := config.CompactionRuntime{
+		Auto: true, ContextWindow: contextWindow, HardInputWindow: contextWindow, WorkingWindow: compactionWindow,
+		MaxOutputTokens: 32_000, ReserveTokens: reserve, KeepRecentTokens: keep,
+	}
+	if createdRuntime.Compaction != wantCompaction {
+		t.Fatalf("compaction runtime = %#v, want %#v", createdRuntime.Compaction, wantCompaction)
+	}
+	if header := replacement.Session.Header(); header.Profile != "resumed" || header.Model != "gpt-5.3-codex-spark" {
+		t.Fatalf("new session header = %#v", header)
+	}
+}
+
+func TestRuntimeBuilderBuildNewReplacementCreationErrorClosesReturnedCandidate(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	candidate := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	createErr := errors.New("create failed after returning candidate")
+	builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		return candidate, createErr
+	}
+
+	_, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+		Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1",
+	})
+	if !errors.Is(err, createErr) {
+		t.Fatalf("buildNewReplacement() error = %v, want creation error", err)
+	}
+	if candidate.closeCalls.Load() != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	}
+}
+
+func TestRuntimeBuilderBuildNewReplacementFailureClosesCandidateAndRedacts(t *testing.T) {
+	const secret = "new-replacement-secret"
+	file := configWithProfiles("default")
+	profile := file.Profiles["default"]
+	profile.APIKeyEnv = "NEW_REPLACEMENT_KEY"
+	file.Profiles["default"] = profile
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.environment[profile.APIKeyEnv] = secret
+	candidate := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) { return candidate, nil }
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return nil, fmt.Errorf("runner failed with %s", secret)
+	}
+
+	_, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+		Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "runner failed") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("buildNewReplacement() error = %v", err)
 	}
 	if candidate.closeCalls.Load() != 1 {
 		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())

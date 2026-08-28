@@ -214,7 +214,21 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	printWarnings(stderr, startupWarnings)
 
+	initialRunner, err := builder.buildRunner(initialSession, runtime)
+	if err != nil {
+		_ = initialSession.Close()
+		return fail(stderr, "%v", builder.redactError(err, &runtime))
+	}
+	if err := updateSessionRuntime(ctx, initialSession, runtime); err != nil {
+		_ = initialSession.Close()
+		return fail(stderr, "%v", builder.redactError(err, &runtime))
+	}
+	initialRunnerPending := true
 	buildRunner := func(current session.Session) app.Runner {
+		if initialRunnerPending {
+			initialRunnerPending = false
+			return initialRunner
+		}
 		runner, buildErr := builder.buildRunner(current, runtime)
 		if buildErr != nil {
 			return nil

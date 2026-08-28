@@ -153,6 +153,9 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 	if runner == nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, errors.New("runner factory returned nil runner"), &runtime)
 	}
+	if err := updateSessionRuntime(ctx, candidate, runtime); err != nil {
+		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+	}
 	return app.SessionReplacement{
 		Session: candidate,
 		Runner:  runner,
@@ -220,6 +223,20 @@ func activatedSessionMatchesPrepared(info session.SessionInfo, header session.He
 		info.Profile == header.Profile &&
 		info.Provider == header.Provider &&
 		info.Model == header.Model
+}
+
+func updateSessionRuntime(ctx context.Context, current session.Session, runtime config.Runtime) error {
+	header := current.Header()
+	if header.Profile == runtime.Profile && header.Provider == runtime.Provider && header.Model == runtime.Model {
+		return nil
+	}
+	updater, ok := current.(session.RuntimeUpdater)
+	if !ok {
+		return errors.New("session does not support runtime provenance updates")
+	}
+	return updater.UpdateRuntime(ctx, session.RuntimeMetadata{
+		Profile: runtime.Profile, Provider: runtime.Provider, Model: runtime.Model,
+	})
 }
 
 func (b runtimeBuilder) cleanupCandidate(candidate session.Session, err error, runtime *config.Runtime) error {

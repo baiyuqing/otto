@@ -72,6 +72,10 @@ type UsageProvider interface {
 	AggregateUsage() (model.Usage, bool)
 }
 
+type RuntimeUpdater interface {
+	UpdateRuntime(context.Context, RuntimeMetadata) error
+}
+
 type Session interface {
 	Header() Header
 	Messages() []model.Message

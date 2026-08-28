@@ -217,6 +217,64 @@ func (s *Store) AggregateUsage() (model.Usage, bool) {
 	return s.aggregateUsage, s.usagePresent
 }
 
+func (s *Store) UpdateRuntime(ctx context.Context, runtime RuntimeMetadata) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errSessionClosed
+	}
+	if s.fatalErr != nil {
+		return s.fatalErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(runtime.Provider) == "" || strings.TrimSpace(runtime.Model) == "" {
+		return fmt.Errorf("%w: runtime provider and model are required", ErrInvalidSession)
+	}
+	if s.header.Profile == runtime.Profile && s.header.Provider == runtime.Provider && s.header.Model == runtime.Model {
+		return nil
+	}
+
+	timestamp, err := formatPersistedTimestamp(time.Now().UTC(), "runtime update")
+	if err != nil {
+		return err
+	}
+	entryID, err := newPiEntryID(s.entryIDs)
+	if err != nil {
+		return fmt.Errorf("generate runtime entry id: %w", err)
+	}
+	runtimeData, err := json.Marshal(runtime)
+	if err != nil {
+		return fmt.Errorf("encode runtime metadata: %w", err)
+	}
+	entry := piEntry{
+		piEntryBase: piEntryBase{Type: "custom", ID: entryID, ParentID: cloneStringPointer(s.leafID), Timestamp: timestamp},
+		Custom:      &piCustom{CustomType: ottoRuntimeCustomType, Data: runtimeData},
+	}
+	encoded, err := encodePiRecord(entry)
+	if err != nil {
+		return err
+	}
+	recordBytes := int64(len(encoded) + 1)
+	if recordBytes > int64(maxSessionFileBytes)-s.fileBytes {
+		return sizeError(ErrSessionFileTooLarge, maxSessionFileBytes)
+	}
+	if _, err := writeEncodedPiRecord(s.writer, encoded); err != nil {
+		s.fatalErr = &fatalPersistenceError{cause: err}
+		return s.fatalErr
+	}
+
+	s.entries = append(s.entries, entry)
+	s.entryIDs[entryID] = struct{}{}
+	s.leafID = stringPointer(entryID)
+	s.fileBytes += recordBytes
+	s.header.Profile = runtime.Profile
+	s.header.Provider = runtime.Provider
+	s.header.Model = runtime.Model
+	return nil
+}
+
 func (s *Store) Append(ctx context.Context, message model.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

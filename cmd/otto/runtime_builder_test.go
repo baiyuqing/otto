@@ -373,6 +373,40 @@ func TestRuntimeBuilderListedResumeRejectsWorkspaceDirectorySymlinkSwapAndKeepsC
 	}
 }
 
+func TestRuntimeBuilderRunnerFailureDoesNotPersistCandidateRuntimeOverride(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.runtimeOverrides.Model = "effective-model"
+	candidate := &runtimeUpdateTrackingSession{Session: session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
+	})}
+	builder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		return &fakePreparedSession{
+			info: session.SessionInfo{
+				Path: "/sessions/candidate.jsonl", ID: "candidate", CWD: builder.workspacePath,
+				Profile: "default", Provider: "openai-compatible", Model: "stored-model",
+			},
+			activate: func(context.Context) (session.Session, []session.Warning, error) { return candidate, nil, nil },
+		}, nil
+	}
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return nil, errors.New("runner failed")
+	}
+
+	if _, err := builder.openReplacement(context.Background(), "/sessions/candidate.jsonl"); err == nil {
+		t.Fatal("openReplacement() succeeded")
+	}
+	if candidate.updateCalls.Load() != 0 {
+		t.Fatalf("runtime update calls = %d, want 0 before successful runner construction", candidate.updateCalls.Load())
+	}
+	if got := candidate.Header(); got.Model != "stored-model" {
+		t.Fatalf("failed candidate header mutated: %#v", got)
+	}
+	if candidate.closeCalls.Load() != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	}
+}
+
 func TestRuntimeBuilderFailureClosesCandidateStore(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 	candidate := &trackedReplacementSession{Session: createOpenPiStore(t, builder.sessionRoot, builder.workspacePath, "candidate"), closed: make(chan struct{})}
@@ -574,6 +608,22 @@ func (p *fakePreparedSession) Close() error {
 		return p.close()
 	}
 	return p.closeErr
+}
+
+type runtimeUpdateTrackingSession struct {
+	session.Session
+	updateCalls atomic.Int32
+	closeCalls  atomic.Int32
+}
+
+func (s *runtimeUpdateTrackingSession) UpdateRuntime(ctx context.Context, metadata session.RuntimeMetadata) error {
+	s.updateCalls.Add(1)
+	return s.Session.(session.RuntimeUpdater).UpdateRuntime(ctx, metadata)
+}
+
+func (s *runtimeUpdateTrackingSession) Close() error {
+	s.closeCalls.Add(1)
+	return s.Session.Close()
 }
 
 type trackedReplacementSession struct {

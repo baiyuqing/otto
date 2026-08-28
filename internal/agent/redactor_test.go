@@ -2,10 +2,20 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func TestRedactorPreservesInvalidCompactionSummaryIdentity(t *testing.T) {
+	err := fmt.Errorf("%w: response contains secret", ErrInvalidCompactionSummary)
+	got := NewRedactor([]string{"secret"}).RedactError(err)
+	if !errors.Is(got, ErrInvalidCompactionSummary) || strings.Contains(got.Error(), "secret") {
+		t.Fatalf("RedactError() = %v", got)
+	}
+}
 
 func TestRedactorNeverUsesAReplacementThatContainsTheCredential(t *testing.T) {
 	for _, credential := range []string{"[REDACTED]", "REDACTED", "[", "界"} {

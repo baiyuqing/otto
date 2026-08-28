@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,6 +263,86 @@ func TestCompleteDoesNotRetryUnauthorizedAndRedactsBoundedError(t *testing.T) {
 	message := err.Error()
 	if attempts != 1 || strings.Contains(message, key) || strings.Contains(message, "Bearer "+key) || strings.Contains(message, "TAIL-MARKER") || len(message) > maxErrorBody+256 {
 		t.Fatalf("attempts = %d, unsafe or unbounded error (%d bytes): %.200s", attempts, len(message), message)
+	}
+}
+
+func TestCompleteReturnsTypedContextOverflowWithoutRetry(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"context_length_exceeded","message":"maximum context length is 128000 tokens; requested 130000 tokens"}}`)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "secret", server.Client())
+	client.sleep = func(context.Context, time.Duration) error {
+		t.Fatal("context overflow response slept")
+		return nil
+	}
+	_, err := client.Complete(context.Background(), provider.Request{Model: "test"}, nil)
+	var overflow *provider.ContextOverflowError
+	if !errors.Is(err, provider.ErrContextOverflow) || !errors.As(err, &overflow) {
+		t.Fatalf("Complete() error = %T %v", err, err)
+	}
+	if calls.Load() != 1 || overflow.Status != http.StatusBadRequest || overflow.Code != "context_length_exceeded" || overflow.MaximumTokens != 128000 || overflow.CurrentTokens != 130000 {
+		t.Fatalf("calls=%d overflow=%#v", calls.Load(), overflow)
+	}
+}
+
+func TestCompleteTypedContextOverflowRedactsAPIKeyAndBodySecrets(t *testing.T) {
+	const (
+		apiKey     = "very-secret-api-key"
+		bodySecret = "body-secret-value"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_, _ = fmt.Fprintf(w, `{"error":{"message":"maximum context length; credentials %s and %s"}}`, apiKey, bodySecret)
+	}))
+	defer server.Close()
+
+	_, err := New(server.URL, apiKey, server.Client()).Complete(context.Background(), provider.Request{Model: "test"}, nil)
+	var overflow *provider.ContextOverflowError
+	if !errors.As(err, &overflow) {
+		t.Fatalf("Complete() error = %T %v", err, err)
+	}
+	if strings.Contains(err.Error(), apiKey) || strings.Contains(err.Error(), bodySecret) || strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("typed error leaked provider data: %q", err)
+	}
+}
+
+func TestCompleteRedactsAPIKeyBeforeContextOverflowClassification(t *testing.T) {
+	const apiKey = "maximum context length"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `{"error":{"message":%q}}`, "Bearer "+apiKey)
+	}))
+	defer server.Close()
+
+	_, err := New(server.URL, apiKey, server.Client()).Complete(context.Background(), provider.Request{Model: "test"}, nil)
+	var overflow *provider.ContextOverflowError
+	if err == nil || errors.As(err, &overflow) {
+		t.Fatalf("Complete() error = %T %v, want redacted unclassified error", err, err)
+	}
+	if strings.Contains(err.Error(), apiKey) {
+		t.Fatalf("error leaked API key: %q", err)
+	}
+}
+
+func TestCompleteDoesNotClassifyContextOverflowPastErrorBodyLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, strings.Repeat(" ", maxErrorBody)+`{"error":{"code":"context_length_exceeded","message":"TAIL-SECRET"}}`)
+	}))
+	defer server.Close()
+
+	_, err := New(server.URL, "key", server.Client()).Complete(context.Background(), provider.Request{Model: "test"}, nil)
+	var overflow *provider.ContextOverflowError
+	if err == nil || errors.As(err, &overflow) {
+		t.Fatalf("Complete() error = %T %v, want bounded unclassified error", err, err)
+	}
+	if strings.Contains(err.Error(), "TAIL-SECRET") || len(err.Error()) > maxErrorBody+256 {
+		t.Fatalf("unsafe or unbounded error (%d bytes): %.200s", len(err.Error()), err)
 	}
 }
 

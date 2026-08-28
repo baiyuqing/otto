@@ -169,12 +169,25 @@ func TestSearchSkipsAbsoluteGitAliasThroughLexicalWorkspaceSymlink(t *testing.T)
 		t.Fatal(err)
 	}
 	workspace := mustWorkspace(t, aliasRoot)
-	absoluteAlias := filepath.Join(aliasRoot, ".git")
-
-	find := NewFindTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"**","path":`+strconv.Quote(absoluteAlias)+`}`))
-	grep := NewGrepTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"match","path":`+strconv.Quote(absoluteAlias)+`}`))
-	if find.IsError || find.Content != "" || grep.IsError || grep.Content != "" {
-		t.Fatalf("absolute .git alias: Find=%#v Grep=%#v, want empty", find, grep)
+	siblingAlias := filepath.Join(parent, "other-link")
+	if err := os.Symlink(realRoot, siblingAlias); err != nil {
+		t.Fatal(err)
+	}
+	relativeSibling, err := filepath.Rel(realRoot, filepath.Join(siblingAlias, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, searchPath := range []string{
+		filepath.Join(aliasRoot, ".git"),
+		filepath.Join(realRoot, ".git"),
+		filepath.Join(siblingAlias, ".git"),
+		relativeSibling,
+	} {
+		find := NewFindTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"**","path":`+strconv.Quote(searchPath)+`}`))
+		grep := NewGrepTool(workspace, 51200).Execute(context.Background(), json.RawMessage(`{"pattern":"match","path":`+strconv.Quote(searchPath)+`}`))
+		if find.IsError || find.Content != "" || grep.IsError || grep.Content != "" {
+			t.Fatalf(".git alias path %q: Find=%#v Grep=%#v, want empty", searchPath, find, grep)
+		}
 	}
 }
 

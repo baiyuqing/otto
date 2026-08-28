@@ -163,7 +163,7 @@ func TestBuildContextUsesLatestActiveOttoRuntime(t *testing.T) {
 
 func TestBuildContextFramesBranchAndCustomMessages(t *testing.T) {
 	branch := testPiEntry("branch_summary", "40000001", nil)
-	branch.BranchSummary = &piBranchSummary{FromID: "ffffffff", Summary: "abandoned work", Usage: testPiUsage(2, 1)}
+	branch.BranchSummary = &piBranchSummary{FromID: "ffffffff", Summary: "abandoned work", Usage: &piUsage{Input: 2, Output: 1, CacheRead: 3, CacheWrite: 4, TotalTokens: 10}}
 	parent := branch.ID
 	hidden := testPiEntry("custom_message", "40000002", &parent)
 	hidden.CustomMessage = &piCustomMessage{CustomType: "hidden.fixture", ContentText: stringPointer("secret context"), Display: false}
@@ -186,7 +186,7 @@ func TestBuildContextFramesBranchAndCustomMessages(t *testing.T) {
 	if context.Messages[0].ContextType != "branch_summary" || !context.Messages[0].Display || context.Messages[1].Display || !context.Messages[2].Display {
 		t.Fatalf("context metadata = %#v", context.Messages)
 	}
-	if context.Usage != (model.Usage{InputTokens: 2, OutputTokens: 1}) {
+	if context.Usage != (model.Usage{InputTokens: 9, OutputTokens: 1, CachedInputTokens: 3}) {
 		t.Fatalf("usage = %#v", context.Usage)
 	}
 }

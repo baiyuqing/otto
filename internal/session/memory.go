@@ -9,10 +9,12 @@ import (
 )
 
 type Memory struct {
-	mu       sync.Mutex
-	header   Header
-	messages []model.Message
-	closed   bool
+	mu             sync.Mutex
+	header         Header
+	messages       []model.Message
+	aggregateUsage model.Usage
+	usagePresent   bool
+	closed         bool
 }
 
 func NewMemory(header Header) *Memory {
@@ -30,6 +32,12 @@ func (m *Memory) Messages() []model.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return cloneMessages(m.messages)
+}
+
+func (m *Memory) AggregateUsage() (model.Usage, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.aggregateUsage, m.usagePresent
 }
 
 func (m *Memory) UpdateRuntime(ctx context.Context, runtime RuntimeMetadata) error {
@@ -60,7 +68,12 @@ func (m *Memory) Append(ctx context.Context, message model.Message) error {
 	if m.closed {
 		return errSessionClosed
 	}
-	m.messages = append(m.messages, cloneMessage(message))
+	cloned := cloneMessage(message)
+	m.messages = append(m.messages, cloned)
+	if cloned.Role == model.RoleAssistant && hasMeaningfulUsage(cloned.Usage) {
+		m.aggregateUsage = addResolvedUsage(m.aggregateUsage, cloned.Usage)
+		m.usagePresent = true
+	}
 	return nil
 }
 

@@ -64,3 +64,41 @@ func TestMessageTextJoinsOnlyTextBlocks(t *testing.T) {
 		t.Fatalf("Text() = %q, want %q", got, "onetwo")
 	}
 }
+
+func TestUsageValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		usage   Usage
+		wantErr bool
+	}{
+		{name: "valid", usage: Usage{InputTokens: 7, OutputTokens: 2, CachedInputTokens: 3}},
+		{name: "zero", usage: Usage{}},
+		{name: "negative-input", usage: Usage{InputTokens: -1, OutputTokens: 1, CachedInputTokens: 0}, wantErr: true},
+		{name: "negative-output", usage: Usage{InputTokens: 1, OutputTokens: -1, CachedInputTokens: 0}, wantErr: true},
+		{name: "negative-cached", usage: Usage{InputTokens: 1, OutputTokens: 1, CachedInputTokens: -1}, wantErr: true},
+		{name: "cached-exceeds-input", usage: Usage{InputTokens: 1, OutputTokens: 1, CachedInputTokens: 2}, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			method := reflect.ValueOf(tc.usage).MethodByName("Validate")
+			if !method.IsValid() {
+				t.Fatal("Usage.Validate method is missing")
+			}
+			results := method.Call(nil)
+			if len(results) != 1 {
+				t.Fatalf("Validate() returned %d values, want 1", len(results))
+			}
+			var err error
+			if !results[0].IsNil() {
+				err = results[0].Interface().(error)
+			}
+			if tc.wantErr && err == nil {
+				t.Fatalf("Validate() = nil, want error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}

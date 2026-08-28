@@ -105,7 +105,7 @@ func TestCompactUsesExactNormalRequestEstimateAndProviderSizer(t *testing.T) {
 	}
 }
 
-func TestCompactTurnPrefixOnlyMakesOneBoundedCall(t *testing.T) {
+func TestCompactFirstTurnPrefixCreatesStructuredSummary(t *testing.T) {
 	messages := []model.Message{
 		compactionTextMessage("turn-u", model.RoleUser, "long first request"),
 		compactionTextMessage("turn-early", model.RoleAssistant, strings.Repeat("early", 240)),
@@ -116,7 +116,39 @@ func TestCompactTurnPrefixOnlyMakesOneBoundedCall(t *testing.T) {
 	appendCompactionMessages(t, memory, messages...)
 	options := testCompactionOptions()
 	options.Compaction.KeepRecentTokens = estimateMessage(messages[2]) + estimateMessage(messages[3])
-	fake := &compactProvider{responses: []provider.Response{{Message: summaryMessage("first-turn continuation context")}}}
+	fake := &compactProvider{responses: []provider.Response{validCompactionResponse(model.Usage{})}}
+	runner := New(fake, nil, memory, options)
+
+	if _, err := runner.Compact(context.Background(), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.requests) != 1 || !strings.Contains(fake.requests[0].Messages[0].Text(), "<summary-mode>structured</summary-mode>") {
+		t.Fatalf("requests=%#v", fake.requests)
+	}
+	latest, _ := memory.LatestCompaction()
+	if latest.Summary != validStructuredSummary {
+		t.Fatalf("summary=%q", latest.Summary)
+	}
+}
+
+func TestCompactTurnPrefixPreservesPreviousStructuredSummary(t *testing.T) {
+	messages := []model.Message{
+		compactionTextMessage("turn-u", model.RoleUser, "long first request"),
+		compactionTextMessage("turn-early", model.RoleAssistant, strings.Repeat("early", 240)),
+		compactionTextMessage("turn-late", model.RoleAssistant, "late progress"),
+		compactionTextMessage("latest-u", model.RoleUser, "follow-up"),
+	}
+	memory := session.NewMemory(testHeader(t))
+	appendCompactionMessages(t, memory, messages...)
+	if _, err := memory.AppendCompaction(context.Background(), session.CompactionCheckpoint{
+		Summary: validStructuredSummary, FirstKeptEntryID: messages[0].ID,
+		TokensBefore: 100, CreatedAt: fixedClock(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	options := testCompactionOptions()
+	options.Compaction.KeepRecentTokens = estimateMessage(messages[2]) + estimateMessage(messages[3])
+	fake := &compactProvider{responses: []provider.Response{{Message: summaryMessage("preserve early turn progress")}}}
 	runner := New(fake, nil, memory, options)
 
 	if _, err := runner.Compact(context.Background(), "", nil); err != nil {
@@ -126,8 +158,9 @@ func TestCompactTurnPrefixOnlyMakesOneBoundedCall(t *testing.T) {
 		t.Fatalf("requests=%#v", fake.requests)
 	}
 	latest, _ := memory.LatestCompaction()
-	if latest.Summary != "first-turn continuation context" {
-		t.Fatalf("summary=%q", latest.Summary)
+	want := validStructuredSummary + splitTurnSummarySeparator + "preserve early turn progress"
+	if latest.Summary != want {
+		t.Fatalf("summary=%q, want %q", latest.Summary, want)
 	}
 }
 
@@ -191,6 +224,43 @@ func TestCompactUpdatesPreviousSummaryWithoutResummarizingCheckpoint(t *testing.
 	second := fake.requests[1].Messages[0].Text()
 	if !strings.Contains(second, "<previous-summary>") || !strings.Contains(second, `## Goal\nkeep working`) || strings.Contains(second, "[Compaction summary]") {
 		t.Fatalf("second summary input=%q", second)
+	}
+}
+
+func TestCompactEstimateAfterIgnoresRetainedAssistantUsageAnchor(t *testing.T) {
+	options := testCompactionOptions()
+	options.SystemPrompt = "system"
+	retained := []model.Message{{
+		Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "retained"}},
+		Usage: &model.Usage{InputTokens: 500_000},
+	}}
+
+	if got := estimateCompactedContext(options, nil, "state", retained); got != 33 {
+		t.Fatalf("estimateCompactedContext() = %d, want content fallback 33", got)
+	}
+}
+
+func TestCompactRejectsContradictorySummaryFinishReasons(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		message model.FinishReason
+		outer   model.FinishReason
+	}{
+		{name: "message stop outer tool calls", message: model.FinishStop, outer: model.FinishToolCalls},
+		{name: "message tool calls outer stop", message: model.FinishToolCalls, outer: model.FinishStop},
+		{name: "message stop outer length", message: model.FinishStop, outer: model.FinishLength},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			memory := populatedCompactionMemory(t)
+			response := validCompactionResponse(model.Usage{})
+			response.Message.FinishReason = test.message
+			response.FinishReason = test.outer
+			runner := New(&compactProvider{responses: []provider.Response{response}}, nil, memory, testCompactionOptions())
+
+			if _, err := runner.Compact(context.Background(), "", nil); !errors.Is(err, ErrInvalidCompactionSummary) {
+				t.Fatalf("Compact() error = %v, want ErrInvalidCompactionSummary", err)
+			}
+		})
 	}
 }
 

@@ -50,7 +50,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 			return fmt.Errorf("decode chat completion stream: %w", err)
 		}
 		if chunk.Usage != nil {
-			usage = model.Usage{InputTokens: chunk.Usage.PromptTokens, OutputTokens: chunk.Usage.CompletionTokens}
+			usage = model.Usage{InputTokens: chunk.Usage.PromptTokens, OutputTokens: chunk.Usage.CompletionTokens, CachedInputTokens: chunk.Usage.cachedTokens()}
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {

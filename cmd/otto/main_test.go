@@ -539,9 +539,13 @@ func TestRunContinueSkipsOldOttoSessions(t *testing.T) {
 	root := filepath.Join(home, ".otto", "sessions")
 	olderValidPath := createCLISession(t, root, workspace, "older-valid-v3")
 	newestValidPath := createCLISession(t, root, workspace, "newest-valid-v3")
-	oldV1Path := writeOldPiV1Session(t, root, workspace, "newer-old-otto-v1")
+	oldV1Path := writeOldOttoV1Session(t, root, workspace, "newer-old-otto-v1")
 	corruptPath := writeCorruptPiSession(t, root, workspace, "newest-corrupt")
 	oldV1Before, err := os.ReadFile(oldV1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptBefore, err := os.ReadFile(corruptPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,12 +566,21 @@ func TestRunContinueSkipsOldOttoSessions(t *testing.T) {
 	if strings.Contains(stdout.String(), "newer-old-otto-v1") || strings.Contains(stdout.String(), "newest-corrupt") {
 		t.Fatalf("--continue selected an invalid newer file: %q", stdout.String())
 	}
-	oldV1After, err := os.ReadFile(oldV1Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(oldV1After, oldV1Before) {
-		t.Fatal("old Otto v1 session was modified")
+	for _, fixture := range []struct {
+		name   string
+		path   string
+		before []byte
+	}{
+		{name: "old Otto v1", path: oldV1Path, before: oldV1Before},
+		{name: "corrupt Pi v3", path: corruptPath, before: corruptBefore},
+	} {
+		after, readErr := os.ReadFile(fixture.path)
+		if readErr != nil {
+			t.Fatalf("read %s after --continue: %v", fixture.name, readErr)
+		}
+		if !bytes.Equal(after, fixture.before) {
+			t.Fatalf("%s session was modified by --continue", fixture.name)
+		}
 	}
 }
 
@@ -577,7 +590,7 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 	root := filepath.Join(home, ".otto", "sessions")
 	oldPath := createCLISession(t, root, workspace, "old-session")
 	newPath := createCLISession(t, root, workspace, "new-session")
-	oldV1Path := writeOldPiV1Session(t, root, workspace, "old-v1")
+	oldV1Path := writeOldOttoV1Session(t, root, workspace, "old-v1")
 	corruptPath := writeCorruptPiSession(t, root, workspace, "corrupt")
 	now := time.Now()
 	setCLISessionMTime(t, oldPath, now.Add(-2*time.Hour))
@@ -618,7 +631,7 @@ func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
 		path string
 		want string
 	}{
-		{name: "old v1", path: writeOldPiV1Session(t, root, workspace, "old-v1"), want: "unsupported session format"},
+		{name: "old Otto v1", path: writeOldOttoV1Session(t, root, workspace, "old-v1"), want: "unsupported session format"},
 		{name: "corrupt", path: writeCorruptPiSession(t, root, workspace, "corrupt"), want: "invalid session"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1534,10 +1547,10 @@ func onlySessionPath(t *testing.T, home string) string {
 	return paths[0]
 }
 
-func writeOldPiV1Session(t *testing.T, root, workspace, id string) string {
+func writeOldOttoV1Session(t *testing.T, root, workspace, id string) string {
 	t.Helper()
 	path := filepath.Join(cliSessionDirectory(t, root, workspace), id+".jsonl")
-	content := fmt.Sprintf("{\"type\":\"session\",\"version\":1,\"id\":%q,\"timestamp\":\"2026-08-27T12:00:00Z\",\"cwd\":%q}\n", id, workspace)
+	content := fmt.Sprintf("{\"type\":\"header\",\"header\":{\"version\":1,\"id\":%q,\"workspace\":%q,\"provider\":\"openai-compatible\",\"profile\":\"test\",\"model\":\"test-model\",\"created_at\":\"2026-08-27T12:00:00Z\"}}\n", id, workspace)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}

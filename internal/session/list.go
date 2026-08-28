@@ -137,7 +137,17 @@ func List(ctx context.Context, root, workspace, currentPath string, limit int) (
 
 		sessionInfo, _, inspectErr := inspectOpenedSession(ctx, path, file, info)
 		closeErr := file.Close()
-		if inspectErr != nil || closeErr != nil {
+		if inspectErr != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return ListResult{}, contextErr
+			}
+			result.Skipped = incrementSkipped(result.Skipped)
+			continue
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return ListResult{}, contextErr
+		}
+		if closeErr != nil {
 			result.Skipped = incrementSkipped(result.Skipped)
 			continue
 		}

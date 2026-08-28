@@ -245,6 +245,19 @@ func TestListValidatesLimit(t *testing.T) {
 	}
 }
 
+func TestListNeverSwallowsCancellationDuringFinalCandidateInspection(t *testing.T) {
+	root := t.TempDir()
+	workspace := t.TempDir()
+	createListSession(t, root, workspace, "only")
+	for cancelAt := 1; cancelAt <= 64; cancelAt++ {
+		ctx := &cancelOnErrCallContext{cancelAt: cancelAt}
+		_, err := List(ctx, root, workspace, "", 20)
+		if ctx.canceled && !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel at Err call %d was swallowed: error = %v", cancelAt, err)
+		}
+	}
+}
+
 func TestListRespectsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -408,6 +421,24 @@ func TestPreviewTextBoundsControlHeavyInput(t *testing.T) {
 	if delta := after.TotalAlloc - before.TotalAlloc; delta > 1<<20 {
 		t.Fatalf("previewText(control-heavy) allocated %d bytes, want <= %d", delta, 1<<20)
 	}
+}
+
+type cancelOnErrCallContext struct {
+	calls    int
+	cancelAt int
+	canceled bool
+}
+
+func (c *cancelOnErrCallContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cancelOnErrCallContext) Done() <-chan struct{}       { return nil }
+func (c *cancelOnErrCallContext) Value(any) any               { return nil }
+func (c *cancelOnErrCallContext) Err() error {
+	c.calls++
+	if c.calls >= c.cancelAt {
+		c.canceled = true
+		return context.Canceled
+	}
+	return nil
 }
 
 func createListSession(t *testing.T, root, workspace, id string) string {

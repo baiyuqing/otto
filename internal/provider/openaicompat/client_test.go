@@ -320,6 +320,23 @@ func TestRequestIncludesEveryFunctionSchemaField(t *testing.T) {
 	}
 }
 
+func TestTranslateRequestSetsReasoningEffort(t *testing.T) {
+	payload, err := json.Marshal(translateRequest(provider.Request{Model: "model", Thinking: "xhigh"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"reasoning_effort":"xhigh"`) {
+		t.Fatalf("payload = %s, want reasoning_effort xhigh", payload)
+	}
+	payload, err = json.Marshal(translateRequest(provider.Request{Model: "model"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "reasoning_effort") {
+		t.Fatalf("payload = %s, want no reasoning_effort", payload)
+	}
+}
+
 func TestTranslateRequestMapsContextMessagesToWireUsers(t *testing.T) {
 	request := translateRequest(provider.Request{Messages: []model.Message{
 		{Role: model.RoleContext, Display: true, Blocks: []model.Block{{Type: model.BlockText, Text: "visible context"}}},

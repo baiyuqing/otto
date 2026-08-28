@@ -49,6 +49,19 @@ func TestResolvePrefersCLIOverridesOverEnvironment(t *testing.T) {
 	}
 }
 
+func TestResolveCopiesThinkingOverride(t *testing.T) {
+	file := File{Profiles: map[string]Profile{
+		"local": {Provider: "openai-compatible", Model: "profile-model", BaseURL: "https://example.com/v1", APIKeyEnv: "PROFILE_KEY"},
+	}}
+	runtime, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "local", Thinking: "max"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Thinking != "max" {
+		t.Fatalf("thinking = %q, want max", runtime.Thinking)
+	}
+}
+
 func TestResolveRejectsUnknownProfile(t *testing.T) {
 	if _, err := Resolve(File{}, nil, SessionDefaults{}, Overrides{Profile: "missing"}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("expected missing profile error, got %v", err)

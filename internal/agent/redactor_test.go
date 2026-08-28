@@ -129,12 +129,79 @@ func TestRedactorJSONKeyRedactionIsSafeAndDeterministic(t *testing.T) {
 	}
 }
 
-func TestRedactorJSONKeyRedactionReturnsValidUTF8ForInvalidKeyBytes(t *testing.T) {
-	const credential = "secret"
-	raw := json.RawMessage(append([]byte(`{"secret-`), 0xff, '"', ':', '1', '}'))
-	got := NewRedactor([]string{credential}).RedactJSONStrings(raw)
-	if !json.Valid(got) || !utf8.Valid(got) || strings.Contains(string(got), credential) {
-		t.Fatalf("RedactJSONStrings() = %q, want valid credential-free UTF-8 JSON", got)
+func TestRedactorJSONDuplicateAndNormalizedKeysFailClosed(t *testing.T) {
+	invalidUTF8 := append([]byte(`{"secret-`), 0xff)
+	invalidUTF8 = append(invalidUTF8, []byte(`":"first","secret-`)...)
+	invalidUTF8 = append(invalidUTF8, 0xfe)
+	invalidUTF8 = append(invalidUTF8, []byte(`":"attacker"}`)...)
+
+	for _, test := range []struct {
+		name string
+		raw  json.RawMessage
+		want string
+	}{
+		{
+			name: "exact duplicate",
+			raw:  json.RawMessage(`{"safe":"first","safe":"attacker"}`),
+			want: `{"safe":null}`,
+		},
+		{
+			name: "escape alias",
+			raw:  json.RawMessage(`{"a":"first","\u0061":"attacker"}`),
+			want: `{"a":null}`,
+		},
+		{
+			name: "unpaired surrogate variants",
+			raw:  json.RawMessage(`{"secret-\ud800":"first","secret-\ud801":"attacker"}`),
+			want: `{"█-�":null}`,
+		},
+		{
+			name: "invalid UTF-8 variants",
+			raw:  json.RawMessage(invalidUTF8),
+			want: `{"█-�":null}`,
+		},
+		{
+			name: "nested array and post-redaction collision",
+			raw:  json.RawMessage(`{"items":[{"secret":"first","█":"attacker"},{"nested":{"a":"first","\u0061":"attacker"}}]}`),
+			want: `{"items":[{"█":null},{"nested":{"a":null}}]}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := NewRedactor([]string{"secret"}).RedactJSONStrings(test.raw)
+			if !json.Valid(got) || !utf8.Valid(got) {
+				t.Fatalf("RedactJSONStrings() returned invalid JSON/UTF-8: %q", got)
+			}
+			if string(got) != test.want {
+				t.Fatalf("RedactJSONStrings() = %s, want %s", got, test.want)
+			}
+			if strings.Contains(string(got), "attacker") || strings.Contains(string(got), "secret") {
+				t.Fatalf("RedactJSONStrings() retained colliding semantics or credential: %s", got)
+			}
+		})
+	}
+}
+
+func TestRedactorJSONInvalidInputAndDepthFailClosed(t *testing.T) {
+	redactor := NewRedactor([]string{"secret"})
+	tooDeep := strings.Repeat("[", 10_001) + `"secret"` + strings.Repeat("]", 10_001)
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"secret":`),
+		json.RawMessage([]byte{0xff}),
+		json.RawMessage(tooDeep),
+	} {
+		got := redactor.RedactJSONStrings(raw)
+		if string(got) != "null" || !json.Valid(got) || !utf8.Valid(got) {
+			t.Fatalf("RedactJSONStrings() = %q, want valid UTF-8 fail-closed JSON", got)
+		}
+	}
+}
+
+func TestRedactorJSONMaximumSupportedDepthDoesNotPanic(t *testing.T) {
+	const depth = 10_000
+	raw := json.RawMessage(strings.Repeat("[", depth) + `"secret"` + strings.Repeat("]", depth))
+	got := NewRedactor([]string{"secret"}).RedactJSONStrings(raw)
+	if !json.Valid(got) || !utf8.Valid(got) || strings.Contains(string(got), "secret") {
+		t.Fatalf("RedactJSONStrings() did not safely handle supported JSON depth: length=%d, prefix=%q", len(got), got[:min(len(got), 80)])
 	}
 }
 

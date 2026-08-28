@@ -16,6 +16,12 @@ type KeyMap struct {
 	PageDown       key.Binding
 	Home           key.Binding
 	End            key.Binding
+	ResumeUp       key.Binding
+	ResumeDown     key.Binding
+	ResumePageUp   key.Binding
+	ResumePageDown key.Binding
+	ResumeSelect   key.Binding
+	ResumeClose    key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -33,5 +39,11 @@ func DefaultKeyMap() KeyMap {
 		PageDown:       key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdown", "page down")),
 		Home:           key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
 		End:            key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
+		ResumeUp:       key.NewBinding(key.WithKeys("up"), key.WithHelp("up", "previous session")),
+		ResumeDown:     key.NewBinding(key.WithKeys("down"), key.WithHelp("down", "next session")),
+		ResumePageUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "previous page")),
+		ResumePageDown: key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdown", "next page")),
+		ResumeSelect:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "resume session")),
+		ResumeClose:    key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
 	}
 }

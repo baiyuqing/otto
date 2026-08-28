@@ -80,7 +80,7 @@ func translateRequest(request provider.Request) chatRequest {
 	}
 	for _, message := range request.Messages {
 		switch message.Role {
-		case model.RoleUser:
+		case model.RoleUser, model.RoleContext:
 			translated.Messages = append(translated.Messages, chatMessage{Role: "user", Content: message.Text()})
 		case model.RoleAssistant:
 			wire := chatMessage{Role: "assistant", Content: message.Text()}

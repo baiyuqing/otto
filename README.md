@@ -11,7 +11,7 @@ Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-orie
 - `otto` CLI for macOS
 - OpenAI-compatible provider support only
 - Adaptive UI selection: full-screen TUI on terminal stdin/stdout, REPL otherwise
-- Streaming TUI and REPL with `/help`, `/exit`, `/new`, and `/session`
+- Streaming TUI and REPL with `/help`, `/exit`, `/new`, and `/session`; the TUI also provides `/resume`
 - Markdown assistant rendering and collapsible tool output in the TUI
 - Built-in `read`, `write`, `edit`, and `bash` tools
 - Persistent JSONL sessions with `--continue` and `--resume`
@@ -23,6 +23,7 @@ Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-orie
 - Claude subscription login
 - Plugins, skills, or project-local config
 - Windows or Linux support commitments
+- Session trees/forks, session naming, deletion, or search
 
 ### Planned providers
 
@@ -95,21 +96,17 @@ Default path:
 ~/.config/otto/config.toml
 ```
 
-Resolution rules:
+Startup resolution is field-specific:
 
-1. CLI flags, including an explicit `--profile`
-2. Environment variables: `OTTO_PROVIDER`, `OTTO_MODEL`
-3. Provider/model stored in a resumed session
-4. `default_profile` from TOML
-5. Built-in defaults for agent limits
+- **Profile:** explicit `--profile` selects a profile. Otherwise a startup `--continue` or `--resume` uses the session's stored profile when present; a new session (or an external Pi session without an Otto profile) uses `default_profile`.
+- **Provider and model:** explicit `--provider` / `--model` override `OTTO_PROVIDER` / `OTTO_MODEL`. Those environment variables override the selected profile and any provider/model stored in a startup-resumed session. Without direct or environment overrides, startup resume uses the stored provider/model; however, explicit `--profile` makes that profile's provider/model the baseline instead. An explicit profile does **not** outrank `OTTO_PROVIDER` or `OTTO_MODEL`.
+- **Endpoint:** `--base-url` overrides the selected profile's `base_url`. There is no base-URL environment override, and session files do not supply an endpoint.
+- **API key:** the selected profile determines `api_key_env`. A nonempty value from that environment variable wins; `OTTO_API_KEY` is its fallback. API keys have no CLI flag and must not be stored in TOML.
+- **Agent limits:** direct `--max-turns`, `--shell-timeout`, and `--max-output-bytes` values override `[agent]` values, which override built-in defaults. Profiles and resumed sessions do not contain these limits.
 
-Additional rules:
+Startup `--continue` / `--resume` therefore restores session provider/model only as defaults: direct flags and `OTTO_PROVIDER` / `OTTO_MODEL` can override them as described above. In contrast, an in-process TUI `/resume` restores the selected session's stored provider/model and ignores the process's provider/model/profile/base-URL overrides and `OTTO_PROVIDER` / `OTTO_MODEL`; its stored profile selects the endpoint and key environment. Agent-limit overrides remain in effect. `/new` returns to the runtime resolved at process startup.
 
-- `--base-url` overrides the profile base URL.
-- The API key comes from the selected profile's `api_key_env`, with `OTTO_API_KEY` as fallback.
-- `--continue` and `--resume` reuse the active session's provider/model unless you explicitly select a different profile.
-- `--no-session` cannot be combined with `--continue` or `--resume`.
-- Raw secrets do not belong in TOML.
+`--no-session` cannot be combined with `--continue` or `--resume`.
 
 UI mode precedence:
 
@@ -172,6 +169,10 @@ Shared commands:
 - `/new` closes the current session and starts a fresh one in the same process.
 - `/exit` exits when idle. In the REPL, EOF also exits.
 
+TUI-only command:
+
+- `/resume` opens a modal containing up to the 20 most recently modified valid sessions for the current canonical workspace. Use `↑`/`↓` or `PgUp`/`PgDn` to navigate, `Enter` to resume, and `Esc` to close it. It does not search other workspaces or session contents.
+
 ## REPL behavior
 
 - Otto accepts one prompt per line.
@@ -184,26 +185,42 @@ Shared commands:
 
 ## Sessions
 
-Persistent sessions live under:
+Otto writes append-only JSONL in the **Pi session format version 3**, compatible with the public session format and `SessionManager` API in Pi 0.84.3. Otto keeps its own storage root, separate from Pi:
 
 ```text
 ~/.otto/sessions/<workspace-key>/<session-id>.jsonl
 ```
 
+It does not write under Pi's `~/.pi/agent/sessions` root.
+
 Examples:
 
 ```bash
-./otto --continue
-./otto --resume /absolute/path/to/session.jsonl
-./otto --no-session
+./otto --cwd /path/to/project --continue
+./otto --cwd /path/to/project --resume /absolute/path/to/session.jsonl
+./otto --cwd /path/to/project --no-session
 ```
 
 Notes:
 
-- `--continue` reopens the newest session for the current canonical workspace.
-- `--resume` reopens a specific session file, but only if its recorded workspace matches the current `--cwd`.
+- `--continue` reopens the newest valid Pi v3 session for the current canonical workspace. Invalid files and old Otto v1 files are skipped.
+- `--resume PATH` reopens a specific valid Pi v3 session file only when its recorded workspace matches the current `--cwd`.
+- Old Otto v1 files are left untouched, but they are unsupported, are not listed by `/resume`, and cannot be resumed.
+- `/resume` is TUI-only and shows at most the recent 20 sessions in the current workspace; controls are documented above.
 - `/session` shows the exact session path.
 - `--no-session` keeps history in memory only.
+- Session files contain sensitive prompt text, assistant responses, tool calls, tool arguments, and tool results. Protect them like source data. Session records do not contain API-key, OAuth-token, or authorization-header fields.
+- Stage 1 has no session tree/fork UI, naming, deletion, or search.
+
+### Optional Pi interoperability probe
+
+If Pi 0.84.3 (or a compatible package exposing the public Pi v3 `SessionManager` API) is installed, this opt-in probe opens one session, builds its context, and prints bounded JSON metadata only—never message or tool content, credentials, or authorization data:
+
+```bash
+OTTO_PI_INTEROP=1 node ./scripts/pi-session-interop.mjs /tmp/otto-session.jsonl
+```
+
+The environment variable is an explicit opt-in marker for operators; the script accepts exactly one session path. It exits 77 with a `SKIP` message when Pi is unavailable and exits nonzero for an invalid session. Default Go tests and builds never invoke Node or Pi.
 
 ## Tools and safety
 

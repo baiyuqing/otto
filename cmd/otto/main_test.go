@@ -305,15 +305,15 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	}
 	deps.detectTerminal = func(io.Reader, io.Writer) bool { return false }
 	var newSessionCalls atomic.Int32
-	var openSessionCalls atomic.Int32
+	var prepareSessionCalls atomic.Int32
 	var tuiCalls atomic.Int32
 	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
 		newSessionCalls.Add(1)
 		return nil, errors.New("new session should not be called")
 	}
-	deps.openSession = func(string, string, io.Writer) (session.Session, error) {
-		openSessionCalls.Add(1)
-		return nil, errors.New("open session should not be called")
+	deps.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		prepareSessionCalls.Add(1)
+		return nil, errors.New("prepare session should not be called")
 	}
 	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
 		tuiCalls.Add(1)
@@ -330,8 +330,8 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	if got, want := stderr.String(), "otto: --ui tui requires terminal stdin and stdout; use --ui repl for redirected input\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
 	}
-	if newSessionCalls.Load() != 0 || openSessionCalls.Load() != 0 || tuiCalls.Load() != 0 {
-		t.Fatalf("new session calls = %d open session calls = %d tui calls = %d, want all zero", newSessionCalls.Load(), openSessionCalls.Load(), tuiCalls.Load())
+	if newSessionCalls.Load() != 0 || prepareSessionCalls.Load() != 0 || tuiCalls.Load() != 0 {
+		t.Fatalf("new session calls = %d prepare session calls = %d tui calls = %d, want all zero", newSessionCalls.Load(), prepareSessionCalls.Load(), tuiCalls.Load())
 	}
 }
 
@@ -374,10 +374,21 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "https://example.test/v1?tenant=x")
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resume")
 	deps := defaultRunDependencies()
-	var openCalls atomic.Int32
-	deps.openSession = func(string, string, io.Writer) (session.Session, error) {
-		openCalls.Add(1)
-		return nil, errors.New("session must not open")
+	var prepareCalls, activateCalls atomic.Int32
+	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+		prepareCalls.Add(1)
+		prepared, err := prepareSession(ctx, path, workspace)
+		if err != nil {
+			return nil, err
+		}
+		return &fakePreparedSession{
+			info: prepared.Info(),
+			activate: func(context.Context) (session.Session, []session.Warning, error) {
+				activateCalls.Add(1)
+				return nil, nil, errors.New("session must not activate")
+			},
+			close: prepared.Close,
+		}, nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -387,8 +398,8 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	if code == 0 || !strings.Contains(stderr.String(), "base_url") {
 		t.Fatalf("code = %d, stderr = %q, want base_url error", code, stderr.String())
 	}
-	if openCalls.Load() != 0 {
-		t.Fatalf("open session calls = %d, want 0", openCalls.Load())
+	if prepareCalls.Load() != 1 || activateCalls.Load() != 0 {
+		t.Fatalf("prepare calls = %d activation calls = %d, want 1 and 0", prepareCalls.Load(), activateCalls.Load())
 	}
 }
 
@@ -408,6 +419,78 @@ func TestRunNoSessionAndExplicitConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".otto", "sessions")); !os.IsNotExist(err) {
 		t.Fatalf("--no-session created persistent root: %v", err)
+	}
+}
+
+func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		browser, ok := backend.(app.SessionBrowser)
+		if !ok {
+			t.Fatal("backend does not expose SessionBrowser")
+		}
+		if _, err := browser.ListSessions(context.Background(), 20); !errors.Is(err, app.ErrPersistenceDisabled) {
+			t.Fatalf("ListSessions() error = %v, want ErrPersistenceDisabled", err)
+		}
+		if _, err := browser.ResumeSession(context.Background(), filepath.Join(workspace, "resume.jsonl")); !errors.Is(err, app.ErrPersistenceDisabled) {
+			t.Fatalf("ResumeSession() error = %v, want ErrPersistenceDisabled", err)
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session", "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "warning-session")
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	var stdout, stderr bytes.Buffer
+	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+		prepared, err := prepareSession(ctx, path, workspace)
+		if err != nil {
+			return nil, err
+		}
+		return &fakePreparedSession{
+			info: prepared.Info(),
+			activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
+				store, warnings, err := prepared.Activate(ctx)
+				return store, append(warnings, session.Warning{Message: "startup warning"}), err
+			},
+			close: prepared.Close,
+		}, nil
+	}
+	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, _ app.Backend) error {
+		if !strings.Contains(stderr.String(), "warning: startup warning\n") {
+			t.Fatalf("stderr before TUI = %q", stderr.String())
+		}
+		return nil
+	}
+
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
 }
 
@@ -445,20 +528,75 @@ func TestRunCanonicalizesCWDBeforeCreatingSession(t *testing.T) {
 	}
 }
 
+func TestRunContinueSkipsOldOttoSessions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"unused"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	home := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	olderValidPath := createCLISession(t, root, workspace, "older-valid-v3")
+	newestValidPath := createCLISession(t, root, workspace, "newest-valid-v3")
+	oldV1Path := writeOldOttoV1Session(t, root, workspace, "newer-old-otto-v1")
+	corruptPath := writeCorruptPiSession(t, root, workspace, "newest-corrupt")
+	oldV1Before, err := os.ReadFile(oldV1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corruptBefore, err := os.ReadFile(corruptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	setCLISessionMTime(t, olderValidPath, now.Add(-4*time.Hour))
+	setCLISessionMTime(t, newestValidPath, now.Add(-3*time.Hour))
+	setCLISessionMTime(t, oldV1Path, now.Add(-2*time.Hour))
+	setCLISessionMTime(t, corruptPath, now.Add(-time.Hour))
+
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--continue"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "offline-test-key",
+	}))
+	if code != 0 || !strings.Contains(stdout.String(), "ID: newest-valid-v3") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "newer-old-otto-v1") || strings.Contains(stdout.String(), "newest-corrupt") {
+		t.Fatalf("--continue selected an invalid newer file: %q", stdout.String())
+	}
+	for _, fixture := range []struct {
+		name   string
+		path   string
+		before []byte
+	}{
+		{name: "old Otto v1", path: oldV1Path, before: oldV1Before},
+		{name: "corrupt Pi v3", path: corruptPath, before: corruptBefore},
+	} {
+		after, readErr := os.ReadFile(fixture.path)
+		if readErr != nil {
+			t.Fatalf("read %s after --continue: %v", fixture.name, readErr)
+		}
+		if !bytes.Equal(after, fixture.before) {
+			t.Fatalf("%s session was modified by --continue", fixture.name)
+		}
+	}
+}
+
 func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 	workspace := t.TempDir()
 	home := t.TempDir()
 	root := filepath.Join(home, ".otto", "sessions")
 	oldPath := createCLISession(t, root, workspace, "old-session")
-	time.Sleep(10 * time.Millisecond)
 	newPath := createCLISession(t, root, workspace, "new-session")
+	oldV1Path := writeOldOttoV1Session(t, root, workspace, "old-v1")
+	corruptPath := writeCorruptPiSession(t, root, workspace, "corrupt")
 	now := time.Now()
-	if err := os.Chtimes(oldPath, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(newPath, now, now); err != nil {
-		t.Fatal(err)
-	}
+	setCLISessionMTime(t, oldPath, now.Add(-2*time.Hour))
+	setCLISessionMTime(t, newPath, now.Add(-time.Hour))
+	setCLISessionMTime(t, oldV1Path, now.Add(-30*time.Minute))
+	setCLISessionMTime(t, corruptPath, now)
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
@@ -468,7 +606,7 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 		want string
 	}{
 		{name: "resume", args: []string{"--resume", oldPath}, want: "ID: old-session"},
-		{name: "continue", args: []string{"--continue"}, want: "ID: new-session"},
+		{name: "continue skips invalid newer sessions", args: []string{"--continue"}, want: "ID: new-session"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -478,6 +616,91 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
+	workspace := t.TempDir()
+	home := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+
+	for _, test := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "old Otto v1", path: writeOldOttoV1Session(t, root, workspace, "old-v1"), want: "unsupported session format"},
+		{name: "corrupt", path: writeCorruptPiSession(t, root, workspace, "corrupt"), want: "invalid session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", test.path}, strings.NewReader("/exit\n"), &stdout, &stderr, env)
+			if code == 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunResumeRejectsAtomicReplacementOfPreparedSessionWithoutMutation(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	resumePath := createCLISession(t, root, workspace, "prepared-startup")
+	replacementPath := createCLISession(t, root, workspace, "path-replacement")
+	replacementBefore, err := os.ReadFile(replacementPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
+		prepared, err := prepareSession(ctx, path, workspace)
+		if err != nil {
+			return nil, err
+		}
+		return &fakePreparedSession{
+			info: prepared.Info(),
+			activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
+				if err := os.Rename(replacementPath, resumePath); err != nil {
+					return nil, nil, err
+				}
+				return prepared.Activate(ctx)
+			},
+			close: prepared.Close,
+		}, nil
+	}
+	var tuiCalls atomic.Int32
+	deps.runTUI = func(context.Context, io.Reader, io.Writer, app.Backend) error {
+		tuiCalls.Add(1)
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui",
+	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 1 || !strings.Contains(stderr.String(), "identity changed") {
+		t.Fatalf("code = %d, stderr = %q, want prepared identity error", code, stderr.String())
+	}
+	if tuiCalls.Load() != 0 {
+		t.Fatalf("TUI calls = %d, want 0", tuiCalls.Load())
+	}
+	after, err := os.ReadFile(resumePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, replacementBefore) {
+		t.Fatal("failed startup activation mutated the replacement path")
 	}
 }
 
@@ -527,11 +750,124 @@ api_key_env = "TEST_KEY"
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	if got.SessionID != "resumed-session" || got.SessionPath != resumePath || got.Workspace != workspace {
+	canonicalResumePath, err := filepath.EvalSymlinks(resumePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID != "resumed-session" || got.SessionPath != canonicalResumePath || got.Workspace != workspace {
 		t.Fatalf("dynamic session info = %#v", got)
 	}
 	if got.Provider != "openai-compatible" || got.Profile != "active" || got.Model != "override-model" {
 		t.Fatalf("runtime info = %#v, want resolved overrides", got)
+	}
+}
+
+func TestRunResumeAndContinuePersistEffectiveRuntimeOverrides(t *testing.T) {
+	for _, selector := range []string{"resume", "continue"} {
+		t.Run(selector, func(t *testing.T) {
+			var requestModel, authorization string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				authorization = r.Header.Get("Authorization")
+				var request struct {
+					Model string `json:"model"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				requestModel = request.Model
+				writeSSE(w, `{"choices":[{"delta":{"content":"effective answer"},"finish_reason":"stop"}]}`)
+			}))
+			defer server.Close()
+
+			home := t.TempDir()
+			workspace := t.TempDir()
+			root := filepath.Join(home, ".otto", "sessions")
+			store, err := session.Create(root, session.Header{
+				Version: session.CurrentVersion, ID: selector + "-runtime", Workspace: workspace,
+				Provider: "openai-compatible", Profile: "stored", Model: "stored-model", CreatedAt: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := store.Path()
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			configPath := filepath.Join(t.TempDir(), "otto.toml")
+			configText := fmt.Sprintf(`default_profile = "stored"
+[profiles.stored]
+provider = "openai-compatible"
+base_url = %q
+model = "stored-profile-model"
+api_key_env = "STORED_KEY"
+[profiles.override]
+provider = "openai-compatible"
+base_url = %q
+model = "override-profile-model"
+api_key_env = "OVERRIDE_KEY"
+`, server.URL, server.URL)
+			if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{
+				"--config", configPath, "--cwd", workspace,
+				"--profile", "override", "--provider", "openai-compatible", "--model", "effective-model",
+			}
+			if selector == "resume" {
+				args = append(args, "--resume", path)
+			} else {
+				args = append(args, "--continue")
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), args, strings.NewReader("use effective runtime\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+				"HOME": home, "SHELL": "/bin/sh", "STORED_KEY": "stored-secret", "OVERRIDE_KEY": "override-secret",
+			}))
+			if code != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if requestModel != "effective-model" || authorization != "Bearer override-secret" {
+				t.Fatalf("request model/auth = %q / %q", requestModel, authorization)
+			}
+
+			reopened, warnings, err := session.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(warnings) != 0 {
+				_ = reopened.Close()
+				t.Fatalf("warnings = %#v", warnings)
+			}
+			header := reopened.Header()
+			if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if header.Profile != "override" || header.Provider != "openai-compatible" || header.Model != "effective-model" {
+				t.Fatalf("reopened Header() = %#v", header)
+			}
+
+			lines := bytes.Split(bytes.TrimSpace(mustReadFile(t, path)), []byte{'\n'})
+			var assistantProvider, assistantModel string
+			for _, line := range lines {
+				var record struct {
+					Type    string `json:"type"`
+					Message struct {
+						Role     string `json:"role"`
+						Provider string `json:"provider"`
+						Model    string `json:"model"`
+					} `json:"message"`
+				}
+				if err := json.Unmarshal(line, &record); err != nil {
+					t.Fatal(err)
+				}
+				if record.Type == "message" && record.Message.Role == "assistant" {
+					assistantProvider, assistantModel = record.Message.Provider, record.Message.Model
+				}
+			}
+			if assistantProvider != "openai-compatible" || assistantModel != "effective-model" {
+				t.Fatalf("persisted assistant provider/model = %q/%q", assistantProvider, assistantModel)
+			}
+		})
 	}
 }
 
@@ -580,6 +916,98 @@ api_key_env = "RESUMED_KEY"
 	}
 	if defaultRequests.Load() != 0 || resumedRequests.Load() != 1 || !strings.Contains(stdout.String(), "resumed profile") {
 		t.Fatalf("default requests = %d, resumed requests = %d, stdout = %q", defaultRequests.Load(), resumedRequests.Load(), stdout.String())
+	}
+}
+
+func TestRunNewAfterResumeResetsStartupRuntimeInfoRunnerAndHeader(t *testing.T) {
+	var defaultRequests, resumedRequests atomic.Int32
+	defaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultRequests.Add(1)
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode default request: %v", err)
+		}
+		if request.Model != "startup-model" || r.Header.Get("Authorization") != "Bearer startup-secret" {
+			t.Errorf("default request model/auth = %q / %q", request.Model, r.Header.Get("Authorization"))
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"startup runner"},"finish_reason":"stop"}]}`)
+	}))
+	defer defaultServer.Close()
+	resumedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resumedRequests.Add(1)
+		writeSSE(w, `{"choices":[{"delta":{"content":"resumed runner"},"finish_reason":"stop"}]}`)
+	}))
+	defer resumedServer.Close()
+
+	home := t.TempDir()
+	workspace := t.TempDir()
+	resumedStore, err := session.Create(filepath.Join(home, ".otto", "sessions"), session.Header{
+		Version: session.CurrentVersion, ID: "resumed", Workspace: workspace, Provider: "openai-compatible",
+		Profile: "resumed", Model: "resumed-model", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumePath := resumedStore.Path()
+	if err := resumedStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "otto.toml")
+	configContent := fmt.Sprintf(`default_profile = "startup"
+[profiles.startup]
+provider = "openai-compatible"
+base_url = %q
+model = "startup-model"
+api_key_env = "STARTUP_KEY"
+[profiles.resumed]
+provider = "openai-compatible"
+base_url = %q
+model = "profile-resumed-model"
+api_key_env = "RESUMED_KEY"
+`, defaultServer.URL, resumedServer.URL)
+	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deps := defaultRunDependencies()
+	deps.subscribeInterrupts = func() interruptSubscription {
+		return interruptSubscription{stop: func() {}}
+	}
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		browser, ok := backend.(app.SessionBrowser)
+		if !ok {
+			t.Fatal("backend does not expose SessionBrowser")
+		}
+		if _, err := browser.ResumeSession(ctx, resumePath); err != nil {
+			return err
+		}
+		if got := backend.Info(); got.SessionID != "resumed" || got.Profile != "resumed" || got.Model != "resumed-model" {
+			t.Fatalf("info after resume = %#v", got)
+		}
+		if err := backend.NewSession(); err != nil {
+			return err
+		}
+		got := backend.Info()
+		if got.SessionID == "resumed" || got.Provider != "openai-compatible" || got.Profile != "startup" || got.Model != "startup-model" {
+			t.Fatalf("info after new = %#v", got)
+		}
+		return backend.Prompt(ctx, "use startup runtime", nil)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath, "--cwd", workspace, "--ui", "tui",
+	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "STARTUP_KEY": "startup-secret", "RESUMED_KEY": "resumed-secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if defaultRequests.Load() != 1 || resumedRequests.Load() != 0 {
+		t.Fatalf("requests = startup %d resumed %d, want 1 and 0", defaultRequests.Load(), resumedRequests.Load())
 	}
 }
 
@@ -767,11 +1195,93 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	}
 }
 
-func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *testing.T) {
+func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArguments(t *testing.T) {
+	credential := fmt.Sprintf("provider-echo-secret-%d", time.Now().UnixNano())
+	authorization := "Bearer " + credential
+	home := t.TempDir()
+	workspace := t.TempDir()
+
+	var requestBodies []string
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		requestBodies = append(requestBodies, string(body))
+		requestCount++
+		if got := r.Header.Get("Authorization"); got != authorization {
+			t.Errorf("Authorization = %q, want resolved credential", got)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requestCount == 1 {
+			textSplit := len(authorization) - 3
+			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, authorization, "prefix-"+credential, credential)
+			argumentSplit := strings.Index(arguments, credential) + len(credential)/2
+			chunks := []string{
+				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "authorization="+authorization[:textSplit]),
+				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, authorization[textSplit:]),
+				fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write","arguments":%q}}]}}]}`, arguments[:argumentSplit]),
+				fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":%q}}]},"finish_reason":"tool_calls"}]}`, arguments[argumentSplit:]),
+			}
+			for _, chunk := range chunks {
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+			}
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"credential remained private"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check provider output\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": credential,
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if requestCount != 2 {
+		t.Fatalf("provider requests = %d, want 2", requestCount)
+	}
+
+	persisted, err := os.ReadFile(onlySessionPath(t, home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "credential.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("credential-bearing unknown key should conservatively prevent write, stat error = %v", err)
+	}
+	locations := map[string]string{
+		"stdout events":      stdout.String(),
+		"stderr":             stderr.String(),
+		"provider follow-up": requestBodies[1],
+		"session JSONL":      string(persisted),
+	}
+	for location, content := range locations {
+		if strings.Contains(content, credential) || strings.Contains(content, authorization) || strings.Contains(content, "attacker-") {
+			t.Fatalf("%s leaked successful provider credential echo or colliding tool value: %q", location, content)
+		}
+	}
+	for _, location := range []string{"stdout events", "provider follow-up", "session JSONL"} {
+		if !strings.Contains(locations[location], "█") {
+			t.Fatalf("%s did not retain a redaction marker: %q", location, locations[location])
+		}
+	}
+}
+
+func TestRunKeepsEveryProfileCredentialOutOfBashEventsSessionAndProviderHistory(t *testing.T) {
 	resolvedCredential := fmt.Sprintf("resolved-%d", time.Now().UnixNano())
+	inactiveCredential := fmt.Sprintf("inactive-%d", time.Now().UnixNano())
 	fallbackCredential := fmt.Sprintf("fallback-%d", time.Now().UnixNano())
-	const profileKeyEnv = "OTTO_E2E_PROFILE_KEY"
+	const (
+		profileKeyEnv  = "OTTO_E2E_PROFILE_KEY"
+		inactiveKeyEnv = "OTTO_E2E_INACTIVE_KEY"
+	)
 	t.Setenv(profileKeyEnv, resolvedCredential)
+	t.Setenv(inactiveKeyEnv, inactiveCredential)
 	t.Setenv("OTTO_API_KEY", fallbackCredential)
 	t.Setenv("OTTO_E2E_UNRELATED", "preserved-environment")
 
@@ -802,7 +1312,7 @@ func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *t
 		current := requestCount
 		mu.Unlock()
 		if current == 1 {
-			command := "env; printf 'reconstructed='; cat .credential-part-1 .credential-part-2"
+			command := "env | grep -E '^OTTO_E2E_(.*_KEY|UNRELATED)=' || true; printf 'reconstructed='; cat .credential-part-1 .credential-part-2"
 			writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`, fmt.Sprintf(`{"command":%q}`, command)))
 			return
 		}
@@ -810,10 +1320,25 @@ func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *t
 	}))
 	defer server.Close()
 
-	configPath := writeCLIConfig(t, "openai-compatible", profileKeyEnv, server.URL)
+	configPath := filepath.Join(t.TempDir(), "otto.toml")
+	configContent := fmt.Sprintf(`default_profile = "active"
+[profiles.active]
+provider = "openai-compatible"
+base_url = %q
+model = "test-model"
+api_key_env = %q
+[profiles.inactive]
+provider = "openai-compatible"
+base_url = "https://inactive.example/v1"
+model = "inactive-model"
+api_key_env = %q
+`, server.URL, profileKeyEnv, inactiveKeyEnv)
+	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check credentials\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
-		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, "OTTO_API_KEY": fallbackCredential,
+		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, inactiveKeyEnv: inactiveCredential, "OTTO_API_KEY": fallbackCredential,
 	}))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
@@ -832,13 +1357,14 @@ func TestRunKeepsResolvedCredentialOutOfBashEventsSessionAndProviderHistory(t *t
 	for location, content := range map[string]string{
 		"stdout": stdout.String(), "stderr": stderr.String(), "JSONL": string(persisted), "provider request 1": bodies[0], "provider request 2": bodies[1],
 	} {
-		for _, forbidden := range []string{resolvedCredential, fallbackCredential, profileKeyEnv, "OTTO_API_KEY"} {
+		for _, forbidden := range []string{resolvedCredential, inactiveCredential, fallbackCredential, profileKeyEnv, inactiveKeyEnv, "OTTO_API_KEY"} {
 			if strings.Contains(content, forbidden) {
 				t.Fatalf("%s leaked protected credential data %q", location, forbidden)
 			}
 		}
 	}
-	if !strings.Contains(string(persisted), "reconstructed=[REDACTED]") || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
+	redactedReconstruction := strings.Contains(string(persisted), "reconstructed=[REDACTED]") || strings.Contains(string(persisted), "reconstructed=█")
+	if !redactedReconstruction || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
 		t.Fatalf("persisted bash event/result did not redact credential while preserving unrelated environment: %s", persisted)
 	}
 }
@@ -1139,6 +1665,14 @@ type trackingSession struct {
 	closeCalls atomic.Int32
 }
 
+func (s *trackingSession) UpdateRuntime(ctx context.Context, metadata session.RuntimeMetadata) error {
+	updater, ok := s.Session.(session.RuntimeUpdater)
+	if !ok {
+		return errors.New("wrapped session does not support runtime updates")
+	}
+	return updater.UpdateRuntime(ctx, metadata)
+}
+
 func (s *trackingSession) Append(ctx context.Context, message model.Message) error {
 	if s.appendErr != nil {
 		return s.appendErr
@@ -1185,7 +1719,7 @@ func testGetenv(values map[string]string) func(string) string {
 
 func createCLISession(t *testing.T, root, workspace, id string) string {
 	t.Helper()
-	store, err := session.Create(root, session.Header{Version: 1, ID: id, Workspace: workspace, Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC()})
+	store, err := session.Create(root, session.Header{Version: session.CurrentVersion, ID: id, Workspace: workspace, Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1206,6 +1740,49 @@ func onlySessionPath(t *testing.T, home string) string {
 		t.Fatalf("session paths = %v, want one", paths)
 	}
 	return paths[0]
+}
+
+func writeOldOttoV1Session(t *testing.T, root, workspace, id string) string {
+	t.Helper()
+	path := filepath.Join(cliSessionDirectory(t, root, workspace), id+".jsonl")
+	content := fmt.Sprintf("{\"type\":\"header\",\"header\":{\"version\":1,\"id\":%q,\"workspace\":%q,\"provider\":\"openai-compatible\",\"profile\":\"test\",\"model\":\"test-model\",\"created_at\":\"2026-08-27T12:00:00Z\"}}\n", id, workspace)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeCorruptPiSession(t *testing.T, root, workspace, id string) string {
+	t.Helper()
+	path := filepath.Join(cliSessionDirectory(t, root, workspace), id+".jsonl")
+	content := fmt.Sprintf("{\"type\":\"session\",\"version\":3,\"id\":%q,\"timestamp\":\"2026-08-27T12:00:00Z\",\"cwd\":%q}\n{\"type\":\"custom\",\"id\":\"71000001\",\"parentId\":null,\"timestamp\":\"2026-08-27T12:00:01Z\",\"customType\":\"otto.runtime\",\"data\":{\"profile\":\"test\",\"provider\":\"openai-compatible\",\"model\":\"test-model\"}}\n{\"type\":\"message\",\"id\":\"bad-json\n", id, workspace)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func cliSessionDirectory(t *testing.T, root, workspace string) string {
+	t.Helper()
+	store, err := session.Create(root, session.Header{Version: session.CurrentVersion, ID: "directory-probe", Workspace: workspace, Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Dir(store.Path())
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(store.Path()); err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
+func setCLISessionMTime(t *testing.T, path string, modified time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, modified, modified); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeSSE(w http.ResponseWriter, chunk string) {

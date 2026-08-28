@@ -27,7 +27,7 @@ func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 	if !strings.Contains(content, "/session") || !strings.Contains(content, "show session details") {
 		t.Fatalf("view = %q, want matching session suggestion", content)
 	}
-	for _, command := range []string{"/help", "/new", "/exit"} {
+	for _, command := range []string{"/help", "/new", "/resume", "/exit"} {
 		if strings.Contains(content, command) {
 			t.Fatalf("view = %q, contains nonmatching suggestion %q", content, command)
 		}
@@ -75,7 +75,7 @@ func TestSlashCommandKeysPassThroughOutsideSuggestionMode(t *testing.T) {
 	if strings.HasPrefix(got.editor.Value(), "/") {
 		t.Fatalf("ordinary tab activated slash completion: editor=%q", got.editor.Value())
 	}
-	for _, description := range []string{"show help", "show session details", "start a new session", "quit"} {
+	for _, description := range []string{"show help", "show session details", "start a new session", "resume a session", "quit"} {
 		if strings.Contains(got.View().Content, description) {
 			t.Fatalf("ordinary view contains suggestion description %q", description)
 		}
@@ -92,6 +92,7 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 		"/help", "show help",
 		"/session", "show session details",
 		"/new", "start a new session",
+		"/resume", "resume a session",
 		"/exit", "quit",
 	} {
 		if !strings.Contains(content, text) {
@@ -102,7 +103,7 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 	m.overlay = overlayHelp
 	help := m.View().Content
 	assertRenderedBounds(t, help, 40, 8)
-	for _, command := range []string{"/help", "/session", "/new", "/exit"} {
+	for _, command := range []string{"/help", "/session", "/new", "/resume", "/exit"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("help = %q, want registry command %q", help, command)
 		}
@@ -159,7 +160,7 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 4 || m.viewport.Height() != 6 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 5 || m.viewport.Height() != 5 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))
@@ -219,7 +220,7 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	m.autoFollow = false
 	m.viewport.SetYOffset(3)
 	m = typeEditorText(t, m, "/")
-	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 6 {
+	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 5 {
 		t.Fatalf("suggestion scroll state: offset=%d follow=%v height=%d", m.viewport.YOffset(), m.autoFollow, m.viewport.Height())
 	}
 
@@ -248,13 +249,13 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	}
 
 	m = resizeModel(t, m, 40, 8)
-	if m.viewport.Height() != 2 {
-		t.Fatalf("minimum viewport height = %d, want 2", m.viewport.Height())
+	if m.viewport.Height() != 1 {
+		t.Fatalf("minimum viewport height = %d, want 1", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
 	m = resizeModel(t, m, 100, 20)
-	if m.viewport.Height() != 14 {
-		t.Fatalf("expanded viewport height = %d, want 14", m.viewport.Height())
+	if m.viewport.Height() != 13 {
+		t.Fatalf("expanded viewport height = %d, want 13", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 100, 20)
 

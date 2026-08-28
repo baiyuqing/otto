@@ -19,9 +19,10 @@ type Agent struct {
 	registry *tool.Registry
 	session  session.Session
 	options  Options
+	redactor *Redactor
 }
 
-func New(provider provider.Provider, registry *tool.Registry, memory session.Session, options Options) *Agent {
+func New(provider provider.Provider, registry *tool.Registry, memory session.Session, options Options, redactors ...*Redactor) *Agent {
 	if registry == nil {
 		registry, _ = tool.NewRegistry()
 	}
@@ -34,7 +35,14 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 	if options.MaxTurns <= 0 {
 		options.MaxTurns = 50
 	}
-	return &Agent{provider: provider, registry: registry, session: memory, options: options}
+	var redactor *Redactor
+	if len(redactors) > 0 {
+		redactor = redactors[0]
+	}
+	if redactor == nil {
+		redactor = NewRedactor(nil)
+	}
+	return &Agent{provider: provider, registry: registry, session: memory, options: options, redactor: redactor}
 }
 
 func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) error {
@@ -43,6 +51,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 	}
 
 	a.emit(emit, Event{Type: EventAgentStarted})
+	userText = a.redactor.RedactString(userText)
 	if err := a.session.Append(ctx, model.Message{
 		ID:        a.options.NewID(),
 		Role:      model.RoleUser,
@@ -53,6 +62,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 	}
 
 	for turn := 0; turn < a.options.MaxTurns; turn++ {
+		stream := a.redactor.newStream()
 		response, err := a.provider.Complete(ctx, provider.Request{
 			Model:        a.options.Model,
 			SystemPrompt: a.options.SystemPrompt,
@@ -61,14 +71,19 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		}, func(event provider.StreamEvent) {
 			switch event.Type {
 			case provider.StreamTextDelta:
-				a.emit(emit, Event{Type: EventTextDelta, Text: event.Text})
+				if text := stream.Write(event.Text); text != "" {
+					a.emit(emit, Event{Type: EventTextDelta, Text: text})
+				}
 			}
 		})
 		if err != nil {
 			return a.fail(emit, err)
 		}
+		if text := stream.Flush(); text != "" {
+			a.emit(emit, Event{Type: EventTextDelta, Text: text})
+		}
 
-		assistant := cloneMessage(response.Message)
+		assistant := a.redactMessage(response.Message)
 		if assistant.ID == "" {
 			assistant.ID = a.options.NewID()
 		}
@@ -107,6 +122,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 			} else {
 				result = a.registry.Execute(ctx, block.ToolName, cloneArguments(block.Arguments))
 			}
+			result.Content = a.redactor.RedactString(result.Content)
 			a.emit(emit, Event{Type: EventToolCallFinished, ToolName: block.ToolName, ToolCallID: block.ToolCallID, ToolResult: result})
 			if err := a.session.Append(durabilityCtx, model.Message{
 				ID:        a.options.NewID(),
@@ -142,8 +158,24 @@ func (a *Agent) emit(emit func(Event), event Event) {
 }
 
 func (a *Agent) fail(emit func(Event), err error) error {
+	err = a.redactor.RedactError(err)
 	a.emit(emit, Event{Type: EventAgentError, Err: err})
 	return err
+}
+
+func (a *Agent) redactMessage(message model.Message) model.Message {
+	redacted := cloneMessage(message)
+	redacted.ID = a.redactor.RedactString(redacted.ID)
+	for index := range redacted.Blocks {
+		block := &redacted.Blocks[index]
+		block.Text = a.redactor.RedactString(block.Text)
+		block.ToolCallID = a.redactor.RedactString(block.ToolCallID)
+		block.ToolName = a.redactor.RedactString(block.ToolName)
+		if block.Type == model.BlockToolCall {
+			block.Arguments = a.redactor.RedactJSONStrings(block.Arguments)
+		}
+	}
+	return redacted
 }
 
 func defaultNewID() string {

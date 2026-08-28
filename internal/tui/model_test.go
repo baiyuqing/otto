@@ -292,6 +292,27 @@ func TestViewResetsMalformedAssistantStyleBeforeNextEntryAndFooter(t *testing.T)
 	}
 }
 
+func TestInitialUsagePrefersBackendAggregateOverCompactedHistoryFallback(t *testing.T) {
+	backend := &fakeBackend{
+		info: app.Info{
+			Profile: "profile", Model: "model", SessionID: "session",
+			Usage: model.Usage{InputTokens: 20, OutputTokens: 6}, UsagePresent: true,
+		},
+		history: []model.Message{{
+			Role: model.RoleContext, ContextType: "compaction", Display: true,
+			Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\ncompact"}},
+			Usage:  &model.Usage{InputTokens: 6, OutputTokens: 1},
+		}},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 12)
+	if m.usage != backend.info.Usage {
+		t.Fatalf("model usage = %#v, want aggregate %#v", m.usage, backend.info.Usage)
+	}
+	if content := m.View().Content; !strings.Contains(content, "tokens 20/6") {
+		t.Fatalf("footer = %q, want aggregate usage", content)
+	}
+}
+
 func TestInitialHistoryStartsAtBottom(t *testing.T) {
 	history := make([]model.Message, 0, 12)
 	for i := range 12 {

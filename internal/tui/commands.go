@@ -8,6 +8,7 @@ const (
 	slashCommandHelp slashCommandKind = iota
 	slashCommandSession
 	slashCommandNew
+	slashCommandResume
 	slashCommandExit
 )
 
@@ -21,6 +22,7 @@ var slashCommands = []slashCommand{
 	{Name: "/help", Description: "show help", Kind: slashCommandHelp},
 	{Name: "/session", Description: "show session details", Kind: slashCommandSession},
 	{Name: "/new", Description: "start a new session", Kind: slashCommandNew},
+	{Name: "/resume", Description: "resume a session", Kind: slashCommandResume},
 	{Name: "/exit", Description: "quit", Kind: slashCommandExit},
 }
 

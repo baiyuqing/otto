@@ -65,8 +65,10 @@ func buildContext(entries []piEntry, leafID string) (ResolvedContext, []Warning,
 				if err != nil {
 					return ResolvedContext{}, collector.warnings, err
 				}
-				resolved.Usage = addResolvedUsage(resolved.Usage, usage)
-				resolved.UsagePresent = true
+				if usage != nil {
+					resolved.Usage = addResolvedUsage(resolved.Usage, usage)
+					resolved.UsagePresent = true
+				}
 			}
 		case "model_change":
 			if entry.ModelChange == nil {
@@ -474,7 +476,12 @@ func addResolvedUsage(total model.Usage, usage *model.Usage) model.Usage {
 	}
 	total.InputTokens = saturatingUsageAdd(total.InputTokens, usage.InputTokens)
 	total.OutputTokens = saturatingUsageAdd(total.OutputTokens, usage.OutputTokens)
+	total.CachedInputTokens = saturatingUsageAdd(total.CachedInputTokens, usage.CachedInputTokens)
 	return total
+}
+
+func hasMeaningfulUsage(usage *model.Usage) bool {
+	return usage != nil && (usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CachedInputTokens != 0)
 }
 
 func saturatingUsageAdd(total, delta int) int {

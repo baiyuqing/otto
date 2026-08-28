@@ -164,3 +164,16 @@ func TestEntriesFromHistoryDefensivelyCopiesAndSaturatesUsageTotals(t *testing.T
 		t.Fatalf("usage = %#v, want saturated nonnegative totals", usage)
 	}
 }
+
+func TestEntriesFromHistorySaturatesCachedUsageTotals(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	history := []model.Message{
+		{Role: model.RoleAssistant, Usage: &model.Usage{InputTokens: maxInt - 1, OutputTokens: maxInt - 2, CachedInputTokens: maxInt - 3}, Blocks: []model.Block{{Type: model.BlockText, Text: "one"}}},
+		{Role: model.RoleAssistant, Usage: &model.Usage{InputTokens: 10, OutputTokens: 10, CachedInputTokens: 10}, Blocks: []model.Block{{Type: model.BlockText, Text: "two"}}},
+	}
+
+	_, usage := EntriesFromHistory(history)
+	if usage != (model.Usage{InputTokens: maxInt, OutputTokens: maxInt, CachedInputTokens: maxInt}) {
+		t.Fatalf("usage = %#v, want all totals saturated", usage)
+	}
+}

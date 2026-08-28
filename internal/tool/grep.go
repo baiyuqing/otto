@@ -1,27 +1,29 @@
 package tool
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
 )
 
 const (
-	defaultGrepLimit = 100
-	maximumGrepLimit = 1000
+	defaultGrepLimit     = 100
+	maximumGrepLimit     = 1000
+	maximumGrepLineBytes = 1 << 20
 )
 
-var errGrepLimitReached = errors.New("grep result limit reached")
+var errGrepTruncated = errors.New("grep results truncated")
 
 type grepTool struct {
 	workspace      *Workspace
@@ -33,7 +35,7 @@ type grepArgs struct {
 	Path       string `json:"path,omitempty"`
 	Glob       string `json:"glob,omitempty"`
 	IgnoreCase bool   `json:"ignore_case,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
+	Limit      *int   `json:"limit,omitempty"`
 }
 
 func NewGrepTool(workspace *Workspace, maxOutputBytes int) Tool {
@@ -43,7 +45,7 @@ func NewGrepTool(workspace *Workspace, maxOutputBytes int) Tool {
 func (t *grepTool) Definition() model.ToolDefinition {
 	return model.ToolDefinition{
 		Name:        "grep",
-		Description: "Search workspace file contents with a regular expression",
+		Description: "Search workspace file contents with a regular expression (read-only)",
 		Parameters: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
@@ -97,9 +99,17 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
+	insideGit, err := searchRootInsideGit(t.workspace, root)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
+	if insideGit {
+		return Result{}
+	}
 
-	matches := make([]string, 0, min(limit, 128))
-	truncated := false
+	collector := newCappedByteCollector(t.maxOutputBytes)
+	matchCount := 0
+	truncationMarker := ""
 	err = filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -130,58 +140,104 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		if globSegments != nil && !matchGlobSegments(globSegments, candidate) {
 			return nil
 		}
-		text, textFile, err := readSearchTextFile(filePath)
+		file, err := os.Open(filePath)
 		if err != nil {
 			return err
 		}
-		if !textFile {
+		remainingBytes := max(0, t.maxOutputBytes-len(collector.Bytes()))
+		scan, scanErr := scanGrepReader(ctx, file, expression, limit-matchCount, remainingBytes)
+		closeErr := file.Close()
+		if scanErr != nil {
+			return scanErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if !scan.textFile {
 			return nil
 		}
 		relative, err := workspaceRelativePath(t.workspace, filePath)
 		if err != nil {
 			return err
 		}
-		for lineIndex, line := range splitLinesPreservingNewlines(text) {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			line = strings.TrimSuffix(line, "\n")
-			line = strings.TrimSuffix(line, "\r")
-			if !expression.MatchString(line) {
-				continue
-			}
-			if len(matches) >= limit {
-				truncated = true
-				return errGrepLimitReached
-			}
-			matches = append(matches, relative+":"+strconv.Itoa(lineIndex+1)+":"+line)
+		for _, match := range scan.matches {
+			_, _ = collector.Write([]byte(relative + ":" + strconv.Itoa(match.number) + ":" + match.text + "\n"))
+			matchCount++
 		}
-		return nil
+		switch {
+		case scan.matchOverflow:
+			truncationMarker = "[truncated: result limit reached]"
+			return errGrepTruncated
+		case scan.byteOverflow || collector.Discarded() > 0:
+			truncationMarker = "[truncated: output limit reached]"
+			return errGrepTruncated
+		default:
+			return nil
+		}
 	})
-	if err != nil && !errors.Is(err, errGrepLimitReached) {
+	if err != nil && !errors.Is(err, errGrepTruncated) {
 		return Result{Content: err.Error(), IsError: true}
 	}
-
-	var output strings.Builder
-	for _, match := range matches {
-		output.WriteString(match)
-		output.WriteByte('\n')
-	}
-	if truncated {
-		output.WriteString("[truncated: result limit reached]\n")
-	}
-	return cappedTextResult(output.String(), t.maxOutputBytes)
+	return cappedCollectorResult(collector, truncationMarker)
 }
 
-func readSearchTextFile(filePath string) (string, bool, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", false, err
+type grepLine struct {
+	number int
+	text   string
+}
+
+type grepScanResult struct {
+	matches       []grepLine
+	textFile      bool
+	matchOverflow bool
+	byteOverflow  bool
+}
+
+func scanGrepReader(ctx context.Context, source io.Reader, expression *regexp.Regexp, maxMatches, maxBytes int) (grepScanResult, error) {
+	reader := bufio.NewReaderSize(source, 64<<10)
+	result := grepScanResult{textFile: true, matches: make([]grepLine, 0, min(max(maxMatches, 0), 32))}
+	lineNumber := 0
+	collectedBytes := 0
+	line := make([]byte, 0, 64<<10)
+	for {
+		if err := ctx.Err(); err != nil {
+			return grepScanResult{}, err
+		}
+		fragment, more, err := reader.ReadLine()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return result, nil
+			}
+			return grepScanResult{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return grepScanResult{}, err
+		}
+		if len(line)+len(fragment) > maximumGrepLineBytes {
+			return grepScanResult{}, nil
+		}
+		line = append(line, fragment...)
+		if more {
+			continue
+		}
+		lineNumber++
+		if bytes.IndexByte(line, 0) >= 0 || !utf8.Valid(line) {
+			return grepScanResult{}, nil
+		}
+		if expression.Match(line) {
+			switch {
+			case len(result.matches) >= maxMatches:
+				result.matchOverflow = true
+			case collectedBytes+len(line) > maxBytes:
+				result.byteOverflow = true
+			default:
+				text := string(append([]byte(nil), line...))
+				result.matches = append(result.matches, grepLine{number: lineNumber, text: text})
+				collectedBytes += len(line)
+			}
+		}
+		line = line[:0]
 	}
-	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
-		return "", false, nil
-	}
-	return string(data), true, nil
 }
 
 var _ Tool = (*grepTool)(nil)

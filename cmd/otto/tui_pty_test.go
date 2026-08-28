@@ -33,6 +33,7 @@ const (
 	ptyQuietWindow              = 50 * time.Millisecond
 	altScreenEnterSeq           = "\x1b[?1049h"
 	altScreenExitSeq            = "\x1b[?1049l"
+	bubbleTeaFullRedrawSeq      = "\x1b[H\x1b[2J"
 	assistantStreamText         = "stream visible from pty smoke backend"
 	ctrlCExitStatusText         = "Ctrl+C again to exit"
 	contextCanceledText         = "context canceled"
@@ -112,10 +113,9 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 
 	selectedOffset := collector.Len()
 	writePTY(t, master, "\x1b[B\r")
-	waitForSubsequence(t, collector, selectedOffset, selectedAssistantTranscript)
-	// The selected ID is not rendered in the picker, so seeing it after Enter
-	// proves that the replacement session committed rather than merely that its
-	// picker row was selected.
+	// The selected ID is not rendered in the picker, so this synchronizes on
+	// the replacement commit. Display evidence comes from the terminal-screen
+	// assertion after resize below.
 	waitForSubsequence(t, collector, selectedOffset, selectedResumeSessionID)
 
 	resizeOffset := collector.Len()
@@ -125,13 +125,15 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
-	redraw := waitForStableSnapshot(t, collector, resizeOffset, selectedAssistantTranscript)
-	if !strings.Contains(redraw, selectedResumeSessionID) {
-		t.Fatalf("post-resume redraw = %s, want selected session ID %q in the same redraw as transcript marker %q", tailTerminalOutput([]byte(redraw)), selectedResumeSessionID, selectedAssistantTranscript)
+	resumeScreen, resizeRaw := waitForTerminalScreen(t, collector, resizeOffset, 140, 34, ptyScreenHasResumeEvidence)
+	redrawOffset := bytes.Index(resizeRaw, []byte(bubbleTeaFullRedrawSeq))
+	if redrawOffset < 0 {
+		t.Fatalf("post-resize raw output = %s, want Bubble Tea full-redraw delimiter %q", tailTerminalOutput(resizeRaw), bubbleTeaFullRedrawSeq)
 	}
-	if strings.Contains(redraw, "Resume Session") {
-		t.Fatalf("post-resume redraw = %s, want no active Resume modal", tailTerminalOutput([]byte(redraw)))
+	if resumeScreen.width != 140 || resumeScreen.height != 34 {
+		t.Fatalf("post-resize terminal screen = %dx%d, want 140x34", resumeScreen.width, resumeScreen.height)
 	}
+	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains transcript+session ID and no Resume modal", bubbleTeaFullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height)
 
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
@@ -261,10 +263,12 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
-	resizeOutput := waitForStableSnapshot(t, collector, resizeOffset, narrowFooterMarker)
-	if strings.Contains(resizeOutput, footerSessionMarker) {
-		t.Fatalf("resize output = %s, want collapsed footer without stale session marker %q", tailTerminalOutput([]byte(resizeOutput)), footerSessionMarker)
-	}
+	waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
+		content := screen.String()
+		return screen.FullRedraws() > 0 && screen.Complete() &&
+			strings.Contains(content, narrowFooterMarker) &&
+			!strings.Contains(content, footerSessionMarker)
+	})
 
 	writePTY(t, master, "\x1b")
 	waitForCancellation(t, backend)
@@ -363,13 +367,13 @@ func waitForSubsequence(t *testing.T, collector *ptyOutputCollector, after int, 
 	return offset
 }
 
-func waitForStableSnapshot(t *testing.T, collector *ptyOutputCollector, after int, want string) string {
+func waitForTerminalScreen(t *testing.T, collector *ptyOutputCollector, after, width, height int, accept func(*ptyTerminalScreen) bool) (*ptyTerminalScreen, []byte) {
 	t.Helper()
-	snapshot, err := collector.WaitForStableSnapshot(after, []byte(want), ptyQuietWindow, ptyStepTimeout)
+	screen, raw, err := collector.WaitForTerminalScreen(after, width, height, accept, ptyQuietWindow, ptyStepTimeout)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return snapshot
+	return screen, raw
 }
 
 type runResult struct {
@@ -484,27 +488,14 @@ func (c *ptyOutputCollector) WaitFor(after int, want []byte, timeout time.Durati
 	}
 }
 
-func (c *ptyOutputCollector) WaitForStableSnapshot(after int, want []byte, quietWindow, timeout time.Duration) (string, error) {
+func (c *ptyOutputCollector) WaitForTerminalScreen(after, width, height int, accept func(*ptyTerminalScreen) bool, quietWindow, timeout time.Duration) (*ptyTerminalScreen, []byte, error) {
 	deadline := time.Now().Add(timeout)
 	stableSince := time.Time{}
 	lastLen := -1
 	for {
 		c.mu.Lock()
 		start := min(max(after, 0), len(c.buf))
-		index := bytes.LastIndex(c.buf[start:], want)
-		matchOffset := -1
-		if index >= 0 {
-			matchOffset = start + index
-			if len(c.buf) != lastLen {
-				lastLen = len(c.buf)
-				stableSince = time.Now()
-			} else if !stableSince.IsZero() && time.Since(stableSince) >= quietWindow {
-				snapshot := string(append([]byte(nil), c.buf[matchOffset:]...))
-				c.mu.Unlock()
-				return snapshot, nil
-			}
-		}
-		snapshot := append([]byte(nil), c.buf...)
+		raw := append([]byte(nil), c.buf[start:]...)
 		readErr := c.err
 		closed := false
 		select {
@@ -514,14 +505,32 @@ func (c *ptyOutputCollector) WaitForStableSnapshot(after int, want []byte, quiet
 		}
 		c.mu.Unlock()
 
-		if closed {
-			if index >= 0 {
-				return string(snapshot[matchOffset:]), nil
+		screen := newPTYTerminalScreen(width, height)
+		if _, err := screen.Write(raw); err != nil {
+			return nil, raw, fmt.Errorf("interpret terminal output: %w\nraw tail: %s", err, tailTerminalOutput(raw))
+		}
+		matched := accept(screen)
+		if len(raw) != lastLen {
+			lastLen = len(raw)
+			stableSince = time.Time{}
+		} else if matched {
+			if stableSince.IsZero() {
+				stableSince = time.Now()
+			} else if time.Since(stableSince) >= quietWindow {
+				return screen, raw, nil
 			}
-			return "", fmt.Errorf("output closed while waiting for stable %q: %v\nlast output: %s", want, readErr, tailTerminalOutput(snapshot))
+		} else {
+			stableSince = time.Time{}
+		}
+
+		if closed {
+			if matched {
+				return screen, raw, nil
+			}
+			return nil, raw, fmt.Errorf("output closed before terminal screen matched: %v\nfinal screen: %q\nraw tail: %s", readErr, screen.String(), tailTerminalOutput(raw))
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timed out waiting for stable %q\nlast output: %s", want, tailTerminalOutput(snapshot))
+			return nil, raw, fmt.Errorf("timed out waiting for matching %dx%d terminal screen\nlast screen: %q\nraw tail: %s", width, height, screen.String(), tailTerminalOutput(raw))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -544,53 +553,62 @@ func tailTerminalOutput(output []byte) string {
 	return fmt.Sprintf("%q", output)
 }
 
-func TestPTYOutputCollectorWaitForStableSnapshotIncludesTrailingFooterBytes(t *testing.T) {
-	collector := &ptyOutputCollector{done: make(chan struct{})}
-
-	go func() {
-		collector.mu.Lock()
-		collector.buf = append(collector.buf, []byte(narrowFooterMarker)...)
-		collector.mu.Unlock()
-
-		time.Sleep(10 * time.Millisecond)
-
-		collector.mu.Lock()
-		collector.buf = append(collector.buf, []byte(" | "+footerSessionMarker)...)
-		collector.mu.Unlock()
-	}()
-
-	snapshot, err := collector.WaitForStableSnapshot(0, []byte(narrowFooterMarker), 20*time.Millisecond, time.Second)
-	if err != nil {
-		t.Fatalf("WaitForStableSnapshot() error = %v", err)
+func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.T) {
+	tests := []struct {
+		name        string
+		chunks      []string
+		want        bool
+		wantRedraws int
+	}{
+		{
+			name: "split reads and separate full redraws",
+			chunks: []string{
+				"\x1b[", "H\x1b[2", "J" + selectedAssistantTranscript,
+				"\x1b[H\x1b", "[2J" + selectedResumeSessionID,
+			},
+			want:        false,
+			wantRedraws: 2,
+		},
+		{
+			name: "split reads in one full redraw",
+			chunks: []string{
+				"\x1b", "[H\x1b[", "2J" + selectedAssistantTranscript + "\r\npty-",
+				"selected-session",
+			},
+			want:        true,
+			wantRedraws: 1,
+		},
+		{
+			name: "split incremental insert-line update preserves one screen",
+			chunks: []string{
+				bubbleTeaFullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID,
+				"\r\x1b[2", "d\x1b[1", "L",
+			},
+			want:        true,
+			wantRedraws: 1,
+		},
+		{
+			name:        "one full redraw still showing modal",
+			chunks:      []string{bubbleTeaFullRedrawSeq + selectedAssistantTranscript + " " + selectedResumeSessionID + " Resume Session"},
+			want:        false,
+			wantRedraws: 1,
+		},
 	}
-	if !strings.Contains(snapshot, footerSessionMarker) {
-		t.Fatalf("snapshot = %s, want trailing footer marker %q", tailTerminalOutput([]byte(snapshot)), footerSessionMarker)
-	}
-}
 
-func TestPTYOutputCollectorWaitForStableSnapshotStartsAtMatchedMarker(t *testing.T) {
-	collector := &ptyOutputCollector{done: make(chan struct{})}
-
-	go func() {
-		collector.mu.Lock()
-		collector.buf = append(collector.buf, []byte("wide redraw before match: "+wideFooterMarker+" | ")...)
-		collector.mu.Unlock()
-
-		time.Sleep(10 * time.Millisecond)
-
-		collector.mu.Lock()
-		collector.buf = append(collector.buf, []byte(narrowFooterMarker)...)
-		collector.mu.Unlock()
-	}()
-
-	snapshot, err := collector.WaitForStableSnapshot(0, []byte(narrowFooterMarker), 20*time.Millisecond, time.Second)
-	if err != nil {
-		t.Fatalf("WaitForStableSnapshot() error = %v", err)
-	}
-	if !strings.HasPrefix(snapshot, narrowFooterMarker) {
-		t.Fatalf("snapshot = %s, want prefix %q", tailTerminalOutput([]byte(snapshot)), narrowFooterMarker)
-	}
-	if strings.Contains(snapshot, wideFooterMarker) {
-		t.Fatalf("snapshot = %s, want to exclude pre-match wide footer %q", tailTerminalOutput([]byte(snapshot)), wideFooterMarker)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := newPTYTerminalScreen(140, 34)
+			for _, chunk := range test.chunks {
+				if _, err := screen.Write([]byte(chunk)); err != nil {
+					t.Fatalf("screen.Write(%q) error = %v", chunk, err)
+				}
+			}
+			if got := screen.FullRedraws(); got != test.wantRedraws {
+				t.Fatalf("FullRedraws() = %d, want %d", got, test.wantRedraws)
+			}
+			if got := ptyScreenHasResumeEvidence(screen); got != test.want {
+				t.Fatalf("ptyScreenHasResumeEvidence() = %t, want %t; redraws=%d screen=%q", got, test.want, screen.FullRedraws(), screen.String())
+			}
+		})
 	}
 }

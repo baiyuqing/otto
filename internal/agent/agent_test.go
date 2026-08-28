@@ -523,7 +523,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 			response: provider.Response{
 				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockText, Text: "text " + credential + " done"},
-					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: arguments},
+					{Type: model.BlockToolCall, ToolCallID: "call-" + credential, ToolName: "echo", Arguments: arguments},
 				}},
 				FinishReason: model.FinishToolCalls,
 			},

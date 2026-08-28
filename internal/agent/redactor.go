@@ -2,12 +2,15 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/baiyuqing/otto/internal/session"
 )
 
 const redactionMarker = "[REDACTED]"
@@ -17,6 +20,7 @@ const redactionMarker = "[REDACTED]"
 // through agent options or errors.
 type Redactor struct {
 	values []string
+	marker string
 }
 
 func NewRedactor(values []string) *Redactor {
@@ -35,6 +39,7 @@ func NewRedactor(values []string) *Redactor {
 	sort.Slice(redactor.values, func(i, j int) bool {
 		return len(redactor.values[i]) > len(redactor.values[j])
 	})
+	redactor.marker = safeRedactionMarker(redactor.values)
 	return redactor
 }
 
@@ -43,7 +48,7 @@ func (r *Redactor) RedactString(text string) string {
 		return text
 	}
 	for _, value := range r.values {
-		text = strings.ReplaceAll(text, value, redactionMarker)
+		text = strings.ReplaceAll(text, value, r.marker)
 	}
 	return text
 }
@@ -61,7 +66,7 @@ func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return json.RawMessage(r.RedactString(string(raw)))
 	}
-	redactJSONValueStrings(r, value)
+	value = redactJSONValueStrings(r, value)
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return json.RawMessage(r.RedactString(string(raw)))
@@ -77,38 +82,72 @@ func (r *Redactor) RedactError(err error) error {
 	if message == err.Error() {
 		return err
 	}
-	return &redactedBoundaryError{message: message, original: err}
+	return &redactedBoundaryError{
+		message:          message,
+		canceled:         errors.Is(err, context.Canceled),
+		deadlineExceeded: errors.Is(err, context.DeadlineExceeded),
+		fatalPersistence: errors.Is(err, session.ErrFatalPersistence),
+		maxTurns:         errors.Is(err, ErrMaxTurns),
+		emptyUserText:    errors.Is(err, ErrEmptyUserText),
+	}
 }
 
 type redactedBoundaryError struct {
-	message  string
-	original error
+	message          string
+	canceled         bool
+	deadlineExceeded bool
+	fatalPersistence bool
+	maxTurns         bool
+	emptyUserText    bool
 }
 
 func (e *redactedBoundaryError) Error() string { return e.message }
 func (e *redactedBoundaryError) Is(target error) bool {
-	return errors.Is(e.original, target)
+	return target == context.Canceled && e.canceled ||
+		target == context.DeadlineExceeded && e.deadlineExceeded ||
+		target == session.ErrFatalPersistence && e.fatalPersistence ||
+		target == ErrMaxTurns && e.maxTurns ||
+		target == ErrEmptyUserText && e.emptyUserText
 }
 
-func redactJSONValueStrings(redactor *Redactor, value any) {
+func redactJSONValueStrings(redactor *Redactor, value any) any {
 	switch value := value.(type) {
+	case string:
+		return redactor.RedactString(value)
 	case map[string]any:
 		for key, item := range value {
-			if text, ok := item.(string); ok {
-				value[key] = redactor.RedactString(text)
-				continue
-			}
-			redactJSONValueStrings(redactor, item)
+			value[key] = redactJSONValueStrings(redactor, item)
 		}
 	case []any:
 		for index, item := range value {
-			if text, ok := item.(string); ok {
-				value[index] = redactor.RedactString(text)
-				continue
-			}
-			redactJSONValueStrings(redactor, item)
+			value[index] = redactJSONValueStrings(redactor, item)
 		}
 	}
+	return value
+}
+
+func safeRedactionMarker(values []string) string {
+	if markerExcludesSecrets(redactionMarker, values) {
+		return redactionMarker
+	}
+	for candidate := rune(utf8.RuneError); candidate <= utf8.MaxRune; candidate++ {
+		if utf8.ValidRune(candidate) {
+			marker := string(candidate)
+			if markerExcludesSecrets(marker, values) {
+				return marker
+			}
+		}
+	}
+	return ""
+}
+
+func markerExcludesSecrets(marker string, values []string) bool {
+	for _, value := range values {
+		if strings.Contains(marker, value) {
+			return false
+		}
+	}
+	return true
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -144,7 +183,7 @@ func (s *streamRedactor) Write(text string) string {
 		index, secret := s.firstSecret()
 		if index >= 0 {
 			output.WriteString(s.pending[:index])
-			output.WriteString(redactionMarker)
+			output.WriteString(s.redactor.marker)
 			s.pending = s.pending[index+len(secret):]
 			continue
 		}

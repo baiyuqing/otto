@@ -32,9 +32,6 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 	if options.NewID == nil {
 		options.NewID = defaultNewID
 	}
-	if options.MaxTurns <= 0 {
-		options.MaxTurns = 50
-	}
 	var redactor *Redactor
 	if len(redactors) > 0 {
 		redactor = redactors[0]
@@ -61,7 +58,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		return a.fail(emit, fmt.Errorf("persist user message: %w", err))
 	}
 
-	for turn := 0; turn < a.options.MaxTurns; turn++ {
+	for {
 		stream := a.redactor.newStream()
 		response, err := a.provider.Complete(ctx, provider.Request{
 			Model:        a.options.Model,
@@ -147,8 +144,6 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 			return nil
 		}
 	}
-
-	return a.fail(emit, ErrMaxTurns)
 }
 
 func (a *Agent) emit(emit func(Event), event Event) {

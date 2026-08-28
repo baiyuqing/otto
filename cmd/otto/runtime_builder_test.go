@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -455,6 +457,17 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 		if got := r.Header.Get("Authorization"); got != "Bearer "+activeKey {
 			t.Errorf("Authorization = %q, want active profile credential", got)
 		}
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if len(payload.Messages) > 2 {
+			writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+			return
+		}
 		command := fmt.Sprintf("printf 'active=%%s inactive=%%s fallback=%%s' \"$%s\" \"$%s\" \"$OTTO_API_KEY\"; printf ' inactive-stderr=%%s' \"$%s\" >&2; exit 7", activeEnv, inactiveEnv, inactiveEnv)
 		writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
 			fmt.Sprintf(`{"command":%q}`, command)))
@@ -481,7 +494,7 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 
 	runner, err := builder.buildRunner(store, config.Runtime{
 		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model",
-		APIKey: activeKey, APIKeyEnv: activeEnv, MaxTurns: 1, ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+		APIKey: activeKey, APIKeyEnv: activeEnv, ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
 	})
 	if err != nil {
 		_ = store.Close()
@@ -494,9 +507,9 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 		}
 		eventText.WriteString(event.ToolResult.Content)
 	})
-	if !errors.Is(runErr, agent.ErrMaxTurns) {
+	if runErr != nil {
 		_ = store.Close()
-		t.Fatalf("Run() error = %v, want agent.ErrMaxTurns", runErr)
+		t.Fatalf("Run() error = %v, want tool-turn success", runErr)
 	}
 	messages := store.Messages()
 	if err := store.Close(); err != nil {
@@ -508,10 +521,9 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 	}
 
 	locations := map[string]string{
-		"runner error": runErr.Error(),
-		"events":       eventText.String(),
-		"messages":     fmt.Sprintf("%#v", messages),
-		"session":      string(persisted),
+		"events":   eventText.String(),
+		"messages": fmt.Sprintf("%#v", messages),
+		"session":  string(persisted),
 	}
 	for location, content := range locations {
 		for _, secret := range []string{activeKey, inactiveKey, fallbackKey} {
@@ -520,7 +532,17 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 			}
 		}
 	}
-	toolResult := messages[len(messages)-1].Blocks[0].Text
+	var toolResult string
+	for _, message := range messages {
+		for _, block := range message.Blocks {
+			if block.Type == model.BlockToolResult {
+				toolResult = block.Text
+			}
+		}
+	}
+	if toolResult == "" {
+		t.Fatalf("no tool result in messages: %#v", messages)
+	}
 	if strings.Contains(toolResult, activeEnv+"=") || strings.Contains(toolResult, inactiveEnv+"=") || strings.Contains(toolResult, "OTTO_API_KEY=") {
 		t.Fatalf("credential environment reached bash: %q", toolResult)
 	}
@@ -542,7 +564,10 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		requests.Add(1)
+		if requests.Add(1) != 1 {
+			writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+			return
+		}
 		command := fmt.Sprintf("printf \"runtime=%%s fallback=%%s unrelated=%%s literal=%%s \" \"${%s:-missing}\" \"${OTTO_API_KEY:-missing}\" \"${%s:-missing}\" %q; printf '%%0200d' 0; sleep 1", apiKeyEnv, unrelatedEnvKey, apiKey)
 		writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
 			fmt.Sprintf(`{"command":%q}`, command)))
@@ -558,7 +583,6 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 		Model:          "runtime-model",
 		APIKey:         apiKey,
 		APIKeyEnv:      apiKeyEnv,
-		MaxTurns:       1,
 		ShellTimeout:   50 * time.Millisecond,
 		MaxOutputBytes: 96,
 	})
@@ -567,15 +591,15 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 	}
 
 	err = runner.Run(context.Background(), "run the tool", nil)
-	if !errors.Is(err, agent.ErrMaxTurns) {
-		t.Fatalf("Run() error = %v, want agent.ErrMaxTurns", err)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want tool-turn success", err)
 	}
-	if requests.Load() != 1 {
-		t.Fatalf("provider requests = %d, want 1", requests.Load())
+	if requests.Load() != 2 {
+		t.Fatalf("provider requests = %d, want 2 (tool turn then final stop)", requests.Load())
 	}
 	messages := memory.Messages()
-	if len(messages) != 3 {
-		t.Fatalf("messages = %#v, want user+assistant+tool", messages)
+	if len(messages) != 4 {
+		t.Fatalf("messages = %#v, want user+assistant+tool+assistant", messages)
 	}
 	toolResult := messages[2].Blocks[0].Text
 	redactedLiteral := strings.Contains(toolResult, "literal=[REDACTED]") || strings.Contains(toolResult, "literal=█")

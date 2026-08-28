@@ -42,7 +42,7 @@ func TestRunExecutesToolAndReturnsToProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 20, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var events []Event
 	if err := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) }); err != nil {
@@ -90,7 +90,7 @@ func TestRunForwardsTextDeltas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var deltas []string
 	if err := runner.Run(context.Background(), "inspect", func(event Event) {
@@ -119,7 +119,7 @@ func TestRunEmitsToolCallEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var got []Event
 	if err := runner.Run(context.Background(), "inspect", func(event Event) {
@@ -155,7 +155,7 @@ func TestRunPersistsUnknownToolResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestRunDelegatesInvalidArgumentsToTool(t *testing.T) {
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
 	}}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
 		t.Fatal(err)
@@ -237,7 +237,7 @@ func TestRunExecutesMultipleToolCallsSequentially(t *testing.T) {
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
 	}}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
 		t.Fatal(err)
@@ -250,33 +250,69 @@ func TestRunExecutesMultipleToolCallsSequentially(t *testing.T) {
 	}
 }
 
-func TestRunFailsAfterMaxProviderTurns(t *testing.T) {
-	fakeProvider := &scriptedProvider{scripts: []providerScript{{
-		response: provider.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
-			FinishReason: model.FinishToolCalls,
+func TestRunMaxTurnsOptionIsIgnored(t *testing.T) {
+	const turns = 55 // exceeds the former default cap of 50
+	scripts := make([]providerScript, 0, turns+1)
+	for i := 0; i < turns; i++ {
+		scripts = append(scripts, providerScript{
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockToolCall, ToolCallID: fmt.Sprintf("call-%d", i), ToolName: "echo", Arguments: json.RawMessage(`{"value":"x"}`)},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		})
+	}
+	scripts = append(scripts, providerScript{
+		response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop},
+	})
+	fakeProvider := &scriptedProvider{scripts: scripts}
+	registry, err := tool.NewRegistry(echoTool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
+
+	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
+		t.Fatalf("Run() error = %v, want success with max turns ignored", err)
+	}
+	if got, want := len(fakeProvider.requests), turns+1; got != want {
+		t.Fatalf("provider calls = %d, want %d", got, want)
+	}
+}
+
+func TestRunContinuesWhileProviderRequestsTools(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			response: provider.Response{
+				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
+				FinishReason: model.FinishToolCalls,
+			},
 		},
-	}}}
+		{
+			response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop},
+		},
+	}}
 	registry, err := tool.NewRegistry(echoTool{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var events []Event
 	err = runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) })
-	if !errors.Is(err, ErrMaxTurns) {
-		t.Fatalf("Run() error = %v, want %v", err, ErrMaxTurns)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want success while tools are requested", err)
 	}
-	if len(fakeProvider.requests) != 1 {
-		t.Fatalf("provider calls = %d, want %d", len(fakeProvider.requests), 1)
+	if len(fakeProvider.requests) != 2 {
+		t.Fatalf("provider calls = %d, want 2 (one tool turn then a final turn)", len(fakeProvider.requests))
 	}
-	if got := memory.Messages(); len(got) != 3 {
-		t.Fatalf("messages = %#v, want user+assistant+tool", got)
+	if got := memory.Messages(); len(got) != 4 {
+		t.Fatalf("messages = %#v, want user+assistant+tool+assistant", got)
 	}
-	if got := eventTypes(events); got[len(got)-1] != EventAgentError {
-		t.Fatalf("event flow = %v, want trailing error", got)
+	if got := eventTypes(events); got[0] != EventAgentStarted || got[len(got)-1] != EventAgentFinished {
+		t.Fatalf("event flow = %v, want started...finished", got)
 	}
 }
 
@@ -288,7 +324,7 @@ func TestRunReturnsProviderFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var gotErr error
 	err = runner.Run(context.Background(), "inspect", func(event Event) {
@@ -329,7 +365,7 @@ func TestRunPersistsCanceledToolResultBeforeNextPrompt(t *testing.T) {
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "recovered"}}}, FinishReason: model.FinishStop}},
 	}}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -392,7 +428,7 @@ func TestRunDoesNotExecuteLaterToolCallsAfterCancellation(t *testing.T) {
 		},
 	}}}
 	memory := session.NewMemory(testHeader(t))
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -425,7 +461,7 @@ func TestRunPreservesProviderCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var gotErr error
 	err = runner.Run(context.Background(), "inspect", func(event Event) {
@@ -469,7 +505,7 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"cat .part-1 .part-2"}`)}}}, FinishReason: model.FinishToolCalls}},
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
 	}}
-	runner := New(fakeProvider, registry, store, Options{Model: "test", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()})
 	var toolEvent Event
 	if err := runner.Run(context.Background(), "check", func(event Event) {
 		if event.Type == EventToolCallFinished {
@@ -532,7 +568,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 	}}
 	memory := session.NewMemory(testHeader(t))
 	redactor := NewRedactor([]string{credential})
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()}, redactor)
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, redactor)
 
 	var events []Event
 	if err := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) }); err != nil {
@@ -599,7 +635,7 @@ func TestRunClassifiesFatalPersistenceAtEveryDurableBoundary(t *testing.T) {
 				{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}}, FinishReason: model.FinishToolCalls}},
 				{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "must not run"}}}, FinishReason: model.FinishStop}},
 			}}
-			runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+			runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 			runErr := runner.Run(context.Background(), "inspect", nil)
 			if !errors.Is(runErr, session.ErrFatalPersistence) || !strings.Contains(runErr.Error(), test.wantBoundary) {
@@ -629,7 +665,7 @@ func TestRunStopsWhenUserMessagePersistenceFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var got []EventType
 	err = runner.Run(context.Background(), "inspect", func(event Event) { got = append(got, event.Type) })
@@ -671,7 +707,7 @@ func TestRunPersistsAssistantBeforeExecutingTools(t *testing.T) {
 			FinishReason: model.FinishToolCalls,
 		},
 	}}}
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	err = runner.Run(context.Background(), "inspect", nil)
 	if !errors.Is(err, persistErr) {
@@ -712,7 +748,7 @@ func TestRunPersistsToolResultsBeforeNextProviderCall(t *testing.T) {
 		},
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
 	}}
-	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", MaxTurns: 2, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	err = runner.Run(context.Background(), "inspect", nil)
 	if !errors.Is(err, persistErr) {
@@ -735,7 +771,7 @@ func TestRunRejectsEmptyUserText(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeProvider := &scriptedProvider{}
-	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	if err := runner.Run(context.Background(), "   ", nil); err == nil {
 		t.Fatal("expected empty user text to fail")
@@ -751,7 +787,7 @@ func TestRunEmitsErrorForEmptyUserText(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeProvider := &scriptedProvider{}
-	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", MaxTurns: 1, Now: fixedClock, NewID: fixedIDs()})
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
 	var gotErr error
 	var events []Event

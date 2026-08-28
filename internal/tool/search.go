@@ -116,18 +116,42 @@ func searchRootInsideGit(workspace *Workspace, requestedPath, resolvedRoot strin
 	if pathHasGitSegment(resolvedRelative) {
 		return true, nil
 	}
-	requestedCandidate := requestedPath
-	if !filepath.IsAbs(requestedCandidate) {
-		requestedCandidate = filepath.Join(workspace.lexicalRoot, requestedCandidate)
+	return requestedGitAliasInsideWorkspace(workspace, requestedPath)
+}
+
+func requestedGitAliasInsideWorkspace(workspace *Workspace, requestedPath string) (bool, error) {
+	candidate := requestedPath
+	if !filepath.IsAbs(candidate) {
+		candidate = workspace.candidatePath(candidate)
 	}
-	requestedRelative, err := filepath.Rel(workspace.lexicalRoot, filepath.Clean(requestedCandidate))
-	if err != nil {
-		return false, err
+	candidate = filepath.Clean(candidate)
+	volume := filepath.VolumeName(candidate)
+	remainder := strings.TrimPrefix(candidate[len(volume):], string(filepath.Separator))
+	prefix := volume
+	if filepath.IsAbs(candidate) {
+		prefix += string(filepath.Separator)
 	}
-	if requestedRelative == ".." || strings.HasPrefix(requestedRelative, ".."+string(filepath.Separator)) {
-		return false, nil
+	for _, segment := range strings.Split(remainder, string(filepath.Separator)) {
+		if segment == "" {
+			continue
+		}
+		prefix = filepath.Join(prefix, segment)
+		if segment != ".git" {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(prefix)
+		if err != nil {
+			return false, err
+		}
+		cleanPrefix := filepath.Clean(prefix)
+		if resolved == workspace.root && (cleanPrefix == workspace.root || cleanPrefix == workspace.lexicalRoot) {
+			continue
+		}
+		if workspace.ensureInside(resolved) == nil {
+			return true, nil
+		}
 	}
-	return pathHasGitSegment(filepath.ToSlash(requestedRelative)), nil
+	return false, nil
 }
 
 func pathHasGitSegment(relative string) bool {

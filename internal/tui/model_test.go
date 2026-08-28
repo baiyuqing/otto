@@ -468,6 +468,24 @@ func TestCollapsedToolSummaryIsSingleLineBoundedAndExpandable(t *testing.T) {
 	}
 }
 
+func TestExpandedToolPreservesArgumentAndOutputWhitespace(t *testing.T) {
+	entry := Entry{
+		Kind:       EntryTool,
+		ToolName:   "bash",
+		ToolArgs:   "\n  {\"command\":\"printf hi\"}\t\n",
+		ToolOutput: " \n output with boundaries \t\n",
+		ToolDone:   true,
+	}
+
+	expanded := renderToolBlock(entry, 80, true)
+	if !strings.Contains(expanded, "Arguments:\n\n  {\"command\":\"printf hi\"}\t\n") {
+		t.Fatalf("expanded tool = %q, want exact argument boundary whitespace", expanded)
+	}
+	if !strings.Contains(expanded, "Output:\n \n output with boundaries \t\n") {
+		t.Fatalf("expanded tool = %q, want exact output boundary whitespace", expanded)
+	}
+}
+
 func TestViewportScrollDisablesAutoFollow(t *testing.T) {
 	history := make([]model.Message, 0, 16)
 	for i := range 16 {

@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"850e8400-e29b-41d4-a716-446655440000","timestamp":"2026-08-28T10:00:00Z","cwd":"/workspace"}
+{"type":"custom","id":"d0000001","parentId":null,"timestamp":"2026-08-28T10:00:01Z","customType":"otto.runtime","data":{"profile":"default","provider":"openai-compatible","model":"test-model"}}
+{"type":"message","id":"d0000002","parentId":"d0000001","timestamp":"2026-08-28T10:00:02Z","message":{"role":"user","content":"old","timestamp":1787911202000}}
+{"type":"compaction","id":"d0000003","parentId":"d0000002","timestamp":"2026-08-28T10:00:03Z","summary":"retained-tail summary","tokensBefore":120,"retainedTail":[{"role":"user","content":"synthetic retained tail","timestamp":1787911202500}],"usage":{"input":8,"output":2,"cacheRead":3,"cacheWrite":1,"totalTokens":14,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"details":{"readFiles":"malformed","omittedReadFiles":-4}}

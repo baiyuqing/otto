@@ -912,6 +912,14 @@ func (s *interceptSession) Append(ctx context.Context, message model.Message) er
 	return s.base.Append(ctx, message)
 }
 
+func (s *interceptSession) AppendCompaction(ctx context.Context, checkpoint session.CompactionCheckpoint) (session.CompactionMetadata, error) {
+	return s.base.AppendCompaction(ctx, checkpoint)
+}
+
+func (s *interceptSession) LatestCompaction() (session.CompactionMetadata, bool) {
+	return s.base.LatestCompaction()
+}
+
 func (s *interceptSession) Path() string { return s.base.Path() }
 
 func (s *interceptSession) Close() error { return s.base.Close() }

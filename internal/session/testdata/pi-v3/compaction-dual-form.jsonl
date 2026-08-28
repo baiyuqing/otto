@@ -1,0 +1,6 @@
+{"type":"session","version":3,"id":"950e8400-e29b-41d4-a716-446655440000","timestamp":"2026-08-28T11:00:00Z","cwd":"/workspace"}
+{"type":"custom","id":"e0000001","parentId":null,"timestamp":"2026-08-28T11:00:01Z","customType":"otto.runtime","data":{"profile":"default","provider":"openai-compatible","model":"test-model"}}
+{"type":"message","id":"e0000002","parentId":"e0000001","timestamp":"2026-08-28T11:00:02Z","message":{"role":"user","content":"old","timestamp":1787914802000}}
+{"type":"message","id":"e0000003","parentId":"e0000002","timestamp":"2026-08-28T11:00:03Z","message":{"role":"user","content":"real retained path","timestamp":1787914803000}}
+{"type":"compaction","id":"e0000004","parentId":"e0000003","timestamp":"2026-08-28T11:00:04Z","summary":"dual summary","firstKeptEntryId":"e0000003","tokensBefore":140,"retainedTail":[{"role":"user","content":"synthetic must lose","timestamp":1787914803500}],"details":{"readFiles":["README.md"]}}
+{"type":"message","id":"e0000005","parentId":"e0000004","timestamp":"2026-08-28T11:00:05Z","message":{"role":"user","content":"after dual checkpoint","timestamp":1787914805000}}

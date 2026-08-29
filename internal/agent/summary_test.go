@@ -528,6 +528,91 @@ func TestAppendCompactionFileBlocksEnforcesCompleteSummaryByteBound(t *testing.T
 	}
 }
 
+func TestAppendCompactionFileBlocksReplacesReservedSuffixAfterCRLFFences(t *testing.T) {
+	cases := []struct {
+		name    string
+		summary string
+		want    string
+	}{
+		{
+			name:    "crlf fence",
+			summary: validStructuredSummary + "\n\n" + "```go\r\nkeep\r\n```\r\n" + "\n\n<read-files>\nstale.go\n</read-files>",
+			want:    validStructuredSummary + "\n\n" + "```go\r\nkeep\r\n```\r\n" + "\n\n<read-files>\nkeep.go\n</read-files>",
+		},
+		{
+			name:    "lone cr fence",
+			summary: validStructuredSummary + "\n\n" + "~~~go\rkeep\r~~~\r" + "\n\n<read-files>\nstale.go\n</read-files>",
+			want:    validStructuredSummary + "\n\n" + "~~~go\rkeep\r~~~\r" + "\n\n<read-files>\nkeep.go\n</read-files>",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendCompactionFileBlocks(test.summary, session.CompactionDetails{ReadFiles: []string{"keep.go"}})
+			if err != nil || got != test.want {
+				t.Fatalf("appendCompactionFileBlocks() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestAppendCompactionFileBlocksPreservesUnclosedReservedLookalikesInsideCRLFFences(t *testing.T) {
+	cases := []struct {
+		name    string
+		summary string
+	}{
+		{
+			name:    "crlf fence",
+			summary: validStructuredSummary + "\n\n```go\r\n<read-files>\nold.go\n</read-files>",
+		},
+		{
+			name:    "lone cr fence",
+			summary: validStructuredSummary + "\n\n```go\r<read-files>\nold.go\n</read-files>",
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendCompactionFileBlocks(test.summary, session.CompactionDetails{})
+			if err != nil || got != test.summary {
+				t.Fatalf("appendCompactionFileBlocks() = %q, %v; want %q", got, err, test.summary)
+			}
+		})
+	}
+}
+
+func TestAppendCompactionFileBlocksExactByteBoundWithCRLFFenceReplacement(t *testing.T) {
+	const stale = "old.go"
+	const fresh = "new.go"
+	fence := "```go\r\nkeep\r\n```\r\n"
+	staleSuffix := "\n\n<read-files>\n" + stale + "\n</read-files>"
+	prefix := validStructuredSummary + "\n\n" + fence
+	padding := summaryMaximumBytes - len(prefix) - len(staleSuffix)
+	if padding < 0 {
+		t.Fatal("bad test setup")
+	}
+	summary := prefix + strings.Repeat("x", padding) + staleSuffix
+	want := prefix + strings.Repeat("x", padding) + "\n\n<read-files>\n" + fresh + "\n</read-files>"
+	if got, err := appendCompactionFileBlocks(summary, session.CompactionDetails{ReadFiles: []string{fresh}}); err != nil || got != want || len(got) != summaryMaximumBytes {
+		t.Fatalf("appendCompactionFileBlocks() = %d bytes, %v; want %d bytes", len(got), err, summaryMaximumBytes)
+	}
+}
+
+func TestAppendCompactionFileBlocksExactByteBoundWithLoneCRFenceReplacement(t *testing.T) {
+	const stale = "old.go"
+	const fresh = "new.go"
+	fence := "~~~go\rkeep\r~~~\r"
+	staleSuffix := "\n\n<read-files>\n" + stale + "\n</read-files>"
+	prefix := validStructuredSummary + "\n\n" + fence
+	padding := summaryMaximumBytes - len(prefix) - len(staleSuffix)
+	if padding < 0 {
+		t.Fatal("bad test setup")
+	}
+	summary := prefix + strings.Repeat("x", padding) + staleSuffix
+	want := prefix + strings.Repeat("x", padding) + "\n\n<read-files>\n" + fresh + "\n</read-files>"
+	if got, err := appendCompactionFileBlocks(summary, session.CompactionDetails{ReadFiles: []string{fresh}}); err != nil || got != want || len(got) != summaryMaximumBytes {
+		t.Fatalf("appendCompactionFileBlocks() = %d bytes, %v; want %d bytes", len(got), err, summaryMaximumBytes)
+	}
+}
+
 func TestBuildSummaryRequestFileDetailsUseOnlySuccessfulPairedFileCalls(t *testing.T) {
 	calls := model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
 		{Type: model.BlockToolCall, ToolName: "read", ToolCallID: "r1", Arguments: json.RawMessage(`{"path":"dir/../read.go"}`)},

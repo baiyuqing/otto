@@ -60,9 +60,7 @@ func validateSummaryHeadings(summary string) error {
 	expected := 0
 	fenceCharacter := byte(0)
 	fenceLength := 0
-	normalized := strings.ReplaceAll(summary, "\r\n", "\n")
-	normalized = strings.ReplaceAll(normalized, "\r", "\n")
-	for _, line := range strings.Split(normalized, "\n") {
+	for _, line := range strings.Split(normalizeSummaryLineEndings(summary), "\n") {
 		if marker, length, closing := summaryFenceMarker(line, fenceCharacter, fenceLength); marker != 0 {
 			if fenceCharacter == 0 && !closing {
 				fenceCharacter, fenceLength = marker, length
@@ -88,9 +86,7 @@ func validateSummaryHeadings(summary string) error {
 func validateTurnSummaryHeadings(summary string) error {
 	fenceCharacter := byte(0)
 	fenceLength := 0
-	normalized := strings.ReplaceAll(summary, "\r\n", "\n")
-	normalized = strings.ReplaceAll(normalized, "\r", "\n")
-	for _, line := range strings.Split(normalized, "\n") {
+	for _, line := range strings.Split(normalizeSummaryLineEndings(summary), "\n") {
 		if marker, length, closing := summaryFenceMarker(line, fenceCharacter, fenceLength); marker != 0 {
 			if fenceCharacter == 0 && !closing {
 				fenceCharacter, fenceLength = marker, length
@@ -138,6 +134,11 @@ func summaryFenceMarker(line string, active byte, activeLength int) (byte, int, 
 		return marker, length, true
 	}
 	return 0, 0, false
+}
+
+func normalizeSummaryLineEndings(summary string) string {
+	normalized := strings.ReplaceAll(summary, "\r\n", "\n")
+	return strings.ReplaceAll(normalized, "\r", "\n")
 }
 
 func isFenceClosingRemainder(remainder string) bool {

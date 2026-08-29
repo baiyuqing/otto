@@ -33,6 +33,12 @@ Rules:
 - Keep session persistence append-only.
 - Keep `bash` unsandboxed, but start it in the selected workspace.
 
+## Development isolation
+
+- Use a dedicated Git worktree and development branch for every feature or bug fix. Never implement directly on `main`.
+- When work requires a design or spec, finish the discussion and get explicit approval before writing production code or tests.
+- If implementation changes are accidentally made on `main`, restore those changes before continuing in the worktree.
+
 ## Go workflow
 
 Primary commands:

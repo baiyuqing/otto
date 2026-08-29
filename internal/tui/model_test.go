@@ -573,8 +573,8 @@ func TestCollapsedToolSummaryIsSingleLineBoundedAndExpandable(t *testing.T) {
 	if strings.Contains(collapsed, "\n") || ansi.StringWidth(collapsed) > width {
 		t.Fatalf("collapsed summary = %q width=%d, want one bounded line", collapsed, ansi.StringWidth(collapsed))
 	}
-	if !strings.Contains(collapsed, "write") || !strings.Contains(collapsed, "complete") || strings.Contains(collapsed, "SECOND-TAIL") || strings.Contains(collapsed, "THIRD-TAIL") {
-		t.Fatalf("collapsed summary = %q, want concise name/argument preview/status without full details", collapsed)
+	if !strings.Contains(collapsed, "write") || !strings.Contains(collapsed, "✓") || strings.Contains(collapsed, "SECOND-TAIL") || strings.Contains(collapsed, "THIRD-TAIL") || strings.Contains(collapsed, "complete output") {
+		t.Fatalf("collapsed summary = %q, want concise name/argument preview without full details", collapsed)
 	}
 
 	expanded := renderToolBlock(entry, width, true)
@@ -1600,8 +1600,8 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 	}
 
 	content := idle.View().Content
-	if idle.expandedDetails || !strings.Contains(content, "read") || !strings.Contains(content, "README.md") || strings.Contains(content, "full output") {
-		t.Fatalf("default tool summary expanded=%v content=%q, want concise argument preview", idle.expandedDetails, content)
+	if idle.expandedDetails || !strings.Contains(content, "read") || !strings.Contains(content, "README.md") || !strings.Contains(content, "full output") || !strings.Contains(content, "✗") {
+		t.Fatalf("default tool summary expanded=%v content=%q, want concise failed preview", idle.expandedDetails, content)
 	}
 
 	expanded, _ := idle.Update(toggleDetailsMsg{})

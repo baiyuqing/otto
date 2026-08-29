@@ -1067,7 +1067,7 @@ func TestExitStillQuitsWhileNewSessionIsPending(t *testing.T) {
 
 func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 	backend := &fakeBackend{
-		info: app.Info{Profile: "profile", Model: "model", SessionID: "session-old"},
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session-old", ContextWindow: 128_000, ContextInputTokens: 29_952, ContextInputTokensPresent: true},
 		history: []model.Message{{
 			Role:   model.RoleAssistant,
 			Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}},
@@ -1076,6 +1076,9 @@ func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 	}
 	backend.newSession = func() error {
 		backend.info.SessionID = "session-new"
+		backend.info.ContextInputTokens = 0
+		backend.info.ContextInputTokensPresent = false
+		backend.info.ContextInputTokensPending = true
 		backend.history = []model.Message{{
 			Role:   model.RoleAssistant,
 			Blocks: []model.Block{{Type: model.BlockText, Text: "fresh transcript"}},
@@ -1083,7 +1086,7 @@ func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 		}}
 		return nil
 	}
-	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 120, 12)
 	m.editor.SetValue("  /new  ")
 
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
@@ -1100,7 +1103,7 @@ func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 	if got.editor.Value() != "" || got.usage.InputTokens != 7 || got.usage.OutputTokens != 9 {
 		t.Fatalf("editor=%q usage=%#v", got.editor.Value(), got.usage)
 	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") || !strings.Contains(content, "ctx ?%") || strings.Contains(content, "ctx 23.4%") {
 		t.Fatalf("view = %q", content)
 	}
 }

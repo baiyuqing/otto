@@ -1431,12 +1431,16 @@ func (m *Model) renderEntryAt(index int, width int) {
 	entry := &m.entries[index]
 	switch entry.Kind {
 	case EntryAssistant, EntryCompaction:
-		if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
+		renderWidth := width
+		if entry.Kind == EntryAssistant {
+			renderWidth = proseWidth(width)
+		}
+		if entry.RenderWidth == renderWidth && (entry.Rendered != "" || entry.Raw == "") {
 			return
 		}
-		rendered, _ := renderMarkdown(m.renderer, entry.Raw, width)
+		rendered, _ := renderMarkdown(m.renderer, entry.Raw, renderWidth)
 		entry.Rendered = rendered
-		entry.RenderWidth = width
+		entry.RenderWidth = renderWidth
 	case EntryTool:
 		entry.RenderWidth = width
 	default:
@@ -1453,7 +1457,30 @@ func (m Model) transcriptContent(width int) string {
 		return emptyTranscriptHint(width)
 	}
 	blocks := make([]string, 0, len(m.entries))
+	assistantTurn := false
 	for _, entry := range m.entries {
+		if entry.Kind == EntryUser {
+			assistantTurn = false
+			blocks = append(blocks, renderUserBlock(entry.Rendered, width, m.darkBackground))
+			continue
+		}
+		if entry.Kind == EntryAssistant || entry.Kind == EntryTool {
+			if !assistantTurn {
+				assistantTurn = true
+				if entry.Kind == EntryAssistant {
+					blocks = append(blocks, renderMessageBlock("Otto", entry.Rendered))
+					continue
+				}
+				blocks = append(blocks, renderMessageBlock("Otto", ""))
+			}
+			if entry.Kind == EntryTool {
+				blocks = append(blocks, indentToolBlock(renderToolBlock(entry, width, m.expandedDetails), width))
+			} else {
+				blocks = append(blocks, entry.Rendered)
+			}
+			continue
+		}
+		assistantTurn = false
 		blocks = append(blocks, m.renderEntry(entry, width))
 	}
 	return strings.Join(blocks, "\n\n")
@@ -1490,6 +1517,34 @@ func renderMessageBlock(title, body string) string {
 	return title + "\n" + body
 }
 
+func proseWidth(width int) int { return min(100, max(1, width)) }
+
+func renderUserBlock(body string, width int, dark bool) string {
+	width = proseWidth(width)
+	content := []string{"│ " + lipgloss.NewStyle().Bold(true).Render("You")}
+	if body != "" {
+		for _, line := range strings.Split(ansi.Wrap(body, max(1, width-2), ""), "\n") {
+			content = append(content, "│ "+line)
+		}
+	}
+	background := "254"
+	if dark {
+		background = "236"
+	}
+	return lipgloss.NewStyle().Width(width).Background(lipgloss.Color(background)).Render(strings.Join(content, "\n"))
+}
+
+func indentToolBlock(block string, width int) string {
+	lines := make([]string, 0)
+	for _, line := range strings.Split(block, "\n") {
+		wrapped := ansi.Wrap(line, max(1, width-2), "")
+		for _, part := range strings.Split(wrapped, "\n") {
+			lines = append(lines, ansi.Truncate("  "+part, max(0, width), ""))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderCompactionBlock(entry Entry, width int, expanded bool) string {
 	summary := ansi.Truncate(compactionSummaryLabel(entry.TokensBefore, entry.TokensAfter), max(0, width), "")
 	if !expanded || entry.Rendered == "" {
@@ -1511,7 +1566,11 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 		status = "error"
 	}
 	args := escapePlainText(entry.ToolArgs)
-	summary := renderToolSummary(name, args, status, width)
+	preview := toolArgumentPreview(entry.ToolName, entry.ToolArgs)
+	if entry.ToolError && entry.ToolOutput != "" {
+		preview += " — " + strings.Join(strings.Fields(escapePlainText(entry.ToolOutput)), " ")
+	}
+	summary := renderToolSummary(name, preview, status, max(1, min(118, width-2)))
 	if !expanded {
 		return summary
 	}
@@ -1525,25 +1584,45 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	return strings.Join(lines, "\n")
 }
 
+func toolArgumentPreview(name, raw string) string {
+	if name == "bash" {
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(raw), &args) == nil && args.Command != "" {
+			return escapePlainText(args.Command)
+		}
+	}
+	return escapePlainText(raw)
+}
+
 func renderToolSummary(name, args, status string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	const prefix = "> "
-	suffix := " " + status
-	minimum := prefix + name + suffix
+	marker := "…"
+	if status == "complete" {
+		marker = "✓"
+	} else if status == "error" {
+		marker = "✗"
+	}
+	prefix := marker + " "
+	minimum := prefix + name
 	if ansi.StringWidth(minimum) > width {
-		nameWidth := max(1, width-ansi.StringWidth(prefix)-ansi.StringWidth(suffix))
+		nameWidth := max(1, width-ansi.StringWidth(prefix))
 		name = ansi.Truncate(name, nameWidth, "…")
 	}
 
-	base := prefix + name
-	remaining := width - ansi.StringWidth(base) - ansi.StringWidth(suffix)
+	base := prefix + name + " "
+	remaining := width - ansi.StringWidth(base)
 	preview := strings.Join(strings.Fields(args), " ")
-	if preview != "" && remaining > 1 {
+	if preview == "" {
+		return strings.TrimRight(base, " ")
+	}
+	if remaining > 1 {
 		base += " " + ansi.Truncate(preview, remaining-1, "…")
 	}
-	return ansi.Truncate(base+suffix, width, "")
+	return ansi.Truncate(base, width, "")
 }
 
 func (m *Model) scrollViewport(delta int) {

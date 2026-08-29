@@ -256,9 +256,10 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return runner
 	}
 	controllerOptions := []app.Option{app.WithRuntimeInfo(app.RuntimeInfo{
-		Provider: runtime.Provider,
-		Profile:  runtime.Profile,
-		Model:    runtime.Model,
+		Provider:      runtime.Provider,
+		Profile:       runtime.Profile,
+		Model:         runtime.Model,
+		ContextWindow: runtime.Compaction.ContextWindow,
 	})}
 	if !options.noSession {
 		controllerOptions = append(controllerOptions,

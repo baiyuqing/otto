@@ -256,7 +256,12 @@ func TestRuntimeBuilderInvalidRuntimeAbandonsPreparedFileWithoutMutation(t *test
 }
 
 func TestRuntimeBuilderOpenReplacementReturnsWarningsAndRuntimeInfo(t *testing.T) {
-	builder := newRuntimeBuilderForTest(t, configWithProfiles("default", "resumed"))
+	file := configWithProfiles("default", "resumed")
+	contextWindow := 131_072
+	profile := file.Profiles["resumed"]
+	profile.ContextWindow = &contextWindow
+	file.Profiles["resumed"] = profile
+	builder := newRuntimeBuilderForTest(t, file)
 	path := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{Version: session.CurrentVersion, ID: "resumed-session", Workspace: builder.workspacePath, Provider: "openai-compatible", Profile: "resumed", Model: "stored-model", CreatedAt: time.Now().UTC()})
 	warnings := []session.Warning{{Message: "repaired dangling tool call"}}
 	var captured config.Runtime
@@ -285,8 +290,11 @@ func TestRuntimeBuilderOpenReplacementReturnsWarningsAndRuntimeInfo(t *testing.T
 		t.Fatal(err)
 	}
 	defer replacement.Session.Close()
-	if replacement.RuntimeInfo != (app.RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "stored-model"}) {
+	if replacement.RuntimeInfo.Provider != "openai-compatible" || replacement.RuntimeInfo.Profile != "resumed" || replacement.RuntimeInfo.Model != "stored-model" {
 		t.Fatalf("runtime info = %#v", replacement.RuntimeInfo)
+	}
+	if replacement.RuntimeInfo.ContextWindow != 131_072 {
+		t.Fatalf("runtime info context window = %d, want 131072", replacement.RuntimeInfo.ContextWindow)
 	}
 	if len(replacement.Warnings) != 1 || replacement.Warnings[0].Message != warnings[0].Message {
 		t.Fatalf("warnings = %#v", replacement.Warnings)
@@ -575,14 +583,17 @@ func TestRuntimeBuilderBuildNewReplacementResolvesCurrentSessionRuntimeTransacti
 		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
 	}
 
-	current := app.RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "gpt-5.3-codex-spark"}
+	current := app.RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "gpt-5.3-codex-spark", ContextWindow: 1}
 	replacement, err := builder.buildNewReplacement(context.Background(), current)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer replacement.Session.Close()
-	if replacement.RuntimeInfo != current {
-		t.Fatalf("runtime info = %#v, want current %#v", replacement.RuntimeInfo, current)
+	if replacement.RuntimeInfo.Provider != current.Provider || replacement.RuntimeInfo.Profile != current.Profile || replacement.RuntimeInfo.Model != current.Model {
+		t.Fatalf("runtime info = %#v, want current identity %#v", replacement.RuntimeInfo, current)
+	}
+	if replacement.RuntimeInfo.ContextWindow != contextWindow {
+		t.Fatalf("runtime info context window = %d, want %d", replacement.RuntimeInfo.ContextWindow, contextWindow)
 	}
 	if !reflect.DeepEqual(createdRuntime, runnerRuntime) {
 		t.Fatalf("create runtime = %#v, runner runtime = %#v", redactedRuntime(createdRuntime), redactedRuntime(runnerRuntime))
@@ -599,6 +610,29 @@ func TestRuntimeBuilderBuildNewReplacementResolvesCurrentSessionRuntimeTransacti
 	}
 	if header := replacement.Session.Header(); header.Profile != "resumed" || header.Model != "gpt-5.3-codex-spark" {
 		t.Fatalf("new session header = %#v", header)
+	}
+}
+
+func TestRuntimeBuilderBuildNewReplacementLeavesUnknownPrivateModelWindowUnset(t *testing.T) {
+	file := configWithProfiles("private")
+	file.Profiles["private"] = config.Profile{
+		Provider:  "openai-compatible",
+		BaseURL:   "https://private.example/v1",
+		Model:     "private-model",
+		APIKeyEnv: "PRIVATE_KEY",
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	replacement, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{Provider: "openai-compatible", Profile: "private", Model: "private-model", ContextWindow: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Session.Close()
+	if replacement.RuntimeInfo.ContextWindow != 0 {
+		t.Fatalf("runtime info context window = %d, want 0 for unknown private model", replacement.RuntimeInfo.ContextWindow)
 	}
 }
 

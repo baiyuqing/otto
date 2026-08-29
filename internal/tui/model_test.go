@@ -206,12 +206,15 @@ func TestInitRequestsBackgroundColorAndStartsSingleSpinnerTick(t *testing.T) {
 }
 
 func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
-	m := newTestModelWithBackend(t, &fakeBackend{history: []model.Message{{
-		Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "history"}},
-	}}})
+	m := newTestModelWithBackend(t, &fakeBackend{history: []model.Message{
+		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "## Assistant history"}}},
+		{ID: "checkpoint", Role: model.RoleContext, ContextType: "compaction", Display: true, ContextTokensBefore: 9000, Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Compaction history"}}},
+	}})
 	// Remove the injected test renderer so this test exercises the production renderer.
 	m.renderer = newGlamourRenderer(true)
 	m.rendererInjected = false
+	m.rerenderAndRefreshViewportContent(false)
+	beforeAssistant, beforeCompaction := m.entries[0].Rendered, m.entries[1].Rendered
 
 	updated, _ := m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}})
 	light := updated.(Model)
@@ -219,12 +222,22 @@ func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
 	if !ok || light.darkBackground || lightRenderer.styleName != "light" {
 		t.Fatalf("light renderer = %#v dark=%v", light.renderer, light.darkBackground)
 	}
+	if light.entries[0].Rendered == beforeAssistant {
+		t.Fatal("assistant Markdown cache was not refreshed for light theme")
+	}
+	if light.entries[1].Rendered == beforeCompaction {
+		t.Fatal("compaction Markdown cache was not refreshed for light theme")
+	}
+	lightAssistant, lightCompaction := light.entries[0].Rendered, light.entries[1].Rendered
 
 	updated, _ = light.Update(tea.BackgroundColorMsg{Color: color.RGBA{A: 0xff}})
 	dark := updated.(Model)
 	darkRenderer, ok := dark.renderer.(GlamourRenderer)
 	if !ok || !dark.darkBackground || darkRenderer.styleName != "dark" {
 		t.Fatalf("dark renderer = %#v dark=%v", dark.renderer, dark.darkBackground)
+	}
+	if dark.entries[0].Rendered == lightAssistant || dark.entries[1].Rendered == lightCompaction {
+		t.Fatalf("dark theme left stale Markdown caches: assistant unchanged=%v compaction unchanged=%v", dark.entries[0].Rendered == lightAssistant, dark.entries[1].Rendered == lightCompaction)
 	}
 }
 

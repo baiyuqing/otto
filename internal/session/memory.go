@@ -18,12 +18,13 @@ type Memory struct {
 	usagePresent        bool
 	latestCompaction    CompactionMetadata
 	hasLatestCompaction bool
+	seenIDs             map[string]struct{}
 	closed              bool
 }
 
 func NewMemory(header Header) *Memory {
 	header.Version = CurrentVersion
-	return &Memory{header: header}
+	return &Memory{header: header, seenIDs: make(map[string]struct{})}
 }
 
 func (m *Memory) Header() Header {
@@ -73,12 +74,23 @@ func (m *Memory) Append(ctx context.Context, message model.Message) error {
 		return errSessionClosed
 	}
 	cloned := cloneMessage(message)
+	if strings.TrimSpace(cloned.ID) == "" {
+		generated, err := newPiEntryID(m.seenIDs)
+		if err != nil {
+			return fmt.Errorf("generate memory message id: %w", err)
+		}
+		cloned.ID = generated
+	}
+	if _, duplicate := m.seenIDs[cloned.ID]; duplicate {
+		return fmt.Errorf("%w: duplicate message id %q", ErrInvalidSession, cloned.ID)
+	}
 	if m.hasLatestCompaction && m.latestCompaction.FirstPostCheckpointMessageID == "" {
 		if err := m.validateFirstPostCheckpointMessage(cloned); err != nil {
 			return err
 		}
 	}
 	m.messages = append(m.messages, cloned)
+	m.seenIDs[cloned.ID] = struct{}{}
 	if cloned.Role == model.RoleAssistant && hasMeaningfulUsage(cloned.Usage) {
 		m.aggregateUsage = addResolvedUsage(m.aggregateUsage, cloned.Usage)
 		m.usagePresent = true

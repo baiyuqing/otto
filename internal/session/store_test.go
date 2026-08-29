@@ -1065,6 +1065,59 @@ func TestStoreAppendHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestMemoryAppendAssignsStableUniqueIDsAndRejectsDuplicateSuppliedIDTransactionally(t *testing.T) {
+	memory := NewMemory(testHeader(t))
+	defer memory.Close()
+
+	first := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "generated"}}, CreatedAt: time.Unix(2, 0).UTC()}
+	if err := memory.Append(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	generatedID := memory.Messages()[0].ID
+	if !piEntryIDPattern.MatchString(generatedID) {
+		t.Fatalf("generated ID = %q, want nonempty stable ID", generatedID)
+	}
+
+	unique := model.Message{ID: "supplied-unique", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "preserved"}}, CreatedAt: time.Unix(3, 0).UTC()}
+	if err := memory.Append(context.Background(), unique); err != nil {
+		t.Fatal(err)
+	}
+	before := memory.Messages()
+	if got := before[1].ID; got != unique.ID {
+		t.Fatalf("supplied ID = %q, want %q", got, unique.ID)
+	}
+
+	duplicate := model.Message{ID: generatedID, Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "duplicate"}}, CreatedAt: time.Unix(4, 0).UTC()}
+	if err := memory.Append(context.Background(), duplicate); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("duplicate Append() error = %v, want ErrInvalidSession", err)
+	}
+	if got := memory.Messages(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("duplicate append mutated messages: got=%#v want=%#v", got, before)
+	}
+}
+
+func TestMemoryRejectsReuseOfOmittedAndCheckpointIDsAfterCompaction(t *testing.T) {
+	memory := createConversationMemory(t)
+	defer memory.Close()
+	omittedID := memory.Messages()[0].ID
+	checkpoint := validCheckpointFor(memory)
+	metadata, err := memory.AppendCompaction(context.Background(), checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := memory.Messages()
+	for _, reusedID := range []string{omittedID, metadata.ID} {
+		message := model.Message{ID: reusedID, Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "reuse"}}, CreatedAt: checkpoint.CreatedAt.Add(time.Second)}
+		if err := memory.Append(context.Background(), message); !errors.Is(err, ErrInvalidSession) {
+			t.Fatalf("reuse %q error = %v, want ErrInvalidSession", reusedID, err)
+		}
+		if got := memory.Messages(); !reflect.DeepEqual(got, before) {
+			t.Fatalf("reuse %q mutated messages: got=%#v want=%#v", reusedID, got, before)
+		}
+	}
+}
+
 func TestNewMemoryUsesCurrentVersion(t *testing.T) {
 	header := testHeader(t)
 	header.Version = 0

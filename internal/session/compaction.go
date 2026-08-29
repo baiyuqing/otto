@@ -46,13 +46,7 @@ func (m *Memory) AppendCompaction(ctx context.Context, checkpoint CompactionChec
 		return CompactionMetadata{}, fmt.Errorf("%w: compaction first-kept message is not in the active context", ErrInvalidSession)
 	}
 
-	seen := make(map[string]struct{}, len(m.messages))
-	for _, message := range m.messages {
-		if piEntryIDPattern.MatchString(message.ID) {
-			seen[message.ID] = struct{}{}
-		}
-	}
-	checkpointID, err := newPiEntryID(seen)
+	checkpointID, err := newPiEntryID(m.seenIDs)
 	if err != nil {
 		return CompactionMetadata{}, fmt.Errorf("generate compaction entry id: %w", err)
 	}
@@ -82,6 +76,7 @@ func (m *Memory) AppendCompaction(ctx context.Context, checkpoint CompactionChec
 		TokensBefore: checkpoint.TokensBefore, Usage: usage, Details: details,
 	}
 	m.messages = candidateMessages
+	m.seenIDs[checkpointID] = struct{}{}
 	if checkpoint.Usage != nil {
 		m.aggregateUsage = addResolvedUsage(m.aggregateUsage, checkpoint.Usage)
 		m.usagePresent = true

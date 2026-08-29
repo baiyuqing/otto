@@ -177,7 +177,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.darkBackground = msg.IsDark()
 		if !m.rendererInjected {
 			m.renderer = newGlamourRenderer(m.darkBackground)
-			m.invalidateAssistantRenders()
+			m.invalidateMarkdownRenders()
 			m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		}
 		return m, nil
@@ -771,7 +771,16 @@ func isCommittedCompactionCompletion(event agent.Event) bool {
 
 func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
 	if envelope.event != nil && isCommittedCompactionCompletion(*envelope.event) {
-		return sendDurableTurnEnvelope(stream, envelope)
+		envelope.applicationAck = newTurnApplicationAck()
+		if !sendDurableTurnEnvelope(stream, envelope) {
+			return false
+		}
+		select {
+		case <-envelope.applicationAck.done:
+			return true
+		case <-stream.abandonSignal:
+			return false
+		}
 	}
 	return sendRegularTurnEvent(ctx, stream, envelope)
 }
@@ -841,6 +850,9 @@ func waitTurn(stream *turnStream) tea.Cmd {
 }
 
 func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
+	if msg.value.applicationAck != nil {
+		defer msg.value.applicationAck.acknowledge()
+	}
 	if !m.isActiveTurnMessage(msg) {
 		if msg.value.done || msg.stream == nil {
 			return m, nil
@@ -1311,9 +1323,9 @@ func (m *Model) renderEntries(width int) {
 	}
 }
 
-func (m *Model) invalidateAssistantRenders() {
+func (m *Model) invalidateMarkdownRenders() {
 	for i := range m.entries {
-		if m.entries[i].Kind == EntryAssistant {
+		if m.entries[i].Kind == EntryAssistant || m.entries[i].Kind == EntryCompaction {
 			m.entries[i].RenderWidth = 0
 			m.entries[i].Rendered = ""
 		}

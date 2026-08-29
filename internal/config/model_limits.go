@@ -167,9 +167,7 @@ func resolveModelLimits(model string) ModelLimits {
 }
 
 func unwrapModelID(model string) (string, modelNamespace, bool) {
-	if strings.HasSuffix(model, ":batch") {
-		model = strings.TrimSuffix(model, ":batch")
-	}
+	model = strings.TrimSuffix(model, ":batch")
 	if strings.Contains(model, ":batch") {
 		return "", modelNamespaceNone, false
 	}

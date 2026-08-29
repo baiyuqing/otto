@@ -2,7 +2,6 @@ package agent
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 	"testing"
 
@@ -556,6 +555,6 @@ func assertToolAtomSide(t *testing.T, selection compactionSelection, ids ...stri
 		}
 	}
 	if wantSide == "" {
-		t.Fatal(fmt.Sprintf("tool atom absent from selection: %v", sides))
+		t.Fatalf("tool atom absent from selection: %v", sides)
 	}
 }

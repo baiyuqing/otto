@@ -21,10 +21,10 @@ type fileToolCall struct {
 }
 
 func appendCompactionFileBlocks(summary string, details session.CompactionDetails) (string, error) {
-	if strings.TrimSpace(summary) == "" || !utf8.ValidString(summary) {
+	complete := stripCompactionFileBlocks(summary)
+	if strings.TrimSpace(complete) == "" || !utf8.ValidString(complete) {
 		return "", errors.New("complete compaction summary must be nonempty UTF-8")
 	}
-	complete := summary
 	if suffix := compactionFileBlocks(details); suffix != "" {
 		complete += "\n\n" + suffix
 	}
@@ -62,12 +62,70 @@ func compactionFileBlocks(details session.CompactionDetails) string {
 	return suffix.String()
 }
 
-func stripCompactionFileBlocks(summary string, details session.CompactionDetails) string {
-	suffix := compactionFileBlocks(details)
-	if suffix == "" {
-		return summary
+func stripCompactionFileBlocks(summary string) string {
+	end := len(summary)
+	for {
+		start, ok := trailingCompactionFileBlockStart(summary[:end])
+		if !ok {
+			return summary[:end]
+		}
+		end = start
 	}
-	return strings.TrimSuffix(summary, "\n\n"+suffix)
+}
+
+func trailingCompactionFileBlockStart(summary string) (int, bool) {
+	for _, tag := range []string{"read-files", "modified-files"} {
+		closing := "\n</" + tag + ">"
+		if !strings.HasSuffix(summary, closing) {
+			continue
+		}
+		contentEnd := len(summary) - len(closing)
+		opener := "\n\n<" + tag + ">\n"
+		start := strings.LastIndex(summary[:contentEnd], opener)
+		if start < 0 || summaryPositionInsideFence(summary, start+2) {
+			continue
+		}
+		content := summary[start+len(opener) : contentEnd]
+		if !validCompactionFileBlockContent(content) {
+			continue
+		}
+		return start, true
+	}
+	return 0, false
+}
+
+func validCompactionFileBlockContent(content string) bool {
+	if content == "" || !utf8.ValidString(content) {
+		return false
+	}
+	for _, path := range strings.Split(content, "\n") {
+		if path == "" {
+			return false
+		}
+		for _, character := range path {
+			if unicode.IsControl(character) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func summaryPositionInsideFence(summary string, position int) bool {
+	fenceCharacter := byte(0)
+	fenceLength := 0
+	for _, line := range strings.Split(summary[:position], "\n") {
+		marker, length, closing := summaryFenceMarker(line, fenceCharacter, fenceLength)
+		if marker == 0 {
+			continue
+		}
+		if fenceCharacter == 0 && !closing {
+			fenceCharacter, fenceLength = marker, length
+		} else if fenceCharacter == marker && closing {
+			fenceCharacter, fenceLength = 0, 0
+		}
+	}
+	return fenceCharacter != 0
 }
 
 func deriveCompactionFileDetails(messages []model.Message, previous session.CompactionDetails) session.CompactionDetails {

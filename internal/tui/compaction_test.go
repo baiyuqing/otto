@@ -527,6 +527,63 @@ func TestAutomaticCompactionEventsApplyInsidePromptStream(t *testing.T) {
 	}
 }
 
+func TestAutomaticCompactionNoopCompletionClearsPromptStreamStatusWithoutDuplicates(t *testing.T) {
+	usage := model.Usage{InputTokens: 40, OutputTokens: 5}
+	backend := &fakeBackend{
+		info: app.Info{Usage: usage, UsagePresent: true},
+		history: []model.Message{{
+			ID:                  "existing-checkpoint",
+			Role:                model.RoleContext,
+			ContextType:         "compaction",
+			Display:             true,
+			ContextTokensBefore: 100,
+			Blocks:              []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\nexisting state"}},
+		}},
+	}
+	backend.prompt = func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventCompactionStarted, Compaction: &agent.CompactionEvent{
+			Automatic: true, Reason: agent.CompactionThreshold,
+		}})
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{
+			Automatic: true, Reason: agent.CompactionThreshold, Noop: true,
+		}})
+		return nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	state := updated.(Model)
+
+	updated, next := state.Update(runCommandWithin(t, cmd, time.Second))
+	state = updated.(Model)
+	if state.statusText != "compacting context" || !state.running {
+		t.Fatalf("started status=%q running=%v", state.statusText, state.running)
+	}
+	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	state = updated.(Model)
+	if state.statusText != "[context] no-op" || !state.running {
+		t.Fatalf("no-op status=%q running=%v", state.statusText, state.running)
+	}
+	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	state = updated.(Model)
+	if next != nil || state.running || state.statusText != "[context] no-op" || state.usage != usage {
+		t.Fatalf("done cmd=%v running=%v status=%q usage=%#v", next, state.running, state.statusText, state.usage)
+	}
+	compactions := 0
+	users := 0
+	for _, entry := range state.entries {
+		switch entry.Kind {
+		case EntryCompaction:
+			compactions++
+		case EntryUser:
+			users++
+		}
+	}
+	if compactions != 1 || users != 1 || len(state.entries) != 2 {
+		t.Fatalf("no-op duplicated checkpoint or prompt entries: %#v", state.entries)
+	}
+}
+
 func TestCompactionCompletionReconcilesAggregateUsageWithoutDuplication(t *testing.T) {
 	backend := &fakeBackend{info: app.Info{Usage: model.Usage{InputTokens: 100, OutputTokens: 10}, UsagePresent: true}}
 	backend.prompt = func(_ context.Context, _ string, emit func(agent.Event)) error {

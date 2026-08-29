@@ -30,7 +30,7 @@ func TestAutomaticCompactionWaitsWithoutWarningForUnsafeRetainedTail(t *testing.
 	wrapped := &retainedTailMetadataSession{Session: memory, metadata: session.CompactionMetadata{
 		ID: "checkpoint", Summary: validStructuredSummary, RetainedTailOnly: true, FirstPostCheckpointMessageID: "repair-result",
 	}}
-	fake := &compactProvider{responses: []provider.Response{{Message: summaryMessage("normal response"), FinishReason: model.FinishStop}}}
+	fake := &compactProvider{responses: []provider.Response{{Message: model.Message{Role: model.RoleAssistant}, FinishReason: model.FinishStop}}}
 	options := testCompactionOptions()
 	options.Compaction = CompactionSettings{Auto: true, WorkingWindow: 10, HardInputWindow: 10, ReserveTokens: 1, KeepRecentTokens: 1}
 	runner := New(fake, nil, wrapped, options)
@@ -43,9 +43,18 @@ func TestAutomaticCompactionWaitsWithoutWarningForUnsafeRetainedTail(t *testing.
 	if _, err := runner.dispatchNormalProviderStep(context.Background(), func(event Event) { events = append(events, event) }, &state); err != nil {
 		t.Fatalf("automatic retained-tail wait returned an error: %v", err)
 	}
-	if fake.calls != 1 || wrapped.appendCalls != 0 || countCompactEvents(events, EventCompactionWarning) != 0 {
+	if fake.calls != 1 || wrapped.appendCalls != 0 || len(events) != 2 || events[0].Type != EventCompactionStarted || events[1].Type != EventCompactionCompleted {
 		t.Fatalf("provider calls=%d appends=%d events=%#v", fake.calls, wrapped.appendCalls, events)
 	}
+	started, completed := events[0].Compaction, events[1].Compaction
+	if started == nil || started.Reason != CompactionThreshold || !started.Automatic || started.Noop ||
+		completed == nil || completed.Reason != CompactionThreshold || !completed.Automatic || !completed.Noop {
+		t.Fatalf("automatic no-op event sequence = %#v", events)
+	}
+	if countCompactEvents(events, EventCompactionWarning) != 0 || countCompactEvents(events, EventAgentError) != 0 || countCompactEvents(events, EventTextDelta) != 0 {
+		t.Fatalf("automatic no-op emitted non-terminal output: %#v", events)
+	}
+	assertCompactionEventsContainNoText(t, events, validStructuredSummary, "a.go", "repair")
 	if state.proactiveAttempted {
 		t.Fatal("no-op retained-tail wait consumed the turn's future compaction opportunity")
 	}
@@ -68,14 +77,24 @@ func TestReactiveCompactionReturnsOriginalOverflowWhenRetainedTailMustWait(t *te
 	options := testCompactionOptions()
 	options.Compaction = CompactionSettings{Auto: true, KeepRecentTokens: 1}
 	runner := New(fake, nil, wrapped, options)
-	_, err := runner.dispatchNormalProviderStep(context.Background(), nil, &runDispatchState{})
+	var events []Event
+	_, err := runner.dispatchNormalProviderStep(context.Background(), func(event Event) { events = append(events, event) }, &runDispatchState{})
 	var generic *automaticDispatchError
 	if !errors.Is(err, provider.ErrContextOverflow) || errors.As(err, &generic) {
 		t.Fatalf("reactive wait error = %T %v; want original typed overflow", err, err)
 	}
-	if fake.calls != 1 || wrapped.appendCalls != 0 {
-		t.Fatalf("provider calls=%d appends=%d", fake.calls, wrapped.appendCalls)
+	if fake.calls != 1 || wrapped.appendCalls != 0 || len(events) != 2 || events[0].Type != EventCompactionStarted || events[1].Type != EventCompactionCompleted {
+		t.Fatalf("provider calls=%d appends=%d events=%#v", fake.calls, wrapped.appendCalls, events)
 	}
+	started, completed := events[0].Compaction, events[1].Compaction
+	if started == nil || started.Reason != CompactionOverflow || !started.Automatic || started.Noop ||
+		completed == nil || completed.Reason != CompactionOverflow || !completed.Automatic || !completed.Noop {
+		t.Fatalf("reactive no-op event sequence = %#v", events)
+	}
+	if countCompactEvents(events, EventCompactionWarning) != 0 || countCompactEvents(events, EventAgentError) != 0 || countCompactEvents(events, EventTextDelta) != 0 {
+		t.Fatalf("reactive no-op emitted non-terminal output: %#v", events)
+	}
+	assertCompactionEventsContainNoText(t, events, validStructuredSummary, "a.go", "repair")
 }
 
 func TestCompactManualNoopEmitsBoundedCompletion(t *testing.T) {
@@ -229,6 +248,42 @@ func TestCompactTurnPrefixPreservesPreviousStructuredSummary(t *testing.T) {
 	want := validStructuredSummary + splitTurnSummarySeparator + "preserve early turn progress" + priorSuffix
 	if latest.Summary != want || strings.Count(latest.Summary, "<read-files>") != 1 {
 		t.Fatalf("summary=%q, want %q", latest.Summary, want)
+	}
+}
+
+func TestCompactTurnPrefixStripsStaleSuffixWithAbsentDetailsBeforeReuse(t *testing.T) {
+	messages := []model.Message{
+		compactionTextMessage("turn-u", model.RoleUser, "long first request"),
+		compactionTextMessage("turn-early", model.RoleAssistant, strings.Repeat("early", 240)),
+		compactionTextMessage("turn-late", model.RoleAssistant, "late progress"),
+		compactionTextMessage("latest-u", model.RoleUser, "follow-up"),
+	}
+	memory := session.NewMemory(testHeader(t))
+	appendCompactionMessages(t, memory, messages...)
+	const stalePath = "stale-external.go"
+	if _, err := memory.AppendCompaction(context.Background(), session.CompactionCheckpoint{
+		Summary:          validStructuredSummary + "\n\n<modified-files>\n" + stalePath + "\n</modified-files>",
+		FirstKeptEntryID: messages[0].ID,
+		TokensBefore:     100,
+		CreatedAt:        fixedClock(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	options := testCompactionOptions()
+	options.Compaction.KeepRecentTokens = estimateMessage(messages[2]) + estimateMessage(messages[3])
+	fake := &compactProvider{responses: []provider.Response{{Message: summaryMessage("preserve early turn progress")}}}
+	runner := New(fake, nil, memory, options)
+
+	if _, err := runner.Compact(context.Background(), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.requests) != 1 || strings.Contains(fake.requests[0].Messages[0].Text(), stalePath) {
+		t.Fatalf("stale suffix sent to summary provider: %#v", fake.requests)
+	}
+	latest, _ := memory.LatestCompaction()
+	want := validStructuredSummary + splitTurnSummarySeparator + "preserve early turn progress"
+	if latest.Summary != want || strings.Contains(latest.Summary, stalePath) {
+		t.Fatalf("persisted summary = %q, want %q", latest.Summary, want)
 	}
 }
 

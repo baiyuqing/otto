@@ -191,12 +191,12 @@ func compactionTranscript(messages []model.Message, latest session.CompactionMet
 
 		isLatest := !hasLatest || latest.ID == "" || message.ID == latest.ID
 		if isLatest {
-			previousSummary = stripCompactionFileBlocks(strings.TrimPrefix(message.Text(), compactionSummaryDisplayPrefix), latest.Details)
+			previousSummary = stripCompactionFileBlocks(strings.TrimPrefix(message.Text(), compactionSummaryDisplayPrefix))
 			foundLatest = true
 		}
 	}
 	if hasLatest && !foundLatest {
-		previousSummary = stripCompactionFileBlocks(latest.Summary, latest.Details)
+		previousSummary = stripCompactionFileBlocks(latest.Summary)
 	}
 	return transcript, previousSummary
 }

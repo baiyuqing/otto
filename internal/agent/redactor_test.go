@@ -2,10 +2,20 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func TestRedactorPreservesInvalidCompactionSummaryIdentity(t *testing.T) {
+	err := fmt.Errorf("%w: response contains secret", ErrInvalidCompactionSummary)
+	got := NewRedactor([]string{"secret"}).RedactError(err)
+	if !errors.Is(got, ErrInvalidCompactionSummary) || strings.Contains(got.Error(), "secret") {
+		t.Fatalf("RedactError() = %v", got)
+	}
+}
 
 func TestRedactorNeverUsesAReplacementThatContainsTheCredential(t *testing.T) {
 	for _, credential := range []string{"[REDACTED]", "REDACTED", "[", "界"} {
@@ -211,5 +221,14 @@ func TestRedactorOverlappingJSONKeySecretsDoNotDependOnConfigurationOrder(t *tes
 	reverse := NewRedactor([]string{"bc", "ab"}).RedactJSONStrings(raw)
 	if string(forward) != string(reverse) {
 		t.Fatalf("overlapping key output depends on credential order: %s != %s", forward, reverse)
+	}
+}
+
+func TestRedactorJSONOutputDoesNotAliasCompactionToolArguments(t *testing.T) {
+	raw := json.RawMessage(`{"path":"secret.go"}`)
+	got := NewRedactor([]string{"secret"}).RedactJSONStrings(raw)
+	got[0] = '['
+	if string(raw) != `{"path":"secret.go"}` {
+		t.Fatalf("redacted output aliases source tool arguments: %s", raw)
 	}
 }

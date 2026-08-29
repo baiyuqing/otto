@@ -10,25 +10,31 @@ import (
 type EntryKind string
 
 const (
-	EntryUser      EntryKind = "user"
-	EntryAssistant EntryKind = "assistant"
-	EntryTool      EntryKind = "tool"
-	EntryError     EntryKind = "error"
-	EntrySystem    EntryKind = "system"
+	EntryUser       EntryKind = "user"
+	EntryAssistant  EntryKind = "assistant"
+	EntryTool       EntryKind = "tool"
+	EntryCompaction EntryKind = "compaction"
+	EntryError      EntryKind = "error"
+	EntrySystem     EntryKind = "system"
 )
 
+const compactionSummaryDisplayPrefix = "[Compaction summary]\n"
+
 type Entry struct {
-	ID          string
-	Kind        EntryKind
-	Raw         string
-	Rendered    string
-	RenderWidth int
-	ToolCallID  string
-	ToolName    string
-	ToolArgs    string
-	ToolOutput  string
-	ToolError   bool
-	ToolDone    bool
+	ID           string
+	Kind         EntryKind
+	Raw          string
+	Rendered     string
+	RenderWidth  int
+	CheckpointID string
+	TokensBefore int
+	TokensAfter  int
+	ToolCallID   string
+	ToolName     string
+	ToolArgs     string
+	ToolOutput   string
+	ToolError    bool
+	ToolDone     bool
 }
 
 func EntriesFromHistory(history []model.Message) ([]Entry, model.Usage) {
@@ -39,6 +45,10 @@ func EntriesFromHistory(history []model.Message) ([]Entry, model.Usage) {
 	for msgIndex, message := range history {
 		usage = addUsageTotals(usage, message.Usage)
 		if message.Role == model.RoleContext && !message.Display {
+			continue
+		}
+		if entry, ok := compactionEntryFromMessage(message, msgIndex); ok {
+			entries = append(entries, entry)
 			continue
 		}
 		baseID := messageEntryBaseID(message, msgIndex)
@@ -103,6 +113,23 @@ func EntriesFromHistory(history []model.Message) ([]Entry, model.Usage) {
 	}
 
 	return entries, usage
+}
+
+func compactionEntryFromMessage(message model.Message, index int) (Entry, bool) {
+	if message.Role != model.RoleContext || message.ContextType != "compaction" || !message.Display {
+		return Entry{}, false
+	}
+	id := message.ID
+	if id == "" {
+		id = messageEntryBaseID(message, index)
+	}
+	return Entry{
+		ID:           id,
+		Kind:         EntryCompaction,
+		Raw:          strings.TrimPrefix(message.Text(), compactionSummaryDisplayPrefix),
+		CheckpointID: message.ID,
+		TokensBefore: max(0, message.ContextTokensBefore),
+	}, true
 }
 
 func entryKindForRole(role model.Role) EntryKind {

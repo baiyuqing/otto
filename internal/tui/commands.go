@@ -1,6 +1,9 @@
 package tui
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 type slashCommandKind uint8
 
@@ -9,6 +12,7 @@ const (
 	slashCommandSession
 	slashCommandNew
 	slashCommandResume
+	slashCommandCompact
 	slashCommandExit
 )
 
@@ -23,6 +27,7 @@ var slashCommands = []slashCommand{
 	{Name: "/session", Description: "show session details", Kind: slashCommandSession},
 	{Name: "/new", Description: "start a new session", Kind: slashCommandNew},
 	{Name: "/resume", Description: "resume a session", Kind: slashCommandResume},
+	{Name: "/compact", Description: "compact context", Kind: slashCommandCompact},
 	{Name: "/exit", Description: "quit", Kind: slashCommandExit},
 }
 
@@ -46,4 +51,16 @@ func findSlashCommand(name string) (slashCommand, bool) {
 		}
 	}
 	return slashCommand{}, false
+}
+
+func parseSlashCommand(value string) (slashCommand, string, bool) {
+	value = strings.TrimSpace(value)
+	name := value
+	argument := ""
+	if index := strings.IndexFunc(value, unicode.IsSpace); index >= 0 {
+		name = value[:index]
+		argument = strings.TrimSpace(value[index:])
+	}
+	command, ok := findSlashCommand(name)
+	return command, argument, ok
 }

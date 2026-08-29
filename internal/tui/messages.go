@@ -1,6 +1,11 @@
 package tui
 
-import "github.com/baiyuqing/otto/internal/agent"
+import (
+	"sync"
+
+	"github.com/baiyuqing/otto/internal/agent"
+	otmodel "github.com/baiyuqing/otto/internal/model"
+)
 
 type overlayKind uint8
 
@@ -16,28 +21,156 @@ type showSessionOverlayMsg struct{}
 
 type hideOverlayMsg struct{}
 
-type toggleToolsMsg struct{}
+type toggleDetailsMsg struct{}
 
 type scrollViewportMsg struct {
 	Delta int
 }
 
 type turnEnvelope struct {
-	event                *agent.Event
-	err                  error
-	done                 bool
-	usesRegularEventSlot bool
+	event                 *agent.Event
+	compactionResult      *agent.CompactionResult
+	applicationAck        *turnApplicationAck
+	aggregateUsage        otmodel.Usage
+	aggregateUsagePresent bool
+	err                   error
+	done                  bool
+	usesRegularEventSlot  bool
+}
+
+type turnApplicationAck struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newTurnApplicationAck() *turnApplicationAck {
+	return &turnApplicationAck{done: make(chan struct{})}
+}
+
+func (a *turnApplicationAck) acknowledge() {
+	if a == nil {
+		return
+	}
+	a.once.Do(func() {
+		close(a.done)
+	})
+}
+
+type activeOperation struct {
+	stream     *turnStream
+	cancel     func()
+	cancelOnce sync.Once
+}
+
+func (o *activeOperation) cancelContext() {
+	if o == nil {
+		return
+	}
+	o.cancelOnce.Do(func() {
+		if o.cancel != nil {
+			o.cancel()
+		}
+	})
+}
+
+func (o *activeOperation) abandon() {
+	if o == nil {
+		return
+	}
+	o.cancelContext()
+	o.stream.abandon()
+}
+
+type operationCleanup struct {
+	mu      sync.Mutex
+	current *activeOperation
+	closed  bool
+}
+
+func newOperationCleanup() *operationCleanup {
+	return &operationCleanup{}
+}
+
+func (c *operationCleanup) register(stream *turnStream, cancel func()) *activeOperation {
+	operation := &activeOperation{stream: stream, cancel: cancel}
+	if c == nil {
+		return operation
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		operation.abandon()
+		return operation
+	}
+	previous := c.current
+	c.current = operation
+	c.mu.Unlock()
+	previous.abandon()
+	return operation
+}
+
+func (c *operationCleanup) finish(operation *activeOperation) {
+	if operation == nil {
+		return
+	}
+	if c != nil {
+		c.mu.Lock()
+		if c.current == operation {
+			c.current = nil
+		}
+		c.mu.Unlock()
+	}
+	operation.cancelContext()
+}
+
+func (c *operationCleanup) abandon(operation *activeOperation) {
+	if operation == nil {
+		return
+	}
+	if c != nil {
+		c.mu.Lock()
+		if c.current == operation {
+			c.current = nil
+		}
+		c.mu.Unlock()
+	}
+	operation.abandon()
+}
+
+func (c *operationCleanup) cleanup() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	operation := c.current
+	c.current = nil
+	c.closed = true
+	c.mu.Unlock()
+	operation.abandon()
 }
 
 type turnStream struct {
 	channel           chan turnEnvelope
 	regularEventSlots chan struct{}
+	generation        uint64
+	abandonSignal     chan struct{}
+	abandonOnce       sync.Once
+}
+
+func (s *turnStream) abandon() {
+	if s == nil {
+		return
+	}
+	s.abandonOnce.Do(func() {
+		close(s.abandonSignal)
+	})
 }
 
 type turnMsg struct {
-	channel <-chan turnEnvelope
-	stream  *turnStream
-	value   turnEnvelope
+	channel    <-chan turnEnvelope
+	stream     *turnStream
+	generation uint64
+	value      turnEnvelope
 }
 
 type renderStreamingMsg struct {

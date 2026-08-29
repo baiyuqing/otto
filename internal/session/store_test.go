@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -455,15 +456,16 @@ func TestAppendRejectsTimestampOutsideRFC3339NanoRange(t *testing.T) {
 }
 
 func TestStoreRetainsFullActivePathAggregateUsageAcrossCompactionAndAppend(t *testing.T) {
-	usageJSON := func(input, output int) string {
-		return fmt.Sprintf(`{"input":%d,"output":%d,"cacheRead":0,"cacheWrite":0,"totalTokens":%d,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, input, output, input+output)
+	usageJSON := func(input, output, cacheRead, cacheWrite int) string {
+		total := input + output + cacheRead + cacheWrite
+		return fmt.Sprintf(`{"input":%d,"output":%d,"cacheRead":%d,"cacheWrite":%d,"totalTokens":%d,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}`, input, output, cacheRead, cacheWrite, total)
 	}
 	path := writeFixture(t, strings.Join([]string{
 		`{"type":"session","version":3,"id":"usage-session","timestamp":"2026-08-27T12:00:00Z","cwd":"/workspace"}`,
 		`{"type":"custom","id":"91000001","parentId":null,"timestamp":"2026-08-27T12:00:01Z","customType":"otto.runtime","data":{"profile":"default","provider":"openai-compatible","model":"model"}}`,
-		fmt.Sprintf(`{"type":"message","id":"91000002","parentId":"91000001","timestamp":"2026-08-27T12:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"old"}],"api":"openai-completions","provider":"openai-compatible","model":"model","usage":%s,"stopReason":"stop","timestamp":2}}`, usageJSON(10, 3)),
-		fmt.Sprintf(`{"type":"branch_summary","id":"91000003","parentId":"91000002","timestamp":"2026-08-27T12:00:03Z","fromId":"91000002","summary":"branch","usage":%s}`, usageJSON(4, 2)),
-		fmt.Sprintf(`{"type":"compaction","id":"91000004","parentId":"91000003","timestamp":"2026-08-27T12:00:04Z","summary":"compact","tokensBefore":17,"retainedTail":[],"usage":%s}`, usageJSON(6, 1)),
+		fmt.Sprintf(`{"type":"message","id":"91000002","parentId":"91000001","timestamp":"2026-08-27T12:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"old"}],"api":"openai-completions","provider":"openai-compatible","model":"model","usage":%s,"stopReason":"stop","timestamp":2}}`, usageJSON(10, 3, 4, 1)),
+		fmt.Sprintf(`{"type":"branch_summary","id":"91000003","parentId":"91000002","timestamp":"2026-08-27T12:00:03Z","fromId":"91000002","summary":"branch","usage":%s}`, usageJSON(4, 2, 3, 1)),
+		fmt.Sprintf(`{"type":"compaction","id":"91000004","parentId":"91000003","timestamp":"2026-08-27T12:00:04Z","summary":"compact","tokensBefore":17,"retainedTail":[],"usage":%s}`, usageJSON(6, 1, 2, 0)),
 	}, "\n")+"\n")
 
 	store, warnings, err := Open(path)
@@ -481,18 +483,77 @@ func TestStoreRetainsFullActivePathAggregateUsageAcrossCompactionAndAppend(t *te
 	if !ok {
 		t.Fatal("Store does not expose aggregate usage")
 	}
-	if usage, present := usageSource.AggregateUsage(); !present || usage != (model.Usage{InputTokens: 20, OutputTokens: 6}) {
+	if usage, present := usageSource.AggregateUsage(); !present || usage != (model.Usage{InputTokens: 31, OutputTokens: 6, CachedInputTokens: 9}) {
 		t.Fatalf("AggregateUsage() = %#v, %v", usage, present)
 	}
 
 	if err := store.Append(context.Background(), model.Message{
 		Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "new"}}, CreatedAt: time.Now().UTC(),
-		FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 2, OutputTokens: 3},
+		FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 2, OutputTokens: 3, CachedInputTokens: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if usage, present := usageSource.AggregateUsage(); !present || usage != (model.Usage{InputTokens: 22, OutputTokens: 9}) {
+	if usage, present := usageSource.AggregateUsage(); !present || usage != (model.Usage{InputTokens: 33, OutputTokens: 9, CachedInputTokens: 10}) {
 		t.Fatalf("AggregateUsage() after append = %#v, %v", usage, present)
+	}
+}
+
+func TestMemoryAndStoreExposeMatchingAggregateUsageAfterAssistantAppends(t *testing.T) {
+	header := testHeader(t)
+	memory := NewMemory(header)
+	store, err := Create(t.TempDir(), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	messages := []model.Message{
+		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "first"}}, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: math.MaxInt - 1, OutputTokens: 1, CachedInputTokens: math.MaxInt - 1}},
+		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "second"}}, CreatedAt: time.Unix(3, 0).UTC(), FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 1, OutputTokens: math.MaxInt - 1, CachedInputTokens: 1}},
+	}
+	for _, message := range messages {
+		if err := memory.Append(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Append(context.Background(), message); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	memoryUsage, ok := any(memory).(UsageProvider)
+	if !ok {
+		t.Fatal("Memory does not expose aggregate usage")
+	}
+	storeUsage, ok := any(store).(UsageProvider)
+	if !ok {
+		t.Fatal("Store does not expose aggregate usage")
+	}
+	want := model.Usage{InputTokens: math.MaxInt, OutputTokens: math.MaxInt, CachedInputTokens: math.MaxInt}
+	if usage, present := memoryUsage.AggregateUsage(); !present || usage != want {
+		t.Fatalf("memory AggregateUsage() = %#v, %v", usage, present)
+	}
+	if usage, present := storeUsage.AggregateUsage(); !present || usage != want {
+		t.Fatalf("store AggregateUsage() = %#v, %v", usage, present)
+	}
+
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none", warnings)
+	}
+	reopenedUsage, ok := any(reopened).(UsageProvider)
+	if !ok {
+		t.Fatal("reopened Store does not expose aggregate usage")
+	}
+	if usage, present := reopenedUsage.AggregateUsage(); !present || usage != want {
+		t.Fatalf("reopened AggregateUsage() = %#v, %v", usage, present)
 	}
 }
 
@@ -1004,6 +1065,59 @@ func TestStoreAppendHonorsCanceledContext(t *testing.T) {
 	}
 }
 
+func TestMemoryAppendAssignsStableUniqueIDsAndRejectsDuplicateSuppliedIDTransactionally(t *testing.T) {
+	memory := NewMemory(testHeader(t))
+	defer memory.Close()
+
+	first := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "generated"}}, CreatedAt: time.Unix(2, 0).UTC()}
+	if err := memory.Append(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	generatedID := memory.Messages()[0].ID
+	if !piEntryIDPattern.MatchString(generatedID) {
+		t.Fatalf("generated ID = %q, want nonempty stable ID", generatedID)
+	}
+
+	unique := model.Message{ID: "supplied-unique", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "preserved"}}, CreatedAt: time.Unix(3, 0).UTC()}
+	if err := memory.Append(context.Background(), unique); err != nil {
+		t.Fatal(err)
+	}
+	before := memory.Messages()
+	if got := before[1].ID; got != unique.ID {
+		t.Fatalf("supplied ID = %q, want %q", got, unique.ID)
+	}
+
+	duplicate := model.Message{ID: generatedID, Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "duplicate"}}, CreatedAt: time.Unix(4, 0).UTC()}
+	if err := memory.Append(context.Background(), duplicate); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("duplicate Append() error = %v, want ErrInvalidSession", err)
+	}
+	if got := memory.Messages(); !reflect.DeepEqual(got, before) {
+		t.Fatalf("duplicate append mutated messages: got=%#v want=%#v", got, before)
+	}
+}
+
+func TestMemoryRejectsReuseOfOmittedAndCheckpointIDsAfterCompaction(t *testing.T) {
+	memory := createConversationMemory(t)
+	defer memory.Close()
+	omittedID := memory.Messages()[0].ID
+	checkpoint := validCheckpointFor(memory)
+	metadata, err := memory.AppendCompaction(context.Background(), checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := memory.Messages()
+	for _, reusedID := range []string{omittedID, metadata.ID} {
+		message := model.Message{ID: reusedID, Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "reuse"}}, CreatedAt: checkpoint.CreatedAt.Add(time.Second)}
+		if err := memory.Append(context.Background(), message); !errors.Is(err, ErrInvalidSession) {
+			t.Fatalf("reuse %q error = %v, want ErrInvalidSession", reusedID, err)
+		}
+		if got := memory.Messages(); !reflect.DeepEqual(got, before) {
+			t.Fatalf("reuse %q mutated messages: got=%#v want=%#v", reusedID, got, before)
+		}
+	}
+}
+
 func TestNewMemoryUsesCurrentVersion(t *testing.T) {
 	header := testHeader(t)
 	header.Version = 0
@@ -1011,6 +1125,68 @@ func TestNewMemoryUsesCurrentVersion(t *testing.T) {
 	defer store.Close()
 	if got := store.Header().Version; got != CurrentVersion {
 		t.Fatalf("Header().Version = %d, want %d", got, CurrentVersion)
+	}
+}
+
+func TestModelUsageToPiSplitsCachedInput(t *testing.T) {
+	got, err := modelUsageToPi(&model.Usage{InputTokens: 100, OutputTokens: 9, CachedInputTokens: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Input != 60 || got.CacheRead != 40 || got.CacheWrite != 0 || got.Output != 9 || got.TotalTokens != 109 {
+		t.Fatalf("modelUsageToPi() = %#v", got)
+	}
+}
+
+func TestModelUsageToPiRejectsInvalidUsage(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage model.Usage
+	}{
+		{name: "negative-input", usage: model.Usage{InputTokens: -1, OutputTokens: 1}},
+		{name: "negative-output", usage: model.Usage{InputTokens: 1, OutputTokens: -1}},
+		{name: "negative-cached", usage: model.Usage{InputTokens: 1, OutputTokens: 1, CachedInputTokens: -1}},
+		{name: "cached-exceeds-input", usage: model.Usage{InputTokens: 1, OutputTokens: 1, CachedInputTokens: 2}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := modelUsageToPi(&tc.usage); err == nil {
+				t.Fatal("modelUsageToPi() = nil error, want invalid usage")
+			}
+		})
+	}
+}
+
+func TestPiUsageToModelReconstructsTotalPromptInput(t *testing.T) {
+	got, err := piUsageToModel(&piUsage{Input: 60, CacheRead: 30, CacheWrite: 10, Output: 9, TotalTokens: 109})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != (model.Usage{InputTokens: 100, OutputTokens: 9, CachedInputTokens: 30}) {
+		t.Fatalf("piUsageToModel() = %#v", got)
+	}
+}
+
+func TestPiUsageToModelRejectsInvalidUsage(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage *piUsage
+	}{
+		{name: "negative-input", usage: &piUsage{Input: -1}},
+		{name: "negative-output", usage: &piUsage{Output: -1}},
+		{name: "negative-cache-read", usage: &piUsage{CacheRead: -1}},
+		{name: "negative-cache-write", usage: &piUsage{CacheWrite: -1}},
+		{name: "negative-total", usage: &piUsage{TotalTokens: -1}},
+		{name: "overflow-input-plus-cache", usage: &piUsage{Input: int64(int(^uint(0)>>1) - 1), CacheRead: 2}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := piUsageToModel(tc.usage); err == nil {
+				t.Fatal("piUsageToModel() = nil error, want invalid usage")
+			}
+		})
 	}
 }
 

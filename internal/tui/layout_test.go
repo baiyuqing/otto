@@ -8,6 +8,16 @@ import (
 	"github.com/baiyuqing/otto/internal/model"
 )
 
+func TestResponsiveHelpOverlayDescribesDetailToggle(t *testing.T) {
+	content := helpOverlayContent(100, 20)
+	if !strings.Contains(content, "toggle details") {
+		t.Fatalf("help overlay = %q, want detail toggle wording", content)
+	}
+	if strings.Contains(content, "toggle tool arguments/output") {
+		t.Fatalf("help overlay = %q, want old tool-only wording removed", content)
+	}
+}
+
 func TestRenderFooterShowsCachedTokensWhenPresent(t *testing.T) {
 	info := app.Info{Profile: "profile", Model: "model", SessionID: "session"}
 

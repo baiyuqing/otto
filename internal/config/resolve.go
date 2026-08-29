@@ -8,8 +8,12 @@ import (
 )
 
 const (
-	defaultShellTimeout   = 120 * time.Second
-	defaultMaxOutputBytes = 51200
+	defaultShellTimeout      = 120 * time.Second
+	defaultMaxOutputBytes    = 51200
+	defaultCompactionReserve = 16_384
+	defaultCompactionKeep    = 20_000
+	minimumCompactionWindow  = 4_096
+	minimumCompactionTarget  = 1_024
 )
 
 func Resolve(file File, env map[string]string, session SessionDefaults, overrides Overrides) (Runtime, error) {
@@ -27,10 +31,11 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 	}
 
 	var (
-		provider  string
-		model     string
-		baseURL   string
-		apiKeyEnv string
+		provider      string
+		model         string
+		baseURL       string
+		apiKeyEnv     string
+		profileConfig Profile
 	)
 
 	if selectedProfile != "" {
@@ -38,6 +43,7 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		if !ok {
 			return Runtime{}, fmt.Errorf("profile %q not found", selectedProfile)
 		}
+		profileConfig = profile
 		provider = profile.Provider
 		model = profile.Model
 		baseURL = profile.BaseURL
@@ -110,6 +116,11 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		maxOutputBytes = overrides.MaxOutputBytes
 	}
 
+	compaction, err := resolveCompaction(file.Agent.Compaction, profileConfig, model)
+	if err != nil {
+		return Runtime{}, err
+	}
+
 	apiKey, err := resolveAPIKey(env, apiKeyEnv)
 	if err != nil {
 		return Runtime{}, err
@@ -125,7 +136,73 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		APIKeyEnv:      apiKeyEnv,
 		ShellTimeout:   shellTimeout,
 		MaxOutputBytes: maxOutputBytes,
+		Compaction:     compaction,
 	}, nil
+}
+
+func resolveCompaction(config CompactionConfig, profile Profile, model string) (CompactionRuntime, error) {
+	auto := true
+	if config.Auto != nil {
+		auto = *config.Auto
+	}
+
+	reserve := defaultCompactionReserve
+	if config.ReserveTokens != nil {
+		if *config.ReserveTokens <= 0 {
+			return CompactionRuntime{}, fmt.Errorf("invalid reserve_tokens: must be greater than zero")
+		}
+		reserve = *config.ReserveTokens
+	}
+
+	keep := defaultCompactionKeep
+	if config.KeepRecentTokens != nil {
+		if *config.KeepRecentTokens <= 0 {
+			return CompactionRuntime{}, fmt.Errorf("invalid keep_recent_tokens: must be greater than zero")
+		}
+		keep = *config.KeepRecentTokens
+	}
+
+	if profile.ContextWindow != nil && *profile.ContextWindow < minimumCompactionWindow {
+		return CompactionRuntime{}, fmt.Errorf("invalid context_window: must be at least %d", minimumCompactionWindow)
+	}
+	if profile.CompactionWindow != nil {
+		if profile.ContextWindow == nil {
+			return CompactionRuntime{}, fmt.Errorf("invalid context_window: required with compaction_window")
+		}
+		if *profile.CompactionWindow < minimumCompactionWindow {
+			return CompactionRuntime{}, fmt.Errorf("invalid compaction_window: must be at least %d", minimumCompactionWindow)
+		}
+		if *profile.CompactionWindow > *profile.ContextWindow {
+			return CompactionRuntime{}, fmt.Errorf("invalid compaction_window: must not exceed context_window")
+		}
+	}
+
+	limits := resolveModelLimits(model)
+	runtime := CompactionRuntime{
+		Auto:             auto,
+		ContextWindow:    limits.ContextWindow,
+		HardInputWindow:  limits.HardInputWindow,
+		WorkingWindow:    limits.WorkingWindow,
+		MaxOutputTokens:  limits.MaxOutputTokens,
+		ReserveTokens:    reserve,
+		KeepRecentTokens: keep,
+	}
+	if profile.ContextWindow != nil {
+		runtime.ContextWindow = *profile.ContextWindow
+		runtime.HardInputWindow = *profile.ContextWindow
+		runtime.WorkingWindow = *profile.ContextWindow
+	}
+	if profile.CompactionWindow != nil {
+		runtime.WorkingWindow = *profile.CompactionWindow
+	}
+
+	if runtime.WorkingWindow > 0 {
+		reserveCap := max(minimumCompactionTarget, runtime.WorkingWindow/4)
+		runtime.ReserveTokens = min(runtime.ReserveTokens, reserveCap)
+		keepCap := max(minimumCompactionTarget, (runtime.WorkingWindow-runtime.ReserveTokens)/2)
+		runtime.KeepRecentTokens = min(runtime.KeepRecentTokens, keepCap)
+	}
+	return runtime, nil
 }
 
 func envValue(env map[string]string, key string) string {

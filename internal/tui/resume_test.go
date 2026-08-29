@@ -37,6 +37,10 @@ func (b *resumeBackend) Prompt(ctx context.Context, text string, emit func(agent
 	return b.prompt(ctx, text, emit)
 }
 
+func (b *resumeBackend) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
 func (b *resumeBackend) NewSession() error {
 	if b.newSession == nil {
 		return nil
@@ -652,6 +656,43 @@ func TestResumePickerCurrentSelectionClosesWithoutResuming(t *testing.T) {
 	}
 }
 
+func TestResumeSuccessRendersFoldedCompactionBeforeRetainedTail(t *testing.T) {
+	backend := &resumeBackend{
+		info: app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old"},
+		history: []model.Message{{
+			Role:   model.RoleAssistant,
+			Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}},
+		}},
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new"}
+		backend.history = []model.Message{
+			{ID: "checkpoint", Role: model.RoleContext, ContextType: "compaction", Display: true, ContextTokensBefore: 258000, Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Goal\nship it"}}},
+			{ID: "tail-user", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "retained request"}}},
+			{ID: "tail-assistant", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "retained answer"}}},
+		}
+		return app.ResumeResult{SessionPath: path}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	if cmd == nil {
+		t.Fatal("resume cmd = nil")
+	}
+	updated, _ = resuming.Update(runCommandWithin(t, cmd, time.Second))
+	got := updated.(Model)
+	content := got.View().Content
+	checkpoint := strings.Index(content, "[context] compacted 258k tokens")
+	tail := strings.Index(content, "retained request")
+	if checkpoint < 0 || tail < 0 || checkpoint >= tail {
+		t.Fatalf("view = %q, want folded compaction before retained tail", content)
+	}
+	if strings.Contains(content, "[Compaction summary]") {
+		t.Fatalf("view = %q, want internal compaction prefix hidden", content)
+	}
+}
+
 func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	backend := &resumeBackend{
 		info: app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old"},
@@ -704,7 +745,7 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	resuming.turnErrorSeen = true
 	resuming.turnEventErr = errors.New("old event error")
 	resuming.fatalErr = errors.New("old fatal")
-	resuming.turnHistoryBaseline = turnHistoryBaseline{messageCount: 2, valid: true}
+	resuming.turnHistoryBaseline = turnHistoryBaseline{idsJSON: `["before"]`, valid: true}
 	resuming.turnEntryStart = 3
 	resuming.liveEntrySequence = 11
 	resuming.autoFollow = false

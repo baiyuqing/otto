@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,10 +63,17 @@ func WithClock(clock Clock) Option {
 	}
 }
 
+type operationKind uint8
+
+const (
+	operationNone operationKind = iota
+	operationPrompt
+	operationCompact
+)
+
 type turnHistoryBaseline struct {
-	messageCount int
-	digest       [sha256.Size]byte
-	valid        bool
+	idsJSON string
+	valid   bool
 }
 
 type Model struct {
@@ -82,7 +88,7 @@ type Model struct {
 	height                 int
 	usage                  otmodel.Usage
 	running                bool
-	expandedTools          bool
+	expandedDetails        bool
 	overlay                overlayKind
 	autoFollow             bool
 	renderer               MarkdownRenderer
@@ -94,18 +100,23 @@ type Model struct {
 	dirtyStreaming         bool
 	renderTickActive       bool
 	cancel                 context.CancelFunc
+	operationCleanup       *operationCleanup
+	activeOperation        *activeOperation
 	ctrlCArmed             bool
 	ctrlCArmedAt           time.Time
 	ctrlCArmGeneration     uint64
 	newSessionPending      bool
 	newSessionGeneration   uint64
 	resume                 resumePickerState
+	activeTurnStream       *turnStream
 	activeTurnChannel      <-chan turnEnvelope
 	activeAssistant        int
 	turnErrorSeen          bool
 	turnEventErr           error
 	fatalErr               error
 	turnGeneration         uint64
+	operationKind          operationKind
+	compactionCompleted    bool
 	turnHistoryBaseline    turnHistoryBaseline
 	turnEntryStart         int
 	liveEntrySequence      int
@@ -132,20 +143,21 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	vp.SoftWrap = true
 
 	model := Model{
-		rootCtx:         ctx,
-		backend:         backend,
-		entries:         entries,
-		viewport:        vp,
-		editor:          editor,
-		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		keymap:          DefaultKeyMap(),
-		usage:           usage,
-		expandedTools:   false,
-		autoFollow:      true,
-		darkBackground:  true,
-		renderer:        newGlamourRenderer(true),
-		clock:           realClock{},
-		activeAssistant: -1,
+		rootCtx:          ctx,
+		backend:          backend,
+		entries:          entries,
+		viewport:         vp,
+		editor:           editor,
+		spinner:          spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		keymap:           DefaultKeyMap(),
+		usage:            usage,
+		expandedDetails:  false,
+		autoFollow:       true,
+		darkBackground:   true,
+		renderer:         newGlamourRenderer(true),
+		clock:            realClock{},
+		operationCleanup: newOperationCleanup(),
+		activeAssistant:  -1,
 	}
 	for _, option := range options {
 		option(&model)
@@ -168,7 +180,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.darkBackground = msg.IsDark()
 		if !m.rendererInjected {
 			m.renderer = newGlamourRenderer(m.darkBackground)
-			m.invalidateAssistantRenders()
+			m.invalidateMarkdownRenders()
 			m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		}
 		return m, nil
@@ -200,8 +212,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideOverlayMsg:
 		m.overlay = overlayNone
 		return m, nil
-	case toggleToolsMsg:
-		m.expandedTools = !m.expandedTools
+	case toggleDetailsMsg:
+		m.expandedDetails = !m.expandedDetails
 		m.refreshViewportContent(!m.autoFollow)
 		return m, nil
 	case scrollViewportMsg:
@@ -337,8 +349,8 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 		}
 		return m, nil
 	}
-	if key.Matches(msg, m.keymap.ToggleTools) {
-		m.expandedTools = !m.expandedTools
+	if key.Matches(msg, m.keymap.ToggleDetails) {
+		m.expandedDetails = !m.expandedDetails
 		m.refreshViewportContent(!m.autoFollow)
 		return m, nil
 	}
@@ -500,10 +512,10 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	return m.startPrompt(prompt)
 }
 
-func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
-	command, ok := findSlashCommand(name)
-	if !ok {
-		m.statusText = fmt.Sprintf("unknown command: %s", name)
+func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
+	command, argument, ok := parseSlashCommand(value)
+	if !ok || (argument != "" && command.Kind != slashCommandCompact) {
+		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
 	}
 	switch command.Kind {
@@ -531,13 +543,19 @@ func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
 	case slashCommandResume:
 		return m.handleResumeCommand()
+	case slashCommandCompact:
+		if m.running || m.newSessionPending {
+			m.statusText = app.ErrPromptActive.Error()
+			return m, nil
+		}
+		return m.startCompaction(argument)
 	case slashCommandExit:
 		if m.running {
 			return m, nil
 		}
 		return m.quit()
 	default:
-		m.statusText = fmt.Sprintf("unknown command: %s", name)
+		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
 	}
 }
@@ -568,22 +586,24 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 }
 
 func (m *Model) resetSessionViewFromBackend(status string) {
+	m.abandonActiveTurn()
 	m.entries, m.usage = entriesAndUsageFromBackend(m.backend)
 	m.overlay = overlayNone
 	m.statusText = status
-	if m.cancel != nil {
-		m.cancel()
-		m.cancel = nil
-	}
+	m.cancel = nil
 	m.running = false
 	m.clearCtrlCArm()
 	m.dirtyStreaming = false
 	m.renderTickActive = false
+	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
+	m.activeOperation = nil
 	m.activeAssistant = -1
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.fatalErr = nil
+	m.operationKind = operationNone
+	m.compactionCompleted = false
 	m.turnHistoryBaseline = turnHistoryBaseline{}
 	m.turnEntryStart = 0
 	m.liveEntrySequence = 0
@@ -668,6 +688,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 
 	m.running = true
 	m.cancel = cancel
+	m.clearCtrlCArm()
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.statusText = ""
@@ -675,7 +696,12 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.renderTickActive = false
 	m.activeAssistant = -1
 	m.turnGeneration++
+	m.operationKind = operationPrompt
+	m.compactionCompleted = false
+	stream.generation = m.turnGeneration
+	m.activeTurnStream = stream
 	m.activeTurnChannel = stream.channel
+	m.registerActiveOperation(stream, cancel)
 	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
 	m.turnEntryStart = len(m.entries)
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
@@ -690,6 +716,7 @@ func newTurnStream() *turnStream {
 	return &turnStream{
 		channel:           make(chan turnEnvelope, turnChannelCapacity),
 		regularEventSlots: make(chan struct{}, turnChannelCapacity-1),
+		abandonSignal:     make(chan struct{}),
 	}
 }
 
@@ -704,7 +731,7 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 	defer close(stream.channel)
 
 	if backend == nil {
-		stream.channel <- turnEnvelope{err: errors.New("backend is required"), done: true}
+		sendDurableTurnEnvelope(stream, turnEnvelope{err: errors.New("backend is required"), done: true})
 		return
 	}
 
@@ -716,30 +743,100 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 		if !acceptingEvents {
 			return
 		}
-		eventCopy := event
-		sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy})
+		eventCopy := cloneAgentEvent(event)
+		envelope := turnEnvelope{event: &eventCopy}
+		if isCommittedCompactionCompletion(eventCopy) {
+			envelope.aggregateUsage, envelope.aggregateUsagePresent = aggregateUsageSnapshot(backend)
+		}
+		sendTurnEvent(ctx, stream, envelope)
 	})
 	eventMu.Lock()
 	acceptingEvents = false
 	eventMu.Unlock()
-	stream.channel <- turnEnvelope{err: err, done: true}
+	sendDurableTurnEnvelope(stream, turnEnvelope{err: err, done: true})
+}
+
+func cloneAgentEvent(event agent.Event) agent.Event {
+	cloned := event
+	if event.Compaction != nil {
+		compaction := *event.Compaction
+		cloned.Compaction = &compaction
+	}
+	return cloned
+}
+
+func aggregateUsageSnapshot(backend app.Backend) (otmodel.Usage, bool) {
+	info := infoFromBackend(backend)
+	return info.Usage, info.UsagePresent
+}
+
+func isCommittedCompactionCompletion(event agent.Event) bool {
+	return event.Type == agent.EventCompactionCompleted && event.Compaction != nil
 }
 
 func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
+	if envelope.event != nil && isCommittedCompactionCompletion(*envelope.event) {
+		envelope.applicationAck = newTurnApplicationAck()
+		if !sendDurableTurnEnvelope(stream, envelope) {
+			return false
+		}
+		select {
+		case <-envelope.applicationAck.done:
+			return true
+		case <-stream.abandonSignal:
+			return false
+		}
+	}
 	return sendRegularTurnEvent(ctx, stream, envelope)
 }
 
+func sendDurableTurnEnvelope(stream *turnStream, envelope turnEnvelope) bool {
+	if stream == nil {
+		return false
+	}
+	select {
+	case <-stream.abandonSignal:
+		return false
+	default:
+	}
+	select {
+	case stream.channel <- envelope:
+		return true
+	case <-stream.abandonSignal:
+		return false
+	}
+}
+
 func sendRegularTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
+	if stream == nil {
+		return false
+	}
+	select {
+	case <-stream.abandonSignal:
+		return false
+	default:
+	}
 	select {
 	case stream.regularEventSlots <- struct{}{}:
 	case <-ctx.Done():
 		return false
+	case <-stream.abandonSignal:
+		return false
 	}
 	envelope.usesRegularEventSlot = true
+	select {
+	case <-stream.abandonSignal:
+		<-stream.regularEventSlots
+		return false
+	default:
+	}
 	select {
 	case stream.channel <- envelope:
 		return true
 	case <-ctx.Done():
+		<-stream.regularEventSlots
+		return false
+	case <-stream.abandonSignal:
 		<-stream.regularEventSlots
 		return false
 	}
@@ -753,34 +850,41 @@ func waitTurn(stream *turnStream) tea.Cmd {
 		} else if envelope.usesRegularEventSlot {
 			<-stream.regularEventSlots
 		}
-		return turnMsg{channel: stream.channel, stream: stream, value: envelope}
+		return turnMsg{channel: stream.channel, stream: stream, generation: stream.generation, value: envelope}
 	}
 }
 
 func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
+	if msg.value.applicationAck != nil {
+		defer msg.value.applicationAck.acknowledge()
+	}
 	if !m.isActiveTurnMessage(msg) {
 		if msg.value.done || msg.stream == nil {
+			return m, nil
+		}
+		if m.running && msg.channel == m.activeTurnChannel {
 			return m, nil
 		}
 		return m, waitTurn(msg.stream)
 	}
 	if msg.value.event != nil {
-		return m.applyTurnEvent(msg.stream, *msg.value.event)
+		return m.applyTurnEvent(msg.stream, msg.value)
 	}
 	if msg.value.done {
 		if m.reconcilePersistedToolResults() {
 			m.refreshViewportContent(!m.autoFollow)
 		}
-		return m.finishTurn(msg.value.err)
+		return m.finishTurn(msg.value)
 	}
 	return m, waitTurn(msg.stream)
 }
 
 func (m Model) isActiveTurnMessage(msg turnMsg) bool {
-	return m.running && m.activeTurnChannel != nil && msg.channel == m.activeTurnChannel && msg.stream != nil && msg.stream.channel == m.activeTurnChannel
+	return m.running && m.activeTurnStream != nil && msg.generation == m.turnGeneration && msg.stream == m.activeTurnStream && msg.channel == m.activeTurnStream.channel && msg.stream.generation == m.turnGeneration && m.activeTurnChannel == m.activeTurnStream.channel
 }
 
-func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model, tea.Cmd) {
+func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Model, tea.Cmd) {
+	event := *envelope.event
 	switch event.Type {
 	case agent.EventTextDelta:
 		m.applyTextDelta(event.Text)
@@ -808,6 +912,11 @@ func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model,
 		return m, waitTurn(stream)
 	case agent.EventAgentError:
 		m.recordTurnError(event.Err)
+		return m, waitTurn(stream)
+	case agent.EventCompactionStarted, agent.EventCompactionCompleted, agent.EventCompactionWarning:
+		if m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent) {
+			m.refreshViewportContent(!m.autoFollow)
+		}
 		return m, waitTurn(stream)
 	case agent.EventAgentFinished, agent.EventAgentStarted:
 		return m, waitTurn(stream)
@@ -868,40 +977,73 @@ func (m Model) findPendingToolEntry(toolCallID string) int {
 }
 
 func captureTurnHistoryBaseline(history []otmodel.Message) turnHistoryBaseline {
-	digest, valid := historyDigest(history)
-	return turnHistoryBaseline{messageCount: len(history), digest: digest, valid: valid}
-}
-
-func historyDigest(history []otmodel.Message) ([sha256.Size]byte, bool) {
-	hasher := sha256.New()
-	_, _ = fmt.Fprintf(hasher, "%d\n", len(history))
-	encoder := json.NewEncoder(hasher)
+	ids := make([]string, 0, len(history))
+	seen := make(map[string]struct{}, len(history))
 	for _, message := range history {
-		if err := encoder.Encode(message); err != nil {
-			return [sha256.Size]byte{}, false
+		if message.ID == "" {
+			continue
 		}
+		if _, ok := seen[message.ID]; ok {
+			continue
+		}
+		seen[message.ID] = struct{}{}
+		ids = append(ids, message.ID)
 	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hasher.Sum(nil))
-	return digest, true
+	sort.Strings(ids)
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return turnHistoryBaseline{}
+	}
+	return turnHistoryBaseline{idsJSON: string(encoded), valid: true}
 }
 
-func (m Model) persistedTurnToolResults() []otmodel.Block {
+func (b turnHistoryBaseline) idSet() map[string]struct{} {
+	if !b.valid {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(b.idsJSON), &ids); err != nil {
+		return nil
+	}
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		set[id] = struct{}{}
+	}
+	return set
+}
+
+func (m Model) persistedTurnMessages() []otmodel.Message {
 	baseline := m.turnHistoryBaseline
 	if !baseline.valid {
 		return nil
 	}
-	history := historyFromBackend(m.backend)
-	if len(history) < baseline.messageCount {
+	knownIDs := baseline.idSet()
+	if knownIDs == nil {
 		return nil
 	}
-	digest, valid := historyDigest(history[:baseline.messageCount])
-	if !valid || digest != baseline.digest {
-		return nil
+	messages := make([]otmodel.Message, 0)
+	for _, message := range historyFromBackend(m.backend) {
+		if message.ID == "" {
+			continue
+		}
+		if _, seen := knownIDs[message.ID]; seen {
+			continue
+		}
+		messages = append(messages, message)
 	}
+	return messages
+}
 
-	var results []otmodel.Block
-	for _, message := range history[baseline.messageCount:] {
+func (m Model) persistedTurnToolResults() []otmodel.Block {
+	messages := m.persistedTurnMessages()
+	if len(messages) == 0 {
+		return nil
+	}
+	results := make([]otmodel.Block, 0)
+	for _, message := range messages {
 		for _, block := range message.Blocks {
 			if block.Type == otmodel.BlockToolResult {
 				results = append(results, block)
@@ -955,6 +1097,80 @@ func (m *Model) reconcilePersistedToolResults() bool {
 	return changed
 }
 
+func (m *Model) reconcilePersistedCheckpoint(checkpointID string, tokensAfter int) bool {
+	if checkpointID == "" {
+		return false
+	}
+	message, ok := m.persistedCompactionMessage(checkpointID)
+	if !ok {
+		return m.updateCompactionEntryTokens(checkpointID, tokensAfter)
+	}
+	entry, ok := compactionEntryFromMessage(message, 0)
+	if !ok {
+		return false
+	}
+	entry.TokensAfter = max(0, tokensAfter)
+	return m.upsertCompactionEntry(entry)
+}
+
+func (m Model) persistedCompactionMessage(checkpointID string) (otmodel.Message, bool) {
+	for _, message := range m.persistedTurnMessages() {
+		if message.ID != checkpointID {
+			continue
+		}
+		if message.Role == otmodel.RoleContext && message.ContextType == "compaction" && message.Display {
+			return message, true
+		}
+		return otmodel.Message{}, false
+	}
+	return otmodel.Message{}, false
+}
+
+func (m *Model) upsertCompactionEntry(entry Entry) bool {
+	if entry.Kind != EntryCompaction {
+		return false
+	}
+	for index := range m.entries {
+		if m.entries[index].Kind != EntryCompaction || m.entries[index].CheckpointID != entry.CheckpointID {
+			continue
+		}
+		updated := m.entries[index]
+		if entry.Raw != "" {
+			updated.Raw = entry.Raw
+		}
+		updated.TokensBefore = max(updated.TokensBefore, entry.TokensBefore)
+		updated.TokensAfter = max(updated.TokensAfter, entry.TokensAfter)
+		if updated == m.entries[index] {
+			return false
+		}
+		updated.RenderWidth = 0
+		m.entries[index] = updated
+		m.renderEntryAt(index, m.transcriptWidth())
+		return true
+	}
+	m.entries = append(m.entries, entry)
+	m.renderEntryAt(len(m.entries)-1, m.transcriptWidth())
+	return true
+}
+
+func (m *Model) updateCompactionEntryTokens(checkpointID string, tokensAfter int) bool {
+	if checkpointID == "" || tokensAfter <= 0 {
+		return false
+	}
+	for index := range m.entries {
+		entry := m.entries[index]
+		if entry.Kind != EntryCompaction || entry.CheckpointID != checkpointID || entry.TokensAfter == tokensAfter {
+			continue
+		}
+		entry.TokensAfter = tokensAfter
+		entry.RenderWidth = 0
+		m.entries[index] = entry
+		m.renderEntryAt(index, m.transcriptWidth())
+		return true
+	}
+	return false
+}
+
 func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
 	if toolCallID == "" {
 		return -1
@@ -972,12 +1188,20 @@ func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
 	return -1
 }
 
-func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
+func (m Model) finishTurn(envelope turnEnvelope) (tea.Model, tea.Cmd) {
+	err := envelope.err
+	changed := false
+	if m.operationKind == operationCompact && !m.compactionCompleted && envelope.compactionResult != nil && (envelope.compactionResult.Noop || envelope.compactionResult.CheckpointID != "" || err == nil) {
+		changed = m.applyCompactionResult(*envelope.compactionResult, envelope.aggregateUsage, envelope.aggregateUsagePresent) || changed
+	}
 	if err == nil {
 		err = m.turnEventErr
 	}
 	m.finalizeStreamingRender()
 	if m.reconcilePendingTools(err) {
+		changed = true
+	}
+	if changed {
 		m.refreshViewportContent(!m.autoFollow)
 	}
 	if err != nil && !m.turnErrorSeen {
@@ -1043,16 +1267,22 @@ func (m *Model) renderActiveAssistantEntry() bool {
 }
 
 func (m *Model) completeTurnState() {
-	if m.cancel != nil {
+	if m.activeOperation != nil {
+		m.operationCleanup.finish(m.activeOperation)
+	} else if m.cancel != nil {
 		m.cancel()
-		m.cancel = nil
 	}
+	m.cancel = nil
+	m.activeOperation = nil
 	m.running = false
+	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
 	m.renderTickActive = false
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.activeAssistant = -1
+	m.operationKind = operationNone
+	m.compactionCompleted = false
 	m.turnHistoryBaseline = turnHistoryBaseline{}
 	m.turnEntryStart = 0
 }
@@ -1101,9 +1331,9 @@ func (m *Model) renderEntries(width int) {
 	}
 }
 
-func (m *Model) invalidateAssistantRenders() {
+func (m *Model) invalidateMarkdownRenders() {
 	for i := range m.entries {
-		if m.entries[i].Kind == EntryAssistant {
+		if m.entries[i].Kind == EntryAssistant || m.entries[i].Kind == EntryCompaction {
 			m.entries[i].RenderWidth = 0
 			m.entries[i].Rendered = ""
 		}
@@ -1116,7 +1346,7 @@ func (m *Model) renderEntryAt(index int, width int) {
 	}
 	entry := &m.entries[index]
 	switch entry.Kind {
-	case EntryAssistant:
+	case EntryAssistant, EntryCompaction:
 		if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
 			return
 		}
@@ -1149,7 +1379,9 @@ func (m Model) renderEntry(entry Entry, width int) string {
 	case EntryAssistant:
 		return renderMessageBlock("Otto", entry.Rendered)
 	case EntryTool:
-		return renderToolBlock(entry, width, m.expandedTools)
+		return renderToolBlock(entry, width, m.expandedDetails)
+	case EntryCompaction:
+		return renderCompactionBlock(entry, width, m.expandedDetails)
 	case EntryError:
 		return renderMessageBlock("Error", entry.Rendered)
 	default:
@@ -1163,6 +1395,14 @@ func renderMessageBlock(title, body string) string {
 		return title
 	}
 	return title + "\n" + body
+}
+
+func renderCompactionBlock(entry Entry, width int, expanded bool) string {
+	summary := ansi.Truncate(compactionSummaryLabel(entry.TokensBefore, entry.TokensAfter), max(0, width), "")
+	if !expanded || entry.Rendered == "" {
+		return summary
+	}
+	return summary + "\n\n" + entry.Rendered
 }
 
 func renderToolBlock(entry Entry, width int, expanded bool) string {
@@ -1274,6 +1514,26 @@ func (m *Model) nextLiveEntryID(kind string) string {
 	return liveEntryIDPrefix + "-" + id
 }
 
+func (m *Model) registerActiveOperation(stream *turnStream, cancel context.CancelFunc) {
+	if m.operationCleanup == nil {
+		m.operationCleanup = newOperationCleanup()
+	}
+	m.activeOperation = m.operationCleanup.register(stream, cancel)
+}
+
+func (m *Model) abandonActiveTurn() {
+	if m.activeOperation != nil {
+		m.operationCleanup.abandon(m.activeOperation)
+		return
+	}
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.activeTurnStream != nil {
+		m.activeTurnStream.abandon()
+	}
+}
+
 func (m Model) reservedStateActive() bool {
-	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.activeTurnStream != nil || m.ctrlCArmed || m.fatalErr != nil
 }

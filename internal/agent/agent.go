@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
@@ -15,14 +17,15 @@ import (
 )
 
 type Agent struct {
-	provider provider.Provider
-	registry *tool.Registry
-	session  session.Session
-	options  Options
-	redactor *Redactor
+	operationMu sync.Mutex
+	provider    provider.Provider
+	registry    *tool.Registry
+	session     session.Session
+	options     Options
+	redactor    *Redactor
 }
 
-func New(provider provider.Provider, registry *tool.Registry, memory session.Session, options Options, redactors ...*Redactor) *Agent {
+func New(completionProvider provider.Provider, registry *tool.Registry, memory session.Session, options Options, redactors ...*Redactor) *Agent {
 	if registry == nil {
 		registry, _ = tool.NewRegistry()
 	}
@@ -32,6 +35,11 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 	if options.NewID == nil {
 		options.NewID = defaultNewID
 	}
+	if options.RequestSizer == nil {
+		if requestSizer, ok := completionProvider.(provider.RequestSizer); ok {
+			options.RequestSizer = requestSizer
+		}
+	}
 	var redactor *Redactor
 	if len(redactors) > 0 {
 		redactor = redactors[0]
@@ -39,10 +47,13 @@ func New(provider provider.Provider, registry *tool.Registry, memory session.Ses
 	if redactor == nil {
 		redactor = NewRedactor(nil)
 	}
-	return &Agent{provider: provider, registry: registry, session: memory, options: options, redactor: redactor}
+	return &Agent{provider: completionProvider, registry: registry, session: memory, options: options, redactor: redactor}
 }
 
 func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) error {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+
 	if text := trimSpace(userText); text == "" {
 		return a.fail(emit, ErrEmptyUserText)
 	}
@@ -58,27 +69,11 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		return a.fail(emit, fmt.Errorf("persist user message: %w", err))
 	}
 
+	dispatchState := runDispatchState{}
 	for {
-		stream := a.redactor.newStream()
-		response, err := a.provider.Complete(ctx, provider.Request{
-			Model:        a.options.Model,
-			SystemPrompt: a.options.SystemPrompt,
-			Thinking:     a.options.Thinking,
-			Messages:     cloneMessages(a.session.Messages()),
-			Tools:        cloneTools(a.registry.Definitions()),
-		}, func(event provider.StreamEvent) {
-			switch event.Type {
-			case provider.StreamTextDelta:
-				if text := stream.Write(event.Text); text != "" {
-					a.emit(emit, Event{Type: EventTextDelta, Text: text})
-				}
-			}
-		})
+		response, err := a.dispatchNormalProviderStep(ctx, emit, &dispatchState)
 		if err != nil {
 			return a.fail(emit, err)
-		}
-		if text := stream.Flush(); text != "" {
-			a.emit(emit, Event{Type: EventTextDelta, Text: text})
 		}
 
 		assistant := a.redactMessage(response.Message)
@@ -145,6 +140,105 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 			return nil
 		}
 	}
+}
+
+func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event), state *runDispatchState) (provider.Response, error) {
+	request, estimate := a.buildNormalProviderRequest()
+	softTrigger, hardTrigger, knownLimits := automaticCompactionTriggers(a.options.Compaction)
+
+	if a.options.Compaction.Auto && knownLimits && estimate > softTrigger {
+		if !state.proactiveAttempted {
+			state.proactiveAttempted = true
+			if _, err := a.compact(ctx, CompactionThreshold, "", emit); err != nil {
+				if errors.Is(err, ErrNothingToCompact) {
+					a.emitCompaction(emit, EventCompactionCompleted, CompactionResult{Reason: CompactionThreshold, Automatic: true, Noop: true})
+					state.proactiveAttempted = false
+				} else {
+					if cancelErr := automaticCancellation(ctx, err); cancelErr != nil {
+						return provider.Response{}, cancelErr
+					}
+					if estimate >= hardTrigger {
+						return provider.Response{}, newAutomaticDispatchError(automaticCompactionHardFailureMessage, err)
+					}
+					a.emit(emit, Event{Type: EventCompactionWarning, Err: errAutomaticCompactionWarning})
+				}
+			} else {
+				if err := ctx.Err(); err != nil {
+					return provider.Response{}, err
+				}
+				request, estimate = a.buildNormalProviderRequest()
+				if estimate > hardTrigger {
+					return provider.Response{}, newAutomaticDispatchError(automaticCompactionStillTooLargeMessage)
+				}
+			}
+		} else if estimate > hardTrigger {
+			return provider.Response{}, newAutomaticDispatchError(automaticCompactionAttemptUsedMessage)
+		}
+	}
+
+	response, visibleText, err := a.completeNormalProviderAttempt(ctx, request, emit)
+	if err == nil || !a.options.Compaction.Auto || visibleText || !isTypedContextOverflow(err) {
+		return response, err
+	}
+
+	originalOverflow := err
+	if _, compactionErr := a.compact(ctx, CompactionOverflow, "", emit); compactionErr != nil {
+		if errors.Is(compactionErr, ErrNothingToCompact) {
+			a.emitCompaction(emit, EventCompactionCompleted, CompactionResult{Reason: CompactionOverflow, Automatic: true, Noop: true})
+			return provider.Response{}, originalOverflow
+		}
+		if cancelErr := automaticCancellation(ctx, compactionErr); cancelErr != nil {
+			return provider.Response{}, cancelErr
+		}
+		return provider.Response{}, newAutomaticDispatchError(overflowCompactionFailureMessage, originalOverflow, compactionErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return provider.Response{}, err
+	}
+
+	retryRequest, retryEstimate := a.buildNormalProviderRequest()
+	if _, hardTrigger, knownLimits := automaticCompactionTriggers(a.options.Compaction); knownLimits && retryEstimate > hardTrigger {
+		return provider.Response{}, newAutomaticDispatchError(automaticCompactionStillTooLargeMessage, originalOverflow)
+	}
+	response, _, err = a.completeNormalProviderAttempt(ctx, retryRequest, emit)
+	if isTypedContextOverflow(err) {
+		return provider.Response{}, newAutomaticDispatchError(overflowRetryFailureMessage, originalOverflow, err)
+	}
+	return response, err
+}
+
+func (a *Agent) buildNormalProviderRequest() (provider.Request, int) {
+	request := provider.Request{
+		Model:        a.options.Model,
+		SystemPrompt: a.options.SystemPrompt,
+		Thinking:     a.options.Thinking,
+		Messages:     cloneMessages(a.session.Messages()),
+		Tools:        cloneTools(a.registry.Definitions()),
+	}
+	latest, hasLatest := a.session.LatestCompaction()
+	return request, estimateRequest(request, latest, hasLatest)
+}
+
+func (a *Agent) completeNormalProviderAttempt(ctx context.Context, request provider.Request, emit func(Event)) (provider.Response, bool, error) {
+	stream := a.redactor.newStream()
+	visibleText := false
+	response, err := a.provider.Complete(ctx, request, func(event provider.StreamEvent) {
+		if event.Type != provider.StreamTextDelta {
+			return
+		}
+		if text := stream.Write(event.Text); text != "" {
+			visibleText = true
+			a.emit(emit, Event{Type: EventTextDelta, Text: text})
+		}
+	})
+	if err != nil {
+		return provider.Response{}, visibleText, err
+	}
+	if text := stream.Flush(); text != "" {
+		visibleText = true
+		a.emit(emit, Event{Type: EventTextDelta, Text: text})
+	}
+	return response, visibleText, nil
 }
 
 func (a *Agent) emit(emit func(Event), event Event) {

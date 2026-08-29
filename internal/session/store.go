@@ -31,21 +31,23 @@ type durableRecordWriter interface {
 }
 
 type Store struct {
-	mu             sync.Mutex
-	header         Header
-	root           string
-	messages       []model.Message
-	aggregateUsage model.Usage
-	usagePresent   bool
-	entries        []piEntry
-	entryIDs       map[string]struct{}
-	leafID         *string
-	path           string
-	file           *os.File
-	writer         durableRecordWriter
-	fileBytes      int64
-	fatalErr       error
-	closed         bool
+	mu                  sync.Mutex
+	header              Header
+	root                string
+	messages            []model.Message
+	aggregateUsage      model.Usage
+	usagePresent        bool
+	latestCompaction    CompactionMetadata
+	hasLatestCompaction bool
+	entries             []piEntry
+	entryIDs            map[string]struct{}
+	leafID              *string
+	path                string
+	file                *os.File
+	writer              durableRecordWriter
+	fileBytes           int64
+	fatalErr            error
+	closed              bool
 }
 
 func Create(root string, header Header) (*Store, error) {
@@ -213,17 +215,19 @@ func openStoreFromFile(file *os.File, path string) (*Store, []Warning, error) {
 	}
 
 	store := &Store{
-		header:         state.header,
-		messages:       state.messages,
-		aggregateUsage: state.aggregateUsage,
-		usagePresent:   state.usagePresent,
-		entries:        append([]piEntry(nil), decoded.Entries...),
-		entryIDs:       state.entryIDs,
-		leafID:         cloneStringPointer(state.leafID),
-		path:           path,
-		file:           file,
-		writer:         file,
-		fileBytes:      position,
+		header:              state.header,
+		messages:            state.messages,
+		aggregateUsage:      state.aggregateUsage,
+		usagePresent:        state.usagePresent,
+		latestCompaction:    cloneCompactionMetadata(state.latestCompaction),
+		hasLatestCompaction: state.hasLatestCompaction,
+		entries:             append([]piEntry(nil), decoded.Entries...),
+		entryIDs:            state.entryIDs,
+		leafID:              cloneStringPointer(state.leafID),
+		path:                path,
+		file:                file,
+		writer:              file,
+		fileBytes:           position,
 	}
 	repairWarnings, err := store.repairDanglingToolCalls()
 	if err != nil {
@@ -363,9 +367,12 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 	s.leafID = stringPointer(entryID)
 	s.fileBytes += recordBytes
 	s.messages = append(s.messages, cloneMessage(persistedMessage))
-	if persistedMessage.Role == model.RoleAssistant {
+	if persistedMessage.Role == model.RoleAssistant && hasMeaningfulUsage(persistedMessage.Usage) {
 		s.aggregateUsage = addResolvedUsage(s.aggregateUsage, persistedMessage.Usage)
 		s.usagePresent = true
+	}
+	if s.hasLatestCompaction && s.latestCompaction.FirstPostCheckpointMessageID == "" {
+		s.latestCompaction.FirstPostCheckpointMessageID = persistedMessage.ID
 	}
 	return nil
 }
@@ -417,13 +424,15 @@ func (s *Store) repairDanglingToolCalls() ([]Warning, error) {
 }
 
 type resolvedPiStoreState struct {
-	header         Header
-	messages       []model.Message
-	aggregateUsage model.Usage
-	usagePresent   bool
-	entryIDs       map[string]struct{}
-	leafID         *string
-	warnings       []Warning
+	header              Header
+	messages            []model.Message
+	aggregateUsage      model.Usage
+	usagePresent        bool
+	latestCompaction    CompactionMetadata
+	hasLatestCompaction bool
+	entryIDs            map[string]struct{}
+	leafID              *string
+	warnings            []Warning
 }
 
 func resolvePiStoreState(decoded piFile) (resolvedPiStoreState, error) {
@@ -447,17 +456,23 @@ func resolvePiStoreState(decoded piFile) (resolvedPiStoreState, error) {
 	if err != nil {
 		return resolvedPiStoreState{}, err
 	}
+	latestCompaction, hasLatestCompaction, err := latestCompactionMetadata(decoded.Entries, leaf)
+	if err != nil {
+		return resolvedPiStoreState{}, err
+	}
 	return resolvedPiStoreState{
 		header: Header{
 			Version: CurrentVersion, ID: decoded.Header.ID, Workspace: decoded.Header.CWD,
 			Provider: resolved.Runtime.Provider, Profile: resolved.Runtime.Profile, Model: resolved.Runtime.Model, CreatedAt: createdAt,
 		},
-		messages:       resolved.Messages,
-		aggregateUsage: resolved.Usage,
-		usagePresent:   resolved.UsagePresent,
-		entryIDs:       entryIDs,
-		leafID:         leafID,
-		warnings:       warnings,
+		messages:            resolved.Messages,
+		aggregateUsage:      resolved.Usage,
+		usagePresent:        resolved.UsagePresent,
+		latestCompaction:    latestCompaction,
+		hasLatestCompaction: hasLatestCompaction,
+		entryIDs:            entryIDs,
+		leafID:              leafID,
+		warnings:            warnings,
 	}, nil
 }
 func validateDomainHeader(header Header) (string, error) {
@@ -535,7 +550,14 @@ func modelMessageToPiEntry(message model.Message, entryID string, parentID *stri
 	if err != nil {
 		return piEntry{}, model.Message{}, err
 	}
-	piMessage := &piMessage{Role: string(message.Role), Content: content, Timestamp: message.CreatedAt.UnixMilli()}
+	_, contentBlocks, err := decodeContent(content, "message content", false)
+	if err != nil {
+		return piEntry{}, model.Message{}, err
+	}
+	piMessage := &piMessage{
+		Role: string(message.Role), Content: content, ContentBlocks: contentBlocks,
+		Timestamp: message.CreatedAt.UnixMilli(),
+	}
 
 	switch message.Role {
 	case model.RoleUser:
@@ -651,18 +673,22 @@ func modelFinishReasonToPi(reason model.FinishReason) (string, error) {
 }
 
 func modelUsageToPi(usage *model.Usage) (*piUsage, error) {
-	var input, output int64
-	if usage != nil {
-		if usage.InputTokens < 0 || usage.OutputTokens < 0 {
-			return nil, fmt.Errorf("%w: usage token counts must be nonnegative", ErrInvalidSession)
-		}
-		input = int64(usage.InputTokens)
-		output = int64(usage.OutputTokens)
+	if usage == nil {
+		return &piUsage{}, nil
 	}
-	if output > math.MaxInt64-input {
+	if err := usage.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSession, err)
+	}
+	if usage.OutputTokens > math.MaxInt-usage.InputTokens {
 		return nil, fmt.Errorf("%w: usage token total overflows", ErrInvalidSession)
 	}
-	return &piUsage{Input: input, Output: output, TotalTokens: input + output}, nil
+	return &piUsage{
+		Input:       int64(usage.InputTokens - usage.CachedInputTokens),
+		Output:      int64(usage.OutputTokens),
+		CacheRead:   int64(usage.CachedInputTokens),
+		CacheWrite:  0,
+		TotalTokens: int64(usage.InputTokens + usage.OutputTokens),
+	}, nil
 }
 
 func piStopReasonToModel(reason string) (model.FinishReason, error) {
@@ -686,13 +712,28 @@ func piUsageToModel(usage *piUsage) (*model.Usage, error) {
 	if usage == nil {
 		return nil, fmt.Errorf("%w: assistant usage is required", ErrInvalidSession)
 	}
-	if usage.Input < 0 || usage.Output < 0 || usage.Input > int64(math.MaxInt) || usage.Output > int64(math.MaxInt) {
+	if usage.Input < 0 || usage.Output < 0 || usage.CacheRead < 0 || usage.CacheWrite < 0 || usage.TotalTokens < 0 {
 		return nil, fmt.Errorf("%w: assistant usage is outside the supported range", ErrInvalidSession)
 	}
-	if usage.Input == 0 && usage.Output == 0 {
+	promptInput, ok := addInt64s(usage.Input, usage.CacheRead, usage.CacheWrite)
+	if !ok || promptInput > int64(math.MaxInt) || usage.Output > int64(math.MaxInt) || usage.CacheRead > int64(math.MaxInt) {
+		return nil, fmt.Errorf("%w: assistant usage is outside the supported range", ErrInvalidSession)
+	}
+	if promptInput == 0 && usage.Output == 0 && usage.CacheRead == 0 && usage.CacheWrite == 0 {
 		return nil, nil
 	}
-	return &model.Usage{InputTokens: int(usage.Input), OutputTokens: int(usage.Output)}, nil
+	return &model.Usage{InputTokens: int(promptInput), OutputTokens: int(usage.Output), CachedInputTokens: int(usage.CacheRead)}, nil
+}
+
+func addInt64s(values ...int64) (int64, bool) {
+	var total int64
+	for _, value := range values {
+		if value < 0 || total > math.MaxInt64-value {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
 }
 
 func validateAssistantToolFinish(blocks []model.Block, reason model.FinishReason) error {

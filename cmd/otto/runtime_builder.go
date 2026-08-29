@@ -180,9 +180,10 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 		Session: candidate,
 		Runner:  runner,
 		RuntimeInfo: app.RuntimeInfo{
-			Provider: runtime.Provider,
-			Profile:  runtime.Profile,
-			Model:    runtime.Model,
+			Provider:      runtime.Provider,
+			Profile:       runtime.Profile,
+			Model:         runtime.Model,
+			ContextWindow: runtime.Compaction.ContextWindow,
 		},
 	}, nil
 }
@@ -221,9 +222,10 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 		Session: candidate,
 		Runner:  runner,
 		RuntimeInfo: app.RuntimeInfo{
-			Provider: runtime.Provider,
-			Profile:  runtime.Profile,
-			Model:    runtime.Model,
+			Provider:      runtime.Provider,
+			Profile:       runtime.Profile,
+			Model:         runtime.Model,
+			ContextWindow: runtime.Compaction.ContextWindow,
 		},
 		Warnings: cloneWarnings(warnings),
 	}, nil

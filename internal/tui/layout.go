@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math/big"
 	"path/filepath"
 	"strings"
 
@@ -103,6 +104,9 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 		} else {
 			fields = append(fields, fmt.Sprintf("tokens %s/%s", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens)))
 		}
+		if context := footerContextField(info); context != "" {
+			fields = append(fields, context)
+		}
 	}
 	if info.SessionID != "" && width >= 60 {
 		fields = append(fields, escapeSingleLineText(info.SessionID))
@@ -118,6 +122,36 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 	footer := strings.Join(fields, " | ")
 	width = max(0, width)
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
+}
+
+func footerContextField(info app.Info) string {
+	if info.ContextWindow <= 0 {
+		return ""
+	}
+	if info.ContextInputTokensPresent {
+		return "ctx " + formatFooterContextPercentage(info.ContextInputTokens, info.ContextWindow)
+	}
+	if info.ContextInputTokensPending {
+		return "ctx ?%"
+	}
+	return ""
+}
+
+func formatFooterContextPercentage(inputTokens, contextWindow int) string {
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	if contextWindow <= 0 {
+		return "0.0%"
+	}
+	numerator := new(big.Int).Mul(big.NewInt(int64(inputTokens)), big.NewInt(1000))
+	denominator := big.NewInt(int64(contextWindow))
+	numerator.Add(numerator, new(big.Int).Rsh(new(big.Int).Set(denominator), 1))
+	tenths := new(big.Int).Quo(numerator, denominator).String()
+	if len(tenths) == 1 {
+		return "0." + tenths + "%"
+	}
+	return tenths[:len(tenths)-1] + "." + tenths[len(tenths)-1:] + "%"
 }
 
 func formatFooterTokenCount(tokens int) string {

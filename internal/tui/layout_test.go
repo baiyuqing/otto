@@ -89,6 +89,67 @@ func TestRenderFooterUsesHumanReadableTokenTotals(t *testing.T) {
 	}
 }
 
+func TestRenderFooterShowsContextPercentageStates(t *testing.T) {
+	base := app.Info{Profile: "profile", Model: "model", SessionID: "session", ContextWindow: 128_000}
+	tests := []struct {
+		name        string
+		info        app.Info
+		want        string
+		wantMissing []string
+	}{
+		{name: "known latest context", info: app.Info{Profile: base.Profile, Model: base.Model, SessionID: base.SessionID, ContextWindow: base.ContextWindow, ContextInputTokens: 29_952, ContextInputTokensPresent: true}, want: "ctx 23.4%"},
+		{name: "pending after compaction", info: app.Info{Profile: base.Profile, Model: base.Model, SessionID: base.SessionID, ContextWindow: base.ContextWindow, ContextInputTokensPending: true}, want: "ctx ?%"},
+		{name: "unknown window hides field", info: app.Info{Profile: base.Profile, Model: base.Model, SessionID: base.SessionID, ContextInputTokens: 29_952, ContextInputTokensPresent: true}, wantMissing: []string{"ctx "}},
+		{name: "omitted prompt usage hides field", info: base, wantMissing: []string{"ctx "}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			footer := renderFooter(120, tt.info, model.Usage{InputTokens: 20, OutputTokens: 6}, "")
+			if tt.want != "" && !strings.Contains(footer, tt.want) {
+				t.Fatalf("footer = %q, want %q", footer, tt.want)
+			}
+			for _, missing := range tt.wantMissing {
+				if strings.Contains(footer, missing) {
+					t.Fatalf("footer = %q, want missing %q", footer, missing)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatFooterContextPercentage(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  int
+		window int
+		want   string
+	}{
+		{name: "zero input", input: 0, window: 128_000, want: "0.0%"},
+		{name: "rounds to one decimal", input: 1, window: 6, want: "16.7%"},
+		{name: "exact percentage", input: 29_952, window: 128_000, want: "23.4%"},
+		{name: "over one hundred is not clamped", input: 1_100, window: 1_000, want: "110.0%"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatFooterContextPercentage(tt.input, tt.window); got != tt.want {
+				t.Fatalf("formatFooterContextPercentage(%d, %d) = %q, want %q", tt.input, tt.window, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderFooterContextFieldStaysWithinBounds(t *testing.T) {
+	info := app.Info{Profile: "profile", Model: "model", SessionID: "session", ContextWindow: 128_000, ContextInputTokens: 29_952, ContextInputTokensPresent: true}
+	for _, width := range []int{48, 60, 72, 120} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			footer := renderFooter(width, info, model.Usage{InputTokens: 20, OutputTokens: 6}, "status")
+			assertRenderedBounds(t, footer, width, 1)
+		})
+	}
+}
+
 func TestRenderFooterKeepsZeroUsageRenderableUnderPTYFixtures(t *testing.T) {
 	info := app.Info{Profile: "profile", Model: "model", SessionID: "session"}
 	footer := renderFooter(120, info, model.Usage{}, "")

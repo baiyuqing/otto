@@ -21,6 +21,10 @@ func typeEditorText(t *testing.T, model Model, text string) Model {
 
 func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)
+	// Seed the transcript so the empty-state hint (which legitimately mentions
+	// /help and /resume) does not interfere with the suggestion scan below.
+	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: "context", Rendered: "context", RenderWidth: 80}}
+	m.rerenderAndRefreshViewportContent(false)
 	m = typeEditorText(t, m, "/s")
 
 	content := m.View().Content

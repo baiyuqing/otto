@@ -216,7 +216,7 @@ Selection rules:
 
 ### Headless mode
 
-`--approve` runs a single prompt without interaction and exits: `0` on success, `1` on error, `130` on interrupt. The value is the prompt text, or `@PATH` to read the prompt from a file. Output uses the REPL's line-oriented rendering without the banner or input prompts. Otto's tools never require interactive approval; `--approve` only supplies the prompt and removes the interactive loop. It cannot be combined with `--ui tui`, and it composes with `--continue`, `--resume`, and `--no-session`.
+`--approve` runs a single prompt without interaction and exits: `0` on success, `1` on error, `130` on interrupt. The value is the prompt text, or `@PATH` to read the prompt from a file (bounded to 1 MiB). Output uses the REPL's line-oriented rendering without the banner or input prompts. Otto's tools never require interactive approval; `--approve` only supplies the prompt and removes the interactive loop. It cannot be combined with `--ui tui`, and it composes with `--continue`, `--resume`, and `--no-session`.
 
 ```bash
 otto --approve "summarize TODOs in this repo"
@@ -324,12 +324,12 @@ The script requires `OTTO_PI_INTEROP=1` as an explicit opt-in marker, accepts ex
 
 All file tools are enabled by default and restricted to the initial workspace:
 
-- `read` reads UTF-8 text with optional line offsets and limits.
+- `read` reads UTF-8 text with optional line offsets and limits; files larger than 64 MiB are rejected before being read into memory.
 - `grep` searches file contents with Go RE2 regular expressions. It supports case-insensitive matching, optional `**` glob filtering, and up to 100 matches by default (1000 maximum).
 - `find` returns sorted regular-file paths matching `**` globs, up to 1000 results by default (10000 maximum).
 - `ls` lists one directory level in sorted order; directories end in `/` and symbolic links in `@`.
 - `write` writes a complete file atomically.
-- `edit` requires exactly one exact text match.
+- `edit` requires exactly one exact text match and shares the 64 MiB file-size limit with `read`.
 
 Recursive `grep` and `find` skip `.git` and discovered symbolic links but include other dotfiles. Binary files, invalid UTF-8 files, and files containing lines larger than 1 MiB are skipped by `grep`. Search and listing output respects the configured tool-output cap.
 

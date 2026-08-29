@@ -25,10 +25,7 @@ func validateTurnSummary(message model.Message) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := validateTurnSummaryHeadings(summary); err != nil {
-		return "", err
-	}
-	return summary, nil
+	return sanitizeTurnSummaryHeadings(summary), nil
 }
 
 func validateSummaryMessage(message model.Message, maximumBytes int) (string, error) {
@@ -83,11 +80,13 @@ func validateSummaryHeadings(summary string) error {
 	return nil
 }
 
-func validateTurnSummaryHeadings(summary string) error {
+func sanitizeTurnSummaryHeadings(summary string) string {
+	lines := strings.Split(summary, "\n")
 	fenceCharacter := byte(0)
 	fenceLength := 0
-	for _, line := range strings.Split(normalizeSummaryLineEndings(summary), "\n") {
-		if marker, length, closing := summaryFenceMarker(line, fenceCharacter, fenceLength); marker != 0 {
+	for index, line := range lines {
+		normalized := strings.TrimRight(line, "\r")
+		if marker, length, closing := summaryFenceMarker(normalized, fenceCharacter, fenceLength); marker != 0 {
 			if fenceCharacter == 0 && !closing {
 				fenceCharacter, fenceLength = marker, length
 			} else if fenceCharacter == marker && closing {
@@ -95,11 +94,34 @@ func validateTurnSummaryHeadings(summary string) error {
 			}
 			continue
 		}
-		if fenceCharacter == 0 && isLevelTwoOrThreeHeading(line) {
-			return errors.New("turn compaction summary contains a level-2 or level-3 heading")
+		if fenceCharacter != 0 || !isLevelTwoOrThreeHeading(normalized) {
+			continue
 		}
+		lines[index] = stripTurnHeadingMarker(line)
 	}
-	return nil
+	return strings.Join(lines, "\n")
+}
+
+func stripTurnHeadingMarker(line string) string {
+	spaces := 0
+	for spaces < len(line) && spaces < 3 && line[spaces] == ' ' {
+		spaces++
+	}
+	trimmed := line[spaces:]
+	markerLength := 0
+	switch {
+	case strings.HasPrefix(trimmed, "###"):
+		markerLength = 3
+	case strings.HasPrefix(trimmed, "##"):
+		markerLength = 2
+	default:
+		return line
+	}
+	rest := strings.TrimLeft(trimmed[markerLength:], " \t")
+	if rest == "" {
+		return line
+	}
+	return rest
 }
 
 func summaryFenceMarker(line string, active byte, activeLength int) (byte, int, bool) {

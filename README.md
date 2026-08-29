@@ -2,7 +2,7 @@
 
 Otto is a minimal macOS coding agent written in Go.
 
-Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-oriented REPL), append-only JSONL sessions, workspace-bound file tools, an unsandboxed `bash` tool, TOML profiles, and an OpenAI-compatible Chat Completions provider.
+Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-oriented REPL), append-only JSONL sessions, manual and automatic context compaction, workspace-bound file tools, an unsandboxed `bash` tool, TOML profiles, and an OpenAI-compatible Chat Completions provider.
 
 ## Stage 1 status
 
@@ -11,10 +11,11 @@ Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-orie
 - `otto` CLI for macOS
 - OpenAI-compatible provider support only
 - Adaptive UI selection: full-screen TUI on terminal stdin/stdout, REPL otherwise
-- Streaming TUI and REPL with `/help`, `/exit`, `/new`, and `/session`; the TUI also provides `/resume`
-- Markdown assistant rendering and collapsible tool output in the TUI
+- Streaming TUI and REPL with `/help`, `/exit`, `/new`, `/session`, and `/compact`; the TUI also provides `/resume`
+- Manual `/compact [focus]` plus automatic proactive and typed-overflow context compaction
+- Folded compaction checkpoints and collapsible tool output in the TUI (`Ctrl+O`)
 - Built-in `read`, `grep`, `find`, `ls`, `write`, `edit`, and `bash` tools
-- Persistent JSONL sessions with `--continue` and `--resume`
+- Persistent append-only Pi v3 JSONL sessions with `--continue` and `--resume`
 - Global TOML configuration at `~/.config/otto/config.toml`
 - `--thinking` pass-through for model reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
 - `--approve` headless mode for non-interactive single-prompt runs
@@ -23,6 +24,7 @@ Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-orie
 
 - Codex subscription login
 - Claude subscription login
+- Anthropic-native provider support
 - Plugins, skills, or project-local config
 - Windows or Linux support commitments
 - Session trees/forks, session naming, deletion, or search
@@ -62,6 +64,11 @@ mode = "auto"
 [agent]
 shell_timeout = "120s"
 max_output_bytes = 51200
+
+[agent.compaction]
+auto = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
 
 [profiles.deepseek]
 provider = "openai-compatible"
@@ -131,6 +138,63 @@ UI mode precedence:
 3. `[ui].mode` in TOML
 4. built-in `auto`
 
+## Context compaction
+
+Compaction is configured in `[agent.compaction]` and, when needed, with per-profile context metadata:
+
+```toml
+[agent.compaction]
+auto = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
+
+[profiles.example]
+provider = "openai-compatible"
+base_url = "https://example.invalid/v1"
+model = "gpt-5.6"
+api_key_env = "EXAMPLE_API_KEY"
+context_window = 1050000
+compaction_window = 272000
+```
+
+Rules and defaults:
+
+- `auto=true` is the default.
+- `reserve_tokens=16384` and `keep_recent_tokens=20000` are the defaults.
+- `context_window` and `compaction_window` must be at least `4096` when set.
+- `compaction_window` requires `context_window` and must not exceed it.
+- For small configured windows, Otto clamps reserve/keep downward so compaction still fits.
+
+Manual compaction stays available in both frontends even when `auto=false`:
+
+- TUI: type `/compact` or `/compact focus on X`
+- REPL: enter `/compact` or `/compact focus on X`
+
+The optional `focus` text is sanitized, bounded to 8 KiB after control cleanup, and appended only to the hidden summary-system prompt.
+
+With `auto=true`, Otto does two bounded automatic checks:
+
+- **Proactive compaction:** when Otto knows the model window and the next request estimate is above the soft trigger (`working_window - reserve_tokens`), it attempts one checkpoint before sending the normal provider request.
+- **Reactive overflow recovery:** when the provider returns a typed context-overflow error, Otto can do one automatic compaction and retry once.
+
+The automatic paths are one-shot only. They do not loop. If `auto=false`, Otto skips those automatic attempts but `/compact` still works.
+
+### Model window metadata
+
+Stage 1 still talks only to the `openai-compatible` transport, but Otto ships a static limit catalog for common GPT, o-series, and Claude model IDs so it can size compaction conservatively.
+
+Important boundaries:
+
+- Listed full-size GPT-5.4 / 5.5 / 5.6 aliases use static `context_window=1050000`, `hard_input_window=922000`, and `compaction_window=272000`.
+- `gpt-5.4-mini`, `gpt-5.4-nano`, GPT-5 / 5.1 / 5.2 aliases, and `gpt-5.3-codex` use the 400K catalog family with a 272K working window.
+- `gpt-5.3-codex-spark` is an exact `128000`-context / `32000`-output override, and `*-chat-latest` aliases use their catalog chat values.
+- GPT-4.1, GPT-4o, o1/o3/o4, and listed Claude aliases/snapshots use the static catalog values compiled into this build.
+- Claude metadata is used only when your OpenAI-compatible endpoint exposes a Claude-family model ID. Otto does **not** add an Anthropic provider in Stage 1.
+
+The 272K GPT working boundary is intentional. Otto compacts well before the hard ceiling to keep regular turns in a cost-aware range. A checkpoint also changes the prompt prefix, so provider prompt-cache hits can reset once immediately after compaction.
+
+If a model ID is unknown to Otto, proactive safe-limit automation is disabled because no trustworthy local window is available. Reactive one-shot recovery can still happen after a typed provider overflow. For private deployments, set `context_window` and optionally `compaction_window` on the selected profile to restore deterministic proactive behavior.
+
 ## Frontends
 
 Examples:
@@ -164,7 +228,7 @@ otto --approve @prompt.txt --no-session
 - The TUI uses the terminal alternate screen buffer.
 - Assistant responses render as Markdown in the transcript.
 - If Markdown rendering fails, Otto falls back to escaped plain text instead of raw control sequences.
-- Tool calls are collapsed to bounded one-line summaries by default; `Ctrl+O` toggles complete arguments and tool output.
+- Tool calls and compaction checkpoints are folded by default; `Ctrl+O` toggles full tool arguments/output and expanded compaction summaries.
 - Mouse-wheel transcript scrolling remains enabled. Hold `Shift` while dragging to select visible terminal text, then use the terminal's normal copy command.
 - The footer adapts to the available width and shows workspace/profile/model, token totals, and session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message until the window is large enough.
@@ -178,7 +242,7 @@ otto --approve @prompt.txt --no-session
 | `↑` / `↓` | Select a slash-command suggestion |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
-| `Ctrl+O` | Toggle complete tool arguments and output |
+| `Ctrl+O` | Toggle complete tool arguments, tool output, and folded compaction summaries |
 | `Shift`+drag | Select visible terminal text while mouse reporting is active |
 | Mouse wheel or `PgUp` / `PgDn` | Scroll the transcript |
 | `Home` / `End` | Jump to the top or bottom of the transcript |
@@ -194,6 +258,7 @@ Shared commands:
 - `/help` shows command help (TUI overlay or REPL text).
 - `/session` shows session details. In the TUI it opens an overlay with the session ID, path, provider, profile, and model.
 - `/new` closes the current session and starts a fresh one in the same process.
+- `/compact [focus]` creates a manual context checkpoint or reports `[context] no-op` when nothing can be compacted.
 - `/exit` exits when idle. In the REPL, EOF also exits.
 
 TUI-only command:
@@ -206,8 +271,9 @@ TUI-only command:
 - `/help` shows commands.
 - `/session` prints the current session ID, path, provider, and model.
 - `/new` closes the current session and starts a fresh one in the same process.
+- `/compact [focus]` creates a manual context checkpoint or reports `[context] no-op`.
 - `/exit` or EOF exits.
-- `Ctrl+C` during an active provider call or tool run cancels only that turn and returns you to the prompt.
+- `Ctrl+C` during an active provider call, tool run, or manual compaction cancels only that turn and returns you to the prompt.
 - `Ctrl+C` while Otto is idle exits with status 130.
 
 ## Sessions
@@ -238,19 +304,19 @@ Notes:
 - `/resume` is TUI-only and shows at most the recent 20 sessions in the current workspace; controls are documented above.
 - `/session` shows the exact session path.
 - `--no-session` keeps history in memory only.
-- Session files are created lazily on the first user prompt; `/new` closes the current session (writing nothing if it had no prompts) and the replacement also stays lazy until its first prompt.
-- Session files contain sensitive prompt text, assistant responses, tool calls, tool arguments, and tool results. Protect them like source data. Session records do not contain API-key, OAuth-token, or authorization-header fields.
+- Manual and automatic compaction append Pi v3 `type: "compaction"` checkpoints. Checkpoints carry `firstKeptEntryId`, `tokensBefore`, optional usage, and bounded file metadata; writes remain append-only.
+- Session files contain sensitive prompt text, assistant responses, compaction summaries, tool calls, tool arguments, tool results, and file metadata. Protect them like source data. Session records do not contain API-key, OAuth-token, or authorization-header fields.
 - Stage 1 has no session tree/fork UI, naming, deletion, or search.
 
 ### Optional Pi interoperability probe
 
-If Pi 0.84.3 (or a compatible package exposing the public Pi v3 `SessionManager` API) is installed, this opt-in probe opens one session, builds its context, and prints bounded JSON metadata only—never message or tool content, credentials, or authorization data:
+If Pi 0.84.3 (or a compatible package exposing the public Pi v3 `SessionManager` API) is installed, this opt-in probe opens one session, builds its context, and prints bounded JSON metadata only—never message, summary, or tool content, credentials, or authorization data:
 
 ```bash
 OTTO_PI_INTEROP=1 node ./scripts/pi-session-interop.mjs /tmp/otto-session.jsonl
 ```
 
-The environment variable is an explicit opt-in marker for operators; the script accepts exactly one session path. It exits 77 with a `SKIP` message when Pi is unavailable and exits nonzero for an invalid session. Default Go tests and builds never invoke Node or Pi.
+The script requires `OTTO_PI_INTEROP=1` as an explicit opt-in marker, accepts exactly one session path, exits 77 with a bounded `SKIP` message when Pi is unavailable or the gate is unset, and exits nonzero for an invalid session. Default Go tests and builds never invoke Node or Pi.
 
 ## Tools and safety
 
@@ -316,9 +382,17 @@ Check the selected profile, `--base-url`, and endpoint path. Stage 1 expects an 
 
 Your provider or proxy is not delivering valid SSE chat-completions output. Confirm streaming is enabled, SSE is not buffered or rewritten, and the upstream really emits `[DONE]`.
 
-### `OpenAI-compatible HTTP 400: ...` with context-length or prompt-size wording
+### Context-length or prompt-size failures
 
-Stage 1 forwards the provider's bounded error body. Start a fresh session with `/new`, shorten the prompt, or reduce large file/tool output in the conversation.
+Otto can now try one automatic checkpoint before the hard limit (when it knows the model window) and one typed-overflow recovery checkpoint after a provider context error. If you still hit a hard input limit:
+
+- run `/compact [focus]` to create a manual checkpoint,
+- use `/new` if you want a completely fresh session,
+- reduce large pasted input or large tool output in the conversation,
+- set profile `context_window` / `compaction_window` for private or unknown model IDs so proactive sizing is available,
+- or choose a model/profile with a larger working window.
+
+Unknown models intentionally skip proactive safe-limit automation until you configure windows or the provider returns a typed context-overflow error.
 
 ## Contributing
 

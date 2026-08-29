@@ -27,7 +27,7 @@ func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 	if !strings.Contains(content, "/session") || !strings.Contains(content, "show session details") {
 		t.Fatalf("view = %q, want matching session suggestion", content)
 	}
-	for _, command := range []string{"/help", "/new", "/resume", "/exit"} {
+	for _, command := range []string{"/help", "/new", "/resume", "/compact", "/exit"} {
 		if strings.Contains(content, command) {
 			t.Fatalf("view = %q, contains nonmatching suggestion %q", content, command)
 		}
@@ -75,7 +75,7 @@ func TestSlashCommandKeysPassThroughOutsideSuggestionMode(t *testing.T) {
 	if strings.HasPrefix(got.editor.Value(), "/") {
 		t.Fatalf("ordinary tab activated slash completion: editor=%q", got.editor.Value())
 	}
-	for _, description := range []string{"show help", "show session details", "start a new session", "resume a session", "quit"} {
+	for _, description := range []string{"show help", "show session details", "start a new session", "resume a session", "compact context", "quit"} {
 		if strings.Contains(got.View().Content, description) {
 			t.Fatalf("ordinary view contains suggestion description %q", description)
 		}
@@ -93,6 +93,7 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 		"/session", "show session details",
 		"/new", "start a new session",
 		"/resume", "resume a session",
+		"/compact", "compact context",
 		"/exit", "quit",
 	} {
 		if !strings.Contains(content, text) {
@@ -103,7 +104,7 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 	m.overlay = overlayHelp
 	help := m.View().Content
 	assertRenderedBounds(t, help, 40, 8)
-	for _, command := range []string{"/help", "/session", "/new", "/resume", "/exit"} {
+	for _, command := range []string{"/help", "/session", "/new", "/resume", "/compact", "/exit"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("help = %q, want registry command %q", help, command)
 		}
@@ -160,7 +161,7 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 5 || m.viewport.Height() != 5 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 6 || m.viewport.Height() != 4 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))
@@ -220,7 +221,7 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	m.autoFollow = false
 	m.viewport.SetYOffset(3)
 	m = typeEditorText(t, m, "/")
-	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 5 {
+	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 4 {
 		t.Fatalf("suggestion scroll state: offset=%d follow=%v height=%d", m.viewport.YOffset(), m.autoFollow, m.viewport.Height())
 	}
 
@@ -254,8 +255,8 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
 	m = resizeModel(t, m, 100, 20)
-	if m.viewport.Height() != 13 {
-		t.Fatalf("expanded viewport height = %d, want 13", m.viewport.Height())
+	if m.viewport.Height() != 12 {
+		t.Fatalf("expanded viewport height = %d, want 12", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 100, 20)
 
@@ -267,6 +268,23 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	m = typeEditorText(t, m, "/")
 	if !m.autoFollow || !m.viewport.AtBottom() {
 		t.Fatalf("bottom transition: follow=%v bottom=%v", m.autoFollow, m.viewport.AtBottom())
+	}
+}
+
+func TestCompactSuggestionCompletesAndClosesWhenFocusStarts(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 16)
+	m = typeEditorText(t, m, "/c")
+	if suggestions := m.commandSuggestions(); len(suggestions) != 1 || suggestions[0].Name != "/compact" {
+		t.Fatalf("/c suggestions = %#v", suggestions)
+	}
+	updated, _ := m.Update(keyPress(tea.KeyTab))
+	m = updated.(Model)
+	if got := m.editor.Value(); got != "/compact" {
+		t.Fatalf("completion = %q, want /compact", got)
+	}
+	m = typeEditorText(t, m, " focus")
+	if suggestions := m.commandSuggestions(); len(suggestions) != 0 {
+		t.Fatalf("focus kept suggestions open: %#v", suggestions)
 	}
 }
 

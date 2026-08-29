@@ -44,6 +44,7 @@ const (
 	selectedAssistantTranscript = "assistant-only selected resume transcript marker"
 	wideFooterMarker            = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0 | " + footerSessionMarker
 	narrowFooterMarker          = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0"
+	ptyCompactFocus             = "focus on PTY compaction"
 )
 
 func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
@@ -219,6 +220,131 @@ func createPTYSession(t *testing.T, root, workspace, id, userTranscript, assista
 	return path
 }
 
+func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open() error = %v", err)
+	}
+	initialMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read initial terminal mode: %v", err)
+	}
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize(100x30) error = %v", err)
+	}
+
+	collector := newPTYOutputCollector(master)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	backend := &ptySmokeBackend{
+		promptCh:          make(chan string, 1),
+		canceledCh:        make(chan struct{}),
+		compactCh:         make(chan string, 2),
+		compactCanceledCh: make(chan struct{}),
+	}
+	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
+
+	t.Cleanup(func() {
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("tui.Run cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("tui.Run cleanup error: %v", err)
+		}
+	})
+
+	enterOffset := waitForSubsequence(t, collector, 0, altScreenEnterSeq)
+	screenOffset := enterOffset + len(altScreenEnterSeq)
+	waitForSubsequence(t, collector, screenOffset, wideFooterMarker)
+
+	writePTY(t, master, "/c")
+	waitForSubsequence(t, collector, screenOffset, "compact context")
+
+	writePTY(t, master, "\t")
+	writePTY(t, master, " "+ptyCompactFocus)
+
+	completionResizeOffset := collector.Len()
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 96, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize(96x30) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("SIGWINCH error = %v", err)
+	}
+	completedScreen, _ := waitForTerminalScreen(t, collector, completionResizeOffset, 96, 30, func(screen *ptyTerminalScreen) bool {
+		content := screen.String()
+		return screen.FullRedraws() > 0 && screen.Complete() &&
+			strings.Contains(content, "/compact "+ptyCompactFocus) &&
+			!strings.Contains(content, "compact context")
+	})
+	if x, y, visible := completedScreen.Cursor(); !visible || x < 2 || y != 28 {
+		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want visible composer row 28", x, y, visible)
+	}
+
+	writePTY(t, master, "\r")
+	waitForCompactFocus(t, backend, ptyCompactFocus)
+	waitForSubsequence(t, collector, screenOffset, "compacting context")
+
+	writePTY(t, master, "\x1b")
+	waitForCompactCancellation(t, backend)
+	waitForSubsequence(t, collector, screenOffset, contextCanceledText)
+
+	writePTY(t, master, "/compact "+ptyCompactFocus+"\r")
+	waitForCompactFocus(t, backend, ptyCompactFocus)
+	waitForSubsequence(t, collector, screenOffset, "[context] no-op")
+
+	resizeOffset := collector.Len()
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}); err != nil {
+		t.Fatalf("pty.Setsize(80x24) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("SIGWINCH error = %v", err)
+	}
+	compactScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
+		content := screen.String()
+		return screen.FullRedraws() > 0 && screen.Complete() &&
+			strings.Contains(content, narrowFooterMarker) &&
+			strings.Contains(content, "[context] no-op") &&
+			strings.Contains(content, contextCanceledText) &&
+			!strings.Contains(content, "compact context")
+	})
+	if x, y, visible := compactScreen.Cursor(); !visible || x != 2 || y != 22 {
+		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (2,22) visible", x, y, visible)
+	}
+	if sequences := compactScreen.AcceptedCSI(); len(sequences) == 0 {
+		t.Fatal("compaction screen accepted no CSI sequences")
+	}
+	writePTY(t, master, "/exit\r")
+	waitForRunReturn(t, runResult)
+	waitForSubsequence(t, collector, 0, altScreenExitSeq)
+
+	if !runResult.Finished() {
+		t.Fatal("run process was still active before terminal restoration check")
+	}
+	output := collector.Snapshot()
+	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
+	if enters != 1 || exits != 1 {
+		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
+	}
+	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read restored terminal mode: %v", err)
+	}
+	if *restoredMode != *initialMode {
+		t.Fatalf("terminal mode leaked after process exit: %s", diffTermios(*initialMode, *restoredMode))
+	}
+	if strings.Contains(string(output), "\x00") {
+		t.Fatalf("raw PTY output leaked NUL control: %s", tailTerminalOutput(output))
+	}
+
+	t.Logf("PTY compaction accepted sequences=%q", compactScreen.AcceptedCSI())
+	t.Logf("PTY compaction escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
+}
+
 func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -290,9 +416,14 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 }
 
 type ptySmokeBackend struct {
-	promptCh   chan string
-	canceledCh chan struct{}
-	cancelOnce sync.Once
+	promptCh          chan string
+	canceledCh        chan struct{}
+	compactCh         chan string
+	compactCanceledCh chan struct{}
+	cancelOnce        sync.Once
+	compactCancelOnce sync.Once
+	compactMu         sync.Mutex
+	compactCalls      int
 }
 
 func (b *ptySmokeBackend) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {
@@ -301,6 +432,29 @@ func (b *ptySmokeBackend) Prompt(ctx context.Context, text string, emit func(age
 	<-ctx.Done()
 	b.cancelOnce.Do(func() { close(b.canceledCh) })
 	return ctx.Err()
+}
+
+func (b *ptySmokeBackend) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
+	if b.compactCh != nil {
+		b.compactCh <- focus
+	}
+	if emit != nil {
+		emit(agent.Event{Type: agent.EventCompactionStarted, Compaction: &agent.CompactionEvent{Reason: agent.CompactionManual}})
+	}
+	b.compactMu.Lock()
+	b.compactCalls++
+	call := b.compactCalls
+	b.compactMu.Unlock()
+	if call == 1 {
+		<-ctx.Done()
+		b.compactCancelOnce.Do(func() {
+			if b.compactCanceledCh != nil {
+				close(b.compactCanceledCh)
+			}
+		})
+		return agent.CompactionResult{}, ctx.Err()
+	}
+	return agent.CompactionResult{Reason: agent.CompactionManual, Noop: true}, nil
 }
 
 func (b *ptySmokeBackend) NewSession() error { return nil }
@@ -334,6 +488,27 @@ func waitForCancellation(t *testing.T, backend *ptySmokeBackend) {
 	case <-backend.canceledCh:
 	case <-time.After(ptyStepTimeout):
 		t.Fatal("timed out waiting for backend cancellation")
+	}
+}
+
+func waitForCompactFocus(t *testing.T, backend *ptySmokeBackend, want string) {
+	t.Helper()
+	select {
+	case got := <-backend.compactCh:
+		if got != want {
+			t.Fatalf("compact focus = %q, want %q", got, want)
+		}
+	case <-time.After(ptyStepTimeout):
+		t.Fatal("timed out waiting for compact focus")
+	}
+}
+
+func waitForCompactCancellation(t *testing.T, backend *ptySmokeBackend) {
+	t.Helper()
+	select {
+	case <-backend.compactCanceledCh:
+	case <-time.After(ptyStepTimeout):
+		t.Fatal("timed out waiting for compact cancellation")
 	}
 }
 

@@ -18,16 +18,25 @@ type File struct {
 }
 
 type Agent struct {
-	MaxTurns       int    `toml:"max_turns"`
-	ShellTimeout   string `toml:"shell_timeout"`
-	MaxOutputBytes int    `toml:"max_output_bytes"`
+	MaxTurns       int              `toml:"max_turns"`
+	ShellTimeout   string           `toml:"shell_timeout"`
+	MaxOutputBytes int              `toml:"max_output_bytes"`
+	Compaction     CompactionConfig `toml:"compaction"`
+}
+
+type CompactionConfig struct {
+	Auto             *bool `toml:"auto"`
+	ReserveTokens    *int  `toml:"reserve_tokens"`
+	KeepRecentTokens *int  `toml:"keep_recent_tokens"`
 }
 
 type Profile struct {
-	Provider  string `toml:"provider"`
-	BaseURL   string `toml:"base_url"`
-	Model     string `toml:"model"`
-	APIKeyEnv string `toml:"api_key_env"`
+	Provider         string `toml:"provider"`
+	BaseURL          string `toml:"base_url"`
+	Model            string `toml:"model"`
+	APIKeyEnv        string `toml:"api_key_env"`
+	ContextWindow    *int   `toml:"context_window"`
+	CompactionWindow *int   `toml:"compaction_window"`
 }
 
 type SessionDefaults struct {
@@ -45,6 +54,16 @@ type Overrides struct {
 	MaxOutputBytes int
 }
 
+type CompactionRuntime struct {
+	Auto             bool
+	ContextWindow    int
+	HardInputWindow  int
+	WorkingWindow    int
+	MaxOutputTokens  int
+	ReserveTokens    int
+	KeepRecentTokens int
+}
+
 type Runtime struct {
 	Profile        string
 	Provider       string
@@ -55,6 +74,7 @@ type Runtime struct {
 	APIKeyEnv      string
 	ShellTimeout   time.Duration
 	MaxOutputBytes int
+	Compaction     CompactionRuntime
 }
 
 func DefaultPath() string {

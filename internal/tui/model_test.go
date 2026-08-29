@@ -24,6 +24,7 @@ import (
 
 type fakeBackend struct {
 	prompt     func(context.Context, string, func(agent.Event)) error
+	compact    func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
 	newSession func() error
 	info       app.Info
 	history    []model.Message
@@ -34,6 +35,13 @@ func (f *fakeBackend) Prompt(ctx context.Context, text string, emit func(agent.E
 		return nil
 	}
 	return f.prompt(ctx, text, emit)
+}
+
+func (f *fakeBackend) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
+	if f.compact == nil {
+		return agent.CompactionResult{Noop: true}, nil
+	}
+	return f.compact(ctx, focus, emit)
 }
 
 func (f *fakeBackend) NewSession() error {
@@ -149,7 +157,7 @@ func keyPress(code rune, modifiers ...tea.KeyMod) tea.KeyPressMsg {
 
 var _ = keyPress
 
-func newTestModelWithBackend(t *testing.T, backend *fakeBackend) Model {
+func newTestModelWithBackend(t *testing.T, backend app.Backend) Model {
 	t.Helper()
 	return NewModel(context.Background(), backend, WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
 		return text, nil
@@ -198,12 +206,15 @@ func TestInitRequestsBackgroundColorAndStartsSingleSpinnerTick(t *testing.T) {
 }
 
 func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
-	m := newTestModelWithBackend(t, &fakeBackend{history: []model.Message{{
-		Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "history"}},
-	}}})
+	m := newTestModelWithBackend(t, &fakeBackend{history: []model.Message{
+		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "## Assistant history"}}},
+		{ID: "checkpoint", Role: model.RoleContext, ContextType: "compaction", Display: true, ContextTokensBefore: 9000, Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Compaction history"}}},
+	}})
 	// Remove the injected test renderer so this test exercises the production renderer.
 	m.renderer = newGlamourRenderer(true)
 	m.rendererInjected = false
+	m.rerenderAndRefreshViewportContent(false)
+	beforeAssistant, beforeCompaction := m.entries[0].Rendered, m.entries[1].Rendered
 
 	updated, _ := m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}})
 	light := updated.(Model)
@@ -211,12 +222,22 @@ func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
 	if !ok || light.darkBackground || lightRenderer.styleName != "light" {
 		t.Fatalf("light renderer = %#v dark=%v", light.renderer, light.darkBackground)
 	}
+	if light.entries[0].Rendered == beforeAssistant {
+		t.Fatal("assistant Markdown cache was not refreshed for light theme")
+	}
+	if light.entries[1].Rendered == beforeCompaction {
+		t.Fatal("compaction Markdown cache was not refreshed for light theme")
+	}
+	lightAssistant, lightCompaction := light.entries[0].Rendered, light.entries[1].Rendered
 
 	updated, _ = light.Update(tea.BackgroundColorMsg{Color: color.RGBA{A: 0xff}})
 	dark := updated.(Model)
 	darkRenderer, ok := dark.renderer.(GlamourRenderer)
 	if !ok || !dark.darkBackground || darkRenderer.styleName != "dark" {
 		t.Fatalf("dark renderer = %#v dark=%v", dark.renderer, dark.darkBackground)
+	}
+	if dark.entries[0].Rendered == lightAssistant || dark.entries[1].Rendered == lightCompaction {
+		t.Fatalf("dark theme left stale Markdown caches: assistant unchanged=%v compaction unchanged=%v", dark.entries[0].Rendered == lightAssistant, dark.entries[1].Rendered == lightCompaction)
 	}
 }
 
@@ -487,25 +508,54 @@ func TestToolExpansionToggle(t *testing.T) {
 	}
 	model := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
 	collapsedByDefault := model.View().Content
-	if model.expandedTools || strings.Contains(collapsedByDefault, "tool output line") {
-		t.Fatalf("default expanded=%v content=%q, want tool output folded", model.expandedTools, collapsedByDefault)
+	if model.expandedDetails || strings.Contains(collapsedByDefault, "tool output line") {
+		t.Fatalf("default expanded=%v content=%q, want tool output folded", model.expandedDetails, collapsedByDefault)
 	}
 
-	updated, _ := model.Update(toggleToolsMsg{})
+	updated, _ := model.Update(toggleDetailsMsg{})
 	expanded := updated.(Model)
-	if !expanded.expandedTools {
-		t.Fatalf("expandedTools = false after toggle, want true")
+	if !expanded.expandedDetails {
+		t.Fatalf("expandedDetails = false after toggle, want true")
 	}
 	if content := expanded.View().Content; !strings.Contains(content, "tool output line") || !strings.Contains(content, `{"path":"README.md"}`) {
 		t.Fatalf("expanded content = %q, want full arguments and output", content)
 	}
 
-	toggledBack, _ := expanded.Update(toggleToolsMsg{})
-	if toggledBack.(Model).expandedTools {
-		t.Fatalf("expandedTools = true after second toggle, want false")
+	toggledBack, _ := expanded.Update(toggleDetailsMsg{})
+	if toggledBack.(Model).expandedDetails {
+		t.Fatalf("expandedDetails = true after second toggle, want false")
 	}
 	if content := toggledBack.View().Content; strings.Contains(content, "tool output line") {
 		t.Fatalf("re-collapsed content = %q, want tool output hidden", content)
+	}
+}
+
+func TestCompactionDetailsToggleShowsCollapsedAndExpandedCheckpointMarkdown(t *testing.T) {
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: []model.Message{{
+			ID:                  "checkpoint",
+			Role:                model.RoleContext,
+			ContextType:         "compaction",
+			Display:             true,
+			ContextTokensBefore: 258000,
+			Blocks:              []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Goal\n\nship\n\tkeep whitespace"}},
+		}},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	collapsed := m.View().Content
+	if !strings.Contains(collapsed, "[context] compacted 258k tokens") || strings.Contains(collapsed, "## Goal") || strings.Contains(collapsed, "[Compaction summary]") {
+		t.Fatalf("collapsed compaction view = %q", collapsed)
+	}
+
+	updated, _ := m.Update(keyPress('o', tea.ModCtrl))
+	expanded := updated.(Model)
+	content := expanded.View().Content
+	if !expanded.expandedDetails || !strings.Contains(content, "[context] compacted 258k tokens") || !strings.Contains(content, "## Goal") || !strings.Contains(content, "keep whitespace") {
+		t.Fatalf("expanded compaction view = %q", content)
+	}
+	if strings.Contains(content, "[Compaction summary]") {
+		t.Fatalf("expanded compaction view = %q, want internal prefix hidden", content)
 	}
 }
 
@@ -606,6 +656,34 @@ func TestShiftEnterRequiresKeyboardEnhancements(t *testing.T) {
 	}
 }
 
+func TestCtrlOTogglesDetailExpansionForToolsAndCompaction(t *testing.T) {
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: []model.Message{
+			{ID: "checkpoint", Role: model.RoleContext, ContextType: "compaction", Display: true, ContextTokensBefore: 64000, Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\nsummary details"}}},
+			{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}},
+			{Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-1", ToolName: "read", Text: "tool output line"}}},
+		},
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	if m.expandedDetails || strings.Contains(m.View().Content, "tool output line") || strings.Contains(m.View().Content, "summary details") {
+		t.Fatalf("default expanded=%v content=%q, want details folded", m.expandedDetails, m.View().Content)
+	}
+
+	updated, _ := m.Update(keyPress('o', tea.ModCtrl))
+	expanded := updated.(Model)
+	content := expanded.View().Content
+	if !expanded.expandedDetails || !strings.Contains(content, "tool output line") || !strings.Contains(content, "summary details") {
+		t.Fatalf("after ctrl+o expanded=%v content=%q, want details visible", expanded.expandedDetails, content)
+	}
+
+	toggledBack, _ := expanded.Update(keyPress('o', tea.ModCtrl))
+	got := toggledBack.(Model)
+	if got.expandedDetails || strings.Contains(got.View().Content, "tool output line") || strings.Contains(got.View().Content, "summary details") {
+		t.Fatalf("after second ctrl+o expanded=%v content=%q, want details folded", got.expandedDetails, got.View().Content)
+	}
+}
+
 func TestCtrlOTogglesToolExpansionKey(t *testing.T) {
 	backend := &fakeBackend{
 		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
@@ -615,20 +693,20 @@ func TestCtrlOTogglesToolExpansionKey(t *testing.T) {
 		},
 	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
-	if m.expandedTools || strings.Contains(m.View().Content, "tool output line") {
-		t.Fatalf("default expanded=%v content=%q, want output folded", m.expandedTools, m.View().Content)
+	if m.expandedDetails || strings.Contains(m.View().Content, "tool output line") {
+		t.Fatalf("default expanded=%v content=%q, want output folded", m.expandedDetails, m.View().Content)
 	}
 
 	updated, _ := m.Update(keyPress('o', tea.ModCtrl))
 	expanded := updated.(Model)
-	if !expanded.expandedTools || !strings.Contains(expanded.View().Content, "tool output line") {
-		t.Fatalf("after ctrl+o expanded=%v content=%q, want output visible", expanded.expandedTools, expanded.View().Content)
+	if !expanded.expandedDetails || !strings.Contains(expanded.View().Content, "tool output line") {
+		t.Fatalf("after ctrl+o expanded=%v content=%q, want output visible", expanded.expandedDetails, expanded.View().Content)
 	}
 
 	toggledBack, _ := expanded.Update(keyPress('o', tea.ModCtrl))
 	got := toggledBack.(Model)
-	if got.expandedTools || strings.Contains(got.View().Content, "tool output line") {
-		t.Fatalf("after second ctrl+o expanded=%v content=%q, want output folded", got.expandedTools, got.View().Content)
+	if got.expandedDetails || strings.Contains(got.View().Content, "tool output line") {
+		t.Fatalf("after second ctrl+o expanded=%v content=%q, want output folded", got.expandedDetails, got.View().Content)
 	}
 }
 
@@ -1522,11 +1600,11 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 	}
 
 	content := idle.View().Content
-	if idle.expandedTools || !strings.Contains(content, "read") || !strings.Contains(content, "README.md") || strings.Contains(content, "full output") {
-		t.Fatalf("default tool summary expanded=%v content=%q, want concise argument preview", idle.expandedTools, content)
+	if idle.expandedDetails || !strings.Contains(content, "read") || !strings.Contains(content, "README.md") || strings.Contains(content, "full output") {
+		t.Fatalf("default tool summary expanded=%v content=%q, want concise argument preview", idle.expandedDetails, content)
 	}
 
-	expanded, _ := idle.Update(toggleToolsMsg{})
+	expanded, _ := idle.Update(toggleDetailsMsg{})
 	if content := expanded.View().Content; !strings.Contains(content, "full output") {
 		t.Fatalf("expanded tool content = %q, want full output", content)
 	}
@@ -1953,6 +2031,33 @@ func TestCanceledFullTurnChannelReconcilesPersistedToolResultsAfterBaseline(t *t
 	}
 }
 
+func TestHistoryBaselineUsesStableIDsAfterActivePrefixShrinkForPersistedToolResults(t *testing.T) {
+	backend := &fakeBackend{history: []model.Message{
+		{ID: "old-user", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "old prompt"}}},
+		{ID: "old-assistant", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old answer"}}},
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.turnHistoryBaseline = captureTurnHistoryBaseline(backend.History())
+	m.turnEntryStart = len(m.entries)
+	m.entries = append(m.entries,
+		Entry{ID: "live-user", Kind: EntryUser, Raw: "question"},
+		Entry{ID: "live-tool", Kind: EntryTool, ToolCallID: "call-1", ToolName: "wrong", ToolOutput: "callback", ToolDone: true},
+	)
+	backend.history = []model.Message{
+		{ID: "checkpoint", Role: model.RoleContext, ContextType: "compaction", Display: true, ContextTokensBefore: 64000, Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\nsummary"}}},
+		{ID: "old-assistant", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "old answer"}}},
+		{ID: "turn-tool-result", Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-1", ToolName: "bash", Text: "stored exact result", IsError: true}}},
+	}
+
+	if !m.reconcilePersistedToolResults() {
+		t.Fatal("reconcilePersistedToolResults() reported no change after active-prefix shrink")
+	}
+	got := m.entries[m.turnEntryStart:]
+	if len(got) != 2 || got[1].ToolCallID != "call-1" || got[1].ToolName != "bash" || got[1].ToolOutput != "stored exact result" || !got[1].ToolError || !got[1].ToolDone {
+		t.Fatalf("reconciled entries = %#v", got)
+	}
+}
+
 func TestPersistedToolReconciliationUpdatesDoneEntriesInStoredOrder(t *testing.T) {
 	backend := &fakeBackend{history: []model.Message{{
 		ID: "before-turn", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "old prompt"}},
@@ -2029,7 +2134,7 @@ func TestFinishTurnReconcilesPendingToolEntries(t *testing.T) {
 	m.cancel = func() {}
 	m.entries = []Entry{{Kind: EntryTool, ToolCallID: "call-1", ToolName: "bash"}}
 
-	updated, _ := m.finishTurn(context.Canceled)
+	updated, _ := m.finishTurn(turnEnvelope{err: context.Canceled})
 	got := updated.(Model)
 	if !got.entries[0].ToolDone || !got.entries[0].ToolError || !strings.Contains(got.entries[0].ToolOutput, context.Canceled.Error()) {
 		t.Fatalf("pending tool after finish = %#v", got.entries[0])
@@ -2044,7 +2149,7 @@ func TestFatalPersistenceWithoutStoredToolResultUsesGenericReconciliation(t *tes
 	m.cancel = func() {}
 	m.entries = append(m.entries, Entry{Kind: EntryTool, ToolCallID: "call-1", ToolName: "bash"})
 
-	updated, cmd := m.finishTurn(fatalErr)
+	updated, cmd := m.finishTurn(turnEnvelope{err: fatalErr})
 	got := updated.(Model)
 	entry := got.entries[len(got.entries)-2]
 	if cmd == nil || !errors.Is(got.fatalErr, session.ErrFatalPersistence) {

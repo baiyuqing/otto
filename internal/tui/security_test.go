@@ -162,6 +162,26 @@ func TestResumePickerSanitizesInjectionInRenderedErrorModesAndPathFallback(t *te
 	})
 }
 
+func TestCompactionSecurityExpandedDetailsSanitizeTerminalControlsAndPreserveWhitespace(t *testing.T) {
+	raw := "## Goal\n\tkeep" + terminalInjectionPayload + "\n  exact trailing space  \n"
+	rendered, err := renderMarkdown(rendererFunc(func(text string, _ int) (string, error) { return text, nil }), raw, 80)
+	if err != nil {
+		t.Fatalf("renderMarkdown() error = %v", err)
+	}
+	entry := Entry{Kind: EntryCompaction, Raw: raw, Rendered: rendered, TokensBefore: 258000}
+	expanded := renderCompactionBlock(entry, 80, true)
+	assertNoRawTerminalControls(t, expanded)
+	if !strings.Contains(expanded, "[context] compacted 258k tokens") || strings.Contains(expanded, "[Compaction summary]") {
+		t.Fatalf("expanded compaction = %q", expanded)
+	}
+	if !strings.Contains(expanded, "## Goal\n\tkeep") || !strings.Contains(expanded, "\n  exact trailing space  ") {
+		t.Fatalf("expanded compaction = %q, want copy-friendly whitespace preserved", expanded)
+	}
+	if !strings.Contains(expanded, `\x1b]52;c;owned\x07\x9b31m\x7f`) {
+		t.Fatalf("expanded compaction = %q, want escaped terminal payload", expanded)
+	}
+}
+
 func TestSingleLineSanitizerEscapesAllLineBreakingControls(t *testing.T) {
 	if got, want := escapeSingleLineText("one\ntwo\rthree\tfour"), `one\x0atwo\x0dthree\x09four`; got != want {
 		t.Fatalf("escapeSingleLineText() = %q, want %q", got, want)

@@ -256,9 +256,12 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		Model:    runtime.Model,
 	})}
 	if !options.noSession {
-		controllerOptions = append(controllerOptions, app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
-			return session.List(ctx, sessionRoot, workspacePath, "", limit)
-		}, builder.openReplacement))
+		controllerOptions = append(controllerOptions,
+			app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
+				return session.List(ctx, sessionRoot, workspacePath, "", limit)
+			}, builder.openReplacement),
+			app.WithNewSessionBuilder(builder.buildNewReplacement),
+		)
 	}
 	controller, err := app.New(initialSession, func() (session.Session, error) {
 		return deps.newSession(options.noSession, sessionRoot, workspacePath, runtime)

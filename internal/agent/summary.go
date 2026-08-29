@@ -53,7 +53,7 @@ For <summary-mode>structured</summary-mode>, output Markdown with exactly these 
 ## Critical Context
 Preserve still-relevant facts from any previous summary, incorporate new work, move completed work to Done, update blockers, and replace stale next steps.
 
-For <summary-mode>turn-prefix</summary-mode>, output only a nonempty concise account of the original request, early progress, and context needed to understand the retained suffix. Do not use the structured headings above.`
+For <summary-mode>turn-prefix</summary-mode>, output only a nonempty concise account of the original request, early progress, and context needed to understand the retained suffix. Do not use the structured headings above, and never emit any Markdown headings (## or ###).`
 
 type summaryRequest struct {
 	Request provider.Request

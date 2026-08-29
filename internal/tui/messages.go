@@ -56,6 +56,99 @@ func (a *turnApplicationAck) acknowledge() {
 	})
 }
 
+type activeOperation struct {
+	stream     *turnStream
+	cancel     func()
+	cancelOnce sync.Once
+}
+
+func (o *activeOperation) cancelContext() {
+	if o == nil {
+		return
+	}
+	o.cancelOnce.Do(func() {
+		if o.cancel != nil {
+			o.cancel()
+		}
+	})
+}
+
+func (o *activeOperation) abandon() {
+	if o == nil {
+		return
+	}
+	o.cancelContext()
+	o.stream.abandon()
+}
+
+type operationCleanup struct {
+	mu      sync.Mutex
+	current *activeOperation
+	closed  bool
+}
+
+func newOperationCleanup() *operationCleanup {
+	return &operationCleanup{}
+}
+
+func (c *operationCleanup) register(stream *turnStream, cancel func()) *activeOperation {
+	operation := &activeOperation{stream: stream, cancel: cancel}
+	if c == nil {
+		return operation
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		operation.abandon()
+		return operation
+	}
+	previous := c.current
+	c.current = operation
+	c.mu.Unlock()
+	previous.abandon()
+	return operation
+}
+
+func (c *operationCleanup) finish(operation *activeOperation) {
+	if operation == nil {
+		return
+	}
+	if c != nil {
+		c.mu.Lock()
+		if c.current == operation {
+			c.current = nil
+		}
+		c.mu.Unlock()
+	}
+	operation.cancelContext()
+}
+
+func (c *operationCleanup) abandon(operation *activeOperation) {
+	if operation == nil {
+		return
+	}
+	if c != nil {
+		c.mu.Lock()
+		if c.current == operation {
+			c.current = nil
+		}
+		c.mu.Unlock()
+	}
+	operation.abandon()
+}
+
+func (c *operationCleanup) cleanup() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	operation := c.current
+	c.current = nil
+	c.closed = true
+	c.mu.Unlock()
+	operation.abandon()
+}
+
 type turnStream struct {
 	channel           chan turnEnvelope
 	regularEventSlots chan struct{}

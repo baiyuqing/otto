@@ -118,7 +118,7 @@ func validCompactionFileBlockContent(content string) bool {
 func summaryPositionInsideFence(summary string, position int) bool {
 	fenceCharacter := byte(0)
 	fenceLength := 0
-	for _, line := range strings.Split(summary[:position], "\n") {
+	for _, line := range strings.Split(normalizeSummaryLineEndings(summary[:position]), "\n") {
 		marker, length, closing := summaryFenceMarker(line, fenceCharacter, fenceLength)
 		if marker == 0 {
 			continue

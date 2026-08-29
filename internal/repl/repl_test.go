@@ -102,13 +102,170 @@ func TestREPLCommandsAndInputHandling(t *testing.T) {
 	if len(prompts) != 1 || prompts[0] != "hello" {
 		t.Fatalf("runner prompts = %q, want [hello]", prompts)
 	}
-	for _, expected := range []string{"/help", "/exit", "/new", "/session", "s-1", "/sessions/s-1.jsonl", "openai-compatible", "m-1"} {
+	for _, expected := range []string{"/help", "/exit", "/new", "/session", "/compact [focus]", "s-1", "/sessions/s-1.jsonl", "openai-compatible", "m-1"} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("stdout missing %q: %s", expected, stdout.String())
 		}
 	}
 	if !strings.Contains(stderr.String(), "unknown command: /unknown") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestREPLCompactCommandPassesFocusAndPrintsConciseResult(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{}
+	backend.compact = func(_ context.Context, focus string, _ func(agent.Event)) (agent.CompactionResult, error) {
+		if focus != "focus on auth" {
+			t.Fatalf("focus = %q", focus)
+		}
+		return agent.CompactionResult{
+			CheckpointID:         "deadbeef",
+			TokensBefore:         258000,
+			EstimatedTokensAfter: 23000,
+		}, nil
+	}
+	r := New(strings.NewReader("/compact \t focus on auth  \n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "[context] compacted 258k → 23k tokens") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestREPLCompactCommandPrefersEventAndDeduplicatesCheckpointID(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{}
+	backend.compact = func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{
+			CheckpointID:         "deadbeef",
+			TokensBefore:         258000,
+			EstimatedTokensAfter: 22000,
+		}})
+		return agent.CompactionResult{
+			CheckpointID:         "deadbeef",
+			TokensBefore:         258000,
+			EstimatedTokensAfter: 23000,
+		}, nil
+	}
+	r := New(strings.NewReader("/compact\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(stdout.String(), "[context]"); got != 1 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "[context] compacted 258k → 22k tokens") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "23k") {
+		t.Fatalf("stdout should prefer event result: %q", stdout.String())
+	}
+}
+
+func TestREPLCompactCommandNoOpRendersConcisely(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{}
+	backend.compact = func(_ context.Context, _ string, _ func(agent.Event)) (agent.CompactionResult, error) {
+		return agent.CompactionResult{Noop: true}, nil
+	}
+	r := New(strings.NewReader("/compact\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "[context] no-op") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestREPLCompactlyRemainsUnknownCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{}
+	backend.compact = func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+		t.Fatal("compact backend should not run")
+		return agent.CompactionResult{}, nil
+	}
+	r := New(strings.NewReader("/compactly\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "unknown command: /compactly") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestREPLAutomaticCompactionSuccessAndWarningDuringPrompt(t *testing.T) {
+	warningErr := errors.New("automatic context compaction failed below the hard input limit; continuing with the original request")
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventCompactionWarning, Err: warningErr})
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{
+			CheckpointID:         "abc123",
+			TokensBefore:         64000,
+			EstimatedTokensAfter: 12000,
+		}})
+		emit(agent.Event{Type: agent.EventTextDelta, Text: "done"})
+		return nil
+	}}
+	r := New(strings.NewReader("inspect\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "[context] compacted 64k → 12k tokens") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), warningErr.Error()) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestREPLCompactCommandInterruptReturnsToPrompt(t *testing.T) {
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	backend := &fakeBackend{}
+	backend.compact = func(ctx context.Context, _ string, _ func(agent.Event)) (agent.CompactionResult, error) {
+		close(started)
+		<-ctx.Done()
+		close(finished)
+		return agent.CompactionResult{}, ctx.Err()
+	}
+	var stdout, stderr bytes.Buffer
+	r := New(strings.NewReader("/compact\n/exit\n"), &stdout, &stderr, backend)
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.Run(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("compact command did not start")
+	}
+	if !r.Interrupt() {
+		t.Fatal("Interrupt() returned false during compact command")
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("compact command was not canceled")
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("Run() = %v, want return to REPL then /exit", err)
+	}
+	if r.Interrupt() {
+		t.Fatal("Interrupt() returned true while idle")
+	}
+}
+
+func TestREPLCompactCommandReturnsFatalPersistenceError(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
+	backend := &fakeBackend{}
+	backend.compact = func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+		return agent.CompactionResult{}, fatalErr
+	}
+	var stdout, stderr bytes.Buffer
+	r := New(strings.NewReader("/compact\n/exit\n"), &stdout, &stderr, backend)
+	err := r.Run(context.Background())
+	if !errors.Is(err, session.ErrFatalPersistence) || !IsCommandError(err, "/compact") {
+		t.Fatalf("Run() = %v, want fatal compact command error", err)
 	}
 }
 
@@ -283,6 +440,7 @@ type fakeBackend struct {
 	newCalls   int
 	newSession func() error
 	prompt     func(context.Context, string, func(agent.Event)) error
+	compact    func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
 }
 
 func (f *fakeBackend) Prompt(ctx context.Context, prompt string, emit func(agent.Event)) error {
@@ -292,8 +450,11 @@ func (f *fakeBackend) Prompt(ctx context.Context, prompt string, emit func(agent
 	return f.prompt(ctx, prompt, emit)
 }
 
-func (f *fakeBackend) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
-	return agent.CompactionResult{Noop: true}, nil
+func (f *fakeBackend) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
+	if f.compact == nil {
+		return agent.CompactionResult{Noop: true}, nil
+	}
+	return f.compact(ctx, focus, emit)
 }
 
 func (f *fakeBackend) NewSession() error {

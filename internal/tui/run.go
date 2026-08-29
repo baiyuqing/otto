@@ -18,15 +18,17 @@ var newProgram = func(model tea.Model, options ...tea.ProgramOption) programRunn
 }
 
 func Run(ctx context.Context, input io.Reader, output io.Writer, backend app.Backend) error {
+	initialModel := NewModel(ctx, backend)
+	cleanup := initialModel.operationCleanup
 	program := newProgram(
-		NewModel(ctx, backend),
+		initialModel,
 		tea.WithContext(rootContext(ctx)),
 		tea.WithInput(input),
 		tea.WithOutput(output),
 		tea.WithoutSignalHandler(),
 	)
 	finalModel, programErr := program.Run()
-	abandonTurnFromModel(finalModel)
+	cleanup.cleanup()
 	fatalErr := fatalErrorFromModel(finalModel)
 	if fatalErr != nil && programErr != nil {
 		return errors.Join(fatalErr, programErr)
@@ -35,17 +37,6 @@ func Run(ctx context.Context, input io.Reader, output io.Writer, backend app.Bac
 		return fatalErr
 	}
 	return programErr
-}
-
-func abandonTurnFromModel(finalModel tea.Model) {
-	switch final := finalModel.(type) {
-	case Model:
-		final.abandonActiveTurn()
-	case *Model:
-		if final != nil {
-			final.abandonActiveTurn()
-		}
-	}
 }
 
 func fatalErrorFromModel(finalModel tea.Model) error {

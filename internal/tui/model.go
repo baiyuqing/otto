@@ -333,7 +333,27 @@ func (m Model) footerStatus() string {
 }
 
 func formatTurnSeconds(duration time.Duration) string {
-	return fmt.Sprintf("%ds", int(duration.Seconds()))
+	if duration < time.Second {
+		return "0s"
+	}
+	seconds := int64(duration / time.Second)
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes := seconds / 60
+	remSeconds := seconds % 60
+	if minutes < 60 {
+		if remSeconds == 0 {
+			return fmt.Sprintf("%dm", minutes)
+		}
+		return fmt.Sprintf("%dm %ds", minutes, remSeconds)
+	}
+	hours := minutes / 60
+	remMinutes := minutes % 60
+	if remMinutes == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh %dm", hours, remMinutes)
 }
 
 func (m Model) overlayContent() string {

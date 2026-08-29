@@ -31,6 +31,7 @@ func (m Model) startCompaction(focus string) (tea.Model, tea.Cmd) {
 	stream.generation = m.turnGeneration
 	m.activeTurnStream = stream
 	m.activeTurnChannel = stream.channel
+	m.registerActiveOperation(stream, cancel)
 	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
 	m.turnEntryStart = len(m.entries)
 	m.clearEditor()

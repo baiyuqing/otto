@@ -100,6 +100,8 @@ type Model struct {
 	dirtyStreaming         bool
 	renderTickActive       bool
 	cancel                 context.CancelFunc
+	operationCleanup       *operationCleanup
+	activeOperation        *activeOperation
 	ctrlCArmed             bool
 	ctrlCArmedAt           time.Time
 	ctrlCArmGeneration     uint64
@@ -141,20 +143,21 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	vp.SoftWrap = true
 
 	model := Model{
-		rootCtx:         ctx,
-		backend:         backend,
-		entries:         entries,
-		viewport:        vp,
-		editor:          editor,
-		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		keymap:          DefaultKeyMap(),
-		usage:           usage,
-		expandedDetails: false,
-		autoFollow:      true,
-		darkBackground:  true,
-		renderer:        newGlamourRenderer(true),
-		clock:           realClock{},
-		activeAssistant: -1,
+		rootCtx:          ctx,
+		backend:          backend,
+		entries:          entries,
+		viewport:         vp,
+		editor:           editor,
+		spinner:          spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		keymap:           DefaultKeyMap(),
+		usage:            usage,
+		expandedDetails:  false,
+		autoFollow:       true,
+		darkBackground:   true,
+		renderer:         newGlamourRenderer(true),
+		clock:            realClock{},
+		operationCleanup: newOperationCleanup(),
+		activeAssistant:  -1,
 	}
 	for _, option := range options {
 		option(&model)
@@ -594,6 +597,7 @@ func (m *Model) resetSessionViewFromBackend(status string) {
 	m.renderTickActive = false
 	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
+	m.activeOperation = nil
 	m.activeAssistant = -1
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
@@ -697,6 +701,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	stream.generation = m.turnGeneration
 	m.activeTurnStream = stream
 	m.activeTurnChannel = stream.channel
+	m.registerActiveOperation(stream, cancel)
 	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
 	m.turnEntryStart = len(m.entries)
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
@@ -1262,10 +1267,13 @@ func (m *Model) renderActiveAssistantEntry() bool {
 }
 
 func (m *Model) completeTurnState() {
-	if m.cancel != nil {
+	if m.activeOperation != nil {
+		m.operationCleanup.finish(m.activeOperation)
+	} else if m.cancel != nil {
 		m.cancel()
-		m.cancel = nil
 	}
+	m.cancel = nil
+	m.activeOperation = nil
 	m.running = false
 	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
@@ -1506,7 +1514,18 @@ func (m *Model) nextLiveEntryID(kind string) string {
 	return liveEntryIDPrefix + "-" + id
 }
 
+func (m *Model) registerActiveOperation(stream *turnStream, cancel context.CancelFunc) {
+	if m.operationCleanup == nil {
+		m.operationCleanup = newOperationCleanup()
+	}
+	m.activeOperation = m.operationCleanup.register(stream, cancel)
+}
+
 func (m *Model) abandonActiveTurn() {
+	if m.activeOperation != nil {
+		m.operationCleanup.abandon(m.activeOperation)
+		return
+	}
 	if m.cancel != nil {
 		m.cancel()
 	}

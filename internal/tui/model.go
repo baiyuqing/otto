@@ -108,6 +108,7 @@ type Model struct {
 	newSessionPending      bool
 	newSessionGeneration   uint64
 	resume                 resumePickerState
+	activeTurnStream       *turnStream
 	activeTurnChannel      <-chan turnEnvelope
 	activeAssistant        int
 	turnErrorSeen          bool
@@ -584,17 +585,16 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 }
 
 func (m *Model) resetSessionViewFromBackend(status string) {
+	m.abandonActiveTurn()
 	m.entries, m.usage = entriesAndUsageFromBackend(m.backend)
 	m.overlay = overlayNone
 	m.statusText = status
-	if m.cancel != nil {
-		m.cancel()
-		m.cancel = nil
-	}
+	m.cancel = nil
 	m.running = false
 	m.clearCtrlCArm()
 	m.dirtyStreaming = false
 	m.renderTickActive = false
+	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
 	m.activeAssistant = -1
 	m.turnErrorSeen = false
@@ -697,6 +697,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.operationKind = operationPrompt
 	m.compactionCompleted = false
 	stream.generation = m.turnGeneration
+	m.activeTurnStream = stream
 	m.activeTurnChannel = stream.channel
 	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
 	m.turnEntryStart = len(m.entries)
@@ -712,6 +713,7 @@ func newTurnStream() *turnStream {
 	return &turnStream{
 		channel:           make(chan turnEnvelope, turnChannelCapacity),
 		regularEventSlots: make(chan struct{}, turnChannelCapacity-1),
+		abandonSignal:     make(chan struct{}),
 	}
 }
 
@@ -726,7 +728,7 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 	defer close(stream.channel)
 
 	if backend == nil {
-		stream.channel <- turnEnvelope{err: errors.New("backend is required"), done: true}
+		sendDurableTurnEnvelope(stream, turnEnvelope{err: errors.New("backend is required"), done: true})
 		return
 	}
 
@@ -738,34 +740,91 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 		if !acceptingEvents {
 			return
 		}
-		eventCopy := event
-		sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy})
+		eventCopy := cloneAgentEvent(event)
+		envelope := turnEnvelope{event: &eventCopy}
+		if isCommittedCompactionCompletion(eventCopy) {
+			envelope.aggregateUsage, envelope.aggregateUsagePresent = aggregateUsageSnapshot(backend)
+		}
+		sendTurnEvent(ctx, stream, envelope)
 	})
 	eventMu.Lock()
 	acceptingEvents = false
 	eventMu.Unlock()
-	stream.channel <- turnEnvelope{err: err, done: true}
+	sendDurableTurnEnvelope(stream, turnEnvelope{err: err, done: true})
+}
+
+func cloneAgentEvent(event agent.Event) agent.Event {
+	cloned := event
+	if event.Compaction != nil {
+		compaction := *event.Compaction
+		cloned.Compaction = &compaction
+	}
+	return cloned
+}
+
+func aggregateUsageSnapshot(backend app.Backend) (otmodel.Usage, bool) {
+	info := infoFromBackend(backend)
+	return info.Usage, info.UsagePresent
+}
+
+func isCommittedCompactionCompletion(event agent.Event) bool {
+	return event.Type == agent.EventCompactionCompleted && event.Compaction != nil
 }
 
 func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
-	if envelope.event != nil && envelope.event.Type == agent.EventCompactionCompleted {
-		stream.channel <- envelope
-		return true
+	if envelope.event != nil && isCommittedCompactionCompletion(*envelope.event) {
+		return sendDurableTurnEnvelope(stream, envelope)
 	}
 	return sendRegularTurnEvent(ctx, stream, envelope)
 }
 
+func sendDurableTurnEnvelope(stream *turnStream, envelope turnEnvelope) bool {
+	if stream == nil {
+		return false
+	}
+	select {
+	case <-stream.abandonSignal:
+		return false
+	default:
+	}
+	select {
+	case stream.channel <- envelope:
+		return true
+	case <-stream.abandonSignal:
+		return false
+	}
+}
+
 func sendRegularTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
+	if stream == nil {
+		return false
+	}
+	select {
+	case <-stream.abandonSignal:
+		return false
+	default:
+	}
 	select {
 	case stream.regularEventSlots <- struct{}{}:
 	case <-ctx.Done():
 		return false
+	case <-stream.abandonSignal:
+		return false
 	}
 	envelope.usesRegularEventSlot = true
+	select {
+	case <-stream.abandonSignal:
+		<-stream.regularEventSlots
+		return false
+	default:
+	}
 	select {
 	case stream.channel <- envelope:
 		return true
 	case <-ctx.Done():
+		<-stream.regularEventSlots
+		return false
+	case <-stream.abandonSignal:
 		<-stream.regularEventSlots
 		return false
 	}
@@ -794,7 +853,7 @@ func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		return m, waitTurn(msg.stream)
 	}
 	if msg.value.event != nil {
-		return m.applyTurnEvent(msg.stream, *msg.value.event)
+		return m.applyTurnEvent(msg.stream, msg.value)
 	}
 	if msg.value.done {
 		if m.reconcilePersistedToolResults() {
@@ -806,10 +865,11 @@ func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) isActiveTurnMessage(msg turnMsg) bool {
-	return m.running && m.activeTurnChannel != nil && msg.generation == m.turnGeneration && msg.channel == m.activeTurnChannel && msg.stream != nil && msg.stream.generation == m.turnGeneration && msg.stream.channel == m.activeTurnChannel
+	return m.running && m.activeTurnStream != nil && msg.generation == m.turnGeneration && msg.stream == m.activeTurnStream && msg.channel == m.activeTurnStream.channel && msg.stream.generation == m.turnGeneration && m.activeTurnChannel == m.activeTurnStream.channel
 }
 
-func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model, tea.Cmd) {
+func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Model, tea.Cmd) {
+	event := *envelope.event
 	switch event.Type {
 	case agent.EventTextDelta:
 		m.applyTextDelta(event.Text)
@@ -839,7 +899,7 @@ func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model,
 		m.recordTurnError(event.Err)
 		return m, waitTurn(stream)
 	case agent.EventCompactionStarted, agent.EventCompactionCompleted, agent.EventCompactionWarning:
-		m.applyCompactionEvent(event)
+		m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent)
 		return m, waitTurn(stream)
 	case agent.EventAgentFinished, agent.EventAgentStarted:
 		return m, waitTurn(stream)
@@ -1007,7 +1067,7 @@ func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
 func (m Model) finishTurn(envelope turnEnvelope) (tea.Model, tea.Cmd) {
 	err := envelope.err
 	if m.operationKind == operationCompact && !m.compactionCompleted && envelope.compactionResult != nil && (envelope.compactionResult.Noop || envelope.compactionResult.CheckpointID != "" || err == nil) {
-		m.applyCompactionResult(*envelope.compactionResult)
+		m.applyCompactionResult(*envelope.compactionResult, envelope.aggregateUsage, envelope.aggregateUsagePresent)
 	}
 	if err == nil {
 		err = m.turnEventErr
@@ -1084,6 +1144,7 @@ func (m *Model) completeTurnState() {
 		m.cancel = nil
 	}
 	m.running = false
+	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
 	m.renderTickActive = false
 	m.turnErrorSeen = false
@@ -1312,6 +1373,15 @@ func (m *Model) nextLiveEntryID(kind string) string {
 	return liveEntryIDPrefix + "-" + id
 }
 
+func (m *Model) abandonActiveTurn() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	if m.activeTurnStream != nil {
+		m.activeTurnStream.abandon()
+	}
+}
+
 func (m Model) reservedStateActive() bool {
-	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.ctrlCArmed || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.activeTurnStream != nil || m.ctrlCArmed || m.fatalErr != nil
 }

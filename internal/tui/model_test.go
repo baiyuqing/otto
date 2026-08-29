@@ -157,7 +157,7 @@ func keyPress(code rune, modifiers ...tea.KeyMod) tea.KeyPressMsg {
 
 var _ = keyPress
 
-func newTestModelWithBackend(t *testing.T, backend *fakeBackend) Model {
+func newTestModelWithBackend(t *testing.T, backend app.Backend) Model {
 	t.Helper()
 	return NewModel(context.Background(), backend, WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
 		return text, nil

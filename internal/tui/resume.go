@@ -314,6 +314,7 @@ func (m Model) failClosedStaleResume() (tea.Model, tea.Cmd) {
 
 func (m Model) quit() (tea.Model, tea.Cmd) {
 	m.cancelSessionListWorker()
+	m.abandonActiveTurn()
 	return m, tea.Quit
 }
 

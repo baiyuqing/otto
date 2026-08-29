@@ -3,7 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -362,4 +364,395 @@ func TestManualCompactionFatalPersistenceQuits(t *testing.T) {
 	if msg := runCommandWithin(t, quitCmd, time.Second); msg == nil {
 		t.Fatal("quit command returned nil")
 	}
+}
+
+func TestFullCompactionQueueDrainsCompletionsAndDone(t *testing.T) {
+	for _, completionCount := range []int{1, 3} {
+		t.Run(fmt.Sprintf("completions=%d", completionCount), func(t *testing.T) {
+			backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+				for index := 0; index < turnChannelCapacity-1; index++ {
+					emit(agent.Event{Type: agent.EventProviderUsage})
+				}
+				for index := 0; index < completionCount; index++ {
+					emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: fmt.Sprintf("checkpoint-%d", index)}})
+				}
+				return nil
+			}}
+			stream := newTurnStream()
+			workerFinished := make(chan struct{})
+			go func() {
+				runTurnWorker(context.Background(), backend, "question", stream)
+				close(workerFinished)
+			}()
+
+			var ordinary, completions, done int
+			for done == 0 {
+				message := runCommandWithin(t, waitTurn(stream), time.Second).(turnMsg)
+				switch {
+				case message.value.done:
+					done++
+				case message.value.event != nil && message.value.event.Type == agent.EventCompactionCompleted:
+					completions++
+				case message.value.event != nil:
+					ordinary++
+				}
+			}
+			select {
+			case <-workerFinished:
+			case <-time.After(time.Second):
+				t.Fatal("worker remained blocked after the stream was drained")
+			}
+			if ordinary != turnChannelCapacity-1 || completions != completionCount || done != 1 {
+				t.Fatalf("ordinary=%d completions=%d done=%d", ordinary, completions, done)
+			}
+			if got := len(stream.regularEventSlots); got != 0 {
+				t.Fatalf("regular event permits after drain = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestAbandonUnblocksFullTurnWorkerAndReleasesBlockedRegularPermit(t *testing.T) {
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		for index := 0; index < turnChannelCapacity-2; index++ {
+			emit(agent.Event{Type: agent.EventProviderUsage})
+		}
+		for index := 0; index < 2; index++ {
+			emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: fmt.Sprintf("checkpoint-%d", index)}})
+		}
+		emit(agent.Event{Type: agent.EventProviderUsage})
+		return nil
+	}}
+	stream := newTurnStream()
+	workerFinished := make(chan struct{})
+	go func() {
+		runTurnWorker(context.Background(), backend, "question", stream)
+		close(workerFinished)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for (len(stream.channel) != turnChannelCapacity || len(stream.regularEventSlots) != turnChannelCapacity-1) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(stream.channel) != turnChannelCapacity || len(stream.regularEventSlots) != turnChannelCapacity-1 {
+		t.Fatalf("blocked stream queue/permits = %d/%d", len(stream.channel), len(stream.regularEventSlots))
+	}
+	stream.abandon()
+	stream.abandon()
+	select {
+	case <-workerFinished:
+	case <-time.After(time.Second):
+		t.Fatal("abandoned worker remained blocked")
+	}
+	drainClosedTurnStream(t, stream)
+	if got := len(stream.regularEventSlots); got != 0 {
+		t.Fatalf("regular event permits after abandoned drain = %d, want 0", got)
+	}
+}
+
+func TestNilCompactionCompletionDoesNotUseDurableSlot(t *testing.T) {
+	stream := newTurnStream()
+	for index := 0; index < turnChannelCapacity-1; index++ {
+		event := agent.Event{Type: agent.EventProviderUsage}
+		if !sendTurnEvent(context.Background(), stream, turnEnvelope{event: &event}) {
+			t.Fatalf("ordinary event %d was dropped", index)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	malformed := agent.Event{Type: agent.EventCompactionCompleted}
+	result := make(chan bool, 1)
+	go func() { result <- sendTurnEvent(ctx, stream, turnEnvelope{event: &malformed}) }()
+
+	select {
+	case delivered := <-result:
+		if delivered {
+			t.Fatal("nil compaction payload consumed durable delivery")
+		}
+	case <-time.After(100 * time.Millisecond):
+		_ = waitTurn(stream)()
+		delivered := <-result
+		t.Fatalf("nil compaction payload blocked on the durable slot (eventually delivered=%v)", delivered)
+	}
+	if got := len(stream.channel); got != turnChannelCapacity-1 {
+		t.Fatalf("queue length = %d, want unchanged %d", got, turnChannelCapacity-1)
+	}
+	if got := len(stream.regularEventSlots); got != turnChannelCapacity-1 {
+		t.Fatalf("regular permits = %d, want unchanged %d", got, turnChannelCapacity-1)
+	}
+}
+
+func TestQuitAbandonsBlockedCommittedCompletion(t *testing.T) {
+	stream := newTurnStream()
+	for index := 0; index < turnChannelCapacity-1; index++ {
+		event := agent.Event{Type: agent.EventProviderUsage}
+		if !sendTurnEvent(context.Background(), stream, turnEnvelope{event: &event}) {
+			t.Fatalf("ordinary event %d was dropped", index)
+		}
+	}
+	completion := agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "first"}}
+	if !sendTurnEvent(context.Background(), stream, turnEnvelope{event: &completion}) {
+		t.Fatal("first completion was dropped")
+	}
+	blockedCompletion := agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "blocked"}}
+	blockedResult := make(chan bool, 1)
+	go func() {
+		blockedResult <- sendTurnEvent(context.Background(), stream, turnEnvelope{event: &blockedCompletion})
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.running = true
+	m.cancel = cancel
+	m.activeTurnStream = stream
+	m.activeTurnChannel = stream.channel
+	_, quit := m.quit()
+	if quit == nil {
+		t.Fatal("quit command = nil")
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("operation context error = %v, want context.Canceled", ctx.Err())
+	}
+	select {
+	case delivered := <-blockedResult:
+		if delivered {
+			t.Fatal("blocked completion reported delivery after quit")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("quit did not abandon blocked completion")
+	}
+	stream.abandon()
+	drainOpenTurnStream(stream)
+}
+
+func TestSessionResetAbandonsBlockedCommittedCompletion(t *testing.T) {
+	stream := newTurnStream()
+	for index := 0; index < turnChannelCapacity; index++ {
+		event := agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: fmt.Sprintf("checkpoint-%d", index)}}
+		if !sendTurnEvent(context.Background(), stream, turnEnvelope{event: &event}) {
+			t.Fatalf("completion %d was dropped", index)
+		}
+	}
+	blocked := agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "blocked"}}
+	blockedResult := make(chan bool, 1)
+	go func() { blockedResult <- sendTurnEvent(context.Background(), stream, turnEnvelope{event: &blocked}) }()
+
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.running = true
+	m.cancel = func() {}
+	m.activeTurnStream = stream
+	m.activeTurnChannel = stream.channel
+	m.resetSessionViewFromBackend("replaced")
+	select {
+	case delivered := <-blockedResult:
+		if delivered {
+			t.Fatal("blocked completion reported delivery after reset")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session reset did not abandon blocked completion")
+	}
+	if m.activeTurnStream != nil || m.activeTurnChannel != nil || m.running {
+		t.Fatalf("reset active stream=%p channel=%v running=%v", m.activeTurnStream, m.activeTurnChannel, m.running)
+	}
+	drainOpenTurnStream(stream)
+}
+
+func TestStaleIndependentTurnStreamContinuesDraining(t *testing.T) {
+	active := newTurnStream()
+	stale := newTurnStream()
+	event := agent.Event{Type: agent.EventProviderUsage}
+	if !sendTurnEvent(context.Background(), stale, turnEnvelope{event: &event}) {
+		t.Fatal("stale event was not queued")
+	}
+	stale.channel <- turnEnvelope{done: true}
+
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.running = true
+	m.turnGeneration = 2
+	active.generation = 2
+	stale.generation = 1
+	m.activeTurnStream = active
+	m.activeTurnChannel = active.channel
+	first := waitTurn(stale)().(turnMsg)
+	updated, next := m.Update(first)
+	if next == nil || !updated.(Model).running {
+		t.Fatalf("stale stream drain cmd=%v running=%v", next, updated.(Model).running)
+	}
+	select {
+	case <-stale.abandonSignal:
+		t.Fatal("stale independent stream was abandoned instead of drained")
+	default:
+	}
+	message := runCommandWithin(t, next, time.Second).(turnMsg)
+	if !message.value.done {
+		t.Fatalf("stale drain envelope = %#v, want done", message.value)
+	}
+}
+
+func TestCompactionCallbackDeepCopiesMutablePayload(t *testing.T) {
+	payload := &agent.CompactionEvent{CheckpointID: "original", TokensBefore: 9000, EstimatedTokensAfter: 2000}
+	mutated := make(chan struct{})
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: payload})
+		payload.CheckpointID = "mutated"
+		payload.EstimatedTokensAfter = 8000
+		close(mutated)
+		return nil
+	}}
+	stream := newTurnStream()
+	go runTurnWorker(context.Background(), backend, "question", stream)
+	message := runCommandWithin(t, waitTurn(stream), time.Second).(turnMsg)
+	<-mutated
+	if message.value.event == nil || message.value.event.Compaction == nil {
+		t.Fatalf("queued event = %#v", message.value.event)
+	}
+	if message.value.event.Compaction == payload {
+		t.Fatal("queued compaction payload aliases callback payload")
+	}
+	if got := message.value.event.Compaction; got.CheckpointID != "original" || got.EstimatedTokensAfter != 2000 {
+		t.Fatalf("queued compaction payload = %#v, want original values", got)
+	}
+}
+
+func TestCompactionCallbackMutationDoesNotRaceQueuedPayload(t *testing.T) {
+	payload := &agent.CompactionEvent{CheckpointID: "original", TokensBefore: 9000, EstimatedTokensAfter: 2000}
+	startMutation := make(chan struct{})
+	mutationDone := make(chan struct{})
+	releaseBackend := make(chan struct{})
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: payload})
+		<-startMutation
+		for index := 0; index < 10000; index++ {
+			payload.EstimatedTokensAfter = 8000 + index%2
+		}
+		close(mutationDone)
+		<-releaseBackend
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	message := runCommandWithin(t, cmd, time.Second)
+	close(startMutation)
+	applied, _ := updated.(Model).Update(message)
+	<-mutationDone
+	close(releaseBackend)
+	if got := applied.(Model).statusText; !strings.Contains(got, "2k") {
+		t.Fatalf("completion status = %q, want immutable queued estimate", got)
+	}
+}
+
+func TestCompactionCompletionUsesCallbackUsageSnapshotBeforeWorkerAdvances(t *testing.T) {
+	advanced := make(chan struct{})
+	backend := &usageSnapshotBackend{info: app.Info{Usage: model.Usage{InputTokens: 100, OutputTokens: 10}, UsagePresent: true}}
+	backend.prompt = func(_ context.Context, _ string, emit func(agent.Event)) error {
+		backend.setInfo(app.Info{Usage: model.Usage{InputTokens: 130, OutputTokens: 14}, UsagePresent: true})
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "checkpoint"}})
+		backend.setInfo(app.Info{Usage: model.Usage{InputTokens: 135, OutputTokens: 16}, UsagePresent: true})
+		emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 5, OutputTokens: 2}})
+		close(advanced)
+		return nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	completion := runCommandWithin(t, cmd, time.Second)
+	<-advanced
+
+	updated, next := updated.(Model).Update(completion)
+	state := updated.(Model)
+	if state.usage != (model.Usage{InputTokens: 130, OutputTokens: 14}) {
+		t.Fatalf("usage after completion = %#v, want callback boundary", state.usage)
+	}
+	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	state = updated.(Model)
+	if state.usage != (model.Usage{InputTokens: 135, OutputTokens: 16}) {
+		t.Fatalf("usage after queued provider event = %#v, want counted once", state.usage)
+	}
+	updated, _ = state.Update(runCommandWithin(t, next, time.Second))
+	if got := updated.(Model).usage; got != (model.Usage{InputTokens: 135, OutputTokens: 16}) {
+		t.Fatalf("final usage = %#v, want counted once", got)
+	}
+}
+
+func TestManualCompactionFallbackUsesReturnBoundaryUsageSnapshot(t *testing.T) {
+	backend := &usageSnapshotBackend{info: app.Info{Usage: model.Usage{InputTokens: 100}, UsagePresent: true}}
+	backend.compact = func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+		backend.setInfo(app.Info{Usage: model.Usage{InputTokens: 130, OutputTokens: 4}, UsagePresent: true})
+		return agent.CompactionResult{CheckpointID: "checkpoint", TokensBefore: 5000, EstimatedTokensAfter: 1000}, nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("/compact")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	done := runCommandWithin(t, cmd, time.Second)
+	backend.setInfo(app.Info{Usage: model.Usage{InputTokens: 170, OutputTokens: 9}, UsagePresent: true})
+
+	updated, _ = updated.(Model).Update(done)
+	if got := updated.(Model).usage; got != (model.Usage{InputTokens: 130, OutputTokens: 4}) {
+		t.Fatalf("manual fallback usage = %#v, want return boundary", got)
+	}
+}
+
+func drainClosedTurnStream(t *testing.T, stream *turnStream) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case envelope, ok := <-stream.channel:
+			if !ok {
+				return
+			}
+			if envelope.usesRegularEventSlot {
+				<-stream.regularEventSlots
+			}
+		case <-deadline:
+			t.Fatal("turn stream did not close")
+		}
+	}
+}
+
+func drainOpenTurnStream(stream *turnStream) {
+	for len(stream.channel) > 0 {
+		envelope := <-stream.channel
+		if envelope.usesRegularEventSlot {
+			<-stream.regularEventSlots
+		}
+	}
+}
+
+type usageSnapshotBackend struct {
+	mu      sync.Mutex
+	info    app.Info
+	prompt  func(context.Context, string, func(agent.Event)) error
+	compact func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
+}
+
+func (b *usageSnapshotBackend) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {
+	if b.prompt == nil {
+		return nil
+	}
+	return b.prompt(ctx, text, emit)
+}
+
+func (b *usageSnapshotBackend) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
+	if b.compact == nil {
+		return agent.CompactionResult{Noop: true}, nil
+	}
+	return b.compact(ctx, focus, emit)
+}
+
+func (b *usageSnapshotBackend) NewSession() error { return nil }
+
+func (b *usageSnapshotBackend) Info() app.Info {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.info
+}
+
+func (b *usageSnapshotBackend) History() []model.Message { return nil }
+
+func (b *usageSnapshotBackend) setInfo(info app.Info) {
+	b.mu.Lock()
+	b.info = info
+	b.mu.Unlock()
 }

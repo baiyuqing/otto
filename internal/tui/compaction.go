@@ -29,6 +29,7 @@ func (m Model) startCompaction(focus string) (tea.Model, tea.Cmd) {
 	m.operationKind = operationCompact
 	m.compactionCompleted = false
 	stream.generation = m.turnGeneration
+	m.activeTurnStream = stream
 	m.activeTurnChannel = stream.channel
 	m.turnHistoryBaseline = turnHistoryBaseline{}
 	m.turnEntryStart = len(m.entries)
@@ -48,7 +49,7 @@ func runCompactionWorker(ctx context.Context, backend app.Backend, focus string,
 	defer close(stream.channel)
 
 	if backend == nil {
-		stream.channel <- turnEnvelope{err: errors.New("backend is required"), done: true}
+		sendDurableTurnEnvelope(stream, turnEnvelope{err: errors.New("backend is required"), done: true})
 		return
 	}
 
@@ -60,17 +61,28 @@ func runCompactionWorker(ctx context.Context, backend app.Backend, focus string,
 		if !acceptingEvents {
 			return
 		}
-		eventCopy := event
-		sendTurnEvent(ctx, stream, turnEnvelope{event: &eventCopy})
+		eventCopy := cloneAgentEvent(event)
+		envelope := turnEnvelope{event: &eventCopy}
+		if isCommittedCompactionCompletion(eventCopy) {
+			envelope.aggregateUsage, envelope.aggregateUsagePresent = aggregateUsageSnapshot(backend)
+		}
+		sendTurnEvent(ctx, stream, envelope)
 	})
 	eventMu.Lock()
 	acceptingEvents = false
 	eventMu.Unlock()
 	resultCopy := result
-	stream.channel <- turnEnvelope{compactionResult: &resultCopy, err: err, done: true}
+	aggregateUsage, aggregateUsagePresent := aggregateUsageSnapshot(backend)
+	sendDurableTurnEnvelope(stream, turnEnvelope{
+		compactionResult:      &resultCopy,
+		aggregateUsage:        aggregateUsage,
+		aggregateUsagePresent: aggregateUsagePresent,
+		err:                   err,
+		done:                  true,
+	})
 }
 
-func (m *Model) applyCompactionEvent(event agent.Event) {
+func (m *Model) applyCompactionEvent(event agent.Event, aggregateUsage otmodel.Usage, aggregateUsagePresent bool) {
 	switch event.Type {
 	case agent.EventCompactionStarted:
 		m.statusText = "compacting context"
@@ -79,7 +91,7 @@ func (m *Model) applyCompactionEvent(event agent.Event) {
 			return
 		}
 		m.compactionCompleted = true
-		m.applyCompactionResult(compactionResultFromEvent(*event.Compaction))
+		m.applyCompactionResult(compactionResultFromEvent(*event.Compaction), aggregateUsage, aggregateUsagePresent)
 	case agent.EventCompactionWarning:
 		if event.Err != nil {
 			m.statusText = event.Err.Error()
@@ -89,15 +101,10 @@ func (m *Model) applyCompactionEvent(event agent.Event) {
 	}
 }
 
-func (m *Model) applyCompactionResult(result agent.CompactionResult) {
+func (m *Model) applyCompactionResult(result agent.CompactionResult, aggregateUsage otmodel.Usage, aggregateUsagePresent bool) {
 	m.statusText = compactionStatus(result)
-	m.reconcileAggregateUsage()
-}
-
-func (m *Model) reconcileAggregateUsage() {
-	info := infoFromBackend(m.backend)
-	if info.UsagePresent {
-		m.usage = addUsageTotals(otmodel.Usage{}, &info.Usage)
+	if aggregateUsagePresent {
+		m.usage = addUsageTotals(otmodel.Usage{}, &aggregateUsage)
 	}
 }
 

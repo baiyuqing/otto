@@ -36,9 +36,10 @@ type ResumeFactory func(context.Context, string) (SessionReplacement, error)
 type NewSessionBuilder func(context.Context, RuntimeInfo) (SessionReplacement, error)
 
 type RuntimeInfo struct {
-	Provider string
-	Profile  string
-	Model    string
+	Provider      string
+	Profile       string
+	Model         string
+	ContextWindow int
 }
 
 type SessionReplacement struct {
@@ -76,14 +77,18 @@ func WithNewSessionBuilder(build NewSessionBuilder) Option {
 }
 
 type Info struct {
-	SessionID    string
-	SessionPath  string
-	Workspace    string
-	Provider     string
-	Profile      string
-	Model        string
-	Usage        model.Usage
-	UsagePresent bool
+	SessionID                 string
+	SessionPath               string
+	Workspace                 string
+	Provider                  string
+	Profile                   string
+	Model                     string
+	Usage                     model.Usage
+	UsagePresent              bool
+	ContextWindow             int
+	ContextInputTokens        int
+	ContextInputTokensPresent bool
+	ContextInputTokensPending bool
 }
 
 type Backend interface {
@@ -320,9 +325,10 @@ func (c *Controller) NewSession() error {
 			Session: replacement,
 			Runner:  runner,
 			RuntimeInfo: RuntimeInfo{
-				Provider: header.Provider,
-				Profile:  header.Profile,
-				Model:    header.Model,
+				Provider:      header.Provider,
+				Profile:       header.Profile,
+				Model:         header.Model,
+				ContextWindow: runtimeInfo.ContextWindow,
 			},
 		}, nil
 	}, true, false)
@@ -619,6 +625,16 @@ func (c *Controller) Info() Info {
 		info.Provider = runtimeInfo.Provider
 		info.Profile = runtimeInfo.Profile
 		info.Model = runtimeInfo.Model
+		info.ContextWindow = runtimeInfo.ContextWindow
+	}
+	if snapshotSource, ok := current.(session.SnapshotProvider); ok {
+		snapshot := snapshotSource.Snapshot()
+		info.Usage = snapshot.AggregateUsage
+		info.UsagePresent = snapshot.AggregateUsagePresent
+		info.ContextInputTokens = snapshot.ContextInputTokens
+		info.ContextInputTokensPresent = snapshot.ContextInputTokensPresent
+		info.ContextInputTokensPending = snapshot.ContextInputTokensPending
+		return info
 	}
 	if usageSource, ok := current.(session.UsageProvider); ok {
 		info.Usage, info.UsagePresent = usageSource.AggregateUsage()

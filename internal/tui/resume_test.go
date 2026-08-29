@@ -695,7 +695,7 @@ func TestResumeSuccessRendersFoldedCompactionBeforeRetainedTail(t *testing.T) {
 
 func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	backend := &resumeBackend{
-		info: app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old"},
+		info: app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", ContextWindow: 128_000, ContextInputTokens: 64_000, ContextInputTokensPresent: true},
 		history: []model.Message{{
 			Role:   model.RoleAssistant,
 			Blocks: []model.Block{{Type: model.BlockText, Text: "old transcript"}},
@@ -709,6 +709,7 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 		backend.info = app.Info{
 			Profile: "new-profile", Model: "new-model", SessionID: "session-new",
 			Usage: model.Usage{InputTokens: 20, OutputTokens: 6}, UsagePresent: true,
+			ContextWindow: 128_000, ContextInputTokens: 16_000, ContextInputTokensPresent: true,
 		}
 		backend.history = []model.Message{{
 			Role:   model.RoleAssistant,
@@ -721,6 +722,7 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 		}, nil
 	}
 	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
+	m = resizeModel(t, m, 120, 12)
 	m.editor.SetValue("draft")
 
 	updated, cmd := m.Update(keyPress(tea.KeyEnter))
@@ -761,7 +763,7 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	if got.usage.InputTokens != 20 || got.usage.OutputTokens != 6 {
 		t.Fatalf("usage = %#v", got.usage)
 	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") || !strings.Contains(content, "ctx 12.5%") || strings.Contains(content, "ctx 50.0%") {
 		t.Fatalf("view = %q", content)
 	}
 	if !strings.Contains(got.statusText, "warning: repaired trailing newline") {

@@ -140,7 +140,16 @@ func decodeStrictJSON(arguments json.RawMessage, destination any, required ...st
 	return nil
 }
 
+const maxReadFileBytes = 64 << 20
+
 func readValidatedTextFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Size() > maxReadFileBytes {
+		return "", fmt.Errorf("file is too large (%d bytes); maximum readable size is %d bytes", info.Size(), maxReadFileBytes)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

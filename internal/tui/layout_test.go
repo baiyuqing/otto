@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -29,5 +30,17 @@ func TestRenderFooterShowsCachedTokensWhenPresent(t *testing.T) {
 	footer = renderFooter(120, info, model.Usage{InputTokens: 20, OutputTokens: 6}, "")
 	if !strings.Contains(footer, "tokens 20/6") || strings.Contains(footer, "cached") {
 		t.Fatalf("footer = %q, want plain tokens field without cached", footer)
+	}
+}
+
+func TestEmptyTranscriptHintStaysWithinBounds(t *testing.T) {
+	for _, width := range []int{minTerminalWidth, 60, 100} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			hint := emptyTranscriptHint(width)
+			if hint == "" {
+				t.Fatalf("hint = %q, want non-empty", hint)
+			}
+			assertRenderedBounds(t, hint, width, 1)
+		})
 	}
 }

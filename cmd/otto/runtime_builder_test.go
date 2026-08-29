@@ -62,6 +62,62 @@ func TestRuntimeBuilderResolveSessionIgnoresProcessModelOverrides(t *testing.T) 
 	}
 }
 
+func TestRuntimeBuilderBuildNewReplacementPreservesExplicitBaseURL(t *testing.T) {
+	const overrideBaseURL = "https://cli-override.example/v1"
+	tests := []struct {
+		name        string
+		file        config.File
+		environment map[string]string
+		current     app.RuntimeInfo
+	}{
+		{
+			name:        "profile-less runtime",
+			file:        config.File{},
+			environment: map[string]string{"OTTO_API_KEY": "fallback-secret"},
+			current:     app.RuntimeInfo{Provider: "openai-compatible", Model: "gpt-4.1"},
+		},
+		{
+			name:        "profile endpoint overridden",
+			file:        configWithProfiles("default"),
+			environment: map[string]string{"DEFAULT_KEY": "default-secret"},
+			current:     app.RuntimeInfo{Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspacePath := mustCanonicalDirectory(t, t.TempDir())
+			workspace, err := tool.NewWorkspace(workspacePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var createdRuntime config.Runtime
+			deps := runDependencies{newSession: func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+				createdRuntime = runtime
+				return session.NewMemory(session.Header{
+					Version: session.CurrentVersion, ID: "fresh", Workspace: workspace,
+					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+				}), nil
+			}}
+			builder := newRuntimeBuilder(tt.file, tt.environment, workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{
+				baseURL: overrideBaseURL,
+			}, nil, deps)
+			builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+				return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+			}
+
+			replacement, err := builder.buildNewReplacement(context.Background(), tt.current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer replacement.Session.Close()
+			if createdRuntime.BaseURL != overrideBaseURL {
+				t.Fatalf("new replacement base URL = %q, want explicit override %q", createdRuntime.BaseURL, overrideBaseURL)
+			}
+		})
+	}
+}
+
 func TestRuntimeBuilderRejectsBaseURLUserinfoWithBoundedRedactedError(t *testing.T) {
 	username := "userinfo-name"
 	password := "userinfo-" + strings.Repeat("secret", 8<<10)
@@ -571,6 +627,151 @@ func TestRuntimeBuilderBuildNewReplacementCreationErrorClosesReturnedCandidate(t
 	}
 }
 
+func TestRuntimeBuilderBuildNewReplacementCleansCanceledCandidate(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	candidate := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		cancel()
+		return candidate, nil
+	}
+	var runnerCalls atomic.Int32
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		runnerCalls.Add(1)
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	_, err := builder.buildNewReplacement(ctx, app.RuntimeInfo{
+		Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("buildNewReplacement() error = %v, want context.Canceled", err)
+	}
+	if runnerCalls.Load() != 0 {
+		t.Fatalf("runner build calls = %d, want 0", runnerCalls.Load())
+	}
+	if candidate.closeCalls.Load() != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	}
+}
+
+func TestRuntimeBuilderBuildNewReplacementRejectsNilSessionAndRunner(t *testing.T) {
+	t.Run("nil session", func(t *testing.T) {
+		builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+		builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+			return nil, nil
+		}
+		_, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+			Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1",
+		})
+		if err == nil || err.Error() != "session factory returned nil session" {
+			t.Fatalf("buildNewReplacement() error = %v, want nil session error", err)
+		}
+	})
+
+	t.Run("nil runner", func(t *testing.T) {
+		builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+		candidate := &trackedReplacementSession{
+			Session: session.NewMemory(session.Header{
+				Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+				Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1", CreatedAt: time.Now().UTC(),
+			}),
+			closed: make(chan struct{}),
+		}
+		builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+			return candidate, nil
+		}
+		builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) { return nil, nil }
+
+		_, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+			Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1",
+		})
+		if err == nil || err.Error() != "runner factory returned nil runner" {
+			t.Fatalf("buildNewReplacement() error = %v, want nil runner error", err)
+		}
+		if candidate.closeCalls.Load() != 1 {
+			t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+		}
+	})
+}
+
+func TestRuntimeBuilderBuildNewReplacementProvenanceFailureClosesCandidate(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	candidate := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "stale-model", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) { return candidate, nil }
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	_, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+		Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime provenance updates") {
+		t.Fatalf("buildNewReplacement() error = %v, want provenance update error", err)
+	}
+	if candidate.closeCalls.Load() != 1 {
+		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	}
+}
+
+func TestRuntimeBuilderCleanupCandidateRedactsJoinedCancellationErrors(t *testing.T) {
+	const (
+		apiKey      = "joined-cancel-api-key-secret"
+		urlSecret   = "joined-cancel-url-secret"
+		urlPassword = "joined-cancel-url-password"
+	)
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	runtime := config.Runtime{
+		APIKey:  apiKey,
+		BaseURL: "https://user:" + urlPassword + "@example.test/v1?tenant=" + urlSecret,
+	}
+
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			closeErr := fmt.Errorf("candidate close exposed %s %s %s", apiKey, urlSecret, urlPassword)
+			candidate := &trackedReplacementSession{
+				Session:  session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "candidate", CreatedAt: time.Now().UTC()}),
+				closed:   make(chan struct{}),
+				closeErr: closeErr,
+			}
+
+			err := builder.cleanupCandidate(candidate, cause, &runtime)
+			if !errors.Is(err, cause) || !errors.Is(err, closeErr) {
+				t.Fatalf("cleanupCandidate() error identities = %v, want %v and close error", err, cause)
+			}
+			for _, secret := range []string{apiKey, urlSecret, urlPassword} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("cleanupCandidate() error leaked %q: %v", secret, err)
+				}
+			}
+			if _, ok := err.(interface{ Unwrap() error }); ok {
+				t.Fatalf("redacted cancellation error exposes its cause through Unwrap: %T", err)
+			}
+			if _, ok := err.(interface{ Unwrap() []error }); ok {
+				t.Fatalf("redacted cancellation error exposes joined causes through Unwrap: %T", err)
+			}
+			if candidate.closeCalls.Load() != 1 {
+				t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+			}
+		})
+	}
+	if got := builder.redactError(context.Canceled, &runtime); got != context.Canceled {
+		t.Fatalf("plain cancellation = %#v, want original sentinel", got)
+	}
+}
+
 func TestRuntimeBuilderBuildNewReplacementFailureClosesCandidateAndRedacts(t *testing.T) {
 	const secret = "new-replacement-secret"
 	file := configWithProfiles("default")
@@ -816,6 +1017,7 @@ type trackedReplacementSession struct {
 	session.Session
 	closed     chan struct{}
 	closeCalls atomic.Int32
+	closeErr   error
 }
 
 func (s *trackedReplacementSession) Close() error {
@@ -826,7 +1028,7 @@ func (s *trackedReplacementSession) Close() error {
 	default:
 		close(s.closed)
 	}
-	return err
+	return errors.Join(err, s.closeErr)
 }
 
 func newRuntimeBuilderForTest(t *testing.T, file config.File) runtimeBuilder {

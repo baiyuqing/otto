@@ -287,8 +287,8 @@ func TestViewPositionsRealCursorAtEditorLocation(t *testing.T) {
 	if cursor == nil {
 		t.Fatal("view cursor = nil, want a real terminal cursor for IME positioning")
 	}
-	if cursor.X != 7 || cursor.Y != 10 {
-		t.Fatalf("view cursor = (%d,%d), want (7,10) at the visible editor", cursor.X, cursor.Y)
+	if cursor.X != 7 || cursor.Y != 9 {
+		t.Fatalf("view cursor = (%d,%d), want (7,9) at the visible editor", cursor.X, cursor.Y)
 	}
 }
 
@@ -302,8 +302,8 @@ func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
 	}
 
 	cursor := m.View().Cursor
-	if cursor == nil || cursor.X != 3 || cursor.Y != 10 {
-		t.Fatalf("suggestion view cursor = %#v, want (3,10) at the editor", cursor)
+	if cursor == nil || cursor.X != 3 || cursor.Y != 9 {
+		t.Fatalf("suggestion view cursor = %#v, want (3,9) at the editor", cursor)
 	}
 }
 

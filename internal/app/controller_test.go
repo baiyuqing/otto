@@ -533,6 +533,105 @@ func TestControllerInfoExposesOptionalAggregateUsageDefensively(t *testing.T) {
 	}
 }
 
+func TestControllerInfoIncludesContextWindowAndSnapshotUsage(t *testing.T) {
+	runtime := RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "active-model"}
+	setRuntimeContextWindow(t, &runtime, 128_000)
+	current := &snapshotSession{
+		Session: session.NewMemory(testHeader("usage")),
+		snapshot: session.Snapshot{
+			AggregateUsage:            model.Usage{InputTokens: 20, OutputTokens: 6},
+			AggregateUsagePresent:     true,
+			ContextInputTokens:        11,
+			ContextInputTokensPresent: true,
+		},
+	}
+	controller, err := New(current, func() (session.Session, error) {
+		return session.NewMemory(testHeader("next")), nil
+	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(runtime))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info := controller.Info()
+	if !info.UsagePresent || info.Usage != current.snapshot.AggregateUsage {
+		t.Fatalf("Info() = %#v", info)
+	}
+	assertInfoContext(t, info, 128_000, 11, true, false)
+	info.Usage.InputTokens = 99
+	if got := controller.Info(); got.Usage != current.snapshot.AggregateUsage {
+		t.Fatalf("mutating Info usage changed controller state: %#v", got)
+	}
+}
+
+func TestControllerNewSessionWithoutBuilderPreservesActiveContextWindow(t *testing.T) {
+	runtime := RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "active-model"}
+	setRuntimeContextWindow(t, &runtime, 32_768)
+	initial := &snapshotSession{Session: &fakeSession{header: testHeader("initial")}, snapshot: session.Snapshot{ContextInputTokensPending: true}}
+	next := &snapshotSession{Session: &fakeSession{header: testHeader("next")}, snapshot: session.Snapshot{ContextInputTokensPending: true}}
+	controller, err := New(initial, func() (session.Session, error) {
+		return next, nil
+	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(runtime))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := controller.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	got := controller.Info()
+	if got.SessionID != "next" {
+		t.Fatalf("Info() session = %#v", got)
+	}
+	assertInfoContext(t, got, 32_768, 0, false, true)
+}
+
+func TestControllerResumePublishesContextWindowOnlyAfterSuccessfulReplacement(t *testing.T) {
+	oldRuntime := RuntimeInfo{Provider: "openai-compatible", Profile: "old", Model: "old-model"}
+	setRuntimeContextWindow(t, &oldRuntime, 16_384)
+	newRuntime := RuntimeInfo{Provider: "openai-compatible", Profile: "new", Model: "new-model"}
+	setRuntimeContextWindow(t, &newRuntime, 65_536)
+	old := &snapshotSession{Session: &fakeSession{header: testHeader("old")}, snapshot: session.Snapshot{ContextInputTokens: 7, ContextInputTokensPresent: true}}
+	next := &snapshotSession{Session: &fakeSession{header: testHeader("next")}, snapshot: session.Snapshot{ContextInputTokensPending: true}}
+
+	controller, err := New(old, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("unused")}, nil
+	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(oldRuntime), WithSessionBrowser(nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{Session: next, Runner: runnerFunc(noopRun), RuntimeInfo: newRuntime}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertInfoContext(t, controller.Info(), 16_384, 7, true, false)
+	if _, err := controller.ResumeSession(context.Background(), next.Path()); err != nil {
+		t.Fatal(err)
+	}
+	got := controller.Info()
+	if got.SessionID != "next" {
+		t.Fatalf("Info() after successful resume = %#v", got)
+	}
+	assertInfoContext(t, got, 65_536, 0, false, true)
+
+	failing, err := New(old, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("unused")}, nil
+	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(oldRuntime), WithSessionBrowser(nil,
+		func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{Session: next, Runner: runnerFunc(noopRun), RuntimeInfo: newRuntime}, errors.New("resume failed")
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failing.ResumeSession(context.Background(), next.Path()); err == nil || err.Error() != "resume failed" {
+		t.Fatalf("ResumeSession() error = %v, want resume failed", err)
+	}
+	stillOld := failing.Info()
+	if stillOld.SessionID != "old" {
+		t.Fatalf("Info() after failed resume = %#v", stillOld)
+	}
+	assertInfoContext(t, stillOld, 16_384, 7, true, false)
+}
+
 func TestControllerHistoryReturnsDefensiveSnapshot(t *testing.T) {
 	current := &fakeSession{header: testHeader("history"), messages: []model.Message{{
 		ID:        "m1",
@@ -2030,7 +2129,7 @@ func TestControllerNewSessionBuilderUsesRuntimeAfterResumeAndCommitsReadyReplace
 	initialRunner := &recordingRunner{}
 	resumedRunner := &recordingRunner{}
 	freshRunner := &recordingRunner{}
-	resumedRuntime := RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model"}
+	resumedRuntime := RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model", ContextWindow: 65_536}
 	var gotRuntime RuntimeInfo
 	legacyCreateCalls := 0
 	legacyBuildCalls := 0
@@ -2040,7 +2139,7 @@ func TestControllerNewSessionBuilderUsesRuntimeAfterResumeAndCommitsReadyReplace
 	}, func(session.Session) Runner {
 		legacyBuildCalls++
 		return initialRunner
-	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "startup", Model: "startup-model"}),
+	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "startup", Model: "startup-model", ContextWindow: 128_000}),
 		WithSessionBrowser(nil, func(context.Context, string) (SessionReplacement, error) {
 			return SessionReplacement{Session: resumed, Runner: resumedRunner, RuntimeInfo: resumedRuntime}, nil
 		}),
@@ -2065,6 +2164,8 @@ func TestControllerNewSessionBuilderUsesRuntimeAfterResumeAndCommitsReadyReplace
 	}
 	if got := controller.Info(); got.SessionID != "fresh" || got.Profile != "resumed" || got.Model != "resumed-model" {
 		t.Fatalf("Info() after new = %#v", got)
+	} else {
+		assertInfoContext(t, got, 65_536, 0, false, false)
 	}
 	if err := controller.Prompt(context.Background(), "fresh", nil); err != nil {
 		t.Fatal(err)
@@ -2201,6 +2302,15 @@ func (s *aggregateUsageSession) AggregateUsage() (model.Usage, bool) {
 	return s.usage, s.present
 }
 
+type snapshotSession struct {
+	session.Session
+	snapshot session.Snapshot
+}
+
+func (s *snapshotSession) Snapshot() session.Snapshot {
+	return s.snapshot
+}
+
 type fakeSession struct {
 	mu         sync.Mutex
 	header     session.Header
@@ -2263,6 +2373,36 @@ func (f *fakeSession) CloseCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closeCalls
+}
+
+func assertInfoContext(t *testing.T, info Info, wantWindow, wantInput int, wantPresent, wantPending bool) {
+	t.Helper()
+	value := reflect.ValueOf(info)
+	window := value.FieldByName("ContextWindow")
+	if !window.IsValid() || int(window.Int()) != wantWindow {
+		t.Fatalf("Info().ContextWindow = %v, want %d", window, wantWindow)
+	}
+	input := value.FieldByName("ContextInputTokens")
+	if !input.IsValid() || int(input.Int()) != wantInput {
+		t.Fatalf("Info().ContextInputTokens = %v, want %d", input, wantInput)
+	}
+	present := value.FieldByName("ContextInputTokensPresent")
+	if !present.IsValid() || present.Bool() != wantPresent {
+		t.Fatalf("Info().ContextInputTokensPresent = %v, want %v", present, wantPresent)
+	}
+	pending := value.FieldByName("ContextInputTokensPending")
+	if !pending.IsValid() || pending.Bool() != wantPending {
+		t.Fatalf("Info().ContextInputTokensPending = %v, want %v", pending, wantPending)
+	}
+}
+
+func setRuntimeContextWindow(t *testing.T, runtime *RuntimeInfo, value int) {
+	t.Helper()
+	field := reflect.ValueOf(runtime).Elem().FieldByName("ContextWindow")
+	if !field.IsValid() {
+		t.Fatal("RuntimeInfo.ContextWindow is missing")
+	}
+	field.SetInt(int64(value))
 }
 
 func newTestController(t *testing.T, runner Runner) *Controller {

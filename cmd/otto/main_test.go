@@ -714,6 +714,7 @@ provider = "openai-compatible"
 base_url = "http://127.0.0.1:1"
 model = "profile-model"
 api_key_env = "ACTIVE_KEY"
+context_window = 131072
 [profiles.test]
 provider = "openai-compatible"
 base_url = "http://127.0.0.1:2"
@@ -756,7 +757,7 @@ api_key_env = "TEST_KEY"
 	if got.SessionID != "resumed-session" || got.SessionPath != canonicalResumePath || got.Workspace != workspace {
 		t.Fatalf("dynamic session info = %#v", got)
 	}
-	if got.Provider != "openai-compatible" || got.Profile != "active" || got.Model != "override-model" {
+	if got.Provider != "openai-compatible" || got.Profile != "active" || got.Model != "override-model" || got.ContextWindow != 131_072 {
 		t.Fatalf("runtime info = %#v, want resolved overrides", got)
 	}
 }

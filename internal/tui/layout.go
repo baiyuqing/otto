@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"math/big"
 	"path/filepath"
 	"strings"
 
@@ -99,9 +100,12 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 	}
 	if width >= 48 {
 		if usage.CachedInputTokens > 0 {
-			fields = append(fields, fmt.Sprintf("tokens %d/%d (cached %d)", max(0, usage.InputTokens), max(0, usage.OutputTokens), usage.CachedInputTokens))
+			fields = append(fields, fmt.Sprintf("tokens %s/%s (cached %s)", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens), formatFooterTokenCount(usage.CachedInputTokens)))
 		} else {
-			fields = append(fields, fmt.Sprintf("tokens %d/%d", max(0, usage.InputTokens), max(0, usage.OutputTokens)))
+			fields = append(fields, fmt.Sprintf("tokens %s/%s", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens)))
+		}
+		if context := footerContextField(info); context != "" {
+			fields = append(fields, context)
 		}
 	}
 	if info.SessionID != "" && width >= 60 {
@@ -118,6 +122,68 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 	footer := strings.Join(fields, " | ")
 	width = max(0, width)
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
+}
+
+func footerContextField(info app.Info) string {
+	if info.ContextWindow <= 0 {
+		return ""
+	}
+	if info.ContextInputTokensPresent {
+		return "ctx " + formatFooterContextPercentage(info.ContextInputTokens, info.ContextWindow)
+	}
+	if info.ContextInputTokensPending {
+		return "ctx ?%"
+	}
+	return ""
+}
+
+func formatFooterContextPercentage(inputTokens, contextWindow int) string {
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	if contextWindow <= 0 {
+		return "0.0%"
+	}
+	numerator := new(big.Int).Mul(big.NewInt(int64(inputTokens)), big.NewInt(1000))
+	denominator := big.NewInt(int64(contextWindow))
+	numerator.Add(numerator, new(big.Int).Rsh(new(big.Int).Set(denominator), 1))
+	tenths := new(big.Int).Quo(numerator, denominator).String()
+	if len(tenths) == 1 {
+		return "0." + tenths + "%"
+	}
+	return tenths[:len(tenths)-1] + "." + tenths[len(tenths)-1:] + "%"
+}
+
+func formatFooterTokenCount(tokens int) string {
+	if tokens <= 0 {
+		return "0"
+	}
+	count := uint64(tokens)
+	if count < 1000 {
+		return fmt.Sprintf("%d", count)
+	}
+	if count < 1_000_000 {
+		return formatFooterTokenCountUnit(count, 1_000, "k", "M", false)
+	}
+	if count < 1_000_000_000 {
+		return formatFooterTokenCountUnit(count, 1_000_000, "M", "B", false)
+	}
+	return formatFooterTokenCountUnit(count, 1_000_000_000, "B", "", true)
+}
+
+func formatFooterTokenCountUnit(count, divisor uint64, suffix, nextSuffix string, largest bool) string {
+	whole := count / divisor
+	rem := count % divisor
+	tenths := (rem*10 + divisor/2) / divisor
+	whole += tenths / 10
+	tenths %= 10
+	if !largest && whole >= 1000 {
+		return "1" + nextSuffix
+	}
+	if tenths == 0 {
+		return fmt.Sprintf("%d%s", whole, suffix)
+	}
+	return fmt.Sprintf("%d.%d%s", whole, tenths, suffix)
 }
 
 func footerWorkspace(workspace string) string {

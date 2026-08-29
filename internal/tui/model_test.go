@@ -2413,17 +2413,43 @@ func TestPromptHistoryDraftNotClobberedWhileEditingBrowsedEntry(t *testing.T) {
 	}
 }
 
-func TestFooterStatusShowsElapsedSecondsWhileRunning(t *testing.T) {
+func TestFormatTurnSecondsUsesHumanReadableDurations(t *testing.T) {
+	tests := []struct {
+		name string
+		dur  time.Duration
+		want string
+	}{
+		{name: "clamps negative durations", dur: -time.Second, want: "0s"},
+		{name: "clamps sub-second durations", dur: 999 * time.Millisecond, want: "0s"},
+		{name: "truncates under-a-minute durations", dur: 59*time.Second + 900*time.Millisecond, want: "59s"},
+		{name: "formats exactly one minute", dur: 60 * time.Second, want: "1m"},
+		{name: "formats minute and second", dur: 61 * time.Second, want: "1m 1s"},
+		{name: "formats under-an-hour durations", dur: 3599 * time.Second, want: "59m 59s"},
+		{name: "formats exactly one hour", dur: 3600 * time.Second, want: "1h"},
+		{name: "formats hour and minute", dur: 3661 * time.Second, want: "1h 1m"},
+		{name: "drops seconds after an hour", dur: 25*time.Hour + 30*time.Minute + 59*time.Second, want: "25h 30m"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatTurnSeconds(tt.dur); got != tt.want {
+				t.Fatalf("formatTurnSeconds(%v) = %q, want %q", tt.dur, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFooterStatusShowsHumanReadableElapsedWhileRunning(t *testing.T) {
 	clock := newFakeClock(time.Unix(100, 0))
 	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
 		return text, nil
 	}))), 80, 12)
 	m.running = true
-	m.turnStartedAt = clock.Now().Add(-3 * time.Second)
+	m.turnStartedAt = clock.Now().Add(-61 * time.Second)
 
 	status := m.footerStatus()
-	if !strings.Contains(status, "working") || !strings.Contains(status, "3s") {
-		t.Fatalf("footer status = %q, want working with 3s elapsed", status)
+	if !strings.Contains(status, "working") || !strings.Contains(status, "1m 1s") {
+		t.Fatalf("footer status = %q, want working with 1m 1s elapsed", status)
 	}
 }
 
@@ -2446,7 +2472,7 @@ func TestTurnCompletionSetsCompletedInDuration(t *testing.T) {
 	if !running.running || running.turnStartedAt.IsZero() {
 		t.Fatalf("running=%v turnStartedAt=%v", running.running, running.turnStartedAt)
 	}
-	clock.Advance(3 * time.Second)
+	clock.Advance(3661 * time.Second)
 
 	first := runCommandWithin(t, cmd, time.Second)
 	afterEvent, next := running.Update(first)
@@ -2460,12 +2486,14 @@ func TestTurnCompletionSetsCompletedInDuration(t *testing.T) {
 	if idle.running {
 		t.Fatal("turn still running after completion")
 	}
-	status := idle.footerStatus()
-	if !strings.Contains(status, "completed in") || !strings.Contains(status, "3s") {
-		t.Fatalf("footer = %q, want completed in 3s", status)
+	if status := idle.footerStatus(); !strings.Contains(status, "completed in 1h 1m") {
+		t.Fatalf("footer = %q, want completed in 1h 1m", status)
 	}
-	if idle.turnDuration != 3*time.Second {
-		t.Fatalf("turnDuration = %v, want 3s", idle.turnDuration)
+	if idle.statusText != "completed in 1h 1m" {
+		t.Fatalf("statusText = %q, want completed in 1h 1m", idle.statusText)
+	}
+	if idle.turnDuration != 3661*time.Second {
+		t.Fatalf("turnDuration = %v, want 3661s", idle.turnDuration)
 	}
 }
 

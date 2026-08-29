@@ -137,16 +137,42 @@ func (r *REPL) prompt(ctx context.Context, line string) error {
 
 func (r *REPL) compact(ctx context.Context, focus string) (agent.CompactionResult, error) {
 	var result agent.CompactionResult
+	renderedIDs := make(map[string]struct{})
+	renderedNoopEmpty := false
 	errorRendered := false
-	completionRendered := false
+	shouldRenderFallback := func(result agent.CompactionResult) bool {
+		if result.CheckpointID != "" {
+			if _, ok := renderedIDs[result.CheckpointID]; ok {
+				return false
+			}
+		}
+		if result.Noop && result.CheckpointID == "" {
+			return !renderedNoopEmpty
+		}
+		return true
+	}
+	renderCompaction := func(compaction agent.CompactionEvent) {
+		switch {
+		case compaction.Noop && compaction.CheckpointID == "":
+			if renderedNoopEmpty {
+				return
+			}
+			renderedNoopEmpty = true
+		case compaction.CheckpointID != "":
+			if _, ok := renderedIDs[compaction.CheckpointID]; ok {
+				return
+			}
+			renderedIDs[compaction.CheckpointID] = struct{}{}
+		}
+		r.renderCompaction(compaction)
+	}
 	err := r.withActiveCancel(ctx, func(turnCtx context.Context) error {
 		var innerErr error
 		result, innerErr = r.backend.Compact(turnCtx, focus, func(event agent.Event) {
 			switch event.Type {
 			case agent.EventCompactionCompleted:
 				if event.Compaction != nil {
-					r.renderCompaction(*event.Compaction)
-					completionRendered = true
+					renderCompaction(*event.Compaction)
 				}
 			default:
 				if r.renderEvent(event) {
@@ -156,6 +182,9 @@ func (r *REPL) compact(ctx context.Context, focus string) (agent.CompactionResul
 		})
 		return innerErr
 	})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return agent.CompactionResult{}, ctxErr
+	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) && !errors.Is(err, session.ErrFatalPersistence) {
 			return agent.CompactionResult{}, nil
@@ -165,7 +194,7 @@ func (r *REPL) compact(ctx context.Context, focus string) (agent.CompactionResul
 		}
 		return agent.CompactionResult{}, &commandError{command: "/compact", err: err}
 	}
-	if !completionRendered {
+	if shouldRenderFallback(result) {
 		r.renderCompactionResult(result)
 	}
 	return result, nil

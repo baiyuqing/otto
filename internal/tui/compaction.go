@@ -90,8 +90,9 @@ func (m *Model) applyCompactionEvent(event agent.Event, aggregateUsage otmodel.U
 		if event.Compaction == nil {
 			return false
 		}
+		changed := m.reconcilePersistedToolResults()
 		m.compactionCompleted = true
-		return m.applyCompactionResult(compactionResultFromEvent(*event.Compaction), aggregateUsage, aggregateUsagePresent)
+		return m.applyCompactionResult(compactionResultFromEvent(*event.Compaction), aggregateUsage, aggregateUsagePresent) || changed
 	case agent.EventCompactionWarning:
 		if event.Err != nil {
 			m.statusText = event.Err.Error()

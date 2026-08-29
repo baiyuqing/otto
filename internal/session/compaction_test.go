@@ -450,7 +450,6 @@ func TestMemoryCompactionRejectsInvalidFirstPostCheckpointMessageWithoutAppendin
 		name    string
 		message model.Message
 	}{
-		{name: "empty ID", message: model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "missing id"}}}},
 		{name: "context role", message: model.Message{ID: "context-post", Role: model.RoleContext, Blocks: []model.Block{{Type: model.BlockText, Text: "context"}}}},
 		{name: "malformed normal message", message: model.Message{ID: "malformed-post", Role: model.RoleUser}},
 	}
@@ -487,6 +486,26 @@ func TestMemoryCompactionRejectsInvalidFirstPostCheckpointMessageWithoutAppendin
 			}
 		})
 	}
+}
+
+func TestMemoryCompactionAssignsIDToValidFirstPostCheckpointMessage(t *testing.T) {
+	memory := createConversationMemory(t)
+	defer memory.Close()
+	metadata, err := memory.AppendCompaction(context.Background(), validCheckpointFor(memory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "generated id"}}, CreatedAt: time.Date(2026, 8, 28, 12, 1, 0, 0, time.UTC)}
+	if err := memory.Append(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	messages := memory.Messages()
+	generatedID := messages[len(messages)-1].ID
+	if !piEntryIDPattern.MatchString(generatedID) {
+		t.Fatalf("first post-checkpoint ID = %q, want generated stable ID", generatedID)
+	}
+	metadata.FirstPostCheckpointMessageID = generatedID
+	assertLatestCompaction(t, memory, metadata)
 }
 
 func TestAppendCompactionRejectsInvalidCheckpointWithoutMutation(t *testing.T) {

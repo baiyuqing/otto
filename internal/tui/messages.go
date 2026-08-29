@@ -30,11 +30,30 @@ type scrollViewportMsg struct {
 type turnEnvelope struct {
 	event                 *agent.Event
 	compactionResult      *agent.CompactionResult
+	applicationAck        *turnApplicationAck
 	aggregateUsage        otmodel.Usage
 	aggregateUsagePresent bool
 	err                   error
 	done                  bool
 	usesRegularEventSlot  bool
+}
+
+type turnApplicationAck struct {
+	done chan struct{}
+	once sync.Once
+}
+
+func newTurnApplicationAck() *turnApplicationAck {
+	return &turnApplicationAck{done: make(chan struct{})}
+}
+
+func (a *turnApplicationAck) acknowledge() {
+	if a == nil {
+		return
+	}
+	a.once.Do(func() {
+		close(a.done)
+	})
 }
 
 type turnStream struct {

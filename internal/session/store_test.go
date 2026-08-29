@@ -413,6 +413,59 @@ func TestCreateLazyRoundTripsThroughOpen(t *testing.T) {
 	}
 }
 
+func TestAppendEmptyToolResultPersistsTextField(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), model.Message{
+		Role:      model.RoleUser,
+		CreatedAt: time.Now().UTC(),
+		Blocks:    []model.Block{{Type: model.BlockText, Text: "run the search"}},
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	// A tool that returns empty output must still produce a valid content
+	// block: the JSONL record keeps "text":"" so the append self-check passes
+	// and the file round-trips through Open.
+	if err := store.Append(context.Background(), model.Message{
+		Role:         model.RoleAssistant,
+		CreatedAt:    time.Now().UTC(),
+		FinishReason: model.FinishToolCalls,
+		Blocks:       []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-empty", ToolName: "grep", Arguments: json.RawMessage(`{"pattern":"x"}`)}},
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), model.Message{
+		Role:      model.RoleTool,
+		CreatedAt: time.Now().UTC(),
+		Blocks:    []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-empty", ToolName: "grep", Text: ""}},
+	}); err != nil {
+		_ = store.Close()
+		t.Fatalf("append empty tool result: %v", err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lines := readJSONLines(t, path)
+	if len(lines) != 5 {
+		t.Fatalf("file lines = %d, want 5", len(lines))
+	}
+	entry, err := decodePiEntry(lines[4])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Message.Role != "toolResult" {
+		t.Fatalf("record role = %q, want toolResult", entry.Message.Role)
+	}
+	if string(entry.Message.Content) != `[{"type":"text","text":""}]` {
+		t.Fatalf("record content = %s, want text field preserved for empty output", entry.Message.Content)
+	}
+}
+
 func TestAppendRejectsTimestampOutsideRFC3339NanoRange(t *testing.T) {
 	store, err := Create(t.TempDir(), testHeader(t))
 	if err != nil {

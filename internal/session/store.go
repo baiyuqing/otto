@@ -650,11 +650,38 @@ func modelBlocksToPiContent(role model.Role, blocks []model.Block) (json.RawMess
 			return nil, fmt.Errorf("%w: unsupported message block type", ErrInvalidSession)
 		}
 	}
-	encoded, err := json.Marshal(content)
+	encoded, err := marshalPiContent(content)
 	if err != nil {
 		return nil, fmt.Errorf("encode Pi message content: %w", err)
 	}
 	return encoded, nil
+}
+
+// marshalPiContent serializes content blocks for storage. The text field must
+// always be present on text blocks (even when empty) so the strict Pi decoder
+// accepts the record; piContentBlock.Text alone would be dropped by omitempty
+// and make empty tool output fail the append-time self-check.
+func marshalPiContent(content []piContentBlock) ([]byte, error) {
+	wire := make([]json.RawMessage, len(content))
+	for index, block := range content {
+		if block.Type == "text" {
+			encoded, err := json.Marshal(struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}{Type: block.Type, Text: block.Text})
+			if err != nil {
+				return nil, err
+			}
+			wire[index] = encoded
+			continue
+		}
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			return nil, err
+		}
+		wire[index] = encoded
+	}
+	return json.Marshal(wire)
 }
 
 func modelFinishReasonToPi(reason model.FinishReason) (string, error) {

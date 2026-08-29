@@ -111,6 +111,7 @@ type replacementState struct {
 	done              chan struct{}
 	owner             uint64
 	phase             replacementPhase
+	buildActive       bool
 	current           session.Session
 	currentWorkspace  string
 	replacement       session.Session
@@ -123,6 +124,7 @@ type activeOperation struct {
 	owner          uint64
 	runner         Runner
 	current        session.Session
+	callbackDepth  int
 	closeRequested bool
 }
 
@@ -144,6 +146,7 @@ type Controller struct {
 	closeComplete       bool
 	closeErr            error
 	reentrantCloseOwner uint64
+	ownerIDSource       func() uint64
 	runtimeInfo         *RuntimeInfo
 }
 
@@ -171,6 +174,7 @@ func New(initial session.Session, create SessionFactory, build RunnerFactory, op
 		runner:           runner,
 		create:           create,
 		build:            build,
+		ownerIDSource:    currentGoroutineID,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -186,7 +190,7 @@ func (c *Controller) Prompt(ctx context.Context, text string, emit func(agent.Ev
 		return err
 	}
 	defer c.endOperation(operation)
-	return operation.runner.Run(ctx, text, emit)
+	return operation.runner.Run(ctx, text, c.operationCallback(operation, emit))
 }
 
 func (c *Controller) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
@@ -195,11 +199,11 @@ func (c *Controller) Compact(ctx context.Context, focus string, emit func(agent.
 		return agent.CompactionResult{}, err
 	}
 	defer c.endOperation(operation)
-	return operation.runner.Compact(ctx, focus, emit)
+	return operation.runner.Compact(ctx, focus, c.operationCallback(operation, emit))
 }
 
 func (c *Controller) beginOperation() (*activeOperation, error) {
-	owner := currentGoroutineID()
+	owner := c.ownerID()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -216,6 +220,28 @@ func (c *Controller) beginOperation() (*activeOperation, error) {
 	}
 	c.active = operation
 	return operation, nil
+}
+
+func (c *Controller) operationCallback(operation *activeOperation, emit func(agent.Event)) func(agent.Event) {
+	if emit == nil {
+		return nil
+	}
+	return func(event agent.Event) {
+		c.mu.Lock()
+		if c.active == operation {
+			operation.callbackDepth++
+		}
+		c.mu.Unlock()
+
+		defer func() {
+			c.mu.Lock()
+			if c.active == operation && operation.callbackDepth > 0 {
+				operation.callbackDepth--
+			}
+			c.mu.Unlock()
+		}()
+		emit(event)
+	}
 }
 
 func (c *Controller) endOperation(operation *activeOperation) {
@@ -249,7 +275,7 @@ func (c *Controller) endOperation(operation *activeOperation) {
 }
 
 func (c *Controller) NewSession() error {
-	owner := currentGoroutineID()
+	owner := c.ownerID()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -325,7 +351,7 @@ func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListR
 
 func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResult, error) {
 	requestedPath := canonicalSessionPath(path)
-	owner := currentGoroutineID()
+	owner := c.ownerID()
 
 	c.mu.Lock()
 	if c.closed {
@@ -378,7 +404,17 @@ func (c *Controller) runReplacement(
 		return ResumeResult{}, err
 	}
 
+	c.mu.Lock()
+	if c.replace == state {
+		state.buildActive = true
+	}
+	c.mu.Unlock()
 	replacement, err := build()
+	c.mu.Lock()
+	if c.replace == state {
+		state.buildActive = false
+	}
+	c.mu.Unlock()
 	warnings := cloneWarnings(replacement.Warnings)
 	if err != nil {
 		c.abortReplacement(state, replacement.Session)
@@ -601,12 +637,11 @@ func (c *Controller) History() []model.Message {
 }
 
 func (c *Controller) Close() error {
-	caller := currentGoroutineID()
+	caller := c.ownerID()
 	c.mu.Lock()
 	if c.closeDone != nil {
 		done := c.closeDone
-		ownedOperation := c.active != nil && c.active.owner == caller
-		if c.closeComplete || caller != 0 && (ownedOperation || c.replacementOwnedByLocked(caller) || c.reentrantCloseOwner == caller) {
+		if c.closeComplete || c.activeCloseIsReentrantLocked(caller) || c.replacementCloseIsReentrantLocked(caller) || caller != 0 && c.reentrantCloseOwner == caller {
 			err := c.closeErr
 			c.mu.Unlock()
 			return err
@@ -626,7 +661,7 @@ func (c *Controller) Close() error {
 	if c.active != nil {
 		operation := c.active
 		operation.closeRequested = true
-		if caller != 0 && operation.owner == caller {
+		if c.activeCloseIsReentrantLocked(caller) {
 			err := c.closeErr
 			c.mu.Unlock()
 			return err
@@ -642,8 +677,10 @@ func (c *Controller) Close() error {
 	if c.replace != nil {
 		state := c.replace
 		state.closeRequested = true
-		if caller != 0 && state.owner == caller {
-			c.reentrantCloseOwner = caller
+		if c.replacementCloseIsReentrantLocked(caller) {
+			if caller != 0 {
+				c.reentrantCloseOwner = caller
+			}
 			err := c.closeErr
 			c.mu.Unlock()
 			return err
@@ -715,8 +752,31 @@ func (c *Controller) finishReplacingLocked(state *replacementState) {
 	close(state.done)
 }
 
-func (c *Controller) replacementOwnedByLocked(owner uint64) bool {
-	return c.replace != nil && c.replace.owner == owner
+func (c *Controller) activeCloseIsReentrantLocked(caller uint64) bool {
+	if c.active == nil {
+		return false
+	}
+	if caller != 0 {
+		return c.active.owner == caller
+	}
+	return c.active.owner == 0 && c.active.callbackDepth > 0
+}
+
+func (c *Controller) replacementCloseIsReentrantLocked(caller uint64) bool {
+	if c.replace == nil {
+		return false
+	}
+	if caller != 0 {
+		return c.replace.owner == caller
+	}
+	return c.replace.owner == 0 && c.replace.buildActive
+}
+
+func (c *Controller) ownerID() uint64 {
+	if c.ownerIDSource == nil {
+		return currentGoroutineID()
+	}
+	return c.ownerIDSource()
 }
 
 // currentGoroutineID supplies the execution identity needed to distinguish a

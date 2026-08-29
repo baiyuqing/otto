@@ -72,6 +72,7 @@ func newRuntimeBuilder(configFile config.File, environment map[string]string, wo
 		prepareSession:       deps.prepareSession,
 		prepareListedSession: deps.prepareListedSession,
 		runtimeOverrides: config.Overrides{
+			BaseURL:        options.baseURL,
 			Thinking:       options.thinking,
 			ShellTimeout:   options.shellTimeout,
 			MaxOutputBytes: options.maxOutput,
@@ -326,8 +327,8 @@ func (b runtimeBuilder) resumeEnvironment() map[string]string {
 }
 
 func (b runtimeBuilder) redactError(err error, runtime *config.Runtime) error {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
+	if err == nil {
+		return nil
 	}
 	message := err.Error()
 	for _, value := range b.secretValues(runtime) {
@@ -336,7 +337,23 @@ func (b runtimeBuilder) redactError(err error, runtime *config.Runtime) error {
 	if message == err.Error() {
 		return err
 	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return redactedIdentityError{message: message, cause: err}
+	}
 	return errors.New(message)
+}
+
+type redactedIdentityError struct {
+	message string
+	cause   error
+}
+
+func (e redactedIdentityError) Error() string {
+	return e.message
+}
+
+func (e redactedIdentityError) Is(target error) bool {
+	return errors.Is(e.cause, target)
 }
 
 func (b runtimeBuilder) credentialEnvironmentNames(runtimeAPIKeyEnv string) []string {

@@ -1709,6 +1709,185 @@ func TestControllerOperationCancellationReleasesLifecycle(t *testing.T) {
 	}
 }
 
+func TestControllerZeroOwnerCloseFromPromptAndCompactCallbacksDoesNotDeadlock(t *testing.T) {
+	for _, operation := range []string{"prompt", "compact"} {
+		t.Run(operation, func(t *testing.T) {
+			current := &fakeSession{header: testHeader(operation)}
+			var controller *Controller
+			runner := &lifecycleRunner{
+				run: func(_ context.Context, _ string, emit func(agent.Event)) error {
+					emit(agent.Event{Type: agent.EventAgentStarted})
+					return nil
+				},
+				compact: func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
+					emit(agent.Event{Type: agent.EventCompactionStarted})
+					return agent.CompactionResult{CheckpointID: "checkpoint"}, nil
+				},
+			}
+			var err error
+			controller, err = New(current, func() (session.Session, error) {
+				return &fakeSession{header: testHeader("next")}, nil
+			}, func(session.Session) Runner { return runner })
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller.ownerIDSource = func() uint64 { return 0 }
+
+			var callbackErr error
+			done := make(chan error, 1)
+			go func() {
+				emit := func(agent.Event) { callbackErr = controller.Close() }
+				if operation == "prompt" {
+					done <- controller.Prompt(context.Background(), "prompt", emit)
+					return
+				}
+				_, compactErr := controller.Compact(context.Background(), "focus", emit)
+				done <- compactErr
+			}()
+
+			if operationErr := awaitError(t, done, operation+" with zero owner IDs"); operationErr != nil {
+				t.Fatal(operationErr)
+			}
+			if callbackErr != nil {
+				t.Fatalf("callback Close() error = %v", callbackErr)
+			}
+			if current.CloseCalls() != 1 {
+				t.Fatalf("close calls = %d, want 1", current.CloseCalls())
+			}
+			if err := controller.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if current.CloseCalls() != 1 {
+				t.Fatalf("close calls after idempotent Close = %d, want 1", current.CloseCalls())
+			}
+		})
+	}
+}
+
+func TestControllerZeroOwnerCloseOutsideCallbackWaits(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	current := &fakeSession{header: testHeader("zero-owner-external")}
+	controller, err := New(current, func() (session.Session, error) {
+		return nil, errors.New("unused")
+	}, func(session.Session) Runner {
+		return &lifecycleRunner{run: func(context.Context, string, func(agent.Event)) error {
+			close(entered)
+			<-release
+			return nil
+		}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.ownerIDSource = func() uint64 { return 0 }
+
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- controller.Prompt(context.Background(), "prompt", nil) }()
+	awaitSignal(t, entered, "zero-owner prompt")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- controller.Close() }()
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("zero-owner Close() outside callback returned early: %v", closeErr)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := awaitError(t, promptDone, "zero-owner prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitError(t, closeDone, "zero-owner external close"); err != nil {
+		t.Fatal(err)
+	}
+	if current.CloseCalls() != 1 {
+		t.Fatalf("close calls = %d, want 1", current.CloseCalls())
+	}
+}
+
+func TestControllerExternalCloseWithDistinctOwnerIDWaits(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	current := &fakeSession{header: testHeader("normal-owner-external")}
+	controller, err := New(current, func() (session.Session, error) {
+		return nil, errors.New("unused")
+	}, func(session.Session) Runner {
+		return &lifecycleRunner{run: func(context.Context, string, func(agent.Event)) error {
+			close(entered)
+			<-release
+			return nil
+		}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ownerCalls uint64
+	controller.ownerIDSource = func() uint64 {
+		ownerCalls++
+		if ownerCalls == 1 {
+			return 101
+		}
+		return 202
+	}
+
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- controller.Prompt(context.Background(), "prompt", nil) }()
+	awaitSignal(t, entered, "normal-owner prompt")
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- controller.Close() }()
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("external Close() returned early: %v", closeErr)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := awaitError(t, promptDone, "normal-owner prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := awaitError(t, closeDone, "normal-owner external close"); err != nil {
+		t.Fatal(err)
+	}
+	if current.CloseCalls() != 1 {
+		t.Fatalf("close calls = %d, want 1", current.CloseCalls())
+	}
+}
+
+func TestControllerZeroOwnerCloseFromReplacementBuildDoesNotDeadlock(t *testing.T) {
+	current := &fakeSession{header: testHeader("current")}
+	candidate := &fakeSession{header: testHeader("candidate")}
+	var controller *Controller
+	var callbackErr error
+	var err error
+	controller, err = New(current, func() (session.Session, error) {
+		return nil, errors.New("legacy factory must not run")
+	}, func(session.Session) Runner { return &recordingRunner{} },
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			callbackErr = controller.Close()
+			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.ownerIDSource = func() uint64 { return 0 }
+
+	done := make(chan error, 1)
+	go func() { done <- controller.NewSession() }()
+	if replacementErr := awaitError(t, done, "zero-owner replacement build"); !errors.Is(replacementErr, ErrClosed) {
+		t.Fatalf("NewSession() error = %v, want ErrClosed", replacementErr)
+	}
+	if callbackErr != nil {
+		t.Fatalf("callback Close() error = %v", callbackErr)
+	}
+	if current.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
+		t.Fatalf("close calls = current %d candidate %d, want 1 each", current.CloseCalls(), candidate.CloseCalls())
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if current.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
+		t.Fatalf("close calls after idempotent Close = current %d candidate %d, want 1 each", current.CloseCalls(), candidate.CloseCalls())
+	}
+}
+
 func TestControllerCloseFromPromptAndCompactionCallbacksDoesNotDeadlock(t *testing.T) {
 	for _, operation := range []string{"prompt", "compact"} {
 		t.Run(operation, func(t *testing.T) {

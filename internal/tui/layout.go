@@ -168,7 +168,7 @@ func helpOverlayContent(width, height int) string {
 		"",
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
-		"Ctrl+O toggle tool arguments/output",
+		"Ctrl+O toggle details",
 		"Shift+drag select terminal text",
 		"PgUp/PgDn scroll",
 		"Home/End transcript top/bottom",

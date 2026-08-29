@@ -52,6 +52,16 @@ func TestHelpOverlayAtMinimumTerminalShowsEveryControlWithinBounds(t *testing.T)
 	}
 }
 
+func TestCompactionResponsiveCollapsedCheckpointStaysWithinBounds(t *testing.T) {
+	entry := Entry{Kind: EntryCompaction, TokensBefore: 258000, TokensAfter: 23000}
+	for _, width := range []int{16, 24, 40} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			rendered := renderCompactionBlock(entry, width, false)
+			assertRenderedBounds(t, rendered, width, 1)
+		})
+	}
+}
+
 func TestLongSessionOverlayAndFooterStayWithinBounds(t *testing.T) {
 	long := strings.Repeat("very-long-metadata/", 20)
 	backend := &fakeBackend{info: app.Info{

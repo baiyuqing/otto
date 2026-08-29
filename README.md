@@ -185,9 +185,10 @@ Stage 1 still talks only to the `openai-compatible` transport, but Otto ships a 
 
 Important boundaries:
 
-- GPT-5.4 / 5.5 / 5.6 families use a static `context_window=1050000`, `hard_input_window=922000`, and `compaction_window=272000`.
-- GPT-5 / 5.1 / 5.2 / 5.3 codex-style families use a 400K catalog context with a 272K working window.
-- GPT-4.1, GPT-4o, o1/o3/o4, and listed Claude aliases/snapshots use their catalog values.
+- Listed full-size GPT-5.4 / 5.5 / 5.6 aliases use static `context_window=1050000`, `hard_input_window=922000`, and `compaction_window=272000`.
+- `gpt-5.4-mini`, `gpt-5.4-nano`, GPT-5 / 5.1 / 5.2 aliases, and `gpt-5.3-codex` use the 400K catalog family with a 272K working window.
+- `gpt-5.3-codex-spark` is an exact `128000`-context / `32000`-output override, and `*-chat-latest` aliases use their catalog chat values.
+- GPT-4.1, GPT-4o, o1/o3/o4, and listed Claude aliases/snapshots use the static catalog values compiled into this build.
 - Claude metadata is used only when your OpenAI-compatible endpoint exposes a Claude-family model ID. Otto does **not** add an Anthropic provider in Stage 1.
 
 The 272K GPT working boundary is intentional. Otto compacts well before the hard ceiling to keep regular turns in a cost-aware range. A checkpoint also changes the prompt prefix, so provider prompt-cache hits can reset once immediately after compaction.
@@ -315,7 +316,7 @@ If Pi 0.84.3 (or a compatible package exposing the public Pi v3 `SessionManager`
 OTTO_PI_INTEROP=1 node ./scripts/pi-session-interop.mjs /tmp/otto-session.jsonl
 ```
 
-The environment variable is an explicit opt-in marker for operators; the script accepts exactly one session path. It exits 77 with a `SKIP` message when Pi is unavailable and exits nonzero for an invalid session. Default Go tests and builds never invoke Node or Pi.
+The script requires `OTTO_PI_INTEROP=1` as an explicit opt-in marker, accepts exactly one session path, exits 77 with a bounded `SKIP` message when Pi is unavailable or the gate is unset, and exits nonzero for an invalid session. Default Go tests and builds never invoke Node or Pi.
 
 ## Tools and safety
 

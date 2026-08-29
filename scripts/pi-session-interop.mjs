@@ -7,6 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
+const INTEROP_ENV = "OTTO_PI_INTEROP";
 const MAX_TEXT = 256;
 
 function skip(message) {
@@ -35,6 +36,14 @@ function countArray(value) {
   return Array.isArray(value) ? value.length : 0;
 }
 
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function validString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
 function countCompactionEntries(entries) {
   const counts = {
     entryCount: 0,
@@ -57,15 +66,20 @@ function countCompactionEntries(entries) {
       throw new Error("unexpected compaction entry metadata");
     }
 
+    const hasFirstKeptEntryID = validString(entry?.firstKeptEntryId);
+    const retainedTailPresent = hasOwn(entry ?? {}, "retainedTail");
+    if (retainedTailPresent && !Array.isArray(entry?.retainedTail)) {
+      throw new Error("unexpected compaction entry metadata");
+    }
     const retainedTailCount = countArray(entry?.retainedTail);
-    if (typeof entry?.firstKeptEntryId === "string") {
+    if (hasFirstKeptEntryID) {
       counts.entriesWithFirstKeptEntryId = saturatingAdd(counts.entriesWithFirstKeptEntryId, 1);
     }
-    if (retainedTailCount > 0) {
+    if (Array.isArray(entry?.retainedTail)) {
       counts.entriesWithRetainedTail = saturatingAdd(counts.entriesWithRetainedTail, 1);
       counts.retainedTailMessageCount = saturatingAdd(counts.retainedTailMessageCount, retainedTailCount);
     }
-    if (typeof entry?.firstKeptEntryId !== "string" && retainedTailCount === 0) {
+    if (!hasFirstKeptEntryID && !Array.isArray(entry?.retainedTail)) {
       throw new Error("compaction entry is missing a retained boundary");
     }
 
@@ -92,11 +106,12 @@ function countCompactionContextMessages(messages) {
   };
 
   for (const message of messages) {
-    if (bounded(message?.role) !== "context" || bounded(message?.contextType) !== "compaction") continue;
-    counts.contextMessageCount = saturatingAdd(counts.contextMessageCount, 1);
-    if (Number.isFinite(message?.contextTokensBefore) && message.contextTokensBefore >= 0) {
-      counts.contextMessagesWithTokensBefore = saturatingAdd(counts.contextMessagesWithTokensBefore, 1);
+    if (bounded(message?.role) !== "compactionSummary") continue;
+    if (!validString(message?.summary) || !Number.isSafeInteger(message?.tokensBefore) || message.tokensBefore < 0) {
+      throw new Error("unexpected compaction context metadata");
     }
+    counts.contextMessageCount = saturatingAdd(counts.contextMessageCount, 1);
+    counts.contextMessagesWithTokensBefore = saturatingAdd(counts.contextMessagesWithTokensBefore, 1);
   }
 
   return counts;
@@ -130,6 +145,9 @@ async function installedPiEntry() {
 if (process.argv.length !== 3) {
   console.error("usage: node scripts/pi-session-interop.mjs SESSION.jsonl");
   process.exit(2);
+}
+if (process.env[INTEROP_ENV] !== "1") {
+  skip(`${INTEROP_ENV}=1 is required to run the optional Pi interop probe`);
 }
 
 const entry = await installedPiEntry();

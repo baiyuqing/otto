@@ -319,6 +319,39 @@ func TestValidateTurnSummaryAndCombineSummaryBounds(t *testing.T) {
 	}
 }
 
+func TestAppendCompactionFileBlocksUsesExactPiSuffixAndOmitsNumericCounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		details session.CompactionDetails
+		want    string
+	}{
+		{name: "empty lists", details: session.CompactionDetails{OmittedReadFiles: 4, OmittedModifiedFiles: 5}, want: validStructuredSummary},
+		{name: "read only", details: session.CompactionDetails{ReadFiles: []string{"a.go", "b.go"}}, want: validStructuredSummary + "\n\n<read-files>\na.go\nb.go\n</read-files>"},
+		{name: "modified only", details: session.CompactionDetails{ModifiedFiles: []string{"m.go"}}, want: validStructuredSummary + "\n\n<modified-files>\nm.go\n</modified-files>"},
+		{name: "both", details: session.CompactionDetails{ReadFiles: []string{"a.go", "b.go"}, ModifiedFiles: []string{"m.go", "z.go"}}, want: validStructuredSummary + "\n\n<read-files>\na.go\nb.go\n</read-files>\n\n<modified-files>\nm.go\nz.go\n</modified-files>"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendCompactionFileBlocks(validStructuredSummary, test.details)
+			if err != nil || got != test.want {
+				t.Fatalf("appendCompactionFileBlocks() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestAppendCompactionFileBlocksEnforcesCompleteSummaryByteBound(t *testing.T) {
+	details := session.CompactionDetails{ReadFiles: []string{"a.go"}}
+	suffix := "\n\n<read-files>\na.go\n</read-files>"
+	base := validStructuredSummary + "\n" + strings.Repeat("x", summaryMaximumBytes-len(validStructuredSummary)-len(suffix)-1)
+	if got, err := appendCompactionFileBlocks(base, details); err != nil || len(got) != summaryMaximumBytes || !utf8.ValidString(got) {
+		t.Fatalf("exact complete summary = %d bytes, %v", len(got), err)
+	}
+	if _, err := appendCompactionFileBlocks(base+"x", details); err == nil {
+		t.Fatal("complete summary one byte above 128 KiB accepted")
+	}
+}
+
 func TestBuildSummaryRequestFileDetailsUseOnlySuccessfulPairedFileCalls(t *testing.T) {
 	calls := model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
 		{Type: model.BlockToolCall, ToolName: "read", ToolCallID: "r1", Arguments: json.RawMessage(`{"path":"dir/../read.go"}`)},

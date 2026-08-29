@@ -2,9 +2,12 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"path/filepath"
 	"sort"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -15,6 +18,56 @@ import (
 type fileToolCall struct {
 	name      string
 	arguments json.RawMessage
+}
+
+func appendCompactionFileBlocks(summary string, details session.CompactionDetails) (string, error) {
+	if strings.TrimSpace(summary) == "" || !utf8.ValidString(summary) {
+		return "", errors.New("complete compaction summary must be nonempty UTF-8")
+	}
+	complete := summary
+	if suffix := compactionFileBlocks(details); suffix != "" {
+		complete += "\n\n" + suffix
+	}
+	if !utf8.ValidString(complete) {
+		return "", errors.New("complete compaction summary is not valid UTF-8")
+	}
+	if len(complete) > summaryMaximumBytes {
+		return "", fmt.Errorf("complete compaction summary exceeds %d bytes", summaryMaximumBytes)
+	}
+	return complete, nil
+}
+
+func compactionFileBlocks(details session.CompactionDetails) string {
+	var suffix strings.Builder
+	writeBlock := func(tag string, paths []string) {
+		if len(paths) == 0 {
+			return
+		}
+		if suffix.Len() != 0 {
+			suffix.WriteString("\n\n")
+		}
+		suffix.WriteByte('<')
+		suffix.WriteString(tag)
+		suffix.WriteString(">\n")
+		for _, path := range paths {
+			suffix.WriteString(path)
+			suffix.WriteByte('\n')
+		}
+		suffix.WriteString("</")
+		suffix.WriteString(tag)
+		suffix.WriteByte('>')
+	}
+	writeBlock("read-files", details.ReadFiles)
+	writeBlock("modified-files", details.ModifiedFiles)
+	return suffix.String()
+}
+
+func stripCompactionFileBlocks(summary string, details session.CompactionDetails) string {
+	suffix := compactionFileBlocks(details)
+	if suffix == "" {
+		return summary
+	}
+	return strings.TrimSuffix(summary, "\n\n"+suffix)
 }
 
 func deriveCompactionFileDetails(messages []model.Message, previous session.CompactionDetails) session.CompactionDetails {

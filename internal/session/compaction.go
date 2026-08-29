@@ -213,16 +213,31 @@ func (s *Store) compactionAnchorLocked(requested string) (string, error) {
 		return "", err
 	}
 
-	anchor := requested
 	if s.hasLatestCompaction && s.latestCompaction.RetainedTailOnly {
-		anchor = s.latestCompaction.FirstPostCheckpointMessageID
-		if anchor == "" {
-			return "", fmt.Errorf("%w: retained-tail compaction has no real post-checkpoint anchor", ErrInvalidSession)
+		checkpointIndex := -1
+		for position := range path {
+			if path[position].ID == s.latestCompaction.ID && path[position].Type == "compaction" {
+				checkpointIndex = position
+				break
+			}
 		}
+		if checkpointIndex < 0 {
+			return "", fmt.Errorf("%w: active retained-tail checkpoint is not on the active path", ErrInvalidSession)
+		}
+		for position := checkpointIndex + 1; position < len(path); position++ {
+			if path[position].ID != requested {
+				continue
+			}
+			if !isRealCompactionContextEntry(path[position]) {
+				return "", fmt.Errorf("%w: retained-tail anchor is not a real context entry", ErrInvalidSession)
+			}
+			return requested, nil
+		}
+		return "", fmt.Errorf("%w: retained-tail anchor must be a real active-path entry after the checkpoint", ErrInvalidSession)
 	}
 	for _, entry := range path {
-		if entry.ID == anchor {
-			return anchor, nil
+		if entry.ID == requested {
+			return requested, nil
 		}
 	}
 	return "", fmt.Errorf("%w: compaction firstKeptEntryId is not a real entry on the active path", ErrInvalidSession)
@@ -339,12 +354,21 @@ func latestCompactionMetadata(entries []piEntry, leafID string) (CompactionMetad
 		Details: decodeCompactionDetails(entry.Compaction.Details), RetainedTailOnly: retainedTailOnly,
 	}
 	for index := latest + 1; index < len(path); index++ {
-		if path[index].Type == "message" {
+		if isRealCompactionContextEntry(path[index]) {
 			metadata.FirstPostCheckpointMessageID = path[index].ID
 			break
 		}
 	}
 	return metadata, true, nil
+}
+
+func isRealCompactionContextEntry(entry piEntry) bool {
+	switch entry.Type {
+	case "message", "branch_summary", "custom_message":
+		return true
+	default:
+		return false
+	}
 }
 
 func resolveCompactionBoundary(path []piEntry, checkpointIndex int) (string, bool, error) {

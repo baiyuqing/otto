@@ -109,6 +109,10 @@ func (a *Agent) compact(ctx context.Context, reason CompactionReason, focus stri
 		usage, usagePresent = combineCompactionUsage(usage, usagePresent, turnUsage, turnUsagePresent)
 		details = turnPrepared.Details
 	}
+	finalSummary, err = appendCompactionFileBlocks(finalSummary, details)
+	if err != nil {
+		return CompactionResult{}, invalidCompactionSummaryError(err)
+	}
 
 	estimatedAfter := estimateCompactedContext(a.options, tools, finalSummary, selection.Retained)
 	result := CompactionResult{

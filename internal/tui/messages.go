@@ -1,6 +1,11 @@
 package tui
 
-import "github.com/baiyuqing/otto/internal/agent"
+import (
+	"sync"
+
+	"github.com/baiyuqing/otto/internal/agent"
+	otmodel "github.com/baiyuqing/otto/internal/model"
+)
 
 type overlayKind uint8
 
@@ -23,17 +28,30 @@ type scrollViewportMsg struct {
 }
 
 type turnEnvelope struct {
-	event                *agent.Event
-	compactionResult     *agent.CompactionResult
-	err                  error
-	done                 bool
-	usesRegularEventSlot bool
+	event                 *agent.Event
+	compactionResult      *agent.CompactionResult
+	aggregateUsage        otmodel.Usage
+	aggregateUsagePresent bool
+	err                   error
+	done                  bool
+	usesRegularEventSlot  bool
 }
 
 type turnStream struct {
 	channel           chan turnEnvelope
 	regularEventSlots chan struct{}
 	generation        uint64
+	abandonSignal     chan struct{}
+	abandonOnce       sync.Once
+}
+
+func (s *turnStream) abandon() {
+	if s == nil {
+		return
+	}
+	s.abandonOnce.Do(func() {
+		close(s.abandonSignal)
+	})
 }
 
 type turnMsg struct {

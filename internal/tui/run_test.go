@@ -126,6 +126,68 @@ func TestRunReturnsFatalPersistenceErrorFromFinalModel(t *testing.T) {
 	}
 }
 
+func TestRunAbandonsBlockedTurnBeforeControllerClose(t *testing.T) {
+	thirdCompletionAttempted := make(chan struct{})
+	runner := &fullCompletionRunner{thirdCompletionAttempted: thirdCompletionAttempted}
+	initial := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "tui-close", Workspace: t.TempDir()})
+	controller, err := app.New(initial, func() (session.Session, error) {
+		return session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "next", Workspace: t.TempDir()}), nil
+	}, func(session.Session) app.Runner { return runner })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldNewProgram := newProgram
+	defer func() { newProgram = oldNewProgram }()
+	var stream *turnStream
+	newProgram = func(model tea.Model, opts ...tea.ProgramOption) programRunner {
+		return programRunnerFunc(func() (tea.Model, error) {
+			current := model.(Model)
+			current.editor.SetValue("question")
+			started, cmd := current.Update(keyPress(tea.KeyEnter))
+			first := runCommandWithin(t, cmd, time.Second).(turnMsg)
+			stream = first.stream
+			select {
+			case <-thirdCompletionAttempted:
+			case <-time.After(time.Second):
+				t.Fatal("runner did not reach blocked completion")
+			}
+			deadline := time.Now().Add(time.Second)
+			for len(stream.channel) != turnChannelCapacity && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if got := len(stream.channel); got != turnChannelCapacity {
+				t.Fatalf("turn channel length = %d, want full capacity", got)
+			}
+			return started, nil
+		})
+	}
+
+	if err := Run(context.Background(), strings.NewReader(""), &bytes.Buffer{}, controller); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if stream == nil {
+		t.Fatal("turn stream was not captured")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- controller.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Controller.Close() error = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		go drainClosedTurnStreamForCleanup(stream)
+		select {
+		case <-closeDone:
+		case <-time.After(time.Second):
+			t.Fatal("Controller.Close remained blocked after test cleanup drain")
+		}
+		t.Fatal("Controller.Close blocked after the TUI frontend returned")
+	}
+	drainClosedTurnStream(t, stream)
+}
+
 func TestRunInspectsEveryFinalModelWhenProgramReturnsError(t *testing.T) {
 	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
 	programErr := errors.New("program failed")
@@ -161,6 +223,35 @@ func TestRunInspectsEveryFinalModelWhenProgramReturnsError(t *testing.T) {
 				t.Fatalf("Run() error = %#v, want sole program error %#v", err, programErr)
 			}
 		})
+	}
+}
+
+type fullCompletionRunner struct {
+	thirdCompletionAttempted chan struct{}
+}
+
+func (r *fullCompletionRunner) Run(_ context.Context, _ string, emit func(agent.Event)) error {
+	for index := 0; index < turnChannelCapacity-1; index++ {
+		emit(agent.Event{Type: agent.EventProviderUsage})
+	}
+	for index := 0; index < 3; index++ {
+		if index == 2 {
+			close(r.thirdCompletionAttempted)
+		}
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "committed"}})
+	}
+	return nil
+}
+
+func (*fullCompletionRunner) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
+func drainClosedTurnStreamForCleanup(stream *turnStream) {
+	for envelope := range stream.channel {
+		if envelope.usesRegularEventSlot {
+			<-stream.regularEventSlots
+		}
 	}
 }
 

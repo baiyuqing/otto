@@ -15,9 +15,10 @@ import (
 const (
 	minTerminalWidth  = 40
 	minTerminalHeight = 8
-	minEditorHeight   = 1
+	minEditorHeight   = 2
 	maxEditorHeight   = 6
 	footerHeight      = 1
+	editorSpacing     = 1
 )
 
 type layoutState struct {
@@ -27,6 +28,7 @@ type layoutState struct {
 	editorHeight     int
 	suggestionHeight int
 	footerHeight     int
+	editorSpacing    int
 }
 
 func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight int) layoutState {
@@ -34,13 +36,14 @@ func calculateLayout(width, height int, editor textarea.Model, requestedSuggesti
 		transcriptWidth: max(0, width),
 		editorHeight:    clamp(editorHeight(editor), minEditorHeight, maxEditorHeight),
 		footerHeight:    footerHeight,
+		editorSpacing:   editorSpacing,
 	}
 	if width < minTerminalWidth || height < minTerminalHeight {
 		layout.tooSmall = true
 		layout.transcriptHeight = max(0, height)
 		return layout
 	}
-	availableHeight := height - layout.editorHeight - layout.footerHeight
+	availableHeight := height - layout.editorHeight - layout.footerHeight - layout.editorSpacing
 	layout.suggestionHeight = min(max(0, requestedSuggestionHeight), max(0, availableHeight-1))
 	transcriptHeight := availableHeight - layout.suggestionHeight
 	if transcriptHeight <= 0 {

@@ -300,13 +300,14 @@ func (m Model) View() tea.View {
 	}
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
+	editorGap := lipgloss.NewStyle().Width(m.width).Height(layout.editorSpacing).MaxHeight(layout.editorSpacing).Render("")
 	editor := lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View())
 	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.footerStatus()))
 	parts := []string{transcript}
 	if layout.suggestionHeight > 0 {
 		parts = append(parts, renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, layout.suggestionHeight))
 	}
-	parts = append(parts, editor, footer)
+	parts = append(parts, editorGap, editor, footer)
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	if m.overlay != overlayNone {
 		content = renderOverlay(m.width, m.height, m.overlayContent())
@@ -562,7 +563,7 @@ func newRootView(m Model, content string) tea.View {
 	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()))
 	if !layout.tooSmall && !m.resume.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
-			cursor.Y += layout.transcriptHeight + layout.suggestionHeight
+			cursor.Y += layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
 			view.Cursor = cursor
 		}
 	}

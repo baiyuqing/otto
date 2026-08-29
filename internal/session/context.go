@@ -285,7 +285,11 @@ func compactionAwarePath(path []piEntry) ([]piEntry, error) {
 	legacyPayload.RetainedTail = nil
 	legacyCompaction.Compaction = &legacyPayload
 	selected = append(selected, legacyCompaction)
-	selected = append(selected, path[firstKept:latest]...)
+	for _, retained := range path[firstKept:latest] {
+		if retained.Type != "compaction" {
+			selected = append(selected, retained)
+		}
+	}
 	selected = append(selected, path[latest+1:]...)
 	return selected, nil
 }

@@ -758,6 +758,88 @@ func TestAppendCompactionCancellationBeforeAndAfterWrite(t *testing.T) {
 	})
 }
 
+func TestStoreRepeatedCheckpointCrossingPriorRecordMatchesMemoryAndReopens(t *testing.T) {
+	createdAt := time.Date(2026, 8, 28, 13, 30, 0, 0, time.UTC)
+	memory := createConversationMemory(t)
+	store := createConversationStore(t)
+	defer memory.Close()
+
+	if err := memory.UpdateRuntime(context.Background(), RuntimeMetadata{Profile: "updated", Provider: "openai-compatible", Model: "updated-model"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateRuntime(context.Background(), RuntimeMetadata{Profile: "updated", Provider: "openai-compatible", Model: "updated-model"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var storeSecond CompactionMetadata
+	for name, current := range map[string]compactionTestSession{"memory": memory, "store": store} {
+		t.Run(name, func(t *testing.T) {
+			before := current.Messages()
+			retainedID := before[2].ID
+			if _, err := current.AppendCompaction(context.Background(), CompactionCheckpoint{
+				Summary: testCompactionSummary + "\nfirst", FirstKeptEntryID: retainedID, TokensBefore: 200,
+				Usage:   &model.Usage{InputTokens: 5, CachedInputTokens: 2, OutputTokens: 1},
+				Details: CompactionDetails{ReadFiles: []string{"first.go"}}, CreatedAt: createdAt,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := current.Append(context.Background(), model.Message{
+				ID: "memory-post", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "post checkpoint"}}, CreatedAt: createdAt.Add(time.Second),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			postID := current.Messages()[len(current.Messages())-1].ID
+			second, err := current.AppendCompaction(context.Background(), CompactionCheckpoint{
+				Summary: testCompactionSummary + "\nsecond", FirstKeptEntryID: retainedID, TokensBefore: 300,
+				Usage:   &model.Usage{InputTokens: 7, CachedInputTokens: 3, OutputTokens: 2},
+				Details: CompactionDetails{ModifiedFiles: []string{"second.go"}}, CreatedAt: createdAt.Add(2 * time.Second),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "store" {
+				storeSecond = second
+			}
+			messages := current.Messages()
+			assertMessageTexts(t, messages, []string{
+				"[Compaction summary]\n" + testCompactionSummary + "\nsecond",
+				"kept request", "kept answer", "post checkpoint",
+			})
+			if messages[0].ID != second.ID || messages[1].ID != retainedID || messages[3].ID != postID {
+				t.Fatalf("active message IDs = %#v", messages)
+			}
+			for _, message := range messages {
+				if strings.Contains(message.Text(), "\nfirst") {
+					t.Fatalf("superseded checkpoint leaked into context: %#v", messages)
+				}
+			}
+			assertLatestCompaction(t, current, second)
+		})
+	}
+
+	wantMessages := store.Messages()
+	wantUsage, wantUsagePresent := store.AggregateUsage()
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 || !reflect.DeepEqual(reopened.Messages(), wantMessages) {
+		t.Fatalf("reopen warnings/messages = %#v / %#v; want %#v", warnings, reopened.Messages(), wantMessages)
+	}
+	if got, present := reopened.AggregateUsage(); present != wantUsagePresent || got != wantUsage {
+		t.Fatalf("reopened usage = %#v, %v; want %#v, %v", got, present, wantUsage, wantUsagePresent)
+	}
+	if header := reopened.Header(); header.Profile != "updated" || header.Model != "updated-model" {
+		t.Fatalf("reopened runtime settings = %#v", header)
+	}
+	assertLatestCompaction(t, reopened, storeSecond)
+}
+
 func TestStoreAppendCompactionRepeatedCheckpointsReopenExactly(t *testing.T) {
 	store := createConversationStore(t)
 	first, err := store.AppendCompaction(context.Background(), validCheckpointFor(store))
@@ -799,7 +881,150 @@ func TestStoreAppendCompactionRepeatedCheckpointsReopenExactly(t *testing.T) {
 	assertLatestCompaction(t, reopened, second)
 }
 
-func TestOpenRetainedTailOnlyCheckpointRebindsFollowOnToRealPostMessage(t *testing.T) {
+func TestStoreRetainedTailRepairAdvancesToRequestedSafeRealAnchor(t *testing.T) {
+	tail := []piMessage{{
+		Role: "assistant", Content: json.RawMessage(`[{"type":"toolCall","id":"repair","name":"read","arguments":{"path":"a.go"}}]`),
+		API: "openai-completions", Provider: "openai-compatible", Model: "test-model", Usage: &piUsage{}, StopReason: "toolUse", Timestamp: 1,
+	}}
+	path := writeExternalRetainedTailFixture(t, tail, nil)
+	store, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if len(warnings) != 1 || !strings.Contains(warnings[0].Message, "repaired dangling tool call") {
+		t.Fatalf("repair warnings = %#v", warnings)
+	}
+	latest, ok := store.LatestCompaction()
+	if !ok || !latest.RetainedTailOnly || latest.FirstPostCheckpointMessageID == "" {
+		t.Fatalf("latest repair metadata = %#v, %v", latest, ok)
+	}
+	repairID := latest.FirstPostCheckpointMessageID
+	messages := store.Messages()
+	if len(messages) != 3 || messages[1].ID != "b0000002-tail-0" || messages[2].ID != repairID || messages[2].Role != model.RoleTool {
+		t.Fatalf("repaired retained tail = %#v", messages)
+	}
+
+	beforeFile := append([]byte(nil), readFile(t, path)...)
+	beforeMessages := store.Messages()
+	for _, invalid := range []string{"b0000001", "b0000002-tail-0"} {
+		if _, err := store.AppendCompaction(context.Background(), CompactionCheckpoint{
+			Summary: testCompactionSummary, FirstKeptEntryID: invalid, TokensBefore: 130, CreatedAt: time.Now().UTC(),
+		}); !errors.Is(err, ErrInvalidSession) {
+			t.Fatalf("invalid retained-tail anchor %q error = %v, want ErrInvalidSession", invalid, err)
+		}
+		if !bytes.Equal(readFile(t, path), beforeFile) || !reflect.DeepEqual(store.Messages(), beforeMessages) {
+			t.Fatalf("invalid anchor %q mutated store", invalid)
+		}
+	}
+
+	if err := store.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "safe later request"}}, CreatedAt: time.Date(2026, 8, 28, 15, 30, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	safeID := store.Messages()[len(store.Messages())-1].ID
+	followOn, err := store.AppendCompaction(context.Background(), CompactionCheckpoint{
+		Summary: testCompactionSummary + "\nfollow on", FirstKeptEntryID: safeID, TokensBefore: 150,
+		CreatedAt: time.Date(2026, 8, 28, 15, 30, 1, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if followOn.FirstKeptEntryID != safeID || strings.Contains(followOn.FirstKeptEntryID, "-tail-") {
+		t.Fatalf("follow-on metadata = %#v, want requested safe ID %q", followOn, safeID)
+	}
+	selected := store.Messages()
+	if len(selected) != 2 || selected[1].ID != safeID || selected[1].Text() != "safe later request" {
+		t.Fatalf("follow-on context = %#v", selected)
+	}
+	if repairID == safeID {
+		t.Fatal("test did not advance beyond repaired tool result")
+	}
+}
+
+func TestStoreRetainedTailContextAnchorKeepsAttachedPrimary(t *testing.T) {
+	contextEntry := piEntry{
+		piEntryBase:   piEntryBase{Type: "custom_message", ID: "b0000003", Timestamp: "2026-08-28T15:00:01Z"},
+		CustomMessage: &piCustomMessage{CustomType: "external.context", Content: json.RawMessage(`[{"type":"text","text":"attached real context"}]`), Display: true},
+	}
+	userEntry := piEntry{
+		piEntryBase: piEntryBase{Type: "message", ID: "b0000004", Timestamp: "2026-08-28T15:00:02Z"},
+		Message:     &piMessage{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"following real request"}]`), Timestamp: 2},
+	}
+	path := writeExternalRetainedTailFixture(t, []piMessage{{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"synthetic tail"}]`), Timestamp: 1}}, []piEntry{contextEntry, userEntry})
+	store, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	latest, ok := store.LatestCompaction()
+	if !ok || latest.FirstPostCheckpointMessageID != contextEntry.ID {
+		t.Fatalf("first real context provenance = %#v, %v", latest, ok)
+	}
+	followOn, err := store.AppendCompaction(context.Background(), CompactionCheckpoint{
+		Summary: testCompactionSummary + "\ncontext follow on", FirstKeptEntryID: contextEntry.ID, TokensBefore: 160,
+		CreatedAt: time.Date(2026, 8, 28, 15, 0, 3, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if followOn.FirstKeptEntryID != contextEntry.ID {
+		t.Fatalf("follow-on anchor = %q, want context %q", followOn.FirstKeptEntryID, contextEntry.ID)
+	}
+	messages := store.Messages()
+	assertMessageTexts(t, messages, []string{"[Compaction summary]\n" + testCompactionSummary + "\ncontext follow on", "[Custom context: external.context]\nattached real context", "following real request"})
+	if messages[1].ID != contextEntry.ID || messages[2].ID != userEntry.ID {
+		t.Fatalf("attached context IDs = %#v", messages)
+	}
+}
+
+func TestStoreEmptyRetainedTailAllowsLaterNormalRecentAnchor(t *testing.T) {
+	user1 := piEntry{
+		piEntryBase: piEntryBase{Type: "message", ID: "b0000003", Timestamp: "2026-08-28T16:00:01Z"},
+		Message:     &piMessage{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"first real request"}]`), Timestamp: 1},
+	}
+	assistant1 := piEntry{
+		piEntryBase: piEntryBase{Type: "message", ID: "b0000004", Timestamp: "2026-08-28T16:00:02Z"},
+		Message: &piMessage{Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"first real answer"}]`), API: "openai-completions",
+			Provider: "openai-compatible", Model: "test-model", Usage: &piUsage{}, StopReason: "stop", Timestamp: 2},
+	}
+	user2 := piEntry{
+		piEntryBase: piEntryBase{Type: "message", ID: "b0000005", Timestamp: "2026-08-28T16:00:03Z"},
+		Message:     &piMessage{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"later real request"}]`), Timestamp: 3},
+	}
+	path := writeExternalRetainedTailFixture(t, []piMessage{}, []piEntry{user1, assistant1, user2})
+	store, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	latest, ok := store.LatestCompaction()
+	if !ok || !latest.RetainedTailOnly || latest.FirstPostCheckpointMessageID != user1.ID {
+		t.Fatalf("empty-tail metadata = %#v, %v", latest, ok)
+	}
+	followOn, err := store.AppendCompaction(context.Background(), CompactionCheckpoint{
+		Summary: testCompactionSummary + "\nnormal recent follow on", FirstKeptEntryID: user2.ID, TokensBefore: 180,
+		CreatedAt: time.Date(2026, 8, 28, 16, 0, 4, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if followOn.FirstKeptEntryID != user2.ID {
+		t.Fatalf("later normal anchor = %q, want %q", followOn.FirstKeptEntryID, user2.ID)
+	}
+	messages := store.Messages()
+	assertMessageTexts(t, messages, []string{"[Compaction summary]\n" + testCompactionSummary + "\nnormal recent follow on", "later real request"})
+	if messages[1].ID != user2.ID {
+		t.Fatalf("later real ID was not retained: %#v", messages)
+	}
+}
+
+func TestOpenRetainedTailOnlyCheckpointAcceptsRequestedRealPostMessage(t *testing.T) {
 	path := copyPiFixture(t, "compaction-retained-tail-only.jsonl")
 	store, warnings, err := Open(path)
 	if err != nil {
@@ -834,7 +1059,7 @@ func TestOpenRetainedTailOnlyCheckpointRebindsFollowOnToRealPostMessage(t *testi
 	assertLatestCompaction(t, store, latest)
 
 	followOn, err := store.AppendCompaction(context.Background(), CompactionCheckpoint{
-		Summary: testCompactionSummary + "\nfollow on", FirstKeptEntryID: messages[1].ID, TokensBefore: 150,
+		Summary: testCompactionSummary + "\nfollow on", FirstKeptEntryID: postID, TokensBefore: 150,
 		CreatedAt: time.Date(2026, 8, 28, 15, 0, 1, 0, time.UTC),
 	})
 	if err != nil {
@@ -1038,6 +1263,52 @@ func compactionPathTextBytes(details CompactionDetails) int {
 		total += len(path)
 	}
 	return total
+}
+
+func writeExternalRetainedTailFixture(t *testing.T, retainedTail []piMessage, after []piEntry) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "external-retained-tail.jsonl")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	created := time.Date(2026, 8, 28, 15, 0, 0, 0, time.UTC)
+	if _, err := writePiRecord(file, piHeader{Type: "session", Version: PiSessionVersion, ID: "external-retained-tail", Timestamp: created.Format(time.RFC3339Nano), CWD: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	runtimeData, err := json.Marshal(RuntimeMetadata{Profile: "test", Provider: "openai-compatible", Model: "test-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := piEntry{
+		piEntryBase: piEntryBase{Type: "custom", ID: "b0000001", Timestamp: created.Format(time.RFC3339Nano)},
+		Custom:      &piCustom{CustomType: ottoRuntimeCustomType, Data: runtimeData},
+	}
+	if _, err := writePiRecord(file, runtime); err != nil {
+		t.Fatal(err)
+	}
+	parent := runtime.ID
+	checkpoint := piEntry{
+		piEntryBase: piEntryBase{Type: "compaction", ID: "b0000002", ParentID: &parent, Timestamp: created.Add(time.Second).Format(time.RFC3339Nano)},
+		Compaction:  &piCompaction{Summary: testCompactionSummary, TokensBefore: 120, RetainedTail: retainedTail},
+	}
+	if len(retainedTail) == 0 {
+		raw := fmt.Sprintf(`{"type":"compaction","id":"b0000002","parentId":"b0000001","timestamp":%q,"summary":%q,"tokensBefore":120,"retainedTail":[]}`, checkpoint.Timestamp, testCompactionSummary)
+		checkpoint.Raw = json.RawMessage(raw)
+	}
+	if _, err := writePiRecord(file, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	parent = checkpoint.ID
+	for index := range after {
+		after[index].ParentID = stringPointer(parent)
+		if _, err := writePiRecord(file, after[index]); err != nil {
+			t.Fatal(err)
+		}
+		parent = after[index].ID
+	}
+	return path
 }
 
 func externalCompactionDetailsFixture(t *testing.T, rawDetails string) string {

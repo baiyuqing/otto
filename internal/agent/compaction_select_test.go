@@ -208,6 +208,79 @@ func TestSelectCompactionRetainedTailOnlyRequiresGenuinePostCheckpointID(t *test
 	}
 }
 
+func TestSelectCompactionRetainedTailAdvancesPastSyntheticToolAtom(t *testing.T) {
+	messages := []model.Message{
+		selectCompactionMessage("checkpoint", "[Compaction summary]\nprior"),
+		selectToolCallMessage("checkpoint-tail-0", model.Block{Type: model.BlockToolCall, ToolCallID: "repair", ToolName: "read"}),
+		selectToolResultMessage("repair-result", "repair", "read"),
+		selectTextMessage("later-user", model.RoleUser, "safe request"),
+		selectTextMessage("later-assistant", model.RoleAssistant, "safe answer"),
+	}
+	latest := session.CompactionMetadata{ID: "checkpoint", RetainedTailOnly: true, FirstPostCheckpointMessageID: "repair-result"}
+
+	selection, err := selectCompaction(messages, latest, true, 100000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSelectIDs(t, selection.HistoricalSource, "checkpoint-tail-0", "repair-result")
+	assertSelectIDs(t, selection.Retained, "later-user", "later-assistant")
+	if selection.FirstKeptID != "later-user" {
+		t.Fatalf("first kept ID = %q, want later-user", selection.FirstKeptID)
+	}
+
+	if _, err := selectCompaction(messages[:3], latest, true, 1, 0); !errors.Is(err, ErrNothingToCompact) {
+		t.Fatalf("unsafe atom without a later real group error = %v, want ErrNothingToCompact", err)
+	}
+}
+
+func TestSelectCompactionRetainedTailKeepsRealAttachedContextGroup(t *testing.T) {
+	messages := []model.Message{
+		selectCompactionMessage("checkpoint", "[Compaction summary]\nprior"),
+		selectTextMessage("checkpoint-tail-0", model.RoleUser, "synthetic request"),
+		selectTextMessage("checkpoint-tail-1", model.RoleAssistant, "synthetic answer"),
+		selectContextMessage("real-context", "branch_summary", "real context"),
+		selectTextMessage("real-user", model.RoleUser, "real request"),
+		selectTextMessage("real-assistant", model.RoleAssistant, "real answer"),
+	}
+	latest := session.CompactionMetadata{ID: "checkpoint", RetainedTailOnly: true, FirstPostCheckpointMessageID: "real-context"}
+
+	selection, err := selectCompaction(messages, latest, true, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSelectIDs(t, selection.HistoricalSource, "checkpoint-tail-0", "checkpoint-tail-1")
+	assertSelectIDs(t, selection.Retained, "real-context", "real-user", "real-assistant")
+	if selection.FirstKeptID != "real-context" {
+		t.Fatalf("first kept ID = %q, want attached context", selection.FirstKeptID)
+	}
+}
+
+func TestSelectCompactionEmptySyntheticTailEventuallyUsesNormalRecentSelection(t *testing.T) {
+	latest := session.CompactionMetadata{ID: "checkpoint", RetainedTailOnly: true, FirstPostCheckpointMessageID: "real-u1"}
+	short := []model.Message{
+		selectCompactionMessage("checkpoint", "[Compaction summary]\nprior"),
+		selectTextMessage("real-u1", model.RoleUser, "first real request"),
+		selectTextMessage("real-a1", model.RoleAssistant, "first real answer"),
+	}
+	if _, err := selectCompaction(short, latest, true, 1, 0); !errors.Is(err, ErrNothingToCompact) {
+		t.Fatalf("short real history error = %v, want ErrNothingToCompact", err)
+	}
+
+	messages := append(short,
+		selectTextMessage("real-u2", model.RoleUser, "later request"),
+		selectTextMessage("real-a2", model.RoleAssistant, "later answer"),
+	)
+	selection, err := selectCompaction(messages, latest, true, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSelectIDs(t, selection.HistoricalSource, "real-u1", "real-a1")
+	assertSelectIDs(t, selection.Retained, "real-u2", "real-a2")
+	if selection.FirstKeptID != "real-u2" {
+		t.Fatalf("first kept ID = %q, want normal recent-tail cut", selection.FirstKeptID)
+	}
+}
+
 func TestSelectCompactionDualFormUsesRealMessageID(t *testing.T) {
 	messages := []model.Message{
 		selectCompactionMessage("checkpoint", "[Compaction summary]\nprior"),

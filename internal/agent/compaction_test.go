@@ -5,15 +5,78 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
+
+func TestAutomaticCompactionWaitsWithoutWarningForUnsafeRetainedTail(t *testing.T) {
+	memory := session.NewMemory(testHeader(t))
+	appendCompactionMessages(t, memory,
+		model.Message{ID: "checkpoint-tail-0", Role: model.RoleAssistant, CreatedAt: time.Unix(1, 0).UTC(), FinishReason: model.FinishToolCalls, Blocks: []model.Block{{
+			Type: model.BlockToolCall, ToolName: "read", ToolCallID: "repair", Arguments: json.RawMessage(`{"path":"a.go"}`),
+		}}},
+		model.Message{ID: "repair-result", Role: model.RoleTool, CreatedAt: time.Unix(2, 0).UTC(), Blocks: []model.Block{{
+			Type: model.BlockToolResult, ToolName: "read", ToolCallID: "repair", Text: "tool result missing from prior session", IsError: true,
+		}}},
+	)
+	wrapped := &retainedTailMetadataSession{Session: memory, metadata: session.CompactionMetadata{
+		ID: "checkpoint", Summary: validStructuredSummary, RetainedTailOnly: true, FirstPostCheckpointMessageID: "repair-result",
+	}}
+	fake := &compactProvider{responses: []provider.Response{{Message: summaryMessage("normal response"), FinishReason: model.FinishStop}}}
+	options := testCompactionOptions()
+	options.Compaction = CompactionSettings{Auto: true, WorkingWindow: 10, HardInputWindow: 10, ReserveTokens: 1, KeepRecentTokens: 1}
+	runner := New(fake, nil, wrapped, options)
+	manual, err := runner.Compact(context.Background(), "", nil)
+	if err != nil || !manual.Noop || fake.calls != 0 || wrapped.appendCalls != 0 {
+		t.Fatalf("manual unsafe retained-tail compaction = %#v, %v; calls=%d appends=%d", manual, err, fake.calls, wrapped.appendCalls)
+	}
+	var events []Event
+	state := runDispatchState{}
+	if _, err := runner.dispatchNormalProviderStep(context.Background(), func(event Event) { events = append(events, event) }, &state); err != nil {
+		t.Fatalf("automatic retained-tail wait returned an error: %v", err)
+	}
+	if fake.calls != 1 || wrapped.appendCalls != 0 || countCompactEvents(events, EventCompactionWarning) != 0 {
+		t.Fatalf("provider calls=%d appends=%d events=%#v", fake.calls, wrapped.appendCalls, events)
+	}
+	if state.proactiveAttempted {
+		t.Fatal("no-op retained-tail wait consumed the turn's future compaction opportunity")
+	}
+}
+
+func TestReactiveCompactionReturnsOriginalOverflowWhenRetainedTailMustWait(t *testing.T) {
+	memory := session.NewMemory(testHeader(t))
+	appendCompactionMessages(t, memory,
+		model.Message{ID: "checkpoint-tail-0", Role: model.RoleAssistant, CreatedAt: time.Unix(1, 0).UTC(), FinishReason: model.FinishToolCalls, Blocks: []model.Block{{
+			Type: model.BlockToolCall, ToolName: "read", ToolCallID: "repair", Arguments: json.RawMessage(`{"path":"a.go"}`),
+		}}},
+		model.Message{ID: "repair-result", Role: model.RoleTool, CreatedAt: time.Unix(2, 0).UTC(), Blocks: []model.Block{{
+			Type: model.BlockToolResult, ToolName: "read", ToolCallID: "repair", Text: "repair", IsError: true,
+		}}},
+	)
+	wrapped := &retainedTailMetadataSession{Session: memory, metadata: session.CompactionMetadata{
+		ID: "checkpoint", Summary: validStructuredSummary, RetainedTailOnly: true, FirstPostCheckpointMessageID: "repair-result",
+	}}
+	fake := &retainedTailOverflowProvider{}
+	options := testCompactionOptions()
+	options.Compaction = CompactionSettings{Auto: true, KeepRecentTokens: 1}
+	runner := New(fake, nil, wrapped, options)
+	_, err := runner.dispatchNormalProviderStep(context.Background(), nil, &runDispatchState{})
+	var generic *automaticDispatchError
+	if !errors.Is(err, provider.ErrContextOverflow) || errors.As(err, &generic) {
+		t.Fatalf("reactive wait error = %T %v; want original typed overflow", err, err)
+	}
+	if fake.calls != 1 || wrapped.appendCalls != 0 {
+		t.Fatalf("provider calls=%d appends=%d", fake.calls, wrapped.appendCalls)
+	}
+}
 
 func TestCompactManualNoopEmitsBoundedCompletion(t *testing.T) {
 	memory := session.NewMemory(testHeader(t))
@@ -70,6 +133,10 @@ func TestCompactPersistsSummaryAndEmitsUsageOnce(t *testing.T) {
 	}
 	if messages[0].Usage == nil || *messages[0].Usage != result.Usage {
 		t.Fatalf("checkpoint usage=%#v", messages[0].Usage)
+	}
+	latest, ok := memory.LatestCompaction()
+	if !ok || latest.Summary != validStructuredSummary || strings.Contains(latest.Summary, "<read-files>") || strings.Contains(latest.Summary, "<modified-files>") {
+		t.Fatalf("empty file lists changed summary: %#v, %v", latest, ok)
 	}
 }
 
@@ -140,9 +207,10 @@ func TestCompactTurnPrefixPreservesPreviousStructuredSummary(t *testing.T) {
 	}
 	memory := session.NewMemory(testHeader(t))
 	appendCompactionMessages(t, memory, messages...)
+	priorSuffix := "\n\n<read-files>\nprior.go\n</read-files>"
 	if _, err := memory.AppendCompaction(context.Background(), session.CompactionCheckpoint{
-		Summary: validStructuredSummary, FirstKeptEntryID: messages[0].ID,
-		TokensBefore: 100, CreatedAt: fixedClock(),
+		Summary: validStructuredSummary + priorSuffix, FirstKeptEntryID: messages[0].ID,
+		TokensBefore: 100, Details: session.CompactionDetails{ReadFiles: []string{"prior.go"}}, CreatedAt: fixedClock(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +226,8 @@ func TestCompactTurnPrefixPreservesPreviousStructuredSummary(t *testing.T) {
 		t.Fatalf("requests=%#v", fake.requests)
 	}
 	latest, _ := memory.LatestCompaction()
-	want := validStructuredSummary + splitTurnSummarySeparator + "preserve early turn progress"
-	if latest.Summary != want {
+	want := validStructuredSummary + splitTurnSummarySeparator + "preserve early turn progress" + priorSuffix
+	if latest.Summary != want || strings.Count(latest.Summary, "<read-files>") != 1 {
 		t.Fatalf("summary=%q, want %q", latest.Summary, want)
 	}
 }
@@ -224,6 +292,112 @@ func TestCompactUpdatesPreviousSummaryWithoutResummarizingCheckpoint(t *testing.
 	second := fake.requests[1].Messages[0].Text()
 	if !strings.Contains(second, "<previous-summary>") || !strings.Contains(second, `## Goal\nkeep working`) || strings.Contains(second, "[Compaction summary]") {
 		t.Fatalf("second summary input=%q", second)
+	}
+}
+
+func TestCompactAppendsFinalFileDetailsAfterUnionRedactionAndModifiedWins(t *testing.T) {
+	const secret = "SECRET-FILE-PATH"
+	memory := session.NewMemory(testHeader(t))
+	appendCompactionMessages(t, memory,
+		compactionTextMessage("old-u", model.RoleUser, "old request"),
+		compactionTextMessage("old-a", model.RoleAssistant, "old answer"),
+	)
+	if _, err := memory.AppendCompaction(context.Background(), session.CompactionCheckpoint{
+		Summary: validStructuredSummary, FirstKeptEntryID: "old-u", TokensBefore: 100,
+		Details:   session.CompactionDetails{ReadFiles: []string{"prior.go", "same.go", secret + "/prior.go"}, OmittedReadFiles: 2},
+		CreatedAt: fixedClock(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	appendCompactionMessages(t, memory,
+		model.Message{ID: "calls", Role: model.RoleAssistant, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishToolCalls, Blocks: []model.Block{
+			{Type: model.BlockToolCall, ToolName: "read", ToolCallID: "read", Arguments: json.RawMessage(`{"path":"same.go"}`)},
+			{Type: model.BlockToolCall, ToolName: "edit", ToolCallID: "edit", Arguments: json.RawMessage(`{"path":"same.go","oldText":"x","newText":"y"}`)},
+			{Type: model.BlockToolCall, ToolName: "write", ToolCallID: "write", Arguments: json.RawMessage(`{"path":"SECRET-FILE-PATH/new.go","content":"x"}`)},
+		}},
+		model.Message{ID: "results", Role: model.RoleTool, CreatedAt: time.Unix(3, 0).UTC(), Blocks: []model.Block{
+			{Type: model.BlockToolResult, ToolName: "read", ToolCallID: "read", Text: "ok"},
+			{Type: model.BlockToolResult, ToolName: "edit", ToolCallID: "edit", Text: "ok"},
+			{Type: model.BlockToolResult, ToolName: "write", ToolCallID: "write", Text: "ok"},
+		}},
+		compactionTextMessage("latest-u", model.RoleUser, "continue"),
+	)
+	fake := &compactProvider{responses: []provider.Response{validCompactionResponse(model.Usage{})}}
+	options := testCompactionOptions()
+	runner := New(fake, nil, memory, options, NewRedactor([]string{secret}))
+	var events []Event
+	result, err := runner.Compact(context.Background(), "", func(event Event) { events = append(events, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	latest, ok := memory.LatestCompaction()
+	if !ok {
+		t.Fatal("missing persisted compaction")
+	}
+	wantDetails := session.CompactionDetails{
+		ReadFiles: []string{"prior.go", redactionMarker + "/prior.go"}, ModifiedFiles: []string{"same.go", redactionMarker + "/new.go"},
+		OmittedReadFiles: 2,
+	}
+	if !reflect.DeepEqual(latest.Details, wantDetails) {
+		t.Fatalf("details = %#v, want %#v", latest.Details, wantDetails)
+	}
+	wantSummary := validStructuredSummary + "\n\n<read-files>\nprior.go\n" + redactionMarker + "/prior.go\n</read-files>\n\n<modified-files>\nsame.go\n" + redactionMarker + "/new.go\n</modified-files>"
+	if latest.Summary != wantSummary || strings.Contains(latest.Summary, secret) {
+		t.Fatalf("persisted summary = %q, want %q", latest.Summary, wantSummary)
+	}
+	retained := []model.Message{compactionTextMessage("latest-u", model.RoleUser, "continue")}
+	if want := estimateCompactedContext(options, nil, wantSummary, retained); result.EstimatedTokensAfter != want {
+		t.Fatalf("estimated after = %d, want final-summary estimate %d", result.EstimatedTokensAfter, want)
+	}
+	assertCompactionEventsContainNoText(t, events, secret, latest.Summary)
+}
+
+func TestCompactCompleteSummaryExactBoundPassesAndPlusOneFailsBeforeAppend(t *testing.T) {
+	detailsSuffix := "\n\n<read-files>\na.go\n</read-files>"
+	base := validStructuredSummary + "\n" + strings.Repeat("x", summaryMaximumBytes-len(validStructuredSummary)-len(detailsSuffix)-1)
+	for _, test := range []struct {
+		name        string
+		summary     string
+		wantErr     bool
+		wantAppends int
+	}{
+		{name: "exact bound", summary: base, wantAppends: 1},
+		{name: "one byte over", summary: base + "x", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			memory := session.NewMemory(testHeader(t))
+			appendCompactionMessages(t, memory,
+				compactionTextMessage("old-u", model.RoleUser, "old request"),
+				model.Message{ID: "call", Role: model.RoleAssistant, CreatedAt: time.Unix(2, 0).UTC(), FinishReason: model.FinishToolCalls, Blocks: []model.Block{{
+					Type: model.BlockToolCall, ToolName: "read", ToolCallID: "read", Arguments: json.RawMessage(`{"path":"a.go"}`),
+				}}},
+				model.Message{ID: "result", Role: model.RoleTool, CreatedAt: time.Unix(3, 0).UTC(), Blocks: []model.Block{{
+					Type: model.BlockToolResult, ToolName: "read", ToolCallID: "read", Text: "ok",
+				}}},
+				compactionTextMessage("latest-u", model.RoleUser, "continue"),
+			)
+			wrapped := &compactionHookSession{Session: memory}
+			fake := &compactProvider{responses: []provider.Response{{Message: summaryMessage(test.summary)}}}
+			runner := New(fake, nil, wrapped, testCompactionOptions())
+			result, err := runner.Compact(context.Background(), "", nil)
+			if test.wantErr {
+				if !errors.Is(err, ErrInvalidCompactionSummary) || result.CheckpointID != "" {
+					t.Fatalf("Compact() = %#v, %v; want typed invalid summary", result, err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				latest, _ := memory.LatestCompaction()
+				if len(latest.Summary) != summaryMaximumBytes || latest.Summary != base+detailsSuffix || !utf8.ValidString(latest.Summary) {
+					t.Fatalf("exact persisted summary = %d bytes", len(latest.Summary))
+				}
+			}
+			if wrapped.appendCalls != test.wantAppends {
+				t.Fatalf("session appends = %d, want %d", wrapped.appendCalls, test.wantAppends)
+			}
+		})
 	}
 }
 
@@ -531,6 +705,18 @@ func (p *streamLimitProvider) Complete(ctx context.Context, _ provider.Request, 
 	return provider.Response{}, ctx.Err()
 }
 
+type retainedTailOverflowProvider struct {
+	calls int
+}
+
+func (p *retainedTailOverflowProvider) SerializedRequestSize(provider.Request) (int, error) {
+	return 1, nil
+}
+func (p *retainedTailOverflowProvider) Complete(context.Context, provider.Request, func(provider.StreamEvent)) (provider.Response, error) {
+	p.calls++
+	return provider.Response{}, &provider.ContextOverflowError{Status: 400, Code: "context_length_exceeded"}
+}
+
 type internalRetryProvider struct {
 	completeCalls     int
 	transportAttempts int
@@ -549,6 +735,21 @@ type compactionHookSession struct {
 	session.Session
 	appendCalls int
 	afterAppend func()
+}
+
+type retainedTailMetadataSession struct {
+	session.Session
+	metadata    session.CompactionMetadata
+	appendCalls int
+}
+
+func (s *retainedTailMetadataSession) LatestCompaction() (session.CompactionMetadata, bool) {
+	return s.metadata, true
+}
+
+func (s *retainedTailMetadataSession) AppendCompaction(ctx context.Context, checkpoint session.CompactionCheckpoint) (session.CompactionMetadata, error) {
+	s.appendCalls++
+	return s.Session.AppendCompaction(ctx, checkpoint)
 }
 
 func (s *compactionHookSession) AppendCompaction(ctx context.Context, checkpoint session.CompactionCheckpoint) (session.CompactionMetadata, error) {

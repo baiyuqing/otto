@@ -45,17 +45,84 @@ func selectCompaction(
 	}
 
 	if hasLatest && latest.RetainedTailOnly {
-		return selectAfterRetainedTail(transcript, selection, latest, hardInputBudget)
+		return selectAfterRetainedTail(transcript, selection, latest, keepRecentTokens, hardInputBudget)
 	}
 
 	groups, err := groupCompactionMessages(transcript)
 	if err != nil {
 		return compactionSelection{}, err
 	}
+	return selectRecentCompaction(transcript, selection, groups, keepRecentTokens, hardInputBudget)
+}
+
+func selectAfterRetainedTail(
+	transcript []model.Message,
+	selection compactionSelection,
+	latest session.CompactionMetadata,
+	keepRecentTokens int,
+	hardInputBudget int,
+) (compactionSelection, error) {
+	if latest.FirstPostCheckpointMessageID == "" {
+		return compactionSelection{}, ErrNothingToCompact
+	}
+	anchor := -1
+	for index := range transcript {
+		if transcript[index].ID == latest.FirstPostCheckpointMessageID {
+			anchor = index
+			break
+		}
+	}
+	if anchor < 0 {
+		return compactionSelection{}, ErrNothingToCompact
+	}
+	groups, err := groupCompactionMessages(transcript)
+	if err != nil {
+		return compactionSelection{}, err
+	}
+	retainedGroup := -1
+	for index, group := range groups {
+		switch {
+		case group.start == anchor:
+			retainedGroup = index
+		case group.start < anchor && anchor < group.end:
+			retainedGroup = index + 1
+		case group.start > anchor:
+			retainedGroup = index
+		}
+		if retainedGroup >= 0 {
+			break
+		}
+	}
+	if retainedGroup < 0 || retainedGroup >= len(groups) {
+		return compactionSelection{}, ErrNothingToCompact
+	}
+	if groups[retainedGroup].start == 0 {
+		return selectRecentCompaction(transcript, selection, groups, keepRecentTokens, hardInputBudget)
+	}
+
+	retainedStart := groups[retainedGroup].start
+	if hardInputBudget > 0 && selectMessageEstimate(transcript[retainedStart:]) > hardInputBudget {
+		return compactionSelection{}, ErrCurrentTurnTooLarge
+	}
+	selection.Retained = cloneSelectionMessages(transcript[retainedStart:])
+	selection.FirstKeptID = selection.Retained[0].ID
+	selection = partitionCompactionSource(transcript, groups, retainedGroup, retainedStart, selection)
+	if err := validateCompactionSelection(selection); err != nil {
+		return compactionSelection{}, err
+	}
+	return selection, nil
+}
+
+func selectRecentCompaction(
+	transcript []model.Message,
+	selection compactionSelection,
+	groups []compactionMessageGroup,
+	keepRecentTokens int,
+	hardInputBudget int,
+) (compactionSelection, error) {
 	if len(groups) == 0 {
 		return compactionSelection{}, ErrNothingToCompact
 	}
-
 	start := latestUserGroup(transcript, groups)
 	if start < 0 {
 		start = len(groups) - 1
@@ -67,7 +134,6 @@ func selectCompaction(
 	if hardInputBudget > 0 && retainedTokens > hardInputBudget {
 		return compactionSelection{}, ErrCurrentTurnTooLarge
 	}
-
 	for start > 0 && retainedTokens < keepRecentTokens {
 		candidateTokens := saturatingEstimateAdd(retainedTokens, groups[start-1].tokens)
 		if hardInputBudget > 0 && candidateTokens > hardInputBudget {
@@ -84,60 +150,9 @@ func selectCompaction(
 	selection.Retained = cloneSelectionMessages(transcript[retainedStart:])
 	selection.FirstKeptID = selection.Retained[0].ID
 	selection = partitionCompactionSource(transcript, groups, start, retainedStart, selection)
-
 	if len(selection.HistoricalSource) == 0 && len(selection.TurnPrefixSource) == 0 {
 		return compactionSelection{}, ErrNothingToCompact
 	}
-	if err := validateCompactionSelection(selection); err != nil {
-		return compactionSelection{}, err
-	}
-	return selection, nil
-}
-
-func selectAfterRetainedTail(
-	transcript []model.Message,
-	selection compactionSelection,
-	latest session.CompactionMetadata,
-	hardInputBudget int,
-) (compactionSelection, error) {
-	if latest.FirstPostCheckpointMessageID == "" {
-		return compactionSelection{}, ErrNothingToCompact
-	}
-	anchor := -1
-	for index := range transcript {
-		if transcript[index].ID == latest.FirstPostCheckpointMessageID {
-			anchor = index
-			break
-		}
-	}
-	if anchor < 0 {
-		return compactionSelection{}, ErrNothingToCompact
-	}
-	if hardInputBudget > 0 && selectMessageEstimate(transcript[anchor:]) > hardInputBudget {
-		return compactionSelection{}, ErrCurrentTurnTooLarge
-	}
-	if anchor == 0 {
-		return compactionSelection{}, ErrNothingToCompact
-	}
-
-	groups, err := groupCompactionMessages(transcript)
-	if err != nil {
-		return compactionSelection{}, err
-	}
-	anchorGroup := -1
-	for index, group := range groups {
-		if group.start == anchor && group.primary == anchor {
-			anchorGroup = index
-			break
-		}
-	}
-	if anchorGroup < 0 {
-		return compactionSelection{}, fmt.Errorf("select compaction: first post-checkpoint message is not a protocol-safe cut")
-	}
-
-	selection.Retained = cloneSelectionMessages(transcript[anchor:])
-	selection.FirstKeptID = latest.FirstPostCheckpointMessageID
-	selection = partitionCompactionSource(transcript, groups, anchorGroup, anchor, selection)
 	if err := validateCompactionSelection(selection); err != nil {
 		return compactionSelection{}, err
 	}
@@ -176,12 +191,12 @@ func compactionTranscript(messages []model.Message, latest session.CompactionMet
 
 		isLatest := !hasLatest || latest.ID == "" || message.ID == latest.ID
 		if isLatest {
-			previousSummary = strings.TrimPrefix(message.Text(), compactionSummaryDisplayPrefix)
+			previousSummary = stripCompactionFileBlocks(strings.TrimPrefix(message.Text(), compactionSummaryDisplayPrefix), latest.Details)
 			foundLatest = true
 		}
 	}
 	if hasLatest && !foundLatest {
-		previousSummary = latest.Summary
+		previousSummary = stripCompactionFileBlocks(latest.Summary, latest.Details)
 	}
 	return transcript, previousSummary
 }

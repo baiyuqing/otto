@@ -15,9 +15,17 @@ import (
 const (
 	minTerminalWidth  = 40
 	minTerminalHeight = 8
-	minEditorHeight   = 1
+	minEditorHeight   = 2
 	maxEditorHeight   = 6
 	footerHeight      = 1
+	editorSpacing     = 1
+	// inputBoxThreshold is the terminal height at which the composer gains its
+	// bordered panel. Below it the editor stays compact so small terminals keep
+	// room for the transcript and the command-suggestion panel.
+	inputBoxThreshold = 12
+	inputBoxBorder    = 2
+	inputBoxLabel     = 1
+	inputBoxPadding   = 1
 )
 
 type layoutState struct {
@@ -27,6 +35,9 @@ type layoutState struct {
 	editorHeight     int
 	suggestionHeight int
 	footerHeight     int
+	editorSpacing    int
+	inputBoxed       bool
+	inputBoxHeight   int
 }
 
 func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight int) layoutState {
@@ -34,13 +45,23 @@ func calculateLayout(width, height int, editor textarea.Model, requestedSuggesti
 		transcriptWidth: max(0, width),
 		editorHeight:    clamp(editorHeight(editor), minEditorHeight, maxEditorHeight),
 		footerHeight:    footerHeight,
+		editorSpacing:   editorSpacing,
+		inputBoxed:      height >= inputBoxThreshold,
+	}
+	if layout.inputBoxed {
+		// The box's top border separates it from the transcript, so the extra
+		// blank row is not needed and would waste space.
+		layout.editorSpacing = 0
+		layout.inputBoxHeight = layout.editorHeight + inputBoxBorder + inputBoxLabel
+	} else {
+		layout.inputBoxHeight = layout.editorHeight
 	}
 	if width < minTerminalWidth || height < minTerminalHeight {
 		layout.tooSmall = true
 		layout.transcriptHeight = max(0, height)
 		return layout
 	}
-	availableHeight := height - layout.editorHeight - layout.footerHeight
+	availableHeight := height - layout.inputBoxHeight - layout.footerHeight - layout.editorSpacing
 	layout.suggestionHeight = min(max(0, requestedSuggestionHeight), max(0, availableHeight-1))
 	transcriptHeight := availableHeight - layout.suggestionHeight
 	if transcriptHeight <= 0 {

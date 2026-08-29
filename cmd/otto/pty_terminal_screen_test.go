@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"testing"
 	"unicode"
 	"unicode/utf8"
 
@@ -179,6 +180,12 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 			return err
 		}
 		s.moveTo(ptyCSIParam(params, 0, 1)-1, s.y)
+	case 'A':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		s.moveTo(s.x, s.y-ptyCSIParam(params, 0, 1))
 	case 'C':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
@@ -246,10 +253,54 @@ func validatePTYSGRParams(raw string) error {
 
 	// These are the exact SGR forms observed in both post-resize PTY slices.
 	switch raw {
-	case "", "1", "37;40", "38;5;240", "38;5;240;27", "38;5;252", "39", "39;7", "40":
+	case "", "1", "22", "30", "37", "37;40", "38;5;240", "38;5;240;27", "38;5;252", "39", "39;7", "40", "48;5;236":
 		return nil
 	default:
 		return fmt.Errorf("unobserved SGR params %q", raw)
+	}
+}
+
+func TestValidatePTYSGRParams(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "accept empty", raw: ""},
+		{name: "accept bold", raw: "1"},
+		{name: "accept normal intensity", raw: "22"},
+		{name: "accept black foreground", raw: "30"},
+		{name: "accept white foreground", raw: "37"},
+		{name: "accept boxed fg/bg", raw: "37;40"},
+		{name: "accept boxed background", raw: "48;5;236"},
+		{name: "accept accent foreground", raw: "38;5;240"},
+		{name: "accept accent foreground with alt", raw: "38;5;240;27"},
+		{name: "accept border foreground", raw: "38;5;252"},
+		{name: "accept reset foreground", raw: "39"},
+		{name: "accept reset with reverse video", raw: "39;7"},
+		{name: "accept background", raw: "40"},
+		{name: "reject generalized background", raw: "48;5;235", wantErr: true},
+		{name: "reject broadened background", raw: "48;5;236;1", wantErr: true},
+		{name: "reject generalized foreground", raw: "38;5;241", wantErr: true},
+		{name: "reject reordered form", raw: "40;37", wantErr: true},
+		{name: "reject RGB syntax", raw: "38;2;1;2;3", wantErr: true},
+		{name: "reject malformed separator", raw: "37;", wantErr: true},
+		{name: "reject unobserved color", raw: "31", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePTYSGRParams(tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validatePTYSGRParams(%q) = nil, want error", tc.raw)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validatePTYSGRParams(%q) = %v, want nil", tc.raw, err)
+			}
+		})
 	}
 }
 

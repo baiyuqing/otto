@@ -155,19 +155,19 @@ func TestSlashCommandCompletionClampsStaleSelection(t *testing.T) {
 
 func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
-	if got := m.viewport.Height(); got != 8 {
-		t.Fatalf("initial viewport height = %d, want 8", got)
+	if got := m.viewport.Height(); got != 6 {
+		t.Fatalf("initial viewport height = %d, want 6", got)
 	}
 
 	updated, _ := m.Update(tea.PasteMsg{Content: "/s"})
 	m = updated.(Model)
-	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 1 || m.viewport.Height() != 7 {
+	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 1 || m.viewport.Height() != 5 {
 		t.Fatalf("paste state: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 6 || m.viewport.Height() != 2 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 6 || m.viewport.Height() != 1 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))
@@ -184,7 +184,7 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	updated, _ = updated.(Model).Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "" || len(m.commandSuggestions()) != 0 || m.viewport.Height() != 8 {
+	if m.editor.Value() != "" || len(m.commandSuggestions()) != 0 || m.viewport.Height() != 6 {
 		t.Fatalf("closed suggestions: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 }
@@ -227,7 +227,7 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	m.autoFollow = false
 	m.viewport.SetYOffset(3)
 	m = typeEditorText(t, m, "/")
-	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 2 {
+	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 1 {
 		t.Fatalf("suggestion scroll state: offset=%d follow=%v height=%d", m.viewport.YOffset(), m.autoFollow, m.viewport.Height())
 	}
 
@@ -261,8 +261,8 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
 	m = resizeModel(t, m, 100, 20)
-	if m.viewport.Height() != 10 {
-		t.Fatalf("expanded viewport height = %d, want 10", m.viewport.Height())
+	if m.viewport.Height() != 8 {
+		t.Fatalf("expanded viewport height = %d, want 8", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 100, 20)
 

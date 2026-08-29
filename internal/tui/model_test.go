@@ -287,8 +287,8 @@ func TestViewPositionsRealCursorAtEditorLocation(t *testing.T) {
 	if cursor == nil {
 		t.Fatal("view cursor = nil, want a real terminal cursor for IME positioning")
 	}
-	if cursor.X != 7 || cursor.Y != 9 {
-		t.Fatalf("view cursor = (%d,%d), want (7,9) at the visible editor", cursor.X, cursor.Y)
+	if cursor.X != 9 || cursor.Y != 8 {
+		t.Fatalf("view cursor = (%d,%d), want (9,8) at the visible editor", cursor.X, cursor.Y)
 	}
 }
 
@@ -302,8 +302,8 @@ func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
 	}
 
 	cursor := m.View().Cursor
-	if cursor == nil || cursor.X != 3 || cursor.Y != 9 {
-		t.Fatalf("suggestion view cursor = %#v, want (3,9) at the editor", cursor)
+	if cursor == nil || cursor.X != 5 || cursor.Y != 8 {
+		t.Fatalf("suggestion view cursor = %#v, want (5,8) at the editor", cursor)
 	}
 }
 
@@ -315,15 +315,15 @@ func TestViewTracksRealCursorAcrossMultilineEditorRows(t *testing.T) {
 	m.editor.CursorUp()
 	m.editor.CursorStart()
 	first := m.View().Cursor
-	if first == nil || first.Y != 9 {
-		t.Fatalf("first-line cursor = %#v, want row 9", first)
+	if first == nil || first.Y != 8 {
+		t.Fatalf("first-line cursor = %#v, want row 8", first)
 	}
 
 	m.editor.CursorDown()
 	m.editor.CursorEnd()
 	last := m.View().Cursor
-	if last == nil || last.Y != 10 {
-		t.Fatalf("last-line cursor = %#v, want row 10", last)
+	if last == nil || last.Y != 9 {
+		t.Fatalf("last-line cursor = %#v, want row 9", last)
 	}
 }
 
@@ -2590,5 +2590,55 @@ func TestTurnChannelCancellationDoesNotLeakWorker(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("iteration %d worker did not exit after cancellation", i)
 		}
+	}
+}
+
+func TestInputBoxAppearsAsBorderedPanelOnStandardTerminal(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 20)
+	m.editor.SetValue("hello")
+	m.editor.CursorEnd()
+	m.rerenderAndRefreshViewportContent(false)
+	content := m.View().Content
+	assertRenderedBounds(t, content, 80, 20)
+	if !strings.Contains(content, "Ask Otto") {
+		t.Fatalf("boxed input = %q, want Ask Otto label", content)
+	}
+	if !strings.Contains(content, "╭") || !strings.Contains(content, "╰") {
+		t.Fatalf("boxed input = %q, want rounded border", content)
+	}
+}
+
+func TestInputBoxStaysCompactOnMinimumTerminal(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 40, 8)
+	m.editor.SetValue("hello")
+	m.rerenderAndRefreshViewportContent(false)
+	content := m.View().Content
+	assertRenderedBounds(t, content, 40, 8)
+	if strings.Contains(content, "╭") {
+		t.Fatalf("minimum terminal must keep the compact editor, got box chrome: %q", content)
+	}
+}
+
+func TestInputBoxGrowsWithMultilineEditorInsideFrame(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 20)
+	m.editor.SetValue("line one\nline two")
+	m.rerenderAndRefreshViewportContent(false)
+	content := m.View().Content
+	assertRenderedBounds(t, content, 80, 20)
+	lines := strings.Split(content, "\n")
+	var sawOpen, sawLabel, sawClose bool
+	for _, line := range lines {
+		if strings.Contains(line, "╭") {
+			sawOpen = true
+		}
+		if strings.Contains(line, "Ask Otto") {
+			sawLabel = true
+		}
+		if strings.Contains(line, "╰") {
+			sawClose = true
+		}
+	}
+	if !sawOpen || !sawLabel || !sawClose {
+		t.Fatalf("bordered input frame missing: open=%v label=%v close=%v\n%s", sawOpen, sawLabel, sawClose, content)
 	}
 }

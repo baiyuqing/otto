@@ -24,6 +24,7 @@ import (
 
 type fakeBackend struct {
 	prompt     func(context.Context, string, func(agent.Event)) error
+	compact    func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
 	newSession func() error
 	info       app.Info
 	history    []model.Message
@@ -36,8 +37,11 @@ func (f *fakeBackend) Prompt(ctx context.Context, text string, emit func(agent.E
 	return f.prompt(ctx, text, emit)
 }
 
-func (f *fakeBackend) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
-	return agent.CompactionResult{Noop: true}, nil
+func (f *fakeBackend) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
+	if f.compact == nil {
+		return agent.CompactionResult{Noop: true}, nil
+	}
+	return f.compact(ctx, focus, emit)
 }
 
 func (f *fakeBackend) NewSession() error {
@@ -2033,7 +2037,7 @@ func TestFinishTurnReconcilesPendingToolEntries(t *testing.T) {
 	m.cancel = func() {}
 	m.entries = []Entry{{Kind: EntryTool, ToolCallID: "call-1", ToolName: "bash"}}
 
-	updated, _ := m.finishTurn(context.Canceled)
+	updated, _ := m.finishTurn(turnEnvelope{err: context.Canceled})
 	got := updated.(Model)
 	if !got.entries[0].ToolDone || !got.entries[0].ToolError || !strings.Contains(got.entries[0].ToolOutput, context.Canceled.Error()) {
 		t.Fatalf("pending tool after finish = %#v", got.entries[0])
@@ -2048,7 +2052,7 @@ func TestFatalPersistenceWithoutStoredToolResultUsesGenericReconciliation(t *tes
 	m.cancel = func() {}
 	m.entries = append(m.entries, Entry{Kind: EntryTool, ToolCallID: "call-1", ToolName: "bash"})
 
-	updated, cmd := m.finishTurn(fatalErr)
+	updated, cmd := m.finishTurn(turnEnvelope{err: fatalErr})
 	got := updated.(Model)
 	entry := got.entries[len(got.entries)-2]
 	if cmd == nil || !errors.Is(got.fatalErr, session.ErrFatalPersistence) {

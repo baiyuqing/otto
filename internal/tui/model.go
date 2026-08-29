@@ -64,6 +64,14 @@ func WithClock(clock Clock) Option {
 	}
 }
 
+type operationKind uint8
+
+const (
+	operationNone operationKind = iota
+	operationPrompt
+	operationCompact
+)
+
 type turnHistoryBaseline struct {
 	messageCount int
 	digest       [sha256.Size]byte
@@ -106,6 +114,8 @@ type Model struct {
 	turnEventErr           error
 	fatalErr               error
 	turnGeneration         uint64
+	operationKind          operationKind
+	compactionCompleted    bool
 	turnHistoryBaseline    turnHistoryBaseline
 	turnEntryStart         int
 	liveEntrySequence      int
@@ -500,10 +510,10 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	return m.startPrompt(prompt)
 }
 
-func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
-	command, ok := findSlashCommand(name)
-	if !ok {
-		m.statusText = fmt.Sprintf("unknown command: %s", name)
+func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
+	command, argument, ok := parseSlashCommand(value)
+	if !ok || (argument != "" && command.Kind != slashCommandCompact) {
+		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
 	}
 	switch command.Kind {
@@ -531,13 +541,19 @@ func (m Model) handleCommand(name string) (tea.Model, tea.Cmd) {
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
 	case slashCommandResume:
 		return m.handleResumeCommand()
+	case slashCommandCompact:
+		if m.running || m.newSessionPending {
+			m.statusText = app.ErrPromptActive.Error()
+			return m, nil
+		}
+		return m.startCompaction(argument)
 	case slashCommandExit:
 		if m.running {
 			return m, nil
 		}
 		return m.quit()
 	default:
-		m.statusText = fmt.Sprintf("unknown command: %s", name)
+		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
 	}
 }
@@ -584,6 +600,8 @@ func (m *Model) resetSessionViewFromBackend(status string) {
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.fatalErr = nil
+	m.operationKind = operationNone
+	m.compactionCompleted = false
 	m.turnHistoryBaseline = turnHistoryBaseline{}
 	m.turnEntryStart = 0
 	m.liveEntrySequence = 0
@@ -668,6 +686,7 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 
 	m.running = true
 	m.cancel = cancel
+	m.clearCtrlCArm()
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.statusText = ""
@@ -675,6 +694,9 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.renderTickActive = false
 	m.activeAssistant = -1
 	m.turnGeneration++
+	m.operationKind = operationPrompt
+	m.compactionCompleted = false
+	stream.generation = m.turnGeneration
 	m.activeTurnChannel = stream.channel
 	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
 	m.turnEntryStart = len(m.entries)
@@ -726,6 +748,10 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 }
 
 func sendTurnEvent(ctx context.Context, stream *turnStream, envelope turnEnvelope) bool {
+	if envelope.event != nil && envelope.event.Type == agent.EventCompactionCompleted {
+		stream.channel <- envelope
+		return true
+	}
 	return sendRegularTurnEvent(ctx, stream, envelope)
 }
 
@@ -753,13 +779,16 @@ func waitTurn(stream *turnStream) tea.Cmd {
 		} else if envelope.usesRegularEventSlot {
 			<-stream.regularEventSlots
 		}
-		return turnMsg{channel: stream.channel, stream: stream, value: envelope}
+		return turnMsg{channel: stream.channel, stream: stream, generation: stream.generation, value: envelope}
 	}
 }
 
 func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	if !m.isActiveTurnMessage(msg) {
 		if msg.value.done || msg.stream == nil {
+			return m, nil
+		}
+		if m.running && msg.channel == m.activeTurnChannel {
 			return m, nil
 		}
 		return m, waitTurn(msg.stream)
@@ -771,13 +800,13 @@ func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 		if m.reconcilePersistedToolResults() {
 			m.refreshViewportContent(!m.autoFollow)
 		}
-		return m.finishTurn(msg.value.err)
+		return m.finishTurn(msg.value)
 	}
 	return m, waitTurn(msg.stream)
 }
 
 func (m Model) isActiveTurnMessage(msg turnMsg) bool {
-	return m.running && m.activeTurnChannel != nil && msg.channel == m.activeTurnChannel && msg.stream != nil && msg.stream.channel == m.activeTurnChannel
+	return m.running && m.activeTurnChannel != nil && msg.generation == m.turnGeneration && msg.channel == m.activeTurnChannel && msg.stream != nil && msg.stream.generation == m.turnGeneration && msg.stream.channel == m.activeTurnChannel
 }
 
 func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model, tea.Cmd) {
@@ -808,6 +837,9 @@ func (m Model) applyTurnEvent(stream *turnStream, event agent.Event) (tea.Model,
 		return m, waitTurn(stream)
 	case agent.EventAgentError:
 		m.recordTurnError(event.Err)
+		return m, waitTurn(stream)
+	case agent.EventCompactionStarted, agent.EventCompactionCompleted, agent.EventCompactionWarning:
+		m.applyCompactionEvent(event)
 		return m, waitTurn(stream)
 	case agent.EventAgentFinished, agent.EventAgentStarted:
 		return m, waitTurn(stream)
@@ -972,7 +1004,11 @@ func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
 	return -1
 }
 
-func (m Model) finishTurn(err error) (tea.Model, tea.Cmd) {
+func (m Model) finishTurn(envelope turnEnvelope) (tea.Model, tea.Cmd) {
+	err := envelope.err
+	if m.operationKind == operationCompact && !m.compactionCompleted && envelope.compactionResult != nil && (envelope.compactionResult.Noop || envelope.compactionResult.CheckpointID != "" || err == nil) {
+		m.applyCompactionResult(*envelope.compactionResult)
+	}
 	if err == nil {
 		err = m.turnEventErr
 	}
@@ -1053,6 +1089,8 @@ func (m *Model) completeTurnState() {
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.activeAssistant = -1
+	m.operationKind = operationNone
+	m.compactionCompleted = false
 	m.turnHistoryBaseline = turnHistoryBaseline{}
 	m.turnEntryStart = 0
 }

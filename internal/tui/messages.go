@@ -24,6 +24,7 @@ type scrollViewportMsg struct {
 
 type turnEnvelope struct {
 	event                *agent.Event
+	compactionResult     *agent.CompactionResult
 	err                  error
 	done                 bool
 	usesRegularEventSlot bool
@@ -32,12 +33,14 @@ type turnEnvelope struct {
 type turnStream struct {
 	channel           chan turnEnvelope
 	regularEventSlots chan struct{}
+	generation        uint64
 }
 
 type turnMsg struct {
-	channel <-chan turnEnvelope
-	stream  *turnStream
-	value   turnEnvelope
+	channel    <-chan turnEnvelope
+	stream     *turnStream
+	generation uint64
+	value      turnEnvelope
 }
 
 type renderStreamingMsg struct {

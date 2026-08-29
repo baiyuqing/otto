@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	tea "charm.land/bubbletea/v2"
@@ -74,6 +75,36 @@ func TestRunReturnsProgramError(t *testing.T) {
 	err := Run(context.Background(), strings.NewReader(""), &bytes.Buffer{}, testBackend{})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Run() error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRunReturnsManualCompactionFatalPersistenceError(t *testing.T) {
+	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
+	backend := &fakeBackend{compact: func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+		return agent.CompactionResult{}, fatalErr
+	}}
+	oldNewProgram := newProgram
+	defer func() { newProgram = oldNewProgram }()
+	newProgram = func(model tea.Model, opts ...tea.ProgramOption) programRunner {
+		return programRunnerFunc(func() (tea.Model, error) {
+			current := model.(Model)
+			current.editor.SetValue("/compact")
+			started, cmd := current.Update(keyPress(tea.KeyEnter))
+			if cmd == nil || !started.(Model).View().AltScreen {
+				t.Fatal("manual compaction did not start in alternate screen")
+			}
+			finished, quitCmd := started.(Model).Update(runCommandWithin(t, cmd, time.Second))
+			if quitCmd == nil || !finished.(Model).View().AltScreen {
+				t.Fatal("fatal compaction did not request quit from alternate screen")
+			}
+			_ = runCommandWithin(t, quitCmd, time.Second)
+			return finished, nil
+		})
+	}
+
+	err := Run(context.Background(), strings.NewReader(""), &bytes.Buffer{}, backend)
+	if !errors.Is(err, session.ErrFatalPersistence) || !errors.Is(err, fatalErr) {
+		t.Fatalf("Run() error = %v, want fatal persistence identity", err)
 	}
 }
 

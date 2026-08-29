@@ -129,6 +129,18 @@ func renderCommandSuggestions(width int, suggestions []slashCommand, selected, h
 		line := fmt.Sprintf("%s%-10s %s", marker, suggestions[index].Name, suggestions[index].Description)
 		lines = append(lines, lipgloss.NewStyle().Width(max(0, width)).MaxWidth(max(0, width)).MaxHeight(1).Render(line))
 	}
+	if start == 0 && end+1 == len(suggestions) && len(lines) > 0 {
+		lastVisible := suggestions[end-1]
+		last := suggestions[len(suggestions)-1]
+		marker := "  "
+		if selected == end-1 {
+			marker = "> "
+		}
+		combined := fmt.Sprintf("%s%s %s | %s %s", marker, lastVisible.Name, lastVisible.Description, last.Name, last.Description)
+		if ansi.StringWidth(combined) <= width {
+			lines[len(lines)-1] = lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(combined)
+		}
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -174,10 +186,14 @@ func helpOverlayContent(width, height int) string {
 	compact := []string{
 		"Help (? /help) | Enter submit",
 		"Shift+Enter/Alt+Enter newline",
-		"Ctrl+O args/output | Shift+drag",
-		"PgUp/PgDn scroll | Home/End top/bot",
+		"Ctrl+O | PgUp/PgDn | Home/End",
 		"Esc close | Ctrl+C cancel/clear/quit",
-		strings.Join(commandNames, " "),
+	}
+	const commandsPerLine = 4
+	for len(commandNames) > 0 {
+		count := min(commandsPerLine, len(commandNames))
+		compact = append(compact, strings.Join(commandNames[:count], " "))
+		commandNames = commandNames[count:]
 	}
 	innerWidth := max(0, width-4)
 	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, max(0, height-2))

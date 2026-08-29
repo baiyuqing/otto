@@ -67,10 +67,14 @@ func stripCompactionFileBlocks(summary string) string {
 	for {
 		start, ok := trailingCompactionFileBlockStart(summary[:end])
 		if !ok {
-			return summary[:end]
+			break
 		}
 		end = start
 	}
+	if end == len(summary) || summaryPositionInsideFence(summary, end+2) {
+		return summary
+	}
+	return summary[:end]
 }
 
 func trailingCompactionFileBlockStart(summary string) (int, bool) {
@@ -82,7 +86,7 @@ func trailingCompactionFileBlockStart(summary string) (int, bool) {
 		contentEnd := len(summary) - len(closing)
 		opener := "\n\n<" + tag + ">\n"
 		start := strings.LastIndex(summary[:contentEnd], opener)
-		if start < 0 || summaryPositionInsideFence(summary, start+2) {
+		if start < 0 {
 			continue
 		}
 		content := summary[start+len(opener) : contentEnd]

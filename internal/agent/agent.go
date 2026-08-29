@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -149,13 +150,17 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 		if !state.proactiveAttempted {
 			state.proactiveAttempted = true
 			if _, err := a.compact(ctx, CompactionThreshold, "", emit); err != nil {
-				if cancelErr := automaticCancellation(ctx, err); cancelErr != nil {
-					return provider.Response{}, cancelErr
+				if errors.Is(err, ErrNothingToCompact) {
+					state.proactiveAttempted = false
+				} else {
+					if cancelErr := automaticCancellation(ctx, err); cancelErr != nil {
+						return provider.Response{}, cancelErr
+					}
+					if estimate >= hardTrigger {
+						return provider.Response{}, newAutomaticDispatchError(automaticCompactionHardFailureMessage, err)
+					}
+					a.emit(emit, Event{Type: EventCompactionWarning, Err: errAutomaticCompactionWarning})
 				}
-				if estimate >= hardTrigger {
-					return provider.Response{}, newAutomaticDispatchError(automaticCompactionHardFailureMessage, err)
-				}
-				a.emit(emit, Event{Type: EventCompactionWarning, Err: errAutomaticCompactionWarning})
 			} else {
 				if err := ctx.Err(); err != nil {
 					return provider.Response{}, err
@@ -177,6 +182,9 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 
 	originalOverflow := err
 	if _, compactionErr := a.compact(ctx, CompactionOverflow, "", emit); compactionErr != nil {
+		if errors.Is(compactionErr, ErrNothingToCompact) {
+			return provider.Response{}, originalOverflow
+		}
 		if cancelErr := automaticCancellation(ctx, compactionErr); cancelErr != nil {
 			return provider.Response{}, cancelErr
 		}

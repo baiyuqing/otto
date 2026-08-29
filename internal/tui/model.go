@@ -29,6 +29,7 @@ const (
 	ctrlCArmWindow       = time.Second
 	liveEntryIDPrefix    = "live"
 	ctrlCExitStatus      = "press Ctrl+C again to exit"
+	promptHistoryLimit   = 100
 )
 
 type Clock interface {
@@ -121,6 +122,11 @@ type Model struct {
 	turnEntryStart         int
 	liveEntrySequence      int
 	commandSuggestionIndex int
+	promptHistory          []string
+	promptHistoryIndex     int
+	promptDraft            string
+	turnStartedAt          time.Time
+	turnDuration           time.Duration
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
@@ -143,21 +149,22 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	vp.SoftWrap = true
 
 	model := Model{
-		rootCtx:          ctx,
-		backend:          backend,
-		entries:          entries,
-		viewport:         vp,
-		editor:           editor,
-		spinner:          spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		keymap:           DefaultKeyMap(),
-		usage:            usage,
-		expandedDetails:  false,
-		autoFollow:       true,
-		darkBackground:   true,
-		renderer:         newGlamourRenderer(true),
-		clock:            realClock{},
-		operationCleanup: newOperationCleanup(),
-		activeAssistant:  -1,
+		rootCtx:            ctx,
+		backend:            backend,
+		entries:            entries,
+		viewport:           vp,
+		editor:             editor,
+		spinner:            spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		keymap:             DefaultKeyMap(),
+		usage:              usage,
+		expandedDetails:    false,
+		autoFollow:         true,
+		darkBackground:     true,
+		renderer:           newGlamourRenderer(true),
+		clock:              realClock{},
+		operationCleanup:   newOperationCleanup(),
+		activeAssistant:    -1,
+		promptHistoryIndex: -1,
 	}
 	for _, option := range options {
 		option(&model)
@@ -311,11 +318,15 @@ func (m Model) footerStatus() string {
 	if !m.running {
 		return m.statusText
 	}
-	running := m.spinner.View() + " working"
+	running := m.spinner.View() + " working " + formatTurnSeconds(m.now().Sub(m.turnStartedAt))
 	if m.statusText == "" {
 		return running
 	}
 	return running + " · " + m.statusText
+}
+
+func formatTurnSeconds(duration time.Duration) string {
+	return fmt.Sprintf("%ds", int(duration.Seconds()))
 }
 
 func (m Model) overlayContent() string {
@@ -372,6 +383,9 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 	if updated, cmd, handled := m.handleCommandSuggestionKey(msg); handled {
 		return updated, cmd
 	}
+	if updated, cmd, handled := m.handlePromptHistoryKey(msg); handled {
+		return updated, cmd
+	}
 	if m.shouldInsertNewline(msg) {
 		return m.updateEditorWithKey(normalizeNewlineKey(msg), previousEditorHeight)
 	}
@@ -414,6 +428,64 @@ func (m Model) handleCommandSuggestionKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 	default:
 		return m, nil, false
 	}
+}
+
+func (m Model) handlePromptHistoryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	switch {
+	case key.Matches(msg, m.keymap.SuggestionUp):
+		if m.promptHistoryIndex < 0 {
+			if m.editor.Value() != "" || len(m.promptHistory) == 0 {
+				return m, nil, false
+			}
+			m.promptDraft = m.editor.Value()
+			m.promptHistoryIndex = len(m.promptHistory) - 1
+			m.setPromptHistoryEditorValue(m.promptHistory[m.promptHistoryIndex])
+			return m, nil, true
+		}
+		if m.promptHistoryIndex > 0 {
+			m.promptHistoryIndex--
+			m.setPromptHistoryEditorValue(m.promptHistory[m.promptHistoryIndex])
+		}
+		return m, nil, true
+	case key.Matches(msg, m.keymap.SuggestionDown):
+		if m.promptHistoryIndex < 0 {
+			return m, nil, false
+		}
+		if m.promptHistoryIndex < len(m.promptHistory)-1 {
+			m.promptHistoryIndex++
+			m.setPromptHistoryEditorValue(m.promptHistory[m.promptHistoryIndex])
+		} else {
+			m.setPromptHistoryEditorValue(m.promptDraft)
+			m.promptHistoryIndex = -1
+		}
+		return m, nil, true
+	default:
+		return m, nil, false
+	}
+}
+
+func (m *Model) setPromptHistoryEditorValue(value string) {
+	previousEditorHeight := m.editor.Height()
+	hadSuggestions := len(m.commandSuggestions()) > 0
+	m.editor.SetValue(value)
+	m.commandSuggestionIndex = 0
+	if m.editor.Height() != previousEditorHeight || hadSuggestions {
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
+	}
+}
+
+func (m *Model) addPromptHistory(trimmed string) {
+	if trimmed == "" {
+		return
+	}
+	if last := len(m.promptHistory) - 1; last < 0 || m.promptHistory[last] != trimmed {
+		m.promptHistory = append(m.promptHistory, trimmed)
+		if len(m.promptHistory) > promptHistoryLimit {
+			m.promptHistory = m.promptHistory[len(m.promptHistory)-promptHistoryLimit:]
+		}
+	}
+	m.promptHistoryIndex = -1
+	m.promptDraft = ""
 }
 
 func (m Model) handleHomeOrEnd(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd) {
@@ -509,6 +581,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 	if m.running || m.newSessionPending {
 		return m, nil
 	}
+	m.addPromptHistory(trimmed)
 	return m.startPrompt(prompt)
 }
 
@@ -607,6 +680,8 @@ func (m *Model) resetSessionViewFromBackend(status string) {
 	m.turnHistoryBaseline = turnHistoryBaseline{}
 	m.turnEntryStart = 0
 	m.liveEntrySequence = 0
+	m.turnStartedAt = time.Time{}
+	m.turnDuration = 0
 	m.autoFollow = true
 	m.editor.SetValue("")
 	m.commandSuggestionIndex = 0
@@ -692,6 +767,8 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.turnErrorSeen = false
 	m.turnEventErr = nil
 	m.statusText = ""
+	m.turnStartedAt = m.now()
+	m.turnDuration = 0
 	m.dirtyStreaming = false
 	m.renderTickActive = false
 	m.activeAssistant = -1
@@ -918,7 +995,13 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 			m.refreshViewportContent(!m.autoFollow)
 		}
 		return m, waitTurn(stream)
-	case agent.EventAgentFinished, agent.EventAgentStarted:
+	case agent.EventAgentFinished:
+		m.turnDuration = m.now().Sub(m.turnStartedAt)
+		if m.statusText == "" {
+			m.statusText = "completed in " + formatTurnSeconds(m.turnDuration)
+		}
+		return m, waitTurn(stream)
+	case agent.EventAgentStarted:
 		return m, waitTurn(stream)
 	default:
 		return m, waitTurn(stream)
@@ -1285,6 +1368,7 @@ func (m *Model) completeTurnState() {
 	m.compactionCompleted = false
 	m.turnHistoryBaseline = turnHistoryBaseline{}
 	m.turnEntryStart = 0
+	m.turnStartedAt = time.Time{}
 }
 
 func (m *Model) scheduleRenderTick() tea.Cmd {
@@ -1365,11 +1449,20 @@ func (m *Model) renderEntryAt(index int, width int) {
 }
 
 func (m Model) transcriptContent(width int) string {
+	if len(m.entries) == 0 && !m.running {
+		return emptyTranscriptHint(width)
+	}
 	blocks := make([]string, 0, len(m.entries))
 	for _, entry := range m.entries {
 		blocks = append(blocks, m.renderEntry(entry, width))
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+const emptyTranscriptHintText = "Ask Otto anything. Type /help for commands or /resume to continue a session."
+
+func emptyTranscriptHint(width int) string {
+	return clipSingleLineText(emptyTranscriptHintText, width)
 }
 
 func (m Model) renderEntry(entry Entry, width int) string {

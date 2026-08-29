@@ -2219,6 +2219,333 @@ func TestViewportRefreshPreservesOffsetBeforeTemporaryClamp(t *testing.T) {
 	}
 }
 
+func TestPromptHistoryUpDownRecallsPreviousPrompts(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.promptHistory = []string{"first", "second", "third"}
+	m.promptHistoryIndex = -1
+	m.promptDraft = ""
+	m.editor.SetValue("")
+
+	updated, _ := m.Update(keyPress(tea.KeyUp))
+	got := updated.(Model)
+	if got.editor.Value() != "third" || got.promptHistoryIndex != 2 || got.promptDraft != "" {
+		t.Fatalf("first up: editor=%q index=%d draft=%q, want third/2/%q", got.editor.Value(), got.promptHistoryIndex, got.promptDraft, "")
+	}
+
+	updated, _ = got.Update(keyPress(tea.KeyUp))
+	got = updated.(Model)
+	if got.editor.Value() != "second" || got.promptHistoryIndex != 1 {
+		t.Fatalf("second up: editor=%q index=%d, want second/1", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	updated, _ = got.Update(keyPress(tea.KeyUp))
+	got = updated.(Model)
+	if got.editor.Value() != "first" || got.promptHistoryIndex != 0 {
+		t.Fatalf("third up: editor=%q index=%d, want first/0", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	// Up at the oldest entry clamps.
+	updated, _ = got.Update(keyPress(tea.KeyUp))
+	got = updated.(Model)
+	if got.editor.Value() != "first" || got.promptHistoryIndex != 0 {
+		t.Fatalf("clamped up: editor=%q index=%d, want first/0", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	updated, _ = got.Update(keyPress(tea.KeyDown))
+	got = updated.(Model)
+	if got.editor.Value() != "second" || got.promptHistoryIndex != 1 {
+		t.Fatalf("first down: editor=%q index=%d, want second/1", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	updated, _ = got.Update(keyPress(tea.KeyDown))
+	got = updated.(Model)
+	if got.editor.Value() != "third" || got.promptHistoryIndex != 2 {
+		t.Fatalf("second down: editor=%q index=%d, want third/2", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	// Down past the newest entry restores the draft and exits browsing.
+	updated, _ = got.Update(keyPress(tea.KeyDown))
+	got = updated.(Model)
+	if got.editor.Value() != "" || got.promptHistoryIndex != -1 {
+		t.Fatalf("final down: editor=%q index=%d, want restored empty draft/-1", got.editor.Value(), got.promptHistoryIndex)
+	}
+}
+
+func TestPromptHistorySubmitAddsAndDedupes(t *testing.T) {
+	backend := &fakeBackend{
+		info:   app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		prompt: func(context.Context, string, func(agent.Event)) error { return nil },
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	submit := func(text string) Model {
+		m.editor.SetValue(text)
+		updated, cmd := m.Update(keyPress(tea.KeyEnter))
+		got := updated.(Model)
+		if cmd != nil {
+			msg := runCommandWithin(t, cmd, time.Second)
+			updated, _ = got.Update(msg)
+			got = updated.(Model)
+		}
+		return got
+	}
+
+	m = submit("hello")
+	m = submit("hello")
+	m = submit("world")
+	if !reflect.DeepEqual(m.promptHistory, []string{"hello", "world"}) {
+		t.Fatalf("history = %#v, want [hello world] with adjacent duplicates removed", m.promptHistory)
+	}
+
+	m = submit("   ")
+	m = submit("/help")
+	if !reflect.DeepEqual(m.promptHistory, []string{"hello", "world"}) {
+		t.Fatalf("history after empty/slash submits = %#v, want [hello world]", m.promptHistory)
+	}
+}
+
+func TestPromptHistoryBrowsingDoesNotInterfereWithSlashSuggestions(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 16)
+	m.promptHistory = []string{"hello"}
+	m.promptHistoryIndex = -1
+	m.editor.SetValue("/")
+	m.rerenderAndRefreshViewportContent(false)
+	if len(m.commandSuggestions()) == 0 {
+		t.Fatal("test setup has no slash-command suggestions")
+	}
+
+	updated, _ := m.Update(keyPress(tea.KeyUp))
+	got := updated.(Model)
+	if got.commandSuggestionIndex != len(slashCommands)-1 {
+		t.Fatalf("suggestion selection = %d, want %d", got.commandSuggestionIndex, len(slashCommands)-1)
+	}
+	if got.editor.Value() != "/" || got.promptHistoryIndex != -1 {
+		t.Fatalf("up interfered with history: editor=%q index=%d", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	updated, _ = got.Update(keyPress(tea.KeyDown))
+	got = updated.(Model)
+	if got.commandSuggestionIndex != 0 || got.editor.Value() != "/" || got.promptHistoryIndex != -1 {
+		t.Fatalf("down state: suggestion=%d editor=%q index=%d", got.commandSuggestionIndex, got.editor.Value(), got.promptHistoryIndex)
+	}
+}
+
+func TestPromptHistoryEditedEntryCanBeResubmitted(t *testing.T) {
+	backend := &fakeBackend{
+		info:   app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		prompt: func(context.Context, string, func(agent.Event)) error { return nil },
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.promptHistory = []string{"hello"}
+	m.promptHistoryIndex = -1
+	m.editor.SetValue("")
+
+	updated, _ := m.Update(keyPress(tea.KeyUp))
+	got := updated.(Model)
+	if got.editor.Value() != "hello" || got.promptHistoryIndex != 0 {
+		t.Fatalf("browsing: editor=%q index=%d, want hello/0", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	got.editor.CursorEnd()
+	got.editor.InsertString(" there")
+	if got.editor.Value() != "hello there" {
+		t.Fatalf("edited value = %q, want hello there", got.editor.Value())
+	}
+
+	updated, cmd := got.Update(keyPress(tea.KeyEnter))
+	submitted := updated.(Model)
+	if cmd == nil || !submitted.running {
+		t.Fatalf("edited submit: cmd=%v running=%v", cmd, submitted.running)
+	}
+	if !reflect.DeepEqual(submitted.promptHistory, []string{"hello", "hello there"}) {
+		t.Fatalf("history = %#v, want [hello hello there]", submitted.promptHistory)
+	}
+	if submitted.promptHistoryIndex != -1 || submitted.promptDraft != "" {
+		t.Fatalf("browsing state after submit: index=%d draft=%q, want -1/empty", submitted.promptHistoryIndex, submitted.promptDraft)
+	}
+	runCommandWithin(t, cmd, time.Second)
+}
+
+func TestPromptHistoryDownOnEmptyHistoryIsUnchanged(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	updated, _ := m.Update(keyPress(tea.KeyUp))
+	got := updated.(Model)
+	if got.editor.Value() != "" || got.promptHistoryIndex != -1 {
+		t.Fatalf("up on empty history: editor=%q index=%d, want unchanged", got.editor.Value(), got.promptHistoryIndex)
+	}
+	updated, _ = got.Update(keyPress(tea.KeyDown))
+	got = updated.(Model)
+	if got.editor.Value() != "" || got.promptHistoryIndex != -1 {
+		t.Fatalf("down on empty history: editor=%q index=%d, want unchanged", got.editor.Value(), got.promptHistoryIndex)
+	}
+}
+
+func TestPromptHistoryDraftNotClobberedWhileEditingBrowsedEntry(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.promptHistory = []string{"first", "second"}
+	m.promptHistoryIndex = -1
+	m.editor.SetValue("")
+
+	updated, _ := m.Update(keyPress(tea.KeyUp))
+	got := updated.(Model)
+	if got.promptHistoryIndex != 1 || got.editor.Value() != "second" {
+		t.Fatalf("browsing state: index=%d editor=%q", got.promptHistoryIndex, got.editor.Value())
+	}
+
+	// Editing replaces the value but keeps the browse index; Up continues browsing.
+	got.editor.CursorEnd()
+	got.editor.InsertString(" edited")
+	updated, _ = got.Update(keyPress(tea.KeyUp))
+	got = updated.(Model)
+	if got.editor.Value() != "first" || got.promptHistoryIndex != 0 {
+		t.Fatalf("up after edit: editor=%q index=%d, want first/0", got.editor.Value(), got.promptHistoryIndex)
+	}
+
+	// Down past the newest entry restores the original empty draft.
+	updated, _ = got.Update(keyPress(tea.KeyDown))
+	got = updated.(Model)
+	if got.editor.Value() != "second" || got.promptHistoryIndex != 1 {
+		t.Fatalf("down after edit: editor=%q index=%d, want second/1", got.editor.Value(), got.promptHistoryIndex)
+	}
+	updated, _ = got.Update(keyPress(tea.KeyDown))
+	got = updated.(Model)
+	if got.editor.Value() != "" || got.promptHistoryIndex != -1 {
+		t.Fatalf("final down after edit: editor=%q index=%d, want empty draft/-1", got.editor.Value(), got.promptHistoryIndex)
+	}
+}
+
+func TestFooterStatusShowsElapsedSecondsWhileRunning(t *testing.T) {
+	clock := newFakeClock(time.Unix(100, 0))
+	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.running = true
+	m.turnStartedAt = clock.Now().Add(-3 * time.Second)
+
+	status := m.footerStatus()
+	if !strings.Contains(status, "working") || !strings.Contains(status, "3s") {
+		t.Fatalf("footer status = %q, want working with 3s elapsed", status)
+	}
+}
+
+func TestTurnCompletionSetsCompletedInDuration(t *testing.T) {
+	clock := newFakeClock(time.Unix(100, 0))
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+			emit(agent.Event{Type: agent.EventAgentFinished})
+			return nil
+		},
+	}
+	m := resizeModel(t, NewModel(context.Background(), backend, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	if !running.running || running.turnStartedAt.IsZero() {
+		t.Fatalf("running=%v turnStartedAt=%v", running.running, running.turnStartedAt)
+	}
+	clock.Advance(3 * time.Second)
+
+	first := runCommandWithin(t, cmd, time.Second)
+	afterEvent, next := running.Update(first)
+	streaming := afterEvent.(Model)
+	if next == nil {
+		t.Fatal("finished event did not schedule wait")
+	}
+	done := runCommandWithin(t, next, time.Second)
+	afterDone, _ := streaming.Update(done)
+	idle := afterDone.(Model)
+	if idle.running {
+		t.Fatal("turn still running after completion")
+	}
+	status := idle.footerStatus()
+	if !strings.Contains(status, "completed in") || !strings.Contains(status, "3s") {
+		t.Fatalf("footer = %q, want completed in 3s", status)
+	}
+	if idle.turnDuration != 3*time.Second {
+		t.Fatalf("turnDuration = %v, want 3s", idle.turnDuration)
+	}
+}
+
+func TestTurnErrorDoesNotOverwriteErrorStatus(t *testing.T) {
+	clock := newFakeClock(time.Unix(100, 0))
+	backend := &fakeBackend{
+		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+			emit(agent.Event{Type: agent.EventAgentError, Err: errors.New("boom")})
+			return errors.New("boom")
+		},
+	}
+	m := resizeModel(t, NewModel(context.Background(), backend, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	clock.Advance(5 * time.Second)
+
+	first := runCommandWithin(t, cmd, time.Second)
+	afterError, next := running.Update(first)
+	got := afterError.(Model)
+	if len(got.entries) == 0 || got.entries[len(got.entries)-1].Kind != EntryError {
+		t.Fatalf("entries = %#v, want error entry recorded", got.entries)
+	}
+	done := runCommandWithin(t, next, time.Second)
+	afterDone, _ := got.Update(done)
+	idle := afterDone.(Model)
+	if idle.running {
+		t.Fatal("turn still running after error completion")
+	}
+	if status := idle.footerStatus(); strings.Contains(status, "completed in") {
+		t.Fatalf("footer = %q, error status was overwritten", status)
+	}
+	if idle.statusText != "" {
+		t.Fatalf("statusText = %q, want empty error status preserved", idle.statusText)
+	}
+}
+
+func TestEmptyTranscriptShowsHint(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	content := m.View().Content
+	if !strings.Contains(content, "Ask Otto anything") {
+		t.Fatalf("content = %q, want empty-state hint", content)
+	}
+}
+
+func TestHintDisappearsAfterFirstEntry(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 12)
+	if !strings.Contains(m.View().Content, "Ask Otto anything") {
+		t.Fatalf("fresh content = %q, want hint", m.View().Content)
+	}
+
+	m.entries = []Entry{{ID: "user", Kind: EntryUser, Raw: "hello"}}
+	m.rerenderAndRefreshViewportContent(false)
+	if strings.Contains(m.View().Content, "Ask Otto anything") {
+		t.Fatalf("content = %q, want hint gone after first entry", m.View().Content)
+	}
+
+	m.entries = nil
+	m.running = true
+	m.rerenderAndRefreshViewportContent(false)
+	if strings.Contains(m.View().Content, "Ask Otto anything") {
+		t.Fatalf("content = %q, want hint gone while running", m.View().Content)
+	}
+}
+
+func TestHintDoesNotLeakIntoSmallTerminalView(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), minTerminalWidth, minTerminalHeight-1)
+	content := m.View().Content
+	if !strings.Contains(content, "terminal is too small") {
+		t.Fatalf("content = %q, want too-small message", content)
+	}
+	if strings.Contains(content, "Ask Otto anything") {
+		t.Fatalf("content = %q, want hint absent in small terminal view", content)
+	}
+}
+
 func countEntriesOfKind(entries []Entry, kind EntryKind) int {
 	count := 0
 	for _, entry := range entries {

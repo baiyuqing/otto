@@ -99,6 +99,18 @@ type UsageProvider interface {
 	AggregateUsage() (model.Usage, bool)
 }
 
+type Snapshot struct {
+	AggregateUsage            model.Usage
+	AggregateUsagePresent     bool
+	ContextInputTokens        int
+	ContextInputTokensPresent bool
+	ContextInputTokensPending bool
+}
+
+type SnapshotProvider interface {
+	Snapshot() Snapshot
+}
+
 type RuntimeUpdater interface {
 	UpdateRuntime(context.Context, RuntimeMetadata) error
 }

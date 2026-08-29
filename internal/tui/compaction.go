@@ -113,16 +113,7 @@ func (m *Model) applyCompactionResult(result agent.CompactionResult, aggregateUs
 }
 
 func compactionResultFromEvent(event agent.CompactionEvent) agent.CompactionResult {
-	return agent.CompactionResult{
-		CheckpointID:         event.CheckpointID,
-		Reason:               event.Reason,
-		TokensBefore:         event.TokensBefore,
-		EstimatedTokensAfter: event.EstimatedTokensAfter,
-		Automatic:            event.Automatic,
-		Usage:                event.Usage,
-		UsagePresent:         event.UsagePresent,
-		Noop:                 event.Noop,
-	}
+	return agent.CompactionResult(event)
 }
 
 func compactionStatus(result agent.CompactionResult) string {

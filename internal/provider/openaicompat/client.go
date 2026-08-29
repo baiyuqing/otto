@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,6 +18,15 @@ import (
 )
 
 const maxErrorBody = 32 << 10
+
+const (
+	defaultDialTimeout           = 30 * time.Second
+	defaultKeepAlive             = 30 * time.Second
+	defaultTLSHandshakeTimeout   = 10 * time.Second
+	defaultResponseHeaderTimeout = 60 * time.Second
+	defaultMaxHeaderBytes        = 1 << 20
+	maxRedirects                 = 3
+)
 
 type Client struct {
 	baseURL    string
@@ -38,7 +48,7 @@ func New(baseURL, apiKey string, httpClient *http.Client) *Client {
 		sleep:      sleepContext,
 	}
 	if client.httpClient == nil {
-		client.httpClient = http.DefaultClient
+		client.httpClient = defaultHTTPClient()
 	}
 	client.baseURL, client.err = NormalizeBaseURL(baseURL)
 	return client
@@ -193,4 +203,42 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// defaultHTTPClient returns the hardened client used when callers do not
+// supply their own. The zero http.Client (http.DefaultClient) has no dial,
+// handshake, response-header, or redirect limits, so a stalled or malicious
+// endpoint could hold a request open indefinitely. Streaming chat completion
+// bodies can legitimately stay open for minutes, so there is intentionally no
+// overall Client.Timeout; cancellation still works through the request context
+// and the transport-level timeouts bound every pre-body phase.
+func defaultHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                  http.ProxyFromEnvironment,
+			DialContext:            (&net.Dialer{Timeout: defaultDialTimeout, KeepAlive: defaultKeepAlive}).DialContext,
+			TLSHandshakeTimeout:    defaultTLSHandshakeTimeout,
+			ResponseHeaderTimeout:  defaultResponseHeaderTimeout,
+			MaxResponseHeaderBytes: defaultMaxHeaderBytes,
+			ForceAttemptHTTP2:      true,
+		},
+		CheckRedirect: redirectPolicy,
+	}
+}
+
+// redirectPolicy follows only same-origin (scheme and host) redirects and
+// stops after maxRedirects hops. Go already strips the Authorization header on
+// cross-host redirects; blocking them outright removes the remaining leak
+// surface instead of relying on that default.
+func redirectPolicy(request *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return errors.New("stopped after 3 redirects")
+	}
+	if len(via) > 0 {
+		previous := via[len(via)-1]
+		if request.URL.Host != previous.URL.Host || request.URL.Scheme != previous.URL.Scheme {
+			return errors.New("redirect to a different origin is blocked")
+		}
+	}
+	return nil
 }

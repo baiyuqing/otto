@@ -300,14 +300,20 @@ func (m Model) View() tea.View {
 	}
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
-	editorGap := lipgloss.NewStyle().Width(m.width).Height(layout.editorSpacing).MaxHeight(layout.editorSpacing).Render("")
-	editor := lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View())
 	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.footerStatus()))
 	parts := []string{transcript}
 	if layout.suggestionHeight > 0 {
 		parts = append(parts, renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, layout.suggestionHeight))
 	}
-	parts = append(parts, editorGap, editor, footer)
+	if layout.editorSpacing > 0 {
+		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorSpacing).MaxHeight(layout.editorSpacing).Render(""))
+	}
+	if layout.inputBoxed {
+		parts = append(parts, boxedInput(m.width, layout.editorHeight, m.editor.View()))
+	} else {
+		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View()))
+	}
+	parts = append(parts, footer)
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	if m.overlay != overlayNone {
 		content = renderOverlay(m.width, m.height, m.overlayContent())
@@ -564,6 +570,11 @@ func newRootView(m Model, content string) tea.View {
 	if !layout.tooSmall && !m.resume.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
 			cursor.Y += layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
+			if layout.inputBoxed {
+				// The textarea sits below the top border and the label row.
+				cursor.Y += 1 + inputBoxLabel
+				cursor.X += 1 + inputBoxPadding
+			}
 			view.Cursor = cursor
 		}
 	}
@@ -1394,8 +1405,12 @@ func (m Model) transcriptWidth() int {
 
 func (m *Model) refreshViewportContent(preserveOffset bool) {
 	previousYOffset := m.viewport.YOffset()
-	m.editor.SetWidth(max(0, m.width))
 	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()))
+	editorWidth := m.width
+	if layout.inputBoxed {
+		editorWidth = max(1, m.width-inputBoxPadding*2-inputBoxBorder)
+	}
+	m.editor.SetWidth(max(0, editorWidth))
 	m.editor.SetHeight(layout.editorHeight)
 	m.viewport.SetWidth(layout.transcriptWidth)
 	m.viewport.SetHeight(max(1, layout.transcriptHeight))
@@ -1709,4 +1724,18 @@ func (m *Model) abandonActiveTurn() {
 
 func (m Model) reservedStateActive() bool {
 	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.activeTurnStream != nil || m.ctrlCArmed || m.fatalErr != nil
+}
+
+// boxedInput renders the composer as a bordered panel that anchors the screen
+// as its primary area. The bold label row and rounded border distinguish the
+// input from the transcript and the footer below it.
+func boxedInput(width, editorHeight int, editorView string) string {
+	label := lipgloss.NewStyle().Bold(true).Render("Ask Otto")
+	body := label + "\n" + editorView
+	return lipgloss.NewStyle().
+		Width(width).
+		Height(editorHeight+inputBoxBorder+inputBoxLabel).
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, inputBoxPadding).
+		Render(body)
 }

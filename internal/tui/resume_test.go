@@ -682,7 +682,7 @@ func TestResumeSuccessRendersFoldedCompactionBeforeRetainedTail(t *testing.T) {
 	}
 	updated, _ = resuming.Update(runCommandWithin(t, cmd, time.Second))
 	got := updated.(Model)
-	content := got.View().Content
+	content := got.transcriptContent(got.transcriptWidth())
 	checkpoint := strings.Index(content, "[context] compacted 258k tokens")
 	tail := strings.Index(content, "retained request")
 	if checkpoint < 0 || tail < 0 || checkpoint >= tail {

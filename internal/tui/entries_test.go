@@ -3,10 +3,54 @@ package tui
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/baiyuqing/otto/internal/model"
 )
+
+func TestEntriesFromHistoryCreatesFoldedCompactionEntry(t *testing.T) {
+	history := []model.Message{{
+		ID:                  "deadbeef",
+		Role:                model.RoleContext,
+		ContextType:         "compaction",
+		Display:             true,
+		ContextTokensBefore: 258000,
+		Blocks:              []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Goal\nship"}},
+	}}
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 1 || entries[0].Kind != EntryCompaction || entries[0].CheckpointID != "deadbeef" {
+		t.Fatalf("entries=%#v", entries)
+	}
+	if entries[0].TokensBefore != 258000 {
+		t.Fatalf("tokens before = %d, want 258000", entries[0].TokensBefore)
+	}
+	if strings.Contains(entries[0].Raw, "[Compaction summary]") || entries[0].Raw != "## Goal\nship" {
+		t.Fatalf("raw=%q", entries[0].Raw)
+	}
+}
+
+func TestEntriesFromHistoryKeepsFoldedCompactionBeforeRetainedTail(t *testing.T) {
+	history := []model.Message{
+		{ID: "checkpoint", Role: model.RoleContext, ContextType: "compaction", Display: true, ContextTokensBefore: 64000, Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\nsummary"}}},
+		{ID: "tail-user", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "retained request"}}},
+		{ID: "tail-assistant", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "retained answer"}}},
+	}
+
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 3 {
+		t.Fatalf("entries=%#v", entries)
+	}
+	if entries[0].Kind != EntryCompaction || entries[0].CheckpointID != "checkpoint" || entries[0].Raw != "summary" {
+		t.Fatalf("compaction entry=%#v", entries[0])
+	}
+	if entries[1].Kind != EntryUser || entries[1].Raw != "retained request" {
+		t.Fatalf("tail user=%#v", entries[1])
+	}
+	if entries[2].Kind != EntryAssistant || entries[2].Raw != "retained answer" {
+		t.Fatalf("tail assistant=%#v", entries[2])
+	}
+}
 
 func TestEntriesFromHistoryPairsToolResults(t *testing.T) {
 	history := []model.Message{
@@ -162,5 +206,18 @@ func TestEntriesFromHistoryDefensivelyCopiesAndSaturatesUsageTotals(t *testing.T
 	}
 	if usage.InputTokens != maxInt || usage.OutputTokens != 3 || usage.CachedInputTokens != 6 {
 		t.Fatalf("usage = %#v, want saturated nonnegative totals", usage)
+	}
+}
+
+func TestEntriesFromHistorySaturatesCachedUsageTotals(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	history := []model.Message{
+		{Role: model.RoleAssistant, Usage: &model.Usage{InputTokens: maxInt - 1, OutputTokens: maxInt - 2, CachedInputTokens: maxInt - 3}, Blocks: []model.Block{{Type: model.BlockText, Text: "one"}}},
+		{Role: model.RoleAssistant, Usage: &model.Usage{InputTokens: 10, OutputTokens: 10, CachedInputTokens: 10}, Blocks: []model.Block{{Type: model.BlockText, Text: "two"}}},
+	}
+
+	_, usage := EntriesFromHistory(history)
+	if usage != (model.Usage{InputTokens: maxInt, OutputTokens: maxInt, CachedInputTokens: maxInt}) {
+		t.Fatalf("usage = %#v, want all totals saturated", usage)
 	}
 }

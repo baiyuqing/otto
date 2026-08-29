@@ -65,8 +65,10 @@ func buildContext(entries []piEntry, leafID string) (ResolvedContext, []Warning,
 				if err != nil {
 					return ResolvedContext{}, collector.warnings, err
 				}
-				resolved.Usage = addResolvedUsage(resolved.Usage, usage)
-				resolved.UsagePresent = true
+				if usage != nil {
+					resolved.Usage = addResolvedUsage(resolved.Usage, usage)
+					resolved.UsagePresent = true
+				}
 			}
 		case "model_change":
 			if entry.ModelChange == nil {
@@ -257,21 +259,19 @@ func compactionAwarePath(path []piEntry) ([]piEntry, error) {
 		return path, nil
 	}
 	compaction := path[latest]
-	if compaction.Compaction == nil {
-		return nil, fmt.Errorf("%w: compaction payload is required", ErrInvalidSession)
+	firstKeptID, retainedTailOnly, err := resolveCompactionBoundary(path, latest)
+	if err != nil {
+		return nil, err
 	}
-	if compactionHasRetainedTail(compaction.Compaction) {
+	if retainedTailOnly {
 		selected := make([]piEntry, 0, 1+len(path)-latest-1)
 		selected = append(selected, compaction)
 		selected = append(selected, path[latest+1:]...)
 		return selected, nil
 	}
-	if compaction.Compaction.FirstKeptEntryID == nil {
-		return nil, fmt.Errorf("%w: compaction requires firstKeptEntryId or retainedTail", ErrInvalidSession)
-	}
 	firstKept := -1
 	for index := 0; index < latest; index++ {
-		if path[index].ID == *compaction.Compaction.FirstKeptEntryID {
+		if path[index].ID == firstKeptID {
 			firstKept = index
 			break
 		}
@@ -280,8 +280,16 @@ func compactionAwarePath(path []piEntry) ([]piEntry, error) {
 		return nil, fmt.Errorf("%w: compaction firstKeptEntryId is not on the active path before the checkpoint", ErrInvalidSession)
 	}
 	selected := make([]piEntry, 0, 1+latest-firstKept+len(path)-latest-1)
-	selected = append(selected, compaction)
-	selected = append(selected, path[firstKept:latest]...)
+	legacyCompaction := compaction
+	legacyPayload := *compaction.Compaction
+	legacyPayload.RetainedTail = nil
+	legacyCompaction.Compaction = &legacyPayload
+	selected = append(selected, legacyCompaction)
+	for _, retained := range path[firstKept:latest] {
+		if retained.Type != "compaction" {
+			selected = append(selected, retained)
+		}
+	}
 	selected = append(selected, path[latest+1:]...)
 	return selected, nil
 }
@@ -309,7 +317,9 @@ func piEntryToContextMessages(entry piEntry) ([]model.Message, error) {
 		if err != nil {
 			return nil, err
 		}
-		messages := []model.Message{newContextMessage(entry.ID, compactionContextType, true, "[Compaction summary]\n"+entry.Compaction.Summary, createdAt, usage)}
+		contextMessage := newContextMessage(entry.ID, compactionContextType, true, "[Compaction summary]\n"+entry.Compaction.Summary, createdAt, usage)
+		contextMessage.ContextTokensBefore = safeContextTokenCount(entry.Compaction.TokensBefore)
+		messages := []model.Message{contextMessage}
 		if compactionHasRetainedTail(entry.Compaction) {
 			for index := range entry.Compaction.RetainedTail {
 				wire := &entry.Compaction.RetainedTail[index]
@@ -397,7 +407,11 @@ func piMessageToContextMessage(wire *piMessage, id string, createdAt time.Time) 
 	case "branchSummary":
 		return newContextMessage(id, branchContextType, true, "[Branch summary]\n"+wire.Summary, createdAt, nil), nil
 	case "compactionSummary":
-		return newContextMessage(id, compactionContextType, true, "[Compaction summary]\n"+wire.Summary, createdAt, nil), nil
+		message := newContextMessage(id, compactionContextType, true, "[Compaction summary]\n"+wire.Summary, createdAt, nil)
+		if wire.TokensBefore != nil {
+			message.ContextTokensBefore = safeContextTokenCount(*wire.TokensBefore)
+		}
+		return message, nil
 	default:
 		return model.Message{}, fmt.Errorf("%w: Pi message role is not supported by Otto", ErrUnsupportedSessionContent)
 	}
@@ -465,7 +479,11 @@ func optionalPiUsageToModel(usage *piUsage) (*model.Usage, error) {
 	if usage == nil {
 		return nil, nil
 	}
-	return piUsageToModel(usage)
+	converted, err := piUsageToModel(usage)
+	if err != nil || converted != nil {
+		return converted, err
+	}
+	return &model.Usage{}, nil
 }
 
 func addResolvedUsage(total model.Usage, usage *model.Usage) model.Usage {
@@ -474,7 +492,12 @@ func addResolvedUsage(total model.Usage, usage *model.Usage) model.Usage {
 	}
 	total.InputTokens = saturatingUsageAdd(total.InputTokens, usage.InputTokens)
 	total.OutputTokens = saturatingUsageAdd(total.OutputTokens, usage.OutputTokens)
+	total.CachedInputTokens = saturatingUsageAdd(total.CachedInputTokens, usage.CachedInputTokens)
 	return total
+}
+
+func hasMeaningfulUsage(usage *model.Usage) bool {
+	return usage != nil && (usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CachedInputTokens != 0)
 }
 
 func saturatingUsageAdd(total, delta int) int {

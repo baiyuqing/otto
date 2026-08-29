@@ -35,6 +35,10 @@ type StreamEvent struct {
 	Arguments  string
 }
 
+type RequestSizer interface {
+	SerializedRequestSize(Request) (int, error)
+}
+
 type Provider interface {
 	Complete(context.Context, Request, func(StreamEvent)) (Response, error)
 }

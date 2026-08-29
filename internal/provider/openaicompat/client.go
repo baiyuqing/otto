@@ -26,7 +26,10 @@ type Client struct {
 	sleep      func(context.Context, time.Duration) error
 }
 
-var _ provider.Provider = (*Client)(nil)
+var (
+	_ provider.Provider     = (*Client)(nil)
+	_ provider.RequestSizer = (*Client)(nil)
+)
 
 func New(baseURL, apiKey string, httpClient *http.Client) *Client {
 	client := &Client{
@@ -49,6 +52,14 @@ func NormalizeBaseURL(baseURL string) (string, error) {
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 	parsed.RawPath = strings.TrimSuffix(parsed.RawPath, "/")
 	return parsed.String(), nil
+}
+
+func (c *Client) SerializedRequestSize(request provider.Request) (int, error) {
+	payload, err := json.Marshal(translateRequest(request))
+	if err != nil {
+		return 0, fmt.Errorf("encode chat completion request: %w", err)
+	}
+	return len(payload), nil
 }
 
 func (c *Client) Complete(ctx context.Context, request provider.Request, emit func(provider.StreamEvent)) (provider.Response, error) {
@@ -107,7 +118,11 @@ func (c *Client) attempt(ctx context.Context, payload []byte, emit func(provider
 			return provider.Response{}, false, isRetryableStatus(response.StatusCode), delay, fmt.Errorf("OpenAI-compatible HTTP %d (error body unreadable)", response.StatusCode)
 		}
 		body = body[:min(len(body), maxErrorBody)]
-		err := fmt.Errorf("OpenAI-compatible HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		safeBody := c.redactErrorBody(body)
+		if overflow := classifyContextOverflow(response.StatusCode, safeBody); overflow != nil {
+			return provider.Response{}, false, false, nil, overflow
+		}
+		err := fmt.Errorf("OpenAI-compatible HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(safeBody)))
 		return provider.Response{}, false, isRetryableStatus(response.StatusCode), delay, err
 	}
 
@@ -142,15 +157,31 @@ func parseRetryAfter(value string) *time.Duration {
 }
 
 func (c *Client) safeError(err error) error {
-	if err == nil || c.apiKey == "" {
+	if err == nil {
+		return nil
+	}
+	var overflow *provider.ContextOverflowError
+	if errors.As(err, &overflow) && overflow != nil {
+		return overflow
+	}
+	if c.apiKey == "" {
 		return err
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	message := strings.ReplaceAll(err.Error(), "Bearer "+c.apiKey, "[REDACTED]")
-	message = strings.ReplaceAll(message, c.apiKey, "[REDACTED]")
-	return errors.New(message)
+	return errors.New(string(c.redactErrorBody([]byte(err.Error()))))
+}
+
+func (c *Client) redactErrorBody(body []byte) []byte {
+	if c.apiKey == "" {
+		return body
+	}
+	replacement := "[REDACTED]"
+	if len(replacement) > len(c.apiKey) {
+		replacement = strings.Repeat("*", len(c.apiKey))
+	}
+	return []byte(strings.ReplaceAll(string(body), c.apiKey, replacement))
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {

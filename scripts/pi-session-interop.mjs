@@ -7,6 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
+const INTEROP_ENV = "OTTO_PI_INTEROP";
 const MAX_TEXT = 256;
 
 function skip(message) {
@@ -17,6 +18,103 @@ function skip(message) {
 function bounded(value) {
   if (typeof value !== "string") return null;
   return value.slice(0, MAX_TEXT);
+}
+
+function boundedCount(value) {
+  if (!Number.isSafeInteger(value) || value < 0) return 0;
+  return value;
+}
+
+function saturatingAdd(total, delta) {
+  total = boundedCount(total);
+  delta = boundedCount(delta);
+  const next = total + delta;
+  return Number.isSafeInteger(next) ? next : Number.MAX_SAFE_INTEGER;
+}
+
+function countArray(value) {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function validString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+function countCompactionEntries(entries) {
+  const counts = {
+    entryCount: 0,
+    entriesWithFirstKeptEntryId: 0,
+    entriesWithRetainedTail: 0,
+    retainedTailMessageCount: 0,
+    entriesWithUsage: 0,
+    entriesWithDetails: 0,
+    detailReadFileCount: 0,
+    detailModifiedFileCount: 0,
+    omittedReadFileCount: 0,
+    omittedModifiedFileCount: 0,
+  };
+
+  for (const entry of entries) {
+    if (entry?.type !== "compaction") continue;
+    counts.entryCount = saturatingAdd(counts.entryCount, 1);
+
+    if (!Number.isFinite(entry?.tokensBefore) || entry.tokensBefore < 0) {
+      throw new Error("unexpected compaction entry metadata");
+    }
+
+    const hasFirstKeptEntryID = validString(entry?.firstKeptEntryId);
+    const retainedTailPresent = hasOwn(entry ?? {}, "retainedTail");
+    if (retainedTailPresent && !Array.isArray(entry?.retainedTail)) {
+      throw new Error("unexpected compaction entry metadata");
+    }
+    const retainedTailCount = countArray(entry?.retainedTail);
+    if (hasFirstKeptEntryID) {
+      counts.entriesWithFirstKeptEntryId = saturatingAdd(counts.entriesWithFirstKeptEntryId, 1);
+    }
+    if (Array.isArray(entry?.retainedTail)) {
+      counts.entriesWithRetainedTail = saturatingAdd(counts.entriesWithRetainedTail, 1);
+      counts.retainedTailMessageCount = saturatingAdd(counts.retainedTailMessageCount, retainedTailCount);
+    }
+    if (!hasFirstKeptEntryID && !Array.isArray(entry?.retainedTail)) {
+      throw new Error("compaction entry is missing a retained boundary");
+    }
+
+    if (entry?.usage && typeof entry.usage === "object") {
+      counts.entriesWithUsage = saturatingAdd(counts.entriesWithUsage, 1);
+    }
+
+    const details = entry?.details;
+    if (!details || typeof details !== "object") continue;
+    counts.entriesWithDetails = saturatingAdd(counts.entriesWithDetails, 1);
+    counts.detailReadFileCount = saturatingAdd(counts.detailReadFileCount, countArray(details.readFiles));
+    counts.detailModifiedFileCount = saturatingAdd(counts.detailModifiedFileCount, countArray(details.modifiedFiles));
+    counts.omittedReadFileCount = saturatingAdd(counts.omittedReadFileCount, boundedCount(details.omittedReadFiles));
+    counts.omittedModifiedFileCount = saturatingAdd(counts.omittedModifiedFileCount, boundedCount(details.omittedModifiedFiles));
+  }
+
+  return counts;
+}
+
+function countCompactionContextMessages(messages) {
+  const counts = {
+    contextMessageCount: 0,
+    contextMessagesWithTokensBefore: 0,
+  };
+
+  for (const message of messages) {
+    if (bounded(message?.role) !== "compactionSummary") continue;
+    if (!validString(message?.summary) || !Number.isSafeInteger(message?.tokensBefore) || message.tokensBefore < 0) {
+      throw new Error("unexpected compaction context metadata");
+    }
+    counts.contextMessageCount = saturatingAdd(counts.contextMessageCount, 1);
+    counts.contextMessagesWithTokensBefore = saturatingAdd(counts.contextMessagesWithTokensBefore, 1);
+  }
+
+  return counts;
 }
 
 async function installedPiEntry() {
@@ -47,6 +145,9 @@ async function installedPiEntry() {
 if (process.argv.length !== 3) {
   console.error("usage: node scripts/pi-session-interop.mjs SESSION.jsonl");
   process.exit(2);
+}
+if (process.env[INTEROP_ENV] !== "1") {
+  skip(`${INTEROP_ENV}=1 is required to run the optional Pi interop probe`);
 }
 
 const entry = await installedPiEntry();
@@ -83,6 +184,9 @@ try {
     roles[role] = (roles[role] ?? 0) + 1;
   }
 
+  const compactionEntries = countCompactionEntries(entries);
+  const compactionContext = countCompactionContextMessages(context.messages);
+
   console.log(JSON.stringify({
     compatible: true,
     piVersion: bounded(pi.VERSION),
@@ -92,6 +196,10 @@ try {
     entryCount: entries.length,
     contextMessageCount: context.messages.length,
     contextRoles: roles,
+    compaction: {
+      ...compactionEntries,
+      ...compactionContext,
+    },
     model: context.model ? {
       provider: bounded(context.model.provider),
       id: bounded(context.model.modelId),

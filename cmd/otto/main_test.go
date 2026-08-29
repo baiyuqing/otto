@@ -1183,6 +1183,13 @@ func TestRunApproveReadsMultilinePromptFromFile(t *testing.T) {
 func TestRunApproveFlagValidation(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
+	oversizedPrompt := filepath.Join(t.TempDir(), "oversized.txt")
+	if err := os.WriteFile(oversizedPrompt, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(oversizedPrompt, maxApprovePromptBytes+1); err != nil {
+		t.Fatal(err)
+	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	environment := map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"}
 	cases := []struct {
@@ -1194,6 +1201,7 @@ func TestRunApproveFlagValidation(t *testing.T) {
 		{"empty prompt", []string{"--approve", "   "}, 2, "--approve requires a non-empty prompt"},
 		{"tui conflict", []string{"--approve", "x", "--ui", "tui"}, 2, "--approve cannot be used with --ui tui"},
 		{"missing file", []string{"--approve", "@" + filepath.Join(workspace, "missing.txt")}, 1, "read approve prompt"},
+		{"oversized file", []string{"--approve", "@" + oversizedPrompt}, 1, "too large"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

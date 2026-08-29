@@ -179,6 +179,12 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 			return err
 		}
 		s.moveTo(ptyCSIParam(params, 0, 1)-1, s.y)
+	case 'C':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		s.moveTo(s.x+ptyCSIParam(params, 0, 1), s.y)
 	case 'J':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {

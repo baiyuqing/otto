@@ -24,6 +24,8 @@ import (
 	"golang.org/x/term"
 )
 
+const maxApprovePromptBytes = 1 << 20
+
 const systemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, grep, find, ls, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
 
 type interruptSubscription struct {
@@ -124,6 +126,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		data, err := os.ReadFile(strings.TrimPrefix(approvePrompt, "@"))
 		if err != nil {
 			return fail(stderr, "read approve prompt: %v", err)
+		}
+		if len(data) > maxApprovePromptBytes {
+			return fail(stderr, "read approve prompt: file is too large (%d bytes); maximum is %d bytes", len(data), maxApprovePromptBytes)
 		}
 		approvePrompt = string(data)
 	}

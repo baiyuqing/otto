@@ -340,6 +340,74 @@ func TestAppendCompactionFileBlocksUsesExactPiSuffixAndOmitsNumericCounts(t *tes
 	}
 }
 
+func TestAppendCompactionFileBlocksCanonicalizesEveryTrailingReservedBlock(t *testing.T) {
+	readOld := "<read-files>\nstale.go\n</read-files>"
+	modifiedOld := "<modified-files>\nold.go\n</modified-files>"
+	canonical := "<read-files>\na.go\n</read-files>\n\n<modified-files>\nm.go\n</modified-files>"
+	tests := []struct {
+		name    string
+		summary string
+		details session.CompactionDetails
+		want    string
+	}{
+		{
+			name:    "absent details remove stale suffix",
+			summary: validStructuredSummary + "\n\n" + readOld,
+			want:    validStructuredSummary,
+		},
+		{
+			name:    "mismatched details replace stale suffix",
+			summary: validStructuredSummary + "\n\n" + readOld,
+			details: session.CompactionDetails{ModifiedFiles: []string{"m.go"}},
+			want:    validStructuredSummary + "\n\n<modified-files>\nm.go\n</modified-files>",
+		},
+		{
+			name:    "sanitized details replace unclean stale paths",
+			summary: validStructuredSummary + "\n\n<read-files>\ndir/../stale.go\nz.go\n</read-files>",
+			details: session.CompactionDetails{ReadFiles: []string{"a.go"}},
+			want:    validStructuredSummary + "\n\n<read-files>\na.go\n</read-files>",
+		},
+		{
+			name:    "reordered repeated sequences become read then modified",
+			summary: validStructuredSummary + "\n\n" + modifiedOld + "\n\n" + readOld + "\n\n" + modifiedOld + "\n\n" + readOld,
+			details: session.CompactionDetails{ReadFiles: []string{"a.go"}, ModifiedFiles: []string{"m.go"}},
+			want:    validStructuredSummary + "\n\n" + canonical,
+		},
+		{
+			name:    "model generated suffix is reserved",
+			summary: validStructuredSummary + "\n\n" + modifiedOld,
+			details: session.CompactionDetails{ReadFiles: []string{"a.go"}, ModifiedFiles: []string{"m.go"}},
+			want:    validStructuredSummary + "\n\n" + canonical,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendCompactionFileBlocks(test.summary, test.details)
+			if err != nil || got != test.want {
+				t.Fatalf("appendCompactionFileBlocks() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestAppendCompactionFileBlocksPreservesNonReservedLookalikesByteForByte(t *testing.T) {
+	tests := []string{
+		validStructuredSummary + " inline <read-files>\na.go\n</read-files>",
+		validStructuredSummary + "\n\n```xml\n<read-files>\na.go\n</read-files>\n```",
+		validStructuredSummary + "\n\n```xml\n\n<read-files>\na.go\n</read-files>",
+		validStructuredSummary + "\n\n<read-files>\na.go\n</modified-files>",
+		validStructuredSummary + "\n\n<read-files>\na.go\n</read-files>\n\nfollowing text",
+		validStructuredSummary + "\n<read-files>\na.go\n</read-files>",
+		validStructuredSummary + "\n\n<read-files>\na.go\n</read-files> ",
+	}
+	for _, summary := range tests {
+		got, err := appendCompactionFileBlocks(summary, session.CompactionDetails{})
+		if err != nil || got != summary {
+			t.Fatalf("lookalike changed:\n got %q, %v\nwant %q", got, err, summary)
+		}
+	}
+}
+
 func TestAppendCompactionFileBlocksEnforcesCompleteSummaryByteBound(t *testing.T) {
 	details := session.CompactionDetails{ReadFiles: []string{"a.go"}}
 	suffix := "\n\n<read-files>\na.go\n</read-files>"
@@ -349,6 +417,14 @@ func TestAppendCompactionFileBlocksEnforcesCompleteSummaryByteBound(t *testing.T
 	}
 	if _, err := appendCompactionFileBlocks(base+"x", details); err == nil {
 		t.Fatal("complete summary one byte above 128 KiB accepted")
+	}
+
+	staleSuffix := "\n\n<modified-files>\nstale.go\n</modified-files>"
+	if got, err := appendCompactionFileBlocks(base+staleSuffix, details); err != nil || got != base+suffix || len(got) != summaryMaximumBytes {
+		t.Fatalf("exact replacement summary = %d bytes, %v", len(got), err)
+	}
+	if _, err := appendCompactionFileBlocks(base+"x"+staleSuffix, details); err == nil {
+		t.Fatal("replacement summary one byte above 128 KiB accepted")
 	}
 }
 

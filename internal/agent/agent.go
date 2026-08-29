@@ -151,6 +151,7 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 			state.proactiveAttempted = true
 			if _, err := a.compact(ctx, CompactionThreshold, "", emit); err != nil {
 				if errors.Is(err, ErrNothingToCompact) {
+					a.emitCompaction(emit, EventCompactionCompleted, CompactionResult{Reason: CompactionThreshold, Automatic: true, Noop: true})
 					state.proactiveAttempted = false
 				} else {
 					if cancelErr := automaticCancellation(ctx, err); cancelErr != nil {
@@ -183,6 +184,7 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 	originalOverflow := err
 	if _, compactionErr := a.compact(ctx, CompactionOverflow, "", emit); compactionErr != nil {
 		if errors.Is(compactionErr, ErrNothingToCompact) {
+			a.emitCompaction(emit, EventCompactionCompleted, CompactionResult{Reason: CompactionOverflow, Automatic: true, Noop: true})
 			return provider.Response{}, originalOverflow
 		}
 		if cancelErr := automaticCancellation(ctx, compactionErr); cancelErr != nil {

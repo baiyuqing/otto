@@ -127,8 +127,8 @@ func TestRunReturnsFatalPersistenceErrorFromFinalModel(t *testing.T) {
 }
 
 func TestRunAbandonsBlockedTurnBeforeControllerClose(t *testing.T) {
-	thirdCompletionAttempted := make(chan struct{})
-	runner := &fullCompletionRunner{thirdCompletionAttempted: thirdCompletionAttempted}
+	completionAttempted := make(chan struct{})
+	runner := &fullCompletionRunner{completionAttempted: completionAttempted}
 	initial := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "tui-close", Workspace: t.TempDir()})
 	controller, err := app.New(initial, func() (session.Session, error) {
 		return session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "next", Workspace: t.TempDir()}), nil
@@ -148,16 +148,16 @@ func TestRunAbandonsBlockedTurnBeforeControllerClose(t *testing.T) {
 			first := runCommandWithin(t, cmd, time.Second).(turnMsg)
 			stream = first.stream
 			select {
-			case <-thirdCompletionAttempted:
+			case <-completionAttempted:
 			case <-time.After(time.Second):
-				t.Fatal("runner did not reach blocked completion")
+				t.Fatal("runner did not reach completion awaiting application acknowledgement")
 			}
 			deadline := time.Now().Add(time.Second)
-			for len(stream.channel) != turnChannelCapacity && time.Now().Before(deadline) {
+			for len(stream.channel) != turnChannelCapacity-1 && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}
-			if got := len(stream.channel); got != turnChannelCapacity {
-				t.Fatalf("turn channel length = %d, want full capacity", got)
+			if got := len(stream.channel); got != turnChannelCapacity-1 {
+				t.Fatalf("turn channel length = %d, want %d queued envelopes", got, turnChannelCapacity-1)
 			}
 			return started, nil
 		})
@@ -227,19 +227,15 @@ func TestRunInspectsEveryFinalModelWhenProgramReturnsError(t *testing.T) {
 }
 
 type fullCompletionRunner struct {
-	thirdCompletionAttempted chan struct{}
+	completionAttempted chan struct{}
 }
 
 func (r *fullCompletionRunner) Run(_ context.Context, _ string, emit func(agent.Event)) error {
 	for index := 0; index < turnChannelCapacity-1; index++ {
 		emit(agent.Event{Type: agent.EventProviderUsage})
 	}
-	for index := 0; index < 3; index++ {
-		if index == 2 {
-			close(r.thirdCompletionAttempted)
-		}
-		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "committed"}})
-	}
+	close(r.completionAttempted)
+	emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "committed"}})
 	return nil
 }
 
@@ -249,6 +245,7 @@ func (*fullCompletionRunner) Compact(context.Context, string, func(agent.Event))
 
 func drainClosedTurnStreamForCleanup(stream *turnStream) {
 	for envelope := range stream.channel {
+		envelope.applicationAck.acknowledge()
 		if envelope.usesRegularEventSlot {
 			<-stream.regularEventSlots
 		}

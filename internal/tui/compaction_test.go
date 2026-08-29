@@ -14,6 +14,7 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
+	"github.com/baiyuqing/otto/internal/tool"
 )
 
 func TestCompactCommandPassesTrimmedFocusWithoutUserTranscriptEntry(t *testing.T) {
@@ -103,6 +104,79 @@ func TestCompactCompletionEventWinsOverReturnedFallback(t *testing.T) {
 	afterDone, _ := eventState.Update(runCommandWithin(t, next, time.Second))
 	if got := afterDone.(Model).statusText; got != status || strings.Contains(got, "3k") {
 		t.Fatalf("fallback replaced completion event: before=%q after=%q", status, got)
+	}
+}
+
+func TestCompactionCheckpointAppendsOnceAndPreservesLiveTranscript(t *testing.T) {
+	backend := &fakeBackend{history: []model.Message{{ID: "before", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "earlier"}}}}}
+	backend.compact = func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+		backend.history = append(backend.history, model.Message{
+			ID:                  "checkpoint",
+			Role:                model.RoleContext,
+			ContextType:         "compaction",
+			Display:             true,
+			ContextTokensBefore: 258000,
+			Blocks:              []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Goal\nship it"}},
+		})
+		return agent.CompactionResult{CheckpointID: "checkpoint", TokensBefore: 258000, EstimatedTokensAfter: 23000}, nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	m.entries = append(m.entries, Entry{ID: "live-user", Kind: EntryUser, Raw: "keep live transcript"})
+	m.editor.SetValue("/compact")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("compact cmd = nil")
+	}
+	updated, _ = updated.(Model).Update(runCommandWithin(t, cmd, time.Second))
+	got := updated.(Model)
+	if countEntriesOfKind(got.entries, EntryCompaction) != 1 {
+		t.Fatalf("entries = %#v, want one folded checkpoint", got.entries)
+	}
+	content := got.View().Content
+	if !strings.Contains(content, "keep live transcript") || !strings.Contains(content, "[context] compacted 258k → 23k tokens") {
+		t.Fatalf("view = %q, want preserved live transcript and live token label", content)
+	}
+	if strings.Contains(content, "[Compaction summary]") {
+		t.Fatalf("view = %q, want hidden compaction prefix", content)
+	}
+}
+
+func TestAutomaticCompactionCheckpointAppearsInsideToolTurnWithoutReplacingToolTranscript(t *testing.T) {
+	backend := &fakeBackend{history: []model.Message{{ID: "before", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "earlier"}}}}}
+	backend.prompt = func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "read", ToolCallID: "call-1", ToolArgs: `{"path":"README.md"}`})
+		backend.history = append(backend.history, model.Message{
+			ID:                  "checkpoint",
+			Role:                model.RoleContext,
+			ContextType:         "compaction",
+			Display:             true,
+			ContextTokensBefore: 64000,
+			Blocks:              []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\nsummary details"}},
+		})
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "checkpoint", TokensBefore: 64000, EstimatedTokensAfter: 12000}})
+		emit(agent.Event{Type: agent.EventToolCallFinished, ToolName: "read", ToolCallID: "call-1", ToolResult: tool.Result{Content: "tool output"}})
+		return nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	m.editor.SetValue("question")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	state := updated.(Model)
+	updated, next := state.Update(runCommandWithin(t, cmd, time.Second))
+	state = updated.(Model)
+	if len(state.entries) != 3 || state.entries[2].Kind != EntryTool || state.entries[2].ToolDone {
+		t.Fatalf("after tool start entries = %#v", state.entries)
+	}
+	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	state = updated.(Model)
+	if len(state.entries) != 4 || state.entries[2].Kind != EntryTool || state.entries[3].Kind != EntryCompaction {
+		t.Fatalf("after compaction entries = %#v", state.entries)
+	}
+	updated, _ = state.Update(runCommandWithin(t, next, time.Second))
+	state = updated.(Model)
+	if !state.entries[2].ToolDone || state.entries[2].ToolOutput != "tool output" || state.entries[3].CheckpointID != "checkpoint" {
+		t.Fatalf("final entries = %#v", state.entries)
 	}
 }
 

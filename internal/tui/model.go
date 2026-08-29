@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,9 +72,8 @@ const (
 )
 
 type turnHistoryBaseline struct {
-	messageCount int
-	digest       [sha256.Size]byte
-	valid        bool
+	idsJSON string
+	valid   bool
 }
 
 type Model struct {
@@ -90,7 +88,7 @@ type Model struct {
 	height                 int
 	usage                  otmodel.Usage
 	running                bool
-	expandedTools          bool
+	expandedDetails        bool
 	overlay                overlayKind
 	autoFollow             bool
 	renderer               MarkdownRenderer
@@ -151,7 +149,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 		spinner:         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		keymap:          DefaultKeyMap(),
 		usage:           usage,
-		expandedTools:   false,
+		expandedDetails: false,
 		autoFollow:      true,
 		darkBackground:  true,
 		renderer:        newGlamourRenderer(true),
@@ -211,8 +209,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideOverlayMsg:
 		m.overlay = overlayNone
 		return m, nil
-	case toggleToolsMsg:
-		m.expandedTools = !m.expandedTools
+	case toggleDetailsMsg:
+		m.expandedDetails = !m.expandedDetails
 		m.refreshViewportContent(!m.autoFollow)
 		return m, nil
 	case scrollViewportMsg:
@@ -348,8 +346,8 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 		}
 		return m, nil
 	}
-	if key.Matches(msg, m.keymap.ToggleTools) {
-		m.expandedTools = !m.expandedTools
+	if key.Matches(msg, m.keymap.ToggleDetails) {
+		m.expandedDetails = !m.expandedDetails
 		m.refreshViewportContent(!m.autoFollow)
 		return m, nil
 	}
@@ -899,7 +897,9 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 		m.recordTurnError(event.Err)
 		return m, waitTurn(stream)
 	case agent.EventCompactionStarted, agent.EventCompactionCompleted, agent.EventCompactionWarning:
-		m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent)
+		if m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent) {
+			m.refreshViewportContent(!m.autoFollow)
+		}
 		return m, waitTurn(stream)
 	case agent.EventAgentFinished, agent.EventAgentStarted:
 		return m, waitTurn(stream)
@@ -960,40 +960,73 @@ func (m Model) findPendingToolEntry(toolCallID string) int {
 }
 
 func captureTurnHistoryBaseline(history []otmodel.Message) turnHistoryBaseline {
-	digest, valid := historyDigest(history)
-	return turnHistoryBaseline{messageCount: len(history), digest: digest, valid: valid}
-}
-
-func historyDigest(history []otmodel.Message) ([sha256.Size]byte, bool) {
-	hasher := sha256.New()
-	_, _ = fmt.Fprintf(hasher, "%d\n", len(history))
-	encoder := json.NewEncoder(hasher)
+	ids := make([]string, 0, len(history))
+	seen := make(map[string]struct{}, len(history))
 	for _, message := range history {
-		if err := encoder.Encode(message); err != nil {
-			return [sha256.Size]byte{}, false
+		if message.ID == "" {
+			continue
 		}
+		if _, ok := seen[message.ID]; ok {
+			continue
+		}
+		seen[message.ID] = struct{}{}
+		ids = append(ids, message.ID)
 	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hasher.Sum(nil))
-	return digest, true
+	sort.Strings(ids)
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		return turnHistoryBaseline{}
+	}
+	return turnHistoryBaseline{idsJSON: string(encoded), valid: true}
 }
 
-func (m Model) persistedTurnToolResults() []otmodel.Block {
+func (b turnHistoryBaseline) idSet() map[string]struct{} {
+	if !b.valid {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(b.idsJSON), &ids); err != nil {
+		return nil
+	}
+	set := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		set[id] = struct{}{}
+	}
+	return set
+}
+
+func (m Model) persistedTurnMessages() []otmodel.Message {
 	baseline := m.turnHistoryBaseline
 	if !baseline.valid {
 		return nil
 	}
-	history := historyFromBackend(m.backend)
-	if len(history) < baseline.messageCount {
+	knownIDs := baseline.idSet()
+	if knownIDs == nil {
 		return nil
 	}
-	digest, valid := historyDigest(history[:baseline.messageCount])
-	if !valid || digest != baseline.digest {
-		return nil
+	messages := make([]otmodel.Message, 0)
+	for _, message := range historyFromBackend(m.backend) {
+		if message.ID == "" {
+			continue
+		}
+		if _, seen := knownIDs[message.ID]; seen {
+			continue
+		}
+		messages = append(messages, message)
 	}
+	return messages
+}
 
-	var results []otmodel.Block
-	for _, message := range history[baseline.messageCount:] {
+func (m Model) persistedTurnToolResults() []otmodel.Block {
+	messages := m.persistedTurnMessages()
+	if len(messages) == 0 {
+		return nil
+	}
+	results := make([]otmodel.Block, 0)
+	for _, message := range messages {
 		for _, block := range message.Blocks {
 			if block.Type == otmodel.BlockToolResult {
 				results = append(results, block)
@@ -1047,6 +1080,80 @@ func (m *Model) reconcilePersistedToolResults() bool {
 	return changed
 }
 
+func (m *Model) reconcilePersistedCheckpoint(checkpointID string, tokensAfter int) bool {
+	if checkpointID == "" {
+		return false
+	}
+	message, ok := m.persistedCompactionMessage(checkpointID)
+	if !ok {
+		return m.updateCompactionEntryTokens(checkpointID, tokensAfter)
+	}
+	entry, ok := compactionEntryFromMessage(message, 0)
+	if !ok {
+		return false
+	}
+	entry.TokensAfter = max(0, tokensAfter)
+	return m.upsertCompactionEntry(entry)
+}
+
+func (m Model) persistedCompactionMessage(checkpointID string) (otmodel.Message, bool) {
+	for _, message := range m.persistedTurnMessages() {
+		if message.ID != checkpointID {
+			continue
+		}
+		if message.Role == otmodel.RoleContext && message.ContextType == "compaction" && message.Display {
+			return message, true
+		}
+		return otmodel.Message{}, false
+	}
+	return otmodel.Message{}, false
+}
+
+func (m *Model) upsertCompactionEntry(entry Entry) bool {
+	if entry.Kind != EntryCompaction {
+		return false
+	}
+	for index := range m.entries {
+		if m.entries[index].Kind != EntryCompaction || m.entries[index].CheckpointID != entry.CheckpointID {
+			continue
+		}
+		updated := m.entries[index]
+		if entry.Raw != "" {
+			updated.Raw = entry.Raw
+		}
+		updated.TokensBefore = max(updated.TokensBefore, entry.TokensBefore)
+		updated.TokensAfter = max(updated.TokensAfter, entry.TokensAfter)
+		if updated == m.entries[index] {
+			return false
+		}
+		updated.RenderWidth = 0
+		m.entries[index] = updated
+		m.renderEntryAt(index, m.transcriptWidth())
+		return true
+	}
+	m.entries = append(m.entries, entry)
+	m.renderEntryAt(len(m.entries)-1, m.transcriptWidth())
+	return true
+}
+
+func (m *Model) updateCompactionEntryTokens(checkpointID string, tokensAfter int) bool {
+	if checkpointID == "" || tokensAfter <= 0 {
+		return false
+	}
+	for index := range m.entries {
+		entry := m.entries[index]
+		if entry.Kind != EntryCompaction || entry.CheckpointID != checkpointID || entry.TokensAfter == tokensAfter {
+			continue
+		}
+		entry.TokensAfter = tokensAfter
+		entry.RenderWidth = 0
+		m.entries[index] = entry
+		m.renderEntryAt(index, m.transcriptWidth())
+		return true
+	}
+	return false
+}
+
 func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
 	if toolCallID == "" {
 		return -1
@@ -1066,14 +1173,18 @@ func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
 
 func (m Model) finishTurn(envelope turnEnvelope) (tea.Model, tea.Cmd) {
 	err := envelope.err
+	changed := false
 	if m.operationKind == operationCompact && !m.compactionCompleted && envelope.compactionResult != nil && (envelope.compactionResult.Noop || envelope.compactionResult.CheckpointID != "" || err == nil) {
-		m.applyCompactionResult(*envelope.compactionResult, envelope.aggregateUsage, envelope.aggregateUsagePresent)
+		changed = m.applyCompactionResult(*envelope.compactionResult, envelope.aggregateUsage, envelope.aggregateUsagePresent) || changed
 	}
 	if err == nil {
 		err = m.turnEventErr
 	}
 	m.finalizeStreamingRender()
 	if m.reconcilePendingTools(err) {
+		changed = true
+	}
+	if changed {
 		m.refreshViewportContent(!m.autoFollow)
 	}
 	if err != nil && !m.turnErrorSeen {
@@ -1215,7 +1326,7 @@ func (m *Model) renderEntryAt(index int, width int) {
 	}
 	entry := &m.entries[index]
 	switch entry.Kind {
-	case EntryAssistant:
+	case EntryAssistant, EntryCompaction:
 		if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
 			return
 		}
@@ -1248,7 +1359,9 @@ func (m Model) renderEntry(entry Entry, width int) string {
 	case EntryAssistant:
 		return renderMessageBlock("Otto", entry.Rendered)
 	case EntryTool:
-		return renderToolBlock(entry, width, m.expandedTools)
+		return renderToolBlock(entry, width, m.expandedDetails)
+	case EntryCompaction:
+		return renderCompactionBlock(entry, width, m.expandedDetails)
 	case EntryError:
 		return renderMessageBlock("Error", entry.Rendered)
 	default:
@@ -1262,6 +1375,14 @@ func renderMessageBlock(title, body string) string {
 		return title
 	}
 	return title + "\n" + body
+}
+
+func renderCompactionBlock(entry Entry, width int, expanded bool) string {
+	summary := ansi.Truncate(compactionSummaryLabel(entry.TokensBefore, entry.TokensAfter), max(0, width), "")
+	if !expanded || entry.Rendered == "" {
+		return summary
+	}
+	return summary + "\n\n" + entry.Rendered
 }
 
 func renderToolBlock(entry Entry, width int, expanded bool) string {

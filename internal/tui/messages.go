@@ -21,7 +21,7 @@ type showSessionOverlayMsg struct{}
 
 type hideOverlayMsg struct{}
 
-type toggleToolsMsg struct{}
+type toggleDetailsMsg struct{}
 
 type scrollViewportMsg struct {
 	Delta int

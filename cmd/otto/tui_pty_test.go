@@ -281,8 +281,9 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 			strings.Contains(content, "/compact "+ptyCompactFocus) &&
 			!strings.Contains(content, "compact context")
 	})
-	if x, y, visible := completedScreen.Cursor(); !visible || x < 2 || y != 26 {
-		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want visible composer row 26", x, y, visible)
+	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
+	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 26 {
+		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,26) visible", x, y, visible, expectedCursorX)
 	}
 
 	writePTY(t, master, "\r")

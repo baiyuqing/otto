@@ -390,15 +390,104 @@ func TestAppendCompactionFileBlocksCanonicalizesEveryTrailingReservedBlock(t *te
 	}
 }
 
+func TestAppendCompactionFileBlocksCanonicalizesFenceNamedTrailingBlocks(t *testing.T) {
+	tests := []struct {
+		name     string
+		read     string
+		modified string
+		summary  string
+		want     string
+	}{
+		{
+			name:     "plain markers in canonical order",
+			read:     "```",
+			modified: "~~~",
+			summary:  validStructuredSummary + fenceNamedSuffix("```", "~~~", false, 1),
+			want:     validStructuredSummary + fenceNamedSuffix("```", "~~~", false, 1),
+		},
+		{
+			name:     "plain markers in reversed order",
+			read:     "```",
+			modified: "~~~",
+			summary:  validStructuredSummary + fenceNamedSuffix("```", "~~~", true, 1),
+			want:     validStructuredSummary + fenceNamedSuffix("```", "~~~", false, 1),
+		},
+		{
+			name:     "info-like markers in canonical order",
+			read:     "```go",
+			modified: "~~~markdown",
+			summary:  validStructuredSummary + fenceNamedSuffix("```go", "~~~markdown", false, 1),
+			want:     validStructuredSummary + fenceNamedSuffix("```go", "~~~markdown", false, 1),
+		},
+		{
+			name:     "info-like markers in reversed order",
+			read:     "```go",
+			modified: "~~~markdown",
+			summary:  validStructuredSummary + fenceNamedSuffix("```go", "~~~markdown", true, 1),
+			want:     validStructuredSummary + fenceNamedSuffix("```go", "~~~markdown", false, 1),
+		},
+		{
+			name:     "long markers in canonical order",
+			read:     "````info",
+			modified: "~~~~info",
+			summary:  validStructuredSummary + fenceNamedSuffix("````info", "~~~~info", false, 1),
+			want:     validStructuredSummary + fenceNamedSuffix("````info", "~~~~info", false, 1),
+		},
+		{
+			name:     "long markers in reversed order",
+			read:     "````info",
+			modified: "~~~~info",
+			summary:  validStructuredSummary + fenceNamedSuffix("````info", "~~~~info", true, 1),
+			want:     validStructuredSummary + fenceNamedSuffix("````info", "~~~~info", false, 1),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendCompactionFileBlocks(test.summary, session.CompactionDetails{ReadFiles: []string{test.read}, ModifiedFiles: []string{test.modified}})
+			if err != nil || got != test.want {
+				t.Fatalf("appendCompactionFileBlocks() = %q, %v; want %q", got, err, test.want)
+			}
+			if strings.Count(got, "<read-files>") != 1 || strings.Count(got, "<modified-files>") != 1 || strings.Count(got, test.read) != 1 || strings.Count(got, test.modified) != 1 {
+				t.Fatalf("fence-named suffix was not canonicalized to one block pair:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestAppendCompactionFileBlocksCanonicalizesRepeatedFenceNamedTrailingBlocks(t *testing.T) {
+	tests := []struct {
+		name     string
+		read     string
+		modified string
+		reversed bool
+	}{
+		{name: "canonical order repeated twice", read: "```go", modified: "~~~markdown", reversed: false},
+		{name: "reversed order repeated twice", read: "```go", modified: "~~~markdown", reversed: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			summary := validStructuredSummary + fenceNamedSuffix(test.read, test.modified, test.reversed, 2)
+			want := validStructuredSummary + fenceNamedSuffix(test.read, test.modified, false, 1)
+			got, err := appendCompactionFileBlocks(summary, session.CompactionDetails{ReadFiles: []string{test.read}, ModifiedFiles: []string{test.modified}})
+			if err != nil || got != want {
+				t.Fatalf("appendCompactionFileBlocks() = %q, %v; want %q", got, err, want)
+			}
+			if strings.Count(got, "<read-files>") != 1 || strings.Count(got, "<modified-files>") != 1 || strings.Count(got, test.read) != 1 || strings.Count(got, test.modified) != 1 {
+				t.Fatalf("repeated fence-named suffix was not reduced to one canonical block pair:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestAppendCompactionFileBlocksPreservesNonReservedLookalikesByteForByte(t *testing.T) {
 	tests := []string{
-		validStructuredSummary + " inline <read-files>\na.go\n</read-files>",
-		validStructuredSummary + "\n\n```xml\n<read-files>\na.go\n</read-files>\n```",
-		validStructuredSummary + "\n\n```xml\n\n<read-files>\na.go\n</read-files>",
-		validStructuredSummary + "\n\n<read-files>\na.go\n</modified-files>",
-		validStructuredSummary + "\n\n<read-files>\na.go\n</read-files>\n\nfollowing text",
-		validStructuredSummary + "\n<read-files>\na.go\n</read-files>",
-		validStructuredSummary + "\n\n<read-files>\na.go\n</read-files> ",
+		validStructuredSummary + " inline <read-files>\n```\n</read-files>",
+		validStructuredSummary + "\n\n```xml\n<read-files>\n```go\n</read-files>\n```",
+		validStructuredSummary + "\n\n```xml\n\n<read-files>\n~~~markdown\n</read-files>",
+		validStructuredSummary + "\n\n<read-files>\n````info\n</modified-files>",
+		validStructuredSummary + "\n\n<read-files>\n```go\n</read-files>\n\nfollowing text",
+		validStructuredSummary + "\n<read-files>\n```go\n</read-files>",
+		validStructuredSummary + "\n\n<read-files>\n```go\n</read-files> ",
 	}
 	for _, summary := range tests {
 		got, err := appendCompactionFileBlocks(summary, session.CompactionDetails{})
@@ -425,6 +514,17 @@ func TestAppendCompactionFileBlocksEnforcesCompleteSummaryByteBound(t *testing.T
 	}
 	if _, err := appendCompactionFileBlocks(base+"x"+staleSuffix, details); err == nil {
 		t.Fatal("replacement summary one byte above 128 KiB accepted")
+	}
+
+	fenceDetails := session.CompactionDetails{ReadFiles: []string{"```go"}, ModifiedFiles: []string{"~~~markdown"}}
+	fenceSuffix := fenceNamedSuffix("```go", "~~~markdown", false, 1)
+	fenceStaleSuffix := fenceNamedSuffix("```go", "~~~markdown", true, 1)
+	fenceBase := validStructuredSummary + "\n" + strings.Repeat("x", summaryMaximumBytes-len(validStructuredSummary)-len(fenceStaleSuffix)-1)
+	if got, err := appendCompactionFileBlocks(fenceBase+fenceStaleSuffix, fenceDetails); err != nil || got != fenceBase+fenceSuffix || len(got) != summaryMaximumBytes || !utf8.ValidString(got) {
+		t.Fatalf("fence-named exact replacement summary = %d bytes, %v", len(got), err)
+	}
+	if _, err := appendCompactionFileBlocks(fenceBase+"x"+fenceStaleSuffix, fenceDetails); err == nil {
+		t.Fatal("fence-named replacement summary one byte above 128 KiB accepted")
 	}
 }
 
@@ -528,6 +628,22 @@ func TestBuildSummaryRequestFileDetailsApplyExactEncodedByteBound(t *testing.T) 
 	if len(got.Details.ModifiedFiles) != 0 || got.Details.OmittedModifiedFiles != 1 || got.Details.OmittedReadFiles != math.MaxInt {
 		t.Fatalf("oversized detail path/count saturation = %#v", got.Details)
 	}
+}
+
+func fenceNamedSuffix(read, modified string, reversed bool, repeats int) string {
+	readBlock := "\n\n<read-files>\n" + read + "\n</read-files>"
+	modifiedBlock := "\n\n<modified-files>\n" + modified + "\n</modified-files>"
+	var suffix strings.Builder
+	for i := 0; i < repeats; i++ {
+		if reversed {
+			suffix.WriteString(modifiedBlock)
+			suffix.WriteString(readBlock)
+			continue
+		}
+		suffix.WriteString(readBlock)
+		suffix.WriteString(modifiedBlock)
+	}
+	return suffix.String()
 }
 
 func pairedToolMessages(name, id string, arguments json.RawMessage, result string, isError bool) []model.Message {

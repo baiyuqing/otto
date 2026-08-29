@@ -164,6 +164,85 @@ func TestREPLCompactCommandPrefersEventAndDeduplicatesCheckpointID(t *testing.T)
 	}
 }
 
+func TestREPLCompactCommandParentCancellationReturnsContextErrorWithoutExtraPrompt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	backend := &fakeBackend{}
+	backend.compact = func(turnCtx context.Context, _ string, _ func(agent.Event)) (agent.CompactionResult, error) {
+		close(started)
+		<-turnCtx.Done()
+		return agent.CompactionResult{}, turnCtx.Err()
+	}
+	var stdout, stderr bytes.Buffer
+	r := New(strings.NewReader("/compact\n"), &stdout, &stderr, backend)
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.Run(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("compact command did not start")
+	}
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want context.Canceled", err)
+	}
+	if got := strings.Count(stdout.String(), "> "); got != 1 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestREPLCompactCommandRendersDistinctCheckpointIDsOnceEach(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{}
+	backend.compact = func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{
+			CheckpointID:         "deadbeef",
+			TokensBefore:         1500,
+			EstimatedTokensAfter: 500,
+		}})
+		return agent.CompactionResult{
+			CheckpointID:         "feedface",
+			TokensBefore:         1500,
+			EstimatedTokensAfter: 400,
+		}, nil
+	}
+	r := New(strings.NewReader("/compact\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(stdout.String(), "[context]"); got != 2 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	for _, expected := range []string{"[context] compacted 1k → 500 tokens", "[context] compacted 1k → 400 tokens"} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("stdout missing %q: %q", expected, stdout.String())
+		}
+	}
+}
+
+func TestREPLCompactCommandNoopEmptyIDDoesNotSuppressNonemptyResult(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{}
+	backend.compact = func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
+		emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{Noop: true}})
+		return agent.CompactionResult{
+			CheckpointID:         "deadbeef",
+			TokensBefore:         5000,
+			EstimatedTokensAfter: 1200,
+		}, nil
+	}
+	r := New(strings.NewReader("/compact\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(stdout.String(), "[context]"); got != 2 {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "[context] no-op") || !strings.Contains(stdout.String(), "[context] compacted 5k → 1k tokens") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestREPLCompactCommandNoOpRendersConcisely(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	backend := &fakeBackend{}

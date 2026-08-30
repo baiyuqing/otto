@@ -64,6 +64,7 @@ const (
 type Store struct {
 	identity    memory.StoreIdentity
 	busyTimeout time.Duration
+	guard       memory.ContentGuard
 
 	database    *sql.DB
 	path        *securePath
@@ -105,6 +106,7 @@ type testHooks struct {
 	beforeBegin            func()
 	beginError             func(attempt int) error
 	retryDelay             func(context.Context, time.Duration) error
+	beforeCommitCheck      func()
 	commitStarted          func()
 	driverExec             func(statement string, exec func() error) error
 	closeError             func(resource string, actual error) error
@@ -366,6 +368,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	store := &Store{
 		identity:    identity,
 		busyTimeout: busyTimeout,
+		guard:       options.Guard,
 		database:    database,
 		path:        path,
 		connections: make(chan *sql.Conn, retainedConnectionCount),
@@ -627,8 +630,20 @@ func (store *Store) Identity(ctx context.Context) (memory.StoreIdentity, error) 
 	if err != nil {
 		return memory.StoreIdentity{}, err
 	}
-	defer done()
-	return store.identity, nil
+	conn, err := store.borrowConnection(ctx)
+	if err != nil {
+		done()
+		return memory.StoreIdentity{}, err
+	}
+	generation, err := readGeneration(ctx, conn)
+	store.returnConnection(conn)
+	done()
+	if err != nil {
+		return memory.StoreIdentity{}, err
+	}
+	identity := store.identity
+	identity.Generation = generation
+	return identity, nil
 }
 
 func (store *Store) admit() (func(), error) {

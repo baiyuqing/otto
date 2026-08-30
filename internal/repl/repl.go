@@ -64,8 +64,14 @@ func NewWithInput(input *Input, stdout, stderr io.Writer, backend app.Backend) *
 
 const ottoMark = "(●ᴥ●)  otto"
 
+const logo = `     ____  __  __
+    / __ \/ /_/ /____
+   / /_/ / __/ __/ __ \
+   \____/\__/\__/\____/
+`
+
 func (r *REPL) Run(ctx context.Context) error {
-	_, _ = io.WriteString(r.stdout, ottoMark+"\n")
+	_, _ = io.WriteString(r.stdout, logo)
 	if info := r.backend.Info(); info.SessionID != "" {
 		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 	}

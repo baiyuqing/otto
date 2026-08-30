@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -158,6 +157,27 @@ var expectedApplicationObjects = map[string]string{
 	"index:memory_candidates_observation": createMemoryCandidatesObservation,
 }
 
+var expectedApplicationObjectTables = map[string]string{
+	"table:memory_meta":                   "memory_meta",
+	"table:memory_records":                "memory_records",
+	"table:memory_observations":           "memory_observations",
+	"table:memory_candidates":             "memory_candidates",
+	"table:memory_records_fts":            "memory_records_fts",
+	"index:memory_records_key_active":     "memory_records",
+	"index:memory_records_list":           "memory_records",
+	"index:memory_candidates_list":        "memory_candidates",
+	"index:memory_candidates_observation": "memory_candidates",
+}
+
+// These are the only SQLite-created indexes sanctioned by schema v1. Their
+// sqlite_schema SQL must remain NULL and their owning table is pinned.
+var expectedSQLiteAutoindexes = map[string]string{
+	"sqlite_autoindex_memory_meta_1":         "memory_meta",
+	"sqlite_autoindex_memory_records_1":      "memory_records",
+	"sqlite_autoindex_memory_observations_1": "memory_observations",
+	"sqlite_autoindex_memory_candidates_1":   "memory_candidates",
+}
+
 var expectedFTSShadowTables = []string{
 	"memory_records_fts_config",
 	"memory_records_fts_content",
@@ -196,7 +216,7 @@ func inspectPreflight(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity
 		return memory.StoreIdentity{}, false, memory.ErrCorrupt
 	case version == 0:
 		var count int
-		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema`).Scan(&count); err != nil {
 			return memory.StoreIdentity{}, false, safeSQLiteError(ctx, err)
 		}
 		if count != 0 {
@@ -229,7 +249,7 @@ func initializeOrVerifySchema(ctx context.Context, conn *sql.Conn, databaseID, u
 	switch version {
 	case 0:
 		var count int
-		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema`).Scan(&count); err != nil {
 			return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 		}
 		if count != 0 {
@@ -286,73 +306,128 @@ func verifySchema(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, er
 		return memory.StoreIdentity{}, memory.ErrCorrupt
 	}
 
-	rows, err := conn.QueryContext(ctx, `SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`)
+	expectedObjectCount := len(expectedApplicationObjects) + len(expectedFTSShadowTables) + len(expectedSQLiteAutoindexes)
+	var objectCount int
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema`).Scan(&objectCount); err != nil {
+		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+	}
+	if objectCount != expectedObjectCount {
+		return memory.StoreIdentity{}, memory.ErrCorrupt
+	}
+
+	expectedNames := make([]string, 0, expectedObjectCount)
+	for key := range expectedApplicationObjects {
+		_, name, ok := strings.Cut(key, ":")
+		if !ok {
+			return memory.StoreIdentity{}, memory.ErrCorrupt
+		}
+		expectedNames = append(expectedNames, name)
+	}
+	expectedNames = append(expectedNames, expectedFTSShadowTables...)
+	for name := range expectedSQLiteAutoindexes {
+		expectedNames = append(expectedNames, name)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(expectedNames)), ",")
+	arguments := make([]any, len(expectedNames)+1)
+	for index, name := range expectedNames {
+		arguments[index] = name
+	}
+	arguments[len(expectedNames)] = expectedObjectCount + 1
+	rows, err := conn.QueryContext(ctx, `SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name IN (`+placeholders+`) AND (sql IS NULL OR length(sql)<=131072) LIMIT ?`, arguments...)
 	if err != nil {
 		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 	}
-	objects := make(map[string]sql.NullString)
+	type schemaObject struct {
+		typ, table string
+		statement  sql.NullString
+	}
+	objects := make(map[string]schemaObject, expectedObjectCount)
 	for rows.Next() {
-		var typ, name string
-		var statement sql.NullString
-		if err := rows.Scan(&typ, &name, &statement); err != nil {
-			rows.Close()
-			return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
-		}
-		key := typ + ":" + name
-		if _, duplicate := objects[key]; duplicate {
-			rows.Close()
+		if len(objects) >= expectedObjectCount {
+			_ = rows.Close()
 			return memory.StoreIdentity{}, memory.ErrCorrupt
 		}
-		objects[key] = statement
+		var typ, name, table string
+		var statement sql.NullString
+		if err := rows.Scan(&typ, &name, &table, &statement); err != nil {
+			_ = rows.Close()
+			return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+		}
+		if _, duplicate := objects[name]; duplicate {
+			_ = rows.Close()
+			return memory.StoreIdentity{}, memory.ErrCorrupt
+		}
+		objects[name] = schemaObject{typ: typ, table: table, statement: statement}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 	}
 	if err := rows.Close(); err != nil {
 		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 	}
-	if err := rows.Err(); err != nil {
-		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
-	}
-
-	allowed := len(expectedApplicationObjects) + len(expectedFTSShadowTables)
-	if len(objects) != allowed {
+	if len(objects) != expectedObjectCount {
 		return memory.StoreIdentity{}, memory.ErrCorrupt
 	}
 	for key, expected := range expectedApplicationObjects {
-		actual, ok := objects[key]
-		if !ok || !actual.Valid || normalizeSchemaSQL(actual.String) != normalizeSchemaSQL(expected) {
+		typ, name, _ := strings.Cut(key, ":")
+		actual, ok := objects[name]
+		if !ok || actual.typ != typ || actual.table != expectedApplicationObjectTables[key] || !actual.statement.Valid || normalizeSchemaSQL(actual.statement.String) != normalizeSchemaSQL(expected) {
 			return memory.StoreIdentity{}, memory.ErrCorrupt
 		}
 	}
 	for _, table := range expectedFTSShadowTables {
-		if _, ok := objects["table:"+table]; !ok {
+		actual, ok := objects[table]
+		if !ok || actual.typ != "table" || actual.table != table || !actual.statement.Valid {
 			return memory.StoreIdentity{}, memory.ErrCorrupt
 		}
-		columns, err := tableColumns(ctx, conn, table)
-		if err != nil {
+		if err := verifyTableColumns(ctx, conn, table, expectedFTSShadowColumns[table]); err != nil {
 			return memory.StoreIdentity{}, err
 		}
-		expected := expectedFTSShadowColumns[table]
-		if len(columns) != len(expected) {
+	}
+	for name, table := range expectedSQLiteAutoindexes {
+		actual, ok := objects[name]
+		if !ok || actual.typ != "index" || actual.table != table || actual.statement.Valid {
 			return memory.StoreIdentity{}, memory.ErrCorrupt
-		}
-		for i := range expected {
-			if columns[i] != expected[i] {
-				return memory.StoreIdentity{}, memory.ErrCorrupt
-			}
 		}
 	}
 
-	metaRows, err := conn.QueryContext(ctx, `SELECT key,value FROM memory_meta WHERE length(value)<=256 ORDER BY key`)
+	var metaCount int
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM memory_meta`).Scan(&metaCount); err != nil {
+		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+	}
+	if metaCount != 4 {
+		return memory.StoreIdentity{}, memory.ErrCorrupt
+	}
+	metaRows, err := conn.QueryContext(ctx, `
+		SELECT key,value FROM memory_meta
+		WHERE key IN ('database_id','user_scope_id','generation','schema_fingerprint')
+		  AND typeof(key)='text' AND length(key) BETWEEN 1 AND 64
+		  AND typeof(value)='text' AND length(value)<=256
+		LIMIT 5`)
 	if err != nil {
 		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 	}
 	meta := make(map[string]string, 4)
 	for metaRows.Next() {
+		if len(meta) >= 4 {
+			_ = metaRows.Close()
+			return memory.StoreIdentity{}, memory.ErrCorrupt
+		}
 		var key, value string
 		if err := metaRows.Scan(&key, &value); err != nil {
-			metaRows.Close()
+			_ = metaRows.Close()
 			return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 		}
+		if _, duplicate := meta[key]; duplicate {
+			_ = metaRows.Close()
+			return memory.StoreIdentity{}, memory.ErrCorrupt
+		}
 		meta[key] = value
+	}
+	if err := metaRows.Err(); err != nil {
+		_ = metaRows.Close()
+		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 	}
 	if err := metaRows.Close(); err != nil {
 		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
@@ -377,27 +452,40 @@ func verifySchema(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, er
 	}, nil
 }
 
-func tableColumns(ctx context.Context, conn *sql.Conn, table string) ([]string, error) {
-	// Table names come only from the compiled manifest, never from callers.
-	rows, err := conn.QueryContext(ctx, fmt.Sprintf("PRAGMA table_xinfo(%q)", table))
+func verifyTableColumns(ctx context.Context, conn *sql.Conn, table string, expected []string) error {
+	// Table names and the row bound come only from the compiled manifest.
+	rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_xinfo(?) LIMIT ?`, table, len(expected)+1)
 	if err != nil {
-		return nil, safeSQLiteError(ctx, err)
+		return safeSQLiteError(ctx, err)
 	}
-	defer rows.Close()
-	var columns []string
+	count := 0
 	for rows.Next() {
-		var cid, notNull, primaryKey, hidden int
-		var name, typ string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey, &hidden); err != nil {
-			return nil, safeSQLiteError(ctx, err)
+		if count >= len(expected) {
+			_ = rows.Close()
+			return memory.ErrCorrupt
 		}
-		columns = append(columns, name)
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return safeSQLiteError(ctx, err)
+		}
+		if name != expected[count] {
+			_ = rows.Close()
+			return memory.ErrCorrupt
+		}
+		count++
 	}
 	if err := rows.Err(); err != nil {
-		return nil, safeSQLiteError(ctx, err)
+		_ = rows.Close()
+		return safeSQLiteError(ctx, err)
 	}
-	return columns, nil
+	if err := rows.Close(); err != nil {
+		return safeSQLiteError(ctx, err)
+	}
+	if count != len(expected) {
+		return memory.ErrCorrupt
+	}
+	return nil
 }
 
 func validDatabaseID(value string) bool {

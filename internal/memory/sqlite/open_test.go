@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -217,6 +218,28 @@ func TestOpenCreatesPrivateFilesAndFourConfiguredConnections(t *testing.T) {
 	}
 }
 
+func TestOpenCreationModesIgnoreRestrictiveUmask(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("secure path implementation is Unix-only")
+	}
+	root := t.TempDir()
+	old := syscall.Umask(0o777)
+	defer syscall.Umask(old)
+
+	parent := filepath.Join(root, "new", "private")
+	path := filepath.Join(parent, "memory.db")
+	store, err := Open(context.Background(), path, testOptions(t))
+	if err != nil {
+		t.Fatalf("Open under restrictive umask: %v", err)
+	}
+	defer store.Close()
+	assertMode(t, parent, 0o700)
+	assertMode(t, path, 0o600)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		assertMode(t, path+suffix, 0o600)
+	}
+}
+
 func TestIdentityPersistsAndIsGuarded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "identity", "memory.db")
 	store := openTestStore(t, path)
@@ -295,8 +318,8 @@ func TestOpenCancellationAndCallbacksOutsideLocks(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Open = %v", err)
 		}
-		if err := os.Rename(path, path+".moved"); err != nil {
-			t.Fatalf("database descriptor leaked: %v", err)
+		if got := processFDCountForPath(t, path); got != 0 {
+			t.Fatalf("database inode descriptor count after canceled Open = %d, want 0", got)
 		}
 	})
 
@@ -343,15 +366,42 @@ func TestOpenCancellationAndCallbacksOutsideLocks(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+
+	t.Run("setup failure closes every physically opened connection", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "setup-cleanup", "memory.db")
+		ctx, cancel := context.WithCancel(context.Background())
+		var opened atomic.Int64
+		installTestHooks(t, testHooks{path: func(event pathEvent) {
+			switch event {
+			case pathAfterWriteDriverOpen, pathAfterRetainedConnection2DriverOpen,
+				pathAfterRetainedConnection3DriverOpen, pathAfterRetainedConnection4DriverOpen:
+				opened.Add(1)
+			}
+			if event == pathAfterRetainedConnection3DriverOpen {
+				cancel()
+			}
+		}})
+		_, err := Open(ctx, path, testOptions(t))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Open = %v", err)
+		}
+		if got := opened.Load(); got != 3 {
+			t.Fatalf("physical setup opens = %d, want 3", got)
+		}
+		if got := processFDCountForPath(t, path); got != 0 {
+			t.Fatalf("database inode descriptors after setup failure = %d", got)
+		}
+	})
 }
 
 type callbackGuard struct {
-	started   chan struct{}
-	release   chan struct{}
-	active    atomic.Bool
-	reentered atomic.Bool
-	calls     atomic.Int64
-	once      sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	blockOnCall int64
+	active      atomic.Bool
+	reentered   atomic.Bool
+	calls       atomic.Int64
+	once        sync.Once
 }
 
 func (guard *callbackGuard) Check(ctx context.Context, _ memory.GuardInput) error {
@@ -360,20 +410,24 @@ func (guard *callbackGuard) Check(ctx context.Context, _ memory.GuardInput) erro
 		return memory.ErrUnavailable
 	}
 	defer guard.active.Store(false)
-	guard.calls.Add(1)
-	guard.once.Do(func() {
-		close(guard.started)
+	call := guard.calls.Add(1)
+	blockOnCall := guard.blockOnCall
+	if blockOnCall == 0 {
+		blockOnCall = 1
+	}
+	if call == blockOnCall {
+		guard.once.Do(func() { close(guard.started) })
 		select {
 		case <-ctx.Done():
 		case <-guard.release:
 		}
-	})
+	}
 	return ctx.Err()
 }
 
 func TestOpenGuardCallbackIsUnlockedAndNotReentered(t *testing.T) {
 	root := t.TempDir()
-	guard := &callbackGuard{started: make(chan struct{}), release: make(chan struct{})}
+	guard := &callbackGuard{started: make(chan struct{}), release: make(chan struct{}), blockOnCall: 1}
 	options := testOptions(t)
 	options.Guard = guard
 	firstDone := make(chan error, 1)
@@ -415,6 +469,78 @@ func TestOpenGuardCallbackIsUnlockedAndNotReentered(t *testing.T) {
 	}
 	if guard.calls.Load() != calls {
 		t.Fatal("Guard callback was retained after Open")
+	}
+}
+
+func TestOpenPublishedGuardRunsAfterStoreOwnsEveryConnection(t *testing.T) {
+	root := t.TempDir()
+	guard := &callbackGuard{
+		started: make(chan struct{}), release: make(chan struct{}), blockOnCall: 2,
+	}
+	options := testOptions(t)
+	options.Guard = guard
+	var ready atomic.Pointer[Store]
+	installTestHooks(t, testHooks{storeReady: func(store *Store) { ready.Store(store) }})
+	done := make(chan error, 1)
+	go func() {
+		store, err := Open(context.Background(), filepath.Join(root, "guarded", "memory.db"), options)
+		if store != nil {
+			_ = store.Close()
+		}
+		done <- err
+	}()
+	<-guard.started
+
+	store := ready.Load()
+	if store == nil {
+		t.Fatal("Store was not assembled before published identity Guard")
+	}
+	if got := len(store.connections); got != retainedConnectionCount {
+		t.Fatalf("published Guard borrowed SQL connection: available = %d", got)
+	}
+	if !store.lifecycleMu.TryLock() {
+		t.Fatal("published Guard held lifecycle lock")
+	}
+	store.lifecycleMu.Unlock()
+	select {
+	case <-store.writeGate:
+		store.writeGate <- struct{}{}
+	default:
+		t.Fatal("published Guard held write gate")
+	}
+	if !connectionProofMu.TryLock() {
+		t.Fatal("published Guard held connection proof lock")
+	}
+	connectionProofMu.Unlock()
+	select {
+	case <-initializationGate:
+		initializationGate <- struct{}{}
+	default:
+		t.Fatal("published Guard held initialization gate")
+	}
+
+	independentDone := make(chan error, 1)
+	go func() {
+		other, err := Open(context.Background(), filepath.Join(root, "other", "memory.db"), testOptions(t))
+		if other != nil {
+			_ = other.Close()
+		}
+		independentDone <- err
+	}()
+	select {
+	case err := <-independentDone:
+		if err != nil {
+			t.Fatalf("independent Open: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("published Guard blocked SQL/proof/lifecycle progress")
+	}
+	close(guard.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if guard.reentered.Load() {
+		t.Fatal("published Guard was reentered")
 	}
 }
 
@@ -526,19 +652,56 @@ func TestOpenRejectsUnsafePathsAndNeverChmodsExistingEntries(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{"WAL symlink", func(t *testing.T, path string) {
-			if err := os.WriteFile(path, nil, 0o600); err != nil {
+		{"database preexisting owner mode", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, nil, 0); err != nil {
 				t.Fatal(err)
 			}
+		}},
+		{"WAL symlink", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
 			if err := os.Symlink(path, path+"-wal"); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"SHM public mode", func(t *testing.T, path string) {
-			if err := os.WriteFile(path, nil, 0o600); err != nil {
+		{"WAL directory", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
+			if err := os.Mkdir(path+"-wal", 0o700); err != nil {
 				t.Fatal(err)
 			}
+		}},
+		{"WAL public mode", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
+			if err := os.WriteFile(path+"-wal", nil, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"WAL preexisting owner mode", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
+			if err := os.WriteFile(path+"-wal", nil, 0); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SHM symlink", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
+			if err := os.Symlink(path, path+"-shm"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SHM directory", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
+			if err := os.Mkdir(path+"-shm", 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SHM public mode", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
 			if err := os.WriteFile(path+"-shm", nil, 0o666); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"SHM preexisting owner mode", func(t *testing.T, path string) {
+			writeEmptyPrivateFile(t, path)
+			if err := os.WriteFile(path+"-shm", nil, 0); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -550,18 +713,73 @@ func TestOpenRejectsUnsafePathsAndNeverChmodsExistingEntries(t *testing.T) {
 			}
 			path := filepath.Join(parent, "unsafe-entry-marker.db")
 			tc.setup(t, path)
-			before, _ := os.Lstat(path)
+			beforeModes := make(map[string]os.FileMode)
+			for _, entry := range []string{path, path + "-wal", path + "-shm"} {
+				if info, err := os.Lstat(entry); err == nil {
+					beforeModes[entry] = info.Mode().Perm()
+				}
+			}
 			_, err := Open(context.Background(), path, testOptions(t))
 			assertSafeError(t, err, memory.ErrInvalidRequest, path, "unsafe-entry-marker")
-			after, _ := os.Lstat(path)
-			if before != nil && after != nil && before.Mode().Perm() != after.Mode().Perm() {
-				t.Fatalf("Open silently chmodded existing DB: %04o -> %04o", before.Mode().Perm(), after.Mode().Perm())
+			for entry, before := range beforeModes {
+				after, statErr := os.Lstat(entry)
+				if statErr == nil && before != after.Mode().Perm() {
+					t.Fatalf("Open silently chmodded existing %s: %04o -> %04o", filepath.Base(entry), before, after.Mode().Perm())
+				}
 			}
 		})
 	}
 
-	if err := validateFileMetadata(syntheticMetadata{mode: regularMode | 0o600, uid: currentUID() + 1}, false); !errors.Is(err, memory.ErrInvalidRequest) {
-		t.Fatalf("synthetic wrong-owner metadata = %v", err)
+	for _, entry := range []string{"database", "WAL", "SHM"} {
+		if err := validateFileMetadata(syntheticMetadata{mode: regularMode | 0o600, uid: currentUID() + 1}, false); !errors.Is(err, memory.ErrInvalidRequest) {
+			t.Fatalf("synthetic wrong-owner %s metadata = %v", entry, err)
+		}
+	}
+}
+
+func TestOpenRejectsDatabaseSidecarInodeAliasing(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("secure path implementation is Unix-only")
+	}
+	for _, tc := range []struct {
+		name string
+		link func(path string) error
+	}{
+		{"database and WAL", func(path string) error { return os.Link(path, path+"-wal") }},
+		{"database and SHM", func(path string) error { return os.Link(path, path+"-shm") }},
+		{"WAL and SHM", func(path string) error {
+			if err := os.WriteFile(path+"-wal", nil, 0o600); err != nil {
+				return err
+			}
+			return os.Link(path+"-wal", path+"-shm")
+		}},
+		{"database external hardlink", func(path string) error { return os.Link(path, path+".alias") }},
+		{"WAL external hardlink", func(path string) error {
+			if err := os.WriteFile(path+"-wal", nil, 0o600); err != nil {
+				return err
+			}
+			return os.Link(path+"-wal", path+".wal-alias")
+		}},
+		{"SHM external hardlink", func(path string) error {
+			if err := os.WriteFile(path+"-shm", nil, 0o600); err != nil {
+				return err
+			}
+			return os.Link(path+"-shm", path+".shm-alias")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := filepath.Join(t.TempDir(), "private")
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(parent, "memory.db")
+			writeEmptyPrivateFile(t, path)
+			if err := tc.link(path); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Open(context.Background(), path, testOptions(t))
+			assertSafeError(t, err, memory.ErrInvalidRequest, path)
+		})
 	}
 }
 
@@ -694,28 +912,245 @@ func TestOpenDescriptorRaceFaultsFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("sidecar swap after creation", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "parent", "memory.db")
-		var swapped atomic.Bool
+	for _, tc := range []struct {
+		name   string
+		before pathEvent
+		after  pathEvent
+	}{
+		{"retained connection 1", pathBeforeWriteDriverOpen, pathAfterWriteDriverOpen},
+		{"retained connection 2", pathBeforeRetainedConnection2DriverOpen, pathAfterRetainedConnection2DriverOpen},
+		{"retained connection 3", pathBeforeRetainedConnection3DriverOpen, pathAfterRetainedConnection3DriverOpen},
+		{"retained connection 4", pathBeforeRetainedConnection4DriverOpen, pathAfterRetainedConnection4DriverOpen},
+	} {
+		t.Run(tc.name+" rejects substitution plus spoof FD", func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "intended", "memory.db")
+			intended := openTestStore(t, path)
+			if err := intended.Close(); err != nil {
+				t.Fatal(err)
+			}
+			substitute := filepath.Join(root, "substitute", "memory.db")
+			other := openTestStore(t, substitute)
+			if err := other.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var spoof *os.File
+			installTestHooks(t, testHooks{path: func(event pathEvent) {
+				switch event {
+				case tc.before:
+					if err := os.Rename(path, path+".saved"); err != nil {
+						panic(err)
+					}
+					if err := os.Rename(substitute, path); err != nil {
+						panic(err)
+					}
+				case tc.after:
+					if err := os.Rename(path, substitute); err != nil {
+						panic(err)
+					}
+					if err := os.Rename(path+".saved", path); err != nil {
+						panic(err)
+					}
+					var err error
+					spoof, err = os.Open(path)
+					if err != nil {
+						panic(err)
+					}
+				}
+			}})
+			_, err := Open(context.Background(), path, Options{Guard: testGuard(t), NewID: memory.NewID})
+			if spoof != nil {
+				_ = spoof.Close()
+			}
+			assertSafeError(t, err, memory.ErrUnsupported, path, substitute)
+			if got := processFDCountForPath(t, substitute); got != 0 {
+				t.Fatalf("substitute inode FD count = %d after refusal", got)
+			}
+		})
+	}
+
+	t.Run("every unexpected newly opened regular FD is rejected", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "parent")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(parent, "intended.db")
+		writeEmptyPrivateFile(t, path)
+		unrelatedPath := filepath.Join(root, "unrelated.db")
+		writeEmptyPrivateFile(t, unrelatedPath)
+		var unrelated *os.File
 		installTestHooks(t, testHooks{path: func(event pathEvent) {
-			if event == pathAfterSidecarCreation && swapped.CompareAndSwap(false, true) {
-				wal := path + "-wal"
-				if _, err := os.Stat(wal); err == nil {
-					if err := os.Rename(wal, wal+".saved"); err != nil {
-						panic(err)
-					}
-					if err := os.WriteFile(wal, nil, 0o600); err != nil {
-						panic(err)
-					}
+			if event == pathAfterPreflightDriverOpen {
+				var err error
+				unrelated, err = os.Open(unrelatedPath)
+				if err != nil {
+					panic(err)
 				}
 			}
 		}})
 		_, err := Open(context.Background(), path, testOptions(t))
-		assertSafeError(t, err, memory.ErrUnsupported, path)
-		if !swapped.Load() {
-			t.Fatal("sidecar hook was not reached")
+		if unrelated != nil {
+			_ = unrelated.Close()
 		}
+		assertSafeError(t, err, memory.ErrUnsupported, path, unrelatedPath)
 	})
+
+	t.Run("first connection rejects substitution plus spoof FD", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "parent")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(parent, "intended.db")
+		writeEmptyPrivateFile(t, path)
+		substitute := filepath.Join(parent, "substitute.db")
+		writeEmptyPrivateFile(t, substitute)
+		var spoof *os.File
+		installTestHooks(t, testHooks{path: func(event pathEvent) {
+			switch event {
+			case pathBeforePreflightDriverOpen:
+				if err := os.Rename(path, path+".saved"); err != nil {
+					panic(err)
+				}
+				if err := os.Rename(substitute, path); err != nil {
+					panic(err)
+				}
+			case pathAfterPreflightDriverOpen:
+				if err := os.Rename(path, substitute); err != nil {
+					panic(err)
+				}
+				if err := os.Rename(path+".saved", path); err != nil {
+					panic(err)
+				}
+				var err error
+				spoof, err = os.Open(path)
+				if err != nil {
+					panic(err)
+				}
+			}
+		}})
+		_, err := Open(context.Background(), path, testOptions(t))
+		if spoof != nil {
+			_ = spoof.Close()
+		}
+		assertSafeError(t, err, memory.ErrUnsupported, path)
+	})
+
+	for _, stage := range []struct {
+		name  string
+		event pathEvent
+	}{
+		{"connection 2", pathAfterRetainedConnection2DriverOpen},
+		{"connection 3", pathAfterRetainedConnection3DriverOpen},
+		{"connection 4", pathAfterRetainedConnection4DriverOpen},
+	} {
+		for _, suffix := range []string{"-wal", "-shm"} {
+			t.Run(stage.name+" "+strings.TrimPrefix(suffix, "-")+" stage swap", func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "sidecar-stage", "memory.db")
+				fixture := openTestStore(t, path)
+				if err := fixture.Close(); err != nil {
+					t.Fatal(err)
+				}
+				var swapped atomic.Bool
+				installTestHooks(t, testHooks{path: func(event pathEvent) {
+					if event != stage.event || !swapped.CompareAndSwap(false, true) {
+						return
+					}
+					sidecar := path + suffix
+					if err := os.Rename(sidecar, sidecar+".saved"); err != nil {
+						panic(err)
+					}
+					if err := os.WriteFile(sidecar, nil, 0o600); err != nil {
+						panic(err)
+					}
+				}})
+				_, err := Open(context.Background(), path, Options{Guard: testGuard(t), NewID: memory.NewID})
+				assertSafeError(t, err, memory.ErrUnsupported, path)
+				if !swapped.Load() {
+					t.Fatal("retained sidecar stage hook was not reached")
+				}
+			})
+		}
+	}
+
+	for _, suffix := range []string{"-wal", "-shm"} {
+		t.Run(strings.TrimPrefix(suffix, "-")+" swap after creation", func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "parent", "memory.db")
+			var swapped atomic.Bool
+			installTestHooks(t, testHooks{path: func(event pathEvent) {
+				if event == pathAfterSidecarCreation && swapped.CompareAndSwap(false, true) {
+					sidecar := path + suffix
+					if _, err := os.Stat(sidecar); err == nil {
+						if err := os.Rename(sidecar, sidecar+".saved"); err != nil {
+							panic(err)
+						}
+						if err := os.WriteFile(sidecar, nil, 0o600); err != nil {
+							panic(err)
+						}
+					}
+				}
+			}})
+			_, err := Open(context.Background(), path, testOptions(t))
+			assertSafeError(t, err, memory.ErrUnsupported, path)
+			if !swapped.Load() {
+				t.Fatal("sidecar hook was not reached")
+			}
+		})
+	}
+}
+
+func TestOpenSerializesDelayedSidecarProofWithEveryAdapterFDOpen(t *testing.T) {
+	root := t.TempDir()
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	secondPreflight := make(chan struct{})
+	var blockedOnce sync.Once
+	var secondOnce sync.Once
+	installTestHooks(t, testHooks{path: func(event pathEvent) {
+		switch event {
+		case pathAfterSidecarCreation:
+			blockedOnce.Do(func() {
+				close(blocked)
+				<-release
+			})
+		case pathBeforePreflightDriverOpen:
+			select {
+			case <-blocked:
+				secondOnce.Do(func() { close(secondPreflight) })
+			default:
+			}
+		}
+	}})
+	firstDone := make(chan error, 1)
+	go func() {
+		store, err := Open(context.Background(), filepath.Join(root, "first", "memory.db"), testOptions(t))
+		if store != nil {
+			_ = store.Close()
+		}
+		firstDone <- err
+	}()
+	<-blocked
+	secondDone := make(chan error, 1)
+	go func() {
+		store, err := Open(context.Background(), filepath.Join(root, "second", "memory.db"), testOptions(t))
+		if store != nil {
+			_ = store.Close()
+		}
+		secondDone <- err
+	}()
+	select {
+	case <-secondPreflight:
+		t.Fatal("another adapter opened proof-stage descriptors during delayed sidecar proof")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestOpenValidatesOptionsAndSafeErrors(t *testing.T) {
@@ -727,6 +1162,7 @@ func TestOpenValidatesOptionsAndSafeErrors(t *testing.T) {
 		{"nil guard", func(o *Options) { o.Guard = nil }},
 		{"negative timeout", func(o *Options) { o.BusyTimeout = -time.Millisecond }},
 		{"overflowing timeout", func(o *Options) { o.BusyTimeout = (time.Duration(math.MaxInt32) + 1) * time.Millisecond }},
+		{"ceil overflow timeout", func(o *Options) { o.BusyTimeout = time.Duration(math.MaxInt32)*time.Millisecond + time.Nanosecond }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -736,6 +1172,15 @@ func TestOpenValidatesOptionsAndSafeErrors(t *testing.T) {
 			assertSafeError(t, err, memory.ErrInvalidRequest, path, "sensitive-path-marker", "db?secret#")
 		})
 	}
+
+	t.Run("positive sub-millisecond timeout uses one millisecond everywhere", func(t *testing.T) {
+		shortPath := filepath.Join(t.TempDir(), "submillisecond", "memory.db")
+		store := openTestStore(t, shortPath, func(o *Options) { o.BusyTimeout = time.Nanosecond })
+		conn := borrowTestConn(t, store)
+		if got := queryInt(t, conn, "PRAGMA busy_timeout"); got != 1 {
+			t.Fatalf("busy_timeout = %d, want exact ceil 1", got)
+		}
+	})
 
 	t.Run("nil ID generator uses secure default", func(t *testing.T) {
 		defaultPath := filepath.Join(t.TempDir(), "default-id", "memory.db")
@@ -792,6 +1237,48 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 			t.Fatalf("busy timeout took %v", elapsed)
 		}
 		_, _ = raw.Exec("ROLLBACK")
+	})
+
+	t.Run("BEGIN budget is cumulative and callback busy timeout is zero", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "cumulative-busy", "memory.db")
+		store := openTestStore(t, path, func(o *Options) { o.BusyTimeout = 80 * time.Millisecond })
+		raw := openRaw(t, path)
+		defer raw.Close()
+		if _, err := raw.Exec("BEGIN IMMEDIATE"); err != nil {
+			t.Fatal(err)
+		}
+		attempted := make(chan struct{})
+		var once sync.Once
+		installTestHooks(t, testHooks{beforeBegin: func() { once.Do(func() { close(attempted) }) }})
+		started := time.Now()
+		done := make(chan error, 1)
+		go func() {
+			done <- store.withWrite(context.Background(), memory.CommitSchema, nil, func(ctx context.Context, conn *sql.Conn) error {
+				var got int
+				if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&got); err != nil {
+					return err
+				}
+				if got != 0 {
+					return fmt.Errorf("callback busy_timeout = %d", got)
+				}
+				return nil
+			})
+		}()
+		<-attempted
+		time.Sleep(30 * time.Millisecond)
+		if _, err := raw.Exec("COMMIT"); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(started); elapsed > 120*time.Millisecond {
+			t.Fatalf("cumulative contention exceeded one budget: %v", elapsed)
+		}
+		conn := borrowTestConn(t, store)
+		if got := queryInt(t, conn, "PRAGMA busy_timeout"); got != 80 {
+			t.Fatalf("restored busy_timeout = %d", got)
+		}
 	})
 
 	t.Run("only primary BUSY before callback retries", func(t *testing.T) {
@@ -868,15 +1355,37 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 	t.Run("commit failure quarantines and poisons", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "commit-marker", "memory.db")
 		store := openTestStore(t, path)
-		installTestHooks(t, testHooks{commitError: func() error { return sqliteCodeError{code: 10} }})
-		err := store.withWrite(context.Background(), memory.CommitUpsert, []string{"safe-id"}, func(context.Context, *sql.Conn) error { return nil })
+		installTestHooks(t, testHooks{driverExec: func(statement string, exec func() error) error {
+			if statement != "COMMIT" {
+				return exec()
+			}
+			if err := exec(); err != nil {
+				return err
+			}
+			return sqliteCodeError{code: 10}
+		}})
+		err := store.withWrite(context.Background(), memory.CommitUpsert, []string{"safe-id"}, func(ctx context.Context, conn *sql.Conn) error {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records(
+				id,scope_namespace,scope_id,kind,semantic_key,text_value,labels_json,metadata_json,source_json,
+				confidence,revision,created_at,updated_at,expires_at,state,forgotten_at
+			) VALUES('safe-id','user','u','note','','commit-proof','[]','{}','{}',1,1,
+				'2026-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z',NULL,'active',NULL)`); err != nil {
+				return err
+			}
+			_, err := conn.ExecContext(ctx, `UPDATE memory_meta SET value='1' WHERE key='generation'`)
+			return err
+		})
 		var unknown *memory.CommitUnknownError
 		if !errors.As(err, &unknown) || !errors.Is(err, memory.ErrCommitUnknown) {
 			t.Fatalf("write = %v", err)
 		}
-		if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "sqlite") {
+		if unknown.Operation() != memory.CommitUpsert || fmt.Sprint(unknown.EntityIDs()) != "[safe-id]" {
+			t.Fatalf("commit metadata = %q %v", unknown.Operation(), unknown.EntityIDs())
+		}
+		if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "sqlite") || strings.Contains(err.Error(), "commit-proof") {
 			t.Fatalf("unsafe commit error = %v", err)
 		}
+		waitFor(t, time.Second, func() bool { return store.database.Stats().OpenConnections == retainedConnectionCount-1 }, "physical COMMIT connection discard")
 		if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
 			t.Fatalf("poisoned Identity = %v", err)
 		}
@@ -893,16 +1402,120 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("explicit reconciliation reopen: %v", err)
 		}
+		identity, identityErr := reopened.Identity(context.Background())
+		if identityErr != nil || identity.Generation != 1 {
+			t.Fatalf("reconciled generation = %d, %v", identity.Generation, identityErr)
+		}
+		conn := borrowTestConn(t, reopened)
+		if got := queryString(t, conn, `SELECT text_value FROM memory_records WHERE id='safe-id'`); got != "commit-proof" {
+			t.Fatalf("ID reconciliation value = %q", got)
+		}
 		_ = reopened.Close()
 	})
 
 	t.Run("rollback failure quarantines and poisons", func(t *testing.T) {
-		store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
-		installTestHooks(t, testHooks{rollbackError: func() error { return sqliteCodeError{code: 10} }})
-		err := store.withWrite(context.Background(), memory.CommitSchema, nil, func(context.Context, *sql.Conn) error { return errors.New("content-marker") })
+		path := filepath.Join(t.TempDir(), "memory.db")
+		store := openTestStore(t, path)
+		installTestHooks(t, testHooks{driverExec: func(statement string, exec func() error) error {
+			if statement != "ROLLBACK" {
+				return exec()
+			}
+			if err := exec(); err != nil {
+				return err
+			}
+			return sqliteCodeError{code: 10}
+		}})
+		err := store.withWrite(context.Background(), memory.CommitSchema, nil, func(ctx context.Context, conn *sql.Conn) error {
+			if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records(
+				id,scope_namespace,scope_id,kind,semantic_key,text_value,labels_json,metadata_json,source_json,
+				confidence,revision,created_at,updated_at,expires_at,state,forgotten_at
+			) VALUES('rollback-proof','user','u','note','','must-disappear','[]','{}','{}',1,1,
+				'2026-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z',NULL,'active',NULL)`); err != nil {
+				return err
+			}
+			return errors.New("content-marker")
+		})
 		assertSafeError(t, err, memory.ErrUnavailable, "content-marker")
 		if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
 			t.Fatalf("poisoned Identity = %v", err)
+		}
+		waitFor(t, time.Second, func() bool { return store.database.Stats().OpenConnections == retainedConnectionCount-1 }, "physical ROLLBACK connection discard")
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := Open(context.Background(), path, Options{Guard: testGuard(t), NewID: memory.NewID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn := borrowTestConn(t, reopened)
+		if got := queryInt(t, conn, `SELECT count(*) FROM memory_records WHERE id='rollback-proof'`); got != 0 {
+			t.Fatalf("real ROLLBACK left %d rows", got)
+		}
+		_ = reopened.Close()
+	})
+}
+
+func TestOpenWriteGateCancellationAndPoisonWakeups(t *testing.T) {
+	t.Run("write gate wait honors cancellation", func(t *testing.T) {
+		store := openTestStore(t, filepath.Join(t.TempDir(), "gate-cancel", "memory.db"))
+		<-store.writeGate
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- store.withWrite(ctx, memory.CommitSchema, nil, func(context.Context, *sql.Conn) error {
+				return errors.New("callback must not run")
+			})
+		}()
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("gate waiter = %v", err)
+		}
+		store.writeGate <- struct{}{}
+	})
+
+	t.Run("poison wakes write gate waiter", func(t *testing.T) {
+		store := openTestStore(t, filepath.Join(t.TempDir(), "gate-poison", "memory.db"))
+		<-store.writeGate
+		done := make(chan error, 1)
+		go func() {
+			done <- store.withWrite(context.Background(), memory.CommitSchema, nil, func(context.Context, *sql.Conn) error {
+				return errors.New("callback must not run")
+			})
+		}()
+		store.poison()
+		select {
+		case err := <-done:
+			if !errors.Is(err, memory.ErrUnavailable) {
+				t.Fatalf("gate waiter = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("poison did not wake gate waiter")
+		}
+		store.writeGate <- struct{}{}
+	})
+
+	t.Run("poison wakes connection waiter", func(t *testing.T) {
+		store := openTestStore(t, filepath.Join(t.TempDir(), "connection-poison", "memory.db"))
+		borrowed := make([]*sql.Conn, 0, retainedConnectionCount)
+		for range retainedConnectionCount {
+			borrowed = append(borrowed, <-store.connections)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := store.borrowConnection(context.Background())
+			done <- err
+		}()
+		store.poison()
+		select {
+		case err := <-done:
+			if !errors.Is(err, memory.ErrUnavailable) {
+				t.Fatalf("connection waiter = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("poison did not wake connection waiter")
+		}
+		for _, conn := range borrowed {
+			_ = conn.Close()
 		}
 	})
 }
@@ -974,6 +1587,49 @@ func TestOpenCloseAdmissionIsConcurrentAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestOpenConcurrentCloseSharesSecureDescriptorError(t *testing.T) {
+	for _, resource := range []string{"database-descriptor", "parent-descriptor"} {
+		t.Run(resource, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "close-error", "memory.db")
+			store, err := Open(context.Background(), path, testOptions(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var injections atomic.Int64
+			installTestHooks(t, testHooks{closeError: func(closedResource string, actual error) error {
+				if actual != nil {
+					return actual
+				}
+				if closedResource == resource && injections.Add(1) == 1 {
+					return errors.New("injected descriptor close failure")
+				}
+				return nil
+			}})
+			const closers = 8
+			start := make(chan struct{})
+			results := make(chan error, closers)
+			for range closers {
+				go func() {
+					<-start
+					results <- store.Close()
+				}()
+			}
+			close(start)
+			for range closers {
+				if err := <-results; !errors.Is(err, memory.ErrUnavailable) {
+					t.Fatalf("shared Close result = %v", err)
+				}
+			}
+			if got := injections.Load(); got != 1 {
+				t.Fatalf("descriptor close injections = %d, want 1", got)
+			}
+			if err := store.Close(); !errors.Is(err, memory.ErrUnavailable) {
+				t.Fatalf("idempotent Close result = %v", err)
+			}
+		})
+	}
+}
+
 func fileDigest(t *testing.T, path string) [sha256.Size]byte {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -981,6 +1637,41 @@ func fileDigest(t *testing.T, path string) [sha256.Size]byte {
 		t.Fatal(err)
 	}
 	return sha256.Sum256(data)
+}
+
+func writeEmptyPrivateFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func processFDCountForPath(t *testing.T, path string) int {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("unsupported stat metadata %T", info.Sys())
+	}
+	fds, err := snapshotProcessFDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fds[inodeIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}]
+}
+
+func waitFor(t *testing.T, timeout time.Duration, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", description)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func openRaw(t *testing.T, path string) *sql.DB {

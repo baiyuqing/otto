@@ -85,19 +85,27 @@ type pathEvent uint8
 const (
 	pathBeforePreflightDriverOpen pathEvent = iota
 	pathAfterPreflightDriverOpen
+	pathAfterPreflightClose
 	pathBeforeWriteDriverOpen
 	pathAfterWriteDriverOpen
+	pathBeforeRetainedConnection2DriverOpen
+	pathAfterRetainedConnection2DriverOpen
+	pathBeforeRetainedConnection3DriverOpen
+	pathAfterRetainedConnection3DriverOpen
+	pathBeforeRetainedConnection4DriverOpen
+	pathAfterRetainedConnection4DriverOpen
 	pathAfterSidecarCreation
 )
 
 type testHooks struct {
 	path          func(pathEvent)
+	storeReady    func(*Store)
 	beforeBegin   func()
 	beginError    func(attempt int) error
 	retryDelay    func(context.Context, time.Duration) error
 	commitStarted func()
-	commitError   func() error
-	rollbackError func() error
+	driverExec    func(statement string, exec func() error) error
+	closeError    func(resource string, actual error) error
 }
 
 var (
@@ -147,14 +155,19 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	if err != nil {
 		return nil, err
 	}
+
+	// Secure descriptor acquisition is serialized with every proof-stage open,
+	// so an independent adapter Open cannot contaminate another FD delta.
+	connectionProofMu.Lock()
 	path, err := openSecurePath(ctx, filename)
+	connectionProofMu.Unlock()
 	if err != nil {
 		return nil, safeOpenError(ctx, err)
 	}
 	keepPath := false
 	defer func() {
 		if !keepPath {
-			path.close()
+			_ = path.close()
 		}
 	}()
 
@@ -168,36 +181,46 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	if err != nil {
 		return nil, err
 	}
-	preflightDB, preflightConn, preflightBaseline, err := openProvenConnection(ctx, preflightDSN, path, pathBeforePreflightDriverOpen, pathAfterPreflightDriverOpen)
+	preflightDB, err := sql.Open(driverName, preflightDSN)
 	if err != nil {
-		return nil, err
-	}
-	if err := applyLimits(preflightConn); err != nil {
-		preflightConn.Close()
-		preflightDB.Close()
-		return nil, err
-	}
-	preflightIdentity, needsInitialization, inspectErr := inspectPreflight(ctx, preflightConn)
-	if proofErr := proveSQLiteSidecarsIfPresent(path, preflightBaseline); proofErr != nil {
-		inspectErr = proofErr
-	} else if validateErr := path.validateSidecarEntries(); inspectErr == nil && validateErr != nil {
-		inspectErr = validateErr
-	}
-	closeErr := preflightConn.Close()
-	if dbErr := preflightDB.Close(); closeErr == nil {
-		closeErr = dbErr
-	}
-	if inspectErr != nil {
-		return nil, safeOpenError(ctx, inspectErr)
-	}
-	if closeErr != nil {
 		return nil, memory.ErrUnavailable
+	}
+	preflightDB.SetMaxOpenConns(1)
+	preflightDB.SetMaxIdleConns(1)
+
+	connectionProofMu.Lock()
+	preflightConn, preflightBaseline, proofErr := openProvenPhysicalConnection(
+		ctx, preflightDB, path, pathBeforePreflightDriverOpen, pathAfterPreflightDriverOpen,
+	)
+	var preflightIdentity memory.StoreIdentity
+	var needsInitialization bool
+	if proofErr == nil {
+		preflightIdentity, needsInitialization, proofErr = inspectPreflight(ctx, preflightConn)
+	}
+	if proofErr == nil {
+		proofErr = proveSQLiteSidecarsIfPresent(path, preflightBaseline)
+	}
+	if preflightConn != nil {
+		if closeErr := preflightConn.Close(); proofErr == nil && closeErr != nil {
+			proofErr = memory.ErrUnavailable
+		}
+	}
+	if closeErr := preflightDB.Close(); proofErr == nil && closeErr != nil {
+		proofErr = memory.ErrUnavailable
+	}
+	if proofErr == nil {
+		proofErr = path.revalidate()
+	}
+	connectionProofMu.Unlock()
+	if proofErr != nil {
+		return nil, safeOpenError(ctx, proofErr)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := path.revalidate(); err != nil {
-		return nil, safeOpenError(ctx, err)
+	callPathHook(pathAfterPreflightClose)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	databaseID, userID := preflightIdentity.DatabaseID, preflightIdentity.UserScope.ID
@@ -214,12 +237,16 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		return nil, err
 	}
 
+	busyMilliseconds, err := ceilMilliseconds(busyTimeout)
+	if err != nil {
+		return nil, err
+	}
 	writeDSN, err := structuredFileURI(path.canonicalPath, map[string]string{
 		"mode":          "rw",
 		"_defensive":    "1",
 		"_foreign_keys": "on",
 		"_synchronous":  "FULL",
-		"_busy_timeout": strconv.FormatInt(busyTimeout.Milliseconds(), 10),
+		"_busy_timeout": strconv.FormatInt(busyMilliseconds, 10),
 		"_txlock":       "immediate",
 		"_dqs":          "0",
 		"_pragma":       "trusted_schema(OFF)",
@@ -227,28 +254,20 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	if err != nil {
 		return nil, err
 	}
-	database, firstConn, sidecarBaseline, err := openProvenConnection(ctx, writeDSN, path, pathBeforeWriteDriverOpen, pathAfterWriteDriverOpen)
+	database, err := sql.Open(driverName, writeDSN)
 	if err != nil {
-		return nil, err
+		return nil, memory.ErrUnavailable
 	}
 	database.SetMaxOpenConns(retainedConnectionCount)
 	database.SetMaxIdleConns(retainedConnectionCount)
 	database.SetConnMaxLifetime(0)
 	database.SetConnMaxIdleTime(0)
-	connections := []*sql.Conn{firstConn}
+	connections := make([]*sql.Conn, 0, retainedConnectionCount)
 	cleanupConnections := func() {
 		for _, conn := range connections {
 			_ = conn.Close()
 		}
 		_ = database.Close()
-	}
-	if err := configureConnection(firstConn, busyTimeout); err != nil {
-		cleanupConnections()
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		cleanupConnections()
-		return nil, err
 	}
 
 	select {
@@ -259,6 +278,30 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	}
 	identity, initializationErr := func() (memory.StoreIdentity, error) {
 		defer func() { initializationGate <- struct{}{} }()
+		connectionProofMu.Lock()
+		defer connectionProofMu.Unlock()
+
+		firstConn, _, err := openProvenPhysicalConnection(
+			ctx, database, path, pathBeforeWriteDriverOpen, pathAfterWriteDriverOpen,
+		)
+		if err != nil {
+			return memory.StoreIdentity{}, err
+		}
+		connections = append(connections, firstConn)
+		if err := configureConnection(firstConn, busyTimeout); err != nil {
+			return memory.StoreIdentity{}, err
+		}
+		if err := recheckPreflight(ctx, firstConn, preflightIdentity, needsInitialization); err != nil {
+			return memory.StoreIdentity{}, err
+		}
+		if err := path.revalidate(); err != nil {
+			return memory.StoreIdentity{}, err
+		}
+		_, hadWAL := path.sidecarIdentities()["-wal"]
+		persistentBaseline, err := snapshotProcessFDs()
+		if err != nil {
+			return memory.StoreIdentity{}, err
+		}
 		var mode string
 		if err := firstConn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&mode); err != nil {
 			return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
@@ -271,10 +314,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 			return memory.StoreIdentity{}, err
 		}
 		callPathHook(pathAfterSidecarCreation)
-		if err := proveSQLiteSidecars(path, sidecarBaseline); err != nil {
-			return memory.StoreIdentity{}, err
-		}
-		if err := path.revalidate(); err != nil {
+		if err := proveSQLiteSidecars(path, persistentBaseline, !hadWAL); err != nil {
 			return memory.StoreIdentity{}, err
 		}
 		return identity, nil
@@ -283,33 +323,41 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		cleanupConnections()
 		return nil, safeOpenError(ctx, initializationErr)
 	}
-	if err := guardStoreIdentity(ctx, options.Guard, identity); err != nil {
-		cleanupConnections()
-		return nil, err
-	}
 	if err := ctx.Err(); err != nil {
 		cleanupConnections()
 		return nil, err
 	}
 
-	for len(connections) < retainedConnectionCount {
-		conn, err := database.Conn(context.Background())
+	retainedEvents := [...][2]pathEvent{
+		{pathBeforeRetainedConnection2DriverOpen, pathAfterRetainedConnection2DriverOpen},
+		{pathBeforeRetainedConnection3DriverOpen, pathAfterRetainedConnection3DriverOpen},
+		{pathBeforeRetainedConnection4DriverOpen, pathAfterRetainedConnection4DriverOpen},
+	}
+	for index := 0; len(connections) < retainedConnectionCount; index++ {
+		connectionProofMu.Lock()
+		conn, baseline, err := openProvenPhysicalConnection(ctx, database, path, retainedEvents[index][0], retainedEvents[index][1])
+		if err == nil {
+			connections = append(connections, conn)
+			err = configureConnection(conn, busyTimeout)
+		}
+		if err == nil {
+			var got memory.StoreIdentity
+			got, err = verifySchema(ctx, conn)
+			if err == nil && got != identity {
+				err = memory.ErrCorrupt
+			}
+		}
+		if err == nil {
+			err = proveRetainedSQLiteConnection(path, baseline)
+		}
+		connectionProofMu.Unlock()
 		if err != nil {
 			cleanupConnections()
 			return nil, safeOpenError(ctx, err)
 		}
-		connections = append(connections, conn)
-		if err := configureConnection(conn, busyTimeout); err != nil {
-			cleanupConnections()
-			return nil, err
-		}
 		if err := ctx.Err(); err != nil {
 			cleanupConnections()
 			return nil, err
-		}
-		if err := path.revalidate(); err != nil {
-			cleanupConnections()
-			return nil, safeOpenError(ctx, err)
 		}
 	}
 
@@ -330,7 +378,32 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		store.connections <- conn
 	}
 	keepPath = true
+	if hook := loadTestHooks().storeReady; hook != nil {
+		hook(store)
+	}
+	if err := guardStoreIdentity(ctx, options.Guard, identity); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	return store, nil
+}
+
+func recheckPreflight(ctx context.Context, conn *sql.Conn, before memory.StoreIdentity, beforeNeedsInitialization bool) error {
+	identity, needsInitialization, err := inspectPreflight(ctx, conn)
+	if err != nil {
+		return err
+	}
+	if needsInitialization != beforeNeedsInitialization {
+		return memory.ErrCorrupt
+	}
+	if !needsInitialization && identity != before {
+		return memory.ErrCorrupt
+	}
+	return nil
 }
 
 func validateOptions(options Options) (time.Duration, error) {
@@ -341,10 +414,25 @@ func validateOptions(options Options) (time.Duration, error) {
 	if timeout == 0 {
 		timeout = defaultBusyTimeout
 	}
-	if timeout < 0 || timeout/time.Millisecond > math.MaxInt32 {
+	milliseconds, err := ceilMilliseconds(timeout)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(milliseconds) * time.Millisecond, nil
+}
+
+func ceilMilliseconds(duration time.Duration) (int64, error) {
+	if duration <= 0 {
 		return 0, memory.ErrInvalidRequest
 	}
-	return timeout, nil
+	milliseconds := int64(duration / time.Millisecond)
+	if duration%time.Millisecond != 0 {
+		milliseconds++
+	}
+	if milliseconds <= 0 || milliseconds > math.MaxInt32 {
+		return 0, memory.ErrInvalidRequest
+	}
+	return milliseconds, nil
 }
 
 func structuredFileURI(path string, parameters map[string]string) (string, error) {
@@ -363,42 +451,33 @@ func structuredFileURI(path string, parameters map[string]string) (string, error
 	return u.String(), nil
 }
 
-func openProvenConnection(ctx context.Context, dsn string, path *securePath, beforeEvent, afterEvent pathEvent) (*sql.DB, *sql.Conn, map[inodeIdentity]int, error) {
+// openProvenPhysicalConnection must be called while connectionProofMu is held.
+// Its baseline immediately precedes the physical driver open, and every
+// positive regular-FD delta is checked by proveSQLiteConnection.
+func openProvenPhysicalConnection(ctx context.Context, database *sql.DB, path *securePath, beforeEvent, afterEvent pathEvent) (*sql.Conn, map[inodeIdentity]int, error) {
 	callPathHook(beforeEvent)
-	connectionProofMu.Lock()
-	defer connectionProofMu.Unlock()
 	before, err := snapshotProcessFDs()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	database, err := sql.Open(driverName, dsn)
-	if err != nil {
-		return nil, nil, nil, memory.ErrUnavailable
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
 	conn, err := database.Conn(context.Background())
 	if err != nil {
-		database.Close()
-		return nil, nil, nil, safeOpenError(ctx, err)
+		return nil, nil, safeOpenError(ctx, err)
 	}
 	callPathHook(afterEvent)
 	if err := applyLimits(conn); err != nil {
-		conn.Close()
-		database.Close()
-		return nil, nil, nil, err
+		_ = conn.Close()
+		return nil, nil, err
 	}
 	if err := proveSQLiteConnection(context.Background(), conn, before, path); err != nil {
-		conn.Close()
-		database.Close()
-		return nil, nil, nil, safeOpenError(ctx, err)
+		_ = conn.Close()
+		return nil, nil, safeOpenError(ctx, err)
 	}
 	if err := ctx.Err(); err != nil {
-		conn.Close()
-		database.Close()
-		return nil, nil, nil, err
+		_ = conn.Close()
+		return nil, nil, err
 	}
-	return database, conn, before, nil
+	return conn, before, nil
 }
 
 func applyLimits(conn *sql.Conn) error {
@@ -422,10 +501,14 @@ func configureConnection(conn *sql.Conn, busyTimeout time.Duration) error {
 	if err := applyLimits(conn); err != nil {
 		return err
 	}
+	busyMilliseconds, err := ceilMilliseconds(busyTimeout)
+	if err != nil {
+		return err
+	}
 	statements := []string{
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA synchronous=FULL",
-		"PRAGMA busy_timeout=" + strconv.FormatInt(busyTimeout.Milliseconds(), 10),
+		"PRAGMA busy_timeout=" + strconv.FormatInt(busyMilliseconds, 10),
 		"PRAGMA trusted_schema=OFF",
 		"PRAGMA writable_schema=OFF",
 	}
@@ -440,7 +523,7 @@ func configureConnection(conn *sql.Conn, busyTimeout time.Duration) error {
 	}{
 		{"PRAGMA foreign_keys", 1},
 		{"PRAGMA synchronous", 2},
-		{"PRAGMA busy_timeout", int(busyTimeout.Milliseconds())},
+		{"PRAGMA busy_timeout", int(busyMilliseconds)},
 		{"PRAGMA trusted_schema", 0},
 		{"PRAGMA writable_schema", 0},
 	}
@@ -604,7 +687,9 @@ func (store *Store) Close() error {
 	if err := store.database.Close(); err != nil {
 		closeFailed = true
 	}
-	store.path.close()
+	if err := store.path.close(); err != nil {
+		closeFailed = true
+	}
 	var result error
 	if closeFailed {
 		result = memory.ErrUnavailable

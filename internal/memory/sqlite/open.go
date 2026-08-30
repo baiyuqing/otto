@@ -131,6 +131,7 @@ type testHooks struct {
 	beforeInitializeBegin           func()
 	beforeInitializeCommit          func()
 	initializeCommitStarted         func()
+	bootstrapDriverCommit           func(exec func() error) error
 	beginError                      func(attempt int) error
 	retryDelay                      func(context.Context, time.Duration) error
 	beforeCommitCheck               func()
@@ -333,6 +334,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		return nil, ctx.Err()
 	case <-initializationGate:
 	}
+	setupCtx := ctx
 	identity, initializationErr := func() (memory.StoreIdentity, error) {
 		defer func() { initializationGate <- struct{}{} }()
 		lockConnectionProof()
@@ -369,15 +371,14 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		if mode != "wal" && mode != "WAL" {
 			return memory.StoreIdentity{}, memory.ErrUnavailable
 		}
-		identity, err := initializeOrVerifySchema(ctx, firstConn, databaseID, userID)
+		identity, commitState, err := initializeOrVerifySchema(ctx, firstConn, databaseID, userID)
 		if err != nil {
 			return memory.StoreIdentity{}, err
 		}
-		verificationCtx := ctx
-		if needsInitialization && ctx.Err() != nil {
-			verificationCtx = context.Background()
+		if commitState == bootstrapCommitSucceeded {
+			setupCtx = context.WithoutCancel(ctx)
 		}
-		if err := verifyFTS5Integrity(verificationCtx, firstConn); err != nil {
+		if err := verifyFTS5Integrity(setupCtx, firstConn); err != nil {
 			return memory.StoreIdentity{}, err
 		}
 		callPathHook(pathAfterSidecarCreation)
@@ -390,13 +391,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		cleanupConnections()
 		return nil, safeOpenError(ctx, initializationErr)
 	}
-	if needsInitialization && ctx.Err() != nil {
-		// A successful noncanceling bootstrap COMMIT is the Open commit point.
-		// Cancellation observed after it started must not rewrite that durable
-		// success as a canceled bootstrap.
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
+	if err := setupCtx.Err(); err != nil {
 		cleanupConnections()
 		return nil, err
 	}
@@ -408,14 +403,14 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	}
 	for index := 0; len(connections) < retainedConnectionCount; index++ {
 		lockConnectionProof()
-		conn, baseline, err := openProvenPhysicalConnection(ctx, database, path, retainedEvents[index][0], retainedEvents[index][1])
+		conn, baseline, err := openProvenPhysicalConnection(setupCtx, database, path, retainedEvents[index][0], retainedEvents[index][1])
 		if err == nil {
 			connections = append(connections, conn)
 			err = configureConnection(conn, busyTimeout)
 		}
 		if err == nil {
 			var got memory.StoreIdentity
-			got, err = verifySchema(ctx, conn)
+			got, err = verifySchema(setupCtx, conn)
 			if err == nil && !sameStableIdentity(got, identity) {
 				err = memory.ErrCorrupt
 			}
@@ -426,9 +421,9 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		connectionProofMu.Unlock()
 		if err != nil {
 			cleanupConnections()
-			return nil, safeOpenError(ctx, err)
+			return nil, safeOpenError(setupCtx, err)
 		}
-		if err := ctx.Err(); err != nil {
+		if err := setupCtx.Err(); err != nil {
 			cleanupConnections()
 			return nil, err
 		}
@@ -470,9 +465,9 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	if hook := loadTestHooks().storeReady; hook != nil {
 		hook(store)
 	}
-	guardErr := guardStoreIdentity(ctx, options.Guard, identity)
+	guardErr := guardStoreIdentity(setupCtx, options.Guard, identity)
 	if guardErr == nil {
-		guardErr = ctx.Err()
+		guardErr = setupCtx.Err()
 	}
 	if guardErr != nil {
 		return nil, guardErr
@@ -694,6 +689,9 @@ func guardStoreIdentity(ctx context.Context, guard memory.ContentGuard, identity
 func safeOpenError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, memory.ErrCommitUnknown) {
+		return memory.ErrCommitUnknown
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr

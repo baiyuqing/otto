@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,40 @@ func TestContractHardLimits(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("limits = %#v, want %#v", got, want)
+	}
+}
+
+func TestErrorSentinelLiterals(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"disabled", ErrDisabled, "memory is disabled"},
+		{"unavailable", ErrUnavailable, "memory is unavailable"},
+		{"conflict", ErrConflict, "memory revision conflict"},
+		{"sensitive memory", ErrSensitiveMemory, "memory contains sensitive data"},
+		{"unsupported", ErrUnsupported, "memory operation is unsupported"},
+		{"memory in use", ErrMemoryInUse, "memory is in use"},
+		{"persistence disabled", ErrPersistenceDisabled, "memory persistence is disabled"},
+		{"busy", ErrBusy, "memory store is busy"},
+		{"commit unknown", ErrCommitUnknown, "memory commit outcome is unknown"},
+		{"corrupt", ErrCorrupt, "memory data is corrupt"},
+		{"incompatible schema", ErrIncompatibleSchema, "memory schema is incompatible"},
+		{"invalid record", ErrInvalidRecord, "invalid memory record"},
+		{"invalid request", ErrInvalidRequest, "invalid memory request"},
+		{"not found", ErrNotFound, "memory entity not found"},
+		{"closed", ErrClosed, "memory is closed"},
+		{"invalid cursor", ErrInvalidCursor, "invalid memory cursor"},
+		{"incomplete forget", ErrIncompleteForget, "memory was forgotten but tombstone recording is incomplete"},
+		{"incomplete purge", ErrIncompletePurge, "memory backup purge is incomplete"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.err.Error(); got != test.want {
+				t.Fatalf("error literal = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -165,6 +200,67 @@ func TestNewIDIsRandomLowercaseHex(t *testing.T) {
 	}
 	if first == second {
 		t.Fatalf("generated duplicate IDs: %q", first)
+	}
+}
+
+func TestGenerateDistinctIDsRetriesDuplicatesThroughCeiling(t *testing.T) {
+	first := strings.Repeat("a", 32)
+	second := strings.Repeat("b", 32)
+	sequence := []string{first}
+	for range MaxDuplicateIDRetries {
+		sequence = append(sequence, first)
+	}
+	sequence = append(sequence, second)
+	calls := 0
+	generate := func() (string, error) {
+		id := sequence[calls]
+		calls++
+		return id, nil
+	}
+
+	got, err := GenerateDistinctIDs(2, generate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{first, second}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("IDs = %#v, want %#v", got, want)
+	}
+	if got[0] == got[1] {
+		t.Fatalf("IDs are not distinct: %#v", got)
+	}
+	if want := MaxDuplicateIDRetries + 2; calls != want {
+		t.Fatalf("generator calls = %d, want %d", calls, want)
+	}
+}
+
+func TestGenerateDistinctIDsExhaustionIsSafe(t *testing.T) {
+	duplicate := strings.Repeat("c", 32)
+	calls := 0
+	_, err := GenerateDistinctIDs(2, func() (string, error) {
+		calls++
+		return duplicate, nil
+	})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+	if strings.Contains(err.Error(), duplicate) {
+		t.Fatalf("error leaks generated ID: %q", err)
+	}
+	if want := MaxDuplicateIDRetries + 2; calls != want {
+		t.Fatalf("generator calls = %d, want %d", calls, want)
+	}
+}
+
+func TestGenerateDistinctIDsSanitizesGeneratorFailure(t *testing.T) {
+	underlying := errors.New("private generator failure")
+	_, err := GenerateDistinctIDs(1, func() (string, error) {
+		return "", underlying
+	})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error = %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, underlying) || strings.Contains(err.Error(), underlying.Error()) {
+		t.Fatalf("error exposes underlying failure: %q", err)
 	}
 }
 

@@ -25,7 +25,15 @@ func NewWorkspaceScope(canonicalPath, stableOverride string) (Scope, error) {
 	if canonicalPath == "" || !utf8.ValidString(canonicalPath) || containsPathControl(canonicalPath) {
 		return Scope{}, fmt.Errorf("%w: canonical workspace path", ErrInvalidRequest)
 	}
-	physicalPath, err := filepath.EvalSymlinks(canonicalPath)
+	absolutePath, err := filepath.Abs(canonicalPath)
+	if err != nil {
+		return Scope{}, fmt.Errorf("%w: canonical workspace path", ErrInvalidRequest)
+	}
+	physicalPath, err := filepath.EvalSymlinks(absolutePath)
+	if err != nil {
+		return Scope{}, fmt.Errorf("%w: canonical workspace path", ErrInvalidRequest)
+	}
+	physicalPath, err = filepath.Abs(physicalPath)
 	if err != nil {
 		return Scope{}, fmt.Errorf("%w: canonical workspace path", ErrInvalidRequest)
 	}

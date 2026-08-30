@@ -194,6 +194,17 @@ func CloneProposal(value Proposal) Proposal {
 	return value
 }
 
+func CloneProposals(values []Proposal) []Proposal {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]Proposal, len(values))
+	for i := range values {
+		cloned[i] = CloneProposal(values[i])
+	}
+	return cloned
+}
+
 func ClonePolicyRequest(value PolicyRequest) PolicyRequest {
 	value.Source = CloneProvenance(value.Source)
 	return value

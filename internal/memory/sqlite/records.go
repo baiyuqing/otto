@@ -621,8 +621,34 @@ type mutationSnapshot struct {
 	digest    [sha256.Size]byte
 }
 
+type recordDigestJSON struct {
+	ID             string          `json:"id"`
+	ScopeNamespace string          `json:"scope_namespace"`
+	ScopeID        string          `json:"scope_id"`
+	Kind           string          `json:"kind"`
+	Key            string          `json:"key"`
+	Text           string          `json:"text"`
+	Labels         json.RawMessage `json:"labels"`
+	Metadata       json.RawMessage `json:"metadata"`
+	Source         json.RawMessage `json:"source"`
+	Confidence     float64         `json:"confidence"`
+	Revision       uint64          `json:"revision"`
+	CreatedAt      string          `json:"created_at"`
+	UpdatedAt      string          `json:"updated_at"`
+	ExpiresAt      *string         `json:"expires_at"`
+}
+
 func digestRecord(record memory.Record) ([sha256.Size]byte, error) {
-	canonical, err := json.Marshal(record)
+	encoded, err := encodeRecord(record)
+	if err != nil {
+		return [sha256.Size]byte{}, memory.ErrCorrupt
+	}
+	wire := recordDigestJSON{
+		ID: record.ID, ScopeNamespace: record.Scope.Namespace, ScopeID: record.Scope.ID, Kind: record.Kind,
+		Key: record.Key, Text: record.Text, Labels: encoded.labels, Metadata: encoded.metadata, Source: encoded.source,
+		Confidence: record.Confidence, Revision: record.Revision, CreatedAt: encoded.created, UpdatedAt: encoded.updated, ExpiresAt: encoded.expires,
+	}
+	canonical, err := json.Marshal(wire)
 	if err != nil {
 		return [sha256.Size]byte{}, memory.ErrCorrupt
 	}

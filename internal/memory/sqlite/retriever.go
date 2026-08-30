@@ -220,6 +220,9 @@ func (store *Store) readRetrievalSnapshot(ctx context.Context, request memory.Re
 		return nil, 0, err
 	}
 
+	if hook := loadTestHooks().beforeReadGeneration; hook != nil {
+		hook(conn)
+	}
 	generation, readErr := readGeneration(ctx, conn)
 	if readErr == nil && hasCursor && generation != cursorGeneration {
 		readErr = memory.ErrConflict
@@ -252,7 +255,7 @@ func (store *Store) readRetrievalSnapshot(ctx context.Context, request memory.Re
 				var replacements []memory.Record
 				replacements, readErr = queryRetrievalRecords(ctx, conn, query, arguments, memory.MaxRetrievalCandidates)
 				if readErr == nil {
-					candidates = applyWorkspaceReplacements(candidates, replacements, request.Labels)
+					candidates = applyWorkspaceReplacements(candidates, replacements)
 				}
 			}
 		}
@@ -271,8 +274,9 @@ func (store *Store) readRetrievalSnapshot(ctx context.Context, request memory.Re
 		return nil, 0, safeRecordReadError(ctx, readErr)
 	}
 
-	sortRetrievalCandidates(candidates)
+	candidates = filterRetrievalCandidateLabels(candidates, request.Labels)
 	candidates = dedupeRetrievalCandidates(candidates)
+	sortRetrievalCandidates(candidates)
 	if len(candidates) > memory.MaxRetrievalCandidates {
 		candidates = candidates[:memory.MaxRetrievalCandidates]
 	}
@@ -410,7 +414,7 @@ func retrievalCandidateKeys(candidates []retrievalCandidate) []retrievalKey {
 	return keys
 }
 
-func applyWorkspaceReplacements(candidates []retrievalCandidate, records []memory.Record, labels []string) []retrievalCandidate {
+func applyWorkspaceReplacements(candidates []retrievalCandidate, records []memory.Record) []retrievalCandidate {
 	replacements := make(map[retrievalKey]memory.Record, len(records))
 	for _, record := range records {
 		replacements[retrievalKey{kind: record.Kind, key: record.Key}] = record
@@ -426,11 +430,22 @@ func applyWorkspaceReplacements(candidates []retrievalCandidate, records []memor
 			result = append(result, candidate)
 			continue
 		}
-		if recordHasAllLabels(replacement, labels) {
-			result = append(result, makeRetrievalCandidate(replacement, candidate.baseline, candidate.lexical))
-		}
+		result = append(result, makeRetrievalCandidate(replacement, candidate.baseline, candidate.lexical))
 	}
 	return mergeRetrievalCandidates(nil, result)
+}
+
+func filterRetrievalCandidateLabels(candidates []retrievalCandidate, required []string) []retrievalCandidate {
+	if len(required) == 0 {
+		return candidates
+	}
+	result := candidates[:0]
+	for _, candidate := range candidates {
+		if recordHasAllLabels(candidate.record, required) {
+			result = append(result, candidate)
+		}
+	}
+	return result
 }
 
 func recordHasAllLabels(record memory.Record, required []string) bool {
@@ -447,17 +462,38 @@ func recordHasAllLabels(record memory.Record, required []string) bool {
 }
 
 func dedupeRetrievalCandidates(candidates []retrievalCandidate) []retrievalCandidate {
-	seen := make(map[[sha256.Size]byte]struct{}, len(candidates))
-	result := candidates[:0]
+	byDigest := make(map[[sha256.Size]byte]int, len(candidates))
+	result := make([]retrievalCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		digest := sha256.Sum256([]byte(strings.TrimSpace(candidate.record.Text)))
-		if _, ok := seen[digest]; ok {
+		index, ok := byDigest[digest]
+		if !ok {
+			byDigest[digest] = len(result)
+			result = append(result, candidate)
 			continue
 		}
-		seen[digest] = struct{}{}
-		result = append(result, candidate)
+		baseline := result[index].baseline || candidate.baseline
+		if betterRetrievalDedupeWinner(candidate, result[index]) {
+			candidate.baseline = baseline
+			result[index] = candidate
+		} else {
+			result[index].baseline = baseline
+		}
 	}
 	return result
+}
+
+func betterRetrievalDedupeWinner(left, right retrievalCandidate) bool {
+	if left.workspace != right.workspace {
+		return left.workspace
+	}
+	if !left.record.UpdatedAt.Equal(right.record.UpdatedAt) {
+		return left.record.UpdatedAt.After(right.record.UpdatedAt)
+	}
+	if left.lexical != right.lexical {
+		return left.lexical < right.lexical
+	}
+	return left.record.ID < right.record.ID
 }
 
 func retrievalBudgetText(record memory.Record) (string, error) {

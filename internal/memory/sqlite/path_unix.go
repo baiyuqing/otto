@@ -213,16 +213,19 @@ func prepareAndInstallPrivateDirectory(ctx context.Context, parentFD int, target
 		if err != nil {
 			return -1, false, err
 		}
+		mkdirat := unix.Mkdirat
+		restoreProofLock := false
 		if hook := loadTestHooks().mkdirat; hook != nil {
-			operation := func() error { return unix.Mkdirat(parentFD, name, 0o700) }
+			mkdirat = hook
 			connectionProofMu.Unlock()
-			err = func() error {
-				defer connectionProofMu.Lock()
-				return hook(operation)
-			}()
-		} else {
-			err = unix.Mkdirat(parentFD, name, 0o700)
+			restoreProofLock = true
 		}
+		err = func() error {
+			if restoreProofLock {
+				defer connectionProofMu.Lock()
+			}
+			return mkdirat(parentFD, name, 0o700)
+		}()
 		if errors.Is(err, unix.EEXIST) {
 			continue
 		}

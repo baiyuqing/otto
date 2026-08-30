@@ -344,6 +344,9 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		if err != nil {
 			return memory.StoreIdentity{}, err
 		}
+		if err := verifyFTS5Integrity(ctx, firstConn); err != nil {
+			return memory.StoreIdentity{}, err
+		}
 		callPathHook(pathAfterSidecarCreation)
 		if err := proveSQLiteSidecars(path, persistentBaseline, !hadWAL); err != nil {
 			return memory.StoreIdentity{}, err
@@ -410,16 +413,25 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		store.connections <- conn
 	}
 	keepPath = true
+	// Account the final guard callback before publishing Store readiness. A
+	// concurrent Close may begin through test instrumentation, but it cannot
+	// release Store resources under an in-flight callback.
+	openDone, err := store.admit()
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	if hook := loadTestHooks().storeReady; hook != nil {
 		hook(store)
 	}
-	if err := guardStoreIdentity(ctx, options.Guard, identity); err != nil {
-		_ = store.Close()
-		return nil, err
+	guardErr := guardStoreIdentity(ctx, options.Guard, identity)
+	if guardErr == nil {
+		guardErr = ctx.Err()
 	}
-	if err := ctx.Err(); err != nil {
+	openDone()
+	if guardErr != nil {
 		_ = store.Close()
-		return nil, err
+		return nil, guardErr
 	}
 	return store, nil
 }
@@ -429,12 +441,18 @@ func recheckPreflight(ctx context.Context, conn *sql.Conn, before memory.StoreId
 	if err != nil {
 		return err
 	}
-	if needsInitialization != beforeNeedsInitialization {
+	if needsInitialization {
+		if !beforeNeedsInitialization {
+			return memory.ErrCorrupt
+		}
+		return nil
+	}
+	if !beforeNeedsInitialization && identity != before {
 		return memory.ErrCorrupt
 	}
-	if !needsInitialization && identity != before {
-		return memory.ErrCorrupt
-	}
+	// A separately opened handle or process may have completed a valid virgin
+	// bootstrap after our read-only preflight. initializeOrVerifySchema will use
+	// and return that winner's durable identity rather than the prospective IDs.
 	return nil
 }
 
@@ -653,7 +671,12 @@ func (store *Store) Identity(ctx context.Context) (memory.StoreIdentity, error) 
 	if err := ctx.Err(); err != nil {
 		return memory.StoreIdentity{}, err
 	}
-	done, err := store.admit()
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.StoreIdentity{}, err
+	}
+	defer operationDone()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return memory.StoreIdentity{}, err
 	}
@@ -671,6 +694,28 @@ func (store *Store) Identity(ctx context.Context) (memory.StoreIdentity, error) 
 	identity := store.identity
 	identity.Generation = generation
 	return identity, nil
+}
+
+type operationAdmissionKey struct{}
+
+type operationAdmission struct{ store *Store }
+
+func (store *Store) startOperation(ctx context.Context) (context.Context, func(), error) {
+	if admitted, ok := ctx.Value(operationAdmissionKey{}).(operationAdmission); ok && admitted.store == store {
+		return ctx, func() {}, nil
+	}
+	done, err := store.admit()
+	if err != nil {
+		return ctx, nil, err
+	}
+	return context.WithValue(ctx, operationAdmissionKey{}, operationAdmission{store: store}), done, nil
+}
+
+func (store *Store) continueOperation(ctx context.Context) (func(), error) {
+	if admitted, ok := ctx.Value(operationAdmissionKey{}).(operationAdmission); ok && admitted.store == store {
+		return func() {}, nil
+	}
+	return store.admit()
 }
 
 func (store *Store) admit() (func(), error) {

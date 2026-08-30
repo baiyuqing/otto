@@ -326,8 +326,8 @@ func (guard *retrievalResourceGuard) Check(ctx context.Context, input memory.Gua
 			store.lifecycleMu.Lock()
 			active := store.active
 			store.lifecycleMu.Unlock()
-			if active != 0 || len(store.writeGate) != 1 || len(store.connections) != retainedConnectionCount {
-				guard.err.Store(fmt.Sprintf("guard resources active=%d write=%d connections=%d", active, len(store.writeGate), len(store.connections)))
+			if active != 1 || len(store.writeGate) != 1 || len(store.connections) != retainedConnectionCount {
+				guard.err.Store(fmt.Sprintf("guard resource/accounting state active=%d write=%d connections=%d", active, len(store.writeGate), len(store.connections)))
 			}
 		}
 	}
@@ -351,8 +351,8 @@ func TestRetrieverCallbacksReleaseResourcesAndCompositeSanitizes(t *testing.T) {
 			store.lifecycleMu.Lock()
 			active := store.active
 			store.lifecycleMu.Unlock()
-			if active != 0 || len(store.writeGate) != 1 || len(store.connections) != retainedConnectionCount {
-				guard.err.Store(fmt.Sprintf("estimator resources active=%d write=%d connections=%d", active, len(store.writeGate), len(store.connections)))
+			if active != 1 || len(store.writeGate) != 1 || len(store.connections) != retainedConnectionCount {
+				guard.err.Store(fmt.Sprintf("estimator resource/accounting state active=%d write=%d connections=%d", active, len(store.writeGate), len(store.connections)))
 			}
 			return 1
 		}}

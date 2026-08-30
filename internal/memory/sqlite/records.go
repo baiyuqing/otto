@@ -186,6 +186,11 @@ func (store *Store) Get(ctx context.Context, ref memory.RecordRef) (memory.Recor
 	if err := ctx.Err(); err != nil {
 		return memory.Record{}, err
 	}
+	ctx, done, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.Record{}, err
+	}
+	defer done()
 	if err := memory.ValidateRecordRef(ref); err != nil {
 		return memory.Record{}, err
 	}
@@ -196,6 +201,11 @@ func (store *Store) GetByKey(ctx context.Context, key memory.RecordKey) (memory.
 	if err := ctx.Err(); err != nil {
 		return memory.Record{}, err
 	}
+	ctx, done, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.Record{}, err
+	}
+	defer done()
 	if err := memory.ValidateRecordKey(key); err != nil {
 		return memory.Record{}, err
 	}
@@ -203,7 +213,7 @@ func (store *Store) GetByKey(ctx context.Context, key memory.RecordKey) (memory.
 }
 
 func (store *Store) getRecord(ctx context.Context, predicate string, arguments ...any) (memory.Record, error) {
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return memory.Record{}, err
 	}
@@ -232,10 +242,15 @@ func (store *Store) GetTombstone(ctx context.Context, ref memory.RecordRef) (mem
 	if err := ctx.Err(); err != nil {
 		return memory.Tombstone{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.Tombstone{}, err
+	}
+	defer operationDone()
 	if err := memory.ValidateRecordRef(ref); err != nil {
 		return memory.Tombstone{}, err
 	}
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return memory.Tombstone{}, err
 	}
@@ -278,6 +293,11 @@ func (store *Store) List(ctx context.Context, request memory.ListRequest) (memor
 	if err := ctx.Err(); err != nil {
 		return memory.RecordPage{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.RecordPage{}, err
+	}
+	defer operationDone()
 	request = memory.CloneListRequest(request)
 	if err := memory.ValidateListRequest(request); err != nil {
 		return memory.RecordPage{}, err
@@ -290,7 +310,7 @@ func (store *Store) List(ctx context.Context, request memory.ListRequest) (memor
 	if err != nil {
 		return memory.RecordPage{}, memory.ErrInvalidCursor
 	}
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return memory.RecordPage{}, err
 	}
@@ -377,6 +397,11 @@ func (store *Store) ListTombstones(ctx context.Context, request memory.Tombstone
 	if err := ctx.Err(); err != nil {
 		return memory.TombstonePage{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.TombstonePage{}, err
+	}
+	defer operationDone()
 	request = memory.CloneTombstoneListRequest(request)
 	if err := memory.ValidateTombstoneListRequest(request); err != nil {
 		return memory.TombstonePage{}, err
@@ -389,7 +414,7 @@ func (store *Store) ListTombstones(ctx context.Context, request memory.Tombstone
 	if err != nil {
 		return memory.TombstonePage{}, memory.ErrInvalidCursor
 	}
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return memory.TombstonePage{}, err
 	}
@@ -567,6 +592,11 @@ func (store *Store) Upsert(ctx context.Context, request memory.UpsertRequest) (m
 	if err := ctx.Err(); err != nil {
 		return memory.Record{}, err
 	}
+	ctx, done, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.Record{}, err
+	}
+	defer done()
 	request = memory.CloneUpsertRequest(request)
 	normalizeRecordCollections(&request.Record)
 	if err := memory.ValidateUpsertRequest(request); err != nil {
@@ -697,7 +727,7 @@ func readMutationSnapshotConn(ctx context.Context, conn *sql.Conn, ref memory.Re
 }
 
 func (store *Store) readMutationSnapshot(ctx context.Context, ref memory.RecordRef) (mutationSnapshot, error) {
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return mutationSnapshot{}, err
 	}
@@ -897,6 +927,11 @@ func (store *Store) Forget(ctx context.Context, request memory.StoreForgetReques
 	if err := ctx.Err(); err != nil {
 		return memory.Tombstone{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.Tombstone{}, err
+	}
+	defer operationDone()
 	if err := memory.ValidateStoreForgetRequest(request); err != nil {
 		return memory.Tombstone{}, err
 	}

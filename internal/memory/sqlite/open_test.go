@@ -680,8 +680,12 @@ func TestOpenCanonicalPathEncodingAndCrashWALRecovery(t *testing.T) {
 		_, err := conn.ExecContext(ctx, `INSERT INTO memory_records(
 			id,scope_namespace,scope_id,kind,semantic_key,text_value,labels_json,metadata_json,source_json,
 			confidence,revision,created_at,updated_at,expires_at,state,forgotten_at
-		) VALUES('crash-row','user','u','note','k','committed','[]','{}','{}',1,1,
+		) VALUES('crash-row','user','u','note','k','committed','[]','{}','{"origin":"human","session_id":"","message_ids":[],"observation_id":"","decision_at":null,"decision_source":""}',1,1,
 			'2026-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z',NULL,'active',NULL)`)
+		if err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, `INSERT INTO memory_records_fts(record_id,text_value,kind,semantic_key,labels) VALUES('crash-row','committed','note','k','')`)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1546,8 +1550,11 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 			if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records(
 				id,scope_namespace,scope_id,kind,semantic_key,text_value,labels_json,metadata_json,source_json,
 				confidence,revision,created_at,updated_at,expires_at,state,forgotten_at
-			) VALUES('safe-id','user','u','note','','commit-proof','[]','{}','{}',1,1,
+			) VALUES('safe-id','user','u','note','','commit-proof','[]','{}','{"origin":"human","session_id":"","message_ids":[],"observation_id":"","decision_at":null,"decision_source":""}',1,1,
 				'2026-01-01T00:00:00.000000000Z','2026-01-01T00:00:00.000000000Z',NULL,'active',NULL)`); err != nil {
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records_fts(record_id,text_value,kind,semantic_key,labels) VALUES('safe-id','commit-proof','note','','')`); err != nil {
 				return err
 			}
 			_, err := conn.ExecContext(ctx, `UPDATE memory_meta SET value='1' WHERE key='generation'`)

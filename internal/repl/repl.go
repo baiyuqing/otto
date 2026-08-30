@@ -62,7 +62,10 @@ func NewWithInput(input *Input, stdout, stderr io.Writer, backend app.Backend) *
 	return &REPL{input: input, stdout: stdout, stderr: stderr, backend: backend}
 }
 
+const ottoMark = "(●ᴥ●)  otto"
+
 func (r *REPL) Run(ctx context.Context) error {
+	_, _ = io.WriteString(r.stdout, ottoMark+"\n")
 	if info := r.backend.Info(); info.SessionID != "" {
 		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 	}

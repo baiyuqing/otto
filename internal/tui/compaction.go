@@ -87,6 +87,10 @@ func (m *Model) applyCompactionEvent(event agent.Event, aggregateUsage otmodel.U
 	switch event.Type {
 	case agent.EventCompactionStarted:
 		m.statusText = "compacting context"
+	case agent.EventCompactionPlanned:
+		if event.Plan != nil {
+			m.statusText = compactionPlanStatus(*event.Plan)
+		}
 	case agent.EventCompactionCompleted:
 		if event.Compaction == nil {
 			return false
@@ -114,6 +118,15 @@ func (m *Model) applyCompactionResult(result agent.CompactionResult, aggregateUs
 
 func compactionResultFromEvent(event agent.CompactionEvent) agent.CompactionResult {
 	return agent.CompactionResult(event)
+}
+
+func compactionPlanStatus(plan agent.CompactionPlan) string {
+	tokens := "~" + formatCompactionTokenCount(plan.TokensBefore)
+	if plan.EstimatedTokensAfter > 0 {
+		tokens += "→" + formatCompactionTokenCount(plan.EstimatedTokensAfter)
+	}
+	return fmt.Sprintf("[context] compacting: summarize %d · keep %d · %s · %s",
+		plan.SummarizedMessages, plan.RetainedMessages, tokens, plan.Mode)
 }
 
 func compactionStatus(result agent.CompactionResult) string {

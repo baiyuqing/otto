@@ -52,6 +52,34 @@ func TestCompactCommandPassesTrimmedFocusWithoutUserTranscriptEntry(t *testing.T
 	}
 }
 
+func TestCompactionPlanStatusShowsIntentBeforeCompletion(t *testing.T) {
+	backend := &fakeBackend{compact: func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
+		emit(agent.Event{Type: agent.EventCompactionStarted, Compaction: &agent.CompactionEvent{Reason: agent.CompactionManual}})
+		emit(agent.Event{Type: agent.EventCompactionPlanned, Plan: &agent.CompactionPlan{
+			Reason: agent.CompactionManual, TokensBefore: 18000, EstimatedTokensAfter: 2000,
+			SummarizedMessages: 38, RetainedMessages: 4, Mode: agent.CompactionModeStructured,
+		}})
+		return agent.CompactionResult{Noop: true}, nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("/compact")
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	state := updated.(Model)
+	updated, next := state.Update(runCommandWithin(t, cmd, time.Second))
+	state = updated.(Model)
+	if !strings.Contains(state.statusText, "compacting") {
+		t.Fatalf("started status = %q", state.statusText)
+	}
+	updated, _ = state.Update(runCommandWithin(t, next, time.Second))
+	status := updated.(Model).statusText
+	for _, want := range []string{"summarize 38", "keep 4", "18k", "2k", "structured"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("plan status = %q, want substring %q", status, want)
+		}
+	}
+}
+
 func TestCompactlyIsRejectedExactly(t *testing.T) {
 	called := false
 	backend := &fakeBackend{compact: func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {

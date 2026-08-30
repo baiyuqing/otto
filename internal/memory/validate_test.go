@@ -543,7 +543,9 @@ func TestValidateManagerAndStoreRequests(t *testing.T) {
 		t.Fatalf("confirmation without purge should be allowed: %v", err)
 	}
 
-	upsert := UpsertRequest{Record: validRecord()}
+	upsertRecord := validRecord()
+	upsertRecord.Revision = 0
+	upsert := UpsertRequest{Record: upsertRecord}
 	if err := ValidateUpsertRequest(upsert); err != nil {
 		t.Fatal(err)
 	}

@@ -47,6 +47,14 @@ func safeSQLiteError(ctx context.Context, err error) error {
 	if errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn) {
 		return memory.ErrClosed
 	}
+	for _, category := range []error{
+		memory.ErrInvalidRequest, memory.ErrSensitiveMemory, memory.ErrUnsupported,
+		memory.ErrConflict, memory.ErrCorrupt, memory.ErrBusy, memory.ErrClosed, memory.ErrUnavailable,
+	} {
+		if errors.Is(err, category) {
+			return category
+		}
+	}
 	var modernError *modernsqlite.Error
 	var coded sqliteCoder
 	var code int
@@ -224,6 +232,9 @@ func (store *Store) withWrite(
 				return err
 			}
 			return safeSQLiteError(ctx, callbackErr)
+		}
+		if hook := loadTestHooks().beforeCommitCheck; hook != nil {
+			hook()
 		}
 		if err := ctx.Err(); err != nil {
 			if rollbackErr := store.rollback(conn); rollbackErr != nil {

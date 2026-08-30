@@ -710,13 +710,17 @@ func ValidateRecordKey(key RecordKey) error {
 }
 
 func ValidateUpsertRequest(request UpsertRequest) error {
-	if err := ValidateRecord(request.Record); err != nil {
-		return err
+	if request.ExpectedRevision == nil {
+		if request.Record.Revision != 0 {
+			return invalidRequest("create revision")
+		}
+		request.Record.Revision = 1
+		return ValidateRecord(request.Record)
 	}
-	if request.ExpectedRevision != nil && *request.ExpectedRevision == 0 {
+	if *request.ExpectedRevision == 0 {
 		return invalidRequest("expected revision")
 	}
-	return nil
+	return ValidateRecord(request.Record)
 }
 
 func ValidateStoreForgetRequest(request StoreForgetRequest) error {

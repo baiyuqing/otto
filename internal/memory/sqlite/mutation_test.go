@@ -23,6 +23,17 @@ func TestMutationConformance(t *testing.T) {
 	memorytest.RunMutationConformance(t, newMutationFixture)
 }
 
+func requireConflictRevisions(t *testing.T, err error, expected, actual uint64) {
+	t.Helper()
+	var conflict *memory.ConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("conflict = %v (%T), want *memory.ConflictError", err, err)
+	}
+	if conflict.ExpectedRevision != expected || conflict.ActualRevision != actual {
+		t.Fatalf("conflict revisions = expected %d, actual %d; want expected %d, actual %d", conflict.ExpectedRevision, conflict.ActualRevision, expected, actual)
+	}
+}
+
 func TestMutationDetectsGuardedSnapshotRacesAtomically(t *testing.T) {
 	t.Run("same revision digest race", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "memory.db")
@@ -52,9 +63,8 @@ func TestMutationDetectsGuardedSnapshotRacesAtomically(t *testing.T) {
 		desired.Text = "outer update"
 		desired.UpdatedAt = desired.UpdatedAt.Add(time.Hour)
 		expected := uint64(1)
-		if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: desired, ExpectedRevision: &expected}); !errors.Is(err, memory.ErrConflict) {
-			t.Fatalf("digest race = %v", err)
-		}
+		_, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: desired, ExpectedRevision: &expected})
+		requireConflictRevisions(t, err, 1, 1)
 		after, err := inspectMutationPersistence(context.Background(), path, created.ID)
 		if err != nil || !reflect.DeepEqual(after, racedState) {
 			t.Fatalf("digest race persistence = %#v, %v; want %#v", after, err, racedState)
@@ -87,12 +97,47 @@ func TestMutationDetectsGuardedSnapshotRacesAtomically(t *testing.T) {
 		outer := memory.CloneRecord(created)
 		outer.Text = "losing concurrent update"
 		outer.UpdatedAt = outer.UpdatedAt.Add(2 * time.Hour)
-		if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: outer, ExpectedRevision: &expected}); !errors.Is(err, memory.ErrConflict) {
-			t.Fatalf("revision race = %v", err)
-		}
+		_, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: outer, ExpectedRevision: &expected})
+		requireConflictRevisions(t, err, 1, 2)
 		after, err := inspectMutationPersistence(context.Background(), path, created.ID)
 		if err != nil || !reflect.DeepEqual(after, racedState) {
 			t.Fatalf("revision race persistence = %#v, %v; want %#v", after, err, racedState)
+		}
+	})
+
+	t.Run("forget after active revision race", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "memory.db")
+		store := openTestStore(t, path)
+		created := mustSQLiteCreate(t, store, sqliteTestRecord("forget-revision-race", "forget-revision-race", time.Date(2026, 8, 29, 19, 7, 0, 0, time.UTC)))
+		inner := memory.CloneRecord(created)
+		inner.Text = "winning concurrent update"
+		inner.UpdatedAt = inner.UpdatedAt.Add(time.Hour)
+		expected := uint64(1)
+		var raced atomic.Bool
+		var racedState memorytest.MutationPersistence
+		installTestHooks(t, testHooks{afterMutationPreRead: func() {
+			if !raced.CompareAndSwap(false, true) {
+				return
+			}
+			if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: inner, ExpectedRevision: &expected}); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			racedState, err = inspectMutationPersistence(context.Background(), path, created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}})
+		outer := memory.StoreForgetRequest{
+			Ref:              memory.RecordRef{Scope: created.Scope, ID: created.ID},
+			ExpectedRevision: 1,
+			ForgottenAt:      created.UpdatedAt.Add(2 * time.Hour),
+		}
+		_, err := store.Forget(context.Background(), outer)
+		requireConflictRevisions(t, err, 1, 2)
+		after, err := inspectMutationPersistence(context.Background(), path, created.ID)
+		if err != nil || !reflect.DeepEqual(after, racedState) {
+			t.Fatalf("forget revision race persistence = %#v, %v; want %#v", after, err, racedState)
 		}
 	})
 
@@ -118,9 +163,8 @@ func TestMutationDetectsGuardedSnapshotRacesAtomically(t *testing.T) {
 		}})
 		outer := inner
 		outer.ForgottenAt = outer.ForgottenAt.Add(time.Hour)
-		if _, err := store.Forget(context.Background(), outer); !errors.Is(err, memory.ErrConflict) {
-			t.Fatalf("state race = %v", err)
-		}
+		_, err := store.Forget(context.Background(), outer)
+		requireConflictRevisions(t, err, 1, 2)
 		after, err := inspectMutationPersistence(context.Background(), path, created.ID)
 		if err != nil || !reflect.DeepEqual(after, racedState) {
 			t.Fatalf("state race persistence = %#v, %v; want %#v", after, err, racedState)

@@ -1522,11 +1522,17 @@ func (m Model) transcriptContent(width int) string {
 	return strings.Join(blocks, "\n\n")
 }
 
-const ottoMark = "(●ᴥ●)  otto"
+const logo = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/"
 const emptyTranscriptHintText = "Ask Otto anything. Type /help for commands or /resume to continue a session."
 
 func emptyTranscriptHint(width int) string {
-	return clipSingleLineText(ottoMark, width) + "\n" + clipSingleLineText(emptyTranscriptHintText, width)
+	var sb strings.Builder
+	for _, line := range strings.Split(logo, "\n") {
+		sb.WriteString(clipSingleLineText(line, width))
+		sb.WriteByte('\n')
+	}
+	sb.WriteString(clipSingleLineText(emptyTranscriptHintText, width))
+	return sb.String()
 }
 
 func (m Model) renderEntry(entry Entry, width int) string {

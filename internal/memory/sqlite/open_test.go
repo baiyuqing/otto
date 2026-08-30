@@ -91,6 +91,22 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
+func assertNoPrivateDirectoryTemps(t *testing.T, root string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(entry.Name(), ".otto-memory-directory-") {
+			t.Errorf("temporary directory leaked: %s", filepath.Base(path))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertSafeError(t *testing.T, err error, category error, secrets ...string) {
 	t.Helper()
 	if !errors.Is(err, category) {
@@ -233,11 +249,73 @@ func TestOpenCreationModesIgnoreRestrictiveUmask(t *testing.T) {
 		t.Fatalf("Open under restrictive umask: %v", err)
 	}
 	defer store.Close()
+	assertMode(t, filepath.Join(root, "new"), 0o700)
 	assertMode(t, parent, 0o700)
 	assertMode(t, path, 0o600)
 	for _, suffix := range []string{"-wal", "-shm"} {
-		assertMode(t, path+suffix, 0o600)
+		info, statErr := os.Stat(path + suffix)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if got := info.Mode().Perm(); got&0o077 != 0 {
+			t.Fatalf("%s mode = %04o, want no group/world bits", suffix, got)
+		}
 	}
+	assertNoPrivateDirectoryTemps(t, root)
+}
+
+func TestOpenDirectoryInstallUsesNoReplaceAndCleansTemporaryDirectories(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("secure path implementation is Unix-only")
+	}
+
+	t.Run("concurrent winner remains unmodified", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "winner")
+		path := filepath.Join(parent, "memory.db")
+		var installed atomic.Bool
+		installTestHooks(t, testHooks{beforeDirectoryInstall: func(name string) {
+			if name != filepath.Base(parent) || !installed.CompareAndSwap(false, true) {
+				return
+			}
+			if err := os.Mkdir(parent, 0o750); err != nil {
+				panic(err)
+			}
+		}})
+
+		_, err := Open(context.Background(), path, testOptions(t))
+		assertSafeError(t, err, memory.ErrInvalidRequest, path)
+		if !installed.Load() {
+			t.Fatal("directory install hook was not reached")
+		}
+		assertMode(t, parent, 0o750)
+		assertNoPrivateDirectoryTemps(t, root)
+	})
+
+	t.Run("cancellation removes prepared directory", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "canceled")
+		path := filepath.Join(parent, "memory.db")
+		ctx, cancel := context.WithCancel(context.Background())
+		var canceled atomic.Bool
+		installTestHooks(t, testHooks{beforeDirectoryInstall: func(name string) {
+			if name == filepath.Base(parent) && canceled.CompareAndSwap(false, true) {
+				cancel()
+			}
+		}})
+
+		_, err := Open(ctx, path, testOptions(t))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Open = %v, want context cancellation", err)
+		}
+		if !canceled.Load() {
+			t.Fatal("directory install hook was not reached")
+		}
+		if _, statErr := os.Lstat(parent); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("target installed after cancellation: %v", statErr)
+		}
+		assertNoPrivateDirectoryTemps(t, root)
+	})
 }
 
 func TestIdentityPersistsAndIsGuarded(t *testing.T) {
@@ -735,6 +813,61 @@ func TestOpenRejectsUnsafePathsAndNeverChmodsExistingEntries(t *testing.T) {
 			t.Fatalf("synthetic wrong-owner %s metadata = %v", entry, err)
 		}
 	}
+}
+
+func TestOpenRejectsConcurrentlyInsertedSidecarsWithoutModeRepair(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("secure path implementation is Unix-only")
+	}
+
+	t.Run("unsafe sidecar", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "private")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(parent, "memory.db")
+		installTestHooks(t, testHooks{path: func(event pathEvent) {
+			if event == pathAfterPreflightDriverOpen {
+				if err := os.WriteFile(path+"-wal", nil, 0o640); err != nil {
+					panic(err)
+				}
+			}
+		}})
+
+		_, err := Open(context.Background(), path, testOptions(t))
+		assertSafeError(t, err, memory.ErrInvalidRequest, path)
+		assertMode(t, path+"-wal", 0o640)
+		assertNoPrivateDirectoryTemps(t, root)
+	})
+
+	t.Run("private sidecar is never normalized", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "private")
+		if err := os.Mkdir(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(parent, "memory.db")
+		var inserted *os.File
+		installTestHooks(t, testHooks{path: func(event pathEvent) {
+			if event != pathAfterPreflightDriverOpen || inserted != nil {
+				return
+			}
+			var err error
+			inserted, err = os.OpenFile(path+"-wal", os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o400)
+			if err != nil {
+				panic(err)
+			}
+		}})
+
+		_, err := Open(context.Background(), path, testOptions(t))
+		if inserted != nil {
+			defer inserted.Close()
+		}
+		assertSafeError(t, err, memory.ErrUnsupported, path)
+		assertMode(t, path+"-wal", 0o400)
+		assertNoPrivateDirectoryTemps(t, root)
+	})
 }
 
 func TestOpenRejectsDatabaseSidecarInodeAliasing(t *testing.T) {

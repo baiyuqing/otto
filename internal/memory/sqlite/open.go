@@ -98,14 +98,15 @@ const (
 )
 
 type testHooks struct {
-	path          func(pathEvent)
-	storeReady    func(*Store)
-	beforeBegin   func()
-	beginError    func(attempt int) error
-	retryDelay    func(context.Context, time.Duration) error
-	commitStarted func()
-	driverExec    func(statement string, exec func() error) error
-	closeError    func(resource string, actual error) error
+	path                   func(pathEvent)
+	beforeDirectoryInstall func(name string)
+	storeReady             func(*Store)
+	beforeBegin            func()
+	beginError             func(attempt int) error
+	retryDelay             func(context.Context, time.Duration) error
+	commitStarted          func()
+	driverExec             func(statement string, exec func() error) error
+	closeError             func(resource string, actual error) error
 }
 
 var (

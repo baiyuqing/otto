@@ -540,7 +540,7 @@ func (guard *capturingGuard) Check(ctx context.Context, input memory.GuardInput)
 func TestCapturedCallbackAdmissionExpires(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")
 	guard := &capturingGuard{base: testGuard(t)}
-	store := openTestStore(t, path, func(options *Options) { options.Guard = guard })
+	store := openTestStore(t, path, func(options *Options) { options.Guard = testGuardWith(t, guard) })
 	record := sqliteTestRecord("captured-context-record", "captured-context-key", time.Date(2026, 8, 30, 0, 5, 0, 0, time.UTC))
 	created := mustSQLiteCreate(t, store, record)
 	guard.capture = true
@@ -592,7 +592,7 @@ func TestOpenFinalGuardPanicCleansAllResources(t *testing.T) {
 	var openErr error
 	func() {
 		defer func() { recovered = recover() }()
-		_, openErr = Open(context.Background(), path, Options{Guard: guard, NewID: testOptions(t).NewID})
+		_, openErr = Open(context.Background(), path, Options{Guard: testGuardWith(t, guard), NewID: testOptions(t).NewID})
 	}()
 	if recovered == nil {
 		t.Fatalf("Open did not propagate final guard panic: err=%v ready=%v armed=%v", openErr, ready != nil, guard.panicNext)

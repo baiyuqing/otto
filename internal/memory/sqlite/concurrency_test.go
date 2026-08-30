@@ -38,7 +38,7 @@ func (guard *blockingGuard) Check(ctx context.Context, input memory.GuardInput) 
 func TestConcurrentCloseWaitsForGuardCallbackAndSharesResult(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")
 	guard := &blockingGuard{base: testGuard(t), entered: make(chan struct{}), release: make(chan struct{})}
-	store := openTestStore(t, path, func(options *Options) { options.Guard = guard })
+	store := openTestStore(t, path, func(options *Options) { options.Guard = testGuardWith(t, guard) })
 	record := sqliteTestRecord("close-guard-record", "close-guard-key", time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC))
 	created := mustSQLiteCreate(t, store, record)
 	guard.block.Store(true)

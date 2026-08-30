@@ -753,10 +753,6 @@ func TestValidateCountErrorsDescribeCountsNotBytes(t *testing.T) {
 
 func TestValidateObservationAndBatchBoundaries(t *testing.T) {
 	obs := Observation{ID: "o-1", UserText: strings.Repeat("u", MaxObservationBytes), SessionID: "s-1"}
-	if err := ValidateObservation(obs); err != nil {
-		t.Fatalf("exact observation bytes: %v", err)
-	}
-	obs.UserText += "x"
 	assertSafeError(t, ValidateObservation(obs), ErrInvalidRequest, obs.UserText)
 
 	for _, fact := range []ToolFact{
@@ -795,6 +791,163 @@ func TestValidateObservationAndBatchBoundaries(t *testing.T) {
 	if err := ValidateProposalBatch(batch); !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("batch count = %v", err)
 	}
+}
+
+func TestValidateGenericQueriesAndEmptyObservationCommit(t *testing.T) {
+	for _, query := range []string{"", "   \t"} {
+		retrieval := RetrievalRequest{Query: query, Scopes: []Scope{validScope()}, Limit: 1, TokenBudget: 1, Now: testNow}
+		if err := ValidateRetrievalRequest(retrieval); err != nil {
+			t.Errorf("retrieval query %q: %v", query, err)
+		}
+		search := SearchRequest{Query: query, Scopes: []Scope{validScope()}, Limit: 1, TokenBudget: 1, Now: testNow}
+		if err := ValidateSearchRequest(search); err != nil {
+			t.Errorf("search query %q: %v", query, err)
+		}
+	}
+	commit := ObservationCommit{ObservationID: "o-empty", CreatedAt: testNow}
+	if err := ValidateObservationCommit(commit); err != nil {
+		t.Fatalf("zero-candidate observation commit: %v", err)
+	}
+}
+
+func TestValidateProposedRecordIsExported(t *testing.T) {
+	proposed := validCandidate().Proposed
+	if err := ValidateProposedRecord(proposed, CandidateCreate); err != nil {
+		t.Fatalf("valid proposed record: %v", err)
+	}
+	proposed.ID = "persisted"
+	if err := ValidateProposedRecord(proposed, CandidateCreate); !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("persisted proposed record = %v", err)
+	}
+}
+
+func TestValidateRevisionDomainMaxInt64(t *testing.T) {
+	maximum := uint64(math.MaxInt64)
+	over := maximum + 1
+
+	record := validRecord()
+	record.Revision = maximum
+	if err := ValidateRecord(record); err != nil {
+		t.Fatalf("record max: %v", err)
+	}
+	record.Revision = over
+	assertSafeError(t, ValidateRecord(record), ErrInvalidRecord)
+
+	tombstone := Tombstone{ID: "r-1", Scope: validScope(), Revision: maximum, CreatedAt: testNow, UpdatedAt: testNow, ForgottenAt: testNow}
+	if err := ValidateTombstone(tombstone); err != nil {
+		t.Fatalf("tombstone max: %v", err)
+	}
+	tombstone.Revision = over
+	assertSafeError(t, ValidateTombstone(tombstone), ErrInvalidRecord)
+
+	update := validCandidate()
+	update.Action, update.TargetID, update.BaseRevision = CandidateUpdate, "r-1", maximum
+	if err := ValidateCandidate(update); err != nil {
+		t.Fatalf("candidate base max: %v", err)
+	}
+	update.BaseRevision = over
+	assertSafeError(t, ValidateCandidate(update), ErrInvalidRecord)
+
+	accepted := validCandidate()
+	accepted.State, accepted.DecidedAt, accepted.DecisionSource = CandidateAccepted, ptrTime(testNow), OriginHuman
+	accepted.ResultRecordID, accepted.ResultRevision = "r-result", maximum
+	accepted.Proposed, accepted.Reason = Record{Scope: validScope()}, ""
+	if err := ValidateCandidate(accepted); err != nil {
+		t.Fatalf("candidate result max: %v", err)
+	}
+	accepted.ResultRevision = over
+	assertSafeError(t, ValidateCandidate(accepted), ErrInvalidRecord)
+
+	for name, validate := range map[string]func(uint64) error{
+		"remember expected": func(revision uint64) error {
+			return ValidateRememberRequest(RememberRequest{ID: "r-1", Scope: validScope(), Kind: "note", Text: "text", Confidence: 1, ExpectedRevision: &revision, Source: Provenance{Origin: OriginHuman}})
+		},
+		"propose request base": func(revision uint64) error {
+			return ValidateProposeRequest(ProposeRequest{Action: CandidateUpdate, Scope: validScope(), Kind: "note", Text: "text", TargetID: "r-1", BaseRevision: revision, Source: Provenance{Origin: OriginModel}})
+		},
+		"forget expected": func(revision uint64) error {
+			return ValidateForgetRequest(ForgetRequest{Ref: RecordRef{Scope: validScope(), ID: "r-1"}, ExpectedRevision: revision})
+		},
+		"store forget expected": func(revision uint64) error {
+			return ValidateStoreForgetRequest(StoreForgetRequest{Ref: RecordRef{Scope: validScope(), ID: "r-1"}, ExpectedRevision: revision, ForgottenAt: testNow})
+		},
+		"review target": func(revision uint64) error {
+			return ValidateReviewRequest(ReviewRequest{Ref: CandidateRef{Scope: validScope(), ID: "c-1"}, Decision: ReviewAccept, TargetRevision: &revision})
+		},
+		"proposal base": func(revision uint64) error {
+			return ValidateProposal(Proposal{Action: CandidateUpdate, Scope: validScope(), Kind: "note", Text: "text", TargetID: "r-1", BaseRevision: revision})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validate(maximum); err != nil {
+				t.Fatalf("max: %v", err)
+			}
+			assertSafeError(t, validate(over), ErrInvalidRequest)
+		})
+	}
+
+	upsert := validRecord()
+	upsert.Revision = maximum
+	if err := ValidateUpsertRequest(UpsertRequest{Record: upsert, ExpectedRevision: &maximum}); err != nil {
+		t.Fatalf("upsert max: %v", err)
+	}
+	upsert.Revision = over
+	assertSafeError(t, ValidateUpsertRequest(UpsertRequest{Record: upsert, ExpectedRevision: &over}), ErrInvalidRequest)
+
+	storeCandidate := update
+	storeCandidate.BaseRevision = maximum
+	request := StoreReviewRequest{Ref: CandidateRef{Scope: validScope(), ID: storeCandidate.ID}, Decision: ReviewAccept, TargetRevision: &maximum, DecisionSource: OriginHuman, DecidedAt: testNow}
+	if err := ValidateStoreReviewRequest(request, storeCandidate); err != nil {
+		t.Fatalf("store review max: %v", err)
+	}
+	request.TargetRevision = &over
+	assertSafeError(t, ValidateStoreReviewRequest(request, storeCandidate), ErrInvalidRequest)
+}
+
+func TestValidateObservationCanonicalSerializedBoundary(t *testing.T) {
+	type wireFact struct {
+		ToolName string `json:"tool_name"`
+		Text     string `json:"text"`
+	}
+	type wireObservation struct {
+		ID            string     `json:"id"`
+		UserText      string     `json:"user_text"`
+		AssistantText string     `json:"assistant_text"`
+		SessionID     string     `json:"session_id"`
+		ToolFacts     []wireFact `json:"tool_facts"`
+		MessageIDs    []string   `json:"message_ids"`
+	}
+	wireSize := func(observation Observation) int {
+		facts := make([]wireFact, len(observation.ToolFacts))
+		for index, fact := range observation.ToolFacts {
+			facts[index] = wireFact(fact)
+		}
+		raw, err := json.Marshal(wireObservation{ID: observation.ID, UserText: observation.UserText, AssistantText: observation.AssistantText, SessionID: observation.SessionID, ToolFacts: facts, MessageIDs: append([]string{}, observation.MessageIDs...)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(raw)
+	}
+
+	observation := Observation{ID: "observation-boundary", SessionID: "session-boundary", MessageIDs: []string{"message-boundary"}, ToolFacts: []ToolFact{{ToolName: "tool", Text: "fact"}}}
+	remaining := MaxObservationBytes - wireSize(observation)
+	observation.UserText = strings.Repeat("x", remaining)
+	if got := wireSize(observation); got != MaxObservationBytes {
+		t.Fatalf("wire size = %d", got)
+	}
+	if err := ValidateObservation(observation); err != nil {
+		t.Fatalf("exact canonical observation: %v", err)
+	}
+	observation.UserText += "x"
+	assertSafeError(t, ValidateObservation(observation), ErrInvalidRequest, observation.UserText)
+
+	escaped := Observation{ID: "escaping-overhead"}
+	remaining = MaxObservationBytes - wireSize(escaped)
+	escaped.UserText = strings.Repeat(`"`, remaining/2+1)
+	if len(escaped.UserText) >= MaxObservationBytes || wireSize(escaped) <= MaxObservationBytes {
+		t.Fatalf("escaping fixture raw=%d wire=%d", len(escaped.UserText), wireSize(escaped))
+	}
+	assertSafeError(t, ValidateObservation(escaped), ErrInvalidRequest, escaped.UserText)
 }
 
 func ptrTime(v time.Time) *time.Time { return &v }

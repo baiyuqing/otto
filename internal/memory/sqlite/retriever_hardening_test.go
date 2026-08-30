@@ -337,7 +337,7 @@ func (guard *retrievalResourceGuard) Check(ctx context.Context, input memory.Gua
 func TestRetrieverCallbacksReleaseResourcesAndCompositeSanitizes(t *testing.T) {
 	t.Run("resources", func(t *testing.T) {
 		guard := &retrievalResourceGuard{}
-		store := openTestStore(t, t.TempDir()+"/retrieval-resources.sqlite", func(options *Options) { options.Guard = guard })
+		store := openTestStore(t, t.TempDir()+"/retrieval-resources.sqlite", func(options *Options) { options.Guard = testGuardWith(t, guard) })
 		guard.store.Store(store)
 		now := time.Date(2026, 8, 29, 19, 45, 0, 0, time.UTC)
 		user := memory.Scope{Namespace: memory.NamespaceUser, ID: "resource-user"}
@@ -397,7 +397,7 @@ func (guard *switchingLeakGuard) Check(_ context.Context, input memory.GuardInpu
 func TestRetrieverFinalCallbackWorkIsBounded(t *testing.T) {
 	guard := &retrievalResourceGuard{}
 	path := t.TempDir() + "/retrieval-ceiling.sqlite"
-	store := openTestStore(t, path, func(options *Options) { options.Guard = guard })
+	store := openTestStore(t, path, func(options *Options) { options.Guard = testGuardWith(t, guard) })
 	guard.store.Store(store)
 	now := time.Date(2026, 8, 29, 19, 50, 0, 0, time.UTC)
 	user := memory.Scope{Namespace: memory.NamespaceUser, ID: "ceiling-user"}

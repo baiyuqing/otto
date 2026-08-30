@@ -5,3 +5,61 @@
 .DS_Store
 .otto/
 *.test
+
+# Secrets — never commit credentials or config that may hold them.
+# Defensive/broad on purpose: better to ignore too much than leak one file.
+
+# Environment / dotenv
+.env
+.env.*
+*.env
+!.env.example
+!.env.sample
+!.env.template
+
+# Local config that may embed secrets
+config.toml
+*.local.toml
+secrets.*
+*.secret
+*.secrets
+.secrets/
+
+# Private keys, certificates, keystores
+*.pem
+*.key
+*.p12
+*.pfx
+*.pkcs12
+*.jks
+*.keystore
+*.asc
+*.gpg
+*.ppk
+
+# SSH
+.ssh/
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+
+# Cloud / service credentials
+.netrc
+.pgpass
+.htpasswd
+.npmrc
+.pypirc
+.aws/
+.gcp/
+*-service-account*.json
+service-account*.json
+gcloud-*.json
+kubeconfig
+*.kubeconfig
+.kube/config
+
+# Token / credential dumps
+*.token
+credentials.json
+credentials

@@ -83,6 +83,24 @@ type Store struct {
 
 type pathEvent uint8
 
+type observationCorrespondenceEvent uint8
+
+const (
+	observationCandidateCorrespondence observationCorrespondenceEvent = iota
+	observationAssociationCorrespondence
+)
+
+func (event observationCorrespondenceEvent) String() string {
+	switch event {
+	case observationCandidateCorrespondence:
+		return "candidate correspondence"
+	case observationAssociationCorrespondence:
+		return "association correspondence"
+	default:
+		return "unknown correspondence"
+	}
+}
+
 const (
 	pathBeforePreflightDriverOpen pathEvent = iota
 	pathAfterPreflightDriverOpen
@@ -99,24 +117,26 @@ const (
 )
 
 type testHooks struct {
-	path                    func(pathEvent)
-	mkdirat                 func(dirfd int, name string, mode uint32) error
-	beforeDirectoryInstall  func(name string)
-	storeReady              func(*Store)
-	beforeBegin             func()
-	beginError              func(attempt int) error
-	retryDelay              func(context.Context, time.Duration) error
-	beforeCommitCheck       func()
-	commitStarted           func()
-	driverExec              func(statement string, exec func() error) error
-	readSetupExec           func(statement string, exec func() error) error
-	beforeReadGeneration    func(*sql.Conn)
-	afterMutationPreRead    func()
-	beforeCandidateDecision func() error
-	beforeCandidateCommit   func() error
-	afterCandidateCommit    func() error
-	restoreBusyTimeout      func(statement string, exec func() error) error
-	closeError              func(resource string, actual error) error
+	path                            func(pathEvent)
+	mkdirat                         func(dirfd int, name string, mode uint32) error
+	beforeDirectoryInstall          func(name string)
+	storeReady                      func(*Store)
+	beforeBegin                     func()
+	beginError                      func(attempt int) error
+	retryDelay                      func(context.Context, time.Duration) error
+	beforeCommitCheck               func()
+	commitStarted                   func()
+	driverExec                      func(statement string, exec func() error) error
+	readSetupExec                   func(statement string, exec func() error) error
+	beforeReadGeneration            func(*sql.Conn)
+	afterMutationPreRead            func()
+	beforeCandidateDecision         func() error
+	beforeCandidateCommit           func() error
+	afterCandidateCommit            func() error
+	afterObservationInitialMiss     func(*Store)
+	beforeObservationCorrespondence func(observationCorrespondenceEvent)
+	restoreBusyTimeout              func(statement string, exec func() error) error
+	closeError                      func(resource string, actual error) error
 }
 
 var (

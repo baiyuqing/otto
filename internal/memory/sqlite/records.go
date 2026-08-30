@@ -838,13 +838,47 @@ func (store *Store) updateRecord(ctx context.Context, input memory.Record, expec
 	return memory.CloneRecord(desired), nil
 }
 
-func replaceFTS(ctx context.Context, conn *sql.Conn, record memory.Record) error {
-	var exactlyOne int
-	if err := conn.QueryRowContext(ctx, `SELECT CASE WHEN count(*)=1 THEN 1 ELSE 0 END FROM memory_records_fts WHERE record_id=?`, record.ID).Scan(&exactlyOne); err != nil {
+func requireFTSRowCount(ctx context.Context, conn *sql.Conn, recordID string, expected int) error {
+	if expected < 0 || expected > 1 {
+		return memory.ErrCorrupt
+	}
+	gate := "typeof(record_id)='text' AND length(CAST(record_id AS BLOB)) BETWEEN 1 AND " + strconv.Itoa(memory.MaxIDBytes)
+	rows, err := conn.QueryContext(ctx, "SELECT CASE WHEN "+gate+" THEN record_id END FROM memory_records_fts WHERE record_id=? LIMIT 2", recordID)
+	if err != nil {
 		return err
 	}
-	if exactlyOne != 1 {
+	count := 0
+	var readErr error
+	for rows.Next() {
+		var id sql.NullString
+		if err := rows.Scan(&id); err != nil {
+			readErr = err
+			break
+		}
+		if !id.Valid || id.String != recordID {
+			readErr = memory.ErrCorrupt
+			break
+		}
+		count++
+	}
+	if err := rows.Err(); readErr == nil && err != nil {
+		readErr = err
+	}
+	if err := rows.Close(); readErr == nil && err != nil {
+		readErr = err
+	}
+	if readErr != nil {
+		return readErr
+	}
+	if count != expected {
 		return memory.ErrCorrupt
+	}
+	return nil
+}
+
+func replaceFTS(ctx context.Context, conn *sql.Conn, record memory.Record) error {
+	if err := requireFTSRowCount(ctx, conn, record.ID, 1); err != nil {
+		return err
 	}
 	result, err := conn.ExecContext(ctx, `DELETE FROM memory_records_fts WHERE record_id=?`, record.ID)
 	if err != nil {
@@ -923,12 +957,8 @@ func (store *Store) Forget(ctx context.Context, request memory.StoreForgetReques
 		if changed != 1 {
 			return classifyConditionalMiss(ctx, conn, request.Ref, request.ExpectedRevision)
 		}
-		var exactlyOne int
-		if err := conn.QueryRowContext(ctx, `SELECT CASE WHEN count(*)=1 THEN 1 ELSE 0 END FROM memory_records_fts WHERE record_id=?`, value.ID).Scan(&exactlyOne); err != nil {
+		if err := requireFTSRowCount(ctx, conn, value.ID, 1); err != nil {
 			return err
-		}
-		if exactlyOne != 1 {
-			return memory.ErrCorrupt
 		}
 		deleted, err := conn.ExecContext(ctx, `DELETE FROM memory_records_fts WHERE record_id=?`, value.ID)
 		if err != nil {

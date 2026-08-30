@@ -97,6 +97,65 @@ func TestReactiveCompactionReturnsOriginalOverflowWhenRetainedTailMustWait(t *te
 	assertCompactionEventsContainNoText(t, events, validStructuredSummary, "a.go", "repair")
 }
 
+func TestCompactEmitsPlanBeforeProviderSummaryCall(t *testing.T) {
+	memory := populatedCompactionMemory(t) // u1(user), a1(assistant), u2(user)
+	fake := &compactProvider{responses: []provider.Response{validCompactionResponse(model.Usage{})}}
+	var events []Event
+	plannedBeforeProvider := false
+	fake.beforeComplete = func() {
+		if countCompactEvents(events, EventCompactionPlanned) == 1 {
+			plannedBeforeProvider = true
+		}
+	}
+	runner := New(fake, nil, memory, testCompactionOptions())
+
+	result, err := runner.Compact(context.Background(), "", func(event Event) { events = append(events, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plannedBeforeProvider {
+		t.Fatal("compaction plan was not emitted before the provider summary call")
+	}
+	if got := countCompactEvents(events, EventCompactionPlanned); got != 1 {
+		t.Fatalf("planned events = %d, want 1; events=%#v", got, events)
+	}
+	plan := firstCompactionPlan(events)
+	if plan == nil {
+		t.Fatal("planned event carried no plan payload")
+	}
+	// The latest user group (u2) is retained; the historic prefix (u1, a1) is summarized.
+	if plan.RetainedMessages != 1 || plan.SummarizedMessages != 2 {
+		t.Fatalf("plan counts = retained %d summarized %d, want 1/2", plan.RetainedMessages, plan.SummarizedMessages)
+	}
+	if plan.Mode != CompactionModeStructured {
+		t.Fatalf("plan mode = %q, want structured", plan.Mode)
+	}
+	if plan.Reason != CompactionManual || plan.Automatic {
+		t.Fatalf("plan reason=%q automatic=%t, want manual/false", plan.Reason, plan.Automatic)
+	}
+	if plan.TokensBefore != result.TokensBefore || plan.TokensBefore <= 0 {
+		t.Fatalf("plan tokensBefore=%d, result tokensBefore=%d", plan.TokensBefore, result.TokensBefore)
+	}
+	if plan.EstimatedTokensAfter <= 0 || plan.EstimatedTokensAfter >= plan.TokensBefore {
+		t.Fatalf("plan estimated after=%d not a saving below before=%d", plan.EstimatedTokensAfter, plan.TokensBefore)
+	}
+}
+
+func TestCompactNoopEmitsNoPlan(t *testing.T) {
+	memory := session.NewMemory(testHeader(t))
+	appendCompactionMessages(t, memory, compactionTextMessage("only", model.RoleUser, "nothing old enough"))
+	fake := &compactProvider{}
+	runner := New(fake, nil, memory, testCompactionOptions())
+
+	var events []Event
+	if _, err := runner.Compact(context.Background(), "", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+	if got := countCompactEvents(events, EventCompactionPlanned); got != 0 {
+		t.Fatalf("planned events = %d, want 0 on no-op; events=%#v", got, events)
+	}
+}
+
 func TestCompactManualNoopEmitsBoundedCompletion(t *testing.T) {
 	memory := session.NewMemory(testHeader(t))
 	appendCompactionMessages(t, memory, compactionTextMessage("only", model.RoleUser, "nothing old enough"))
@@ -704,11 +763,12 @@ func validCompactionResponse(usage model.Usage) provider.Response {
 }
 
 type compactProvider struct {
-	responses     []provider.Response
-	requests      []provider.Request
-	calls         int
-	sizeCalls     int
-	afterComplete func()
+	responses      []provider.Response
+	requests       []provider.Request
+	calls          int
+	sizeCalls      int
+	beforeComplete func()
+	afterComplete  func()
 }
 
 func (p *compactProvider) SerializedRequestSize(request provider.Request) (int, error) {
@@ -718,6 +778,9 @@ func (p *compactProvider) SerializedRequestSize(request provider.Request) (int, 
 }
 
 func (p *compactProvider) Complete(ctx context.Context, request provider.Request, emit func(provider.StreamEvent)) (provider.Response, error) {
+	if p.beforeComplete != nil {
+		p.beforeComplete()
+	}
 	p.calls++
 	p.requests = append(p.requests, testCloneRequest(request))
 	if len(p.responses) == 0 {
@@ -814,6 +877,15 @@ func (s *compactionHookSession) AppendCompaction(ctx context.Context, checkpoint
 		s.afterAppend()
 	}
 	return metadata, err
+}
+
+func firstCompactionPlan(events []Event) *CompactionPlan {
+	for _, event := range events {
+		if event.Type == EventCompactionPlanned {
+			return event.Plan
+		}
+	}
+	return nil
 }
 
 func countCompactEvents(events []Event, eventType EventType) int {

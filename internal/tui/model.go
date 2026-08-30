@@ -871,6 +871,10 @@ func cloneAgentEvent(event agent.Event) agent.Event {
 		compaction := *event.Compaction
 		cloned.Compaction = &compaction
 	}
+	if event.Plan != nil {
+		plan := *event.Plan
+		cloned.Plan = &plan
+	}
 	return cloned
 }
 
@@ -1022,7 +1026,7 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 	case agent.EventAgentError:
 		m.recordTurnError(event.Err)
 		return m, waitTurn(stream)
-	case agent.EventCompactionStarted, agent.EventCompactionCompleted, agent.EventCompactionWarning:
+	case agent.EventCompactionStarted, agent.EventCompactionPlanned, agent.EventCompactionCompleted, agent.EventCompactionWarning:
 		if m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent) {
 			m.refreshViewportContent(!m.autoFollow)
 		}

@@ -354,8 +354,8 @@ func TestREPLReturnsNilAtEOF(t *testing.T) {
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run() at EOF = %v", err)
 	}
-	if got := output.String(); got != "(●ᴥ●)  otto\n> " {
-		t.Fatalf("output = %q, want mark then prompt", got)
+	if got := output.String(); got != logo+"> " {
+		t.Fatalf("output = %q, want logo then prompt", got)
 	}
 }
 

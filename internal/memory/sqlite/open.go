@@ -111,6 +111,7 @@ type testHooks struct {
 	driverExec             func(statement string, exec func() error) error
 	readSetupExec          func(statement string, exec func() error) error
 	beforeReadGeneration   func(*sql.Conn)
+	afterMutationPreRead   func()
 	restoreBusyTimeout     func(statement string, exec func() error) error
 	closeError             func(resource string, actual error) error
 }

@@ -26,6 +26,7 @@ type recordCursor struct {
 }
 
 type listFingerprint struct {
+	Domain         string         `json:"domain"`
 	Scopes         []memory.Scope `json:"scopes"`
 	Kinds          []string       `json:"kinds"`
 	Labels         []string       `json:"labels"`
@@ -35,7 +36,7 @@ type listFingerprint struct {
 
 func fingerprintList(request memory.ListRequest) (string, error) {
 	canonical := listFingerprint{
-		Scopes: append([]memory.Scope(nil), request.Scopes...), Kinds: append([]string(nil), request.Kinds...),
+		Domain: "records", Scopes: append([]memory.Scope(nil), request.Scopes...), Kinds: append([]string(nil), request.Kinds...),
 		Labels: append([]string(nil), request.Labels...), IncludeExpired: request.IncludeExpired,
 	}
 	sort.Slice(canonical.Scopes, func(i, j int) bool {
@@ -49,6 +50,22 @@ func fingerprintList(request memory.ListRequest) (string, error) {
 	if !request.IncludeExpired {
 		canonical.Now = formatTimestamp(request.Now)
 	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", memory.ErrInvalidCursor
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func fingerprintTombstones(request memory.TombstoneListRequest) (string, error) {
+	canonical := listFingerprint{Domain: "tombstones", Scopes: append([]memory.Scope(nil), request.Scopes...)}
+	sort.Slice(canonical.Scopes, func(i, j int) bool {
+		if canonical.Scopes[i].Namespace != canonical.Scopes[j].Namespace {
+			return canonical.Scopes[i].Namespace < canonical.Scopes[j].Namespace
+		}
+		return canonical.Scopes[i].ID < canonical.Scopes[j].ID
+	})
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
 		return "", memory.ErrInvalidCursor

@@ -60,10 +60,10 @@ func TestIndentedToolSummaryFitsTerminalAnd120CellLimit(t *testing.T) {
 	}
 }
 
-func TestEmptyTranscriptHintIncludesOttoMark(t *testing.T) {
+func TestEmptyTranscriptHintIncludesLogo(t *testing.T) {
 	got := emptyTranscriptHint(80)
-	if !strings.HasPrefix(got, "(●ᴥ●)  otto") {
-		t.Fatalf("empty hint = %q, want otto mark as first line", got)
+	if !strings.HasPrefix(got, "     ____") {
+		t.Fatalf("empty hint = %q, want logo as first line", got)
 	}
 }
 

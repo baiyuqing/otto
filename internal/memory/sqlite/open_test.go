@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/memory"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -254,31 +255,27 @@ func TestOpenRejectsOwnerBitStrippingUmaskWithoutBroadeningConcurrentCreation(t 
 	defer syscall.Umask(old)
 
 	unrelated := filepath.Join(root, "unrelated")
-	create := make(chan struct{})
-	created := make(chan struct{})
 	var createErr error
 	var createMode os.FileMode
-	go func() {
-		<-create
-		createErr = os.WriteFile(unrelated, nil, 0o666)
-		if createErr == nil {
-			var info os.FileInfo
-			info, createErr = os.Stat(unrelated)
-			if createErr == nil {
-				createMode = info.Mode().Perm()
-			}
-		}
-		close(created)
-	}()
-	var createOnce sync.Once
-	installTestHooks(t, testHooks{mkdirat: func(operation func() error) error {
+	installTestHooks(t, testHooks{mkdirat: func(dirfd int, name string, mode uint32) error {
 		if !connectionProofMu.TryLock() {
 			t.Fatal("Mkdirat test seam ran under the connection proof lock")
 		}
 		connectionProofMu.Unlock()
-		createOnce.Do(func() { close(create) })
+		created := make(chan struct{})
+		go func() {
+			createErr = os.WriteFile(unrelated, nil, 0o666)
+			if createErr == nil {
+				var info os.FileInfo
+				info, createErr = os.Stat(unrelated)
+				if createErr == nil {
+					createMode = info.Mode().Perm()
+				}
+			}
+			close(created)
+		}()
 		<-created
-		return operation()
+		return unix.Mkdirat(dirfd, name, mode)
 	}})
 
 	parent := filepath.Join(root, "new", "private")

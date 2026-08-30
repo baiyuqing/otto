@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,63 +35,117 @@ func TestProcessHelper(*testing.T) {}
 
 func runProcessHelper() {
 	childID := os.Getenv("OTTO_SQLITE_CHILD_ID")
+	action := os.Getenv("OTTO_SQLITE_ACTION")
 	input := bufio.NewReader(os.Stdin)
-	fmt.Printf("armed %s\n", childID)
-	if _, err := input.ReadString('\n'); err != nil {
-		printProcessResult("failed", childID)
-		return
+	printProcessResult("armed", childID)
+	firstCommand := "open"
+	if action == "init" {
+		firstCommand = "arm"
 	}
-	fmt.Printf("ready %s\n", childID)
-	if _, err := input.ReadString('\n'); err != nil {
-		printProcessResult("failed", childID)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	factory := NewFactory(os.Getenv("OTTO_SQLITE_PATH"), Options{Guard: memory.NewCompositeGuard(memory.DefaultGuard{}), NewID: memory.NewID})
-	var components memory.Components
-	var err error
-	for attempt := 0; attempt < 8; attempt++ {
-		components, err = factory.Open(ctx)
-		if !errors.Is(err, memory.ErrBusy) {
-			break
-		}
-	}
-	if err != nil {
-		printProcessResult(classifyProcessError(err), childID)
-		return
-	}
-	store := components.Store
-	defer store.Close()
-	fmt.Printf("opened %s\n", childID)
-	if _, err := input.ReadString('\n'); err != nil {
-		printProcessResult("failed", childID)
-		return
-	}
-	fmt.Printf("ready %s\n", childID)
-	if _, err := input.ReadString('\n'); err != nil {
+	if !readProcessCommand(input, firstCommand) {
 		printProcessResult("failed", childID)
 		return
 	}
 
-	action := os.Getenv("OTTO_SQLITE_ACTION")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	factory := NewFactory(os.Getenv("OTTO_SQLITE_PATH"), Options{Guard: memory.NewCompositeGuard(memory.DefaultGuard{}), NewID: memory.NewID})
 	entityID := os.Getenv("OTTO_SQLITE_ENTITY_ID")
 	scope := memory.Scope{Namespace: memory.NamespaceUser, ID: os.Getenv("OTTO_SQLITE_SCOPE_ID")}
 	key := os.Getenv("OTTO_SQLITE_KEY")
-	switch action {
-	case "init":
+
+	var seamFailed bool
+	var seamOnce sync.Once
+	waitAtSeam := func() {
+		seamOnce.Do(func() {
+			printProcessResult("seam", childID)
+			if !readProcessCommand(input, "go") {
+				seamFailed = true
+			}
+		})
+	}
+	if action == "init" {
+		restoreHooks := setTestHooks(testHooks{beforeInitializeBegin: waitAtSeam})
+		components, err := openProcessComponents(ctx, factory)
+		restoreHooks()
+		if seamFailed {
+			printProcessResult("failed", childID)
+			return
+		}
+		if err != nil {
+			printProcessResult(classifyProcessError(err), childID)
+			return
+		}
+		store := components.Store
+		defer store.Close()
 		identity, err := store.Identity(ctx)
 		if err != nil {
 			printProcessResult(classifyProcessError(err), childID)
 			return
 		}
 		printProcessResult("ok", identity.DatabaseID)
+		return
+	}
+
+	printProcessResult("ready", childID)
+	if !readProcessCommand(input, "go") {
+		printProcessResult("failed", childID)
+		return
+	}
+	components, err := openProcessComponents(ctx, factory)
+	if err != nil {
+		printProcessResult(classifyProcessError(err), childID)
+		return
+	}
+	store := components.Store
+	defer store.Close()
+	printProcessResult("opened", childID)
+	actionCommand := "arm"
+	if action == "update-stale" {
+		actionCommand = "inspect"
+	}
+	if !readProcessCommand(input, actionCommand) {
+		printProcessResult("failed", childID)
+		return
+	}
+
+	var expectedOperation memory.CommitOperation
+	var expectedIDs []string
+	switch action {
+	case "create", "create-exit", "update", "update-stale":
+		expectedOperation = memory.CommitUpsert
+		expectedIDs = []string{entityID}
+	case "observe":
+		expectedOperation = memory.CommitObserve
+		expectedIDs = []string{os.Getenv("OTTO_SQLITE_OBSERVATION_ID"), entityID}
+	case "review":
+		expectedOperation = memory.CommitReview
+		expectedIDs = []string{entityID}
+	default:
+		printProcessResult("failed", childID)
+		return
+	}
+	restoreHooks := func() {}
+	if action != "update-stale" {
+		restoreHooks = setTestHooks(testHooks{beforeWriteBegin: func(operation memory.CommitOperation, ids []string) {
+			if operation == expectedOperation && reflect.DeepEqual(ids, expectedIDs) {
+				waitAtSeam()
+			}
+		}})
+	}
+	defer restoreHooks()
+
+	switch action {
 	case "create", "create-exit":
 		for attempt := 0; attempt < 8; attempt++ {
 			_, err = store.Upsert(ctx, memory.UpsertRequest{Record: processRecord(entityID, scope, key)})
 			if !errors.Is(err, memory.ErrBusy) {
 				break
 			}
+		}
+		if seamFailed {
+			printProcessResult("failed", entityID)
+			return
 		}
 		if err != nil {
 			printProcessResult(classifyProcessError(err), entityID)
@@ -100,7 +155,7 @@ func runProcessHelper() {
 			os.Exit(0)
 		}
 		printProcessResult("ok", entityID)
-	case "update":
+	case "update", "update-stale":
 		record := processRecord(entityID, scope, key)
 		record.Text = "fixed updated value"
 		record.Revision = 1
@@ -111,6 +166,10 @@ func runProcessHelper() {
 			if !errors.Is(err, memory.ErrBusy) {
 				break
 			}
+		}
+		if seamFailed {
+			printProcessResult("failed", entityID)
+			return
 		}
 		printProcessResult(classifyProcessError(err), entityID)
 	case "observe":
@@ -123,6 +182,10 @@ func runProcessHelper() {
 			if !errors.Is(err, memory.ErrBusy) {
 				break
 			}
+		}
+		if seamFailed {
+			printProcessResult("failed", entityID)
+			return
 		}
 		if err != nil || len(receipt.CandidateIDs) != 1 {
 			printProcessResult(classifyProcessError(err), entityID)
@@ -144,10 +207,29 @@ func runProcessHelper() {
 				break
 			}
 		}
+		if seamFailed {
+			printProcessResult("failed", entityID)
+			return
+		}
 		printProcessResult(classifyProcessError(err), entityID)
-	default:
-		printProcessResult("failed", childID)
 	}
+}
+
+func readProcessCommand(input *bufio.Reader, want string) bool {
+	command, err := input.ReadString('\n')
+	return err == nil && command == want+"\n"
+}
+
+func openProcessComponents(ctx context.Context, factory memory.Factory) (memory.Components, error) {
+	var components memory.Components
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		components, err = factory.Open(ctx)
+		if !errors.Is(err, memory.ErrBusy) {
+			break
+		}
+	}
+	return components, err
 }
 
 func processTime() time.Time { return time.Date(2026, 8, 30, 2, 0, 0, 0, time.UTC) }
@@ -252,9 +334,9 @@ func (child *processChild) send(t *testing.T, command string) {
 	}
 }
 
-func (child *processChild) arm(t *testing.T) {
+func (child *processChild) prepareOpen(t *testing.T) {
 	t.Helper()
-	child.send(t, "arm")
+	child.send(t, "open")
 	category, id := child.readResult(t)
 	if category != "ready" || id != child.id {
 		t.Fatal("helper ready barrier mismatch")
@@ -274,9 +356,32 @@ func (child *processChild) awaitOpened(t *testing.T) {
 	}
 }
 
+func (child *processChild) awaitSeam(t *testing.T) {
+	t.Helper()
+	category, id := child.readResult(t)
+	if category != "seam" || id != child.id {
+		t.Fatal("helper SQL seam mismatch")
+	}
+}
+
+func (child *processChild) armInitializer(t *testing.T) {
+	t.Helper()
+	child.send(t, "arm")
+	child.awaitSeam(t)
+}
+
 func (child *processChild) armAction(t *testing.T) {
 	t.Helper()
-	child.arm(t)
+	child.send(t, "arm")
+	child.awaitSeam(t)
+}
+
+func (child *processChild) startUngatedAction(t *testing.T) {
+	t.Helper()
+	child.send(t, "inspect")
+	if err := child.stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (child *processChild) releaseAction(t *testing.T) {
@@ -327,7 +432,7 @@ func (child *processChild) readResult(t *testing.T) (string, string) {
 		t.Fatalf("helper %s invalid result shape", child.id)
 	}
 	switch fields[0] {
-	case "armed", "ready", "opened", "ok", "existing", "conflict", "notfound", "closed", "busy", "corrupt", "unavailable", "invalid", "unsupported", "unknown", "failed":
+	case "armed", "ready", "opened", "seam", "ok", "existing", "conflict", "notfound", "closed", "busy", "corrupt", "unavailable", "invalid", "unsupported", "unknown", "failed":
 	default:
 		t.Fatalf("helper %s invalid result category", child.id)
 	}
@@ -352,16 +457,7 @@ func TestProcessConcurrencyGroundwork(t *testing.T) {
 		startProcessChild(t, path, "initializer-b", "init", nil),
 	}
 	for _, child := range initializers {
-		child.arm(t)
-	}
-	for _, child := range initializers {
-		child.goOpen(t)
-	}
-	for _, child := range initializers {
-		child.awaitOpened(t)
-	}
-	for _, child := range initializers {
-		child.armAction(t)
+		child.armInitializer(t)
 	}
 	for _, child := range initializers {
 		child.releaseAction(t)
@@ -381,20 +477,27 @@ func TestProcessConcurrencyGroundwork(t *testing.T) {
 	}) [][2]string {
 		t.Helper()
 		children := make([]*processChild, len(specs))
-		// Open sequentially, then release actions simultaneously. Only virgin
-		// initialization intentionally races Open; Phase 2's lifetime lock is
-		// required before claiming arbitrary concurrent open/close support.
+		// Open sequentially, then hold every raced action at its SQL seam before
+		// releasing any of them. Only virgin initialization intentionally races
+		// Open; Phase 2's lifetime lock is required before claiming arbitrary
+		// concurrent open/close support.
 		for index, spec := range specs {
 			children[index] = startProcessChild(t, path, spec.id, spec.action, spec.values)
-			children[index].arm(t)
+			children[index].prepareOpen(t)
 			children[index].goOpen(t)
 			children[index].awaitOpened(t)
 		}
-		for _, child := range children {
-			child.armAction(t)
+		for index, child := range children {
+			if specs[index].action == "update-stale" {
+				child.startUngatedAction(t)
+			} else {
+				child.armAction(t)
+			}
 		}
-		for _, child := range children {
-			child.releaseAction(t)
+		for index, child := range children {
+			if specs[index].action != "update-stale" {
+				child.releaseAction(t)
+			}
 		}
 		results := make([][2]string, len(children))
 		for index, child := range children {
@@ -584,7 +687,7 @@ func TestProcessConcurrencyGroundwork(t *testing.T) {
 	stale := runChildren([]struct {
 		id, action string
 		values     map[string]string
-	}{{"stale-child", "update", values(tombstoneRecord.ID, tombstoneScope.ID, tombstoneRecord.Key)}})
+	}{{"stale-child", "update-stale", values(tombstoneRecord.ID, tombstoneScope.ID, tombstoneRecord.Key)}})
 	if stale[0][0] != "conflict" {
 		t.Fatalf("stale tombstone revival = %v", stale)
 	}
@@ -602,7 +705,7 @@ func TestProcessConcurrencyGroundwork(t *testing.T) {
 	}
 
 	exitChild := startProcessChild(t, path, "postcommit-exit-child", "create-exit", values("postcommit-record", "postcommit-scope", "postcommit-key"))
-	exitChild.arm(t)
+	exitChild.prepareOpen(t)
 	exitChild.goOpen(t)
 	exitChild.awaitOpened(t)
 	exitChild.armAction(t)

@@ -4,12 +4,15 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/baiyuqing/otto/internal/memory"
 	"golang.org/x/sys/unix"
@@ -20,7 +23,12 @@ const (
 	fdDirectory = "/proc/self/fd"
 )
 
-var sidecarSuffixes = [...]string{"-wal", "-shm"}
+const privateDirectoryTemporaryPrefix = ".otto-memory-directory-"
+
+var (
+	sidecarSuffixes       = [...]string{"-wal", "-shm"}
+	directoryCreationMode sync.Mutex
+)
 
 // Darwin exposes process descriptors through /dev/fd rather than procfs.
 func processFDDirectory() string {
@@ -59,17 +67,15 @@ type retainedSidecar struct {
 }
 
 type securePath struct {
-	canonicalPath          string
-	canonicalParent        string
-	baseName               string
-	parent                 *os.File
-	database               *os.File
-	parentIdentity         inodeIdentity
-	databaseIdentity       inodeIdentity
-	sidecars               map[string]retainedSidecar
-	preexistingSidecars    map[string]bool
-	initialSidecarScanDone bool
-	created                bool
+	canonicalPath    string
+	canonicalParent  string
+	baseName         string
+	parent           *os.File
+	database         *os.File
+	parentIdentity   inodeIdentity
+	databaseIdentity inodeIdentity
+	sidecars         map[string]retainedSidecar
+	created          bool
 }
 
 func currentUID() uint32 { return uint32(os.Geteuid()) }
@@ -111,41 +117,10 @@ func openSecurePath(ctx context.Context, inputPath string) (*securePath, error) 
 	currentFD := ancestorFD
 	currentPath := canonicalAncestor
 	for _, name := range missing {
-		if err := ctx.Err(); err != nil {
-			_ = unix.Close(currentFD)
-			return nil, err
-		}
-		mkdirErr := unix.Mkdirat(currentFD, name, 0o700)
-		created := mkdirErr == nil
-		if mkdirErr != nil && !errors.Is(mkdirErr, unix.EEXIST) {
-			_ = unix.Close(currentFD)
-			return nil, memory.ErrInvalidRequest
-		}
-		if created {
-			// mkdirat does not return a descriptor and an owner-bit umask can
-			// make the entry impossible to open. Bootstrap only the entry this
-			// successful mkdirat created, then establish and verify the exact
-			// mode again through the retained descriptor.
-			if err := unix.Fchmodat(currentFD, name, 0o700, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-				_ = unix.Close(currentFD)
-				return nil, memory.ErrUnavailable
-			}
-		}
-		nextFD, openErr := unix.Openat(currentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		nextFD, _, openErr := openOrInstallPrivateDirectory(ctx, currentFD, name)
 		_ = unix.Close(currentFD)
 		if openErr != nil {
-			return nil, memory.ErrInvalidRequest
-		}
-		if created {
-			if err := unix.Fchmod(nextFD, 0o700); err != nil {
-				_ = unix.Close(nextFD)
-				return nil, memory.ErrUnavailable
-			}
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(nextFD, &stat); err != nil || validateFileMetadata(statMetadata{stat}, true) != nil || created && uint32(stat.Mode)&0o777 != 0o700 {
-			_ = unix.Close(nextFD)
-			return nil, memory.ErrInvalidRequest
+			return nil, openErr
 		}
 		currentFD = nextFD
 		currentPath = filepath.Join(currentPath, name)
@@ -168,22 +143,160 @@ func openSecurePath(ctx context.Context, inputPath string) (*securePath, error) 
 		return nil, err
 	}
 	path := &securePath{
-		canonicalPath:       filepath.Join(currentPath, baseName),
-		canonicalParent:     currentPath,
-		baseName:            baseName,
-		parent:              parentFile,
-		database:            databaseFile,
-		parentIdentity:      identityFromStat(parentStat),
-		databaseIdentity:    identityFromStat(databaseStat),
-		sidecars:            make(map[string]retainedSidecar, len(sidecarSuffixes)),
-		preexistingSidecars: make(map[string]bool, len(sidecarSuffixes)),
-		created:             created,
+		canonicalPath:    filepath.Join(currentPath, baseName),
+		canonicalParent:  currentPath,
+		baseName:         baseName,
+		parent:           parentFile,
+		database:         databaseFile,
+		parentIdentity:   identityFromStat(parentStat),
+		databaseIdentity: identityFromStat(databaseStat),
+		sidecars:         make(map[string]retainedSidecar, len(sidecarSuffixes)),
+		created:          created,
 	}
 	if err := path.validateSidecarEntries(); err != nil {
 		_ = path.close()
 		return nil, err
 	}
 	return path, nil
+}
+
+func openOrInstallPrivateDirectory(ctx context.Context, parentFD int, name string) (int, bool, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return -1, false, err
+		}
+		fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err == nil {
+			var stat unix.Stat_t
+			if err := unix.Fstat(fd, &stat); err != nil || validateFileMetadata(statMetadata{stat}, true) != nil {
+				_ = unix.Close(fd)
+				return -1, false, memory.ErrInvalidRequest
+			}
+			return fd, false, nil
+		}
+		if !errors.Is(err, unix.ENOENT) {
+			return -1, false, memory.ErrInvalidRequest
+		}
+
+		fd, installed, err := prepareAndInstallPrivateDirectory(ctx, parentFD, name)
+		if err != nil {
+			return -1, false, err
+		}
+		if installed {
+			return fd, true, nil
+		}
+		// A no-replace loser is never repaired. Restart by opening and
+		// validating the winner as a pre-existing entry.
+	}
+}
+
+func prepareAndInstallPrivateDirectory(ctx context.Context, parentFD int, targetName string) (resultFD int, installed bool, resultErr error) {
+	resultFD = -1
+	var temporaryName string
+	for attempt := 0; attempt < 16; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return -1, false, err
+		}
+		name, err := randomPrivateDirectoryName()
+		if err != nil {
+			return -1, false, err
+		}
+		err = mkdiratExactPrivate(parentFD, name)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return -1, false, memory.ErrUnavailable
+		}
+		temporaryName = name
+		break
+	}
+	if temporaryName == "" {
+		return -1, false, memory.ErrUnavailable
+	}
+
+	temporaryExists := true
+	preparedFD := -1
+	keepDescriptor := false
+	defer func() {
+		if preparedFD >= 0 && !keepDescriptor {
+			if err := unix.Close(preparedFD); err != nil && resultErr == nil {
+				resultErr = memory.ErrUnavailable
+			}
+		}
+		if temporaryExists {
+			if err := unix.Unlinkat(parentFD, temporaryName, unix.AT_REMOVEDIR); err != nil && resultErr == nil {
+				resultErr = memory.ErrUnavailable
+			}
+		}
+	}()
+
+	preparedFD, resultErr = unix.Openat(parentFD, temporaryName, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if resultErr != nil {
+		return -1, false, memory.ErrUnavailable
+	}
+	if resultErr = unix.Fchmod(preparedFD, 0o700); resultErr != nil {
+		return -1, false, memory.ErrUnavailable
+	}
+	var preparedStat unix.Stat_t
+	if resultErr = unix.Fstat(preparedFD, &preparedStat); resultErr != nil || validateFileMetadata(statMetadata{preparedStat}, true) != nil || uint32(preparedStat.Mode)&0o777 != 0o700 {
+		return -1, false, memory.ErrUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return -1, false, err
+	}
+	if hook := loadTestHooks().beforeDirectoryInstall; hook != nil {
+		hook(targetName)
+	}
+	if err := ctx.Err(); err != nil {
+		return -1, false, err
+	}
+
+	resultErr = renameDirectoryNoReplace(parentFD, temporaryName, parentFD, targetName)
+	if errors.Is(resultErr, unix.EEXIST) {
+		return -1, false, nil
+	}
+	if resultErr != nil {
+		if noReplaceUnsupported(resultErr) {
+			return -1, false, memory.ErrUnsupported
+		}
+		return -1, false, memory.ErrUnavailable
+	}
+	temporaryExists = false
+
+	var installedStat unix.Stat_t
+	if err := unix.Fstatat(parentFD, targetName, &installedStat, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		identityFromStat(installedStat) != identityFromStat(preparedStat) ||
+		validateFileMetadata(statMetadata{installedStat}, true) != nil || uint32(installedStat.Mode)&0o777 != 0o700 {
+		return -1, false, memory.ErrUnsupported
+	}
+	keepDescriptor = true
+	return preparedFD, true, nil
+}
+
+func randomPrivateDirectoryName() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", memory.ErrUnavailable
+	}
+	return privateDirectoryTemporaryPrefix + hex.EncodeToString(value[:]), nil
+}
+
+// mkdir does not return a descriptor, and an owner-bit umask can otherwise
+// make the prepared directory impossible to open. Restrict the process-wide
+// umask change to one serialized syscall and restore it before any lookup or
+// callback; exact mode is then re-established and verified on the descriptor.
+func mkdiratExactPrivate(parentFD int, name string) error {
+	directoryCreationMode.Lock()
+	oldMask := unix.Umask(0)
+	err := unix.Mkdirat(parentFD, name, 0o700)
+	unix.Umask(oldMask)
+	directoryCreationMode.Unlock()
+	return err
+}
+
+func noReplaceUnsupported(err error) bool {
+	return errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP)
 }
 
 func nearestPhysicalAncestor(parent string) (string, []string, error) {
@@ -331,22 +444,11 @@ func (path *securePath) validateSidecarEntries() error {
 			return memory.ErrInvalidRequest
 		}
 		identities[identity] = suffix
-		if !path.initialSidecarScanDone {
-			path.preexistingSidecars[suffix] = true
-		}
 		if retained, ok := path.sidecars[suffix]; ok {
 			if retained.identity != identity {
 				return memory.ErrUnsupported
 			}
 			continue
-		}
-		if !path.preexistingSidecars[suffix] && uint32(entryStat.Mode)&0o777 != 0o600 {
-			if err := fchmodProcessFD(identity, 0o600); err != nil {
-				return err
-			}
-			if err := unix.Fstatat(int(path.parent.Fd()), path.baseName+suffix, &entryStat, unix.AT_SYMLINK_NOFOLLOW); err != nil || identityFromStat(entryStat) != identity || uint32(entryStat.Mode)&0o777 != 0o600 {
-				return memory.ErrUnsupported
-			}
 		}
 		fd, err := unix.Openat(int(path.parent.Fd()), path.baseName+suffix, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
@@ -364,34 +466,7 @@ func (path *securePath) validateSidecarEntries() error {
 		}
 		path.sidecars[suffix] = retainedSidecar{file: file, identity: identity}
 	}
-	path.initialSidecarScanDone = true
 	return nil
-}
-
-func fchmodProcessFD(identity inodeIdentity, mode uint32) error {
-	directory, err := os.Open(processFDDirectory())
-	if err != nil {
-		return memory.ErrUnsupported
-	}
-	names, err := directory.Readdirnames(-1)
-	_ = directory.Close()
-	if err != nil {
-		return memory.ErrUnsupported
-	}
-	for _, name := range names {
-		fd, err := strconv.Atoi(name)
-		if err != nil {
-			continue
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || identityFromStat(stat) != identity {
-			continue
-		}
-		if err := unix.Fchmod(fd, mode); err == nil {
-			return nil
-		}
-	}
-	return memory.ErrUnsupported
 }
 
 func (path *securePath) sidecarIdentities() map[string]inodeIdentity {

@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -20,6 +21,10 @@ func invalidRequest(field string, limit ...int) error {
 		return fmt.Errorf("%w: %s exceeds %d", ErrInvalidRequest, field, limit[0])
 	}
 	return fmt.Errorf("%w: %s", ErrInvalidRequest, field)
+}
+
+func invalidCount(base error, field string, limit int) error {
+	return fmt.Errorf("%w: %s exceeds count limit %d", base, field, limit)
 }
 
 func ValidateScope(scope Scope) error {
@@ -117,7 +122,7 @@ func validateProvenance(value Provenance, active bool, base error) error {
 		return bad("source observation ID")
 	}
 	if len(value.MessageIDs) > MaxProvenanceMessageIDs {
-		return bad("source message ID count")
+		return invalidCount(base, "source message ID count", MaxProvenanceMessageIDs)
 	}
 	seen := make(map[string]struct{}, len(value.MessageIDs))
 	for _, id := range value.MessageIDs {
@@ -194,14 +199,14 @@ func validateLabels(labels []string, maxCount int, base error) error {
 		return invalidRequest(field, limit...)
 	}
 	if len(labels) > maxCount {
-		return bad("label count", maxCount)
+		return invalidCount(base, "label count", maxCount)
 	}
 	normalized := make(map[string]struct{}, len(labels))
 	for _, label := range labels {
 		if !validSemantic(label, MaxLabelBytes, true) {
 			return bad("label", MaxLabelBytes)
 		}
-		key := strings.ToLower(strings.TrimSpace(label))
+		key := foldCanonical(strings.TrimSpace(label))
 		if _, ok := normalized[key]; ok {
 			return bad("duplicate label")
 		}
@@ -218,7 +223,7 @@ func validateMetadata(metadata map[string]string, base error) error {
 		return invalidRequest(field, limit...)
 	}
 	if len(metadata) > MaxMetadataEntries {
-		return bad("metadata entry count", MaxMetadataEntries)
+		return invalidCount(base, "metadata entry count", MaxMetadataEntries)
 	}
 	total := 0
 	normalized := make(map[string]struct{}, len(metadata))
@@ -233,13 +238,28 @@ func validateMetadata(metadata map[string]string, base error) error {
 		if total > MaxMetadataBytes {
 			return bad("metadata total bytes", MaxMetadataBytes)
 		}
-		norm := strings.ToLower(strings.TrimSpace(key))
+		norm := foldCanonical(strings.TrimSpace(key))
 		if _, ok := normalized[norm]; ok {
 			return bad("duplicate metadata key")
 		}
 		normalized[norm] = struct{}{}
 	}
 	return nil
+}
+
+func foldCanonical(value string) string {
+	var canonical strings.Builder
+	canonical.Grow(len(value))
+	for _, r := range value {
+		folded := r
+		for next := unicode.SimpleFold(r); next != r; next = unicode.SimpleFold(next) {
+			if next < folded {
+				folded = next
+			}
+		}
+		canonical.WriteRune(folded)
+	}
+	return canonical.String()
 }
 
 func validateProposedRecord(record Record, action CandidateAction) error {
@@ -359,8 +379,11 @@ func decidedProposedEmpty(record Record) bool {
 }
 
 func validateScopes(scopes []Scope, allowEmpty, phaseOne bool) error {
-	if len(scopes) == 0 && !allowEmpty || len(scopes) > MaxRequestScopes {
-		return invalidRequest("scope count", MaxRequestScopes)
+	if len(scopes) == 0 && !allowEmpty {
+		return invalidRequest("scope count")
+	}
+	if len(scopes) > MaxRequestScopes {
+		return invalidCount(ErrInvalidRequest, "scope count", MaxRequestScopes)
 	}
 	seen := make(map[Scope]struct{}, len(scopes))
 	users, workspaces := 0, 0
@@ -391,7 +414,7 @@ func validateScopes(scopes []Scope, allowEmpty, phaseOne bool) error {
 
 func validateFilters(kinds, labels []string) error {
 	if len(kinds) > MaxRequestKinds {
-		return invalidRequest("kind filter count", MaxRequestKinds)
+		return invalidCount(ErrInvalidRequest, "kind filter count", MaxRequestKinds)
 	}
 	seen := map[string]struct{}{}
 	for _, kind := range kinds {
@@ -404,7 +427,7 @@ func validateFilters(kinds, labels []string) error {
 		seen[kind] = struct{}{}
 	}
 	if len(labels) > MaxRequestLabels {
-		return invalidRequest("label filter count", MaxRequestLabels)
+		return invalidCount(ErrInvalidRequest, "label filter count", MaxRequestLabels)
 	}
 	seen = make(map[string]struct{}, len(labels))
 	for _, label := range labels {
@@ -650,7 +673,7 @@ func ValidateForgetRequest(request ForgetRequest) error {
 	if request.ExpectedRevision == 0 {
 		return invalidRequest("expected revision")
 	}
-	if request.PurgeBackups && !request.ConfirmPurge || !request.PurgeBackups && request.ConfirmPurge {
+	if request.PurgeBackups && !request.ConfirmPurge {
 		return invalidRequest("purge confirmation")
 	}
 	return nil
@@ -707,34 +730,69 @@ func ValidateStoreForgetRequest(request StoreForgetRequest) error {
 }
 
 func ValidateProposalBatch(batch ProposalBatch) error {
-	if len(batch.Candidates) == 0 || len(batch.Candidates) > MaxCandidateBatch {
-		return invalidRequest("candidate batch count", MaxCandidateBatch)
+	if len(batch.Candidates) == 0 {
+		return invalidRequest("candidate batch count")
 	}
-	total := 0
+	if len(batch.Candidates) > MaxCandidateBatch {
+		return invalidCount(ErrInvalidRequest, "candidate batch count", MaxCandidateBatch)
+	}
 	for _, candidate := range batch.Candidates {
 		if err := ValidateCandidate(candidate); err != nil {
 			return err
 		}
-		total += candidateApproxBytes(candidate)
-		if total > MaxCandidateBatchBytes {
+		if candidate.State != CandidatePending {
+			return invalidRequest("candidate batch state")
+		}
+	}
+	return validateCandidateBatchBytes(batch.Candidates)
+}
+
+func validateCandidateBatchBytes(candidates []Candidate) error {
+	if len(candidates) > MaxCandidateBatch {
+		return invalidCount(ErrInvalidRequest, "candidate batch count", MaxCandidateBatch)
+	}
+	total := 0
+	add := func(value string) error {
+		if len(value) > MaxCandidateBatchBytes-total {
 			return invalidRequest("candidate batch bytes", MaxCandidateBatchBytes)
+		}
+		total += len(value)
+		return nil
+	}
+	for _, c := range candidates {
+		if len(c.Proposed.Labels) > MaxLabels || len(c.Proposed.Metadata) > MaxMetadataEntries || len(c.Proposed.Source.MessageIDs) > MaxProvenanceMessageIDs {
+			return invalidRequest("candidate batch shape")
+		}
+		for _, value := range []string{
+			c.ID, string(c.Action), c.TargetID, c.Reason, string(c.State), string(c.DecisionSource), c.ResultRecordID,
+			c.Proposed.ID, c.Proposed.Scope.Namespace, c.Proposed.Scope.ID, c.Proposed.Kind, c.Proposed.Key, c.Proposed.Text,
+			string(c.Proposed.Source.Origin), c.Proposed.Source.SessionID, c.Proposed.Source.ObservationID,
+			string(c.Proposed.Source.DecisionSource),
+		} {
+			if err := add(value); err != nil {
+				return err
+			}
+		}
+		for _, value := range c.Proposed.Labels {
+			if err := add(value); err != nil {
+				return err
+			}
+		}
+		for key, value := range c.Proposed.Metadata {
+			if err := add(key); err != nil {
+				return err
+			}
+			if err := add(value); err != nil {
+				return err
+			}
+		}
+		for _, value := range c.Proposed.Source.MessageIDs {
+			if err := add(value); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
-}
-
-func candidateApproxBytes(c Candidate) int {
-	total := len(c.ID) + len(c.TargetID) + len(c.Reason) + len(c.ResultRecordID) + len(c.Proposed.ID) + len(c.Proposed.Scope.Namespace) + len(c.Proposed.Scope.ID) + len(c.Proposed.Kind) + len(c.Proposed.Key) + len(c.Proposed.Text) + len(c.Proposed.Source.SessionID) + len(c.Proposed.Source.ObservationID)
-	for _, v := range c.Proposed.Labels {
-		total += len(v)
-	}
-	for k, v := range c.Proposed.Metadata {
-		total += len(k) + len(v)
-	}
-	for _, v := range c.Proposed.Source.MessageIDs {
-		total += len(v)
-	}
-	return total
 }
 
 func ValidateObservation(observation Observation) error {
@@ -784,9 +842,18 @@ func ValidateObservationReceipt(receipt ObservationReceipt) error {
 	return nil
 }
 
-func ValidateStoreReviewRequest(request StoreReviewRequest, candidates ...Candidate) error {
+func ValidateStoreReviewRequest(request StoreReviewRequest, candidate Candidate) error {
 	if err := ValidateCandidateRef(request.Ref); err != nil {
 		return err
+	}
+	if err := ValidateCandidate(candidate); err != nil {
+		return err
+	}
+	if candidate.State != CandidatePending {
+		return invalidRequest("review candidate state")
+	}
+	if request.Ref.Scope != candidate.Proposed.Scope || request.Ref.ID != candidate.ID {
+		return invalidRequest("review candidate reference")
 	}
 	if request.Decision != ReviewAccept && request.Decision != ReviewReject || !decisionOrigin(request.DecisionSource) || !validTimestamp(request.DecidedAt) {
 		return invalidRequest("review decision")
@@ -796,16 +863,6 @@ func ValidateStoreReviewRequest(request StoreReviewRequest, candidates ...Candid
 	}
 	if request.TargetRevision != nil && *request.TargetRevision == 0 {
 		return invalidRequest("review target revision")
-	}
-	if len(candidates) == 0 {
-		return nil
-	}
-	if len(candidates) != 1 {
-		return invalidRequest("review candidate count")
-	}
-	candidate := candidates[0]
-	if request.Ref.Scope != candidate.Proposed.Scope || request.Ref.ID != candidate.ID {
-		return invalidRequest("review candidate reference")
 	}
 	if request.DecidedAt.Before(candidate.CreatedAt) {
 		return invalidRequest("review decision time")
@@ -831,7 +888,7 @@ func ValidateStoreReviewRequest(request StoreReviewRequest, candidates ...Candid
 		if request.TargetRevision != nil {
 			target = *request.TargetRevision
 		}
-		if target != candidate.BaseRevision && request.Edited == nil {
+		if candidate.Action == CandidateUpdate && target != candidate.BaseRevision && request.Edited == nil {
 			return invalidRequest("review rebase edit")
 		}
 	}

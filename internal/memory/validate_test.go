@@ -163,6 +163,8 @@ func TestValidateRecordGrammarEnumsNumbersAndTimes(t *testing.T) {
 		func(r *Record) { r.Metadata = map[string]string{" key": "v"} },
 		func(r *Record) { r.Labels = []string{"Alpha", "alpha"} },
 		func(r *Record) { r.Metadata = map[string]string{"Alpha": "1", "alpha": "2"} },
+		func(r *Record) { r.Labels = []string{"Σ", "ς"} },
+		func(r *Record) { r.Metadata = map[string]string{"σ": "1", "ς": "2"} },
 		func(r *Record) { r.Source.Origin = Origin("unknown") },
 		func(r *Record) { r.Source.DecisionSource = OriginModel; r.Source.DecisionAt = nil },
 		func(r *Record) { x := testNow; r.Source.DecisionAt = &x; r.Source.DecisionSource = "" },
@@ -203,6 +205,21 @@ func TestValidateRecordGrammarEnumsNumbersAndTimes(t *testing.T) {
 		if err := ValidateRecord(r); err != nil {
 			t.Errorf("decided active %s: %v", origin, err)
 		}
+	}
+}
+
+func TestValidateRecordRejectsMonotonicTimestamps(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.UTC
+	stamp := time.Now()
+	time.Local = oldLocal
+	if stamp.Location() != time.UTC || stamp == stamp.Round(0) {
+		t.Fatal("test fixture did not retain a UTC monotonic reading")
+	}
+	record := validRecord()
+	record.CreatedAt, record.UpdatedAt = stamp, stamp
+	if err := ValidateRecord(record); !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("monotonic timestamp error = %v, want ErrInvalidRecord", err)
 	}
 }
 
@@ -521,6 +538,10 @@ func TestValidateManagerAndStoreRequests(t *testing.T) {
 	if err := ValidateForgetRequest(forget); err != nil {
 		t.Fatal(err)
 	}
+	forget.PurgeBackups = false
+	if err := ValidateForgetRequest(forget); err != nil {
+		t.Fatalf("confirmation without purge should be allowed: %v", err)
+	}
 
 	upsert := UpsertRequest{Record: validRecord()}
 	if err := ValidateUpsertRequest(upsert); err != nil {
@@ -530,6 +551,32 @@ func TestValidateManagerAndStoreRequests(t *testing.T) {
 	upsert.ExpectedRevision = &badRev
 	if err := ValidateUpsertRequest(upsert); !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("upsert = %v", err)
+	}
+}
+
+func TestValidateBindOptionsPhaseOneScopeRules(t *testing.T) {
+	user := validScope()
+	workspace := Scope{Namespace: NamespaceWorkspace, ID: "w-1"}
+	for _, options := range []BindOptions{
+		{Scopes: []Scope{user}, DefaultWriteScope: user},
+		{Scopes: []Scope{user, workspace}, DefaultWriteScope: workspace},
+	} {
+		if err := ValidateBindOptions(options); err != nil {
+			t.Fatalf("valid options rejected: %v", err)
+		}
+	}
+	invalid := []BindOptions{
+		{},
+		{Scopes: []Scope{workspace}, DefaultWriteScope: workspace},
+		{Scopes: []Scope{user, user}, DefaultWriteScope: user},
+		{Scopes: []Scope{user, workspace, {Namespace: NamespaceWorkspace, ID: "w-2"}}, DefaultWriteScope: user},
+		{Scopes: []Scope{user, {Namespace: "custom", ID: "c-1"}}, DefaultWriteScope: user},
+		{Scopes: []Scope{user}, DefaultWriteScope: workspace},
+	}
+	for i, options := range invalid {
+		if err := ValidateBindOptions(options); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("invalid options %d error = %v", i, err)
+		}
 	}
 }
 
@@ -573,6 +620,43 @@ func TestValidateReviewRebaseAndEditRules(t *testing.T) {
 	if err := ValidateStoreReviewRequest(base, candidate); !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("edited rejection = %v", err)
 	}
+
+	forget := validCandidate()
+	forget.Action = CandidateForget
+	forget.TargetID, forget.BaseRevision = "r-1", 2
+	forget.Proposed = Record{Scope: validScope(), Source: Provenance{Origin: OriginModel}}
+	forgetRebase := StoreReviewRequest{
+		Ref: CandidateRef{Scope: validScope(), ID: forget.ID}, Decision: ReviewAccept,
+		TargetRevision: &target, DecisionSource: OriginHuman, DecidedAt: testNow,
+	}
+	if err := ValidateStoreReviewRequest(forgetRebase, forget); err != nil {
+		t.Errorf("refreshed forget rebase rejected: %v", err)
+	}
+}
+
+func TestValidateCandidatePersistenceAndReviewRequirePendingAuthority(t *testing.T) {
+	decided := validCandidate()
+	decided.State = CandidateAccepted
+	decided.DecidedAt = ptrTime(testNow)
+	decided.DecisionSource = OriginHuman
+	decided.ResultRecordID, decided.ResultRevision = "r-new", 1
+	decided.Proposed = Record{Scope: validScope()}
+	if err := ValidateProposalBatch(ProposalBatch{Candidates: []Candidate{decided}}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("decided proposal batch error = %v, want ErrInvalidRequest", err)
+	}
+
+	request := StoreReviewRequest{
+		Ref: CandidateRef{Scope: validScope(), ID: decided.ID}, ResultRecordID: "r-next",
+		Decision: ReviewAccept, DecisionSource: OriginHuman, DecidedAt: testNow,
+	}
+	if err := ValidateStoreReviewRequest(request, decided); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("already-decided review error = %v, want ErrInvalidRequest", err)
+	}
+	malformed := validCandidate()
+	malformed.State = CandidateState("bypass")
+	if err := ValidateStoreReviewRequest(request, malformed); !errors.Is(err, ErrInvalidRequest) && !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("malformed review candidate error = %v", err)
+	}
 }
 
 func TestValidateManagerReviewEditedContent(t *testing.T) {
@@ -589,6 +673,27 @@ func TestValidateManagerReviewEditedContent(t *testing.T) {
 	request.Edited.Scope = Scope{Namespace: NamespaceWorkspace, ID: "w-1"}
 	if err := ValidateReviewRequest(request); !errors.Is(err, ErrInvalidRequest) {
 		t.Errorf("wrong edit scope = %v", err)
+	}
+}
+
+func TestValidateCandidateBatchByteBoundary(t *testing.T) {
+	candidate := Candidate{}
+	candidate.Proposed.Text = strings.Repeat("x", MaxCandidateBatchBytes)
+	if err := validateCandidateBatchBytes([]Candidate{candidate}); err != nil {
+		t.Fatalf("exact candidate batch bytes: %v", err)
+	}
+	candidate.Proposed.Text += "x"
+	if err := validateCandidateBatchBytes([]Candidate{candidate}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("one-over candidate batch bytes error = %v", err)
+	}
+}
+
+func TestValidateCountErrorsDescribeCountsNotBytes(t *testing.T) {
+	record := validRecord()
+	record.Labels = make([]string, MaxLabels+1)
+	err := ValidateRecord(record)
+	if !errors.Is(err, ErrInvalidRecord) || !strings.Contains(err.Error(), "count") || strings.Contains(err.Error(), "bytes") {
+		t.Fatalf("count error = %v, want count description without bytes", err)
 	}
 }
 

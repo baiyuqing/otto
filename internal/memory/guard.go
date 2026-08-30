@@ -64,12 +64,14 @@ func validateGuardInput(input GuardInput) error {
 	}
 	total := 0
 	for _, field := range input.Fields {
-		if !utf8.ValidString(field.Value) {
-			return sensitive("invalid text")
+		if len(field.Value) > MaxGuardBytes-total {
+			return sensitive("byte limit")
 		}
 		total += len(field.Value)
-		if total > MaxGuardBytes {
-			return sensitive("byte limit")
+	}
+	for _, field := range input.Fields {
+		if !utf8.ValidString(field.Value) {
+			return sensitive("invalid text")
 		}
 	}
 	return nil
@@ -94,7 +96,7 @@ func hasURIUserinfo(value string) bool {
 	for _, candidate := range guardURLPattern.FindAllString(value, -1) {
 		candidate = strings.TrimRight(candidate, ".,;!?)]}>")
 		parsed, err := url.Parse(candidate)
-		if err == nil && parsed.User != nil && parsed.User.Username() != "" {
+		if err == nil && parsed.User != nil {
 			return true
 		}
 	}
@@ -115,7 +117,7 @@ func NewExactGuard(values []string) (*ExactGuard, error) {
 	fingerprints := make([]exactFingerprint, 0, len(values))
 	seen := make(map[exactFingerprint]struct{}, len(values))
 	for _, value := range values {
-		if value == "" || !utf8.ValidString(value) || len(value) > MaxExactGuardValueBytes {
+		if value == "" || len(value) > MaxExactGuardValueBytes || !utf8.ValidString(value) {
 			return nil, invalidRequest("exact guard value", MaxExactGuardValueBytes)
 		}
 		fingerprint := exactFingerprint{length: len(value), digest: sha256.Sum256([]byte(value))}
@@ -248,20 +250,152 @@ func (guard *CompositeGuard) Check(ctx context.Context, input GuardInput) error 
 	return nil
 }
 
+type guardBudget struct {
+	fields int
+	bytes  int
+}
+
+func (budget *guardBudget) reserve(count int) error {
+	if count < 0 || count > MaxGuardFields-budget.fields {
+		return sensitive("field limit")
+	}
+	budget.fields += count
+	return nil
+}
+
+func (budget *guardBudget) reserveMultiple(count, multiplier int) error {
+	remaining := MaxGuardFields - budget.fields
+	if count < 0 || multiplier <= 0 || count > remaining/multiplier {
+		return sensitive("field limit")
+	}
+	budget.fields += count * multiplier
+	return nil
+}
+
+func (budget *guardBudget) add(value string) error {
+	if len(value) > MaxGuardBytes-budget.bytes {
+		return sensitive("byte limit")
+	}
+	budget.bytes += len(value)
+	return nil
+}
+
+func preflightRecord(budget *guardBudget, record Record) error {
+	if err := budget.reserve(10); err != nil {
+		return err
+	}
+	if err := budget.reserve(len(record.Labels)); err != nil {
+		return err
+	}
+	if err := budget.reserveMultiple(len(record.Metadata), 2); err != nil {
+		return err
+	}
+	if err := budget.reserve(len(record.Source.MessageIDs)); err != nil {
+		return err
+	}
+	for _, value := range []string{
+		record.ID, record.Scope.Namespace, record.Scope.ID, record.Kind, record.Key, record.Text,
+		string(record.Source.Origin), record.Source.SessionID, record.Source.ObservationID, string(record.Source.DecisionSource),
+	} {
+		if err := budget.add(value); err != nil {
+			return err
+		}
+	}
+	for _, label := range record.Labels {
+		if err := budget.add(label); err != nil {
+			return err
+		}
+	}
+	for key, value := range record.Metadata {
+		if err := budget.add(key); err != nil {
+			return err
+		}
+		if err := budget.add(value); err != nil {
+			return err
+		}
+	}
+	for _, id := range record.Source.MessageIDs {
+		if err := budget.add(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preflightCandidate(budget *guardBudget, candidate Candidate) error {
+	if err := budget.reserve(7); err != nil {
+		return err
+	}
+	for _, value := range []string{
+		candidate.ID, string(candidate.Action), candidate.TargetID, candidate.Reason,
+		string(candidate.State), string(candidate.DecisionSource), candidate.ResultRecordID,
+	} {
+		if err := budget.add(value); err != nil {
+			return err
+		}
+	}
+	return preflightRecord(budget, candidate.Proposed)
+}
+
 func GuardRecord(ctx context.Context, guard ContentGuard, record Record) error {
-	fields := make([]GuardField, 0, 16+len(record.Labels)+len(record.Metadata)*2+len(record.Source.MessageIDs))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	budget := guardBudget{}
+	if err := preflightRecord(&budget, record); err != nil {
+		return err
+	}
+	fields := make([]GuardField, 0, budget.fields)
 	appendRecordFields(&fields, record, "record ")
 	return runGuard(ctx, guard, fields)
 }
 
 func GuardCandidate(ctx context.Context, guard ContentGuard, candidate Candidate) error {
-	fields := make([]GuardField, 0, 24+len(candidate.Proposed.Labels)+len(candidate.Proposed.Metadata)*2+len(candidate.Proposed.Source.MessageIDs))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	budget := guardBudget{}
+	if err := preflightCandidate(&budget, candidate); err != nil {
+		return err
+	}
+	fields := make([]GuardField, 0, budget.fields)
 	appendCandidateFields(&fields, candidate)
 	return runGuard(ctx, guard, fields)
 }
 
 func GuardObservation(ctx context.Context, guard ContentGuard, observation Observation) error {
-	fields := make([]GuardField, 0, 4+len(observation.MessageIDs)+len(observation.ToolFacts)*2)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	budget := guardBudget{}
+	if err := budget.reserve(4); err != nil {
+		return err
+	}
+	if err := budget.reserve(len(observation.MessageIDs)); err != nil {
+		return err
+	}
+	if err := budget.reserveMultiple(len(observation.ToolFacts), 2); err != nil {
+		return err
+	}
+	for _, value := range []string{observation.ID, observation.UserText, observation.AssistantText, observation.SessionID} {
+		if err := budget.add(value); err != nil {
+			return err
+		}
+	}
+	for _, id := range observation.MessageIDs {
+		if err := budget.add(id); err != nil {
+			return err
+		}
+	}
+	for _, fact := range observation.ToolFacts {
+		if err := budget.add(fact.ToolName); err != nil {
+			return err
+		}
+		if err := budget.add(fact.Text); err != nil {
+			return err
+		}
+	}
+	fields := make([]GuardField, 0, budget.fields)
 	appendField(&fields, "observation ID", observation.ID, true)
 	appendField(&fields, "observation user text", observation.UserText, false)
 	appendField(&fields, "observation assistant text", observation.AssistantText, false)
@@ -277,7 +411,25 @@ func GuardObservation(ctx context.Context, guard ContentGuard, observation Obser
 }
 
 func GuardObservationCommit(ctx context.Context, guard ContentGuard, commit ObservationCommit) error {
-	fields := make([]GuardField, 0, 1+len(commit.Candidates)*16)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	budget := guardBudget{}
+	if err := budget.reserve(1); err != nil {
+		return err
+	}
+	if len(commit.Candidates) > (MaxGuardFields-budget.fields)/17 {
+		return sensitive("field limit")
+	}
+	if err := budget.add(commit.ObservationID); err != nil {
+		return err
+	}
+	for _, candidate := range commit.Candidates {
+		if err := preflightCandidate(&budget, candidate); err != nil {
+			return err
+		}
+	}
+	fields := make([]GuardField, 0, budget.fields)
 	appendField(&fields, "observation ID", commit.ObservationID, true)
 	for _, candidate := range commit.Candidates {
 		appendCandidateFields(&fields, candidate)
@@ -286,7 +438,25 @@ func GuardObservationCommit(ctx context.Context, guard ContentGuard, commit Obse
 }
 
 func GuardObservationReceipt(ctx context.Context, guard ContentGuard, receipt ObservationReceipt) error {
-	fields := make([]GuardField, 0, 1+len(receipt.CandidateIDs))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	budget := guardBudget{}
+	if err := budget.reserve(1); err != nil {
+		return err
+	}
+	if err := budget.reserve(len(receipt.CandidateIDs)); err != nil {
+		return err
+	}
+	if err := budget.add(receipt.ObservationID); err != nil {
+		return err
+	}
+	for _, id := range receipt.CandidateIDs {
+		if err := budget.add(id); err != nil {
+			return err
+		}
+	}
+	fields := make([]GuardField, 0, budget.fields)
 	appendField(&fields, "observation ID", receipt.ObservationID, true)
 	for _, id := range receipt.CandidateIDs {
 		appendField(&fields, "candidate ID", id, true)

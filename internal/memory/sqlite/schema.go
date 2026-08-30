@@ -205,6 +205,24 @@ func normalizeSchemaSQL(statement string) string {
 }
 
 func inspectPreflight(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, bool, error) {
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+		return memory.StoreIdentity{}, false, safeSQLiteError(ctx, err)
+	}
+	identity, needsInitialization, inspectErr := inspectPreflightSnapshot(ctx, conn)
+	_, rollbackErr := conn.ExecContext(context.Background(), "ROLLBACK")
+	if inspectErr != nil {
+		return memory.StoreIdentity{}, false, inspectErr
+	}
+	if rollbackErr != nil {
+		return memory.StoreIdentity{}, false, memory.ErrUnavailable
+	}
+	return identity, needsInitialization, nil
+}
+
+func inspectPreflightSnapshot(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, bool, error) {
+	if err := verifyQuickCheck(ctx, conn); err != nil {
+		return memory.StoreIdentity{}, false, err
+	}
 	version, err := readUserVersion(ctx, conn)
 	if err != nil {
 		return memory.StoreIdentity{}, false, safeSQLiteError(ctx, err)
@@ -444,12 +462,241 @@ func verifySchema(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, er
 	if err != nil || strconv.FormatUint(generation, 10) != generationText {
 		return memory.StoreIdentity{}, memory.ErrCorrupt
 	}
-	return memory.StoreIdentity{
+	identity := memory.StoreIdentity{
 		DatabaseID:    databaseID,
 		UserScope:     memory.Scope{Namespace: "user", ID: userID},
 		SchemaVersion: schemaVersion,
 		Generation:    generation,
-	}, nil
+	}
+	if err := verifyContentIntegrity(ctx, conn); err != nil {
+		return memory.StoreIdentity{}, err
+	}
+	return identity, nil
+}
+
+func verifyQuickCheck(ctx context.Context, conn *sql.Conn) error {
+	// The argument bounds SQLite's diagnostic output to one row. Accepting only
+	// one exact "ok" result prevents diagnostics (which may contain content or
+	// paths) from crossing the adapter error boundary.
+	rows, err := conn.QueryContext(ctx, "PRAGMA quick_check(1)")
+	if err != nil {
+		return integritySQLiteError(ctx, err)
+	}
+	count := 0
+	result := error(nil)
+	for rows.Next() {
+		count++
+		var value sql.NullString
+		if count > 1 || rows.Scan(&value) != nil || !value.Valid || value.String != "ok" {
+			result = memory.ErrCorrupt
+			break
+		}
+	}
+	if err := rows.Err(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	if err := rows.Close(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	if result == nil && count != 1 {
+		result = memory.ErrCorrupt
+	}
+	return result
+}
+
+func verifyContentIntegrity(ctx context.Context, conn *sql.Conn) error {
+	if err := requireNoIntegrityRow(ctx, conn, `SELECT 1 FROM memory_records WHERE typeof(state)<>'text' OR state NOT IN ('active','tombstone') LIMIT 1`); err != nil {
+		return err
+	}
+	if err := verifyRecordRows(ctx, conn, "active", recordProjection(), func(row rowScanner) error {
+		_, err := decodeRecordRow(row)
+		return err
+	}); err != nil {
+		return err
+	}
+	if err := verifyRecordRows(ctx, conn, "tombstone", tombstoneProjection(), func(row rowScanner) error {
+		_, err := decodeTombstoneRow(row)
+		return err
+	}); err != nil {
+		return err
+	}
+	if err := verifyCandidateRows(ctx, conn); err != nil {
+		return err
+	}
+	if err := verifyObservationRows(ctx, conn); err != nil {
+		return err
+	}
+	for _, query := range []string{
+		// Every live observed Candidate has exactly one corresponding receipt
+		// entry. Receipt entries with no Candidate are deliberately allowed.
+		`SELECT 1 FROM memory_candidates AS c
+		 WHERE c.observation_id IS NOT NULL AND NOT EXISTS (
+		   SELECT 1 FROM memory_observations AS o WHERE o.id=c.observation_id
+		     AND (SELECT count(*) FROM json_each(o.candidate_ids_json) WHERE type='text' AND value=c.id)=1
+		 ) LIMIT 1`,
+		// If a retained receipt ID still names a Candidate, that Candidate must
+		// point back to this receipt. This catches orphaned/stale associations
+		// without requiring receipt retention to keep Candidate rows forever.
+		`SELECT 1 FROM memory_observations AS o, json_each(o.candidate_ids_json) AS item
+		 JOIN memory_candidates AS c ON c.id=item.value
+		 WHERE item.type='text' AND (c.observation_id IS NULL OR c.observation_id<>o.id) LIMIT 1`,
+		`SELECT 1 FROM memory_candidates
+		 WHERE state='pending' AND (
+		   (observation_id IS NULL AND COALESCE(json_extract(proposed_json,'$.source.observation_id'),'')<>'')
+		   OR (observation_id IS NOT NULL AND (
+		     COALESCE(json_type(proposed_json,'$.source.observation_id'),'')<>'text'
+		     OR COALESCE(json_extract(proposed_json,'$.source.observation_id'),'')<>observation_id
+		   ))
+		 ) LIMIT 1`,
+	} {
+		if err := requireNoIntegrityRow(ctx, conn, query); err != nil {
+			return err
+		}
+	}
+
+	labels := `COALESCE((SELECT group_concat(value,char(10)) FROM
+		(SELECT value FROM json_each(r.labels_json) WHERE type='text' ORDER BY value)), '')`
+	if err := requireNoIntegrityRow(ctx, conn, `SELECT 1 FROM memory_records AS r
+		WHERE r.state='active' AND (SELECT count(*) FROM memory_records_fts AS f WHERE f.record_id=r.id)<>1 LIMIT 1`); err != nil {
+		return err
+	}
+	if err := requireNoIntegrityRow(ctx, conn, `SELECT 1 FROM memory_records_fts AS f
+		LEFT JOIN memory_records AS r ON r.id=f.record_id AND r.state='active'
+		WHERE r.id IS NULL OR typeof(f.record_id)<>'text' OR f.record_id<>r.id
+		   OR typeof(f.text_value)<>'text' OR f.text_value<>r.text_value
+		   OR typeof(f.kind)<>'text' OR f.kind<>r.kind
+		   OR typeof(f.semantic_key)<>'text' OR f.semantic_key<>r.semantic_key
+		   OR typeof(f.labels)<>'text' OR f.labels<>`+labels+` LIMIT 1`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyRecordRows(ctx context.Context, conn *sql.Conn, state, projection string, decode func(rowScanner) error) error {
+	rows, err := conn.QueryContext(ctx, "SELECT "+projection+" FROM memory_records WHERE state=?", state)
+	if err != nil {
+		return integritySQLiteError(ctx, err)
+	}
+	result := error(nil)
+	for rows.Next() {
+		if err := decode(rows); err != nil {
+			result = memory.ErrCorrupt
+			break
+		}
+	}
+	if err := rows.Err(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	if err := rows.Close(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	return result
+}
+
+func verifyCandidateRows(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, "SELECT "+candidateProjection()+" FROM memory_candidates")
+	if err != nil {
+		return integritySQLiteError(ctx, err)
+	}
+	result := error(nil)
+	for rows.Next() {
+		if _, err := decodeCandidateRow(rows); err != nil {
+			result = memory.ErrCorrupt
+			break
+		}
+	}
+	if err := rows.Err(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	if err := rows.Close(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	return result
+}
+
+func verifyObservationRows(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, "SELECT "+observationProjection()+" FROM memory_observations")
+	if err != nil {
+		return integritySQLiteError(ctx, err)
+	}
+	result := error(nil)
+	for rows.Next() {
+		receipt, _, err := decodeObservationRow(rows)
+		if err != nil {
+			result = memory.ErrCorrupt
+			break
+		}
+		seen := make(map[string]struct{}, len(receipt.CandidateIDs))
+		for _, id := range receipt.CandidateIDs {
+			if _, duplicate := seen[id]; duplicate {
+				result = memory.ErrCorrupt
+				break
+			}
+			seen[id] = struct{}{}
+		}
+		if result != nil {
+			break
+		}
+	}
+	if err := rows.Err(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	if err := rows.Close(); result == nil && err != nil {
+		result = integritySQLiteError(ctx, err)
+	}
+	return result
+}
+
+func requireNoIntegrityRow(ctx context.Context, conn *sql.Conn, query string) error {
+	var marker int
+	err := conn.QueryRowContext(ctx, query).Scan(&marker)
+	if err == nil {
+		return memory.ErrCorrupt
+	}
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	return integritySQLiteError(ctx, err)
+}
+
+func verifyFTS5Integrity(ctx context.Context, conn *sql.Conn) error {
+	// The FTS5 integrity command uses SQLite's write-command surface even
+	// though it does not repair or retain data. An immediate transaction makes
+	// independent openers serialize this check with real mutations instead of
+	// reporting transient cross-process lock diagnostics as corruption.
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return safeSQLiteError(ctx, err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records_fts(memory_records_fts) VALUES('integrity-check')`); err != nil {
+		return integritySQLiteError(ctx, err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+		return memory.ErrUnavailable
+	}
+	committed = true
+	return nil
+}
+
+func integritySQLiteError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	mapped := safeSQLiteError(ctx, err)
+	if mapped == memory.ErrBusy || mapped == memory.ErrClosed {
+		return mapped
+	}
+	// Integrity SQL never exports SQLite diagnostics: any non-contention
+	// failure while examining a proven database is a corruption category.
+	return memory.ErrCorrupt
 }
 
 func verifyTableColumns(ctx context.Context, conn *sql.Conn, table string, expected []string) error {

@@ -59,6 +59,11 @@ func (store *Store) Retrieve(ctx context.Context, input memory.RetrievalRequest)
 	if err := ctx.Err(); err != nil {
 		return memory.RetrievalResult{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.RetrievalResult{}, err
+	}
+	defer operationDone()
 	request := memory.CloneRetrievalRequest(input)
 	validation := request
 	if validation.Query == "" {
@@ -200,7 +205,7 @@ func decodeRetrievalCursor(value, fingerprint string) (retrievalCursor, uint64, 
 }
 
 func (store *Store) readRetrievalSnapshot(ctx context.Context, request memory.RetrievalRequest, expression string, cursorGeneration uint64, hasCursor bool) ([]retrievalCandidate, uint64, error) {
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return nil, 0, err
 	}

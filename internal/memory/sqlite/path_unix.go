@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/baiyuqing/otto/internal/memory"
 	"golang.org/x/sys/unix"
@@ -25,10 +24,7 @@ const (
 
 const privateDirectoryTemporaryPrefix = ".otto-memory-directory-"
 
-var (
-	sidecarSuffixes       = [...]string{"-wal", "-shm"}
-	directoryCreationMode sync.Mutex
-)
+var sidecarSuffixes = [...]string{"-wal", "-shm"}
 
 // Darwin exposes process descriptors through /dev/fd rather than procfs.
 func processFDDirectory() string {
@@ -192,30 +188,8 @@ func openOrInstallPrivateDirectory(ctx context.Context, parentFD int, name strin
 
 func prepareAndInstallPrivateDirectory(ctx context.Context, parentFD int, targetName string) (resultFD int, installed bool, resultErr error) {
 	resultFD = -1
-	var temporaryName string
-	for attempt := 0; attempt < 16; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return -1, false, err
-		}
-		name, err := randomPrivateDirectoryName()
-		if err != nil {
-			return -1, false, err
-		}
-		err = mkdiratExactPrivate(parentFD, name)
-		if errors.Is(err, unix.EEXIST) {
-			continue
-		}
-		if err != nil {
-			return -1, false, memory.ErrUnavailable
-		}
-		temporaryName = name
-		break
-	}
-	if temporaryName == "" {
-		return -1, false, memory.ErrUnavailable
-	}
-
-	temporaryExists := true
+	temporaryName := ""
+	temporaryExists := false
 	preparedFD := -1
 	keepDescriptor := false
 	defer func() {
@@ -231,8 +205,33 @@ func prepareAndInstallPrivateDirectory(ctx context.Context, parentFD int, target
 		}
 	}()
 
-	preparedFD, resultErr = unix.Openat(parentFD, temporaryName, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if resultErr != nil {
+	for attempt := 0; attempt < 16; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return -1, false, err
+		}
+		name, err := randomPrivateDirectoryName()
+		if err != nil {
+			return -1, false, err
+		}
+		if hook := loadTestHooks().beforeDirectoryCreate; hook != nil {
+			hook()
+		}
+		err = unix.Mkdirat(parentFD, name, 0o700)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return -1, false, memory.ErrUnavailable
+		}
+		temporaryName = name
+		temporaryExists = true
+		preparedFD, resultErr = unix.Openat(parentFD, temporaryName, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if resultErr != nil {
+			return -1, false, memory.ErrUnavailable
+		}
+		break
+	}
+	if preparedFD < 0 {
 		return -1, false, memory.ErrUnavailable
 	}
 	if resultErr = unix.Fchmod(preparedFD, 0o700); resultErr != nil {
@@ -280,19 +279,6 @@ func randomPrivateDirectoryName() (string, error) {
 		return "", memory.ErrUnavailable
 	}
 	return privateDirectoryTemporaryPrefix + hex.EncodeToString(value[:]), nil
-}
-
-// mkdir does not return a descriptor, and an owner-bit umask can otherwise
-// make the prepared directory impossible to open. Restrict the process-wide
-// umask change to one serialized syscall and restore it before any lookup or
-// callback; exact mode is then re-established and verified on the descriptor.
-func mkdiratExactPrivate(parentFD int, name string) error {
-	directoryCreationMode.Lock()
-	oldMask := unix.Umask(0)
-	err := unix.Mkdirat(parentFD, name, 0o700)
-	unix.Umask(oldMask)
-	directoryCreationMode.Unlock()
-	return err
 }
 
 func noReplaceUnsupported(err error) bool {

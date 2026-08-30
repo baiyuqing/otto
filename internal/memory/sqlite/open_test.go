@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -234,32 +235,59 @@ func TestOpenCreatesPrivateFilesAndFourConfiguredConnections(t *testing.T) {
 	}
 }
 
-func TestOpenCreationModesIgnoreRestrictiveUmask(t *testing.T) {
+func TestOpenRejectsOwnerBitStrippingUmaskWithoutBroadeningConcurrentCreation(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("secure path implementation is Unix-only")
 	}
+	const helperEnvironment = "OTTO_TEST_OWNER_BIT_STRIPPING_UMASK"
+	if os.Getenv(helperEnvironment) == "" {
+		command := exec.Command(os.Args[0], "-test.run=^TestOpenRejectsOwnerBitStrippingUmaskWithoutBroadeningConcurrentCreation$")
+		command.Env = append(os.Environ(), helperEnvironment+"=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("isolated umask regression failed: %v\n%s", err, output)
+		}
+		return
+	}
+
 	root := t.TempDir()
 	old := syscall.Umask(0o777)
 	defer syscall.Umask(old)
 
+	unrelated := filepath.Join(root, "unrelated")
+	create := make(chan struct{})
+	created := make(chan struct{})
+	var createErr error
+	var createMode os.FileMode
+	go func() {
+		<-create
+		createErr = os.WriteFile(unrelated, nil, 0o666)
+		if createErr == nil {
+			var info os.FileInfo
+			info, createErr = os.Stat(unrelated)
+			if createErr == nil {
+				createMode = info.Mode().Perm()
+			}
+		}
+		close(created)
+	}()
+	var createOnce sync.Once
+	installTestHooks(t, testHooks{beforeDirectoryCreate: func() {
+		createOnce.Do(func() { close(create) })
+		<-created
+	}})
+
 	parent := filepath.Join(root, "new", "private")
 	path := filepath.Join(parent, "memory.db")
-	store, err := Open(context.Background(), path, testOptions(t))
-	if err != nil {
-		t.Fatalf("Open under restrictive umask: %v", err)
+	_, err := Open(context.Background(), path, testOptions(t))
+	assertSafeError(t, err, memory.ErrUnavailable, path)
+	if createErr != nil {
+		t.Fatalf("create unrelated file: %v", createErr)
 	}
-	defer store.Close()
-	assertMode(t, filepath.Join(root, "new"), 0o700)
-	assertMode(t, parent, 0o700)
-	assertMode(t, path, 0o600)
-	for _, suffix := range []string{"-wal", "-shm"} {
-		info, statErr := os.Stat(path + suffix)
-		if statErr != nil {
-			t.Fatal(statErr)
-		}
-		if got := info.Mode().Perm(); got&0o077 != 0 {
-			t.Fatalf("%s mode = %04o, want no group/world bits", suffix, got)
-		}
+	if createMode != 0 {
+		t.Fatalf("unrelated file mode = %04o, want 0000 from ambient umask", createMode)
+	}
+	if _, statErr := os.Lstat(parent); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("target installed under owner-bit-stripping umask: %v", statErr)
 	}
 	assertNoPrivateDirectoryTemps(t, root)
 }
@@ -279,6 +307,9 @@ func TestOpenDirectoryInstallUsesNoReplaceAndCleansTemporaryDirectories(t *testi
 				return
 			}
 			if err := os.Mkdir(parent, 0o750); err != nil {
+				panic(err)
+			}
+			if err := os.Chmod(parent, 0o750); err != nil {
 				panic(err)
 			}
 		}})
@@ -701,6 +732,9 @@ func TestOpenRejectsUnsafePathsAndNeverChmodsExistingEntries(t *testing.T) {
 		if err := os.Mkdir(parent, 0o750); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chmod(parent, 0o750); err != nil {
+			t.Fatal(err)
+		}
 		path := filepath.Join(parent, "memory.db")
 		_, err := Open(context.Background(), path, testOptions(t))
 		assertSafeError(t, err, memory.ErrInvalidRequest, path, "unsafe-parent-marker")
@@ -729,6 +763,9 @@ func TestOpenRejectsUnsafePathsAndNeverChmodsExistingEntries(t *testing.T) {
 			if err := os.WriteFile(path, nil, 0o640); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.Chmod(path, 0o640); err != nil {
+				t.Fatal(err)
+			}
 		}},
 		{"database preexisting owner mode", func(t *testing.T, path string) {
 			if err := os.WriteFile(path, nil, 0); err != nil {
@@ -750,6 +787,9 @@ func TestOpenRejectsUnsafePathsAndNeverChmodsExistingEntries(t *testing.T) {
 		{"WAL public mode", func(t *testing.T, path string) {
 			writeEmptyPrivateFile(t, path)
 			if err := os.WriteFile(path+"-wal", nil, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path+"-wal", 0o640); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -830,6 +870,9 @@ func TestOpenRejectsConcurrentlyInsertedSidecarsWithoutModeRepair(t *testing.T) 
 		installTestHooks(t, testHooks{path: func(event pathEvent) {
 			if event == pathAfterPreflightDriverOpen {
 				if err := os.WriteFile(path+"-wal", nil, 0o640); err != nil {
+					panic(err)
+				}
+				if err := os.Chmod(path+"-wal", 0o640); err != nil {
 					panic(err)
 				}
 			}

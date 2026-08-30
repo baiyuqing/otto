@@ -22,9 +22,10 @@ type securePath struct{ canonicalPath string }
 func currentUID() uint32                                          { return 0 }
 func validateFileMetadata(syntheticMetadata, bool) error          { return memory.ErrUnsupported }
 func openSecurePath(context.Context, string) (*securePath, error) { return nil, memory.ErrUnsupported }
-func (*securePath) close()                                        {}
+func (*securePath) close() error                                  { return memory.ErrUnsupported }
 func (*securePath) revalidate() error                             { return memory.ErrUnsupported }
 func (*securePath) validateSidecarEntries() error                 { return memory.ErrUnsupported }
+func (*securePath) sidecarIdentities() map[string]inodeIdentity   { return nil }
 func snapshotProcessFDs() (map[inodeIdentity]int, error)          { return nil, memory.ErrUnsupported }
 func proveSQLiteConnection(context.Context, *sql.Conn, map[inodeIdentity]int, *securePath) error {
 	return memory.ErrUnsupported
@@ -32,4 +33,9 @@ func proveSQLiteConnection(context.Context, *sql.Conn, map[inodeIdentity]int, *s
 func proveSQLiteSidecarsIfPresent(*securePath, map[inodeIdentity]int) error {
 	return memory.ErrUnsupported
 }
-func proveSQLiteSidecars(*securePath, map[inodeIdentity]int) error { return memory.ErrUnsupported }
+func proveSQLiteSidecars(*securePath, map[inodeIdentity]int, bool) error {
+	return memory.ErrUnsupported
+}
+func proveRetainedSQLiteConnection(*securePath, map[inodeIdentity]int) error {
+	return memory.ErrUnsupported
+}

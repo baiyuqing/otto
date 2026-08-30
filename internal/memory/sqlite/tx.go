@@ -154,12 +154,10 @@ func (store *Store) withWrite(
 		if err != nil {
 			return err
 		}
-		milliseconds := remaining.Milliseconds()
-		if remaining%time.Millisecond != 0 {
-			milliseconds++
-		}
-		if milliseconds < 1 {
-			milliseconds = 1
+		milliseconds, conversionErr := ceilMilliseconds(remaining)
+		if conversionErr != nil {
+			store.returnConnection(conn)
+			return memory.ErrBusy
 		}
 		if _, err := conn.ExecContext(context.Background(), "PRAGMA busy_timeout="+strconv.FormatInt(milliseconds, 10)); err != nil {
 			store.quarantine(conn)
@@ -209,6 +207,14 @@ func (store *Store) withWrite(
 			continue
 		}
 
+		if _, err := conn.ExecContext(context.Background(), "PRAGMA busy_timeout=0"); err != nil {
+			if rollbackErr := store.rollback(conn); rollbackErr != nil {
+				return rollbackErr
+			}
+			store.quarantine(conn)
+			return memory.ErrUnavailable
+		}
+
 		callbackErr := callback(ctx, conn)
 		if callbackErr != nil {
 			if err := store.rollback(conn); err != nil {
@@ -233,12 +239,7 @@ func (store *Store) withWrite(
 		if hooks.commitStarted != nil {
 			hooks.commitStarted()
 		}
-		var commitErr error
-		if hooks.commitError != nil {
-			commitErr = hooks.commitError()
-		} else {
-			_, commitErr = conn.ExecContext(context.Background(), "COMMIT")
-		}
+		commitErr := executeDriverControl(conn, "COMMIT")
 		if commitErr != nil {
 			store.quarantine(conn)
 			return commitUnknown
@@ -285,7 +286,13 @@ func (store *Store) borrowConnection(ctx context.Context) (*sql.Conn, error) {
 	case <-store.poisoned:
 		return nil, memory.ErrUnavailable
 	case conn := <-store.connections:
-		return conn, nil
+		select {
+		case <-store.poisoned:
+			_ = conn.Close()
+			return nil, memory.ErrUnavailable
+		default:
+			return conn, nil
+		}
 	}
 }
 
@@ -293,7 +300,12 @@ func (store *Store) restoreAndReturnConnection(conn *sql.Conn) error {
 	if conn == nil {
 		return memory.ErrUnavailable
 	}
-	statement := "PRAGMA busy_timeout=" + strconv.FormatInt(store.busyTimeout.Milliseconds(), 10)
+	milliseconds, err := ceilMilliseconds(store.busyTimeout)
+	if err != nil {
+		store.quarantine(conn)
+		return memory.ErrUnavailable
+	}
+	statement := "PRAGMA busy_timeout=" + strconv.FormatInt(milliseconds, 10)
 	if _, err := conn.ExecContext(context.Background(), statement); err != nil {
 		store.quarantine(conn)
 		return memory.ErrUnavailable
@@ -314,18 +326,22 @@ func (store *Store) returnConnection(conn *sql.Conn) {
 }
 
 func (store *Store) rollback(conn *sql.Conn) error {
-	hooks := loadTestHooks()
-	var err error
-	if hooks.rollbackError != nil {
-		err = hooks.rollbackError()
-	} else {
-		_, err = conn.ExecContext(context.Background(), "ROLLBACK")
-	}
-	if err != nil {
+	if err := executeDriverControl(conn, "ROLLBACK"); err != nil {
 		store.quarantine(conn)
 		return memory.ErrUnavailable
 	}
 	return nil
+}
+
+func executeDriverControl(conn *sql.Conn, statement string) error {
+	exec := func() error {
+		_, err := conn.ExecContext(context.Background(), statement)
+		return err
+	}
+	if hook := loadTestHooks().driverExec; hook != nil {
+		return hook(statement, exec)
+	}
+	return exec()
 }
 
 func (store *Store) quarantine(conn *sql.Conn) {

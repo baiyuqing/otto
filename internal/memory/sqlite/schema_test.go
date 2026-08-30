@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,7 +25,6 @@ func TestSchemaV1ManifestFeaturesAndFingerprint(t *testing.T) {
 	}
 	rows, err := conn.QueryContext(context.Background(), `
 		SELECT type, name, sql FROM sqlite_schema
-		WHERE name NOT LIKE 'sqlite_%'
 		ORDER BY type, name`)
 	if err != nil {
 		t.Fatal(err)
@@ -53,6 +53,14 @@ func TestSchemaV1ManifestFeaturesAndFingerprint(t *testing.T) {
 		if _, ok := objects["table:"+shadow]; !ok {
 			t.Errorf("missing FTS shadow table %s (objects: %v)", shadow, names)
 		}
+	}
+	for index := range expectedSQLiteAutoindexes {
+		if statement, ok := objects["index:"+index]; !ok || statement != "" {
+			t.Errorf("missing or non-internal autoindex %s", index)
+		}
+	}
+	if got, want := len(objects), len(expectedApplicationObjects)+len(expectedFTSShadowTables)+len(expectedSQLiteAutoindexes); got != want {
+		t.Fatalf("manifest object count = %d, want %d", got, want)
 	}
 	if got, want := queryString(t, conn, `SELECT value FROM memory_meta WHERE key='schema_fingerprint'`), compiledSchemaFingerprint; got != want {
 		t.Fatalf("schema fingerprint = %q, want %q", got, want)
@@ -194,6 +202,108 @@ func TestSchemaPreflightRefusesUnknownLayoutsWithoutWrites(t *testing.T) {
 	}
 }
 
+func TestSchemaPreflightRejectsWALOnlyFutureAndCorruptLayoutsWithoutWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mutation string
+		category error
+	}{
+		{"future version", `PRAGMA user_version=2`, memory.ErrIncompatibleSchema},
+		{"corrupt object", `CREATE TABLE wal_only_unknown(value TEXT)`, memory.ErrCorrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "wal-preflight", "memory.db")
+			store := openTestStore(t, path)
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			raw := openRaw(t, path)
+			defer raw.Close()
+			if _, err := raw.Exec(`PRAGMA wal_autocheckpoint=0`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`BEGIN IMMEDIATE; ` + tc.mutation + `; COMMIT`); err != nil {
+				t.Fatal(err)
+			}
+			databaseBefore := fileDigest(t, path)
+			walBefore := fileDigest(t, path+"-wal")
+			var writeOpen atomic.Bool
+			installTestHooks(t, testHooks{path: func(event pathEvent) {
+				if event == pathBeforeWriteDriverOpen {
+					writeOpen.Store(true)
+				}
+			}})
+			_, err := Open(context.Background(), path, Options{Guard: testGuard(t), NewID: memory.NewID})
+			assertSafeError(t, err, tc.category, path)
+			if writeOpen.Load() {
+				t.Fatal("write-capable connection opened for WAL-only refusal")
+			}
+			if got := fileDigest(t, path); got != databaseBefore {
+				t.Fatal("WAL-only refusal changed database digest")
+			}
+			if got := fileDigest(t, path+"-wal"); got != walBefore {
+				t.Fatal("WAL-only refusal changed WAL digest")
+			}
+		})
+	}
+}
+
+func TestSchemaWriteConnectionRechecksSameInodeBeforePersistentPragmas(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mutation string
+		category error
+	}{
+		{"future version", `PRAGMA user_version=2`, memory.ErrIncompatibleSchema},
+		{"manifest corruption", `CREATE TABLE same_inode_unknown(value TEXT)`, memory.ErrCorrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "same-inode", "memory.db")
+			store := openTestStore(t, path)
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var mutated atomic.Bool
+			var mutationDB *sql.DB
+			var databaseAfterMutation [32]byte
+			var walAfterMutation [32]byte
+			var hadWAL bool
+			installTestHooks(t, testHooks{path: func(event pathEvent) {
+				if event != pathAfterPreflightClose || !mutated.CompareAndSwap(false, true) {
+					return
+				}
+				mutationDB = openRaw(t, path)
+				if _, err := mutationDB.Exec(tc.mutation); err != nil {
+					t.Fatal(err)
+				}
+				databaseAfterMutation = fileDigest(t, path)
+				if _, err := os.Stat(path + "-wal"); err == nil {
+					hadWAL = true
+					walAfterMutation = fileDigest(t, path+"-wal")
+				}
+			}})
+			_, err := Open(context.Background(), path, Options{Guard: testGuard(t), NewID: memory.NewID})
+			assertSafeError(t, err, tc.category, path)
+			if !mutated.Load() {
+				t.Fatal("preflight-to-write mutation hook was not reached")
+			}
+			if got := fileDigest(t, path); got != databaseAfterMutation {
+				t.Fatal("refusal performed a persistent database write")
+			}
+			if hadWAL {
+				if got := fileDigest(t, path+"-wal"); got != walAfterMutation {
+					t.Fatal("refusal performed a persistent WAL write")
+				}
+			}
+			if mutationDB != nil {
+				if closeErr := mutationDB.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
+			}
+		})
+	}
+}
+
 func TestSchemaV1CorruptionIsNeverRepaired(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -231,6 +341,29 @@ func TestSchemaV1CorruptionIsNeverRepaired(t *testing.T) {
 		}},
 		{"changed fingerprint", func(t *testing.T, db *sql.DB) {
 			if _, err := db.Exec(`UPDATE memory_meta SET value='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' WHERE key='schema_fingerprint'`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"oversized fifth metadata row", func(t *testing.T, db *sql.DB) {
+			if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON; INSERT INTO memory_meta(key,value) VALUES('extra',?)`, strings.Repeat("x", 257)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"sqlite_stat1", func(t *testing.T, db *sql.DB) {
+			if _, err := db.Exec(`ANALYZE`); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"many extra objects are bounded", func(t *testing.T, db *sql.DB) {
+			var statements strings.Builder
+			statements.WriteString("BEGIN;")
+			for i := 0; i < 128; i++ {
+				statements.WriteString("CREATE TABLE bounded_extra_")
+				statements.WriteString(strconv.Itoa(i))
+				statements.WriteString("(value TEXT);")
+			}
+			statements.WriteString("COMMIT;")
+			if _, err := db.Exec(statements.String()); err != nil {
 				t.Fatal(err)
 			}
 		}},

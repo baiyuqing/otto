@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/memory"
@@ -74,11 +75,13 @@ type Store struct {
 	poisoned    chan struct{}
 	poisonOnce  sync.Once
 
-	lifecycleMu sync.Mutex
-	lifecycle   *sync.Cond
-	state       storeState
-	active      int
-	closeErr    error
+	lifecycleMu       sync.Mutex
+	lifecycle         *sync.Cond
+	state             storeState
+	active            int
+	closeErr          error
+	operationIdentity atomic.Uint64
+	quarantined       atomic.Int32
 }
 
 type pathEvent uint8
@@ -129,6 +132,11 @@ type testHooks struct {
 	driverExec                      func(statement string, exec func() error) error
 	readSetupExec                   func(statement string, exec func() error) error
 	beforeReadGeneration            func(*sql.Conn)
+	beforeQuickCheck                func()
+	beforeFTS5Integrity             func(*sql.Conn)
+	beforePreflightRecheck          func()
+	operationAdmitted               func()
+	afterConnectionAcquired         func()
 	afterMutationPreRead            func()
 	beforeCandidateDecision         func() error
 	beforeCandidateCommit           func() error
@@ -137,6 +145,8 @@ type testHooks struct {
 	beforeObservationCorrespondence func(observationCorrespondenceEvent)
 	restoreBusyTimeout              func(statement string, exec func() error) error
 	closeError                      func(resource string, actual error) error
+	closeWait                       func(owner bool)
+	beforeCloseResources            func()
 }
 
 var (
@@ -322,6 +332,9 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		if err := configureConnection(firstConn, busyTimeout); err != nil {
 			return memory.StoreIdentity{}, err
 		}
+		if hook := loadTestHooks().beforePreflightRecheck; hook != nil {
+			hook()
+		}
 		if err := recheckPreflight(ctx, firstConn, preflightIdentity, needsInitialization); err != nil {
 			return memory.StoreIdentity{}, err
 		}
@@ -377,7 +390,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		if err == nil {
 			var got memory.StoreIdentity
 			got, err = verifySchema(ctx, conn)
-			if err == nil && got != identity {
+			if err == nil && !sameStableIdentity(got, identity) {
 				err = memory.ErrCorrupt
 			}
 		}
@@ -413,14 +426,21 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		store.connections <- conn
 	}
 	keepPath = true
-	// Account the final guard callback before publishing Store readiness. A
-	// concurrent Close may begin through test instrumentation, but it cannot
-	// release Store resources under an in-flight callback.
+	// Account the final guard callback before publishing Store readiness. The
+	// deferred owner cleanup is deliberately installed before either test
+	// instrumentation or user guard code can panic.
 	openDone, err := store.admit()
 	if err != nil {
 		_ = store.Close()
 		return nil, err
 	}
+	published := false
+	defer func() {
+		openDone()
+		if !published {
+			_ = store.Close()
+		}
+	}()
 	if hook := loadTestHooks().storeReady; hook != nil {
 		hook(store)
 	}
@@ -428,11 +448,10 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	if guardErr == nil {
 		guardErr = ctx.Err()
 	}
-	openDone()
 	if guardErr != nil {
-		_ = store.Close()
 		return nil, guardErr
 	}
+	published = true
 	return store, nil
 }
 
@@ -447,13 +466,17 @@ func recheckPreflight(ctx context.Context, conn *sql.Conn, before memory.StoreId
 		}
 		return nil
 	}
-	if !beforeNeedsInitialization && identity != before {
+	if !beforeNeedsInitialization && !sameStableIdentity(identity, before) {
 		return memory.ErrCorrupt
 	}
 	// A separately opened handle or process may have completed a valid virgin
 	// bootstrap after our read-only preflight. initializeOrVerifySchema will use
 	// and return that winner's durable identity rather than the prospective IDs.
 	return nil
+}
+
+func sameStableIdentity(left, right memory.StoreIdentity) bool {
+	return left.DatabaseID == right.DatabaseID && left.UserScope == right.UserScope && left.SchemaVersion == right.SchemaVersion
 }
 
 func validateOptions(options Options) (time.Duration, error) {
@@ -698,21 +721,55 @@ func (store *Store) Identity(ctx context.Context) (memory.StoreIdentity, error) 
 
 type operationAdmissionKey struct{}
 
-type operationAdmission struct{ store *Store }
+type operationAdmission struct {
+	store    *Store
+	identity uint64
+	state    atomic.Uint64
+}
+
+func admissionFromContext(ctx context.Context, store *Store) (*operationAdmission, bool, error) {
+	admitted, ok := ctx.Value(operationAdmissionKey{}).(*operationAdmission)
+	if !ok || admitted.store != store {
+		return nil, false, nil
+	}
+	if admitted.identity == 0 || admitted.state.Load() != admitted.identity {
+		return nil, true, memory.ErrClosed
+	}
+	return admitted, true, nil
+}
 
 func (store *Store) startOperation(ctx context.Context) (context.Context, func(), error) {
-	if admitted, ok := ctx.Value(operationAdmissionKey{}).(operationAdmission); ok && admitted.store == store {
+	if _, found, err := admissionFromContext(ctx, store); found {
+		if err != nil {
+			return ctx, nil, err
+		}
 		return ctx, func() {}, nil
 	}
 	done, err := store.admit()
 	if err != nil {
 		return ctx, nil, err
 	}
-	return context.WithValue(ctx, operationAdmissionKey{}, operationAdmission{store: store}), done, nil
+	identity := store.operationIdentity.Add(1)
+	if identity == 0 { // Preserve zero as the dead-token state after wraparound.
+		identity = store.operationIdentity.Add(1)
+	}
+	admitted := &operationAdmission{store: store, identity: identity}
+	admitted.state.Store(identity)
+	if hook := loadTestHooks().operationAdmitted; hook != nil {
+		hook()
+	}
+	return context.WithValue(ctx, operationAdmissionKey{}, admitted), func() {
+		if admitted.state.CompareAndSwap(identity, 0) {
+			done()
+		}
+	}, nil
 }
 
 func (store *Store) continueOperation(ctx context.Context) (func(), error) {
-	if admitted, ok := ctx.Value(operationAdmissionKey{}).(operationAdmission); ok && admitted.store == store {
+	if _, found, err := admissionFromContext(ctx, store); found {
+		if err != nil {
+			return nil, err
+		}
 		return func() {}, nil
 	}
 	return store.admit()
@@ -751,6 +808,9 @@ func (store *Store) Close() error {
 	switch store.state {
 	case storeClosing:
 		for store.state == storeClosing {
+			if hook := loadTestHooks().closeWait; hook != nil {
+				hook(false)
+			}
 			store.lifecycle.Wait()
 		}
 		err := store.closeErr
@@ -763,10 +823,16 @@ func (store *Store) Close() error {
 	}
 	store.state = storeClosing
 	for store.active != 0 {
+		if hook := loadTestHooks().closeWait; hook != nil {
+			hook(true)
+		}
 		store.lifecycle.Wait()
 	}
 	store.lifecycleMu.Unlock()
 
+	if hook := loadTestHooks().beforeCloseResources; hook != nil {
+		hook()
+	}
 	var closeFailed bool
 	for _, conn := range store.allConns {
 		if err := conn.Close(); err != nil && !errors.Is(err, sql.ErrConnDone) && !errors.Is(err, driver.ErrBadConn) {

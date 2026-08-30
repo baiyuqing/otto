@@ -305,9 +305,14 @@ func (store *Store) borrowConnection(ctx context.Context) (*sql.Conn, error) {
 	case conn := <-store.connections:
 		select {
 		case <-store.poisoned:
-			_ = conn.Close()
+			// Poison rejects new work, but it does not make this healthy retained
+			// connection ambiguous. Return it for exact owner accounting.
+			store.returnConnection(conn)
 			return nil, memory.ErrUnavailable
 		default:
+			if hook := loadTestHooks().afterConnectionAcquired; hook != nil {
+				hook()
+			}
 			return conn, nil
 		}
 	}
@@ -345,11 +350,10 @@ func (store *Store) returnConnection(conn *sql.Conn) {
 	if conn == nil {
 		return
 	}
-	select {
-	case <-store.poisoned:
-		_ = conn.Close()
-	case store.connections <- conn:
-	}
+	// Only the connection with an uncertain driver COMMIT (or another
+	// independently failed connection) is quarantined. Poison is Store-level
+	// admission state, not evidence that healthy borrowed connections failed.
+	store.connections <- conn
 }
 
 func (store *Store) rollback(conn *sql.Conn) error {
@@ -376,6 +380,7 @@ func (store *Store) quarantine(conn *sql.Conn) {
 	if conn == nil {
 		return
 	}
+	store.quarantined.Add(1)
 	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 	_ = conn.Close()
 }

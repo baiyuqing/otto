@@ -178,20 +178,16 @@ var expectedSQLiteAutoindexes = map[string]string{
 	"sqlite_autoindex_memory_candidates_1":   "memory_candidates",
 }
 
-var expectedFTSShadowTables = []string{
-	"memory_records_fts_config",
-	"memory_records_fts_content",
-	"memory_records_fts_data",
-	"memory_records_fts_docsize",
-	"memory_records_fts_idx",
-}
-
-var expectedFTSShadowColumns = map[string][]string{
-	"memory_records_fts_config":  {"k", "v"},
-	"memory_records_fts_content": {"id", "c0", "c1", "c2", "c3", "c4"},
-	"memory_records_fts_data":    {"id", "block"},
-	"memory_records_fts_docsize": {"id", "sz"},
-	"memory_records_fts_idx":     {"segid", "term", "pgno"},
+// SQLite 3.53.3 as pinned through modernc.org/sqlite v1.57.0 emits these
+// exact FTS5 shadow-table definitions for createMemoryRecordsFTS. They are
+// part of schema v1: accepting merely compatible names/columns would permit a
+// database whose storage schema was not produced by the compiled manifest.
+var expectedFTSShadowTables = map[string]string{
+	"memory_records_fts_config":  `CREATE TABLE 'memory_records_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID`,
+	"memory_records_fts_content": `CREATE TABLE 'memory_records_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4)`,
+	"memory_records_fts_data":    `CREATE TABLE 'memory_records_fts_data'(id INTEGER PRIMARY KEY, block BLOB)`,
+	"memory_records_fts_docsize": `CREATE TABLE 'memory_records_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)`,
+	"memory_records_fts_idx":     `CREATE TABLE 'memory_records_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID`,
 }
 
 func fingerprintManifest(manifest string) string {
@@ -341,7 +337,9 @@ func verifySchema(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, er
 		}
 		expectedNames = append(expectedNames, name)
 	}
-	expectedNames = append(expectedNames, expectedFTSShadowTables...)
+	for name := range expectedFTSShadowTables {
+		expectedNames = append(expectedNames, name)
+	}
 	for name := range expectedSQLiteAutoindexes {
 		expectedNames = append(expectedNames, name)
 	}
@@ -394,13 +392,10 @@ func verifySchema(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, er
 			return memory.StoreIdentity{}, memory.ErrCorrupt
 		}
 	}
-	for _, table := range expectedFTSShadowTables {
+	for table, expected := range expectedFTSShadowTables {
 		actual, ok := objects[table]
-		if !ok || actual.typ != "table" || actual.table != table || !actual.statement.Valid {
+		if !ok || actual.typ != "table" || actual.table != table || !actual.statement.Valid || normalizeSchemaSQL(actual.statement.String) != normalizeSchemaSQL(expected) {
 			return memory.StoreIdentity{}, memory.ErrCorrupt
-		}
-		if err := verifyTableColumns(ctx, conn, table, expectedFTSShadowColumns[table]); err != nil {
-			return memory.StoreIdentity{}, err
 		}
 	}
 	for name, table := range expectedSQLiteAutoindexes {
@@ -475,6 +470,9 @@ func verifySchema(ctx context.Context, conn *sql.Conn) (memory.StoreIdentity, er
 }
 
 func verifyQuickCheck(ctx context.Context, conn *sql.Conn) error {
+	if hook := loadTestHooks().beforeQuickCheck; hook != nil {
+		hook()
+	}
 	// The argument bounds SQLite's diagnostic output to one row. Accepting only
 	// one exact "ok" result prevents diagnostics (which may contain content or
 	// paths) from crossing the adapter error boundary.
@@ -556,8 +554,11 @@ func verifyContentIntegrity(ctx context.Context, conn *sql.Conn) error {
 
 	labels := `COALESCE((SELECT group_concat(value,char(10)) FROM
 		(SELECT value FROM json_each(r.labels_json) WHERE type='text' ORDER BY value)), '')`
-	if err := requireNoIntegrityRow(ctx, conn, `SELECT 1 FROM memory_records AS r
-		WHERE r.state='active' AND (SELECT count(*) FROM memory_records_fts AS f WHERE f.record_id=r.id)<>1 LIMIT 1`); err != nil {
+	// FTS record_id is UNINDEXED. Keep startup verification linear in result
+	// shape: one grouped duplicate pass, one FTS-to-primary-key correspondence
+	// pass, then aggregate parity to prove no active row is missing.
+	if err := requireNoIntegrityRow(ctx, conn, `SELECT 1 FROM memory_records_fts
+		GROUP BY record_id HAVING count(*)<>1 LIMIT 1`); err != nil {
 		return err
 	}
 	if err := requireNoIntegrityRow(ctx, conn, `SELECT 1 FROM memory_records_fts AS f
@@ -567,6 +568,11 @@ func verifyContentIntegrity(ctx context.Context, conn *sql.Conn) error {
 		   OR typeof(f.kind)<>'text' OR f.kind<>r.kind
 		   OR typeof(f.semantic_key)<>'text' OR f.semantic_key<>r.semantic_key
 		   OR typeof(f.labels)<>'text' OR f.labels<>`+labels+` LIMIT 1`); err != nil {
+		return err
+	}
+	if err := requireNoIntegrityRow(ctx, conn, `SELECT 1
+		WHERE (SELECT count(*) FROM memory_records WHERE state='active')
+		   <> (SELECT count(*) FROM memory_records_fts) LIMIT 1`); err != nil {
 		return err
 	}
 	return nil
@@ -660,6 +666,9 @@ func requireNoIntegrityRow(ctx context.Context, conn *sql.Conn, query string) er
 }
 
 func verifyFTS5Integrity(ctx context.Context, conn *sql.Conn) error {
+	if hook := loadTestHooks().beforeFTS5Integrity; hook != nil {
+		hook(conn)
+	}
 	// The FTS5 integrity command uses SQLite's write-command surface even
 	// though it does not repair or retain data. An immediate transaction makes
 	// independent openers serialize this check with real mutations instead of
@@ -697,42 +706,6 @@ func integritySQLiteError(ctx context.Context, err error) error {
 	// Integrity SQL never exports SQLite diagnostics: any non-contention
 	// failure while examining a proven database is a corruption category.
 	return memory.ErrCorrupt
-}
-
-func verifyTableColumns(ctx context.Context, conn *sql.Conn, table string, expected []string) error {
-	// Table names and the row bound come only from the compiled manifest.
-	rows, err := conn.QueryContext(ctx, `SELECT name FROM pragma_table_xinfo(?) LIMIT ?`, table, len(expected)+1)
-	if err != nil {
-		return safeSQLiteError(ctx, err)
-	}
-	count := 0
-	for rows.Next() {
-		if count >= len(expected) {
-			_ = rows.Close()
-			return memory.ErrCorrupt
-		}
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			_ = rows.Close()
-			return safeSQLiteError(ctx, err)
-		}
-		if name != expected[count] {
-			_ = rows.Close()
-			return memory.ErrCorrupt
-		}
-		count++
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return safeSQLiteError(ctx, err)
-	}
-	if err := rows.Close(); err != nil {
-		return safeSQLiteError(ctx, err)
-	}
-	if count != len(expected) {
-		return memory.ErrCorrupt
-	}
-	return nil
 }
 
 func validDatabaseID(value string) bool {

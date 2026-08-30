@@ -41,6 +41,7 @@ func TestOpenSynchronizesNewPathBeforeDriverUse(t *testing.T) {
 	store := openTestStore(t, path)
 	_ = store
 	want := []string{
+		"ancestor-parent",
 		"prepared-directory", "directory-install", "directory-parent",
 		"prepared-directory", "directory-install", "directory-parent",
 		"database-file", "database-parent", "driver-open",
@@ -54,6 +55,80 @@ func TestOpenSynchronizesNewPathBeforeDriverUse(t *testing.T) {
 	if !reflect.DeepEqual(got[:len(want)], want) {
 		t.Fatalf("durability order = %v, want prefix %v", got, want)
 	}
+}
+
+func TestOpenRepairsFailedDirectoryInstallSyncOnRetry(t *testing.T) {
+	t.Run("repair precedes successful retry", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "new", "memory.db")
+		var mu sync.Mutex
+		var events []string
+		failedInstall := false
+		installTestHooks(t, testHooks{fsync: func(resource string, syncDescriptor func() error) error {
+			mu.Lock()
+			events = append(events, resource)
+			shouldFail := resource == "directory-parent" && !failedInstall
+			if shouldFail {
+				failedInstall = true
+			}
+			mu.Unlock()
+			if shouldFail {
+				return errors.New("injected install sync failure")
+			}
+			return syncDescriptor()
+		}})
+		store, err := Open(context.Background(), path, testOptions(t))
+		if store != nil {
+			_ = store.Close()
+		}
+		if !errors.Is(err, memory.ErrUnavailable) || !failedInstall {
+			t.Fatalf("first Open = %v, failedInstall=%v", err, failedInstall)
+		}
+
+		mu.Lock()
+		events = nil
+		mu.Unlock()
+		store, err = Open(context.Background(), path, testOptions(t))
+		if err != nil {
+			t.Fatalf("retry Open = %v", err)
+		}
+		defer store.Close()
+		mu.Lock()
+		got := append([]string(nil), events...)
+		mu.Unlock()
+		wantPrefix := []string{"ancestor-parent", "database-file", "database-parent"}
+		if len(got) < len(wantPrefix) || !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
+			t.Fatalf("retry durability order = %v, want prefix %v", got, wantPrefix)
+		}
+	})
+
+	t.Run("persistent repair failure remains unavailable", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "new", "memory.db")
+		failedInstall := false
+		failRepair := false
+		installTestHooks(t, testHooks{fsync: func(resource string, syncDescriptor func() error) error {
+			if resource == "directory-parent" && !failedInstall {
+				failedInstall = true
+				return errors.New("injected install sync failure")
+			}
+			if resource == "ancestor-parent" && failRepair {
+				return errors.New("injected repair sync failure")
+			}
+			return syncDescriptor()
+		}})
+		store, err := Open(context.Background(), path, testOptions(t))
+		if store != nil {
+			_ = store.Close()
+		}
+		if !errors.Is(err, memory.ErrUnavailable) || !failedInstall {
+			t.Fatalf("first Open = %v, failedInstall=%v", err, failedInstall)
+		}
+		failRepair = true
+		store, err = Open(context.Background(), path, testOptions(t))
+		if store != nil {
+			_ = store.Close()
+		}
+		assertSafeError(t, err, memory.ErrUnavailable, path, "injected")
+	})
 }
 
 func TestOpenFsyncFailuresFailClosed(t *testing.T) {
@@ -104,18 +179,88 @@ func TestBootstrapCancellationCommitPoint(t *testing.T) {
 		}
 	})
 
-	t.Run("cancellation after commit starts does not mask success", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "commit-started", "memory.db")
+	t.Run("cancellation after known commit success does not mask success", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "commit-succeeded", "memory.db")
+		ctx, cancel := context.WithCancel(context.Background())
+		commitSucceeded := make(chan struct{})
+		releaseResponse := make(chan struct{})
+		installTestHooks(t, testHooks{bootstrapDriverCommit: func(exec func() error) error {
+			if err := exec(); err != nil {
+				return err
+			}
+			close(commitSucceeded)
+			<-releaseResponse
+			return nil
+		}})
+		type openResult struct {
+			store *Store
+			err   error
+		}
+		result := make(chan openResult, 1)
+		options := testOptions(t)
+		go func() {
+			store, err := Open(ctx, path, options)
+			result <- openResult{store: store, err: err}
+		}()
+		<-commitSucceeded
+		cancel()
+		close(releaseResponse)
+		opened := <-result
+		if opened.err != nil {
+			t.Fatalf("Open = %v", opened.err)
+		}
+		defer opened.store.Close()
+		identity, err := opened.store.Identity(context.Background())
+		if err != nil || identity.Generation != 0 {
+			t.Fatalf("identity = %#v, %v", identity, err)
+		}
+	})
+
+	t.Run("already initialized verification keeps cancellation", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "already-initialized", "memory.db")
+		initialized := openTestStore(t, path)
+		if err := initialized.Close(); err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		installTestHooks(t, testHooks{initializeCommitStarted: cancel})
 		store, err := Open(ctx, path, testOptions(t))
-		if err != nil {
-			t.Fatalf("Open = %v", err)
+		if store != nil {
+			_ = store.Close()
 		}
-		defer store.Close()
-		identity, err := store.Identity(context.Background())
-		if err != nil || identity.Generation != 0 {
-			t.Fatalf("identity = %#v, %v", identity, err)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Open = %v, want context cancellation", err)
+		}
+	})
+
+	t.Run("cancellation with ambiguous commit preserves commit unknown", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "commit-ambiguous", "memory.db")
+		ctx, cancel := context.WithCancel(context.Background())
+		commitSucceeded := make(chan struct{})
+		releaseResponse := make(chan struct{})
+		installTestHooks(t, testHooks{bootstrapDriverCommit: func(exec func() error) error {
+			if err := exec(); err != nil {
+				return err
+			}
+			close(commitSucceeded)
+			<-releaseResponse
+			return errors.New("injected response loss")
+		}})
+		result := make(chan error, 1)
+		options := testOptions(t)
+		go func() {
+			store, err := Open(ctx, path, options)
+			if store != nil {
+				_ = store.Close()
+			}
+			result <- err
+		}()
+		<-commitSucceeded
+		cancel()
+		close(releaseResponse)
+		err := <-result
+		if !errors.Is(err, memory.ErrCommitUnknown) || errors.Is(err, context.Canceled) {
+			t.Fatalf("Open = %v, want ErrCommitUnknown", err)
 		}
 	})
 }

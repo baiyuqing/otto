@@ -70,13 +70,7 @@ func (store *Store) Retrieve(ctx context.Context, input memory.RetrievalRequest)
 	}
 	defer operationDone()
 	request := memory.CloneRetrievalRequest(input)
-	validation := request
-	if validation.Query == "" {
-		// Empty retrieval is a baseline request; the neutral validator otherwise
-		// deliberately requires query text for search-like operations.
-		validation.Query = "baseline"
-	}
-	if err := memory.ValidateRetrievalRequest(validation); err != nil {
+	if err := memory.ValidateRetrievalRequest(request); err != nil {
 		return memory.RetrievalResult{}, err
 	}
 	expression, err := buildFTSLiteralExpression(request.Query)

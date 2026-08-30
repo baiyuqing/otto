@@ -106,9 +106,9 @@ func openSecurePath(ctx context.Context, inputPath string) (*securePath, error) 
 		return nil, err
 	}
 
-	ancestorFD, err := openDirectoryAbsolute(canonicalAncestor)
+	ancestorFD, err := openPhysicalAncestorWithRepairSync(canonicalAncestor)
 	if err != nil {
-		return nil, memory.ErrInvalidRequest
+		return nil, err
 	}
 	currentFD := ancestorFD
 	currentPath := canonicalAncestor
@@ -393,6 +393,47 @@ func fsyncSecureDescriptor(resource string, fd int) error {
 		return memory.ErrUnavailable
 	}
 	return nil
+}
+
+func openPhysicalAncestorWithRepairSync(path string) (int, error) {
+	ancestorFD, err := openDirectoryAbsolute(path)
+	if err != nil {
+		return -1, memory.ErrInvalidRequest
+	}
+	cleanPath := filepath.Clean(path)
+	if cleanPath == string(filepath.Separator) {
+		return ancestorFD, nil
+	}
+	parentFD, err := openDirectoryAbsolute(filepath.Dir(cleanPath))
+	if err != nil {
+		_ = unix.Close(ancestorFD)
+		return -1, memory.ErrInvalidRequest
+	}
+	closeWithError := func(result error) error {
+		if closeErr := unix.Close(parentFD); closeErr != nil && result == nil {
+			return memory.ErrUnavailable
+		}
+		return result
+	}
+	var ancestorStat, edgeStat unix.Stat_t
+	if err := unix.Fstat(ancestorFD, &ancestorStat); err != nil {
+		_ = unix.Close(ancestorFD)
+		return -1, closeWithError(memory.ErrUnavailable)
+	}
+	if err := unix.Fstatat(parentFD, filepath.Base(cleanPath), &edgeStat, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
+		uint32(edgeStat.Mode)&unix.S_IFMT != unix.S_IFDIR || identityFromStat(edgeStat) != identityFromStat(ancestorStat) {
+		_ = unix.Close(ancestorFD)
+		return -1, closeWithError(memory.ErrUnsupported)
+	}
+	if err := fsyncSecureDescriptor("ancestor-parent", parentFD); err != nil {
+		_ = unix.Close(ancestorFD)
+		return -1, closeWithError(err)
+	}
+	if err := closeWithError(nil); err != nil {
+		_ = unix.Close(ancestorFD)
+		return -1, err
+	}
+	return ancestorFD, nil
 }
 
 func openDirectoryAbsolute(path string) (int, error) {

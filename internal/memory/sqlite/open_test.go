@@ -489,6 +489,10 @@ func TestOpenCancellationAndCallbacksOutsideLocks(t *testing.T) {
 
 	t.Run("setup failure closes every physically opened connection", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "setup-cleanup", "memory.db")
+		initialized := openTestStore(t, path)
+		if err := initialized.Close(); err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		var opened atomic.Int64
 		installTestHooks(t, testHooks{path: func(event pathEvent) {

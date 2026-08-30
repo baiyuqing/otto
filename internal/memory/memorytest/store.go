@@ -34,6 +34,17 @@ type MutationStore interface {
 	Forget(context.Context, memory.StoreForgetRequest) (memory.Tombstone, error)
 }
 
+// CandidateStore is the complete neutral persistence surface added in Task 7.
+type CandidateStore interface {
+	MutationStore
+	GetCandidate(context.Context, memory.CandidateRef) (memory.Candidate, error)
+	ListCandidates(context.Context, memory.CandidateListRequest) (memory.CandidatePage, error)
+	Propose(context.Context, memory.ProposalBatch) (memory.CandidateBatch, error)
+	GetObservationReceipt(context.Context, string) (memory.ObservationReceipt, error)
+	CommitObservation(context.Context, memory.ObservationCommit) (memory.ObservationReceipt, error)
+	Review(context.Context, memory.StoreReviewRequest) (memory.ReviewResult, error)
+}
+
 // Corruption identifies a direct-storage fixture mutation. These values are
 // test-only and let conformance exercise adapter safety without production
 // fault methods on RecordStore.
@@ -806,6 +817,358 @@ func RunMutationConformance(t *testing.T, factory Factory) {
 			t.Fatalf("Forget retry after reconciliation = %#v, %v", idempotent, err)
 		}
 	})
+}
+
+// RunCandidateConformance checks candidate durability, observation idempotency,
+// review materialization, rebases, pagination, clearing, and cross-handle races.
+func RunCandidateConformance(t *testing.T, factory Factory) {
+	t.Helper()
+	newFixture := func(t *testing.T) (Fixture, CandidateStore) {
+		t.Helper()
+		fixture := factory(t)
+		store, ok := fixture.Store.(CandidateStore)
+		if !ok || fixture.Reopen == nil || fixture.Cleanup == nil || fixture.ForbiddenValue == "" {
+			t.Fatal("memorytest: incomplete required candidate fixture")
+		}
+		return fixture, store
+	}
+	identityGeneration := func(t *testing.T, store CandidateStore) uint64 {
+		t.Helper()
+		identity, err := store.Identity(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return identity.Generation
+	}
+	propose := func(t *testing.T, store CandidateStore, candidates ...memory.Candidate) memory.CandidateBatch {
+		t.Helper()
+		batch, err := store.Propose(context.Background(), memory.ProposalBatch{Candidates: candidates})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return batch
+	}
+
+	t.Run("proposal atomic order aliases exact reads and pagination", func(t *testing.T) {
+		fixture, store := newFixture(t)
+		defer fixture.Cleanup()
+		at := time.Date(2026, 8, 29, 20, 0, 0, 0, time.UTC)
+		scope := memory.Scope{Namespace: "user", ID: "candidate-page"}
+		first := pendingCandidate("candidate-b", scope, at)
+		second := pendingCandidate("candidate-a", scope, at)
+		want := []memory.Candidate{memory.CloneCandidate(first), memory.CloneCandidate(second)}
+		batch := propose(t, store, first, second)
+		if !reflect.DeepEqual(batch.Candidates, want) || identityGeneration(t, store) != 1 {
+			t.Fatalf("proposal = %#v, generation=%d", batch, identityGeneration(t, store))
+		}
+		first.Proposed.Labels[0], first.Proposed.Metadata["purpose"], first.Proposed.Source.MessageIDs[0] = "input", "input", "input"
+		batch.Candidates[0].Proposed.Labels[0] = "output"
+		got, err := store.GetCandidate(context.Background(), memory.CandidateRef{Scope: scope, ID: want[0].ID})
+		if err != nil || !reflect.DeepEqual(got, want[0]) {
+			t.Fatalf("GetCandidate = %#v, %v", got, err)
+		}
+		got.Proposed.Metadata["purpose"] = "alias"
+		again, _ := store.GetCandidate(context.Background(), memory.CandidateRef{Scope: scope, ID: want[0].ID})
+		if !reflect.DeepEqual(again, want[0]) {
+			t.Fatalf("candidate alias changed: %#v", again)
+		}
+		if _, err := store.GetCandidate(context.Background(), memory.CandidateRef{Scope: memory.Scope{Namespace: "user", ID: "wrong"}, ID: want[0].ID}); !errors.Is(err, memory.ErrNotFound) {
+			t.Fatalf("wrong scope = %v", err)
+		}
+		request := memory.CandidateListRequest{Scopes: []memory.Scope{scope}, States: []memory.CandidateState{memory.CandidatePending}, Limit: 1}
+		page1, err := store.ListCandidates(context.Background(), request)
+		if err != nil || len(page1.Candidates) != 1 || page1.Candidates[0].ID != "candidate-a" || page1.NextCursor == "" || strings.Contains(page1.NextCursor, want[0].Proposed.Text) {
+			t.Fatalf("first candidate page = %#v, %v", page1, err)
+		}
+		request.Cursor = page1.NextCursor
+		page2, err := store.ListCandidates(context.Background(), request)
+		if err != nil || len(page2.Candidates) != 1 || page2.Candidates[0].ID != "candidate-b" || page2.NextCursor != "" {
+			t.Fatalf("second candidate page = %#v, %v", page2, err)
+		}
+		bad := pendingCandidate("candidate-b", scope, at.Add(time.Second))
+		if _, err := store.Propose(context.Background(), memory.ProposalBatch{Candidates: []memory.Candidate{pendingCandidate("candidate-c", scope, at), bad}}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("duplicate batch = %v", err)
+		}
+		invalid := pendingCandidate("candidate-invalid", scope, at)
+		invalid.Proposed.Text = ""
+		if _, err := store.Propose(context.Background(), memory.ProposalBatch{Candidates: []memory.Candidate{pendingCandidate("candidate-atomic", scope, at), invalid}}); !errors.Is(err, memory.ErrInvalidRecord) {
+			t.Fatalf("invalid batch = %v", err)
+		}
+		sensitive := pendingCandidate("candidate-sensitive", scope, at)
+		sensitive.Proposed.Metadata["blocked"] = fixture.ForbiddenValue
+		if _, err := store.Propose(context.Background(), memory.ProposalBatch{Candidates: []memory.Candidate{pendingCandidate("candidate-guard-atomic", scope, at), sensitive}}); !errors.Is(err, memory.ErrSensitiveMemory) {
+			t.Fatalf("guarded batch = %v", err)
+		}
+		for _, id := range []string{"candidate-c", "candidate-atomic", "candidate-guard-atomic"} {
+			if _, err := store.GetCandidate(context.Background(), memory.CandidateRef{Scope: scope, ID: id}); !errors.Is(err, memory.ErrNotFound) {
+				t.Fatalf("atomic residue %s = %v", id, err)
+			}
+		}
+		if identityGeneration(t, store) != 1 {
+			t.Fatalf("failed proposal generation = %d", identityGeneration(t, store))
+		}
+		mutation := pendingCandidate("candidate-cursor-mutation", scope, at.Add(time.Second))
+		propose(t, store, mutation)
+		if _, err := store.ListCandidates(context.Background(), request); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("stale candidate cursor = %v", err)
+		}
+	})
+
+	t.Run("observation receipt is ordered durable and payload independent", func(t *testing.T) {
+		fixture, store := newFixture(t)
+		defer fixture.Cleanup()
+		ctx := context.Background()
+		at := time.Date(2026, 8, 29, 20, 10, 0, 0, time.UTC)
+		if _, err := store.GetObservationReceipt(ctx, "observation-empty"); !errors.Is(err, memory.ErrNotFound) {
+			t.Fatalf("unknown receipt = %v", err)
+		}
+		empty, err := store.CommitObservation(ctx, memory.ObservationCommit{ObservationID: "observation-empty", CreatedAt: at, Candidates: []memory.Candidate{}})
+		if err != nil || empty.Existing || empty.CandidateIDs == nil || len(empty.CandidateIDs) != 0 || identityGeneration(t, store) != 1 {
+			t.Fatalf("empty receipt = %#v, %v generation=%d", empty, err, identityGeneration(t, store))
+		}
+		// Durable receipt probing wins before validation of an alternate retry.
+		retry, err := store.CommitObservation(ctx, memory.ObservationCommit{ObservationID: "observation-empty"})
+		if err != nil || !retry.Existing || len(retry.CandidateIDs) != 0 || identityGeneration(t, store) != 1 {
+			t.Fatalf("empty retry = %#v, %v", retry, err)
+		}
+		scope := memory.Scope{Namespace: "user", ID: "observed"}
+		one := pendingCandidate("observed-two", scope, at.Add(time.Second))
+		two := pendingCandidate("observed-one", scope, at.Add(time.Second))
+		one.Proposed.Source.ObservationID, two.Proposed.Source.ObservationID = "observation-batch", "observation-batch"
+		commit := memory.ObservationCommit{ObservationID: "observation-batch", CreatedAt: at.Add(time.Second), Candidates: []memory.Candidate{one, two}}
+		receipt, err := store.CommitObservation(ctx, commit)
+		if err != nil || receipt.Existing || !reflect.DeepEqual(receipt.CandidateIDs, []string{one.ID, two.ID}) || identityGeneration(t, store) != 2 {
+			t.Fatalf("receipt = %#v, %v", receipt, err)
+		}
+		commit.Candidates[0].Proposed.Text = "caller mutation"
+		receipt.CandidateIDs[0] = "caller mutation"
+		listed, err := store.ListCandidates(ctx, memory.CandidateListRequest{Scopes: []memory.Scope{scope}, States: []memory.CandidateState{memory.CandidatePending}, Limit: 10})
+		if err != nil || len(listed.Candidates) != 2 || listed.Candidates[0].ID != two.ID || listed.Candidates[1].ID != one.ID {
+			t.Fatalf("observed candidates = %#v, %v", listed, err)
+		}
+		probe, err := store.GetObservationReceipt(ctx, "observation-batch")
+		if err != nil || !probe.Existing || !reflect.DeepEqual(probe.CandidateIDs, []string{one.ID, two.ID}) {
+			t.Fatalf("probe = %#v, %v", probe, err)
+		}
+		alternate := memory.ObservationCommit{ObservationID: "observation-batch", Candidates: []memory.Candidate{pendingCandidate("invalid-alternate", scope, time.Time{})}}
+		again, err := store.CommitObservation(ctx, alternate)
+		if err != nil || !again.Existing || !reflect.DeepEqual(again.CandidateIDs, probe.CandidateIDs) || identityGeneration(t, store) != 2 {
+			t.Fatalf("alternate retry = %#v, %v", again, err)
+		}
+		occupied := pendingCandidate("occupied-observation-candidate", scope, at.Add(2*time.Second))
+		propose(t, store, occupied)
+		duplicate := memory.CloneCandidate(occupied)
+		duplicate.Proposed.Source.ObservationID = "failed-observation"
+		if _, err := store.CommitObservation(ctx, memory.ObservationCommit{ObservationID: "failed-observation", CreatedAt: at.Add(2 * time.Second), Candidates: []memory.Candidate{duplicate}}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("failed candidate insert = %v", err)
+		}
+		if _, err := store.GetObservationReceipt(ctx, "failed-observation"); !errors.Is(err, memory.ErrNotFound) || identityGeneration(t, store) != 3 {
+			t.Fatalf("failed insert receipt residue = %v generation=%d", err, identityGeneration(t, store))
+		}
+		mismatch := pendingCandidate("observation-mismatch", scope, at.Add(3*time.Second))
+		mismatch.Proposed.Source.ObservationID = "other-observation"
+		if _, err := store.CommitObservation(ctx, memory.ObservationCommit{ObservationID: "observation-mismatch", CreatedAt: at.Add(3 * time.Second), Candidates: []memory.Candidate{mismatch}}); !errors.Is(err, memory.ErrCorrupt) && !errors.Is(err, memory.ErrInvalidRequest) {
+			t.Fatalf("mismatched source = %v", err)
+		}
+		if _, err := store.GetObservationReceipt(ctx, "observation-mismatch"); !errors.Is(err, memory.ErrNotFound) {
+			t.Fatalf("mismatch receipt residue = %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopenedBase, err := fixture.Reopen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		reopened := reopenedBase.(CandidateStore)
+		durable, err := reopened.GetObservationReceipt(ctx, "observation-batch")
+		if err != nil || !reflect.DeepEqual(durable.CandidateIDs, []string{one.ID, two.ID}) {
+			t.Fatalf("reopened receipt = %#v, %v", durable, err)
+		}
+	})
+
+	t.Run("reject clears content and survives reopen", func(t *testing.T) {
+		fixture, store := newFixture(t)
+		defer fixture.Cleanup()
+		at := time.Date(2026, 8, 29, 20, 20, 0, 0, time.UTC)
+		scope := memory.Scope{Namespace: "user", ID: "review-reject"}
+		candidate := pendingCandidate("reject-candidate", scope, at)
+		propose(t, store, candidate)
+		result, err := store.Review(context.Background(), memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: candidate.ID}, Decision: memory.ReviewReject, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(time.Second)})
+		if err != nil || result.Record != nil || result.Tombstone != nil || result.Candidate.State != memory.CandidateRejected || result.Candidate.Reason != "" || result.Candidate.Proposed.Text != "" || result.Candidate.Proposed.Scope != scope {
+			t.Fatalf("reject = %#v, %v", result, err)
+		}
+		if identityGeneration(t, store) != 2 {
+			t.Fatalf("reject generation = %d", identityGeneration(t, store))
+		}
+		if _, err := store.Review(context.Background(), memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: candidate.ID}, Decision: memory.ReviewReject, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(2 * time.Second)}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("second review = %v", err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopenedBase, err := fixture.Reopen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleared, err := reopenedBase.(CandidateStore).GetCandidate(context.Background(), memory.CandidateRef{Scope: scope, ID: candidate.ID})
+		if err != nil || cleared.Proposed.Text != "" || cleared.Reason != "" || cleared.State != memory.CandidateRejected {
+			t.Fatalf("reopened reject = %#v, %v", cleared, err)
+		}
+	})
+
+	t.Run("accept create update rebase and forget", func(t *testing.T) {
+		fixture, store := newFixture(t)
+		defer fixture.Cleanup()
+		ctx := context.Background()
+		at := time.Date(2026, 8, 29, 20, 30, 0, 0, time.UTC)
+		scope := memory.Scope{Namespace: "user", ID: "review-accept"}
+		create := pendingCandidate("create-candidate", scope, at)
+		propose(t, store, create)
+		for name, id := range map[string]string{"missing": "", "extra reject": "extra"} {
+			decision := memory.ReviewAccept
+			if name == "extra reject" {
+				decision = memory.ReviewReject
+			}
+			_, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: create.ID}, ResultRecordID: id, Decision: decision, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(time.Second)})
+			if !errors.Is(err, memory.ErrInvalidRequest) {
+				t.Fatalf("%s result ID = %v", name, err)
+			}
+		}
+		accepted, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: create.ID}, ResultRecordID: "created-record", Decision: memory.ReviewAccept, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(time.Second)})
+		if err != nil || accepted.Record == nil || accepted.Record.ID != "created-record" || accepted.Record.Revision != 1 || accepted.Record.Source.DecisionAt == nil || *accepted.Record.Source.DecisionAt != at.Add(time.Second) || accepted.Candidate.State != memory.CandidateAccepted || accepted.Candidate.Proposed.Text != "" {
+			t.Fatalf("accept create = %#v, %v", accepted, err)
+		}
+		collision := pendingCandidate("collision-candidate", scope, at.Add(2*time.Second))
+		propose(t, store, collision)
+		if _, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: collision.ID}, ResultRecordID: "created-record", Decision: memory.ReviewAccept, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(3 * time.Second)}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("colliding create = %v", err)
+		}
+		pending, _ := store.GetCandidate(ctx, memory.CandidateRef{Scope: scope, ID: collision.ID})
+		if pending.State != memory.CandidatePending {
+			t.Fatalf("collision resolved candidate: %#v", pending)
+		}
+
+		nilCreate := pendingCandidate("nil-update-create", scope, at.Add(2*time.Second))
+		nilCreate.Proposed.Key = "nil-update-key"
+		propose(t, store, nilCreate)
+		nilTarget, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: nilCreate.ID}, ResultRecordID: "nil-update-target", Decision: memory.ReviewAccept, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(3 * time.Second)})
+		if err != nil || nilTarget.Record == nil {
+			t.Fatalf("nil update target create = %#v, %v", nilTarget, err)
+		}
+		nilUpdate := pendingCandidate("nil-update-candidate", scope, at.Add(4*time.Second))
+		nilUpdate.Action, nilUpdate.TargetID, nilUpdate.BaseRevision = memory.CandidateUpdate, nilTarget.Record.ID, 1
+		nilUpdate.Proposed.Text = "accepted proposed content without edit"
+		propose(t, store, nilUpdate)
+		nilUpdated, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: nilUpdate.ID}, Decision: memory.ReviewAccept, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(5 * time.Second)})
+		if err != nil || nilUpdated.Record == nil || nilUpdated.Record.Text != nilUpdate.Proposed.Text || nilUpdated.Record.Revision != 2 {
+			t.Fatalf("nil edited update = %#v, %v", nilUpdated, err)
+		}
+
+		target := *accepted.Record
+		update := pendingCandidate("update-candidate", scope, at.Add(4*time.Second))
+		update.Action, update.TargetID, update.BaseRevision = memory.CandidateUpdate, target.ID, target.Revision
+		update.Proposed.Text, update.Proposed.Metadata = "intended update", map[string]string{"base": "proposal"}
+		propose(t, store, update)
+		otherBase, err := fixture.Reopen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		other := otherBase.(CandidateStore)
+		changed := memory.CloneRecord(target)
+		changed.Metadata = map[string]string{"concurrent": "preserve"}
+		changed.UpdatedAt = at.Add(5 * time.Second)
+		expected := uint64(1)
+		current, err := other.Upsert(ctx, memory.UpsertRequest{Record: changed, ExpectedRevision: &expected})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: update.ID}, Decision: memory.ReviewAccept, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(6 * time.Second)}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("stale nil update = %v", err)
+		}
+		refreshed := memory.CloneRecord(current)
+		refreshed.ID, refreshed.Revision, refreshed.CreatedAt, refreshed.UpdatedAt = "", 0, time.Time{}, time.Time{}
+		refreshed.Text = "rebased intended update"
+		refreshed.Source.DecisionAt, refreshed.Source.DecisionSource = nil, ""
+		targetRevision := current.Revision
+		updated, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: update.ID}, Decision: memory.ReviewAccept, Edited: &refreshed, TargetRevision: &targetRevision, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(6 * time.Second)})
+		if err != nil || updated.Record == nil || updated.Record.Revision != 3 || updated.Record.Metadata["concurrent"] != "preserve" || updated.Record.Text != refreshed.Text {
+			t.Fatalf("rebased update = %#v, %v", updated, err)
+		}
+
+		forget := pendingCandidate("forget-candidate", scope, at.Add(7*time.Second))
+		forget.Action, forget.TargetID, forget.BaseRevision = memory.CandidateForget, target.ID, 3
+		forget.Proposed = memory.Record{Scope: scope, Source: memory.Provenance{Origin: memory.OriginModel}}
+		propose(t, store, forget)
+		concurrent := memory.CloneRecord(*updated.Record)
+		concurrent.Text, concurrent.UpdatedAt = "concurrent update before forget rebase", at.Add(8*time.Second)
+		expected = 3
+		current, err = other.Upsert(ctx, memory.UpsertRequest{Record: concurrent, ExpectedRevision: &expected})
+		if err != nil || current.Revision != 4 {
+			t.Fatalf("concurrent forget target = %#v, %v", current, err)
+		}
+		if _, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: forget.ID}, Decision: memory.ReviewAccept, DecisionSource: memory.OriginMigration, DecidedAt: at.Add(9 * time.Second)}); !errors.Is(err, memory.ErrConflict) {
+			t.Fatalf("stale forget = %v", err)
+		}
+		forgetRevision := uint64(4)
+		forgotten, err := store.Review(ctx, memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: forget.ID}, Decision: memory.ReviewAccept, TargetRevision: &forgetRevision, DecisionSource: memory.OriginMigration, DecidedAt: at.Add(9 * time.Second)})
+		if err != nil || forgotten.Tombstone == nil || forgotten.Tombstone.Revision != 5 || forgotten.Candidate.ResultRevision != 5 {
+			t.Fatalf("rebased forget = %#v, %v", forgotten, err)
+		}
+		if _, err := store.Get(ctx, memory.RecordRef{Scope: scope, ID: target.ID}); !errors.Is(err, memory.ErrNotFound) {
+			t.Fatalf("forgotten active read = %v", err)
+		}
+	})
+
+	t.Run("two review handles have exactly one winner", func(t *testing.T) {
+		fixture, first := newFixture(t)
+		defer fixture.Cleanup()
+		at := time.Date(2026, 8, 29, 20, 50, 0, 0, time.UTC)
+		scope := memory.Scope{Namespace: "user", ID: "review-race"}
+		candidate := pendingCandidate("race-candidate", scope, at)
+		propose(t, first, candidate)
+		secondBase, err := fixture.Reopen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		second := secondBase.(CandidateStore)
+		request := memory.StoreReviewRequest{Ref: memory.CandidateRef{Scope: scope, ID: candidate.ID}, Decision: memory.ReviewReject, DecisionSource: memory.OriginHuman, DecidedAt: at.Add(time.Second)}
+		errorsCh := make(chan error, 2)
+		start := make(chan struct{})
+		for _, store := range []CandidateStore{first, second} {
+			go func(store CandidateStore) {
+				<-start
+				_, err := store.Review(context.Background(), request)
+				errorsCh <- err
+			}(store)
+		}
+		close(start)
+		successes, conflicts := 0, 0
+		for range 2 {
+			err := <-errorsCh
+			if err == nil {
+				successes++
+			} else if errors.Is(err, memory.ErrConflict) {
+				conflicts++
+			} else {
+				t.Fatalf("race error = %v", err)
+			}
+		}
+		if successes != 1 || conflicts != 1 {
+			t.Fatalf("race successes=%d conflicts=%d", successes, conflicts)
+		}
+	})
+}
+
+func pendingCandidate(id string, scope memory.Scope, at time.Time) memory.Candidate {
+	return memory.Candidate{
+		ID: id, Action: memory.CandidateCreate, State: memory.CandidatePending, CreatedAt: at, Reason: "candidate reason",
+		Proposed: memory.Record{
+			Scope: scope, Kind: "note", Key: id, Text: "candidate proposed text", Labels: []string{"candidate"},
+			Metadata: map[string]string{"purpose": "test"}, Confidence: 0.75,
+			Source: memory.Provenance{Origin: memory.OriginModel, SessionID: "candidate-session", MessageIDs: []string{"candidate-message"}},
+		},
+	}
 }
 
 func assertNormalizedCollections(t *testing.T, record memory.Record) {

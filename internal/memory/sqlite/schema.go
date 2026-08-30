@@ -246,6 +246,9 @@ func inspectPreflightSnapshot(ctx context.Context, conn *sql.Conn) (memory.Store
 }
 
 func initializeOrVerifySchema(ctx context.Context, conn *sql.Conn, databaseID, userID string) (identity memory.StoreIdentity, err error) {
+	if hook := loadTestHooks().beforeInitializeBegin; hook != nil {
+		hook()
+	}
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
 	}

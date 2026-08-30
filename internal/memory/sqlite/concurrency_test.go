@@ -134,14 +134,33 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 	type seamCase struct {
 		name    string
 		prepare func(*testing.T, *Store, chan struct{}, <-chan struct{}) (testHooks, func() error)
+		blocked func(*testing.T, *Store)
 	}
 	cases := []seamCase{
-		{"SQL execution", func(_ *testing.T, store *Store, entered chan struct{}, release <-chan struct{}) (testHooks, func() error) {
-			var once sync.Once
-			return testHooks{afterConnectionAcquired: func() { once.Do(func() { close(entered) }); <-release }}, func() error {
-				_, err := store.Identity(context.Background())
-				return err
+		{"Identity SQL response", func(_ *testing.T, store *Store, entered chan struct{}, release <-chan struct{}) (testHooks, func() error) {
+			return testHooks{identityReadGeneration: func(query func() (uint64, error)) (uint64, error) {
+					generation, err := query()
+					close(entered)
+					<-release
+					return generation, err
+				}}, func() error {
+					identity, err := store.Identity(context.Background())
+					if err == nil && identity != store.identity {
+						return fmt.Errorf("Identity = %#v, want %#v", identity, store.identity)
+					}
+					return err
+				}
+		}, func(t *testing.T, store *Store) {
+			store.lifecycleMu.Lock()
+			active := store.active
+			store.lifecycleMu.Unlock()
+			if active != 1 || len(store.connections) != retainedConnectionCount-1 || len(store.writeGate) != 1 || store.quarantined.Load() != 0 {
+				t.Fatalf("Identity SQL accounting: active=%d connections=%d gate=%d quarantined=%d", active, len(store.connections), len(store.writeGate), store.quarantined.Load())
 			}
+			if !store.lifecycleMu.TryLock() {
+				t.Fatal("Identity SQL response hook ran with lifecycle mutex held")
+			}
+			store.lifecycleMu.Unlock()
 		}},
 		{"precommit", func(t *testing.T, store *Store, entered chan struct{}, release <-chan struct{}) (testHooks, func() error) {
 			record := sqliteTestRecord("close-precommit-record", "close-precommit-key", time.Date(2026, 8, 30, 0, 40, 0, 0, time.UTC))
@@ -149,7 +168,7 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 				_, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record})
 				return err
 			}
-		}},
+		}, nil},
 		{"COMMIT response", func(t *testing.T, store *Store, entered chan struct{}, release <-chan struct{}) (testHooks, func() error) {
 			record := sqliteTestRecord("close-commit-record", "close-commit-key", time.Date(2026, 8, 30, 0, 41, 0, 0, time.UTC))
 			return testHooks{driverExec: func(statement string, exec func() error) error {
@@ -166,7 +185,7 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 					_, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record})
 					return err
 				}
-		}},
+		}, nil},
 		{"postcommit publication", func(t *testing.T, store *Store, entered chan struct{}, release <-chan struct{}) (testHooks, func() error) {
 			candidate := sqlitePendingCandidate("close-publication-candidate", memory.Scope{Namespace: "user", ID: "close-publication-scope"}, time.Date(2026, 8, 30, 0, 42, 0, 0, time.UTC))
 			return testHooks{afterCandidateCommit: func() error {
@@ -178,7 +197,7 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 					_, err := store.Propose(context.Background(), memory.ProposalBatch{Candidates: []memory.Candidate{candidate}})
 					return err
 				}
-		}},
+		}, nil},
 		{"blocking estimator", func(t *testing.T, store *Store, entered chan struct{}, release <-chan struct{}) (testHooks, func() error) {
 			now := time.Date(2026, 8, 30, 0, 43, 0, 0, time.UTC)
 			scope := memory.Scope{Namespace: "user", ID: "close-estimator-scope"}
@@ -195,7 +214,7 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 				_, err := store.Retrieve(context.Background(), request)
 				return err
 			}
-		}},
+		}, nil},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -203,7 +222,7 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 			entered := make(chan struct{})
 			release := make(chan struct{})
 			hooks, operation := test.prepare(t, store, entered, release)
-			closeWaiting := make(chan bool, 1)
+			closeWaiting := make(chan bool, 10)
 			resourcesReady := make(chan struct{})
 			resourcesRelease := make(chan struct{})
 			hooks.closeWait = func(owner bool) { closeWaiting <- owner }
@@ -213,10 +232,22 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 			operationResult := make(chan error, 1)
 			go func() { operationResult <- operation() }()
 			<-entered
-			closeResult := make(chan error, 1)
-			go func() { closeResult <- store.Close() }()
-			if owner := <-closeWaiting; !owner {
-				t.Fatal("first Close was not lifecycle owner")
+			if test.blocked != nil {
+				test.blocked(t, store)
+			}
+			const closers = 10
+			closeResult := make(chan error, closers)
+			for index := 0; index < closers; index++ {
+				go func() { closeResult <- store.Close() }()
+			}
+			owners := 0
+			for index := 0; index < closers; index++ {
+				if <-closeWaiting {
+					owners++
+				}
+			}
+			if owners != 1 {
+				t.Fatalf("Close owner wait paths = %d, want 1", owners)
 			}
 			if _, err := store.Identity(context.Background()); err != memory.ErrClosed {
 				t.Fatalf("later operation = %v, want exact ErrClosed", err)
@@ -235,8 +266,10 @@ func TestConcurrentClosePublicOperationSeams(t *testing.T) {
 				t.Fatalf("pre-Close accounting: connections=%d quarantined=%d gate=%d", got, store.quarantined.Load(), len(store.writeGate))
 			}
 			close(resourcesRelease)
-			if err := <-closeResult; err != nil {
-				t.Fatal(err)
+			for index := 0; index < closers; index++ {
+				if err := <-closeResult; err != nil {
+					t.Fatalf("Close %d = %v", index, err)
+				}
 			}
 		})
 	}
@@ -407,7 +440,9 @@ func TestConcurrentTwoHandleAtomicityAndAccounting(t *testing.T) {
 		first.Scope = scope
 		second := sqliteTestRecord(fmt.Sprintf("create-right-%03d", repetition), key, at)
 		second.Scope = scope
-		createErrors := runTwo(t,
+		createErrors := runTwoAtWriteSeam(t, memory.CommitUpsert, func(ids []string) bool {
+			return len(ids) == 1 && (ids[0] == first.ID || ids[0] == second.ID)
+		}, nil,
 			func() error {
 				_, err := left.Upsert(context.Background(), memory.UpsertRequest{Record: first})
 				return err
@@ -439,39 +474,24 @@ func TestConcurrentTwoHandleAtomicityAndAccounting(t *testing.T) {
 		rightUpdate := memory.CloneRecord(created)
 		rightUpdate.Text = "complete right update"
 		rightUpdate.UpdatedAt = at.Add(time.Second)
-		writeSeam := make(chan struct{})
-		writeRelease := make(chan struct{})
-		var seamOnce sync.Once
-		restoreHooks := setTestHooks(testHooks{beforeCommitCheck: func() {
-			seamOnce.Do(func() { close(writeSeam) })
-			<-writeRelease
-		}})
 		var updateResults [2]memory.Record
-		updateDone := make(chan [2]error, 1)
-		go func() {
-			updateDone <- runTwo(t,
-				func() error {
-					var callErr error
-					updateResults[0], callErr = left.Upsert(context.Background(), memory.UpsertRequest{Record: leftUpdate, ExpectedRevision: &expected})
-					return callErr
-				},
-				func() error {
-					var callErr error
-					updateResults[1], callErr = right.Upsert(context.Background(), memory.UpsertRequest{Record: rightUpdate, ExpectedRevision: &expected})
-					return callErr
-				},
-			)
-		}()
-		<-writeSeam
-		old, readErr := right.Get(context.Background(), memory.RecordRef{Scope: scope, ID: created.ID})
-		if readErr != nil || !reflect.DeepEqual(old, created) {
-			close(writeRelease)
-			restoreHooks()
-			t.Fatalf("overlapped reader did not see complete old record: %#v, %v", old, readErr)
-		}
-		close(writeRelease)
-		updateErrors := <-updateDone
-		restoreHooks()
+		updateErrors := runTwoAtWriteSeam(t, memory.CommitUpsert, exactWriteIDs(created.ID), func() {
+			old, readErr := right.Get(context.Background(), memory.RecordRef{Scope: scope, ID: created.ID})
+			if readErr != nil || !reflect.DeepEqual(old, created) {
+				t.Fatalf("overlapped reader did not see complete old record: %#v, %v", old, readErr)
+			}
+		},
+			func() error {
+				var callErr error
+				updateResults[0], callErr = left.Upsert(context.Background(), memory.UpsertRequest{Record: leftUpdate, ExpectedRevision: &expected})
+				return callErr
+			},
+			func() error {
+				var callErr error
+				updateResults[1], callErr = right.Upsert(context.Background(), memory.UpsertRequest{Record: rightUpdate, ExpectedRevision: &expected})
+				return callErr
+			},
+		)
 		assertOneSuccessOneConflict(t, "update", updateErrors)
 		winner := 0
 		if updateErrors[0] != nil {
@@ -496,7 +516,9 @@ func TestConcurrentTwoHandleAtomicityAndAccounting(t *testing.T) {
 		observedRight := sqlitePendingCandidate(fmt.Sprintf("observed-right-%03d", repetition), scope, at.Add(2*time.Second))
 		observedRight.Proposed.Source.ObservationID = observationID
 		var receipts [2]memory.ObservationReceipt
-		observationErrors := runTwo(t,
+		observationErrors := runTwoAtWriteSeam(t, memory.CommitObserve, func(ids []string) bool {
+			return len(ids) == 2 && ids[0] == observationID && (ids[1] == observedLeft.ID || ids[1] == observedRight.ID)
+		}, nil,
 			func() error {
 				var callErr error
 				receipts[0], callErr = left.CommitObservation(context.Background(), memory.ObservationCommit{ObservationID: observationID, Candidates: []memory.Candidate{observedLeft}, CreatedAt: at.Add(2 * time.Second)})
@@ -535,7 +557,7 @@ func TestConcurrentTwoHandleAtomicityAndAccounting(t *testing.T) {
 			t.Fatal(err)
 		}
 		var reviewResults [2]memory.ReviewResult
-		reviewErrors := runTwo(t,
+		reviewErrors := runTwoAtWriteSeam(t, memory.CommitReview, exactWriteIDs(reviewCandidate.ID), nil,
 			func() error {
 				var callErr error
 				reviewResults[0], callErr = left.Review(context.Background(), review)
@@ -579,18 +601,56 @@ func TestConcurrentTwoHandleAtomicityAndAccounting(t *testing.T) {
 	}
 }
 
-func runTwo(t *testing.T, left, right func() error) [2]error {
+func exactWriteIDs(ids ...string) func([]string) bool {
+	return func(got []string) bool { return reflect.DeepEqual(got, ids) }
+}
+
+func runTwoAtWriteSeam(
+	t *testing.T,
+	operation memory.CommitOperation,
+	matchIDs func([]string) bool,
+	whileBlocked func(),
+	left, right func() error,
+) [2]error {
 	t.Helper()
-	ready := make(chan struct{}, 2)
-	start := make(chan struct{})
+	arrived := make(chan struct{}, 2)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	var matched int
+	var matchMu sync.Mutex
+	restoreHooks := setTestHooks(testHooks{beforeWriteBegin: func(gotOperation memory.CommitOperation, ids []string) {
+		if gotOperation != operation || !matchIDs(ids) {
+			return
+		}
+		matchMu.Lock()
+		if matched >= 2 {
+			matchMu.Unlock()
+			return
+		}
+		matched++
+		matchMu.Unlock()
+		arrived <- struct{}{}
+		<-release
+	}})
+	defer restoreHooks()
+
 	var result [2]error
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go func() { defer wait.Done(); ready <- struct{}{}; <-start; result[0] = left() }()
-	go func() { defer wait.Done(); ready <- struct{}{}; <-start; result[1] = right() }()
-	<-ready
-	<-ready
-	close(start)
+	go func() { defer wait.Done(); result[0] = left() }()
+	go func() { defer wait.Done(); result[1] = right() }()
+	<-arrived
+	<-arrived
+	if whileBlocked != nil {
+		whileBlocked()
+	}
+	close(release)
+	released = true
 	wait.Wait()
 	return result
 }

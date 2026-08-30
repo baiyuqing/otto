@@ -125,6 +125,8 @@ type testHooks struct {
 	beforeDirectoryInstall          func(name string)
 	storeReady                      func(*Store)
 	beforeBegin                     func()
+	beforeWriteBegin                func(memory.CommitOperation, []string)
+	beforeInitializeBegin           func()
 	beginError                      func(attempt int) error
 	retryDelay                      func(context.Context, time.Duration) error
 	beforeCommitCheck               func()
@@ -132,6 +134,7 @@ type testHooks struct {
 	driverExec                      func(statement string, exec func() error) error
 	readSetupExec                   func(statement string, exec func() error) error
 	beforeReadGeneration            func(*sql.Conn)
+	identityReadGeneration          func(func() (uint64, error)) (uint64, error)
 	beforeQuickCheck                func()
 	beforeFTS5Integrity             func(*sql.Conn)
 	beforePreflightRecheck          func()
@@ -708,7 +711,13 @@ func (store *Store) Identity(ctx context.Context) (memory.StoreIdentity, error) 
 		done()
 		return memory.StoreIdentity{}, err
 	}
-	generation, err := readGeneration(ctx, conn)
+	query := func() (uint64, error) { return readGeneration(ctx, conn) }
+	var generation uint64
+	if hook := loadTestHooks().identityReadGeneration; hook != nil {
+		generation, err = hook(query)
+	} else {
+		generation, err = query()
+	}
 	store.returnConnection(conn)
 	done()
 	if err != nil {

@@ -186,6 +186,9 @@ func (store *Store) withWrite(
 			beginErr = hooks.beginError(attempt)
 		}
 		if beginErr == nil {
+			if hook := hooks.beforeWriteBegin; hook != nil {
+				hook(operation, append([]string(nil), entityIDs...))
+			}
 			_, beginErr = conn.ExecContext(ctx, "BEGIN IMMEDIATE")
 		}
 		if beginErr != nil {

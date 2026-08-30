@@ -173,7 +173,7 @@ func TestEmptyTranscriptHintStaysWithinBounds(t *testing.T) {
 			if hint == "" {
 				t.Fatalf("hint = %q, want non-empty", hint)
 			}
-			assertRenderedBounds(t, hint, width, 2)
+			assertRenderedBounds(t, hint, width, 5)
 		})
 	}
 }

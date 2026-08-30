@@ -349,6 +349,11 @@ func (store *Store) Propose(ctx context.Context, input memory.ProposalBatch) (me
 	if err := ctx.Err(); err != nil {
 		return memory.CandidateBatch{}, err
 	}
+	ctx, done, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.CandidateBatch{}, err
+	}
+	defer done()
 	batch, err := prepareCandidateBatch(ctx, store.guard, input)
 	if err != nil {
 		return memory.CandidateBatch{}, err
@@ -424,6 +429,11 @@ func (store *Store) GetCandidate(ctx context.Context, ref memory.CandidateRef) (
 	if err := ctx.Err(); err != nil {
 		return memory.Candidate{}, err
 	}
+	ctx, done, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.Candidate{}, err
+	}
+	defer done()
 	if err := memory.ValidateCandidateRef(ref); err != nil {
 		return memory.Candidate{}, err
 	}
@@ -470,7 +480,7 @@ func readCandidateSnapshotConn(ctx context.Context, conn *sql.Conn, ref memory.C
 }
 
 func (store *Store) readCandidateSnapshot(ctx context.Context, ref memory.CandidateRef, verifyObservation bool) (candidateSnapshot, error) {
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return candidateSnapshot{}, err
 	}
@@ -489,6 +499,11 @@ func (store *Store) ListCandidates(ctx context.Context, input memory.CandidateLi
 	if err := ctx.Err(); err != nil {
 		return memory.CandidatePage{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.CandidatePage{}, err
+	}
+	defer operationDone()
 	if len(input.Scopes) > memory.MaxRequestScopes || len(input.States) > memory.MaxRequestKinds || len(input.Cursor) > memory.MaxCursorBytes {
 		return memory.CandidatePage{}, memory.ErrInvalidRequest
 	}
@@ -518,7 +533,7 @@ func (store *Store) ListCandidates(ctx context.Context, input memory.CandidateLi
 	if err != nil {
 		return memory.CandidatePage{}, memory.ErrInvalidCursor
 	}
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return memory.CandidatePage{}, err
 	}
@@ -720,10 +735,12 @@ func readObservationReceiptConn(ctx context.Context, conn *sql.Conn, id string, 
 				hook(observationCandidateCorrespondence)
 			}
 			scanErr := conn.QueryRowContext(ctx, "SELECT CASE WHEN "+gate+" AND observation_id=? THEN 1 END FROM memory_candidates WHERE id=? LIMIT 1", id, id, candidateID).Scan(&valid)
+			if errors.Is(scanErr, sql.ErrNoRows) {
+				// Receipts are durable idempotency evidence and may outlive
+				// Candidate retention. Existing Candidates still must match.
+				continue
+			}
 			if scanErr != nil {
-				if errors.Is(scanErr, sql.ErrNoRows) {
-					return memory.ObservationReceipt{}, memory.ErrCorrupt
-				}
 				return memory.ObservationReceipt{}, safeRecordReadError(ctx, scanErr)
 			}
 			if !valid.Valid || valid.Int64 != 1 {
@@ -768,11 +785,8 @@ func readObservationReceiptConn(ctx context.Context, conn *sql.Conn, id string, 
 		if correspondenceErr != nil {
 			return memory.ObservationReceipt{}, correspondenceErr
 		}
-		if len(associated) != len(seen) {
-			return memory.ObservationReceipt{}, memory.ErrCorrupt
-		}
-		for candidateID := range seen {
-			if _, exists := associated[candidateID]; !exists {
+		for candidateID := range associated {
+			if _, exists := seen[candidateID]; !exists {
 				return memory.ObservationReceipt{}, memory.ErrCorrupt
 			}
 		}
@@ -784,13 +798,18 @@ func (store *Store) GetObservationReceipt(ctx context.Context, id string) (memor
 	if err := ctx.Err(); err != nil {
 		return memory.ObservationReceipt{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.ObservationReceipt{}, err
+	}
+	defer operationDone()
 	if !validCandidateOpaqueID(id) {
 		return memory.ObservationReceipt{}, memory.ErrInvalidRequest
 	}
 	if err := store.guardFields(ctx, memory.GuardField{Name: "observation receipt ID", Value: id, Opaque: true}); err != nil {
 		return memory.ObservationReceipt{}, err
 	}
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return memory.ObservationReceipt{}, err
 	}
@@ -869,6 +888,11 @@ func (store *Store) CommitObservation(ctx context.Context, input memory.Observat
 	if err := ctx.Err(); err != nil {
 		return memory.ObservationReceipt{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.ObservationReceipt{}, err
+	}
+	defer operationDone()
 	if !validCandidateOpaqueID(input.ObservationID) {
 		return memory.ObservationReceipt{}, memory.ErrInvalidRequest
 	}
@@ -983,6 +1007,11 @@ func (store *Store) Review(ctx context.Context, input memory.StoreReviewRequest)
 	if err := ctx.Err(); err != nil {
 		return memory.ReviewResult{}, err
 	}
+	ctx, operationDone, err := store.startOperation(ctx)
+	if err != nil {
+		return memory.ReviewResult{}, err
+	}
+	defer operationDone()
 	if err := memory.ValidateCandidateRef(input.Ref); err != nil {
 		return memory.ReviewResult{}, err
 	}

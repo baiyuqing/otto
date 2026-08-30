@@ -131,7 +131,7 @@ func (store *Store) withWrite(
 	if err != nil {
 		return memory.ErrInvalidRequest
 	}
-	done, err := store.admit()
+	done, err := store.continueOperation(ctx)
 	if err != nil {
 		return err
 	}

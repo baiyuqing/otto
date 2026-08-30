@@ -53,6 +53,11 @@ func recordProjection() string {
 
 type rowScanner interface{ Scan(...any) error }
 
+type recordScanError struct{ err error }
+
+func (err recordScanError) Error() string { return "record projection scan failed" }
+func (err recordScanError) Unwrap() error { return err.err }
+
 func decodeRecordRow(scanner rowScanner) (memory.Record, error) {
 	var valid sql.NullInt64
 	var id, namespace, scopeID, kind, key, text sql.NullString
@@ -65,7 +70,7 @@ func decodeRecordRow(scanner rowScanner) (memory.Record, error) {
 		&labelsJSON, &metadataJSON, &sourceJSON, &confidence, &revision,
 		&createdAt, &updatedAt, &expiresAt,
 	); err != nil {
-		return memory.Record{}, err
+		return memory.Record{}, recordScanError{err: err}
 	}
 	mandatoryStrings := [...]sql.NullString{id, namespace, scopeID, kind, key, text, labelsJSON, metadataJSON, sourceJSON, createdAt, updatedAt}
 	if !valid.Valid || valid.Int64 != 1 || !confidence.Valid || !revision.Valid {
@@ -195,6 +200,9 @@ func (store *Store) List(ctx context.Context, request memory.ListRequest) (memor
 		done()
 		return memory.RecordPage{}, err
 	}
+	if hook := loadTestHooks().beforeReadGeneration; hook != nil {
+		hook(conn)
+	}
 	generation, readErr := readGeneration(ctx, conn)
 	if readErr == nil && request.Cursor != "" && generation != cursorGeneration {
 		readErr = memory.ErrConflict
@@ -273,12 +281,20 @@ func buildListQuery(request memory.ListRequest, cursor recordCursor) (string, []
 	}
 	labelGate := "typeof(labels_json)='text' AND length(CAST(labels_json AS BLOB))<=" + strconv.Itoa(maxLabelsJSONBytes)
 	gatedLabels := "CASE WHEN " + labelGate + " THEN labels_json END"
+	validLabels := labelGate + " AND json_valid(" + gatedLabels + ")"
+	iterableLabels := "CASE WHEN " + validLabels + " AND json_type(" + gatedLabels + ")='array' THEN " + gatedLabels + " ELSE '[]' END"
+	labelShape := validLabels + " AND json_type(" + gatedLabels + ")='array' AND NOT EXISTS (SELECT 1 FROM json_each(" + iterableLabels + ") WHERE type<>'text')"
 	for _, label := range request.Labels {
-		clauses = append(clauses, "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid("+gatedLabels+") THEN "+gatedLabels+" ELSE '[]' END) WHERE type='text' AND value=?)")
+		// Structurally unsafe label JSON must reach the bounded projection so it
+		// is reported as corruption rather than disappearing behind this filter.
+		clauses = append(clauses, "(NOT ("+labelShape+") OR EXISTS (SELECT 1 FROM json_each("+iterableLabels+") WHERE type='text' AND value=?))")
 		arguments = append(arguments, label)
 	}
 	if !request.IncludeExpired {
-		clauses = append(clauses, "(expires_at IS NULL OR expires_at>?)")
+		expirySafe := timestampPredicateSafety("expires_at") + " AND " + timestampPredicateSafety("created_at") + " AND expires_at>=created_at"
+		// The semantic comparison is valid only for canonical timestamps.
+		// Unsafe values bypass it and are rejected by decodeRecordRow.
+		clauses = append(clauses, "(expires_at IS NULL OR NOT ("+expirySafe+") OR expires_at>?)")
 		arguments = append(arguments, formatTimestamp(request.Now))
 	}
 	if cursor.Version != 0 {
@@ -292,11 +308,45 @@ func buildListQuery(request memory.ListRequest, cursor recordCursor) (string, []
 
 func placeholders(count int) string { return strings.TrimSuffix(strings.Repeat("?,", count), ",") }
 
+func timestampPredicateSafety(column string) string {
+	value := "CAST(" + column + " AS TEXT)"
+	pattern := "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]Z"
+	year := "CAST(substr(" + value + ",1,4) AS INTEGER)"
+	month := "CAST(substr(" + value + ",6,2) AS INTEGER)"
+	day := "CAST(substr(" + value + ",9,2) AS INTEGER)"
+	leap := "((" + year + "%4=0 AND " + year + "%100<>0) OR " + year + "%400=0)"
+	lastDay := "CASE " + month + " WHEN 2 THEN CASE WHEN " + leap + " THEN 29 ELSE 28 END " +
+		"WHEN 4 THEN 30 WHEN 6 THEN 30 WHEN 9 THEN 30 WHEN 11 THEN 30 ELSE 31 END"
+	return "typeof(" + column + ")='text' AND length(CAST(" + column + " AS BLOB))=" + strconv.Itoa(len(timestampLayout)) +
+		" AND " + value + " GLOB '" + pattern + "'" +
+		" AND substr(" + value + ",5,1)='-' AND substr(" + value + ",8,1)='-'" +
+		" AND substr(" + value + ",11,1)='T' AND substr(" + value + ",14,1)=':'" +
+		" AND substr(" + value + ",17,1)=':' AND substr(" + value + ",20,1)='.' AND substr(" + value + ",30,1)='Z'" +
+		" AND " + year + " BETWEEN 1 AND 9999 AND " + month + " BETWEEN 1 AND 12" +
+		" AND " + day + " BETWEEN 1 AND (" + lastDay + ")" +
+		" AND CAST(substr(" + value + ",12,2) AS INTEGER) BETWEEN 0 AND 23" +
+		" AND CAST(substr(" + value + ",15,2) AS INTEGER) BETWEEN 0 AND 59" +
+		" AND CAST(substr(" + value + ",18,2) AS INTEGER) BETWEEN 0 AND 59"
+}
+
+func normalizeRecordCollections(record *memory.Record) {
+	if record.Labels == nil {
+		record.Labels = make([]string, 0)
+	}
+	if record.Metadata == nil {
+		record.Metadata = make(map[string]string)
+	}
+	if record.Source.MessageIDs == nil {
+		record.Source.MessageIDs = make([]string, 0)
+	}
+}
+
 func (store *Store) Upsert(ctx context.Context, request memory.UpsertRequest) (memory.Record, error) {
 	if err := ctx.Err(); err != nil {
 		return memory.Record{}, err
 	}
 	request = memory.CloneUpsertRequest(request)
+	normalizeRecordCollections(&request.Record)
 	if err := memory.ValidateUpsertRequest(request); err != nil {
 		return memory.Record{}, err
 	}
@@ -342,10 +392,13 @@ func (store *Store) Upsert(ctx context.Context, request memory.UpsertRequest) (m
 func readGeneration(ctx context.Context, conn *sql.Conn) (uint64, error) {
 	var value sql.NullString
 	err := conn.QueryRowContext(ctx, `SELECT CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB)) BETWEEN 1 AND 20 THEN value END FROM memory_meta WHERE key='generation' LIMIT 1`).Scan(&value)
-	if err != nil || !value.Valid {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return 0, ctxErr
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, memory.ErrCorrupt
 		}
+		return 0, safeRecordReadError(ctx, err)
+	}
+	if !value.Valid {
 		return 0, memory.ErrCorrupt
 	}
 	generation, err := strconv.ParseUint(value.String, 10, 64)
@@ -375,16 +428,31 @@ func bumpGeneration(ctx context.Context, conn *sql.Conn) error {
 }
 
 func beginReadTransaction(ctx context.Context, conn *sql.Conn) (contaminated bool, result error) {
-	if _, err := conn.ExecContext(ctx, "PRAGMA query_only=ON"); err != nil {
-		return false, safeSQLiteError(ctx, err)
+	if err := executeReadSetup(ctx, conn, "PRAGMA query_only=ON"); err != nil {
+		cleanupUncertainReadSetup(conn)
+		return true, safeSQLiteError(ctx, err)
 	}
-	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
-		if _, resetErr := conn.ExecContext(context.Background(), "PRAGMA query_only=OFF"); resetErr != nil {
-			return true, memory.ErrUnavailable
-		}
-		return false, safeSQLiteError(ctx, err)
+	if err := executeReadSetup(ctx, conn, "BEGIN"); err != nil {
+		cleanupUncertainReadSetup(conn)
+		return true, safeSQLiteError(ctx, err)
 	}
 	return false, nil
+}
+
+func executeReadSetup(ctx context.Context, conn *sql.Conn, statement string) error {
+	exec := func() error {
+		_, err := conn.ExecContext(ctx, statement)
+		return err
+	}
+	if hook := loadTestHooks().readSetupExec; hook != nil {
+		return hook(statement, exec)
+	}
+	return exec()
+}
+
+func cleanupUncertainReadSetup(conn *sql.Conn) {
+	_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	_, _ = conn.ExecContext(context.Background(), "PRAGMA query_only=OFF")
 }
 
 func endReadTransaction(conn *sql.Conn) error {
@@ -413,11 +481,25 @@ func safeRecordReadError(ctx context.Context, err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return memory.ErrNotFound
 	}
-	mapped := safeSQLiteError(ctx, err)
-	if errors.Is(mapped, memory.ErrUnavailable) {
-		// Scan conversion failures on a length-gated projection indicate an
-		// externally corrupted STRICT row, not caller-visible driver detail.
+	if sqlitePrimaryCode(err) == sqliteTooBig {
+		// The retained connection length ceiling rejected a projected corrupt
+		// value before it could cross the driver boundary.
 		return memory.ErrCorrupt
 	}
-	return mapped
+	var scanErr recordScanError
+	if errors.As(err, &scanErr) {
+		mapped := safeSQLiteError(ctx, scanErr.err)
+		if errors.Is(mapped, memory.ErrBusy) || errors.Is(mapped, memory.ErrClosed) ||
+			errors.Is(scanErr.err, memory.ErrUnavailable) || errors.Is(mapped, context.Canceled) ||
+			errors.Is(mapped, context.DeadlineExceeded) {
+			return mapped
+		}
+		var coded sqliteCoder
+		if errors.As(scanErr.err, &coded) {
+			return mapped
+		}
+		// A non-driver projection conversion/shape failure is structural.
+		return memory.ErrCorrupt
+	}
+	return safeSQLiteError(ctx, err)
 }

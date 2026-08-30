@@ -17,6 +17,7 @@ const (
 	sqliteLocked     = 6
 	sqliteInterrupt  = 9
 	sqliteCorrupt    = 11
+	sqliteTooBig     = 18
 	sqliteConstraint = 19
 	sqliteMisuse     = 21
 	sqliteNotADB     = 26
@@ -255,9 +256,10 @@ func (store *Store) withWrite(
 			store.quarantine(conn)
 			return commitUnknown
 		}
-		if err := store.restoreAndReturnConnection(conn); err != nil {
-			return err
-		}
+		// COMMIT success is the operation result. A later connection reset
+		// failure still quarantines the Store, but must not turn durable success
+		// into a retryable-looking failure.
+		_ = store.restoreAndReturnConnection(conn)
 		return nil
 	}
 }
@@ -317,7 +319,17 @@ func (store *Store) restoreAndReturnConnection(conn *sql.Conn) error {
 		return memory.ErrUnavailable
 	}
 	statement := "PRAGMA busy_timeout=" + strconv.FormatInt(milliseconds, 10)
-	if _, err := conn.ExecContext(context.Background(), statement); err != nil {
+	exec := func() error {
+		_, err := conn.ExecContext(context.Background(), statement)
+		return err
+	}
+	var resetErr error
+	if hook := loadTestHooks().restoreBusyTimeout; hook != nil {
+		resetErr = hook(statement, exec)
+	} else {
+		resetErr = exec()
+	}
+	if resetErr != nil {
 		store.quarantine(conn)
 		return memory.ErrUnavailable
 	}

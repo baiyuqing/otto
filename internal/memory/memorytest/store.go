@@ -26,12 +26,42 @@ type RecordStore interface {
 	Close() error
 }
 
+// Corruption identifies a direct-storage fixture mutation. These values are
+// test-only and let conformance exercise adapter safety without production
+// fault methods on RecordStore.
+type Corruption string
+
+const (
+	CorruptTextOneOver        Corruption = "text-one-over"
+	CorruptMetadataOneOver    Corruption = "metadata-one-over"
+	CorruptTextOneMiB         Corruption = "text-one-mib"
+	CorruptLabelsMalformed    Corruption = "labels-malformed"
+	CorruptLabelsOversized    Corruption = "labels-oversized"
+	CorruptLabelsWrongShape   Corruption = "labels-wrong-shape"
+	CorruptExpiryMalformed    Corruption = "expiry-malformed"
+	CorruptExpiryNoncanonical Corruption = "expiry-noncanonical"
+	CorruptSensitiveText      Corruption = "sensitive-text"
+)
+
+// Persistence is adapter state inspected without going through RecordStore.
+type Persistence struct {
+	RecordRows int
+	FTSRows    int
+	Generation uint64
+}
+
 // Fixture owns one fresh database. Reopen opens the same database after Store
 // has been closed; Cleanup must be safe after either store has been closed.
+// Every callback is required and connected to the adapter's real persistence.
 type Fixture struct {
-	Store   RecordStore
-	Reopen  func() (RecordStore, error)
-	Cleanup func()
+	Store                    RecordStore
+	Reopen                   func() (RecordStore, error)
+	Cleanup                  func()
+	Inspect                  func(context.Context, string) (Persistence, error)
+	Inject                   func(memory.Record, Corruption) error
+	UpsertBeforeCommitCancel func(context.Context, memory.UpsertRequest) (memory.Record, error)
+	UpsertCommitResponseLoss func(context.Context, memory.UpsertRequest) (memory.Record, error)
+	ForbiddenValue           string
 }
 
 // Factory returns a fresh isolated fixture for each conformance subtest.
@@ -40,9 +70,18 @@ type Factory func(*testing.T) Fixture
 // RunRecordConformance checks behavior shared by persistent record stores.
 func RunRecordConformance(t *testing.T, factory Factory) {
 	t.Helper()
+	newFixture := func(t *testing.T) Fixture {
+		t.Helper()
+		fixture := factory(t)
+		if fixture.Store == nil || fixture.Reopen == nil || fixture.Cleanup == nil || fixture.Inspect == nil || fixture.Inject == nil ||
+			fixture.UpsertBeforeCommitCancel == nil || fixture.UpsertCommitResponseLoss == nil || fixture.ForbiddenValue == "" {
+			t.Fatal("memorytest: incomplete required record fixture callbacks")
+		}
+		return fixture
+	}
 
 	t.Run("create identity aliasing and reopen", func(t *testing.T) {
-		fixture := factory(t)
+		fixture := newFixture(t)
 		defer fixture.Cleanup()
 		ctx := context.Background()
 		before, err := fixture.Store.Identity(ctx)
@@ -89,6 +128,10 @@ func RunRecordConformance(t *testing.T, factory Factory) {
 		if err != nil || after.Generation != 1 {
 			t.Fatalf("generation after create = %d, %v", after.Generation, err)
 		}
+		persisted, err := fixture.Inspect(ctx, want.ID)
+		if err != nil || persisted != (Persistence{RecordRows: 1, FTSRows: 1, Generation: 1}) {
+			t.Fatalf("create persistence = %#v, %v", persisted, err)
+		}
 
 		if err := fixture.Store.Close(); err != nil {
 			t.Fatal(err)
@@ -104,7 +147,7 @@ func RunRecordConformance(t *testing.T, factory Factory) {
 	})
 
 	t.Run("keys exact reads and conflicts", func(t *testing.T) {
-		fixture := factory(t)
+		fixture := newFixture(t)
 		defer fixture.Cleanup()
 		ctx := context.Background()
 		now := time.Date(2026, 8, 29, 12, 0, 0, 1, time.UTC)
@@ -122,6 +165,10 @@ func RunRecordConformance(t *testing.T, factory Factory) {
 		identity, err := fixture.Store.Identity(ctx)
 		if err != nil || identity.Generation != 3 {
 			t.Fatalf("generation after conflict = %d, %v", identity.Generation, err)
+		}
+		persisted, inspectErr := fixture.Inspect(ctx, duplicate.ID)
+		if inspectErr != nil || persisted.RecordRows != 0 || persisted.FTSRows != 0 || persisted.Generation != 3 {
+			t.Fatalf("conflict persistence = %#v, %v", persisted, inspectErr)
 		}
 		got, err := fixture.Store.GetByKey(ctx, memory.RecordKey{Scope: first.Scope, Kind: first.Kind, Key: first.Key})
 		if err != nil || !reflect.DeepEqual(got, created) {
@@ -149,7 +196,7 @@ func RunRecordConformance(t *testing.T, factory Factory) {
 	})
 
 	t.Run("list filters expiry order and pagination", func(t *testing.T) {
-		fixture := factory(t)
+		fixture := newFixture(t)
 		defer fixture.Cleanup()
 		ctx := context.Background()
 		base := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
@@ -211,7 +258,7 @@ func RunRecordConformance(t *testing.T, factory Factory) {
 	})
 
 	t.Run("cursor cancellation and sensitive refusal", func(t *testing.T) {
-		fixture := factory(t)
+		fixture := newFixture(t)
 		defer fixture.Cleanup()
 		ctx := context.Background()
 		now := time.Date(2026, 8, 29, 13, 0, 0, 0, time.UTC)
@@ -269,7 +316,153 @@ func RunRecordConformance(t *testing.T, factory Factory) {
 		if err != nil || after.Generation != before.Generation {
 			t.Fatalf("refusal generation = %d, want %d: %v", after.Generation, before.Generation, err)
 		}
+		persisted, inspectErr := fixture.Inspect(ctx, sensitive.ID)
+		if inspectErr != nil || persisted.RecordRows != 0 || persisted.FTSRows != 0 || persisted.Generation != before.Generation {
+			t.Fatalf("refusal persistence = %#v, %v", persisted, inspectErr)
+		}
 	})
+
+	t.Run("nil and empty collection normalization", func(t *testing.T) {
+		for _, nonnil := range []bool{false, true} {
+			fixture := newFixture(t)
+			ctx := context.Background()
+			record := fullRecord("normalized", "normalized", time.Date(2026, 8, 29, 13, 10, 0, 0, time.UTC))
+			if nonnil {
+				record.Labels = make([]string, 0, 1)
+				record.Metadata = make(map[string]string, 1)
+				record.Source.MessageIDs = make([]string, 0, 1)
+			} else {
+				record.Labels, record.Metadata, record.Source.MessageIDs = nil, nil, nil
+			}
+			created, err := fixture.Store.Upsert(ctx, memory.UpsertRequest{Record: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNormalizedCollections(t, created)
+			if nonnil {
+				record.Labels = append(record.Labels, "caller-label")
+				record.Metadata["caller"] = "metadata"
+				record.Source.MessageIDs = append(record.Source.MessageIDs, "caller-message")
+			}
+			got, err := fixture.Store.Get(ctx, memory.RecordRef{Scope: record.Scope, ID: record.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNormalizedCollections(t, got)
+			if err := fixture.Store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := fixture.Reopen()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err = reopened.Get(ctx, memory.RecordRef{Scope: record.Scope, ID: record.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNormalizedCollections(t, got)
+			fixture.Cleanup()
+		}
+	})
+
+	for _, corruption := range []Corruption{
+		CorruptTextOneOver, CorruptMetadataOneOver, CorruptTextOneMiB,
+		CorruptLabelsMalformed, CorruptLabelsOversized, CorruptLabelsWrongShape,
+		CorruptExpiryMalformed, CorruptExpiryNoncanonical, CorruptSensitiveText,
+	} {
+		corruption := corruption
+		t.Run("isolated filtered corruption "+string(corruption), func(t *testing.T) {
+			fixture := newFixture(t)
+			defer fixture.Cleanup()
+			now := time.Date(2026, 8, 29, 13, 20, 0, 0, time.UTC)
+			record := fullRecord("injected", "injected", now)
+			if err := fixture.Inject(record, corruption); err != nil {
+				t.Fatal(err)
+			}
+			want := memory.ErrCorrupt
+			if corruption == CorruptSensitiveText {
+				want = memory.ErrSensitiveMemory
+			}
+			if _, err := fixture.Store.Get(context.Background(), memory.RecordRef{Scope: record.Scope, ID: record.ID}); !errors.Is(err, want) {
+				t.Fatalf("Get corruption %q = %v", corruption, err)
+			}
+			request := memory.ListRequest{Scopes: []memory.Scope{record.Scope}, Kinds: []string{record.Kind}, Labels: []string{"alpha"}, Limit: 1, Now: now}
+			if _, err := fixture.Store.List(context.Background(), request); !errors.Is(err, want) {
+				t.Fatalf("filtered List corruption %q = %v", corruption, err)
+			}
+		})
+	}
+
+	t.Run("precommit cancellation after persistence writes", func(t *testing.T) {
+		fixture := newFixture(t)
+		defer fixture.Cleanup()
+		record := fullRecord("cancel-after-writes", "cancel-after-writes", time.Date(2026, 8, 29, 13, 30, 0, 0, time.UTC))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if _, err := fixture.UpsertBeforeCommitCancel(ctx, memory.UpsertRequest{Record: record}); !errors.Is(err, context.Canceled) {
+			t.Fatalf("precommit cancellation = %v", err)
+		}
+		persisted, err := fixture.Inspect(context.Background(), record.ID)
+		if err != nil || persisted != (Persistence{}) {
+			t.Fatalf("precommit residue = %#v, %v", persisted, err)
+		}
+	})
+
+	t.Run("real commit response loss reconciles caller ID", func(t *testing.T) {
+		fixture := newFixture(t)
+		defer fixture.Cleanup()
+		record := fullRecord("commit-loss", "commit-loss", time.Date(2026, 8, 29, 13, 40, 0, 0, time.UTC))
+		_, err := fixture.UpsertCommitResponseLoss(context.Background(), memory.UpsertRequest{Record: record})
+		var unknown *memory.CommitUnknownError
+		if !errors.As(err, &unknown) || !reflect.DeepEqual(unknown.EntityIDs(), []string{record.ID}) {
+			t.Fatalf("commit response loss = %#v, %v", unknown, err)
+		}
+		if _, err := fixture.Store.Get(context.Background(), memory.RecordRef{Scope: record.Scope, ID: record.ID}); !errors.Is(err, memory.ErrUnavailable) {
+			t.Fatalf("old Store after unknown commit = %v", err)
+		}
+		if err := fixture.Store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := fixture.Reopen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := reopened.Get(context.Background(), memory.RecordRef{Scope: record.Scope, ID: record.ID})
+		if err != nil || got.ID != record.ID || got.Revision != 1 {
+			t.Fatalf("commit reconciliation = %#v, %v", got, err)
+		}
+	})
+
+	t.Run("exact forbidden semantic and opaque fields", func(t *testing.T) {
+		for _, field := range []string{"semantic", "opaque ID", "opaque source"} {
+			fixture := newFixture(t)
+			record := fullRecord("forbidden", "forbidden", time.Date(2026, 8, 29, 13, 50, 0, 0, time.UTC))
+			switch field {
+			case "semantic":
+				record.Metadata["exact"] = fixture.ForbiddenValue
+			case "opaque ID":
+				record.ID = fixture.ForbiddenValue
+			case "opaque source":
+				record.Source.SessionID = fixture.ForbiddenValue
+			}
+			if _, err := fixture.Store.Upsert(context.Background(), memory.UpsertRequest{Record: record}); !errors.Is(err, memory.ErrSensitiveMemory) {
+				t.Fatalf("exact forbidden %s Upsert = %v", field, err)
+			}
+			persisted, err := fixture.Inspect(context.Background(), record.ID)
+			if err != nil || persisted != (Persistence{}) {
+				t.Fatalf("forbidden %s persistence = %#v, %v", field, persisted, err)
+			}
+			fixture.Cleanup()
+		}
+	})
+}
+
+func assertNormalizedCollections(t *testing.T, record memory.Record) {
+	t.Helper()
+	if record.Labels == nil || len(record.Labels) != 0 || record.Metadata == nil || len(record.Metadata) != 0 ||
+		record.Source.MessageIDs == nil || len(record.Source.MessageIDs) != 0 {
+		t.Fatalf("collections not normalized: labels=%#v metadata=%#v messages=%#v", record.Labels, record.Metadata, record.Source.MessageIDs)
+	}
 }
 
 func cursorWithVersion(t *testing.T, value string, version int) string {

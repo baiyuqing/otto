@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -80,6 +81,42 @@ func TestDefaultGuardInputBoundsFailClosed(t *testing.T) {
 	}
 	over := exact + "X"
 	assertSafeError(t, checkGuard(t, guard, GuardField{Name: "text", Value: over}), ErrSensitiveMemory, over)
+
+	// The byte cap must win before UTF-8 validation, proving oversized values are
+	// rejected by scalar length rather than scanned in full.
+	overWithInvalidTail := over + string([]byte{0xff})
+	err := checkGuard(t, guard, GuardField{Name: "text", Value: overWithInvalidTail})
+	assertSafeError(t, err, ErrSensitiveMemory, overWithInvalidTail)
+	if !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("oversized invalid text error = %v, want byte limit", err)
+	}
+}
+
+func TestDefaultGuardDetectorsFailIndependentlyWithoutMarker(t *testing.T) {
+	guard := DefaultGuard{}
+	cases := []struct {
+		name, value, category string
+	}{
+		{"authorization", "Authorization: Bearer synthetic-credential-value", "credential header"},
+		{"cookie", "Cookie: session=synthetic-cookie-value", "credential header"},
+		{"assignment", "api_key=synthetic-assignment-value", "credential assignment"},
+		{"URI user password", "https://synthetic-user:synthetic-pass@example.invalid/path", "URI userinfo"},
+		{"URI empty user", "https://:synthetic-pass@example.invalid/path", "URI userinfo"},
+		{"URI empty userinfo", "https://@example.invalid/path", "URI userinfo"},
+		{"URI empty password", "https://synthetic-user:@example.invalid/path", "URI userinfo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(tc.value, "[REDACTED]") {
+				t.Fatal("detector fixture must not contain generic marker")
+			}
+			err := checkGuard(t, guard, GuardField{Name: "text", Value: tc.value})
+			assertSafeError(t, err, ErrSensitiveMemory, tc.value)
+			if !strings.Contains(err.Error(), tc.category) {
+				t.Fatalf("error = %v, want category %q", err, tc.category)
+			}
+		})
+	}
 }
 
 func TestDefaultGuardCancellationAndInvalidText(t *testing.T) {
@@ -307,7 +344,7 @@ func TestGuardCandidateObservationCommitAndReceiptCoverPersistedStrings(t *testi
 
 func TestGuardHelpersBoundBeforeCallingGuardAndDoNotMutate(t *testing.T) {
 	r := validRecord()
-	r.Labels = make([]string, MaxGuardFields+1)
+	r.Labels = make([]string, MaxGuardFields-10+1)
 	called := false
 	guard := testGuard(func(context.Context, GuardInput) error { called = true; return nil })
 	before := CloneRecord(r)
@@ -320,5 +357,47 @@ func TestGuardHelpersBoundBeforeCallingGuardAndDoNotMutate(t *testing.T) {
 	}
 	if err := GuardRecord(context.Background(), nil, validRecord()); err != ErrUnavailable {
 		t.Fatalf("nil guard = %v", err)
+	}
+}
+
+func TestGuardHelpersRejectHugeShapesBeforeFieldSliceAllocation(t *testing.T) {
+	called := false
+	guard := testGuard(func(context.Context, GuardInput) error { called = true; return nil })
+
+	hugeCount := MaxGuardFields * 16
+	record := validRecord()
+	record.Labels = make([]string, hugeCount)
+	candidate := validCandidate()
+	candidate.Proposed.Labels = make([]string, hugeCount)
+	observation := Observation{MessageIDs: make([]string, hugeCount)}
+	commit := ObservationCommit{Candidates: make([]Candidate, hugeCount)}
+	receipt := ObservationReceipt{CandidateIDs: make([]string, hugeCount)}
+
+	cases := []struct {
+		name  string
+		check func() error
+	}{
+		{"record", func() error { return GuardRecord(context.Background(), guard, record) }},
+		{"candidate", func() error { return GuardCandidate(context.Background(), guard, candidate) }},
+		{"observation", func() error { return GuardObservation(context.Background(), guard, observation) }},
+		{"commit", func() error { return GuardObservationCommit(context.Background(), guard, commit) }},
+		{"receipt", func() error { return GuardObservationReceipt(context.Background(), guard, receipt) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			for i := 0; i < 100; i++ {
+				_ = tc.check()
+			}
+			runtime.ReadMemStats(&after)
+			if got := (after.TotalAlloc - before.TotalAlloc) / 100; got > 8*1024 {
+				t.Fatalf("oversized helper allocated %d bytes/op, want bounded preflight", got)
+			}
+		})
+	}
+	if called {
+		t.Fatal("guard callback invoked for oversized helper input")
 	}
 }

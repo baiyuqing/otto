@@ -82,6 +82,29 @@ func (a *Agent) compact(ctx context.Context, reason CompactionReason, focus stri
 	if !structured {
 		firstMaximumBytes = turnSummaryMaximumBytes
 	}
+
+	// The plan is fully determined here, before any provider call: what gets
+	// summarized versus retained, and the token estimate. Emitting it now lets a
+	// frontend show the pre-execution plan while the summary request runs.
+	planMode := CompactionModeTurnPrefix
+	switch {
+	case hasTurn:
+		planMode = CompactionModeSplitTurn
+	case structured:
+		planMode = CompactionModeStructured
+	}
+	a.emitCompactionPlan(emit, CompactionPlan{
+		Reason:       reason,
+		Automatic:    automatic,
+		TokensBefore: tokensBefore,
+		// ponytail: floor estimate excludes the not-yet-generated summary; the
+		// exact post-checkpoint estimate arrives on EventCompactionCompleted.
+		EstimatedTokensAfter: estimateCompactedContext(a.options, tools, "", selection.Retained),
+		SummarizedMessages:   len(selection.HistoricalSource) + len(selection.TurnPrefixSource),
+		RetainedMessages:     len(selection.Retained),
+		Mode:                 planMode,
+	})
+
 	generated, generatedUsage, generatedUsagePresent, err := a.executeSummaryRequest(ctx, prepared.Request, firstMaximumBytes, structured)
 	if err != nil {
 		return CompactionResult{}, err
@@ -377,6 +400,11 @@ func estimateCompactedContext(options Options, tools []model.ToolDefinition, sum
 		Messages:     messages,
 		Tools:        cloneTools(tools),
 	}, session.CompactionMetadata{}, true)
+}
+
+func (a *Agent) emitCompactionPlan(emit func(Event), plan CompactionPlan) {
+	planCopy := plan
+	a.emit(emit, Event{Type: EventCompactionPlanned, Plan: &planCopy})
 }
 
 func (a *Agent) emitCompaction(emit func(Event), eventType EventType, result CompactionResult) {

@@ -78,13 +78,23 @@ func TestRecordConformance(t *testing.T) {
 				case memorytest.CorruptLabelsWrongShape:
 					row.labels = `[1]`
 				case memorytest.CorruptExpiryMalformed:
-					row.expires = "malformed-expiry"
+					row.expires = "!malformed-expiry"
 				case memorytest.CorruptExpiryNoncanonical:
-					row.expires = "2026-08-29T13:20:00.000000000z"
+					row.expires = "2026-08-29T13:20:00.000000000Y"
 				case memorytest.CorruptSensitiveText:
 					row.text = "prefix [REDACTED] suffix"
 				default:
 					return errors.New("unknown conformance corruption")
+				}
+				if corruption == memorytest.CorruptExpiryMalformed || corruption == memorytest.CorruptExpiryNoncanonical {
+					now := record.CreatedAt
+					rawExpiry, ok := row.expires.(string)
+					if !ok || rawExpiry > formatTimestamp(now) {
+						t.Fatalf("expiry corruption fixture %q = %q, must compare <= canonical Now", corruption, rawExpiry)
+					}
+					if corruption == memorytest.CorruptExpiryNoncanonical && len(rawExpiry) != len(timestampLayout) {
+						t.Fatalf("noncanonical expiry fixture length = %d, want %d", len(rawExpiry), len(timestampLayout))
+					}
 				}
 				database := openExternalSQLite(t, path)
 				defer database.Close()

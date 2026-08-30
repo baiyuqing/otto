@@ -49,9 +49,9 @@ func TestSchemaV1ManifestFeaturesAndFingerprint(t *testing.T) {
 			t.Errorf("schema object %s missing or changed", key)
 		}
 	}
-	for _, shadow := range expectedFTSShadowTables {
-		if _, ok := objects["table:"+shadow]; !ok {
-			t.Errorf("missing FTS shadow table %s (objects: %v)", shadow, names)
+	for shadow, statement := range expectedFTSShadowTables {
+		if got, ok := objects["table:"+shadow]; !ok || normalizeSchemaSQL(got) != normalizeSchemaSQL(statement) {
+			t.Errorf("missing or changed FTS shadow table %s (objects: %v)", shadow, names)
 		}
 	}
 	for index := range expectedSQLiteAutoindexes {

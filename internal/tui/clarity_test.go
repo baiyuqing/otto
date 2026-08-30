@@ -60,6 +60,13 @@ func TestIndentedToolSummaryFitsTerminalAnd120CellLimit(t *testing.T) {
 	}
 }
 
+func TestEmptyTranscriptHintIncludesOttoMark(t *testing.T) {
+	got := emptyTranscriptHint(80)
+	if !strings.HasPrefix(got, "(●ᴥ●)  otto") {
+		t.Fatalf("empty hint = %q, want otto mark as first line", got)
+	}
+}
+
 func TestExpandedToolWrapsIndentedDetailsWithoutDroppingTail(t *testing.T) {
 	entry := Entry{Kind: EntryTool, ToolName: "write", ToolArgs: "argument-head-" + strings.Repeat("a", 60) + "-argument-tail", ToolOutput: "output-head-" + strings.Repeat("b", 60) + "-output-tail", ToolDone: true}
 	got := indentToolBlock(renderToolBlock(entry, 30, true), 30)

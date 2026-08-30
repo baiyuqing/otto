@@ -13,6 +13,12 @@ import (
 	"github.com/baiyuqing/otto/internal/memory/memorytest"
 )
 
+var _ memory.Store = (*Store)(nil)
+
+func TestCandidateConformance(t *testing.T) {
+	memorytest.RunCandidateConformance(t, newMutationFixture)
+}
+
 func TestRecordConformance(t *testing.T) {
 	memorytest.RunRecordConformance(t, func(t *testing.T) memorytest.Fixture {
 		directory := t.TempDir()

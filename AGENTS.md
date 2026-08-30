@@ -23,7 +23,7 @@ Keep responsibilities split along the current Go package layout:
 - `internal/provider/openaicompat`: all Stage 1 provider-specific HTTP/JSON/SSE code
 - `internal/repl`: line-oriented REPL rendering and commands
 - `internal/session`: in-memory and JSONL session storage
-- `internal/tool`: workspace validation plus `read`/`write`/`edit`/`bash`
+- `internal/tool`: workspace validation plus `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`
 - `internal/tui`: full-screen Bubble Tea frontend, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
 
 Rules:
@@ -81,7 +81,7 @@ Do not add production behavior without a failing test first unless the user expl
 - Never add `--api-key`; Stage 1 uses environment variables only.
 - Never put raw API keys, OAuth tokens, or auth headers in TOML, JSONL session fixtures, logs, docs, or tests.
 - Redact sample values in errors and examples.
-- `read`, `write`, and `edit` must reject workspace escapes after canonical path and symlink validation.
+- `read`, `grep`, `find`, `ls`, `write`, and `edit` must reject workspace escapes after canonical path and symlink validation.
 - Do not describe `bash` as sandboxed. It is intentionally unsandboxed.
 
 ## Documentation expectations

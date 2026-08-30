@@ -1,0 +1,36 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+@AGENTS.md
+
+AGENTS.md is the canonical rulebook: Stage 1 scope (openai-compatible provider only), package boundaries, mandatory TDD workflow, offline-test requirements, and secrets rules. Follow it exactly. This file only adds what AGENTS.md does not cover.
+
+## Commands
+
+```bash
+make build      # go build -trimpath -o ./otto ./cmd/otto
+make check      # full CI gate: fmt, vet, staticcheck, test, test-race, git diff --check
+make test       # go test ./... (offline; no network, credentials, or TTY needed)
+make test-tui   # PTY smoke test: go test ./cmd/otto -run TestTUIPseudoTerminalLifecycle -count=1
+```
+
+Single test: `go test ./internal/tui -run TestName -count=1` (tests live next to their package).
+
+## Architecture
+
+Otto is a macOS coding-agent CLI. The wiring, from process start to a rendered response:
+
+1. **`cmd/otto/main.go` + `runtime_builder.go`** — parse flags, resolve the runtime (provider, model, API key, session) from flags > `OTTO_*` env vars > TOML profile > resumed-session defaults (exact precedence is documented in README "Configuration and precedence"), then construct: provider → tool registry → session store → `agent.Agent` → `app.Controller` → frontend.
+
+2. **`internal/app.Controller`** — the concurrency hub between frontends and the agent. Serializes prompts (one active turn; `ErrPromptActive` otherwise), owns session replacement for `/new` and `/resume` (swaps session + runner + runtime info atomically), and exposes `Info()`/`History()` snapshots. Frontends never touch the agent, provider, or session directly — everything goes through the Controller via the factory types (`SessionFactory`, `RunnerFactory`, `ResumeFactory`) injected at startup.
+
+3. **`internal/agent.Agent.Run`** — the turn loop: redact and append the user message, stream a provider completion, execute any tool calls through the registry, append results, loop until the provider finishes without tool calls. Progress is reported as a flat `agent.Event` stream (`text_delta`, `tool_call_started/finished`, `provider_usage`, …) that both frontends render; the Event stream is the only frontend-facing output contract.
+
+4. **`internal/provider`** — a one-method interface: `Complete(ctx, Request, streamCallback) (Response, error)`. `openaicompat` is the sole Stage 1 implementation and owns all HTTP/JSON/SSE wire structs; nothing provider-specific may leak out of that package. `internal/model` holds the provider-neutral message/block/tool types everything else speaks.
+
+5. **`internal/session`** — append-only JSONL in the **Pi session format v3** (`pi_codec.go`/`pi_types.go`), stored under `~/.otto/sessions/<workspace-key>/`. Files are created lazily on the first user prompt (`prepared.go`); `memory.go` backs `--no-session`. `scripts/pi-session-interop.mjs` is an opt-in compatibility probe against a real Pi install — never invoked by default tests.
+
+6. **Frontends** — `internal/tui` (full-screen Bubble Tea: transcript, Markdown rendering, slash-command completion, `/resume` modal) and `internal/repl` (line-oriented fallback for non-TTY). Selection is `--ui` > `OTTO_UI` > `[ui].mode` > auto (TUI only when stdin **and** stdout are terminals).
+
+Cross-cutting: `agent.Redactor` scrubs API-key values from text before it reaches the session file; `internal/tool` enforces workspace confinement (canonical paths, symlink resolution) for `read`/`grep`/`find`/`ls`/`write`/`edit`, while `bash` is deliberately unsandboxed.

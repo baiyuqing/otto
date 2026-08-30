@@ -106,7 +106,7 @@ func retrievalRecordProjection(alias string) string {
 	return strings.Join(parts, ",")
 }
 
-func retrievalFilter(request memory.RetrievalRequest, alias string, scopes []memory.Scope, includeLabels bool) ([]string, []any) {
+func retrievalFilter(request memory.RetrievalRequest, alias string, scopes []memory.Scope) ([]string, []any) {
 	q := func(column string) string { return alias + "." + column }
 	clauses := []string{q("state") + "=?"}
 	arguments := []any{string(memory.RecordActive)}
@@ -122,17 +122,6 @@ func retrievalFilter(request memory.RetrievalRequest, alias string, scopes []mem
 			arguments = append(arguments, kind)
 		}
 	}
-	if includeLabels {
-		labelGate := "typeof(" + q("labels_json") + ")='text' AND length(CAST(" + q("labels_json") + " AS BLOB))<=" + strconv.Itoa(maxLabelsJSONBytes)
-		gated := "CASE WHEN " + labelGate + " THEN " + q("labels_json") + " END"
-		valid := labelGate + " AND json_valid(" + gated + ")"
-		iterable := "CASE WHEN " + valid + " AND json_type(" + gated + ")='array' THEN " + gated + " ELSE '[]' END"
-		shape := valid + " AND json_type(" + gated + ")='array' AND NOT EXISTS (SELECT 1 FROM json_each(" + iterable + ") WHERE type<>'text')"
-		for _, label := range request.Labels {
-			clauses = append(clauses, "(NOT ("+shape+") OR EXISTS (SELECT 1 FROM json_each("+iterable+") WHERE type='text' AND value=?))")
-			arguments = append(arguments, label)
-		}
-	}
 	if !request.IncludeExpired {
 		expires := q("expires_at")
 		safe := timestampPredicateSafety(expires) + " AND " + timestampPredicateSafety(q("created_at")) + " AND " + expires + ">=" + q("created_at")
@@ -143,7 +132,7 @@ func retrievalFilter(request memory.RetrievalRequest, alias string, scopes []mem
 }
 
 func buildBaselineQuery(request memory.RetrievalRequest, user memory.Scope) (string, []any) {
-	clauses, arguments := retrievalFilter(request, "r", []memory.Scope{user}, true)
+	clauses, arguments := retrievalFilter(request, "r", []memory.Scope{user})
 	clauses = append(clauses, "r.semantic_key<>?", "r.kind IN (?,?)")
 	arguments = append(arguments, "", "preference", "instruction", memory.MaxBaselineRecords)
 	query := "SELECT " + retrievalRecordProjection("r") + " FROM memory_records r WHERE " + strings.Join(clauses, " AND ") + " ORDER BY r.updated_at DESC,r.id ASC LIMIT ?"
@@ -151,7 +140,7 @@ func buildBaselineQuery(request memory.RetrievalRequest, user memory.Scope) (str
 }
 
 func buildFTSCandidateQuery(request memory.RetrievalRequest, expression string) (string, []any) {
-	clauses, arguments := retrievalFilter(request, "r", request.Scopes, true)
+	clauses, arguments := retrievalFilter(request, "r", request.Scopes)
 	clauses = append(clauses, "memory_records_fts MATCH ?")
 	arguments = append(arguments, expression, memory.MaxRetrievalCandidates)
 	rank := "bm25(memory_records_fts,0.0,1.0,0.5,2.0,1.0)"
@@ -170,7 +159,7 @@ func buildWorkspaceReplacementQuery(request memory.RetrievalRequest, workspace m
 		values[index] = "(?,?)"
 		arguments = append(arguments, key.kind, key.key)
 	}
-	clauses, filterArguments := retrievalFilter(request, "r", []memory.Scope{workspace}, false)
+	clauses, filterArguments := retrievalFilter(request, "r", []memory.Scope{workspace})
 	arguments = append(arguments, filterArguments...)
 	arguments = append(arguments, memory.MaxRetrievalCandidates)
 	query := "WITH requested(kind,key) AS (VALUES " + strings.Join(values, ",") + ") SELECT " + retrievalRecordProjection("r") +

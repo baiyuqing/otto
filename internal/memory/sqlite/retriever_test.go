@@ -25,6 +25,7 @@ func TestRetrieverLiteralScopeAndEmptyBaseline(t *testing.T) {
 		{"pref", "preference", "editor", "prefers vim", user},
 		{"keyless", "note", "", "vim keyless", user},
 		{"other", "note", "other", "vim elsewhere", other},
+		{"sentinel", "note", "sentinel", "in-scope nonmatching sentinel", user},
 	} {
 		record := sqliteTestRecord(value.id, value.key, now)
 		record.Scope, record.Kind, record.Text = value.scope, value.kind, value.text

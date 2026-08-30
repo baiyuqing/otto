@@ -36,6 +36,18 @@ func (err sqliteCodeError) Code() int     { return err.code }
 
 type sqliteCoder interface{ Code() int }
 
+type badConnectionUnavailable struct{ cause error }
+
+func (err badConnectionUnavailable) Error() string { return memory.ErrUnavailable.Error() }
+func (err badConnectionUnavailable) Unwrap() error { return err.cause }
+func (err badConnectionUnavailable) Is(target error) bool {
+	return target == memory.ErrUnavailable
+}
+
+func isBadConnection(err error) bool {
+	return errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn)
+}
+
 func safeSQLiteError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
@@ -45,7 +57,7 @@ func safeSQLiteError(ctx context.Context, err error) error {
 			return ctxErr
 		}
 	}
-	if errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn) {
+	if isBadConnection(err) {
 		return memory.ErrClosed
 	}
 	var conflict *memory.ConflictError
@@ -349,6 +361,37 @@ func (store *Store) restoreAndReturnConnection(conn *sql.Conn) error {
 	return nil
 }
 
+func callBorrowedReadHook(operation string, conn *sql.Conn) {
+	if hook := loadTestHooks().borrowedRead; hook != nil {
+		hook(operation, conn)
+	}
+}
+
+func (store *Store) finishBorrowedRead(conn *sql.Conn, readErr error) error {
+	if isBadConnection(readErr) {
+		store.quarantine(conn)
+		return memory.ErrUnavailable
+	}
+	store.returnConnection(conn)
+	return readErr
+}
+
+func (store *Store) finishReadTransaction(conn *sql.Conn, readErr, endErr error) error {
+	if isBadConnection(readErr) || isBadConnection(endErr) {
+		store.quarantine(conn)
+		return memory.ErrUnavailable
+	}
+	if endErr != nil {
+		store.quarantine(conn)
+		if readErr == nil {
+			return safeSQLiteError(context.Background(), endErr)
+		}
+		return readErr
+	}
+	store.returnConnection(conn)
+	return readErr
+}
+
 func (store *Store) returnConnection(conn *sql.Conn) {
 	if conn == nil {
 		return
@@ -386,4 +429,7 @@ func (store *Store) quarantine(conn *sql.Conn) {
 	store.quarantined.Add(1)
 	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 	_ = conn.Close()
+	if hook := loadTestHooks().connectionQuarantined; hook != nil {
+		hook()
+	}
 }

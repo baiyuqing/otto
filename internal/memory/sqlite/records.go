@@ -222,9 +222,10 @@ func (store *Store) getRecord(ctx context.Context, predicate string, arguments .
 		done()
 		return memory.Record{}, err
 	}
+	callBorrowedReadHook("record-exact", conn)
 	query := "SELECT " + recordProjection() + " FROM memory_records WHERE state='active' AND " + predicate + " LIMIT 1"
 	record, scanErr := decodeRecordRow(conn.QueryRowContext(ctx, query, arguments...))
-	store.returnConnection(conn)
+	scanErr = store.finishBorrowedRead(conn, scanErr)
 	done()
 	if scanErr != nil {
 		if errors.Is(scanErr, sql.ErrNoRows) {
@@ -259,9 +260,10 @@ func (store *Store) GetTombstone(ctx context.Context, ref memory.RecordRef) (mem
 		done()
 		return memory.Tombstone{}, err
 	}
+	callBorrowedReadHook("tombstone-exact", conn)
 	query := "SELECT " + tombstoneProjection() + " FROM memory_records WHERE state='tombstone' AND scope_namespace=? AND scope_id=? AND id=? LIMIT 1"
 	value, scanErr := decodeTombstoneRow(conn.QueryRowContext(ctx, query, ref.Scope.Namespace, ref.Scope.ID, ref.ID))
-	store.returnConnection(conn)
+	scanErr = store.finishBorrowedRead(conn, scanErr)
 	done()
 	if scanErr != nil {
 		if errors.Is(scanErr, sql.ErrNoRows) {
@@ -319,6 +321,7 @@ func (store *Store) List(ctx context.Context, request memory.ListRequest) (memor
 		done()
 		return memory.RecordPage{}, err
 	}
+	callBorrowedReadHook("record-list", conn)
 	contaminated, err := beginReadTransaction(ctx, conn)
 	if err != nil {
 		if contaminated {
@@ -364,17 +367,10 @@ func (store *Store) List(ctx context.Context, request memory.ListRequest) (memor
 		}
 	}
 	endErr := endReadTransaction(conn)
-	if readErr == nil && endErr != nil {
-		readErr = endErr
-	}
-	if endErr != nil {
-		store.quarantine(conn)
-	} else {
-		store.returnConnection(conn)
-	}
+	readErr = store.finishReadTransaction(conn, readErr, endErr)
 	done()
 	if readErr != nil {
-		return memory.RecordPage{}, readErr
+		return memory.RecordPage{}, safeRecordReadError(ctx, readErr)
 	}
 	for _, record := range records {
 		if err := memory.GuardRecord(ctx, store.guard, record); err != nil {
@@ -423,6 +419,7 @@ func (store *Store) ListTombstones(ctx context.Context, request memory.Tombstone
 		done()
 		return memory.TombstonePage{}, err
 	}
+	callBorrowedReadHook("tombstone-list", conn)
 	contaminated, err := beginReadTransaction(ctx, conn)
 	if err != nil {
 		if contaminated {
@@ -465,17 +462,10 @@ func (store *Store) ListTombstones(ctx context.Context, request memory.Tombstone
 		}
 	}
 	endErr := endReadTransaction(conn)
-	if readErr == nil && endErr != nil {
-		readErr = endErr
-	}
-	if endErr != nil {
-		store.quarantine(conn)
-	} else {
-		store.returnConnection(conn)
-	}
+	readErr = store.finishReadTransaction(conn, readErr, endErr)
 	done()
 	if readErr != nil {
-		return memory.TombstonePage{}, readErr
+		return memory.TombstonePage{}, safeRecordReadError(ctx, readErr)
 	}
 	for _, value := range tombstones {
 		if err := store.guardTombstone(ctx, value); err != nil {
@@ -619,7 +609,22 @@ func (store *Store) createRecord(ctx context.Context, input memory.Record) (memo
 		return memory.Record{}, err
 	}
 	err = store.withWrite(ctx, memory.CommitUpsert, []string{desired.ID}, func(ctx context.Context, conn *sql.Conn) error {
-		_, err := conn.ExecContext(ctx, `INSERT INTO memory_records(
+		idGate := "typeof(id)='text' AND length(CAST(id AS BLOB)) BETWEEN 1 AND " + strconv.Itoa(memory.MaxIDBytes)
+		var existingID sql.NullString
+		err := conn.QueryRowContext(ctx, "SELECT CASE WHEN "+idGate+" THEN id END FROM memory_records WHERE id=? LIMIT 1", desired.ID).Scan(&existingID)
+		if err == nil {
+			if !existingID.Valid {
+				return memory.ErrCorrupt
+			}
+			return memory.ErrConflict
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err := requireFTSRowCount(ctx, conn, desired.ID, 0); err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, `INSERT INTO memory_records(
 			id,scope_namespace,scope_id,kind,semantic_key,text_value,labels_json,metadata_json,source_json,
 			confidence,revision,created_at,updated_at,expires_at,state,forgotten_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',NULL)`,
@@ -632,6 +637,9 @@ func (store *Store) createRecord(ctx context.Context, input memory.Record) (memo
 		}
 		if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records_fts(record_id,text_value,kind,semantic_key,labels) VALUES(?,?,?,?,?)`,
 			desired.ID, desired.Text, desired.Kind, desired.Key, ftsLabels(desired.Labels)); err != nil {
+			return err
+		}
+		if err := requireFTSRowCount(ctx, conn, desired.ID, 1); err != nil {
 			return err
 		}
 		return bumpGeneration(ctx, conn)
@@ -736,6 +744,7 @@ func (store *Store) readMutationSnapshot(ctx context.Context, ref memory.RecordR
 		done()
 		return mutationSnapshot{}, err
 	}
+	callBorrowedReadHook("mutation-snapshot", conn)
 	contaminated, err := beginReadTransaction(ctx, conn)
 	if err != nil {
 		if contaminated {
@@ -748,17 +757,10 @@ func (store *Store) readMutationSnapshot(ctx context.Context, ref memory.RecordR
 	}
 	snapshot, readErr := readMutationSnapshotConn(ctx, conn, ref)
 	endErr := endReadTransaction(conn)
-	if readErr == nil && endErr != nil {
-		readErr = endErr
-	}
-	if endErr != nil {
-		store.quarantine(conn)
-	} else {
-		store.returnConnection(conn)
-	}
+	readErr = store.finishReadTransaction(conn, readErr, endErr)
 	done()
 	if readErr != nil {
-		return mutationSnapshot{}, readErr
+		return mutationSnapshot{}, safeRecordReadError(ctx, readErr)
 	}
 	if snapshot.record != nil {
 		if err := memory.GuardRecord(ctx, store.guard, *snapshot.record); err != nil {
@@ -1059,10 +1061,16 @@ func bumpGeneration(ctx context.Context, conn *sql.Conn) error {
 func beginReadTransaction(ctx context.Context, conn *sql.Conn) (contaminated bool, result error) {
 	if err := executeReadSetup(ctx, conn, "PRAGMA query_only=ON"); err != nil {
 		cleanupUncertainReadSetup(conn)
+		if isBadConnection(err) {
+			return true, badConnectionUnavailable{cause: err}
+		}
 		return true, safeSQLiteError(ctx, err)
 	}
 	if err := executeReadSetup(ctx, conn, "BEGIN"); err != nil {
 		cleanupUncertainReadSetup(conn)
+		if isBadConnection(err) {
+			return true, badConnectionUnavailable{cause: err}
+		}
 		return true, safeSQLiteError(ctx, err)
 	}
 	return false, nil
@@ -1086,10 +1094,10 @@ func cleanupUncertainReadSetup(conn *sql.Conn) {
 
 func endReadTransaction(conn *sql.Conn) error {
 	if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
-		return memory.ErrUnavailable
+		return err
 	}
 	if _, err := conn.ExecContext(context.Background(), "PRAGMA query_only=OFF"); err != nil {
-		return memory.ErrUnavailable
+		return err
 	}
 	return nil
 }
@@ -1097,6 +1105,9 @@ func endReadTransaction(conn *sql.Conn) error {
 func safeRecordReadError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
+	}
+	if isBadConnection(err) {
+		return badConnectionUnavailable{cause: err}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
@@ -1122,7 +1133,7 @@ func safeRecordReadError(ctx context.Context, err error) error {
 	var scanErr recordScanError
 	if errors.As(err, &scanErr) {
 		mapped := safeSQLiteError(ctx, scanErr.err)
-		if errors.Is(mapped, memory.ErrBusy) || errors.Is(mapped, memory.ErrClosed) ||
+		if errors.Is(mapped, memory.ErrBusy) || errors.Is(mapped, memory.ErrClosed) || isBadConnection(mapped) ||
 			errors.Is(scanErr.err, memory.ErrUnavailable) || errors.Is(mapped, context.Canceled) ||
 			errors.Is(mapped, context.DeadlineExceeded) {
 			return mapped

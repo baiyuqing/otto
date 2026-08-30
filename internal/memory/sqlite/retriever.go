@@ -47,12 +47,17 @@ type retrievalCandidate struct {
 }
 
 type rankedRowScanner struct {
-	row  rowScanner
-	rank *sql.NullFloat64
+	row      rowScanner
+	recordID *sql.NullString
+	text     *sql.NullString
+	kind     *sql.NullString
+	key      *sql.NullString
+	labels   *sql.NullString
+	rank     *sql.NullFloat64
 }
 
 func (scanner rankedRowScanner) Scan(destinations ...any) error {
-	return scanner.row.Scan(append(destinations, scanner.rank)...)
+	return scanner.row.Scan(append(destinations, scanner.recordID, scanner.text, scanner.kind, scanner.key, scanner.labels, scanner.rank)...)
 }
 
 func (store *Store) Retrieve(ctx context.Context, input memory.RetrievalRequest) (memory.RetrievalResult, error) {
@@ -214,6 +219,7 @@ func (store *Store) readRetrievalSnapshot(ctx context.Context, request memory.Re
 		done()
 		return nil, 0, err
 	}
+	callBorrowedReadHook("retrieval", conn)
 	contaminated, err := beginReadTransaction(ctx, conn)
 	if err != nil {
 		if contaminated {
@@ -266,14 +272,7 @@ func (store *Store) readRetrievalSnapshot(ctx context.Context, request memory.Re
 		}
 	}
 	endErr := endReadTransaction(conn)
-	if readErr == nil && endErr != nil {
-		readErr = endErr
-	}
-	if endErr != nil {
-		store.quarantine(conn)
-	} else {
-		store.returnConnection(conn)
-	}
+	readErr = store.finishReadTransaction(conn, readErr, endErr)
 	done()
 	if readErr != nil {
 		return nil, 0, safeRecordReadError(ctx, readErr)
@@ -336,22 +335,31 @@ func queryRankedRetrievalRecords(ctx context.Context, conn *sql.Conn, query stri
 		return nil, safeRecordReadError(ctx, err)
 	}
 	result := make([]retrievalCandidate, 0, memory.MaxRetrievalCandidates)
+	seen := make(map[string]struct{}, memory.MaxRetrievalCandidates)
 	var readErr error
 	for rows.Next() {
 		if len(result) >= memory.MaxRetrievalCandidates {
 			readErr = memory.ErrCorrupt
 			break
 		}
+		var recordID, text, kind, key, labels sql.NullString
 		var rank sql.NullFloat64
-		record, err := decodeRecordRow(rankedRowScanner{row: rows, rank: &rank})
+		record, err := decodeRecordRow(rankedRowScanner{row: rows, recordID: &recordID, text: &text, kind: &kind, key: &key, labels: &labels, rank: &rank})
 		if err != nil {
 			readErr = safeRecordReadError(ctx, err)
 			break
 		}
-		if !rank.Valid || math.IsNaN(rank.Float64) || math.IsInf(rank.Float64, 0) {
+		if !recordID.Valid || !text.Valid || !kind.Valid || !key.Valid || !labels.Valid || !rank.Valid ||
+			recordID.String != record.ID || text.String != record.Text || kind.String != record.Kind || key.String != record.Key || labels.String != ftsLabels(record.Labels) ||
+			math.IsNaN(rank.Float64) || math.IsInf(rank.Float64, 0) {
 			readErr = memory.ErrCorrupt
 			break
 		}
+		if _, duplicate := seen[record.ID]; duplicate {
+			readErr = memory.ErrCorrupt
+			break
+		}
+		seen[record.ID] = struct{}{}
 		result = append(result, makeRetrievalCandidate(record, false, len(result)+1))
 	}
 	if err := rows.Err(); readErr == nil && err != nil {

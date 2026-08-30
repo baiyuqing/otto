@@ -250,6 +250,9 @@ func prepareAndInstallPrivateDirectory(ctx context.Context, parentFD int, target
 	if resultErr = unix.Fstat(preparedFD, &preparedStat); resultErr != nil || validateFileMetadata(statMetadata{preparedStat}, true) != nil || uint32(preparedStat.Mode)&0o777 != 0o700 {
 		return -1, false, memory.ErrUnavailable
 	}
+	if resultErr = fsyncSecureDescriptor("prepared-directory", preparedFD); resultErr != nil {
+		return -1, false, resultErr
+	}
 	if err := ctx.Err(); err != nil {
 		return -1, false, err
 	}
@@ -271,6 +274,9 @@ func prepareAndInstallPrivateDirectory(ctx context.Context, parentFD int, target
 		return -1, false, memory.ErrUnavailable
 	}
 	temporaryExists = false
+	if resultErr = fsyncSecureDescriptor("directory-parent", parentFD); resultErr != nil {
+		return -1, false, resultErr
+	}
 
 	var installedStat unix.Stat_t
 	if err := unix.Fstatat(parentFD, targetName, &installedStat, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
@@ -355,6 +361,17 @@ func openOrCreateDatabase(ctx context.Context, parentFD int, name string) (*os.F
 			_ = unix.Close(fd)
 			return nil, false, unix.Stat_t{}, memory.ErrInvalidRequest
 		}
+		// Sync both descriptors on every secure acquisition. This also repairs the
+		// durability proof after a prior fail-closed attempt created the entry but
+		// failed one of its syncs before Store publication.
+		if err := fsyncSecureDescriptor("database-file", fd); err != nil {
+			_ = unix.Close(fd)
+			return nil, false, unix.Stat_t{}, err
+		}
+		if err := fsyncSecureDescriptor("database-parent", parentFD); err != nil {
+			_ = unix.Close(fd)
+			return nil, false, unix.Stat_t{}, err
+		}
 		file := os.NewFile(uintptr(fd), "secure-memory-database")
 		if file == nil {
 			_ = unix.Close(fd)
@@ -362,6 +379,20 @@ func openOrCreateDatabase(ctx context.Context, parentFD int, name string) (*os.F
 		}
 		return file, created, stat, nil
 	}
+}
+
+func fsyncSecureDescriptor(resource string, fd int) error {
+	syncDescriptor := func() error { return unix.Fsync(fd) }
+	var err error
+	if hook := loadTestHooks().fsync; hook != nil {
+		err = hook(resource, syncDescriptor)
+	} else {
+		err = syncDescriptor()
+	}
+	if err != nil {
+		return memory.ErrUnavailable
+	}
+	return nil
 }
 
 func openDirectoryAbsolute(path string) (int, error) {

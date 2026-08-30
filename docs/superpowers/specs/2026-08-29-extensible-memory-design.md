@@ -1,7 +1,7 @@
 # Extensible Memory Subsystem Design
 
-**Status:** Chat-approved; awaiting written-spec review  
-**Date:** 2026-08-29  
+**Status:** Approved
+**Date:** 2026-08-29
 **Target:** Otto Stage 1 on macOS
 
 ## 1. Goal

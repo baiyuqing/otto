@@ -77,7 +77,7 @@ func TestRecordCallbacksRunWithoutStoreResources(t *testing.T) {
 	}
 	guard := &resourceCheckingGuard{t: t}
 	options := testOptions(t)
-	options.Guard = guard
+	options.Guard = testGuardWith(t, guard)
 	store, err := Open(context.Background(), path, options)
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +416,8 @@ func TestCommitSuccessSurvivesBusyTimeoutRestoreFailure(t *testing.T) {
 func TestReadSetupUncertaintyPoisonsAndWakesWaiters(t *testing.T) {
 	t.Run("real BEGIN then error", func(t *testing.T) {
 		store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
-		installTestHooks(t, testHooks{readSetupExec: func(statement string, exec func() error) error {
+		quarantined := make(chan struct{}, 1)
+		installTestHooks(t, testHooks{connectionQuarantined: func() { quarantined <- struct{}{} }, readSetupExec: func(statement string, exec func() error) error {
 			if err := exec(); err != nil {
 				return err
 			}
@@ -432,9 +433,10 @@ func TestReadSetupUncertaintyPoisonsAndWakesWaiters(t *testing.T) {
 		if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
 			t.Fatalf("Store after uncertain BEGIN = %v", err)
 		}
-		waitFor(t, time.Second, func() bool {
-			return store.database.Stats().OpenConnections == retainedConnectionCount-1
-		}, "physical uncertain read connection discard")
+		<-quarantined
+		if got := store.database.Stats().OpenConnections; got != retainedConnectionCount-1 {
+			t.Fatalf("physical connections = %d", got)
+		}
 	})
 
 	t.Run("query-only setup cancellation", func(t *testing.T) {
@@ -514,11 +516,11 @@ func TestSafeRecordReadErrorDistinguishesStructureAndOperations(t *testing.T) {
 	}{
 		{"projection shape", recordScanError{err: errors.New("scan conversion")}, memory.ErrCorrupt},
 		{"scan busy", recordScanError{err: sqliteCodeError{code: sqliteBusy}}, memory.ErrBusy},
-		{"scan closed", recordScanError{err: sql.ErrConnDone}, memory.ErrClosed},
+		{"scan bad connection", recordScanError{err: sql.ErrConnDone}, memory.ErrUnavailable},
 		{"scan I/O", recordScanError{err: sqliteCodeError{code: 10}}, memory.ErrUnavailable},
 		{"scan unavailable", recordScanError{err: memory.ErrUnavailable}, memory.ErrUnavailable},
 		{"query busy", sqliteCodeError{code: sqliteBusy}, memory.ErrBusy},
-		{"query closed", sql.ErrConnDone, memory.ErrClosed},
+		{"query bad connection", sql.ErrConnDone, memory.ErrUnavailable},
 		{"query I/O", sqliteCodeError{code: 10}, memory.ErrUnavailable},
 		{"generic unavailable", errors.New("driver operation failed"), memory.ErrUnavailable},
 	}
@@ -536,7 +538,7 @@ func TestSafeRecordReadErrorDistinguishesStructureAndOperations(t *testing.T) {
 			_ = conn.Close()
 		}})
 		_, err := store.List(context.Background(), memory.ListRequest{Scopes: []memory.Scope{{Namespace: "user", ID: "reader"}}, Limit: 1, IncludeExpired: true})
-		if !errors.Is(err, memory.ErrClosed) || errors.Is(err, memory.ErrCorrupt) {
+		if !errors.Is(err, memory.ErrUnavailable) || errors.Is(err, memory.ErrClosed) || errors.Is(err, memory.ErrCorrupt) {
 			t.Fatalf("closed production read classification = %v", err)
 		}
 	})

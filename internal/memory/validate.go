@@ -87,6 +87,8 @@ func validTimestamp(value time.Time) bool {
 
 func validOptionalTimestamp(value *time.Time) bool { return value == nil || validTimestamp(*value) }
 
+func validRevision(value uint64) bool { return value >= 1 && value <= math.MaxInt64 }
+
 func validOrigin(origin Origin) bool {
 	switch origin {
 	case OriginHuman, OriginModel, OriginExtractor, OriginImport, OriginMigration:
@@ -177,7 +179,7 @@ func ValidateRecord(record Record) error {
 	if math.IsNaN(record.Confidence) || math.IsInf(record.Confidence, 0) || record.Confidence < 0 || record.Confidence > 1 {
 		return invalidRecord("record confidence")
 	}
-	if record.Revision == 0 {
+	if !validRevision(record.Revision) {
 		return invalidRecord("record revision")
 	}
 	if !validTimestamp(record.CreatedAt) || !validTimestamp(record.UpdatedAt) || record.UpdatedAt.Before(record.CreatedAt) {
@@ -262,7 +264,10 @@ func foldCanonical(value string) string {
 	return canonical.String()
 }
 
-func validateProposedRecord(record Record, action CandidateAction) error {
+func ValidateProposedRecord(record Record, action CandidateAction) error {
+	if action != CandidateCreate && action != CandidateUpdate && action != CandidateForget {
+		return invalidRecord("proposed action")
+	}
 	if err := ValidateScope(record.Scope); err != nil {
 		return invalidRecord("proposed scope")
 	}
@@ -321,7 +326,7 @@ func ValidateCandidate(candidate Candidate) error {
 			return invalidRecord("create target")
 		}
 	case CandidateUpdate, CandidateForget:
-		if !validOpaqueID(candidate.TargetID, MaxIDBytes) || candidate.BaseRevision == 0 {
+		if !validOpaqueID(candidate.TargetID, MaxIDBytes) || !validRevision(candidate.BaseRevision) {
 			return invalidRecord("candidate target")
 		}
 	default:
@@ -332,7 +337,7 @@ func ValidateCandidate(candidate Candidate) error {
 		if candidate.DecidedAt != nil || candidate.DecisionSource != "" || candidate.ResultRecordID != "" || candidate.ResultRevision != 0 {
 			return invalidRecord("pending decision fields")
 		}
-		if err := validateProposedRecord(candidate.Proposed, candidate.Action); err != nil {
+		if err := ValidateProposedRecord(candidate.Proposed, candidate.Action); err != nil {
 			return err
 		}
 		if !validSemantic(candidate.Reason, MaxReasonBytes, false) {
@@ -350,7 +355,7 @@ func ValidateCandidate(candidate Candidate) error {
 				return invalidRecord("rejected result")
 			}
 		} else {
-			if candidate.ResultRevision == 0 {
+			if !validRevision(candidate.ResultRevision) {
 				return invalidRecord("accepted result revision")
 			}
 			if candidate.Action == CandidateCreate {
@@ -507,6 +512,9 @@ func ValidateCandidateListRequest(request CandidateListRequest) error {
 }
 
 func validateQuery(value string) error {
+	if len(value) <= MaxQueryBytes && utf8.ValidString(value) && strings.TrimSpace(value) == "" {
+		return nil
+	}
 	if !validSemantic(value, MaxQueryBytes, true) {
 		return invalidRequest("query", MaxQueryBytes)
 	}
@@ -623,7 +631,7 @@ func ValidateRememberRequest(request RememberRequest) error {
 		if request.ID != "" {
 			return invalidRequest("create ID")
 		}
-	} else if *request.ExpectedRevision == 0 || request.ID == "" && request.Key == "" || request.ID != "" && !validOpaqueID(request.ID, MaxIDBytes) {
+	} else if !validRevision(*request.ExpectedRevision) || request.ID == "" && request.Key == "" || request.ID != "" && !validOpaqueID(request.ID, MaxIDBytes) {
 		return invalidRequest("update identity and revision")
 	}
 	return nil
@@ -640,7 +648,7 @@ func ValidateProposeRequest(request ProposeRequest) error {
 		if err := ValidateScope(request.Scope); err != nil {
 			return err
 		}
-		if !validOpaqueID(request.TargetID, MaxIDBytes) || request.BaseRevision == 0 {
+		if !validOpaqueID(request.TargetID, MaxIDBytes) || !validRevision(request.BaseRevision) {
 			return invalidRequest("forget proposal target")
 		}
 		if request.Kind != "" || request.Key != "" || request.Text != "" || len(request.Labels) != 0 || len(request.Metadata) != 0 || request.Confidence != 0 || request.ExpiresAt != nil {
@@ -657,7 +665,7 @@ func ValidateProposeRequest(request ProposeRequest) error {
 			return invalidRequest("create proposal target")
 		}
 	case CandidateUpdate:
-		if !validOpaqueID(request.TargetID, MaxIDBytes) || request.BaseRevision == 0 {
+		if !validOpaqueID(request.TargetID, MaxIDBytes) || !validRevision(request.BaseRevision) {
 			return invalidRequest("update proposal target")
 		}
 	default:
@@ -670,7 +678,7 @@ func ValidateForgetRequest(request ForgetRequest) error {
 	if err := ValidateRecordRef(request.Ref); err != nil {
 		return err
 	}
-	if request.ExpectedRevision == 0 {
+	if !validRevision(request.ExpectedRevision) {
 		return invalidRequest("expected revision")
 	}
 	if request.PurgeBackups && !request.ConfirmPurge {
@@ -717,7 +725,7 @@ func ValidateUpsertRequest(request UpsertRequest) error {
 		request.Record.Revision = 1
 		return ValidateRecord(request.Record)
 	}
-	if *request.ExpectedRevision == 0 || request.Record.Revision != *request.ExpectedRevision {
+	if !validRevision(*request.ExpectedRevision) || request.Record.Revision != *request.ExpectedRevision {
 		return invalidRequest("expected revision")
 	}
 	return ValidateRecord(request.Record)
@@ -727,7 +735,7 @@ func ValidateStoreForgetRequest(request StoreForgetRequest) error {
 	if err := ValidateRecordRef(request.Ref); err != nil {
 		return err
 	}
-	if request.ExpectedRevision == 0 || !validTimestamp(request.ForgottenAt) {
+	if !validRevision(request.ExpectedRevision) || !validTimestamp(request.ForgottenAt) {
 		return invalidRequest("forget revision or time")
 	}
 	return nil
@@ -799,6 +807,20 @@ func validateCandidateBatchBytes(candidates []Candidate) error {
 	return nil
 }
 
+type canonicalToolFact struct {
+	ToolName string `json:"tool_name"`
+	Text     string `json:"text"`
+}
+
+type canonicalObservation struct {
+	ID            string              `json:"id"`
+	UserText      string              `json:"user_text"`
+	AssistantText string              `json:"assistant_text"`
+	SessionID     string              `json:"session_id"`
+	ToolFacts     []canonicalToolFact `json:"tool_facts"`
+	MessageIDs    []string            `json:"message_ids"`
+}
+
 func ValidateObservation(observation Observation) error {
 	if !validOpaqueID(observation.ID, MaxIDBytes) || observation.SessionID != "" && !validOpaqueID(observation.SessionID, MaxSessionIDBytes) {
 		return invalidRequest("observation ID")
@@ -806,7 +828,6 @@ func ValidateObservation(observation Observation) error {
 	if len(observation.MessageIDs) > MaxObservationMessageIDs || len(observation.ToolFacts) > MaxToolFacts {
 		return invalidRequest("observation count")
 	}
-	total := len(observation.UserText) + len(observation.AssistantText)
 	if !validText(observation.UserText, MaxObservationBytes) || !validText(observation.AssistantText, MaxObservationBytes) {
 		return invalidRequest("observation text", MaxObservationBytes)
 	}
@@ -815,14 +836,20 @@ func ValidateObservation(observation Observation) error {
 			return invalidRequest("observation message ID")
 		}
 	}
-	for _, fact := range observation.ToolFacts {
+	facts := make([]canonicalToolFact, len(observation.ToolFacts))
+	messageIDs := append([]string{}, observation.MessageIDs...)
+	for index, fact := range observation.ToolFacts {
 		if !validSemantic(fact.ToolName, MaxToolNameBytes, true) || !validText(fact.Text, MaxToolFactTextBytes) {
 			return invalidRequest("tool fact")
 		}
-		total += len(fact.ToolName) + len(fact.Text)
+		facts[index] = canonicalToolFact(fact)
 	}
-	if total > MaxObservationBytes {
-		return invalidRequest("observation bytes", MaxObservationBytes)
+	canonical, err := json.Marshal(canonicalObservation{
+		ID: observation.ID, UserText: observation.UserText, AssistantText: observation.AssistantText,
+		SessionID: observation.SessionID, ToolFacts: facts, MessageIDs: messageIDs,
+	})
+	if err != nil || len(canonical) > MaxObservationBytes {
+		return invalidRequest("observation canonical bytes", MaxObservationBytes)
 	}
 	return nil
 }
@@ -831,7 +858,18 @@ func ValidateObservationCommit(commit ObservationCommit) error {
 	if !validOpaqueID(commit.ObservationID, MaxIDBytes) || !validTimestamp(commit.CreatedAt) {
 		return invalidRequest("observation commit")
 	}
-	return ValidateProposalBatch(ProposalBatch{Candidates: commit.Candidates})
+	if len(commit.Candidates) > MaxCandidateBatch {
+		return invalidCount(ErrInvalidRequest, "candidate batch count", MaxCandidateBatch)
+	}
+	for _, candidate := range commit.Candidates {
+		if err := ValidateCandidate(candidate); err != nil {
+			return err
+		}
+		if candidate.State != CandidatePending {
+			return invalidRequest("candidate batch state")
+		}
+	}
+	return validateCandidateBatchBytes(commit.Candidates)
 }
 
 func ValidateObservationReceipt(receipt ObservationReceipt) error {
@@ -865,7 +903,7 @@ func ValidateStoreReviewRequest(request StoreReviewRequest, candidate Candidate)
 	if request.ResultRecordID != "" && !validOpaqueID(request.ResultRecordID, MaxIDBytes) {
 		return invalidRequest("review result ID")
 	}
-	if request.TargetRevision != nil && *request.TargetRevision == 0 {
+	if request.TargetRevision != nil && !validRevision(*request.TargetRevision) {
 		return invalidRequest("review target revision")
 	}
 	if request.DecidedAt.Before(candidate.CreatedAt) {
@@ -900,7 +938,7 @@ func ValidateStoreReviewRequest(request StoreReviewRequest, candidate Candidate)
 		if candidate.Action == CandidateForget || request.Edited.Scope != candidate.Proposed.Scope {
 			return invalidRequest("review edit scope")
 		}
-		if err := validateProposedRecord(*request.Edited, candidate.Action); err != nil {
+		if err := ValidateProposedRecord(*request.Edited, candidate.Action); err != nil {
 			return err
 		}
 	}
@@ -917,14 +955,14 @@ func ValidateReviewRequest(request ReviewRequest) error {
 	if request.Decision == ReviewReject && (request.Edited != nil || request.TargetRevision != nil) {
 		return invalidRequest("rejected review fields")
 	}
-	if request.TargetRevision != nil && *request.TargetRevision == 0 {
+	if request.TargetRevision != nil && !validRevision(*request.TargetRevision) {
 		return invalidRequest("target revision")
 	}
 	if request.Edited != nil {
 		if request.Edited.Scope != request.Ref.Scope {
 			return invalidRequest("review edit scope")
 		}
-		if err := validateProposedRecord(*request.Edited, CandidateUpdate); err != nil {
+		if err := ValidateProposedRecord(*request.Edited, CandidateUpdate); err != nil {
 			return err
 		}
 	}
@@ -938,7 +976,7 @@ func ValidateTombstone(tombstone Tombstone) error {
 	if err := ValidateScope(tombstone.Scope); err != nil {
 		return invalidRecord("tombstone scope")
 	}
-	if tombstone.Revision == 0 || !validTimestamp(tombstone.CreatedAt) || !validTimestamp(tombstone.UpdatedAt) || !validTimestamp(tombstone.ForgottenAt) {
+	if !validRevision(tombstone.Revision) || !validTimestamp(tombstone.CreatedAt) || !validTimestamp(tombstone.UpdatedAt) || !validTimestamp(tombstone.ForgottenAt) {
 		return invalidRecord("tombstone revision or time")
 	}
 	if tombstone.UpdatedAt.Before(tombstone.CreatedAt) || tombstone.ForgottenAt.Before(tombstone.CreatedAt) || tombstone.ForgottenAt.After(tombstone.UpdatedAt) {
@@ -955,7 +993,7 @@ func ValidateProposal(proposal Proposal) error {
 		return invalidRequest("proposal reason", MaxReasonBytes)
 	}
 	if proposal.Action == CandidateForget {
-		if !validOpaqueID(proposal.TargetID, MaxIDBytes) || proposal.BaseRevision == 0 {
+		if !validOpaqueID(proposal.TargetID, MaxIDBytes) || !validRevision(proposal.BaseRevision) {
 			return invalidRequest("forget proposal target")
 		}
 		if proposal.Kind != "" || proposal.Key != "" || proposal.Text != "" || len(proposal.Labels) != 0 || len(proposal.Metadata) != 0 || proposal.Confidence != 0 || proposal.ExpiresAt != nil {
@@ -981,7 +1019,7 @@ func ValidateProposal(proposal Proposal) error {
 			return invalidRequest("create proposal target")
 		}
 	case CandidateUpdate:
-		if !validOpaqueID(proposal.TargetID, MaxIDBytes) || proposal.BaseRevision == 0 {
+		if !validOpaqueID(proposal.TargetID, MaxIDBytes) || !validRevision(proposal.BaseRevision) {
 			return invalidRequest("update proposal target")
 		}
 	default:

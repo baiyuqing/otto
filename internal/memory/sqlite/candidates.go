@@ -489,8 +489,9 @@ func (store *Store) readCandidateSnapshot(ctx context.Context, ref memory.Candid
 		done()
 		return candidateSnapshot{}, err
 	}
+	callBorrowedReadHook("candidate-exact", conn)
 	snapshot, readErr := readCandidateSnapshotConn(ctx, conn, ref, verifyObservation)
-	store.returnConnection(conn)
+	readErr = store.finishBorrowedRead(conn, readErr)
 	done()
 	return snapshot, readErr
 }
@@ -542,6 +543,7 @@ func (store *Store) ListCandidates(ctx context.Context, input memory.CandidateLi
 		done()
 		return memory.CandidatePage{}, err
 	}
+	callBorrowedReadHook("candidate-list", conn)
 	contaminated, err := beginReadTransaction(ctx, conn)
 	if err != nil {
 		if contaminated {
@@ -599,17 +601,10 @@ func (store *Store) ListCandidates(ctx context.Context, input memory.CandidateLi
 		}
 	}
 	endErr := endReadTransaction(conn)
-	if readErr == nil && endErr != nil {
-		readErr = endErr
-	}
-	if endErr != nil {
-		store.quarantine(conn)
-	} else {
-		store.returnConnection(conn)
-	}
+	readErr = store.finishReadTransaction(conn, readErr, endErr)
 	done()
 	if readErr != nil {
-		return memory.CandidatePage{}, readErr
+		return memory.CandidatePage{}, safeRecordReadError(ctx, readErr)
 	}
 	candidates := make([]memory.Candidate, len(snapshots))
 	for index, snapshot := range snapshots {
@@ -818,8 +813,9 @@ func (store *Store) GetObservationReceipt(ctx context.Context, id string) (memor
 		done()
 		return memory.ObservationReceipt{}, err
 	}
+	callBorrowedReadHook("receipt", conn)
 	receipt, readErr := readObservationReceiptConn(ctx, conn, id, true)
-	store.returnConnection(conn)
+	readErr = store.finishBorrowedRead(conn, readErr)
 	done()
 	if readErr != nil {
 		return memory.ObservationReceipt{}, readErr
@@ -849,19 +845,11 @@ func prepareObservationCommit(ctx context.Context, guard memory.ContentGuard, in
 		return memory.ObservationCommit{}, err
 	}
 	commit := memory.CloneObservationCommit(input)
-	if !validCandidateOpaqueID(commit.ObservationID) || commit.CreatedAt.IsZero() || commit.CreatedAt.Location() != time.UTC || commit.CreatedAt.Year() < 1 || commit.CreatedAt.Year() > 9999 || commit.CreatedAt != commit.CreatedAt.Round(0) {
-		return memory.ObservationCommit{}, memory.ErrInvalidRequest
-	}
-	if len(commit.Candidates) > memory.MaxCandidateBatch {
-		return memory.ObservationCommit{}, memory.ErrInvalidRequest
-	}
 	for index := range commit.Candidates {
 		normalizeProposedCollections(&commit.Candidates[index].Proposed)
 	}
-	if len(commit.Candidates) != 0 {
-		if err := memory.ValidateProposalBatch(memory.ProposalBatch{Candidates: commit.Candidates}); err != nil {
-			return memory.ObservationCommit{}, err
-		}
+	if err := memory.ValidateObservationCommit(commit); err != nil {
+		return memory.ObservationCommit{}, err
 	}
 	seen := make(map[string]struct{}, len(commit.Candidates))
 	for _, candidate := range commit.Candidates {
@@ -1055,7 +1043,7 @@ func (store *Store) Review(ctx context.Context, input memory.StoreReviewRequest)
 	}
 
 	var guardedTarget mutationSnapshot
-	if guarded.candidate.Action != memory.CandidateCreate {
+	if request.Decision == memory.ReviewAccept && guarded.candidate.Action != memory.CandidateCreate {
 		guardedTarget, err = store.readMutationSnapshot(ctx, memory.RecordRef{Scope: guarded.candidate.Proposed.Scope, ID: guarded.candidate.TargetID})
 		if err != nil {
 			return memory.ReviewResult{}, err
@@ -1063,14 +1051,12 @@ func (store *Store) Review(ctx context.Context, input memory.StoreReviewRequest)
 		if guardedTarget.tombstone != nil {
 			return memory.ReviewResult{}, conflictRecord(guarded.candidate.TargetID, guarded.candidate.BaseRevision, guardedTarget.tombstone.Revision)
 		}
-		if request.Decision == memory.ReviewAccept {
-			expected := guarded.candidate.BaseRevision
-			if request.TargetRevision != nil {
-				expected = *request.TargetRevision
-			}
-			if guardedTarget.record.Revision != expected {
-				return memory.ReviewResult{}, conflictRecord(guarded.candidate.TargetID, expected, guardedTarget.record.Revision)
-			}
+		expected := guarded.candidate.BaseRevision
+		if request.TargetRevision != nil {
+			expected = *request.TargetRevision
+		}
+		if guardedTarget.record.Revision != expected {
+			return memory.ReviewResult{}, conflictRecord(guarded.candidate.TargetID, expected, guardedTarget.record.Revision)
 		}
 	}
 
@@ -1156,7 +1142,7 @@ func (store *Store) Review(ctx context.Context, input memory.StoreReviewRequest)
 		if current.candidate.State != memory.CandidatePending || current.digest != guarded.digest {
 			return memory.ErrConflict
 		}
-		if guarded.candidate.Action != memory.CandidateCreate {
+		if request.Decision == memory.ReviewAccept && guarded.candidate.Action != memory.CandidateCreate {
 			if err := compareReviewTarget(ctx, conn, guardedTarget, guarded.candidate, guardedTarget.record.Revision); err != nil {
 				return err
 			}

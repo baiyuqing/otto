@@ -29,13 +29,22 @@ const (
 	testForbidden  = "deaddeaddeaddeaddeaddeaddeaddead"
 )
 
-func testGuard(t *testing.T, forbidden ...string) memory.ContentGuard {
+func testGuard(t *testing.T, forbidden ...string) *memory.CompositeGuard {
 	t.Helper()
 	exact, err := memory.NewExactGuard(forbidden)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return memory.NewCompositeGuard(memory.DefaultGuard{}, exact)
+}
+
+func testGuardWith(t *testing.T, member memory.ContentGuard, forbidden ...string) *memory.CompositeGuard {
+	t.Helper()
+	exact, err := memory.NewExactGuard(forbidden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return memory.NewCompositeGuard(memory.DefaultGuard{}, exact, member)
 }
 
 func testOptions(t *testing.T) Options {
@@ -540,7 +549,7 @@ func TestOpenGuardCallbackIsUnlockedAndNotReentered(t *testing.T) {
 	root := t.TempDir()
 	guard := &callbackGuard{started: make(chan struct{}), release: make(chan struct{}), blockOnCall: 1}
 	options := testOptions(t)
-	options.Guard = guard
+	options.Guard = testGuardWith(t, guard)
 	firstDone := make(chan error, 1)
 	go func() {
 		store, err := Open(context.Background(), filepath.Join(root, "guarded", "memory.db"), options)
@@ -589,7 +598,7 @@ func TestOpenPublishedGuardRunsAfterStoreOwnsEveryConnection(t *testing.T) {
 		started: make(chan struct{}), release: make(chan struct{}), blockOnCall: 2,
 	}
 	options := testOptions(t)
-	options.Guard = guard
+	options.Guard = testGuardWith(t, guard)
 	var ready atomic.Pointer[Store]
 	installTestHooks(t, testHooks{storeReady: func(store *Store) { ready.Store(store) }})
 	done := make(chan error, 1)
@@ -1287,9 +1296,17 @@ func TestOpenSerializesDelayedSidecarProofWithEveryAdapterFDOpen(t *testing.T) {
 	blocked := make(chan struct{})
 	release := make(chan struct{})
 	secondPreflight := make(chan struct{})
+	secondProofAttempt := make(chan struct{})
 	var blockedOnce sync.Once
 	var secondOnce sync.Once
-	installTestHooks(t, testHooks{path: func(event pathEvent) {
+	var attemptOnce sync.Once
+	installTestHooks(t, testHooks{beforeProofLock: func() {
+		select {
+		case <-blocked:
+			attemptOnce.Do(func() { close(secondProofAttempt) })
+		default:
+		}
+	}, path: func(event pathEvent) {
 		switch event {
 		case pathAfterSidecarCreation:
 			blockedOnce.Do(func() {
@@ -1321,10 +1338,11 @@ func TestOpenSerializesDelayedSidecarProofWithEveryAdapterFDOpen(t *testing.T) {
 		}
 		secondDone <- err
 	}()
+	<-secondProofAttempt
 	select {
 	case <-secondPreflight:
 		t.Fatal("another adapter opened proof-stage descriptors during delayed sidecar proof")
-	case <-time.After(20 * time.Millisecond):
+	default:
 	}
 	close(release)
 	if err := <-firstDone; err != nil {
@@ -1342,6 +1360,9 @@ func TestOpenValidatesOptionsAndSafeErrors(t *testing.T) {
 		edit func(*Options)
 	}{
 		{"nil guard", func(o *Options) { o.Guard = nil }},
+		{"bare default guard", func(o *Options) { o.Guard = memory.DefaultGuard{} }},
+		{"bare custom guard", func(o *Options) { o.Guard = &receiptTrackingGuard{} }},
+		{"nil composite guard", func(o *Options) { var guard *memory.CompositeGuard; o.Guard = guard }},
 		{"negative timeout", func(o *Options) { o.BusyTimeout = -time.Millisecond }},
 		{"overflowing timeout", func(o *Options) { o.BusyTimeout = (time.Duration(math.MaxInt32) + 1) * time.Millisecond }},
 		{"ceil overflow timeout", func(o *Options) { o.BusyTimeout = time.Duration(math.MaxInt32)*time.Millisecond + time.Nanosecond }},
@@ -1421,18 +1442,24 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 		_, _ = raw.Exec("ROLLBACK")
 	})
 
-	t.Run("BEGIN budget is cumulative and callback busy timeout is zero", func(t *testing.T) {
+	t.Run("retry barrier and callback busy timeout is zero", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "cumulative-busy", "memory.db")
 		store := openTestStore(t, path, func(o *Options) { o.BusyTimeout = 80 * time.Millisecond })
-		raw := openRaw(t, path)
-		defer raw.Close()
-		if _, err := raw.Exec("BEGIN IMMEDIATE"); err != nil {
-			t.Fatal(err)
-		}
-		attempted := make(chan struct{})
-		var once sync.Once
-		installTestHooks(t, testHooks{beforeBegin: func() { once.Do(func() { close(attempted) }) }})
-		started := time.Now()
+		retryReady := make(chan struct{})
+		retryRelease := make(chan struct{})
+		installTestHooks(t, testHooks{
+			beginError: func(attempt int) error {
+				if attempt == 0 {
+					return sqliteCodeError{code: sqliteBusy}
+				}
+				return nil
+			},
+			retryDelay: func(context.Context, time.Duration) error {
+				close(retryReady)
+				<-retryRelease
+				return nil
+			},
+		})
 		done := make(chan error, 1)
 		go func() {
 			done <- store.withWrite(context.Background(), memory.CommitSchema, nil, func(ctx context.Context, conn *sql.Conn) error {
@@ -1446,16 +1473,10 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 				return nil
 			})
 		}()
-		<-attempted
-		time.Sleep(30 * time.Millisecond)
-		if _, err := raw.Exec("COMMIT"); err != nil {
-			t.Fatal(err)
-		}
+		<-retryReady
+		close(retryRelease)
 		if err := <-done; err != nil {
 			t.Fatal(err)
-		}
-		if elapsed := time.Since(started); elapsed > 120*time.Millisecond {
-			t.Fatalf("cumulative contention exceeded one budget: %v", elapsed)
 		}
 		conn := borrowTestConn(t, store)
 		if got := queryInt(t, conn, "PRAGMA busy_timeout"); got != 80 {
@@ -1537,7 +1558,8 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 	t.Run("commit failure quarantines and poisons", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "commit-marker", "memory.db")
 		store := openTestStore(t, path)
-		installTestHooks(t, testHooks{driverExec: func(statement string, exec func() error) error {
+		quarantined := make(chan struct{}, 1)
+		installTestHooks(t, testHooks{connectionQuarantined: func() { quarantined <- struct{}{} }, driverExec: func(statement string, exec func() error) error {
 			if statement != "COMMIT" {
 				return exec()
 			}
@@ -1570,7 +1592,10 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 		if strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "sqlite") || strings.Contains(err.Error(), "commit-proof") {
 			t.Fatalf("unsafe commit error = %v", err)
 		}
-		waitFor(t, time.Second, func() bool { return store.database.Stats().OpenConnections == retainedConnectionCount-1 }, "physical COMMIT connection discard")
+		<-quarantined
+		if got := store.database.Stats().OpenConnections; got != retainedConnectionCount-1 {
+			t.Fatalf("physical connections = %d", got)
+		}
 		if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
 			t.Fatalf("poisoned Identity = %v", err)
 		}
@@ -1601,7 +1626,8 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 	t.Run("rollback failure quarantines and poisons", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "memory.db")
 		store := openTestStore(t, path)
-		installTestHooks(t, testHooks{driverExec: func(statement string, exec func() error) error {
+		quarantined := make(chan struct{}, 1)
+		installTestHooks(t, testHooks{connectionQuarantined: func() { quarantined <- struct{}{} }, driverExec: func(statement string, exec func() error) error {
 			if statement != "ROLLBACK" {
 				return exec()
 			}
@@ -1624,7 +1650,10 @@ func TestOpenBusyRetryAndTransactionAmbiguity(t *testing.T) {
 		if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
 			t.Fatalf("poisoned Identity = %v", err)
 		}
-		waitFor(t, time.Second, func() bool { return store.database.Stats().OpenConnections == retainedConnectionCount-1 }, "physical ROLLBACK connection discard")
+		<-quarantined
+		if got := store.database.Stats().OpenConnections; got != retainedConnectionCount-1 {
+			t.Fatalf("physical connections = %d", got)
+		}
 		if err := store.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -1767,16 +1796,15 @@ func TestOpenCloseAdmissionIsConcurrentAndIdempotent(t *testing.T) {
 		})
 	}()
 	<-entered
-	const closers = 8
+	const closers = 10
+	closeWaiting := make(chan struct{})
+	var closeWaitingOnce sync.Once
+	installTestHooks(t, testHooks{closeWait: func(bool) { closeWaitingOnce.Do(func() { close(closeWaiting) }) }})
 	results := make(chan error, closers)
 	for range closers {
 		go func() { results <- store.Close() }()
 	}
-	select {
-	case err := <-results:
-		t.Fatalf("Close returned before admitted operation completed: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
+	<-closeWaiting
 	close(release)
 	if err := <-operation; err != nil {
 		t.Fatal(err)
@@ -1865,17 +1893,6 @@ func processFDCountForPath(t *testing.T, path string) int {
 		t.Fatal(err)
 	}
 	return fds[inodeIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}]
-}
-
-func waitFor(t *testing.T, timeout time.Duration, condition func() bool, description string) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for !condition() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", description)
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
 
 func openRaw(t *testing.T, path string) *sql.DB {

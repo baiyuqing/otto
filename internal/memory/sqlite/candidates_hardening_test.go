@@ -95,7 +95,7 @@ func TestCandidateReceiptCorrespondenceIsBoundedAndPreservesOperationalErrors(t 
 func TestCandidateObservationReceiptIsGuardedBeforeCommit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")
 	guard := &receiptTrackingGuard{}
-	store := openTestStore(t, path, func(options *Options) { options.Guard = guard })
+	store := openTestStore(t, path, func(options *Options) { options.Guard = testGuardWith(t, guard) })
 	at := time.Date(2026, 8, 30, 9, 10, 0, 0, time.UTC)
 	scope := memory.Scope{Namespace: "user", ID: "receipt-pre-guard"}
 	candidate := sqlitePendingCandidate("receipt-pre-guard-candidate", scope, at)

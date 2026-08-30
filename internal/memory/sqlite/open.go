@@ -121,12 +121,16 @@ const (
 
 type testHooks struct {
 	path                            func(pathEvent)
+	beforeProofLock                 func()
 	mkdirat                         func(dirfd int, name string, mode uint32) error
 	beforeDirectoryInstall          func(name string)
+	fsync                           func(resource string, sync func() error) error
 	storeReady                      func(*Store)
 	beforeBegin                     func()
 	beforeWriteBegin                func(memory.CommitOperation, []string)
 	beforeInitializeBegin           func()
+	beforeInitializeCommit          func()
+	initializeCommitStarted         func()
 	beginError                      func(attempt int) error
 	retryDelay                      func(context.Context, time.Duration) error
 	beforeCommitCheck               func()
@@ -135,6 +139,7 @@ type testHooks struct {
 	readSetupExec                   func(statement string, exec func() error) error
 	beforeReadGeneration            func(*sql.Conn)
 	identityReadGeneration          func(func() (uint64, error)) (uint64, error)
+	borrowedRead                    func(operation string, conn *sql.Conn)
 	beforeQuickCheck                func()
 	beforeFTS5Integrity             func(*sql.Conn)
 	beforePreflightRecheck          func()
@@ -150,6 +155,7 @@ type testHooks struct {
 	closeError                      func(resource string, actual error) error
 	closeWait                       func(owner bool)
 	beforeCloseResources            func()
+	connectionQuarantined           func()
 }
 
 var (
@@ -182,6 +188,13 @@ func loadTestHooks() testHooks {
 	return hooks
 }
 
+func lockConnectionProof() {
+	if hook := loadTestHooks().beforeProofLock; hook != nil {
+		hook()
+	}
+	connectionProofMu.Lock()
+}
+
 func callPathHook(event pathEvent) {
 	if hook := loadTestHooks().path; hook != nil {
 		hook(event)
@@ -202,7 +215,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 
 	// Secure descriptor acquisition is serialized with every proof-stage open,
 	// so an independent adapter Open cannot contaminate another FD delta.
-	connectionProofMu.Lock()
+	lockConnectionProof()
 	path, err := openSecurePath(ctx, filename)
 	connectionProofMu.Unlock()
 	if err != nil {
@@ -232,7 +245,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	preflightDB.SetMaxOpenConns(1)
 	preflightDB.SetMaxIdleConns(1)
 
-	connectionProofMu.Lock()
+	lockConnectionProof()
 	preflightConn, preflightBaseline, proofErr := openProvenPhysicalConnection(
 		ctx, preflightDB, path, pathBeforePreflightDriverOpen, pathAfterPreflightDriverOpen,
 	)
@@ -322,7 +335,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 	}
 	identity, initializationErr := func() (memory.StoreIdentity, error) {
 		defer func() { initializationGate <- struct{}{} }()
-		connectionProofMu.Lock()
+		lockConnectionProof()
 		defer connectionProofMu.Unlock()
 
 		firstConn, _, err := openProvenPhysicalConnection(
@@ -360,7 +373,11 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		if err != nil {
 			return memory.StoreIdentity{}, err
 		}
-		if err := verifyFTS5Integrity(ctx, firstConn); err != nil {
+		verificationCtx := ctx
+		if needsInitialization && ctx.Err() != nil {
+			verificationCtx = context.Background()
+		}
+		if err := verifyFTS5Integrity(verificationCtx, firstConn); err != nil {
 			return memory.StoreIdentity{}, err
 		}
 		callPathHook(pathAfterSidecarCreation)
@@ -373,6 +390,12 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		cleanupConnections()
 		return nil, safeOpenError(ctx, initializationErr)
 	}
+	if needsInitialization && ctx.Err() != nil {
+		// A successful noncanceling bootstrap COMMIT is the Open commit point.
+		// Cancellation observed after it started must not rewrite that durable
+		// success as a canceled bootstrap.
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		cleanupConnections()
 		return nil, err
@@ -384,7 +407,7 @@ func Open(ctx context.Context, filename string, options Options) (*Store, error)
 		{pathBeforeRetainedConnection4DriverOpen, pathAfterRetainedConnection4DriverOpen},
 	}
 	for index := 0; len(connections) < retainedConnectionCount; index++ {
-		connectionProofMu.Lock()
+		lockConnectionProof()
 		conn, baseline, err := openProvenPhysicalConnection(ctx, database, path, retainedEvents[index][0], retainedEvents[index][1])
 		if err == nil {
 			connections = append(connections, conn)
@@ -483,7 +506,8 @@ func sameStableIdentity(left, right memory.StoreIdentity) bool {
 }
 
 func validateOptions(options Options) (time.Duration, error) {
-	if options.Guard == nil {
+	guard, ok := options.Guard.(*memory.CompositeGuard)
+	if !ok || guard == nil {
 		return 0, memory.ErrInvalidRequest
 	}
 	timeout := options.BusyTimeout
@@ -711,6 +735,7 @@ func (store *Store) Identity(ctx context.Context) (memory.StoreIdentity, error) 
 		done()
 		return memory.StoreIdentity{}, err
 	}
+	callBorrowedReadHook("identity", conn)
 	query := func() (uint64, error) { return readGeneration(ctx, conn) }
 	var generation uint64
 	if hook := loadTestHooks().identityReadGeneration; hook != nil {
@@ -718,7 +743,7 @@ func (store *Store) Identity(ctx context.Context) (memory.StoreIdentity, error) 
 	} else {
 		generation, err = query()
 	}
-	store.returnConnection(conn)
+	err = store.finishBorrowedRead(conn, err)
 	done()
 	if err != nil {
 		return memory.StoreIdentity{}, err

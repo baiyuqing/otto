@@ -37,6 +37,35 @@ func TestDefaultGuardRejectsSensitiveShapesWithoutEcho(t *testing.T) {
 	}
 }
 
+func TestDefaultGuardRejectsGenericHierarchicalURIUserinfo(t *testing.T) {
+	guard := DefaultGuard{}
+	rejected := []string{
+		"postgres://user:synthetic-pass@example.invalid/database",
+		"ssh://user:synthetic-pass@example.invalid/path",
+		"custom+v1://user@example.invalid/resource",
+		"custom://%75ser:%70ass@example.invalid/resource",
+		"//user:synthetic-pass@example.invalid/path",
+	}
+	for _, value := range rejected {
+		err := checkGuard(t, guard, GuardField{Name: "URI", Value: value})
+		assertSafeError(t, err, ErrSensitiveMemory, value, "synthetic-pass")
+	}
+	allowed := []string{
+		"postgres://example.invalid/database",
+		"ssh://example.invalid/path",
+		"custom+v1://example.invalid/resource",
+		"file:///ordinary/local/path",
+		"mailto:user@example.invalid",
+		"echo postgres://example.invalid/database",
+		"false //example.invalid/path",
+	}
+	for _, value := range allowed {
+		if err := checkGuard(t, guard, GuardField{Name: "URI", Value: value}); err != nil {
+			t.Errorf("ordinary URI %q rejected: %v", value, err)
+		}
+	}
+}
+
 func TestDefaultGuardScansMarkerInEverySemanticAndOpaqueClass(t *testing.T) {
 	guard := DefaultGuard{}
 	for _, field := range []GuardField{
@@ -220,6 +249,29 @@ func TestExactGuardScansWholeLexicalHeaderURIAndOpaqueSpans(t *testing.T) {
 	}
 	if err := checkGuard(t, guard, GuardField{Name: "url", Value: "https://ordinary.example.invalid/endpoint"}); err != nil {
 		t.Fatalf("ordinary URL: %v", err)
+	}
+}
+
+func TestExactGuardUsesGenericHierarchicalURISpans(t *testing.T) {
+	values := []string{
+		"postgres://example.invalid/database",
+		"ssh://example.invalid/path",
+		"custom+v1://example.invalid/resource",
+		"custom://example.invalid/%70ercent-path",
+		"//example.invalid/network-path",
+	}
+	guard, err := NewExactGuard(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range values {
+		input := "resolved endpoint is " + value + ", continue safely"
+		assertSafeError(t, checkGuard(t, guard, GuardField{Name: "URI", Value: input}), ErrSensitiveMemory, value)
+	}
+	for _, value := range []string{"echo postgres://ordinary.invalid/db", "false //ordinary.invalid/path"} {
+		if err := checkGuard(t, guard, GuardField{Name: "URI", Value: value}); err != nil {
+			t.Fatalf("ordinary URI text rejected: %v", err)
+		}
 	}
 }
 

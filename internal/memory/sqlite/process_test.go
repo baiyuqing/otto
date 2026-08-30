@@ -127,11 +127,24 @@ func runProcessHelper() {
 	}
 	restoreHooks := func() {}
 	if action != "update-stale" {
-		restoreHooks = setTestHooks(testHooks{beforeWriteBegin: func(operation memory.CommitOperation, ids []string) {
+		hooks := testHooks{beforeWriteBegin: func(operation memory.CommitOperation, ids []string) {
 			if operation == expectedOperation && reflect.DeepEqual(ids, expectedIDs) {
 				waitAtSeam()
 			}
-		}})
+		}}
+		if action == "create-exit" {
+			hooks.driverExec = func(statement string, exec func() error) error {
+				if statement != "COMMIT" {
+					return exec()
+				}
+				err := exec()
+				if err == nil {
+					os.Exit(0)
+				}
+				return err
+			}
+		}
+		restoreHooks = setTestHooks(hooks)
 	}
 	defer restoreHooks()
 
@@ -150,9 +163,6 @@ func runProcessHelper() {
 		if err != nil {
 			printProcessResult(classifyProcessError(err), entityID)
 			return
-		}
-		if action == "create-exit" {
-			os.Exit(0)
 		}
 		printProcessResult("ok", entityID)
 	case "update", "update-stale":

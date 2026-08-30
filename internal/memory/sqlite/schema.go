@@ -298,11 +298,20 @@ func initializeOrVerifySchema(ctx context.Context, conn *sql.Conn, databaseID, u
 		}
 		return memory.StoreIdentity{}, memory.ErrCorrupt
 	}
+	if hook := loadTestHooks().beforeInitializeCommit; hook != nil {
+		hook()
+	}
+	if err := ctx.Err(); err != nil {
+		return memory.StoreIdentity{}, err
+	}
+	if hook := loadTestHooks().initializeCommitStarted; hook != nil {
+		hook()
+	}
 	if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
 		return memory.StoreIdentity{}, memory.ErrCommitUnknown
 	}
 	committed = true
-	return verifySchema(ctx, conn)
+	return verifySchema(context.Background(), conn)
 }
 
 func readUserVersion(ctx context.Context, conn *sql.Conn) (int, error) {

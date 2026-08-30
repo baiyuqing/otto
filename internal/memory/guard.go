@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	guardURLPattern             = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
+	guardURIPattern             = regexp.MustCompile(`(?i)(?:[a-z][a-z0-9+.-]*:)?//[^\s<>"']+`)
 	credentialAssignmentPattern = regexp.MustCompile(`(?i)(?:^|[\s,;{(])(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret|password|passwd)\s*[:=]\s*[^\s,;}]+`)
 	privateKeyPattern           = regexp.MustCompile(`(?i)-----\s*(?:BEGIN|END)\s+(?:[A-Z0-9]+\s+)*PRIVATE KEY\s*-----`)
 )
@@ -92,9 +92,20 @@ func hasSensitiveHeader(value string) bool {
 	return false
 }
 
-func hasURIUserinfo(value string) bool {
-	for _, candidate := range guardURLPattern.FindAllString(value, -1) {
+func hierarchicalURISpans(value string) []string {
+	candidates := guardURIPattern.FindAllString(value, -1)
+	spans := candidates[:0]
+	for _, candidate := range candidates {
 		candidate = strings.TrimRight(candidate, ".,;!?)]}>")
+		if candidate != "" {
+			spans = append(spans, candidate)
+		}
+	}
+	return spans
+}
+
+func hasURIUserinfo(value string) bool {
+	for _, candidate := range hierarchicalURISpans(value) {
 		parsed, err := url.Parse(candidate)
 		if err == nil && parsed.User != nil {
 			return true
@@ -193,8 +204,7 @@ func (guard *ExactGuard) Check(ctx context.Context, input GuardInput) error {
 				}
 			}
 		}
-		for _, span := range guardURLPattern.FindAllString(field.Value, -1) {
-			span = strings.TrimRight(span, ".,;!?)]}>")
+		for _, span := range hierarchicalURISpans(field.Value) {
 			if match, err := check(span); err != nil {
 				return err
 			} else if match {

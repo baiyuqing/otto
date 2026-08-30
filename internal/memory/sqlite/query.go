@@ -144,7 +144,19 @@ func buildFTSCandidateQuery(request memory.RetrievalRequest, expression string) 
 	clauses = append(clauses, "memory_records_fts MATCH ?")
 	arguments = append(arguments, expression, memory.MaxRetrievalCandidates)
 	rank := "bm25(memory_records_fts,0.0,1.0,0.5,2.0,1.0)"
-	query := "SELECT " + retrievalRecordProjection("r") + ",CASE WHEN typeof(" + rank + ") IN ('real','integer') THEN " + rank + " END " +
+	ftsGate := func(column string, minimum, maximum int) string {
+		qualified := "memory_records_fts." + column
+		return "CASE WHEN typeof(" + qualified + ")='text' AND length(CAST(" + qualified + " AS BLOB)) BETWEEN " + strconv.Itoa(minimum) + " AND " + strconv.Itoa(maximum) + " THEN " + qualified + " END"
+	}
+	maxFTSLabelsBytes := memory.MaxLabels*memory.MaxLabelBytes + memory.MaxLabels - 1
+	ftsProjection := strings.Join([]string{
+		ftsGate("record_id", 1, memory.MaxIDBytes),
+		ftsGate("text_value", 1, memory.MaxRecordTextBytes),
+		ftsGate("kind", 1, memory.MaxKindBytes),
+		ftsGate("semantic_key", 0, memory.MaxSemanticKeyBytes),
+		ftsGate("labels", 0, maxFTSLabelsBytes),
+	}, ",")
+	query := "SELECT " + retrievalRecordProjection("r") + "," + ftsProjection + ",CASE WHEN typeof(" + rank + ") IN ('real','integer') THEN " + rank + " END " +
 		"FROM memory_records_fts JOIN memory_records r ON memory_records_fts.record_id=r.id WHERE " + strings.Join(clauses, " AND ") +
 		" ORDER BY " + rank + " ASC,r.updated_at DESC,r.id ASC LIMIT ?"
 	return query, arguments

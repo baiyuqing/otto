@@ -774,10 +774,10 @@ func (store *Store) updateRecord(ctx context.Context, input memory.Record, expec
 			return err
 		}
 		if current.tombstone != nil {
-			return memory.ErrConflict
+			return conflictRecord(desired.ID, expected, current.tombstone.Revision)
 		}
 		if current.record.Revision != existing.Revision || current.digest != guarded.digest {
-			return memory.ErrConflict
+			return conflictRecord(desired.ID, expected, current.record.Revision)
 		}
 		result, err := conn.ExecContext(ctx, `UPDATE memory_records SET
 			kind=?,semantic_key=?,text_value=?,labels_json=?,metadata_json=?,source_json=?,confidence=?,revision=?,updated_at=?,expires_at=?
@@ -800,6 +800,10 @@ func (store *Store) updateRecord(ctx context.Context, input memory.Record, expec
 		return bumpGeneration(ctx, conn)
 	})
 	if err != nil {
+		var conflict *memory.ConflictError
+		if errors.As(err, &conflict) {
+			return memory.Record{}, conflict
+		}
 		if errors.Is(err, memory.ErrConflict) {
 			return memory.Record{}, conflictRecord(desired.ID, expected, existing.Revision)
 		}
@@ -872,8 +876,11 @@ func (store *Store) Forget(ctx context.Context, request memory.StoreForgetReques
 		if err != nil {
 			return err
 		}
-		if current.tombstone != nil || current.record.Revision != existing.Revision || current.digest != guarded.digest {
-			return memory.ErrConflict
+		if current.tombstone != nil {
+			return conflictRecord(existing.ID, request.ExpectedRevision, current.tombstone.Revision)
+		}
+		if current.record.Revision != existing.Revision || current.digest != guarded.digest {
+			return conflictRecord(existing.ID, request.ExpectedRevision, current.record.Revision)
 		}
 		result, err := conn.ExecContext(ctx, `UPDATE memory_records SET
 			kind='',semantic_key='',text_value='',labels_json='[]',metadata_json='{}',source_json='{}',confidence=0.0,
@@ -908,6 +915,10 @@ func (store *Store) Forget(ctx context.Context, request memory.StoreForgetReques
 		return bumpGeneration(ctx, conn)
 	})
 	if err != nil {
+		var conflict *memory.ConflictError
+		if errors.As(err, &conflict) {
+			return memory.Tombstone{}, conflict
+		}
 		if errors.Is(err, memory.ErrConflict) {
 			return memory.Tombstone{}, conflictRecord(existing.ID, request.ExpectedRevision, existing.Revision)
 		}
@@ -1001,6 +1012,10 @@ func safeRecordReadError(ctx context.Context, err error) error {
 	}
 	if errors.Is(err, memory.ErrCorrupt) {
 		return memory.ErrCorrupt
+	}
+	var conflict *memory.ConflictError
+	if errors.As(err, &conflict) {
+		return conflict
 	}
 	if errors.Is(err, memory.ErrConflict) {
 		return memory.ErrConflict

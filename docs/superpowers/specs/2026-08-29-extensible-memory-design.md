@@ -91,7 +91,7 @@ per-runtime TurnMemory = Shared Core + runtime-scoped Extractor
 - `internal/memory/sqlite`: SQLite schema, migrations, CRUD, FTS5 retrieval, locks, backup, and restore.
 - `internal/agent`: turn-level orchestration only; it imports the narrow memory contract and never a backend package.
 - `internal/app`: frontend-safe memory management facade and lifecycle serialization.
-- `internal/tool`: `memory_search`, `remember`, and `forget` tool adapters. Search depends on the read-only management surface; model mutations depend on `memory.Proposer`. No tool accesses a Store or the human-authorized mutation methods.
+- `internal/tool`: `memory_search`, `remember`, and `forget` tool adapters. Search depends on the `Reader` surface; model mutations depend on `memory.Proposer`. No tool accesses a Store or the human-authorized mutation methods.
 - `internal/config`: strict TOML schema and runtime resolution for memory.
 - `cmd/otto`: backend registry, construction, standalone `otto memory` commands, close ordering, and warnings.
 - `internal/tui` and `internal/repl`: presentation and explicit human management commands.
@@ -116,8 +116,16 @@ type TurnMemory interface {
 ### 6.2 Management contract
 
 ```go
-type Manager interface {
+type Reader interface {
+    Get(context.Context, RecordRef) (Record, error)
+    GetByKey(context.Context, RecordKey) (Record, error)
+    GetTombstone(context.Context, RecordRef) (Tombstone, error)
+    GetCandidate(context.Context, CandidateRef) (Candidate, error)
     Search(context.Context, SearchRequest) (SearchResult, error)
+}
+
+type Manager interface {
+    Reader
     Remember(context.Context, RememberRequest) (Record, error)
     Forget(context.Context, ForgetRequest) (ForgetResult, error)
     Review(context.Context, ReviewRequest) (ReviewResult, error)
@@ -140,9 +148,9 @@ type Service interface {
 }
 ```
 
-The process-level Service owns the shared Store, Retriever, Policy, and maintenance worker. `Bind` creates an immutable per-runner Binding containing the runtime-scoped Extractor, redactor, and request sizer. Closing a Binding cannot close the shared Store; closing the Service first prevents new bindings, waits for released bindings, then closes shared components.
+The process-level Service owns the shared Store, Retriever, Policy, and maintenance worker. `Bind` creates an immutable per-runner Binding containing the allowed user/workspace scopes, default automatic-write scope, runtime-scoped Extractor, redactor, and token estimator. The Agent Loop does not choose arbitrary scope IDs; Binding injects and enforces its resolved scopes and normalized UTC clock, so the Agent cannot make expired records eligible. Closing a Binding cannot close the shared Store; closing the Service first prevents new bindings, waits for released bindings, then closes shared components.
 
-The management API distinguishes human-authorized calls from model-originated proposals by using different methods. Frontends and standalone human commands receive `Manager`; model mutation tools receive only `Proposer`. Human authority is therefore created by the application call path, and no model-supplied boolean or string can grant it.
+Reader.Get/GetByKey/GetTombstone/GetCandidate provide exact scope-bound reads for keyed CAS updates and explicit stale-candidate refresh; app/frontends never reach into Store for them. The management API distinguishes human-authorized calls from model-originated proposals by using different methods. Frontends and standalone human commands receive `Manager`; read-only model search receives `Reader`; model mutation tools receive only `Proposer`. Human authority is therefore created by the application call path, and no model-supplied boolean or string can grant it.
 
 ### 6.3 Maintenance contract
 
@@ -152,6 +160,7 @@ type Maintenance interface {
     ListBackups(context.Context) ([]BackupInfo, error)
     VerifyBackup(context.Context, string) (BackupInfo, error)
     Restore(context.Context, RestoreRequest) error
+    PurgeForgotten(context.Context, PurgeForgottenRequest) (PurgeForgottenResult, error)
 }
 ```
 
@@ -163,12 +172,18 @@ The core service is composed from four narrow components:
 
 ```go
 type Store interface {
+    Identity(context.Context) (StoreIdentity, error)
     Get(context.Context, RecordRef) (Record, error)
+    GetByKey(context.Context, RecordKey) (Record, error)
+    GetTombstone(context.Context, RecordRef) (Tombstone, error)
+    GetCandidate(context.Context, CandidateRef) (Candidate, error)
     List(context.Context, ListRequest) (RecordPage, error)
+    ListTombstones(context.Context, TombstoneListRequest) (TombstonePage, error)
     ListCandidates(context.Context, CandidateListRequest) (CandidatePage, error)
     Upsert(context.Context, UpsertRequest) (Record, error)
     Forget(context.Context, StoreForgetRequest) (Tombstone, error)
     Propose(context.Context, ProposalBatch) (CandidateBatch, error)
+    GetObservationReceipt(context.Context, string) (ObservationReceipt, error)
     CommitObservation(context.Context, ObservationCommit) (ObservationReceipt, error)
     Review(context.Context, StoreReviewRequest) (ReviewResult, error)
     Close() error
@@ -187,13 +202,17 @@ type Policy interface {
 }
 ```
 
-Each Store mutation is atomic. `CommitObservation` atomically records the idempotency receipt and all candidates. `Review` atomically checks the candidate and target revisions, applies an accepted mutation, and records the decision. All pages use opaque cursors with deterministic ordering.
+Retriever has neutral opaque pagination. Turn recall sets `IncludeBaseline=true`, `IncludeExpired=false`, and the Binding's runtime estimator. Process-level management Search has no Binding, so it always uses the fixed conservative byte estimator; textual search sets `IncludeBaseline=false` and may request expired records, while empty search uses Store.List so it can enumerate complete active data rather than recall baselines.
+
+Store implementations never invoke caller-supplied guards, token estimators, clocks, or ID generators while SQL rows, transactions, borrowed connections, or lifecycle mutexes are held. Reads release bounded projections before callbacks; writes guard snapshots first and transactionally verify their digest/revision before mutation.
+
+Each Store mutation is atomic. Cancellation before the commit point rolls back; once SQLite commit starts, a successful commit is reported even if the context is subsequently canceled, while a commit error returns content-free `ErrCommitUnknown` and bounded entity IDs for reconciliation through Reader/Store before retry. Observation IDs remain the only automatic replay key; other mutations use caller-generated IDs plus explicit reconciliation rather than pretending commit ambiguity cannot occur. `CommitObservation` atomically records the idempotency receipt and all candidates. `Review` atomically checks the candidate and target revisions, applies an accepted mutation, and records the decision. All pages use opaque cursors with deterministic ordering.
 
 A backend factory returns components rather than a monolithic service:
 
 ```go
 type Factory interface {
-    Open(context.Context, BackendConfig) (Components, error)
+    Open(context.Context) (Components, error)
 }
 
 type Components struct {
@@ -204,7 +223,7 @@ type Components struct {
 }
 ```
 
-Factories are registered at compile time by a stable backend name. The first registry contains `sqlite`; `NullService` is constructed by the application rather than registered as persistent storage. A returned Maintenance implementation is non-nil and returns `ErrUnsupported` for unsupported operations.
+Factories are registered at compile time by a stable backend name. `cmd/otto` validates configuration and constructs a backend-specific Factory with typed options before calling `Open`; the neutral Factory API therefore does not carry an untyped configuration map. The first registry contains `sqlite`; `NullService` is constructed by the application rather than registered as persistent storage. A returned Maintenance implementation is non-nil and returns `ErrUnsupported` for unsupported operations.
 
 Required persistence semantics are not optional capabilities. A backend must round-trip core fields, enforce conditional revisions, provide deterministic pagination, and atomically commit observation receipts with their candidate mutations. Capabilities only describe optional features such as semantic search, online backup, or encryption at rest.
 
@@ -271,7 +290,31 @@ Initial hard limits are:
 
 These are hard safety ceilings. Config may choose lower recall limits but cannot raise safety ceilings.
 
+A forgotten row decodes only to a content-free Tombstone:
+
+```go
+type Tombstone struct {
+    ID          string
+    Scope       Scope
+    Revision    uint64
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+    ForgottenAt time.Time
+}
+```
+
 ### 7.3 Provenance
+
+```go
+type Provenance struct {
+    Origin         Origin
+    SessionID      string
+    MessageIDs     []string
+    ObservationID  string
+    DecisionAt     *time.Time
+    DecisionSource Origin
+}
+```
 
 Provenance records only bounded identifiers and origin metadata:
 
@@ -293,8 +336,11 @@ type Candidate struct {
     BaseRevision uint64
     Reason       string
     State        CandidateState
-    CreatedAt    time.Time
-    DecidedAt    *time.Time
+    CreatedAt      time.Time
+    DecidedAt      *time.Time
+    DecisionSource Origin
+    ResultRecordID string
+    ResultRevision uint64
 }
 ```
 
@@ -302,9 +348,9 @@ Actions are `create`, `update`, and `forget`. States are `pending`, `accepted`, 
 
 - Pending candidates never participate in recall.
 - Update and forget candidates include the target revision observed during extraction.
-- Review atomically checks that revision; stale candidates return `ErrConflict` and remain reviewable after refresh.
+- Review atomically checks that revision; stale candidates return `ErrConflict` and remain pending. After explicitly refreshing the active Record, only a human/migration review path may submit that current target revision to rebase the same Candidate; update rebases also require non-nil full edited content constructed from the refreshed target, preventing stale proposals from overwriting intervening fields; model/extractor/import paths cannot.
 - Accepted candidates link to the resulting record revision.
-- Accepted and rejected proposal text is cleared immediately after the decision; bounded identifiers and decision metadata remain for 90 days.
+- Accepted and rejected Proposed content—including kind, key, text, labels, metadata, provenance, confidence, expiry, and proposal timestamps—and reason are cleared immediately after the decision. Only scope, action/target/result identifiers and revisions, state, and decision metadata remain for 90 days.
 - Pending candidates older than 30 days are deleted by bounded maintenance work.
 
 ## 8. Turn data flow
@@ -315,7 +361,7 @@ For each non-empty user turn:
 
 1. Validate and redact the user text using the current runtime redactor.
 2. Persist the redacted user message to the current session.
-3. Call `Recall` once with user and workspace scopes, the query, a count limit, and a token budget.
+3. Call `Recall` once with the query, count limit, and token budget; the immutable Binding injects its resolved user/workspace scopes.
 4. Render selected records into one request-local context message.
 5. Build the ordinary provider request from the memory context followed by active session messages.
 
@@ -347,9 +393,9 @@ It then:
 - Applies deterministic scope, kind, relevance, update-time, and ID tie-breaking.
 - Enforces configured result and token budgets plus immutable hard ceilings.
 
-A provider request sizer is used when available; otherwise the existing conservative estimate is used. Backend relevance scores are not stable API and are not interpreted by the agent loop.
+A dedicated runtime token estimator is injected when available; it is separate from the provider's serialized request-byte sizer. Otherwise the existing conservative token estimate is used. Backend relevance scores are not stable API and are not interpreted by the agent loop.
 
-The initial SQLite retriever treats user input as terms, not raw FTS syntax, and constructs parameterized FTS queries. A future vector or hybrid retriever can replace it without changing the loop or record store.
+The initial SQLite retriever accepts exactly one user scope and at most one workspace scope; custom namespaces remain valid Store data but are not recall-eligible until a precedence policy is defined. It treats user input as terms, not raw FTS syntax, constructs parameterized FTS queries, and returns opaque generation-bound pages. A future vector or hybrid retriever can replace it without changing the loop or record store.
 
 ### 8.3 Agent tools
 
@@ -371,16 +417,15 @@ Observe(ctx, Observation{
     UserText:      redactedUserText,
     AssistantText: redactedFinalText,
     ToolFacts:     boundedToolFacts,
-    Scope:         workspaceScope,
     SessionID:     sessionID,
     MessageIDs:    boundedMessageIDs,
 })
 ```
 
 - Automatic observation is disabled by default.
-- `Observation.ID` is derived from stable session/final-message identity and extractor version.
-- The Store commits the observation receipt and generated candidates atomically.
-- Repeating an observation returns the original receipt and cannot duplicate candidates.
+- `Observation.ID` is derived from stable session/final-message identity and extractor version; Binding injects and enforces its resolved default write scope rather than accepting one from the Agent Loop.
+- Binding probes the Store's content-free `GetObservationReceipt` before extractor invocation; a hit returns the original receipt without calling the extractor.
+- On a miss, the Store commits the observation receipt and generated candidates atomically; `CommitObservation` rechecks inside its write transaction so concurrent retries converge on the original receipt and cannot duplicate candidates.
 - A failed observation emits a warning and does not change the successful turn outcome.
 - Cancellation or timeout leaves no partial candidate set and permits an idempotent later retry.
 
@@ -413,13 +458,13 @@ No provider credentials are stored in Memory config, records, candidates, errors
 
 ### 9.2 Default policy
 
-The policy decision is one of `accept`, `pending`, or `reject`.
+The policy decision is one of `accept`, `pending`, or `reject`. PolicyRequest carries origin/action, scope, kind, confidence, and bounded provenance so replacement policies can implement configured rules without Store/backend access.
 
 Default behavior:
 
 - An explicit frontend or standalone human command can write an active record immediately after validation.
-- Model tools always produce pending candidates.
-- Automatic extraction produces pending candidates.
+- Model tools, automatic extraction, and future imports produce pending candidates.
+- Internal schema/data migrations preserve accepted records without user review but still pass validation and sensitivity checks.
 - Sensitive or malformed proposals are rejected before persistence.
 - Pending candidates are not recalled.
 
@@ -467,7 +512,7 @@ SQLite permits concurrent readers and one writer. `SQLITE_BUSY` receives only bo
 - Observation IDs are unique.
 - Candidate decision and resulting record mutation are one transaction.
 - FTS rows are updated atomically with active record state.
-- Forget clears text and metadata from the live row and leaves a content-free tombstone sufficient to prevent stale resurrection.
+- Forget clears all content-bearing fields from the live row and leaves a content-free ID/scope/revision/timestamp tombstone sufficient to reject stale mutations of that record ID. A later proposal for the same semantic key is a new pending Candidate and cannot become active without an explicit human review; deliberate re-remembering is allowed and is not stale resurrection.
 
 ### 10.4 Forget ledger
 
@@ -479,7 +524,9 @@ No mechanism can retrofit a tombstone into an unmanaged backup copied away befor
 
 ### 10.5 Multi-process schema safety
 
-Every normal process holds a shared advisory lock on `memory.lock` for the lifetime of its Store. Migration and restore require the exclusive lock.
+This section becomes normative in the Durability phase. Memory Core advertises `ConcurrentProcesses: false`; its subprocess tests are groundwork, not a support claim.
+
+Once enabled, every normal process holds a shared advisory lock on `memory.lock` for the lifetime of its Store. Migration and restore require the exclusive lock.
 
 On open:
 
@@ -557,7 +604,7 @@ Two explicit semantics exist:
 - Normal forget removes live content and records a tombstone. Historical backups can retain the old bytes until normal retention removes them. Restore in the same installation reapplies newer tombstones by default.
 - Strong forget (`--purge-backups`) removes live content, identifies and deletes every managed backup that may contain the record, fsyncs the backup directory, and creates a new verified clean backup.
 
-Strong forget is irreversible and requires a second confirmation. If deletion of any contaminated backup fails, the live forget remains effective but the command returns a typed incomplete-purge error naming only backup IDs, not paths or content. Retrying is idempotent.
+Strong forget is irreversible and requires a second confirmation. The neutral Service forgets live data first, then calls `Maintenance.PurgeForgotten` with the content-free Tombstone; this keeps backup/ledger coordination backend-neutral and makes partial-purge retry explicit. If deletion of any contaminated backup fails, the live forget remains effective but the command returns a typed incomplete-purge error naming only backup IDs, not paths or content. Retrying is idempotent.
 
 Otto cannot erase unmanaged copies that a user previously copied outside the managed backup directory; the confirmation states this limitation.
 
@@ -565,7 +612,7 @@ Otto cannot erase unmanaged copies that a user previously copied outside the man
 
 ### 12.1 Secret rejection
 
-Before extraction, inputs pass through the current runtime redactor. Before any candidate or record is persisted, all fields pass through validation and sensitivity checks again.
+Before extraction, inputs pass through the current runtime redactor. Before any candidate, receipt, or record is persisted, every caller-controlled persisted string—including opaque IDs—passes through validation and a required non-nil composite ContentGuard. The guard combines generic detection with a hash-only exact matcher for resolved credentials/endpoints, retains no raw forbidden value, and is injectable at SQLite construction before runtime config wiring exists.
 
 Rejected classes include:
 
@@ -576,7 +623,7 @@ Rejected classes include:
 - Private keys and known credential blocks.
 - Redaction markers or values changed by redaction.
 
-Sensitivity rejection is fail-closed and returns `ErrSensitiveMemory`. Samples and errors never echo the rejected value.
+Decoded Store/Retriever content is revalidated and guarded before return so externally corrupted rows cannot bypass this boundary. Sensitivity rejection is fail-closed and returns `ErrSensitiveMemory`. Samples and errors never echo the rejected value.
 
 ### 12.2 Prompt injection and poisoning
 
@@ -705,9 +752,16 @@ Typed errors include:
 - `ErrSensitiveMemory`
 - `ErrUnsupported`
 - `ErrMemoryInUse`
+- `ErrPersistenceDisabled`
+- `ErrBusy`
+- `ErrCommitUnknown`
 - `ErrCorrupt`
 - `ErrIncompatibleSchema`
 - `ErrInvalidRecord`
+- `ErrInvalidRequest`
+- `ErrNotFound`
+- `ErrClosed`
+- `ErrInvalidCursor`
 - `ErrIncompleteForget`
 - `ErrIncompletePurge`
 
@@ -793,8 +847,8 @@ git diff --check
 
 Implementation is split into independently reviewed changes:
 
-1. **Memory core:** contracts, validation, scopes, records, candidates, policy, null service, SQLite CRUD/CAS/FTS schema, and conformance tests.
-2. **Durability:** lifetime locks, migrations, automatic/manual backup, restore, strong forget, and maintenance CLI.
+1. **Memory core:** contracts, validation, scopes, records, candidates, policy, null service, SQLite CRUD/CAS/FTS schema, and conformance tests. It keeps `ConcurrentProcesses: false`; subprocess tests establish baseline SQLite behavior but do not claim supported deployment.
+2. **Durability:** local-filesystem validation, shared lifetime/exclusive locks, migrations, automatic/manual backup, restore, strong forget, and maintenance CLI. Only this phase enables `ConcurrentProcesses: true`.
 3. **Recall and explicit management:** config/runtime construction, request-local recall, tools, app facade, TUI/REPL management, and session non-persistence tests.
 4. **Automatic extraction:** runtime-scoped extractor, observation idempotency, candidate policy/review flow, events, and usage isolation.
 

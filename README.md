@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="Otto logo" width="320">
+</p>
+
 # Otto
 
 Otto is a minimal macOS coding agent written in Go.

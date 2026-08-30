@@ -316,6 +316,230 @@ func TestRecordCommitCancellationUnknownAndOverflowRollback(t *testing.T) {
 	})
 }
 
+func TestMetadataCanonicalWireBoundaryAdapter(t *testing.T) {
+	record := sqliteTestRecord("metadata-boundary", "metadata-boundary", time.Date(2026, 8, 29, 17, 30, 0, 0, time.UTC))
+	record.Metadata = make(map[string]string, 8)
+	for index := range 8 {
+		size := 504
+		if index == 0 {
+			size = 503
+		}
+		record.Metadata[fmt.Sprintf("k%d", index)] = strings.Repeat("v", size)
+	}
+	validated := record
+	validated.Revision = 1
+	if err := memory.ValidateRecord(validated); err != nil {
+		t.Fatalf("exact wire boundary validation = %v", err)
+	}
+	encoded, err := encodeRecord(validated)
+	if err != nil || len(encoded.metadata) != memory.MaxMetadataBytes {
+		t.Fatalf("exact wire boundary encoding = %d, %v", len(encoded.metadata), err)
+	}
+	store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
+	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record}); err != nil {
+		t.Fatalf("exact wire boundary Upsert = %v", err)
+	}
+
+	over := record
+	over.Metadata = memory.CloneRecord(record).Metadata
+	over.Metadata["k0"] += "v"
+	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: over}); !errors.Is(err, memory.ErrInvalidRecord) {
+		t.Fatalf("one-over wire boundary = %v", err)
+	}
+
+	escaped := sqliteTestRecord("metadata-escaped", "metadata-escaped", record.CreatedAt.Add(time.Nanosecond))
+	escaped.Metadata = map[string]string{`quote"slash\\`: strings.Repeat(`"\\`, 128), "punctuation": `{},:[]`}
+	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: escaped}); err != nil {
+		t.Fatalf("escaped metadata Upsert = %v", err)
+	}
+}
+
+func TestCommitSuccessSurvivesBusyTimeoutRestoreFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.db")
+	store := openTestStore(t, path)
+	installTestHooks(t, testHooks{restoreBusyTimeout: func(_ string, exec func() error) error {
+		if err := exec(); err != nil {
+			return err
+		}
+		return errors.New("synthetic post-commit reset failure")
+	}})
+	record := sqliteTestRecord("restore-success", "restore-success", time.Date(2026, 8, 29, 17, 40, 0, 0, time.UTC))
+	created, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record})
+	if err != nil || created.ID != record.ID || created.Revision != 1 {
+		t.Fatalf("Upsert after durable COMMIT = %#v, %v", created, err)
+	}
+	external := openExternalSQLite(t, path)
+	for query, want := range map[string]int{
+		`SELECT count(*) FROM memory_records WHERE id='restore-success'`:            1,
+		`SELECT count(*) FROM memory_records_fts WHERE record_id='restore-success'`: 1,
+		`SELECT CAST(value AS INTEGER) FROM memory_meta WHERE key='generation'`:     1,
+	} {
+		var got int
+		if err := external.QueryRow(query).Scan(&got); err != nil || got != want {
+			t.Fatalf("durable %s = %d, %v", query, got, err)
+		}
+	}
+	_ = external.Close()
+	if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
+		t.Fatalf("poisoned Store Identity = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(context.Background(), path, testOptions(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.Get(context.Background(), memory.RecordRef{Scope: record.Scope, ID: record.ID})
+	if err != nil || got.ID != record.ID || got.Revision != 1 {
+		t.Fatalf("reopen reconciliation = %#v, %v", got, err)
+	}
+}
+
+func TestReadSetupUncertaintyPoisonsAndWakesWaiters(t *testing.T) {
+	t.Run("real BEGIN then error", func(t *testing.T) {
+		store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
+		installTestHooks(t, testHooks{readSetupExec: func(statement string, exec func() error) error {
+			if err := exec(); err != nil {
+				return err
+			}
+			if statement == "BEGIN" {
+				return errors.New("synthetic lost BEGIN response")
+			}
+			return nil
+		}})
+		_, err := store.List(context.Background(), memory.ListRequest{Scopes: []memory.Scope{{Namespace: "user", ID: "reader"}}, Limit: 1, IncludeExpired: true})
+		if !errors.Is(err, memory.ErrUnavailable) {
+			t.Fatalf("BEGIN response error = %v", err)
+		}
+		if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
+			t.Fatalf("Store after uncertain BEGIN = %v", err)
+		}
+		waitFor(t, time.Second, func() bool {
+			return store.database.Stats().OpenConnections == retainedConnectionCount-1
+		}, "physical uncertain read connection discard")
+	})
+
+	t.Run("query-only setup cancellation", func(t *testing.T) {
+		store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
+		ctx, cancel := context.WithCancel(context.Background())
+		installTestHooks(t, testHooks{readSetupExec: func(statement string, exec func() error) error {
+			if err := exec(); err != nil {
+				return err
+			}
+			if statement == "PRAGMA query_only=ON" {
+				cancel()
+				return context.Canceled
+			}
+			return nil
+		}})
+		_, err := store.List(ctx, memory.ListRequest{Scopes: []memory.Scope{{Namespace: "user", ID: "reader"}}, Limit: 1, IncludeExpired: true})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("setup cancellation = %v", err)
+		}
+		if _, err := store.Identity(context.Background()); !errors.Is(err, memory.ErrUnavailable) {
+			t.Fatalf("Store after setup cancellation = %v", err)
+		}
+	})
+
+	t.Run("poison wakes connection waiter", func(t *testing.T) {
+		store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
+		held := make([]*sql.Conn, 0, retainedConnectionCount-1)
+		for range retainedConnectionCount - 1 {
+			held = append(held, <-store.connections)
+		}
+		started, release := make(chan struct{}), make(chan struct{})
+		installTestHooks(t, testHooks{readSetupExec: func(statement string, exec func() error) error {
+			if err := exec(); err != nil {
+				return err
+			}
+			if statement == "BEGIN" {
+				close(started)
+				<-release
+				return errors.New("synthetic uncertain BEGIN")
+			}
+			return nil
+		}})
+		listDone := make(chan error, 1)
+		go func() {
+			_, err := store.List(context.Background(), memory.ListRequest{Scopes: []memory.Scope{{Namespace: "user", ID: "reader"}}, Limit: 1, IncludeExpired: true})
+			listDone <- err
+		}()
+		<-started
+		waiter := make(chan error, 1)
+		go func() {
+			_, err := store.Get(context.Background(), memory.RecordRef{Scope: memory.Scope{Namespace: "user", ID: "reader"}, ID: "waiter"})
+			waiter <- err
+		}()
+		close(release)
+		if err := <-listDone; !errors.Is(err, memory.ErrUnavailable) {
+			t.Fatalf("uncertain List = %v", err)
+		}
+		select {
+		case err := <-waiter:
+			if !errors.Is(err, memory.ErrUnavailable) {
+				t.Fatalf("connection waiter = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("poison did not wake connection waiter")
+		}
+		for _, conn := range held {
+			store.returnConnection(conn)
+		}
+	})
+}
+
+func TestSafeRecordReadErrorDistinguishesStructureAndOperations(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want error
+	}{
+		{"projection shape", recordScanError{err: errors.New("scan conversion")}, memory.ErrCorrupt},
+		{"scan busy", recordScanError{err: sqliteCodeError{code: sqliteBusy}}, memory.ErrBusy},
+		{"scan closed", recordScanError{err: sql.ErrConnDone}, memory.ErrClosed},
+		{"scan I/O", recordScanError{err: sqliteCodeError{code: 10}}, memory.ErrUnavailable},
+		{"scan unavailable", recordScanError{err: memory.ErrUnavailable}, memory.ErrUnavailable},
+		{"query busy", sqliteCodeError{code: sqliteBusy}, memory.ErrBusy},
+		{"query closed", sql.ErrConnDone, memory.ErrClosed},
+		{"query I/O", sqliteCodeError{code: 10}, memory.ErrUnavailable},
+		{"generic unavailable", errors.New("driver operation failed"), memory.ErrUnavailable},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := safeRecordReadError(context.Background(), testCase.err); !errors.Is(got, testCase.want) {
+				t.Fatalf("classification = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+
+	t.Run("production closed connection seam", func(t *testing.T) {
+		store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
+		installTestHooks(t, testHooks{beforeReadGeneration: func(conn *sql.Conn) {
+			_ = conn.Close()
+		}})
+		_, err := store.List(context.Background(), memory.ListRequest{Scopes: []memory.Scope{{Namespace: "user", ID: "reader"}}, Limit: 1, IncludeExpired: true})
+		if !errors.Is(err, memory.ErrClosed) || errors.Is(err, memory.ErrCorrupt) {
+			t.Fatalf("closed production read classification = %v", err)
+		}
+	})
+}
+
+func TestUpsertRejectsMismatchedExpectedRevisionBeforeUnsupported(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
+	record := sqliteTestRecord("revision-mismatch", "revision-mismatch", time.Date(2026, 8, 29, 17, 50, 0, 0, time.UTC))
+	record.Revision = 2
+	expected := uint64(1)
+	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record, ExpectedRevision: &expected}); !errors.Is(err, memory.ErrInvalidRequest) {
+		t.Fatalf("mismatched update revision = %v", err)
+	}
+	expected = 2
+	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record, ExpectedRevision: &expected}); !errors.Is(err, memory.ErrUnsupported) {
+		t.Fatalf("matching create-only update = %v", err)
+	}
+}
+
 func TestRecordEncodingFTSConflictAndCallerIDs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.db")
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {

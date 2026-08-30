@@ -118,8 +118,10 @@ func decodeProvenance(raw []byte) (memory.Provenance, error) {
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return memory.Provenance{}, memory.ErrCorrupt
 	}
+	messages := make([]string, len(wire.MessageIDs))
+	copy(messages, wire.MessageIDs)
 	value := memory.Provenance{
-		Origin: wire.Origin, SessionID: wire.SessionID, MessageIDs: append([]string(nil), wire.MessageIDs...),
+		Origin: wire.Origin, SessionID: wire.SessionID, MessageIDs: messages,
 		ObservationID: wire.ObservationID, DecisionSource: wire.DecisionSource,
 	}
 	if wire.DecisionAt != nil {

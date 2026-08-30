@@ -1,19 +1,20 @@
 package memory
 
 const (
-	MaxRecordTextBytes       = 8 * 1024
-	MaxNamespaceBytes        = 32
-	MaxKindBytes             = 32
-	MaxIDBytes               = 64
-	MaxScopeIDBytes          = 128
-	MaxSessionIDBytes        = 128
-	MaxMessageIDBytes        = 128
-	MaxSemanticKeyBytes      = 256
-	MaxLabels                = 32
-	MaxLabelBytes            = 64
-	MaxMetadataEntries       = 32
-	MaxMetadataKeyBytes      = 64
-	MaxMetadataValueBytes    = 512
+	MaxRecordTextBytes    = 8 * 1024
+	MaxNamespaceBytes     = 32
+	MaxKindBytes          = 32
+	MaxIDBytes            = 64
+	MaxScopeIDBytes       = 128
+	MaxSessionIDBytes     = 128
+	MaxMessageIDBytes     = 128
+	MaxSemanticKeyBytes   = 256
+	MaxLabels             = 32
+	MaxLabelBytes         = 64
+	MaxMetadataEntries    = 32
+	MaxMetadataKeyBytes   = 64
+	MaxMetadataValueBytes = 512
+	// MaxMetadataBytes bounds canonical deterministic encoding/json object wire bytes.
 	MaxMetadataBytes         = 4 * 1024
 	MaxReasonBytes           = 2 * 1024
 	MaxProvenanceMessageIDs  = 32

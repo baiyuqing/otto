@@ -271,9 +271,14 @@ func TestOpenRejectsOwnerBitStrippingUmaskWithoutBroadeningConcurrentCreation(t 
 		close(created)
 	}()
 	var createOnce sync.Once
-	installTestHooks(t, testHooks{beforeDirectoryCreate: func() {
+	installTestHooks(t, testHooks{mkdirat: func(operation func() error) error {
+		if !connectionProofMu.TryLock() {
+			t.Fatal("Mkdirat test seam ran under the connection proof lock")
+		}
+		connectionProofMu.Unlock()
 		createOnce.Do(func() { close(create) })
 		<-created
+		return operation()
 	}})
 
 	parent := filepath.Join(root, "new", "private")

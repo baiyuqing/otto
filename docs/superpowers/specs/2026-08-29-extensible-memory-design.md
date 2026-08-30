@@ -91,7 +91,7 @@ per-runtime TurnMemory = Shared Core + runtime-scoped Extractor
 - `internal/memory/sqlite`: SQLite schema, migrations, CRUD, FTS5 retrieval, locks, backup, and restore.
 - `internal/agent`: turn-level orchestration only; it imports the narrow memory contract and never a backend package.
 - `internal/app`: frontend-safe memory management facade and lifecycle serialization.
-- `internal/tool`: `memory_search`, `remember`, and `forget` tool adapters. They depend on `memory.Manager`, not a Store.
+- `internal/tool`: `memory_search`, `remember`, and `forget` tool adapters. Search depends on the read-only management surface; model mutations depend on `memory.Proposer`. No tool accesses a Store or the human-authorized mutation methods.
 - `internal/config`: strict TOML schema and runtime resolution for memory.
 - `cmd/otto`: backend registry, construction, standalone `otto memory` commands, close ordering, and warnings.
 - `internal/tui` and `internal/repl`: presentation and explicit human management commands.
@@ -123,6 +123,10 @@ type Manager interface {
     Review(context.Context, ReviewRequest) (ReviewResult, error)
 }
 
+type Proposer interface {
+    Propose(context.Context, ProposeRequest) (CandidateBatch, error)
+}
+
 type Binding interface {
     TurnMemory
     Close() error
@@ -130,6 +134,7 @@ type Binding interface {
 
 type Service interface {
     Manager
+    Proposer
     Bind(context.Context, BindOptions) (Binding, error)
     Close() error
 }
@@ -137,7 +142,7 @@ type Service interface {
 
 The process-level Service owns the shared Store, Retriever, Policy, and maintenance worker. `Bind` creates an immutable per-runner Binding containing the runtime-scoped Extractor, redactor, and request sizer. Closing a Binding cannot close the shared Store; closing the Service first prevents new bindings, waits for released bindings, then closes shared components.
 
-The management API distinguishes human-authorized calls from model-originated proposals. That authority is created by the application path; a model-supplied boolean or string cannot grant it.
+The management API distinguishes human-authorized calls from model-originated proposals by using different methods. Frontends and standalone human commands receive `Manager`; model mutation tools receive only `Proposer`. Human authority is therefore created by the application call path, and no model-supplied boolean or string can grant it.
 
 ### 6.3 Maintenance contract
 

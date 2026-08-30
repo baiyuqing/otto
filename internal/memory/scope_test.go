@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,6 +32,27 @@ func TestWorkspaceScopeUsesStableOverrideOrPathDigest(t *testing.T) {
 	}
 	if want := (Scope{Namespace: NamespaceWorkspace, ID: "stable-project"}); got != want {
 		t.Fatalf("override scope = %#v, want %#v", got, want)
+	}
+}
+
+func TestWorkspaceScopeRelativeAndAbsoluteAliasesMatch(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(parent)
+
+	relative, err := NewWorkspaceScope("workspace", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := NewWorkspaceScope(workspace, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relative != absolute {
+		t.Fatalf("relative scope = %#v, absolute scope = %#v", relative, absolute)
 	}
 }
 

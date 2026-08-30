@@ -26,6 +26,30 @@ func TestCloneRecordDoesNotAlias(t *testing.T) {
 	}
 }
 
+func TestCloneProposalsDoesNotAlias(t *testing.T) {
+	expiry := time.Date(2026, 8, 29, 1, 2, 3, 0, time.UTC)
+	original := []Proposal{{
+		Labels:    []string{"one"},
+		Metadata:  map[string]string{"k": "v"},
+		ExpiresAt: &expiry,
+	}}
+	cloned := CloneProposals(original)
+	cloned[0].Labels[0] = "changed"
+	cloned[0].Metadata["k"] = "changed"
+	*cloned[0].ExpiresAt = expiry.Add(time.Hour)
+	if original[0].Labels[0] != "one" || original[0].Metadata["k"] != "v" || !original[0].ExpiresAt.Equal(expiry) {
+		t.Fatalf("clone aliases original: original=%#v clone=%#v", original, cloned)
+	}
+
+	if got := CloneProposals(nil); got != nil {
+		t.Fatalf("nil proposals became non-nil: %#v", got)
+	}
+	empty := CloneProposals([]Proposal{})
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("non-nil empty proposals changed: %#v", empty)
+	}
+}
+
 func TestCloneCandidateAndReviewResultDoNotAlias(t *testing.T) {
 	expiry := time.Date(2026, 8, 29, 1, 2, 3, 0, time.UTC)
 	decided := expiry.Add(time.Hour)

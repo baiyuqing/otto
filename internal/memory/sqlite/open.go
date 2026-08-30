@@ -99,6 +99,7 @@ const (
 
 type testHooks struct {
 	path                   func(pathEvent)
+	beforeDirectoryCreate  func()
 	beforeDirectoryInstall func(name string)
 	storeReady             func(*Store)
 	beforeBegin            func()

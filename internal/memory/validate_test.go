@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strings"
@@ -122,13 +124,17 @@ func TestValidateRecordEveryByteAndCountBoundary(t *testing.T) {
 	r = validRecord()
 	r.Metadata = make(map[string]string, 8)
 	for i := 0; i < 8; i++ {
-		r.Metadata[string(rune('a'+i))] = strings.Repeat("x", 511)
+		size := 504
+		if i == 0 {
+			size = 503
+		}
+		r.Metadata[fmt.Sprintf("k%d", i)] = strings.Repeat("x", size)
 	}
 	if err := ValidateRecord(r); err != nil {
-		t.Fatalf("exact metadata total: %v", err)
+		t.Fatalf("exact metadata canonical JSON bytes: %v", err)
 	}
-	r.Metadata["a"] += "x"
-	assertSafeError(t, ValidateRecord(r), ErrInvalidRecord, r.Metadata["a"])
+	r.Metadata["k0"] += "x"
+	assertSafeError(t, ValidateRecord(r), ErrInvalidRecord, r.Metadata["k0"])
 
 	r = validRecord()
 	r.Source.MessageIDs = make([]string, MaxProvenanceMessageIDs)
@@ -552,7 +558,53 @@ func TestValidateManagerAndStoreRequests(t *testing.T) {
 	badRev := uint64(0)
 	upsert.ExpectedRevision = &badRev
 	if err := ValidateUpsertRequest(upsert); !errors.Is(err, ErrInvalidRequest) {
-		t.Errorf("upsert = %v", err)
+		t.Errorf("zero expected revision = %v", err)
+	}
+	upsert.Record.Revision = 2
+	mismatch := uint64(1)
+	upsert.ExpectedRevision = &mismatch
+	if err := ValidateUpsertRequest(upsert); !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("mismatched expected revision = %v", err)
+	}
+	mismatch = 2
+	if err := ValidateUpsertRequest(upsert); err != nil {
+		t.Errorf("matching expected revision = %v", err)
+	}
+}
+
+func TestValidateMetadataCanonicalWireBoundary(t *testing.T) {
+	metadata := make(map[string]string, 8)
+	for index := range 8 {
+		size := 504
+		if index == 0 {
+			size = 503
+		}
+		metadata[fmt.Sprintf("k%d", index)] = strings.Repeat("v", size)
+	}
+	record := validRecord()
+	record.Metadata = metadata
+	if raw, err := json.Marshal(metadata); err != nil || len(raw) != MaxMetadataBytes {
+		t.Fatalf("boundary fixture wire bytes = %d, %v", len(raw), err)
+	}
+	if err := ValidateRecord(record); err != nil {
+		t.Fatalf("exact canonical metadata boundary = %v", err)
+	}
+	metadata["k0"] += "v"
+	if raw, err := json.Marshal(metadata); err != nil || len(raw) != MaxMetadataBytes+1 {
+		t.Fatalf("one-over fixture wire bytes = %d, %v", len(raw), err)
+	}
+	if err := ValidateRecord(record); !errors.Is(err, ErrInvalidRecord) {
+		t.Fatalf("one-over canonical metadata = %v", err)
+	}
+
+	escaped := validRecord()
+	escaped.Metadata = map[string]string{`quote"slash\\`: strings.Repeat(`"\\`, 128)}
+	raw, err := json.Marshal(escaped.Metadata)
+	if err != nil || len(raw) <= len(`quote"slash\\`)+len(escaped.Metadata[`quote"slash\\`]) {
+		t.Fatalf("escaping fixture = %d, %v", len(raw), err)
+	}
+	if err := ValidateRecord(escaped); err != nil {
+		t.Fatalf("escaped canonical metadata = %v", err)
 	}
 }
 

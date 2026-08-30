@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -225,7 +226,6 @@ func validateMetadata(metadata map[string]string, base error) error {
 	if len(metadata) > MaxMetadataEntries {
 		return invalidCount(base, "metadata entry count", MaxMetadataEntries)
 	}
-	total := 0
 	normalized := make(map[string]struct{}, len(metadata))
 	for key, value := range metadata {
 		if !validSemantic(key, MaxMetadataKeyBytes, true) {
@@ -234,15 +234,15 @@ func validateMetadata(metadata map[string]string, base error) error {
 		if !validText(value, MaxMetadataValueBytes) {
 			return bad("metadata value", MaxMetadataValueBytes)
 		}
-		total += len(key) + len(value)
-		if total > MaxMetadataBytes {
-			return bad("metadata total bytes", MaxMetadataBytes)
-		}
 		norm := foldCanonical(strings.TrimSpace(key))
 		if _, ok := normalized[norm]; ok {
 			return bad("duplicate metadata key")
 		}
 		normalized[norm] = struct{}{}
+	}
+	canonical, err := json.Marshal(metadata)
+	if err != nil || len(canonical) > MaxMetadataBytes {
+		return bad("metadata canonical JSON bytes", MaxMetadataBytes)
 	}
 	return nil
 }
@@ -717,7 +717,7 @@ func ValidateUpsertRequest(request UpsertRequest) error {
 		request.Record.Revision = 1
 		return ValidateRecord(request.Record)
 	}
-	if *request.ExpectedRevision == 0 {
+	if *request.ExpectedRevision == 0 || request.Record.Revision != *request.ExpectedRevision {
 		return invalidRequest("expected revision")
 	}
 	return ValidateRecord(request.Record)

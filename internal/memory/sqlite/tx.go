@@ -260,24 +260,12 @@ func (store *Store) withWrite(
 			store.quarantine(conn)
 			return commitUnknown
 		}
-		if candidateCommitOperation(operation) {
-			if hook := loadTestHooks().afterCandidateCommit; hook != nil {
-				if err := hook(); err != nil {
-					store.quarantine(conn)
-					return commitUnknown
-				}
-			}
-		}
 		// COMMIT success is the operation result. A later connection reset
 		// failure still quarantines the Store, but must not turn durable success
 		// into a retryable-looking failure.
 		_ = store.restoreAndReturnConnection(conn)
 		return nil
 	}
-}
-
-func candidateCommitOperation(operation memory.CommitOperation) bool {
-	return operation == memory.CommitPropose || operation == memory.CommitObserve || operation == memory.CommitReview
 }
 
 func retryBackoff(attempt int, seed *uint64) time.Duration {

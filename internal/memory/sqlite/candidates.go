@@ -357,6 +357,10 @@ func (store *Store) Propose(ctx context.Context, input memory.ProposalBatch) (me
 	for index, candidate := range batch.Candidates {
 		ids[index] = candidate.ID
 	}
+	commitUnknown, err := memory.NewCommitUnknownError(memory.CommitPropose, ids)
+	if err != nil {
+		return memory.CandidateBatch{}, memory.ErrInvalidRequest
+	}
 	err = store.withWrite(ctx, memory.CommitPropose, ids, func(ctx context.Context, conn *sql.Conn) error {
 		for _, candidate := range batch.Candidates {
 			arguments, err := candidateInsertArguments(candidate, nil)
@@ -375,7 +379,20 @@ func (store *Store) Propose(ctx context.Context, input memory.ProposalBatch) (me
 	if err != nil {
 		return memory.CandidateBatch{}, err
 	}
+	if err := store.publishCandidateCommit(commitUnknown); err != nil {
+		return memory.CandidateBatch{}, err
+	}
 	return memory.CloneCandidateBatch(memory.CandidateBatch(batch)), nil
+}
+
+func (store *Store) publishCandidateCommit(commitUnknown *memory.CommitUnknownError) error {
+	if hook := loadTestHooks().afterCandidateCommit; hook != nil {
+		if err := hook(); err != nil {
+			store.poison()
+			return commitUnknown
+		}
+	}
+	return nil
 }
 
 func candidateBeforeCommitHook() error {
@@ -439,7 +456,13 @@ func readCandidateSnapshotConn(ctx context.Context, conn *sql.Conn, ref memory.C
 	}
 	if verifyObservation && snapshot.observationID != "" {
 		receipt, err := readObservationReceiptConn(ctx, conn, snapshot.observationID, true)
-		if err != nil || !receiptContainsExactlyOnce(receipt, snapshot.candidate.ID) {
+		if err != nil {
+			if errors.Is(err, memory.ErrNotFound) {
+				return candidateSnapshot{}, memory.ErrCorrupt
+			}
+			return candidateSnapshot{}, err
+		}
+		if !receiptContainsExactlyOnce(receipt, snapshot.candidate.ID) {
 			return candidateSnapshot{}, memory.ErrCorrupt
 		}
 	}
@@ -537,7 +560,15 @@ func (store *Store) ListCandidates(ctx context.Context, input memory.CandidateLi
 				}
 				if snapshot.observationID != "" {
 					receipt, verifyErr := readObservationReceiptConn(ctx, conn, snapshot.observationID, true)
-					if verifyErr != nil || !receiptContainsExactlyOnce(receipt, snapshot.candidate.ID) {
+					if verifyErr != nil {
+						if errors.Is(verifyErr, memory.ErrNotFound) {
+							readErr = memory.ErrCorrupt
+						} else {
+							readErr = verifyErr
+						}
+						break
+					}
+					if !receiptContainsExactlyOnce(receipt, snapshot.candidate.ID) {
 						readErr = memory.ErrCorrupt
 						break
 					}
@@ -685,13 +716,65 @@ func readObservationReceiptConn(ctx context.Context, conn *sql.Conn, id string, 
 				" AND typeof(observation_id)='text' AND length(CAST(observation_id AS BLOB)) BETWEEN 1 AND " + strconv.Itoa(memory.MaxIDBytes) +
 				" AND typeof(state)='text' AND state IN ('pending','accepted','rejected') AND " + proposedGate + " AND json_valid(" + gatedProposed + ") AND json_type(" + gatedProposed + ")='object'" +
 				" AND (state<>'pending' OR (json_type(" + gatedProposed + ",'$.source.observation_id')='text' AND json_extract(" + gatedProposed + ",'$.source.observation_id')=?))"
-			if err := conn.QueryRowContext(ctx, "SELECT CASE WHEN "+gate+" AND observation_id=? THEN 1 END FROM memory_candidates WHERE id=? LIMIT 1", id, id, candidateID).Scan(&valid); err != nil || !valid.Valid || valid.Int64 != 1 {
+			if hook := loadTestHooks().beforeObservationCorrespondence; hook != nil {
+				hook(observationCandidateCorrespondence)
+			}
+			scanErr := conn.QueryRowContext(ctx, "SELECT CASE WHEN "+gate+" AND observation_id=? THEN 1 END FROM memory_candidates WHERE id=? LIMIT 1", id, id, candidateID).Scan(&valid)
+			if scanErr != nil {
+				if errors.Is(scanErr, sql.ErrNoRows) {
+					return memory.ObservationReceipt{}, memory.ErrCorrupt
+				}
+				return memory.ObservationReceipt{}, safeRecordReadError(ctx, scanErr)
+			}
+			if !valid.Valid || valid.Int64 != 1 {
 				return memory.ObservationReceipt{}, memory.ErrCorrupt
 			}
 		}
-		var count int
-		if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM memory_candidates WHERE observation_id=?", id).Scan(&count); err != nil || count != len(receipt.CandidateIDs) {
+
+		if hook := loadTestHooks().beforeObservationCorrespondence; hook != nil {
+			hook(observationAssociationCorrespondence)
+		}
+		associationGate := "typeof(id)='text' AND length(CAST(id AS BLOB)) BETWEEN 1 AND " + strconv.Itoa(memory.MaxIDBytes) +
+			" AND typeof(observation_id)='text' AND length(CAST(observation_id AS BLOB)) BETWEEN 1 AND " + strconv.Itoa(memory.MaxIDBytes)
+		query := "SELECT CASE WHEN " + associationGate + " THEN id END FROM memory_candidates WHERE observation_id=? LIMIT " + strconv.Itoa(memory.MaxCandidateBatch+1)
+		rows, queryErr := conn.QueryContext(ctx, query, id)
+		if queryErr != nil {
+			return memory.ObservationReceipt{}, safeRecordReadError(ctx, queryErr)
+		}
+		associated := make(map[string]struct{}, len(receipt.CandidateIDs))
+		var correspondenceErr error
+		for rows.Next() {
+			var candidateID sql.NullString
+			if scanErr := rows.Scan(&candidateID); scanErr != nil {
+				correspondenceErr = safeRecordReadError(ctx, recordScanError{err: scanErr})
+				break
+			}
+			if !candidateID.Valid || len(associated) >= memory.MaxCandidateBatch {
+				correspondenceErr = memory.ErrCorrupt
+				break
+			}
+			if _, duplicate := associated[candidateID.String]; duplicate {
+				correspondenceErr = memory.ErrCorrupt
+				break
+			}
+			associated[candidateID.String] = struct{}{}
+		}
+		if rowsErr := rows.Err(); correspondenceErr == nil && rowsErr != nil {
+			correspondenceErr = safeRecordReadError(ctx, rowsErr)
+		}
+		if closeErr := rows.Close(); correspondenceErr == nil && closeErr != nil {
+			correspondenceErr = safeRecordReadError(ctx, closeErr)
+		}
+		if correspondenceErr != nil {
+			return memory.ObservationReceipt{}, correspondenceErr
+		}
+		if len(associated) != len(seen) {
 			return memory.ObservationReceipt{}, memory.ErrCorrupt
+		}
+		for candidateID := range seen {
+			if _, exists := associated[candidateID]; !exists {
+				return memory.ObservationReceipt{}, memory.ErrCorrupt
+			}
 		}
 	}
 	return receipt, nil
@@ -794,6 +877,9 @@ func (store *Store) CommitObservation(ctx context.Context, input memory.Observat
 	} else if !errors.Is(err, memory.ErrNotFound) {
 		return memory.ObservationReceipt{}, err
 	}
+	if hook := loadTestHooks().afterObservationInitialMiss; hook != nil {
+		hook(store)
+	}
 	commit, err := prepareObservationCommit(ctx, store.guard, input)
 	if err != nil {
 		return memory.ObservationReceipt{}, err
@@ -806,8 +892,17 @@ func (store *Store) CommitObservation(ctx context.Context, input memory.Observat
 	if err != nil || len(idsJSON) > maxObservationIDsJSON {
 		return memory.ObservationReceipt{}, memory.ErrInvalidRequest
 	}
+	receipt := memory.ObservationReceipt{ObservationID: commit.ObservationID, CandidateIDs: ids}
+	if err := memory.GuardObservationReceipt(ctx, store.guard, receipt); err != nil {
+		return memory.ObservationReceipt{}, err
+	}
+	entityIDs := append([]string{commit.ObservationID}, ids...)
+	commitUnknown, err := memory.NewCommitUnknownError(memory.CommitObserve, entityIDs)
+	if err != nil {
+		return memory.ObservationReceipt{}, memory.ErrInvalidRequest
+	}
 	var raced memory.ObservationReceipt
-	err = store.withWrite(ctx, memory.CommitObserve, append([]string{commit.ObservationID}, ids...), func(ctx context.Context, conn *sql.Conn) error {
+	err = store.withWrite(ctx, memory.CommitObserve, entityIDs, func(ctx context.Context, conn *sql.Conn) error {
 		existing, readErr := readObservationReceiptConn(ctx, conn, commit.ObservationID, true)
 		if readErr == nil {
 			raced = existing
@@ -829,7 +924,13 @@ func (store *Store) CommitObservation(ctx context.Context, input memory.Observat
 			}
 		}
 		verified, err := readObservationReceiptConn(ctx, conn, commit.ObservationID, true)
-		if err != nil || !equalStrings(verified.CandidateIDs, ids) {
+		if err != nil {
+			if errors.Is(err, memory.ErrNotFound) {
+				return memory.ErrCorrupt
+			}
+			return err
+		}
+		if !equalStrings(verified.CandidateIDs, ids) {
 			return memory.ErrCorrupt
 		}
 		if err := bumpGeneration(ctx, conn); err != nil {
@@ -838,6 +939,9 @@ func (store *Store) CommitObservation(ctx context.Context, input memory.Observat
 		return candidateBeforeCommitHook()
 	})
 	if len(raced.CandidateIDs) != 0 || raced.ObservationID != "" {
+		if err != memory.ErrConflict {
+			return memory.ObservationReceipt{}, err
+		}
 		raced.Existing = true
 		if guardErr := memory.GuardObservationReceipt(ctx, store.guard, raced); guardErr != nil {
 			return memory.ObservationReceipt{}, guardErr
@@ -847,8 +951,7 @@ func (store *Store) CommitObservation(ctx context.Context, input memory.Observat
 	if err != nil {
 		return memory.ObservationReceipt{}, err
 	}
-	receipt := memory.ObservationReceipt{ObservationID: commit.ObservationID, CandidateIDs: ids}
-	if err := memory.GuardObservationReceipt(ctx, store.guard, receipt); err != nil {
+	if err := store.publishCandidateCommit(commitUnknown); err != nil {
 		return memory.ObservationReceipt{}, err
 	}
 	return memory.CloneObservationReceipt(receipt), nil
@@ -1012,6 +1115,10 @@ func (store *Store) Review(ctx context.Context, input memory.StoreReviewRequest)
 	} else if desiredTombstone != nil {
 		entityIDs = append(entityIDs, desiredTombstone.ID)
 	}
+	commitUnknown, err := memory.NewCommitUnknownError(memory.CommitReview, entityIDs)
+	if err != nil {
+		return memory.ReviewResult{}, memory.ErrInvalidRequest
+	}
 	err = store.withWrite(ctx, memory.CommitReview, entityIDs, func(ctx context.Context, conn *sql.Conn) error {
 		current, err := readCandidateSnapshotConn(ctx, conn, request.Ref, true)
 		if err != nil {
@@ -1067,9 +1174,16 @@ func (store *Store) Review(ctx context.Context, input memory.StoreReviewRequest)
 		return candidateBeforeCommitHook()
 	})
 	if err != nil {
+		var conflict *memory.ConflictError
+		if errors.As(err, &conflict) {
+			return memory.ReviewResult{}, conflict
+		}
 		if errors.Is(err, memory.ErrConflict) {
 			return memory.ReviewResult{}, memory.ErrConflict
 		}
+		return memory.ReviewResult{}, err
+	}
+	if err := store.publishCandidateCommit(commitUnknown); err != nil {
 		return memory.ReviewResult{}, err
 	}
 	result.Candidate = decidedCandidate
@@ -1115,12 +1229,29 @@ func insertAcceptedRecord(ctx context.Context, conn *sql.Conn, record memory.Rec
 	if err != nil {
 		return err
 	}
+	idGate := "typeof(id)='text' AND length(CAST(id AS BLOB)) BETWEEN 1 AND " + strconv.Itoa(memory.MaxIDBytes)
+	var existingID sql.NullString
+	err = conn.QueryRowContext(ctx, "SELECT CASE WHEN "+idGate+" THEN id END FROM memory_records WHERE id=? LIMIT 1", record.ID).Scan(&existingID)
+	if err == nil {
+		if !existingID.Valid {
+			return memory.ErrCorrupt
+		}
+		return memory.ErrConflict
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := requireFTSRowCount(ctx, conn, record.ID, 0); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records(id,scope_namespace,scope_id,kind,semantic_key,text_value,labels_json,metadata_json,source_json,confidence,revision,created_at,updated_at,expires_at,state,forgotten_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',NULL)`,
 		record.ID, record.Scope.Namespace, record.Scope.ID, record.Kind, record.Key, record.Text, string(encoded.labels), string(encoded.metadata), string(encoded.source), record.Confidence, record.Revision, encoded.created, encoded.updated, encoded.expires); err != nil {
 		return err
 	}
-	_, err = conn.ExecContext(ctx, `INSERT INTO memory_records_fts(record_id,text_value,kind,semantic_key,labels) VALUES(?,?,?,?,?)`, record.ID, record.Text, record.Kind, record.Key, ftsLabels(record.Labels))
-	return err
+	if _, err := conn.ExecContext(ctx, `INSERT INTO memory_records_fts(record_id,text_value,kind,semantic_key,labels) VALUES(?,?,?,?,?)`, record.ID, record.Text, record.Kind, record.Key, ftsLabels(record.Labels)); err != nil {
+		return err
+	}
+	return requireFTSRowCount(ctx, conn, record.ID, 1)
 }
 
 func updateAcceptedRecord(ctx context.Context, conn *sql.Conn, record memory.Record, expected uint64) error {
@@ -1135,8 +1266,11 @@ func updateAcceptedRecord(ctx context.Context, conn *sql.Conn, record memory.Rec
 		return err
 	}
 	changed, err := result.RowsAffected()
-	if err != nil || changed != 1 {
-		return memory.ErrConflict
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return classifyConditionalMiss(ctx, conn, memory.RecordRef{Scope: record.Scope, ID: record.ID}, expected)
 	}
 	return replaceFTS(ctx, conn, record)
 }
@@ -1148,12 +1282,14 @@ func forgetAcceptedRecord(ctx context.Context, conn *sql.Conn, tombstone memory.
 		return err
 	}
 	changed, err := result.RowsAffected()
-	if err != nil || changed != 1 {
-		return memory.ErrConflict
+	if err != nil {
+		return err
 	}
-	var count int
-	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM memory_records_fts WHERE record_id=?`, tombstone.ID).Scan(&count); err != nil || count != 1 {
-		return memory.ErrCorrupt
+	if changed != 1 {
+		return classifyConditionalMiss(ctx, conn, memory.RecordRef{Scope: tombstone.Scope, ID: tombstone.ID}, expected)
+	}
+	if err := requireFTSRowCount(ctx, conn, tombstone.ID, 1); err != nil {
+		return err
 	}
 	deleted, err := conn.ExecContext(ctx, `DELETE FROM memory_records_fts WHERE record_id=?`, tombstone.ID)
 	if err != nil {

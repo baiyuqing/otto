@@ -99,7 +99,7 @@ const (
 
 type testHooks struct {
 	path                   func(pathEvent)
-	mkdirat                func(operation func() error) error
+	mkdirat                func(dirfd int, name string, mode uint32) error
 	beforeDirectoryInstall func(name string)
 	storeReady             func(*Store)
 	beforeBegin            func()

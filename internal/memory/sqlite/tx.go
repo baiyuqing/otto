@@ -49,8 +49,8 @@ func safeSQLiteError(ctx context.Context, err error) error {
 		return memory.ErrClosed
 	}
 	for _, category := range []error{
-		memory.ErrInvalidRequest, memory.ErrSensitiveMemory, memory.ErrUnsupported,
-		memory.ErrConflict, memory.ErrCorrupt, memory.ErrBusy, memory.ErrClosed, memory.ErrUnavailable,
+		memory.ErrInvalidRequest, memory.ErrInvalidRecord, memory.ErrSensitiveMemory, memory.ErrUnsupported,
+		memory.ErrNotFound, memory.ErrConflict, memory.ErrCorrupt, memory.ErrBusy, memory.ErrClosed, memory.ErrUnavailable,
 	} {
 		if errors.Is(err, category) {
 			return category

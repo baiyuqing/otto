@@ -85,15 +85,31 @@ func TestRecordCallbacksRunWithoutStoreResources(t *testing.T) {
 	defer store.Close()
 	guard.store.Store(store)
 	record := sqliteTestRecord("callback-record", "callback", time.Date(2026, 8, 29, 14, 30, 0, 0, time.UTC))
-	mustSQLiteCreate(t, store, record)
+	created := mustSQLiteCreate(t, store, record)
 	if _, err := store.Get(context.Background(), memory.RecordRef{Scope: record.Scope, ID: record.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.List(context.Background(), memory.ListRequest{Scopes: []memory.Scope{record.Scope}, Limit: 1, IncludeExpired: true}); err != nil {
 		t.Fatal(err)
 	}
-	if guard.recordCalls.Load() < 3 {
-		t.Fatalf("record guard calls = %d", guard.recordCalls.Load())
+	updated := memory.CloneRecord(created)
+	updated.UpdatedAt = updated.UpdatedAt.Add(time.Hour)
+	expected := uint64(1)
+	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: updated, ExpectedRevision: &expected}); err != nil {
+		t.Fatal(err)
+	}
+	forgottenAt := updated.UpdatedAt.Add(time.Hour)
+	if _, err := store.Forget(context.Background(), memory.StoreForgetRequest{Ref: memory.RecordRef{Scope: record.Scope, ID: record.ID}, ExpectedRevision: 2, ForgottenAt: forgottenAt}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetTombstone(context.Background(), memory.RecordRef{Scope: record.Scope, ID: record.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListTombstones(context.Background(), memory.TombstoneListRequest{Scopes: []memory.Scope{record.Scope}, Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if guard.recordCalls.Load() < 6 || guard.tombstoneCalls.Load() < 2 {
+		t.Fatalf("guard calls = records %d, tombstones %d", guard.recordCalls.Load(), guard.tombstoneCalls.Load())
 	}
 }
 
@@ -526,7 +542,7 @@ func TestSafeRecordReadErrorDistinguishesStructureAndOperations(t *testing.T) {
 	})
 }
 
-func TestUpsertRejectsMismatchedExpectedRevisionBeforeUnsupported(t *testing.T) {
+func TestUpsertRejectsMismatchedExpectedRevisionBeforeRead(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
 	record := sqliteTestRecord("revision-mismatch", "revision-mismatch", time.Date(2026, 8, 29, 17, 50, 0, 0, time.UTC))
 	record.Revision = 2
@@ -535,8 +551,8 @@ func TestUpsertRejectsMismatchedExpectedRevisionBeforeUnsupported(t *testing.T) 
 		t.Fatalf("mismatched update revision = %v", err)
 	}
 	expected = 2
-	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record, ExpectedRevision: &expected}); !errors.Is(err, memory.ErrUnsupported) {
-		t.Fatalf("matching create-only update = %v", err)
+	if _, err := store.Upsert(context.Background(), memory.UpsertRequest{Record: record, ExpectedRevision: &expected}); !errors.Is(err, memory.ErrNotFound) {
+		t.Fatalf("matching absent update = %v", err)
 	}
 }
 
@@ -604,21 +620,29 @@ func TestRecordEncodingFTSConflictAndCallerIDs(t *testing.T) {
 }
 
 type resourceCheckingGuard struct {
-	t           *testing.T
-	store       atomic.Pointer[Store]
-	recordCalls atomic.Int64
+	t              *testing.T
+	store          atomic.Pointer[Store]
+	recordCalls    atomic.Int64
+	tombstoneCalls atomic.Int64
 }
 
 func (guard *resourceCheckingGuard) Check(ctx context.Context, input memory.GuardInput) error {
-	isRecord := false
+	isRecord, isTombstone := false, false
 	for _, field := range input.Fields {
 		if strings.HasPrefix(field.Name, "record ") {
 			isRecord = true
-			break
+		}
+		if strings.HasPrefix(field.Name, "tombstone ") {
+			isTombstone = true
 		}
 	}
-	if isRecord {
-		guard.recordCalls.Add(1)
+	if isRecord || isTombstone {
+		if isRecord {
+			guard.recordCalls.Add(1)
+		}
+		if isTombstone {
+			guard.tombstoneCalls.Add(1)
+		}
 		store := guard.store.Load()
 		if store != nil {
 			store.lifecycleMu.Lock()

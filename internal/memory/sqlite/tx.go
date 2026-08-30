@@ -48,6 +48,10 @@ func safeSQLiteError(ctx context.Context, err error) error {
 	if errors.Is(err, sql.ErrConnDone) || errors.Is(err, driver.ErrBadConn) {
 		return memory.ErrClosed
 	}
+	var conflict *memory.ConflictError
+	if errors.As(err, &conflict) {
+		return conflict
+	}
 	for _, category := range []error{
 		memory.ErrInvalidRequest, memory.ErrInvalidRecord, memory.ErrSensitiveMemory, memory.ErrUnsupported,
 		memory.ErrNotFound, memory.ErrConflict, memory.ErrCorrupt, memory.ErrBusy, memory.ErrClosed, memory.ErrUnavailable,

@@ -1719,12 +1719,31 @@ func TestOpenSQLiteErrorClassificationUsesCodesNotMessages(t *testing.T) {
 		{"interrupt without cancellation", context.Background(), sqliteCodeError{code: sqliteInterrupt}, memory.ErrUnavailable},
 		{"interrupt with cancellation", canceled, sqliteCodeError{code: sqliteInterrupt}, context.Canceled},
 		{"closed connection", context.Background(), sql.ErrConnDone, memory.ErrClosed},
+		{"arbitrary", context.Background(), errors.New("content-bearing-driver-message"), memory.ErrUnavailable},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := safeSQLiteError(tc.ctx, tc.err)
 			assertSafeError(t, got, tc.want, "content-bearing-driver-message")
 		})
+	}
+}
+
+func TestOpenSQLiteErrorClassificationPreservesTypedConflicts(t *testing.T) {
+	conflict := &memory.ConflictError{EntityKind: "record", ID: "typed-conflict", ExpectedRevision: 1, ActualRevision: 2}
+	if got := safeSQLiteError(context.Background(), conflict); got != conflict {
+		t.Fatalf("safeSQLiteError conflict = %#v, want original %#v", got, conflict)
+	}
+	if got := safeRecordReadError(context.Background(), conflict); got != conflict {
+		t.Fatalf("safeRecordReadError conflict = %#v, want original %#v", got, conflict)
+	}
+
+	store := openTestStore(t, filepath.Join(t.TempDir(), "memory.db"))
+	err := store.withWrite(context.Background(), memory.CommitUpsert, []string{conflict.ID}, func(context.Context, *sql.Conn) error {
+		return conflict
+	})
+	if err != conflict {
+		t.Fatalf("withWrite conflict = %#v, want original %#v", err, conflict)
 	}
 }
 

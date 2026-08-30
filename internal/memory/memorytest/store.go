@@ -603,8 +603,16 @@ func RunMutationConformance(t *testing.T, factory Factory) {
 		}
 		stale := early
 		stale.ExpectedRevision, stale.ForgottenAt = 2, record.UpdatedAt.Add(time.Hour)
+		beforeStale, err := fixture.InspectMutation(ctx, record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err := store.Forget(ctx, stale); !errors.Is(err, memory.ErrConflict) {
 			t.Fatalf("stale Forget = %v", err)
+		}
+		afterStale, err := fixture.InspectMutation(ctx, record.ID)
+		if err != nil || !reflect.DeepEqual(afterStale, beforeStale) {
+			t.Fatalf("stale Forget persistence changed\n before: %#v\n  after: %#v, %v", beforeStale, afterStale, err)
 		}
 
 		request := memory.StoreForgetRequest{Ref: memory.RecordRef{Scope: record.Scope, ID: record.ID}, ExpectedRevision: 1, ForgottenAt: record.UpdatedAt.Add(time.Hour)}
@@ -653,8 +661,13 @@ func RunMutationConformance(t *testing.T, factory Factory) {
 		staleRecord := memory.CloneRecord(record)
 		staleRecord.UpdatedAt = request.ForgottenAt.Add(time.Hour)
 		expected := uint64(1)
-		if _, err := store.Upsert(ctx, memory.UpsertRequest{Record: staleRecord, ExpectedRevision: &expected}); !errors.Is(err, memory.ErrConflict) {
-			t.Fatalf("tombstone resurrection = %v", err)
+		_, err = store.Upsert(ctx, memory.UpsertRequest{Record: staleRecord, ExpectedRevision: &expected})
+		var conflict *memory.ConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("tombstone resurrection = %v (%T), want *memory.ConflictError", err, err)
+		}
+		if conflict.ExpectedRevision != 1 || conflict.ActualRevision != 2 {
+			t.Fatalf("tombstone resurrection revisions = expected %d, actual %d; want expected 1, actual 2", conflict.ExpectedRevision, conflict.ActualRevision)
 		}
 	})
 

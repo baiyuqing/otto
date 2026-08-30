@@ -511,9 +511,12 @@ func ValidateCandidateListRequest(request CandidateListRequest) error {
 	return validatePage(request.Limit, request.Cursor, MaxPageSize)
 }
 
-func validateQuery(value string) error {
+func validateQuery(value string, allowEmpty bool) error {
 	if len(value) <= MaxQueryBytes && utf8.ValidString(value) && strings.TrimSpace(value) == "" {
-		return nil
+		if allowEmpty {
+			return nil
+		}
+		return invalidRequest("query", MaxQueryBytes)
 	}
 	if !validSemantic(value, MaxQueryBytes, true) {
 		return invalidRequest("query", MaxQueryBytes)
@@ -532,7 +535,7 @@ func validateBudget(limit, budget, maxLimit int) error {
 }
 
 func ValidateRetrievalRequest(request RetrievalRequest) error {
-	if err := validateQuery(request.Query); err != nil {
+	if err := validateQuery(request.Query, true); err != nil {
 		return err
 	}
 	if err := validateScopes(request.Scopes, false, true); err != nil {
@@ -551,7 +554,7 @@ func ValidateRetrievalRequest(request RetrievalRequest) error {
 }
 
 func ValidateSearchRequest(request SearchRequest) error {
-	if err := validateQuery(request.Query); err != nil {
+	if err := validateQuery(request.Query, true); err != nil {
 		return err
 	}
 	if err := validateScopes(request.Scopes, false, true); err != nil {
@@ -583,7 +586,7 @@ func ValidateSearchRequest(request SearchRequest) error {
 }
 
 func ValidateRecallRequest(request RecallRequest) error {
-	if err := validateQuery(request.Query); err != nil {
+	if err := validateQuery(request.Query, false); err != nil {
 		return err
 	}
 	if err := validateFilters(request.Kinds, nil); err != nil {

@@ -803,6 +803,10 @@ func TestValidateGenericQueriesAndEmptyObservationCommit(t *testing.T) {
 		if err := ValidateSearchRequest(search); err != nil {
 			t.Errorf("search query %q: %v", query, err)
 		}
+		recall := RecallRequest{Query: query, Limit: 1, TokenBudget: 1}
+		if err := ValidateRecallRequest(recall); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("recall query %q = %v, want ErrInvalidRequest", query, err)
+		}
 	}
 	commit := ObservationCommit{ObservationID: "o-empty", CreatedAt: testNow}
 	if err := ValidateObservationCommit(commit); err != nil {

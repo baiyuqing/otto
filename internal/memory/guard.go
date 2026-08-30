@@ -96,12 +96,39 @@ func hierarchicalURISpans(value string) []string {
 	candidates := guardURIPattern.FindAllString(value, -1)
 	spans := candidates[:0]
 	for _, candidate := range candidates {
-		candidate = strings.TrimRight(candidate, ".,;!?)]}>")
+		candidate = trimURITrailingPunctuation(candidate)
 		if candidate != "" {
 			spans = append(spans, candidate)
 		}
 	}
 	return spans
+}
+
+func trimURITrailingPunctuation(candidate string) string {
+	openBrackets, closeBrackets := 0, 0
+	for _, character := range candidate {
+		switch character {
+		case '[':
+			openBrackets++
+		case ']':
+			closeBrackets++
+		}
+	}
+	for len(candidate) > 0 {
+		switch candidate[len(candidate)-1] {
+		case '.', ',', ';', '!', '?', ')', '}', '>':
+			candidate = candidate[:len(candidate)-1]
+		case ']':
+			if closeBrackets <= openBrackets {
+				return candidate
+			}
+			closeBrackets--
+			candidate = candidate[:len(candidate)-1]
+		default:
+			return candidate
+		}
+	}
+	return candidate
 }
 
 func hasURIUserinfo(value string) bool {

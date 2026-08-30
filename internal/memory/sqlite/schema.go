@@ -245,12 +245,21 @@ func inspectPreflightSnapshot(ctx context.Context, conn *sql.Conn) (memory.Store
 	}
 }
 
-func initializeOrVerifySchema(ctx context.Context, conn *sql.Conn, databaseID, userID string) (identity memory.StoreIdentity, err error) {
+type bootstrapCommitState uint8
+
+const (
+	bootstrapCommitNotApplicable bootstrapCommitState = iota
+	bootstrapCommitStarted
+	bootstrapCommitSucceeded
+	bootstrapCommitUnknown
+)
+
+func initializeOrVerifySchema(ctx context.Context, conn *sql.Conn, databaseID, userID string) (identity memory.StoreIdentity, commitState bootstrapCommitState, err error) {
 	if hook := loadTestHooks().beforeInitializeBegin; hook != nil {
 		hook()
 	}
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+		return memory.StoreIdentity{}, commitState, safeSQLiteError(ctx, err)
 	}
 	committed := false
 	defer func() {
@@ -261,20 +270,21 @@ func initializeOrVerifySchema(ctx context.Context, conn *sql.Conn, databaseID, u
 
 	version, err := readUserVersion(ctx, conn)
 	if err != nil {
-		return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+		return memory.StoreIdentity{}, commitState, safeSQLiteError(ctx, err)
 	}
+	initializing := version == 0
 	switch version {
 	case 0:
 		var count int
 		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema`).Scan(&count); err != nil {
-			return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+			return memory.StoreIdentity{}, commitState, safeSQLiteError(ctx, err)
 		}
 		if count != 0 {
-			return memory.StoreIdentity{}, memory.ErrCorrupt
+			return memory.StoreIdentity{}, commitState, memory.ErrCorrupt
 		}
 		for _, statement := range schemaStatements {
 			if _, err := conn.ExecContext(ctx, statement); err != nil {
-				return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+				return memory.StoreIdentity{}, commitState, safeSQLiteError(ctx, err)
 			}
 		}
 		for _, pair := range [][2]string{
@@ -284,34 +294,64 @@ func initializeOrVerifySchema(ctx context.Context, conn *sql.Conn, databaseID, u
 			{"schema_fingerprint", compiledSchemaFingerprint},
 		} {
 			if _, err := conn.ExecContext(ctx, `INSERT INTO memory_meta(key,value) VALUES(?,?)`, pair[0], pair[1]); err != nil {
-				return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+				return memory.StoreIdentity{}, commitState, safeSQLiteError(ctx, err)
 			}
 		}
 		if _, err := conn.ExecContext(ctx, "PRAGMA user_version=1"); err != nil {
-			return memory.StoreIdentity{}, safeSQLiteError(ctx, err)
+			return memory.StoreIdentity{}, commitState, safeSQLiteError(ctx, err)
 		}
 	case schemaVersion:
-		// A competing initializer won. Verification below reuses its identity.
+		// A competing initializer won. Its verification remains governed by the
+		// caller context because this process did not publish bootstrap state.
 	default:
 		if version > schemaVersion {
-			return memory.StoreIdentity{}, memory.ErrIncompatibleSchema
+			return memory.StoreIdentity{}, commitState, memory.ErrIncompatibleSchema
 		}
-		return memory.StoreIdentity{}, memory.ErrCorrupt
+		return memory.StoreIdentity{}, commitState, memory.ErrCorrupt
 	}
 	if hook := loadTestHooks().beforeInitializeCommit; hook != nil {
 		hook()
 	}
 	if err := ctx.Err(); err != nil {
-		return memory.StoreIdentity{}, err
+		return memory.StoreIdentity{}, commitState, err
 	}
-	if hook := loadTestHooks().initializeCommitStarted; hook != nil {
-		hook()
+	commitExecuted := false
+	executeCommit := func() error {
+		commitExecuted = true
+		if initializing {
+			commitState = bootstrapCommitStarted
+		}
+		if hook := loadTestHooks().initializeCommitStarted; hook != nil {
+			hook()
+		}
+		_, execErr := conn.ExecContext(context.Background(), "COMMIT")
+		return execErr
 	}
-	if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
-		return memory.StoreIdentity{}, memory.ErrCommitUnknown
+	if hook := loadTestHooks().bootstrapDriverCommit; hook != nil {
+		err = hook(executeCommit)
+	} else {
+		err = executeCommit()
+	}
+	if err != nil {
+		if !commitExecuted {
+			return memory.StoreIdentity{}, commitState, memory.ErrUnavailable
+		}
+		if initializing {
+			commitState = bootstrapCommitUnknown
+		}
+		return memory.StoreIdentity{}, commitState, memory.ErrCommitUnknown
+	}
+	if !commitExecuted {
+		return memory.StoreIdentity{}, commitState, memory.ErrUnavailable
 	}
 	committed = true
-	return verifySchema(context.Background(), conn)
+	verificationCtx := ctx
+	if initializing {
+		commitState = bootstrapCommitSucceeded
+		verificationCtx = context.WithoutCancel(ctx)
+	}
+	identity, err = verifySchema(verificationCtx, conn)
+	return identity, commitState, err
 }
 
 func readUserVersion(ctx context.Context, conn *sql.Conn) (int, error) {

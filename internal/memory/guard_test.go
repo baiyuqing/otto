@@ -66,6 +66,32 @@ func TestDefaultGuardRejectsGenericHierarchicalURIUserinfo(t *testing.T) {
 	}
 }
 
+func TestDefaultGuardIPv6URIUserinfoAndTrailingWrappers(t *testing.T) {
+	guard := DefaultGuard{}
+	for _, prefix := range []string{
+		"postgres://user:synthetic-pass@[::1]",
+		"ssh://user:synthetic-pass@[::1]",
+		"//user:synthetic-pass@[::1]",
+	} {
+		for _, suffix := range []string{"", "/", ",", "]."} {
+			value := prefix + suffix
+			err := checkGuard(t, guard, GuardField{Name: "URI", Value: value})
+			assertSafeError(t, err, ErrSensitiveMemory, value, "synthetic-pass")
+		}
+	}
+	for _, value := range []string{
+		"postgres://[::1]",
+		"ssh://[2001:db8::1]/path",
+		"//[::1]",
+		"ordinary endpoint postgres://[::1], then text",
+		"wrapped endpoint ssh://[::1]].",
+	} {
+		if err := checkGuard(t, guard, GuardField{Name: "URI", Value: value}); err != nil {
+			t.Errorf("ordinary IPv6 URI %q rejected: %v", value, err)
+		}
+	}
+}
+
 func TestDefaultGuardScansMarkerInEverySemanticAndOpaqueClass(t *testing.T) {
 	guard := DefaultGuard{}
 	for _, field := range []GuardField{
@@ -271,6 +297,24 @@ func TestExactGuardUsesGenericHierarchicalURISpans(t *testing.T) {
 	for _, value := range []string{"echo postgres://ordinary.invalid/db", "false //ordinary.invalid/path"} {
 		if err := checkGuard(t, guard, GuardField{Name: "URI", Value: value}); err != nil {
 			t.Fatalf("ordinary URI text rejected: %v", err)
+		}
+	}
+}
+
+func TestExactGuardIPv6URISpanParity(t *testing.T) {
+	values := []string{"postgres://[::1]", "ssh://[2001:db8::1]/path", "//[::1]"}
+	guard := mustExactGuard(t, values)
+	for index, value := range values {
+		for _, input := range []string{
+			"resolved endpoint is " + value + ", continue",
+			"resolved endpoint is " + value + "].",
+		} {
+			err := checkGuard(t, guard, GuardField{Name: "URI", Value: input})
+			assertSafeError(t, err, ErrSensitiveMemory, values...)
+		}
+		ordinary := fmt.Sprintf("postgres://[2001:db8::%x]/ordinary", index+10)
+		if err := checkGuard(t, guard, GuardField{Name: "URI", Value: ordinary}); err != nil {
+			t.Fatalf("ordinary IPv6 endpoint rejected: %v", err)
 		}
 	}
 }

@@ -12,6 +12,7 @@ const (
 	slashCommandSession
 	slashCommandNew
 	slashCommandResume
+	slashCommandArchive
 	slashCommandCompact
 	slashCommandExit
 )
@@ -27,6 +28,7 @@ var slashCommands = []slashCommand{
 	{Name: "/session", Description: "show session details", Kind: slashCommandSession},
 	{Name: "/new", Description: "start a new session", Kind: slashCommandNew},
 	{Name: "/resume", Description: "resume a session", Kind: slashCommandResume},
+	{Name: "/archive", Description: "archive a session", Kind: slashCommandArchive},
 	{Name: "/compact", Description: "compact context", Kind: slashCommandCompact},
 	{Name: "/exit", Description: "quit", Kind: slashCommandExit},
 }

@@ -88,6 +88,7 @@ type cliOptions struct {
 	noSession      bool
 	continueLast   bool
 	resumePath     string
+	archivePath    string
 	shellTimeSet   bool
 	maxOutputSet   bool
 	approveSet     bool
@@ -147,6 +148,15 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "%v", err)
 	}
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
+
+	if options.archivePath != "" {
+		result, err := session.Archive(ctx, sessionRoot, workspacePath, options.archivePath)
+		if err != nil {
+			return fail(stderr, "archive session: %v", err)
+		}
+		_, _ = fmt.Fprintf(stdout, "Archived: %s\n", result.Path)
+		return 0
+	}
 
 	sessionPath := options.resumePath
 	listedSessionPath := false
@@ -267,6 +277,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 				return session.List(ctx, sessionRoot, workspacePath, "", limit)
 			}, builder.openReplacement),
 			app.WithNewSessionBuilder(builder.buildNewReplacement),
+			app.WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
+				return session.Archive(ctx, sessionRoot, workspacePath, path)
+			}),
 		)
 	}
 	controller, err := app.New(initialSession, func() (session.Session, error) {
@@ -404,6 +417,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.BoolVar(&options.noSession, "no-session", false, "use an in-memory session")
 	flags.BoolVar(&options.continueLast, "continue", false, "continue the newest workspace session")
 	flags.StringVar(&options.resumePath, "resume", "", "resume a session file")
+	flags.StringVar(&options.archivePath, "archive", "", "archive an active session file")
 	flags.Usage = func() { printUsage(stderr) }
 	if err := flags.Parse(args); err != nil {
 		return options, false, err
@@ -429,6 +443,23 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	if options.noSession && (options.continueLast || options.resumePath != "") {
 		_, _ = fmt.Fprintln(stderr, "otto: --no-session cannot be used with --continue or --resume")
 		return options, false, errors.New("conflicting session flags")
+	}
+	if options.archivePath != "" {
+		conflict := ""
+		switch {
+		case options.continueLast:
+			conflict = "--continue"
+		case options.resumePath != "":
+			conflict = "--resume"
+		case options.noSession:
+			conflict = "--no-session"
+		case options.approveSet:
+			conflict = "--approve"
+		}
+		if conflict != "" {
+			_, _ = fmt.Fprintf(stderr, "otto: --archive cannot be used with %s\n", conflict)
+			return options, false, errors.New("conflicting archive flag")
+		}
 	}
 	if options.shellTimeSet && options.shellTimeout <= 0 {
 		_, _ = fmt.Fprintln(stderr, "otto: --shell-timeout must be greater than zero")
@@ -477,6 +508,7 @@ Options:
   --no-session           use an in-memory session
   --continue             continue newest workspace session
   --resume PATH          resume a session file
+  --archive PATH         archive an active session file
 `)
 }
 

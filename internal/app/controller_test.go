@@ -740,6 +740,66 @@ func TestControllerCloseWaitsForActivePrompt(t *testing.T) {
 	}
 }
 
+func TestControllerCloseClosesRunnerDirectly(t *testing.T) {
+	current := &fakeSession{header: testHeader("close")}
+	runner := &recordingRunner{}
+	controller, err := New(current, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return runner })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if runner.CloseCalls() != 1 {
+		t.Fatalf("runner close calls = %d, want 1", runner.CloseCalls())
+	}
+}
+
+func TestControllerCloseWaitsForActivePromptThenClosesRunner(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runner := &lifecycleRunner{run: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-release
+		return nil
+	}}
+	current := &fakeSession{header: testHeader("close-wait")}
+	controller, err := New(current, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return runner })
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- controller.Prompt(context.Background(), "one", func(agent.Event) {}) }()
+	<-started
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- controller.Close() }()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close() returned early: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if runner.CloseCalls() != 0 {
+		t.Fatalf("runner close calls before release = %d, want 0", runner.CloseCalls())
+	}
+
+	close(release)
+	if err := <-promptDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	if runner.CloseCalls() != 1 {
+		t.Fatalf("runner close calls after release = %d, want 1", runner.CloseCalls())
+	}
+}
+
 func TestControllerPreservesFatalPersistenceIdentity(t *testing.T) {
 	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
 	controller := newTestController(t, runnerFunc(func(ctx context.Context, text string, emit func(agent.Event)) error {
@@ -849,6 +909,12 @@ func TestControllerResumeSwapsSessionRunnerAndRuntimeAtomically(t *testing.T) {
 	if old.CloseCalls() != 1 {
 		t.Fatalf("old close calls = %d, want 1", old.CloseCalls())
 	}
+	if oldRunner.CloseCalls() != 1 {
+		t.Fatalf("old runner close calls = %d, want 1", oldRunner.CloseCalls())
+	}
+	if nextRunner.CloseCalls() != 0 {
+		t.Fatalf("next runner close calls = %d, want 0", nextRunner.CloseCalls())
+	}
 	if err := controller.Prompt(context.Background(), "new runner", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -877,6 +943,9 @@ func TestControllerResumeBuildFailureKeepsCurrentUsable(t *testing.T) {
 	}
 	if old.CloseCalls() != 0 {
 		t.Fatalf("old close calls = %d, want 0", old.CloseCalls())
+	}
+	if oldRunner.CloseCalls() != 0 {
+		t.Fatalf("old runner close calls = %d, want 0", oldRunner.CloseCalls())
 	}
 }
 
@@ -1065,6 +1134,9 @@ func TestControllerResumeRejectsInvalidCandidateAndKeepsCurrent(t *testing.T) {
 			}
 			if old.CloseCalls() != 0 {
 				t.Fatalf("old close calls = %d, want 0", old.CloseCalls())
+			}
+			if oldRunner.CloseCalls() != 0 {
+				t.Fatalf("old runner close calls = %d, want 0", oldRunner.CloseCalls())
 			}
 			if tt.candidate != nil && tt.candidate.CloseCalls() != 1 {
 				t.Fatalf("candidate close calls = %d, want 1", tt.candidate.CloseCalls())
@@ -2247,6 +2319,9 @@ func noopRun(context.Context, string, func(agent.Event)) error { return nil }
 type lifecycleRunner struct {
 	run     func(context.Context, string, func(agent.Event)) error
 	compact func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
+
+	mu         sync.Mutex
+	closeCalls int
 }
 
 func (r *lifecycleRunner) Run(ctx context.Context, text string, emit func(agent.Event)) error {
@@ -2263,13 +2338,27 @@ func (r *lifecycleRunner) Compact(ctx context.Context, focus string, emit func(a
 	return r.compact(ctx, focus, emit)
 }
 
+func (r *lifecycleRunner) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeCalls++
+	return nil
+}
+
+func (r *lifecycleRunner) CloseCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeCalls
+}
+
 func testHeader(id string) session.Header {
 	return session.Header{Version: 1, ID: id, Workspace: "/workspace", Provider: "openai-compatible", Profile: "test", Model: "model", CreatedAt: time.Unix(1, 0).UTC()}
 }
 
 type recordingRunner struct {
-	mu    sync.Mutex
-	calls int
+	mu         sync.Mutex
+	calls      int
+	closeCalls int
 }
 
 func (r *recordingRunner) Run(context.Context, string, func(agent.Event)) error {
@@ -2290,6 +2379,19 @@ func (r *recordingRunner) Calls() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
+}
+
+func (r *recordingRunner) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeCalls++
+	return nil
+}
+
+func (r *recordingRunner) CloseCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeCalls
 }
 
 type aggregateUsageSession struct {

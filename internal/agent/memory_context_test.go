@@ -19,6 +19,8 @@ type fakeMemoryBinding struct {
 	recallResult memory.RecallResult
 	recallErr    error
 	lastRequest  memory.RecallRequest
+	closeCalls   int
+	closeErr     error
 }
 
 func (b *fakeMemoryBinding) Recall(_ context.Context, request memory.RecallRequest) (memory.RecallResult, error) {
@@ -31,7 +33,10 @@ func (b *fakeMemoryBinding) Observe(context.Context, memory.Observation) (memory
 	return memory.ObserveResult{}, nil
 }
 
-func (b *fakeMemoryBinding) Close() error { return nil }
+func (b *fakeMemoryBinding) Close() error {
+	b.closeCalls++
+	return b.closeErr
+}
 
 func TestRenderMemoryContextEscapesDelimiters(t *testing.T) {
 	records := []memory.Record{
@@ -149,5 +154,36 @@ func TestRunEmitsMemoryWarningAndContinuesWhenRecallFails(t *testing.T) {
 	}
 	if len(fakeProvider.requests) != 1 || len(fakeProvider.requests[0].Messages) == 0 {
 		t.Fatalf("expected turn to still dispatch the user message")
+	}
+}
+
+func TestAgentCloseClosesMemoryBindingAndPropagatesError(t *testing.T) {
+	registry, err := tool.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeErr := errors.New("store close failed")
+	binding := &fakeMemoryBinding{closeErr: closeErr}
+	mem := session.NewMemory(testHeader(t))
+	runner := New(&scriptedProvider{}, registry, mem, Options{Model: "test", Now: fixedClock, NewID: fixedIDs(), Memory: binding})
+
+	if err := runner.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("Close() error = %v, want %v", err, closeErr)
+	}
+	if binding.closeCalls != 1 {
+		t.Fatalf("binding close calls = %d, want 1", binding.closeCalls)
+	}
+}
+
+func TestAgentCloseWithoutMemoryBindingIsNoop(t *testing.T) {
+	registry, err := tool.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem := session.NewMemory(testHeader(t))
+	runner := New(&scriptedProvider{}, registry, mem, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()})
+
+	if err := runner.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
 	}
 }

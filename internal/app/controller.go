@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -133,9 +134,33 @@ type replacementState struct {
 	buildActive       bool
 	current           session.Session
 	currentWorkspace  string
+	runner            Runner
 	replacement       session.Session
 	replacementClosed bool
 	closeRequested    bool
+}
+
+// closeRunner closes runner if it implements io.Closer. The Runner interface
+// stays narrow (Run, Compact) because most implementations own no closable
+// resources; a memory-bound agent.Agent is the one that does.
+func closeRunner(runner Runner) error {
+	if closer, ok := runner.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+// joinCloseErrors combines two close errors without disturbing callers that
+// compare a lone error by identity (errors.Join always allocates, even for
+// one non-nil argument).
+func joinCloseErrors(a, b error) error {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return errors.Join(a, b)
 }
 
 type activeOperation struct {
@@ -284,6 +309,7 @@ func (c *Controller) endOperation(operation *activeOperation) {
 	if current != nil {
 		closeErr = current.Close()
 	}
+	closeErr = joinCloseErrors(closeErr, closeRunner(operation.runner))
 
 	c.mu.Lock()
 	if c.active == operation {
@@ -503,6 +529,7 @@ func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {
 		phase:            replacementPhaseBuilding,
 		current:          c.current,
 		currentWorkspace: c.currentWorkspace,
+		runner:           c.runner,
 	}
 	c.replace = state
 	return state
@@ -587,7 +614,7 @@ func (c *Controller) runReplacement(
 		c.mu.Unlock()
 	}
 
-	if err := state.current.Close(); err != nil {
+	if err := joinCloseErrors(state.current.Close(), closeRunner(state.runner)); err != nil {
 		c.mu.Lock()
 		deferredClose := state.closeRequested
 		shouldClose := c.releaseReplacementLocked(state, replacement.Session)
@@ -692,6 +719,7 @@ func (c *Controller) abortReplacement(state *replacementState, replacement sessi
 	if current != nil {
 		closeErr = current.Close()
 	}
+	closeErr = joinCloseErrors(closeErr, closeRunner(state.runner))
 	c.finishReplacing(state)
 	c.completeClose(closeDone, closeErr)
 }
@@ -826,12 +854,14 @@ func (c *Controller) Close() error {
 		return err
 	}
 	current := c.current
+	runner := c.runner
 	c.mu.Unlock()
 
 	var err error
 	if current != nil {
 		err = current.Close()
 	}
+	err = joinCloseErrors(err, closeRunner(runner))
 	c.completeClose(done, err)
 	return err
 }

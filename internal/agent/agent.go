@@ -57,6 +57,14 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 	return &Agent{provider: completionProvider, registry: registry, session: memory, options: options, redactor: redactor}
 }
 
+// Close releases resources held by the agent's memory binding, if any.
+func (a *Agent) Close() error {
+	if a.options.Memory == nil {
+		return nil
+	}
+	return a.options.Memory.Close()
+}
+
 func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) error {
 	a.operationMu.Lock()
 	defer a.operationMu.Unlock()

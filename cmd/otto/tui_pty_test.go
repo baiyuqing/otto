@@ -42,8 +42,8 @@ const (
 	footerSessionMarker         = "resize-session-marker-0123456789"
 	selectedResumeSessionID     = "pty-selected-session"
 	selectedAssistantTranscript = "assistant-only selected resume transcript marker"
-	wideFooterMarker            = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0 | " + footerSessionMarker
-	narrowFooterMarker          = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0"
+	wideFooterMarker            = footerWorkspaceName + " | " + footerProfileModel + " | unsafe | tokens 0/0 | " + footerSessionMarker
+	narrowFooterMarker          = footerWorkspaceName + " | " + footerProfileModel + " | unsafe | tokens 0/0"
 	ptyCompactFocus             = "focus on PTY compaction"
 )
 
@@ -466,6 +466,9 @@ func (b *ptySmokeBackend) Info() app.Info {
 		Profile:   "pty-profile",
 		Model:     "pty-model",
 		SessionID: footerSessionMarker,
+		Sandbox: app.SandboxInfo{
+			Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+		},
 	}
 }
 

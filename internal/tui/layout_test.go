@@ -12,7 +12,9 @@ import (
 )
 
 func TestResponsiveHelpOverlayDescribesDetailToggle(t *testing.T) {
-	content := helpOverlayContent(100, 20)
+	content := helpOverlayContent(100, 20, app.SandboxInfo{
+		Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+	})
 	if !strings.Contains(content, "toggle details") {
 		t.Fatalf("help overlay = %q, want detail toggle wording", content)
 	}
@@ -163,6 +165,83 @@ func TestRenderFooterHandlesMaxIntUsageWithoutOverflow(t *testing.T) {
 	footer := renderFooter(120, info, model.Usage{InputTokens: int(^uint(0) >> 1), OutputTokens: int(^uint(0) >> 1)}, "")
 	if !strings.Contains(footer, "tokens ") || !strings.Contains(footer, "B") {
 		t.Fatalf("footer = %q, want large-token B suffix without panic", footer)
+	}
+}
+
+func TestRenderFooterKeepsSandboxBadgeAcrossSupportedWidths(t *testing.T) {
+	states := []struct {
+		name  string
+		info  app.SandboxInfo
+		badge string
+	}{
+		{
+			name:  "seatbelt",
+			info:  app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone},
+			badge: "sb",
+		},
+		{
+			name:  "off",
+			info:  app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone},
+			badge: "unsafe",
+		},
+		{
+			name:  "unavailable",
+			info:  app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, BashAvailable: false, Reason: app.SandboxReasonSelfTestFailed},
+			badge: "no-bash",
+		},
+	}
+
+	for _, state := range states {
+		for _, width := range []int{minTerminalWidth, 48, 60, 72, 120} {
+			t.Run(fmt.Sprintf("%s-width-%d", state.name, width), func(t *testing.T) {
+				info := app.Info{
+					Workspace: "/workspace/" + strings.Repeat("workspace", 20),
+					Profile:   "profile", Model: "model", SessionID: strings.Repeat("session", 20),
+					ContextWindow: 128_000, ContextInputTokens: 100_000, ContextInputTokensPresent: true,
+					Sandbox: state.info,
+				}
+				footer := renderFooter(width, info, model.Usage{InputTokens: 123_456, OutputTokens: 78_901, CachedInputTokens: 100_000}, "working")
+				assertRenderedBounds(t, footer, width, 1)
+				fields := strings.Split(strings.TrimSpace(footer), " | ")
+				found := false
+				for _, field := range fields {
+					if field == state.badge {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("footer = %q, want fixed Sandbox badge %q", footer, state.badge)
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxOverlayContentUsesOnlyFixedSafeState(t *testing.T) {
+	payload := "invalid\x1b]52;c;owned\a\nforged"
+	sandboxInfo := app.SandboxInfo{
+		Mode: app.SandboxMode(payload), Network: app.SandboxNetwork(payload), BashAvailable: true, Reason: app.SandboxReason(payload),
+	}
+	help := helpOverlayContent(100, 30, sandboxInfo)
+	session := sessionOverlayContent(app.Info{SessionID: "session", Sandbox: sandboxInfo})
+	for name, content := range map[string]string{"help": help, "session": session} {
+		if !strings.Contains(content, "Sandbox: bash disabled · sandbox unavailable") {
+			t.Fatalf("%s content = %q, want safe Sandbox summary", name, content)
+		}
+		if strings.Contains(content, payload) || strings.ContainsAny(content, "\x1b\a") {
+			t.Fatalf("%s content leaked control-bearing Sandbox state: %q", name, content)
+		}
+	}
+	if !strings.Contains(session, "Sandbox reason: runtime-failure") {
+		t.Fatalf("session content = %q, want safe fallback reason", session)
+	}
+	if strings.Contains(help, "Sandbox reason:") {
+		t.Fatalf("help content exposed unavailable reason: %q", help)
+	}
+
+	for _, size := range []struct{ width, height int }{{40, 8}, {60, 12}, {100, 30}} {
+		assertRenderedBounds(t, renderOverlay(size.width, size.height, helpOverlayContent(size.width, size.height, sandboxInfo)), size.width, size.height)
+		assertRenderedBounds(t, renderOverlay(size.width, size.height, session), size.width, size.height)
 	}
 }
 

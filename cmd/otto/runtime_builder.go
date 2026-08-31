@@ -56,6 +56,7 @@ type runtimeBuilder struct {
 	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
 	buildRunnerOverride  func(session.Session, config.Runtime) (app.Runner, error)
 	runtimeOverrides     config.Overrides
+	sandboxInfo          app.SandboxInfo
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
@@ -126,7 +127,7 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
 	redactor := agent.NewRedactor(b.secretValues(&runtime))
 	return agent.New(client, registry, current, agent.Options{
-		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
+		Model: runtime.Model, SystemPrompt: systemPromptFor(registry.Definitions(), b.sandboxInfo), Thinking: runtime.Thinking,
 		Compaction: agent.CompactionSettings{
 			Auto:             runtime.Compaction.Auto,
 			HardInputWindow:  runtime.Compaction.HardInputWindow,
@@ -184,6 +185,7 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 			Profile:       runtime.Profile,
 			Model:         runtime.Model,
 			ContextWindow: runtime.Compaction.ContextWindow,
+			Sandbox:       b.sandboxInfo,
 		},
 	}, nil
 }
@@ -226,6 +228,7 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 			Profile:       runtime.Profile,
 			Model:         runtime.Model,
 			ContextWindow: runtime.Compaction.ContextWindow,
+			Sandbox:       b.sandboxInfo,
 		},
 		Warnings: cloneWarnings(warnings),
 	}, nil

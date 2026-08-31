@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -2227,6 +2228,318 @@ func TestControllerResumeAndCloseRaceDoesNotLeakOrDoubleClose(t *testing.T) {
 		if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
 			t.Fatalf("iteration %d close calls = old %d, candidate %d", i, old.CloseCalls(), candidate.CloseCalls())
 		}
+	}
+}
+
+func TestSandboxEnumsHaveExactValues(t *testing.T) {
+	modes := []SandboxMode{SandboxSeatbelt, SandboxOff, SandboxUnavailable}
+	if want := []SandboxMode{"seatbelt", "off", "unavailable"}; !reflect.DeepEqual(modes, want) {
+		t.Fatalf("Sandbox modes = %q, want %q", modes, want)
+	}
+	networks := []SandboxNetwork{SandboxNetworkAllowed, SandboxNetworkDenied, SandboxNetworkUnconfined}
+	if want := []SandboxNetwork{"allowed", "denied", "unconfined"}; !reflect.DeepEqual(networks, want) {
+		t.Fatalf("Sandbox networks = %q, want %q", networks, want)
+	}
+	reasons := []SandboxReason{
+		SandboxReasonNone,
+		SandboxReasonUnsupportedPlatform,
+		SandboxReasonSeatbeltMissing,
+		SandboxReasonSelfTestFailed,
+		SandboxReasonRuntimeFailure,
+		SandboxReasonInvalidShell,
+		SandboxReasonEnvironmentRejected,
+		SandboxReasonPolicyUnsupported,
+	}
+	wantReasons := []SandboxReason{"", "unsupported-platform", "seatbelt-missing", "self-test-failed", "runtime-failure", "invalid-shell", "environment-rejected", "policy-unsupported"}
+	if !reflect.DeepEqual(reasons, wantReasons) {
+		t.Fatalf("Sandbox reasons = %q, want %q", reasons, wantReasons)
+	}
+}
+
+func TestSandboxInfoRenderingUsesOnlyFixedLiterals(t *testing.T) {
+	tests := []struct {
+		name        string
+		info        SandboxInfo
+		wantSummary string
+		wantBadge   string
+		wantReason  string
+	}{
+		{
+			name:        "seatbelt network allowed",
+			info:        SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkAllowed, BashAvailable: true, Reason: SandboxReasonNone},
+			wantSummary: "seatbelt · workspace-write · network allowed",
+			wantBadge:   "sb",
+		},
+		{
+			name:        "seatbelt network denied",
+			info:        SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkDenied, BashAvailable: true, Reason: SandboxReasonNone},
+			wantSummary: "seatbelt · workspace-write · network denied",
+			wantBadge:   "sb",
+		},
+		{
+			name:        "explicit off",
+			info:        SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonNone},
+			wantSummary: "sandbox off · WARNING: bash is unsandboxed",
+			wantBadge:   "unsafe",
+		},
+		{
+			name:        "unavailable",
+			info:        SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: false, Reason: SandboxReasonSeatbeltMissing},
+			wantSummary: "bash disabled · sandbox unavailable",
+			wantBadge:   "no-bash",
+			wantReason:  "seatbelt-missing",
+		},
+		{
+			name:        "zero value falls back safely",
+			info:        SandboxInfo{},
+			wantSummary: "bash disabled · sandbox unavailable",
+			wantBadge:   "no-bash",
+			wantReason:  "runtime-failure",
+		},
+		{
+			name: "invalid and control bearing values fall back safely",
+			info: SandboxInfo{
+				Mode:          SandboxMode("seatbelt\x1b]52;c;owned\a"),
+				Network:       SandboxNetwork("allowed\nforged"),
+				BashAvailable: true,
+				Reason:        SandboxReason("bad\rreason"),
+			},
+			wantSummary: "bash disabled · sandbox unavailable",
+			wantBadge:   "no-bash",
+			wantReason:  "runtime-failure",
+		},
+		{
+			name:        "inconsistent seatbelt state falls back safely",
+			info:        SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonNone},
+			wantSummary: "bash disabled · sandbox unavailable",
+			wantBadge:   "no-bash",
+			wantReason:  "runtime-failure",
+		},
+		{
+			name:        "inconsistent off state falls back safely",
+			info:        SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: false, Reason: SandboxReasonNone},
+			wantSummary: "bash disabled · sandbox unavailable",
+			wantBadge:   "no-bash",
+			wantReason:  "runtime-failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.info.Summary(); got != tt.wantSummary {
+				t.Fatalf("Summary() = %q, want %q", got, tt.wantSummary)
+			}
+			if got := tt.info.Badge(); got != tt.wantBadge {
+				t.Fatalf("Badge() = %q, want %q", got, tt.wantBadge)
+			}
+			if got := tt.info.ReasonCode(); got != tt.wantReason {
+				t.Fatalf("ReasonCode() = %q, want %q", got, tt.wantReason)
+			}
+			for _, rendered := range []string{tt.info.Summary(), tt.info.Badge(), tt.info.ReasonCode()} {
+				if strings.ContainsAny(rendered, "\x00\x1b\a\n\r\t") {
+					t.Fatalf("rendered sandbox state contains controls: %q", rendered)
+				}
+			}
+		})
+	}
+}
+
+func TestSandboxInfoReasonCodeAllowsOnlyApprovedUnavailableReasons(t *testing.T) {
+	approved := []SandboxReason{
+		SandboxReasonUnsupportedPlatform,
+		SandboxReasonSeatbeltMissing,
+		SandboxReasonSelfTestFailed,
+		SandboxReasonRuntimeFailure,
+		SandboxReasonInvalidShell,
+		SandboxReasonEnvironmentRejected,
+		SandboxReasonPolicyUnsupported,
+	}
+	for _, reason := range approved {
+		info := SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: false, Reason: reason}
+		if got := info.ReasonCode(); got != string(reason) {
+			t.Fatalf("ReasonCode() = %q, want approved code %q", got, reason)
+		}
+	}
+
+	available := SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkAllowed, BashAvailable: true, Reason: SandboxReasonRuntimeFailure}
+	if got := available.ReasonCode(); got != "runtime-failure" {
+		t.Fatalf("inconsistent available ReasonCode() = %q, want safe unavailable fallback", got)
+	}
+	available.Reason = SandboxReasonNone
+	if got := available.ReasonCode(); got != "" {
+		t.Fatalf("available ReasonCode() = %q, want empty", got)
+	}
+}
+
+func TestControllerSandboxInfoIsCopiedAndPreservedAcrossReplacementAndRollback(t *testing.T) {
+	processSandbox := SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkDenied, BashAvailable: true, Reason: SandboxReasonNone}
+	replacementSandbox := SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonNone}
+	initialRuntime := RuntimeInfo{
+		Provider: "openai-compatible", Profile: "initial", Model: "initial-model", ContextWindow: 32_768,
+		Sandbox: processSandbox,
+	}
+	initial := &fakeSession{header: testHeader("sandbox-initial")}
+	fresh := &fakeSession{header: testHeader("sandbox-fresh")}
+	resumed := &fakeSession{header: testHeader("sandbox-resumed")}
+	failed := &fakeSession{header: testHeader("sandbox-failed")}
+	var newInput RuntimeInfo
+
+	controller, err := New(initial, func() (session.Session, error) {
+		return nil, errors.New("legacy create must not run")
+	}, func(session.Session) Runner {
+		return &recordingRunner{}
+	}, WithRuntimeInfo(initialRuntime), WithNewSessionBuilder(func(_ context.Context, current RuntimeInfo) (SessionReplacement, error) {
+		newInput = current
+		return SessionReplacement{
+			Session: fresh,
+			Runner:  &recordingRunner{},
+			RuntimeInfo: RuntimeInfo{
+				Provider: "openai-compatible", Profile: "fresh", Model: "fresh-model", ContextWindow: 65_536,
+				Sandbox: replacementSandbox,
+			},
+		}, nil
+	}), WithSessionBrowser(nil, func(_ context.Context, path string) (SessionReplacement, error) {
+		if strings.Contains(path, "failed") {
+			return SessionReplacement{
+				Session: failed,
+				Runner:  &recordingRunner{},
+				RuntimeInfo: RuntimeInfo{
+					Provider: "openai-compatible", Profile: "failed", Model: "failed-model",
+					Sandbox: SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, Reason: SandboxReasonSelfTestFailed},
+				},
+			}, errors.New("replacement failed")
+		}
+		return SessionReplacement{
+			Session: resumed,
+			Runner:  &recordingRunner{},
+			RuntimeInfo: RuntimeInfo{
+				Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model",
+				Sandbox: replacementSandbox,
+			},
+		}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initialRuntime.Sandbox = replacementSandbox
+	got := controller.Info()
+	if got.Sandbox != processSandbox {
+		t.Fatalf("initial Info().Sandbox = %#v, want copied process value %#v", got.Sandbox, processSandbox)
+	}
+	got.Sandbox = replacementSandbox
+	if again := controller.Info().Sandbox; again != processSandbox {
+		t.Fatalf("mutating returned Info changed Sandbox to %#v", again)
+	}
+
+	if err := controller.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	if newInput.Sandbox != processSandbox {
+		t.Fatalf("new-session builder Sandbox = %#v, want process value %#v", newInput.Sandbox, processSandbox)
+	}
+	if got := controller.Info(); got.SessionID != "sandbox-fresh" || got.Sandbox != processSandbox {
+		t.Fatalf("Info() after /new = %#v", got)
+	}
+
+	if _, err := controller.ResumeSession(context.Background(), resumed.Path()); err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Info(); got.SessionID != "sandbox-resumed" || got.Sandbox != processSandbox {
+		t.Fatalf("Info() after resume = %#v", got)
+	}
+
+	if _, err := controller.ResumeSession(context.Background(), failed.Path()); err == nil || err.Error() != "replacement failed" {
+		t.Fatalf("failed ResumeSession() error = %v", err)
+	}
+	if got := controller.Info(); got.SessionID != "sandbox-resumed" || got.Sandbox != processSandbox {
+		t.Fatalf("Info() after replacement rollback = %#v", got)
+	}
+}
+
+func TestControllerSandboxInfoSurvivesLegacyNewSessionFallback(t *testing.T) {
+	processSandbox := SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonNone}
+	controller, err := New(&fakeSession{header: testHeader("legacy-sandbox-old")}, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("legacy-sandbox-new")}, nil
+	}, func(session.Session) Runner {
+		return &recordingRunner{}
+	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "model", Sandbox: processSandbox}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Info(); got.SessionID != "legacy-sandbox-new" || got.Sandbox != processSandbox {
+		t.Fatalf("Info() after fallback /new = %#v", got)
+	}
+}
+
+func TestControllerSandboxInfoIsStableDuringConcurrentInfoAndReplacements(t *testing.T) {
+	processSandbox := SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkAllowed, BashAvailable: true, Reason: SandboxReasonNone}
+	sequence := 0
+	controller, err := New(&fakeSession{header: testHeader("sandbox-race-initial")}, func() (session.Session, error) {
+		return nil, errors.New("legacy create must not run")
+	}, func(session.Session) Runner {
+		return &recordingRunner{}
+	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "race", Model: "model", Sandbox: processSandbox}),
+		WithNewSessionBuilder(func(_ context.Context, current RuntimeInfo) (SessionReplacement, error) {
+			if current.Sandbox != processSandbox {
+				return SessionReplacement{}, fmt.Errorf("builder observed Sandbox %#v", current.Sandbox)
+			}
+			sequence++
+			return SessionReplacement{
+				Session: &fakeSession{header: testHeader(fmt.Sprintf("sandbox-race-%d", sequence))},
+				Runner:  &recordingRunner{},
+				RuntimeInfo: RuntimeInfo{
+					Provider: "openai-compatible", Profile: "race", Model: "model",
+					Sandbox: SandboxInfo{Mode: SandboxMode("invalid\nstate"), Network: SandboxNetwork("invalid"), BashAvailable: true},
+				},
+			}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	failures := make(chan error, 1)
+	var readers sync.WaitGroup
+	for range 8 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					if got := controller.Info().Sandbox; got != processSandbox {
+						select {
+						case failures <- fmt.Errorf("Info().Sandbox = %#v, want %#v", got, processSandbox):
+						default:
+						}
+						return
+					}
+				}
+			}
+		}()
+	}
+	for range 100 {
+		if err := controller.NewSession(); err != nil {
+			close(stop)
+			readers.Wait()
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	readers.Wait()
+	select {
+	case err := <-failures:
+		t.Fatal(err)
+	default:
+	}
+	if got := controller.Info().Sandbox; got != processSandbox {
+		t.Fatalf("final Info().Sandbox = %#v, want %#v", got, processSandbox)
 	}
 }
 

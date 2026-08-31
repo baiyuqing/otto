@@ -354,8 +354,9 @@ func TestREPLReturnsNilAtEOF(t *testing.T) {
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run() at EOF = %v", err)
 	}
-	if got := output.String(); got != logo+"> " {
-		t.Fatalf("output = %q, want logo then prompt", got)
+	want := logo + "Sandbox: bash disabled · sandbox unavailable\n> "
+	if got := output.String(); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 
@@ -511,6 +512,92 @@ func TestREPLParentCancellationStopsIdleScan(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("idle scan did not stop after parent cancellation")
+	}
+}
+
+func TestREPLSandboxStatusAppearsAtStartupAndInSessionCommand(t *testing.T) {
+	info := app.Info{
+		SessionID: "sandbox-session", Provider: "openai-compatible", Model: "model",
+		Sandbox: app.SandboxInfo{
+			Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonNone,
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	r := New(strings.NewReader("/session\n/exit\n"), &stdout, &stderr, &fakeBackend{info: info})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	const status = "Sandbox: seatbelt · workspace-write · network denied"
+	rendered := stdout.String()
+	if got := strings.Count(rendered, status); got != 2 {
+		t.Fatalf("Sandbox status count = %d, want startup and /session output in %q", got, rendered)
+	}
+	if sessionIndex, sandboxIndex := strings.Index(rendered, "Session: sandbox-session\n"), strings.Index(rendered, status); sessionIndex < 0 || sandboxIndex < sessionIndex {
+		t.Fatalf("startup Sandbox status is not after session line: %q", rendered)
+	}
+	if strings.Contains(rendered, "Sandbox reason:") {
+		t.Fatalf("available Sandbox rendered a reason: %q", rendered)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestREPLSandboxUnavailableReasonIsFixedAndControlSafe(t *testing.T) {
+	payload := "raw\x1b]52;c;owned\a\nSandbox reason: forged"
+	info := app.Info{
+		SessionID: "sandbox-session",
+		Sandbox: app.SandboxInfo{
+			Mode:          app.SandboxUnavailable,
+			Network:       app.SandboxNetwork(payload),
+			BashAvailable: false,
+			Reason:        app.SandboxReason(payload),
+		},
+	}
+	var output bytes.Buffer
+	r := New(strings.NewReader("/session\n/exit\n"), &output, &output, &fakeBackend{info: info})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	rendered := output.String()
+	if !strings.Contains(rendered, "Sandbox: bash disabled · sandbox unavailable") {
+		t.Fatalf("output missing safe unavailable summary: %q", rendered)
+	}
+	if !strings.Contains(rendered, "Sandbox reason: runtime-failure") {
+		t.Fatalf("output missing safe unavailable reason: %q", rendered)
+	}
+	if strings.Contains(rendered, payload) || strings.ContainsAny(rendered, "\x1b\a") {
+		t.Fatalf("output leaked control-bearing Sandbox state: %q", rendered)
+	}
+}
+
+func TestRunOnceTreatsSessionAsOrdinaryPromptWithoutSandboxPresentation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	calls := 0
+	backend := &fakeBackend{
+		info: app.Info{Sandbox: app.SandboxInfo{
+			Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+		}},
+		prompt: func(_ context.Context, prompt string, emit func(agent.Event)) error {
+			calls++
+			if prompt != "/session" {
+				t.Fatalf("prompt = %q, want /session", prompt)
+			}
+			emit(agent.Event{Type: agent.EventTextDelta, Text: "provider response"})
+			return nil
+		},
+	}
+	r := New(strings.NewReader(""), &stdout, &stderr, backend)
+	if err := r.RunOnce(context.Background(), "/session"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || stdout.String() != "provider response\n" {
+		t.Fatalf("calls = %d, stdout = %q", calls, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Sandbox:") || strings.Contains(stdout.String(), logo) || stderr.Len() != 0 {
+		t.Fatalf("RunOnce rendered interactive presentation: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

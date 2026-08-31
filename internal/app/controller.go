@@ -35,11 +35,100 @@ type ResumeFactory func(context.Context, string) (SessionReplacement, error)
 
 type NewSessionBuilder func(context.Context, RuntimeInfo) (SessionReplacement, error)
 
+type SandboxMode string
+
+type SandboxNetwork string
+
+type SandboxReason string
+
+const (
+	SandboxSeatbelt    SandboxMode = "seatbelt"
+	SandboxOff         SandboxMode = "off"
+	SandboxUnavailable SandboxMode = "unavailable"
+
+	SandboxNetworkAllowed    SandboxNetwork = "allowed"
+	SandboxNetworkDenied     SandboxNetwork = "denied"
+	SandboxNetworkUnconfined SandboxNetwork = "unconfined"
+
+	SandboxReasonNone                SandboxReason = ""
+	SandboxReasonUnsupportedPlatform SandboxReason = "unsupported-platform"
+	SandboxReasonSeatbeltMissing     SandboxReason = "seatbelt-missing"
+	SandboxReasonSelfTestFailed      SandboxReason = "self-test-failed"
+	SandboxReasonRuntimeFailure      SandboxReason = "runtime-failure"
+	SandboxReasonInvalidShell        SandboxReason = "invalid-shell"
+	SandboxReasonEnvironmentRejected SandboxReason = "environment-rejected"
+	SandboxReasonPolicyUnsupported   SandboxReason = "policy-unsupported"
+)
+
+type SandboxInfo struct {
+	Mode          SandboxMode
+	Network       SandboxNetwork
+	BashAvailable bool
+	Reason        SandboxReason
+}
+
+func (s SandboxInfo) Summary() string {
+	switch {
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkAllowed && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "seatbelt · workspace-write · network allowed"
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkDenied && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "seatbelt · workspace-write · network denied"
+	case s.Mode == SandboxOff && s.Network == SandboxNetworkUnconfined && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "sandbox off · WARNING: bash is unsandboxed"
+	default:
+		return "bash disabled · sandbox unavailable"
+	}
+}
+
+func (s SandboxInfo) Badge() string {
+	switch {
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkAllowed && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "sb"
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkDenied && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "sb"
+	case s.Mode == SandboxOff && s.Network == SandboxNetworkUnconfined && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "unsafe"
+	default:
+		return "no-bash"
+	}
+}
+
+func (s SandboxInfo) ReasonCode() string {
+	switch {
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkAllowed && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return ""
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkDenied && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return ""
+	case s.Mode == SandboxOff && s.Network == SandboxNetworkUnconfined && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return ""
+	}
+
+	switch s.Reason {
+	case SandboxReasonUnsupportedPlatform:
+		return "unsupported-platform"
+	case SandboxReasonSeatbeltMissing:
+		return "seatbelt-missing"
+	case SandboxReasonSelfTestFailed:
+		return "self-test-failed"
+	case SandboxReasonRuntimeFailure:
+		return "runtime-failure"
+	case SandboxReasonInvalidShell:
+		return "invalid-shell"
+	case SandboxReasonEnvironmentRejected:
+		return "environment-rejected"
+	case SandboxReasonPolicyUnsupported:
+		return "policy-unsupported"
+	default:
+		return "runtime-failure"
+	}
+}
+
 type RuntimeInfo struct {
 	Provider      string
 	Profile       string
 	Model         string
 	ContextWindow int
+	Sandbox       SandboxInfo
 }
 
 type SessionReplacement struct {
@@ -60,6 +149,7 @@ func WithRuntimeInfo(info RuntimeInfo) Option {
 	return func(controller *Controller) {
 		copy := info
 		controller.runtimeInfo = &copy
+		controller.sandboxInfo = info.Sandbox
 	}
 }
 
@@ -89,6 +179,7 @@ type Info struct {
 	ContextInputTokens        int
 	ContextInputTokensPresent bool
 	ContextInputTokensPending bool
+	Sandbox                   SandboxInfo
 }
 
 type Backend interface {
@@ -153,6 +244,7 @@ type Controller struct {
 	reentrantCloseOwner uint64
 	ownerIDSource       func() uint64
 	runtimeInfo         *RuntimeInfo
+	sandboxInfo         SandboxInfo
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
@@ -293,16 +385,18 @@ func (c *Controller) NewSession() error {
 	state := c.beginReplacementLocked(owner)
 	builder := c.newSession
 	current := c.current
+	sandboxInfo := c.sandboxInfo
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
+		copy.Sandbox = sandboxInfo
 		runtimeInfo = &copy
 	}
 	c.mu.Unlock()
 
 	if runtimeInfo == nil {
 		header := current.Header()
-		runtimeInfo = &RuntimeInfo{Provider: header.Provider, Profile: header.Profile, Model: header.Model}
+		runtimeInfo = &RuntimeInfo{Provider: header.Provider, Profile: header.Profile, Model: header.Model, Sandbox: sandboxInfo}
 	}
 
 	_, err := c.runReplacement(context.Background(), state, func() (SessionReplacement, error) {
@@ -329,6 +423,7 @@ func (c *Controller) NewSession() error {
 				Profile:       header.Profile,
 				Model:         header.Model,
 				ContextWindow: runtimeInfo.ContextWindow,
+				Sandbox:       sandboxInfo,
 			},
 		}, nil
 	}, true, false)
@@ -514,6 +609,7 @@ func (c *Controller) runReplacement(
 	c.runner = replacement.Runner
 	if replaceRuntime {
 		runtimeInfo := replacement.RuntimeInfo
+		runtimeInfo.Sandbox = c.sandboxInfo
 		c.runtimeInfo = &runtimeInfo
 	}
 	closed := c.closed
@@ -603,14 +699,16 @@ func (c *Controller) Info() Info {
 	c.mu.Lock()
 	current := c.current
 	currentPath := strings.Clone(c.currentPath)
+	sandboxInfo := c.sandboxInfo
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
+		copy.Sandbox = sandboxInfo
 		runtimeInfo = &copy
 	}
 	c.mu.Unlock()
 	if current == nil {
-		return Info{}
+		return Info{Sandbox: sandboxInfo}
 	}
 	header := current.Header()
 	info := Info{
@@ -620,6 +718,7 @@ func (c *Controller) Info() Info {
 		Provider:    header.Provider,
 		Profile:     header.Profile,
 		Model:       header.Model,
+		Sandbox:     sandboxInfo,
 	}
 	if runtimeInfo != nil {
 		info.Provider = runtimeInfo.Provider

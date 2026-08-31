@@ -89,39 +89,109 @@ func smallTerminalView(width, height int) string {
 }
 
 func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) string {
+	width = max(0, width)
 	profileModel := strings.Trim(strings.Trim(escapeSingleLineText(info.Profile)+"/"+escapeSingleLineText(info.Model), "/"), " ")
 	if profileModel == "" {
 		profileModel = "unknown/unknown"
 	}
 
-	fields := []string{profileModel}
-	if workspace := escapeSingleLineText(footerWorkspace(info.Workspace)); workspace != "" && width >= 72 {
-		fields = append([]string{workspace}, fields...)
+	status = escapeSingleLineText(status)
+	badge := info.Sandbox.Badge()
+	workspace := ""
+	if width >= 72 {
+		workspace = escapeSingleLineText(footerWorkspace(info.Workspace))
 	}
+	usageField := ""
+	contextField := ""
 	if width >= 48 {
 		if usage.CachedInputTokens > 0 {
-			fields = append(fields, fmt.Sprintf("tokens %s/%s (cached %s)", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens), formatFooterTokenCount(usage.CachedInputTokens)))
+			usageField = fmt.Sprintf("tokens %s/%s (cached %s)", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens), formatFooterTokenCount(usage.CachedInputTokens))
 		} else {
-			fields = append(fields, fmt.Sprintf("tokens %s/%s", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens)))
+			usageField = fmt.Sprintf("tokens %s/%s", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens))
 		}
-		if context := footerContextField(info); context != "" {
-			fields = append(fields, context)
-		}
+		contextField = footerContextField(info)
 	}
+	sessionID := ""
 	if info.SessionID != "" && width >= 60 {
-		fields = append(fields, escapeSingleLineText(info.SessionID))
-	}
-	if status != "" {
-		fields = append([]string{escapeSingleLineText(status)}, fields...)
+		sessionID = escapeSingleLineText(info.SessionID)
 	}
 
-	for len(fields) > 1 && lipgloss.Width(strings.Join(fields, " | ")) > max(0, width) {
-		fields = fields[:len(fields)-1]
+	optional := map[string]string{
+		"workspace": workspace,
+		"usage":     usageField,
+		"context":   contextField,
+		"session":   sessionID,
+	}
+	buildFields := func() []string {
+		fields := make([]string, 0, 7)
+		if status != "" {
+			fields = append(fields, status)
+		}
+		if optional["workspace"] != "" {
+			fields = append(fields, optional["workspace"])
+		}
+		fields = append(fields, profileModel, badge)
+		if optional["usage"] != "" {
+			fields = append(fields, optional["usage"])
+		}
+		if optional["context"] != "" {
+			fields = append(fields, optional["context"])
+		}
+		if optional["session"] != "" {
+			fields = append(fields, optional["session"])
+		}
+		return fields
+	}
+
+	fields := buildFields()
+	for _, name := range []string{"session", "workspace", "context", "usage"} {
+		if lipgloss.Width(strings.Join(fields, " | ")) <= width {
+			break
+		}
+		if optional[name] == "" {
+			continue
+		}
+		optional[name] = ""
+		fields = buildFields()
 	}
 
 	footer := strings.Join(fields, " | ")
-	width = max(0, width)
+	if lipgloss.Width(footer) > width {
+		footer = renderFooterCore(width, status, profileModel, badge)
+	}
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
+}
+
+func renderFooterCore(width int, status, profileModel, badge string) string {
+	if width <= 0 {
+		return ""
+	}
+	const separator = " | "
+	badgeWidth := ansi.StringWidth(badge)
+	if badgeWidth >= width {
+		return ansi.Truncate(badge, width, "")
+	}
+	available := width - badgeWidth - ansi.StringWidth(separator)
+	if available <= 0 {
+		return badge
+	}
+
+	left := profileModel
+	if status != "" {
+		withProfile := status + separator + profileModel
+		if ansi.StringWidth(withProfile) <= available {
+			left = withProfile
+		} else {
+			left = status
+		}
+	}
+	if ansi.StringWidth(left) > available {
+		left = ansi.Truncate(left, available, "…")
+	}
+	if left == "" {
+		return badge
+	}
+	return left + separator + badge
 }
 
 func footerContextField(info app.Info) string {
@@ -249,9 +319,10 @@ func renderOverlay(width, height int, content string) string {
 	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box), width, height)
 }
 
-func helpOverlayContent(width, height int) string {
+func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 	full := []string{
 		"Help (? or /help)",
+		"Sandbox: " + info.Summary(),
 		"",
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
@@ -262,32 +333,31 @@ func helpOverlayContent(width, height int) string {
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
 	}
-	commandNames := make([]string, 0, len(slashCommands))
 	for _, command := range slashCommands {
 		full = append(full, command.Name+" "+command.Description)
-		commandNames = append(commandNames, command.Name)
 	}
 	if height-2 >= len(full) {
 		return strings.Join(full, "\n")
 	}
 	compact := []string{
-		"Help (? /help) | Enter submit",
-		"Shift+Enter/Alt+Enter newline",
-		"Ctrl+O | PgUp/PgDn | Home/End",
-		"Esc close | Ctrl+C cancel/clear/quit",
-	}
-	const commandsPerLine = 4
-	for len(commandNames) > 0 {
-		count := min(commandsPerLine, len(commandNames))
-		compact = append(compact, strings.Join(commandNames[:count], " "))
-		commandNames = commandNames[count:]
+		"Help ? /help Enter Shift+Enter",
+		"Alt+Enter Ctrl+O PgUp/PgDn Home/End",
+		"Esc Ctrl+C /session /new /exit",
+		"/resume /compact",
 	}
 	innerWidth := max(0, width-4)
+	if innerWidth > 0 {
+		sandbox := ansi.Wrap("Sandbox: "+info.Summary(), innerWidth, "")
+		compact = append(compact, strings.Split(sandbox, "\n")...)
+	}
 	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, max(0, height-2))
 }
 
 func sessionOverlayContent(info app.Info) string {
-	lines := []string{"Session"}
+	lines := []string{"Session", "Sandbox: " + info.Sandbox.Summary()}
+	if reason := info.Sandbox.ReasonCode(); reason != "" {
+		lines = append(lines, "Sandbox reason: "+reason)
+	}
 	appendField := func(name, value string) {
 		if value == "" {
 			return

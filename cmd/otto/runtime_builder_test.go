@@ -1009,6 +1009,42 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 	}
 }
 
+func TestRuntimeBuilderSandboxInfoIsFixedAcrossNewAndResumeReplacements(t *testing.T) {
+	processSandbox := app.SandboxInfo{
+		Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonNone,
+	}
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.sandboxInfo = processSandbox
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	newReplacement, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+		Provider: "openai-compatible", Profile: "default", Model: "gpt-4.1",
+		Sandbox: app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newReplacement.Session.Close()
+	if got := newReplacement.RuntimeInfo.Sandbox; got != processSandbox {
+		t.Fatalf("new replacement Sandbox = %#v, want process value %#v", got, processSandbox)
+	}
+
+	path := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{
+		Version: session.CurrentVersion, ID: "sandbox-resume", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
+	})
+	resumeReplacement, err := builder.openReplacement(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumeReplacement.Session.Close()
+	if got := resumeReplacement.RuntimeInfo.Sandbox; got != processSandbox {
+		t.Fatalf("resume replacement Sandbox = %#v, want process value %#v", got, processSandbox)
+	}
+}
+
 type fakePreparedSession struct {
 	info       session.SessionInfo
 	activate   func(context.Context) (session.Session, []session.Warning, error)

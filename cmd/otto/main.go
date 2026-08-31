@@ -17,6 +17,7 @@ import (
 
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/repl"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
@@ -26,7 +27,53 @@ import (
 
 const maxApprovePromptBytes = 1 << 20
 
-const systemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, grep, find, ls, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
+func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) string {
+	policy := "Sandbox policy: Bash is unavailable."
+	bashUsable := false
+	switch {
+	case info.Mode == app.SandboxSeatbelt && info.Network == app.SandboxNetworkAllowed && info.BashAvailable && info.Reason == app.SandboxReasonNone:
+		policy = "Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
+		bashUsable = true
+	case info.Mode == app.SandboxSeatbelt && info.Network == app.SandboxNetworkDenied && info.BashAvailable && info.Reason == app.SandboxReasonNone:
+		policy = "Sandbox policy: Seatbelt confines Bash to workspace-write with network denied."
+		bashUsable = true
+	case info.Mode == app.SandboxOff && info.Network == app.SandboxNetworkUnconfined && info.BashAvailable && info.Reason == app.SandboxReasonNone:
+		policy = "Sandbox policy: Bash is unsandboxed."
+		bashUsable = true
+	}
+
+	toolNames := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		if definition.Name == "bash" && !bashUsable {
+			continue
+		}
+		if safePromptToolName(definition.Name) {
+			toolNames = append(toolNames, definition.Name)
+		}
+	}
+	tools := "none"
+	if len(toolNames) > 0 {
+		tools = strings.Join(toolNames, ", ")
+	}
+	return "You are Otto, a concise coding agent. Inspect the workspace before changing it. Usable tools: " + tools + ". File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. " + policy
+}
+
+func safePromptToolName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for index := range len(name) {
+		character := name[index]
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 type interruptSubscription struct {
 	signals <-chan os.Signal
@@ -183,7 +230,11 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if shell == "" {
 		shell = "/bin/sh"
 	}
+	sandboxInfo := app.SandboxInfo{
+		Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+	}
 	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
+	builder.sandboxInfo = sandboxInfo
 
 	var (
 		metadata        *session.RuntimeMetadata
@@ -260,6 +311,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		Profile:       runtime.Profile,
 		Model:         runtime.Model,
 		ContextWindow: runtime.Compaction.ContextWindow,
+		Sandbox:       sandboxInfo,
 	})}
 	if !options.noSession {
 		controllerOptions = append(controllerOptions,

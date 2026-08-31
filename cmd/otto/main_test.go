@@ -1229,7 +1229,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 }
 
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
-	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Use read, grep, find, ls, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
+	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Bash is unsandboxed."
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++

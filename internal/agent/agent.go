@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/session"
@@ -39,6 +40,12 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 		if requestSizer, ok := completionProvider.(provider.RequestSizer); ok {
 			options.RequestSizer = requestSizer
 		}
+	}
+	if options.MemoryRecallLimit <= 0 {
+		options.MemoryRecallLimit = defaultMemoryRecallLimit
+	}
+	if options.MemoryRecallTokenBudget <= 0 {
+		options.MemoryRecallTokenBudget = defaultMemoryRecallTokenBudget
 	}
 	var redactor *Redactor
 	if len(redactors) > 0 {
@@ -70,6 +77,19 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 	}
 
 	dispatchState := runDispatchState{}
+	if a.options.Memory != nil {
+		result, err := a.options.Memory.Recall(ctx, memory.RecallRequest{
+			Query:       userText,
+			Limit:       a.options.MemoryRecallLimit,
+			TokenBudget: a.options.MemoryRecallTokenBudget,
+		})
+		if err != nil {
+			a.emit(emit, Event{Type: EventMemoryWarning, Err: err})
+		} else {
+			dispatchState.memoryContext = a.redactor.RedactString(renderMemoryContext(result.Records))
+		}
+	}
+
 	for {
 		response, err := a.dispatchNormalProviderStep(ctx, emit, &dispatchState)
 		if err != nil {
@@ -150,7 +170,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 }
 
 func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event), state *runDispatchState) (provider.Response, error) {
-	request, estimate := a.buildNormalProviderRequest()
+	request, estimate := a.buildNormalProviderRequest(state)
 	softTrigger, hardTrigger, knownLimits := automaticCompactionTriggers(a.options.Compaction)
 
 	if a.options.Compaction.Auto && knownLimits && estimate > softTrigger {
@@ -173,7 +193,7 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 				if err := ctx.Err(); err != nil {
 					return provider.Response{}, err
 				}
-				request, estimate = a.buildNormalProviderRequest()
+				request, estimate = a.buildNormalProviderRequest(state)
 				if estimate > hardTrigger {
 					return provider.Response{}, newAutomaticDispatchError(automaticCompactionStillTooLargeMessage)
 				}
@@ -203,7 +223,7 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 		return provider.Response{}, err
 	}
 
-	retryRequest, retryEstimate := a.buildNormalProviderRequest()
+	retryRequest, retryEstimate := a.buildNormalProviderRequest(state)
 	if _, hardTrigger, knownLimits := automaticCompactionTriggers(a.options.Compaction); knownLimits && retryEstimate > hardTrigger {
 		return provider.Response{}, newAutomaticDispatchError(automaticCompactionStillTooLargeMessage, originalOverflow)
 	}
@@ -214,12 +234,20 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 	return response, err
 }
 
-func (a *Agent) buildNormalProviderRequest() (provider.Request, int) {
+func (a *Agent) buildNormalProviderRequest(state *runDispatchState) (provider.Request, int) {
+	messages := cloneMessages(a.session.Messages())
+	if state != nil && state.memoryContext != "" {
+		memoryMessage := model.Message{
+			Role:   model.RoleUser,
+			Blocks: []model.Block{{Type: model.BlockText, Text: state.memoryContext}},
+		}
+		messages = append([]model.Message{memoryMessage}, messages...)
+	}
 	request := provider.Request{
 		Model:        a.options.Model,
 		SystemPrompt: a.options.SystemPrompt,
 		Thinking:     a.options.Thinking,
-		Messages:     cloneMessages(a.session.Messages()),
+		Messages:     messages,
 		Tools:        cloneTools(a.registry.Definitions()),
 	}
 	latest, hasLatest := a.session.LatestCompaction()

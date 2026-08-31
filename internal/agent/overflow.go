@@ -20,6 +20,7 @@ var errAutomaticCompactionWarning = errors.New(automaticCompactionWarningMessage
 
 type runDispatchState struct {
 	proactiveAttempted bool
+	memoryContext      string
 }
 
 type automaticDispatchError struct {

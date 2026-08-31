@@ -398,6 +398,191 @@ func TestStateConstructionDoesNotFollowRootReplacementAfterValidation(t *testing
 	}
 }
 
+func TestStateFinalConstructionRejectsReplacedProfilesAndProfile(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(*testing.T, string, string)
+	}{
+		{
+			name: "profiles directory",
+			replace: func(t *testing.T, base, root string) {
+				profiles := filepath.Join(root, "profiles")
+				if err := os.Rename(profiles, filepath.Join(base, "created-profiles")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(profiles, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(profiles, "profile.sb"), []byte("substituted"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "profile file",
+			replace: func(t *testing.T, base, root string) {
+				profile := filepath.Join(root, "profiles", "profile.sb")
+				if err := os.Rename(profile, filepath.Join(base, "created-profile.sb")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(profile, []byte("substituted"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
+			cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
+			operations := defaultStateOperations()
+			injected := false
+			operations.event = func(event stateEvent) {
+				if event.kind != stateEventFinalValidation || injected {
+					return
+				}
+				injected = true
+				test.replace(t, base, event.path)
+			}
+
+			created, err := createStateWithOperations(workspace, cache, operations)
+			if created != nil {
+				_ = created.close()
+			}
+			if !injected {
+				t.Fatal("createStateWithOperations() did not emit the final-validation event")
+			}
+			if err == nil || created != nil {
+				t.Fatalf("createStateWithOperations() accepted a final replacement (state non-nil=%v, error=%v)", created != nil, err)
+			}
+		})
+	}
+}
+
+func TestStatePartialCleanupDoesNotTraverseUnknownOrSubstitutedDirectory(t *testing.T) {
+	tests := []struct {
+		name   string
+		insert func(*testing.T, string, string) string
+	}{
+		{
+			name: "unknown directory",
+			insert: func(t *testing.T, _, root string) string {
+				unknown := filepath.Join(root, "unknown", "nested")
+				if err := os.MkdirAll(unknown, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				marker := filepath.Join("unknown", "nested", "keep")
+				if err := os.WriteFile(filepath.Join(root, marker), []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return marker
+			},
+		},
+		{
+			name: "substituted directory",
+			insert: func(t *testing.T, base, root string) string {
+				home := filepath.Join(root, "home")
+				if err := os.Rename(home, filepath.Join(base, "created-home")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(home, "nested"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				marker := filepath.Join("home", "nested", "keep")
+				if err := os.WriteFile(filepath.Join(root, marker), []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return marker
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
+			cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
+			operations := defaultStateOperations()
+			injected := false
+			detachedRoot := ""
+			markerPath := ""
+			operations.event = func(event stateEvent) {
+				if event.kind != stateEventFinalValidation || injected {
+					return
+				}
+				injected = true
+				marker := test.insert(t, base, event.path)
+				detachedRoot = event.path + ".detached"
+				if err := os.Rename(event.path, detachedRoot); err != nil {
+					t.Fatal(err)
+				}
+				markerPath = filepath.Join(detachedRoot, marker)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(detachedRoot) })
+
+			created, err := createStateWithOperations(workspace, cache, operations)
+			if created != nil {
+				_ = created.close()
+			}
+			if !injected || err == nil || created != nil {
+				t.Fatalf("createStateWithOperations() did not fail after the injected replacement (event=%v, state non-nil=%v, error=%v)", injected, created != nil, err)
+			}
+			contents, readErr := os.ReadFile(markerPath)
+			if readErr != nil || string(contents) != "keep" {
+				t.Fatalf("partial cleanup touched untrusted directory contents: contents=%q error=%v", contents, readErr)
+			}
+		})
+	}
+}
+
+func TestStateProfileCloseErrorsRetireDescriptorsBeforeDeferredCleanup(t *testing.T) {
+	t.Run("construction", func(t *testing.T) {
+		base := t.TempDir()
+		workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
+		cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
+		probe := newStateCloseReuseProbe(t, makeProfileTestFile(t, filepath.Join(base, "sentinel"), 0o600))
+		probe.enabled = true
+		operations := defaultStateOperations()
+		operations.closeFD = probe.closeFD
+
+		created, err := createStateWithOperations(workspace, cache, operations)
+		if created != nil {
+			_ = created.close()
+		}
+		if err == nil || created != nil {
+			t.Fatalf("createStateWithOperations() accepted a synthetic profile close error (state non-nil=%v, error=%v)", created != nil, err)
+		}
+		probe.assertReusedFDOpen(t)
+		assertNoStateLeaves(t, cache)
+	})
+
+	t.Run("profile write", func(t *testing.T) {
+		base := t.TempDir()
+		workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
+		cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
+		probe := newStateCloseReuseProbe(t, makeProfileTestFile(t, filepath.Join(base, "sentinel"), 0o600))
+		operations := defaultStateOperations()
+		operations.closeFD = probe.closeFD
+		state, err := createStateWithOperations(workspace, cache, operations)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := state.close(); err != nil {
+				t.Errorf("state.close() error = %v", err)
+			}
+		})
+
+		probe.enabled = true
+		if err := state.writeProfile([]byte("private profile")); err == nil {
+			t.Fatal("writeProfile() accepted a synthetic profile close error")
+		}
+		probe.assertReusedFDOpen(t)
+	})
+}
+
 func TestStateWriteProfileDoesNotUseSubstitutedRootInode(t *testing.T) {
 	base := t.TempDir()
 	workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
@@ -501,6 +686,65 @@ func TestStateCloseReturnsStableBoundedPathFreeError(t *testing.T) {
 		strings.Contains(message, filepath.Base(state.directories.Root)) ||
 		strings.Contains(message, "profile.sb") {
 		t.Fatalf("close error is not bounded and path-free: %q", message)
+	}
+}
+
+type stateCloseReuseProbe struct {
+	t        *testing.T
+	sentinel string
+	enabled  bool
+	reusedFD int
+	calls    int
+}
+
+func newStateCloseReuseProbe(t *testing.T, sentinel string) *stateCloseReuseProbe {
+	t.Helper()
+	probe := &stateCloseReuseProbe{t: t, sentinel: sentinel, reusedFD: -1}
+	t.Cleanup(func() {
+		if probe.reusedFD >= 0 {
+			_ = unix.Close(probe.reusedFD)
+			probe.reusedFD = -1
+		}
+	})
+	return probe
+}
+
+func (p *stateCloseReuseProbe) closeFD(fd int) error {
+	if !p.enabled {
+		return unix.Close(fd)
+	}
+	p.calls++
+	if p.reusedFD >= 0 {
+		p.t.Fatalf("close hook called more than once after descriptor reuse")
+	}
+	if err := unix.Close(fd); err != nil {
+		p.t.Fatalf("real close in injected hook failed: %v", err)
+	}
+	reusedFD, err := unix.Open(p.sentinel, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		p.t.Fatalf("open sentinel in injected hook: %v", err)
+	}
+	if reusedFD != fd {
+		_ = unix.Close(reusedFD)
+		p.t.Fatalf("sentinel descriptor = %d, want immediate reuse of %d", reusedFD, fd)
+	}
+	p.reusedFD = reusedFD
+	return errors.New("synthetic descriptor close failure")
+}
+
+func (p *stateCloseReuseProbe) assertReusedFDOpen(t *testing.T) {
+	t.Helper()
+	if p.calls != 1 || p.reusedFD < 0 {
+		t.Fatalf("injected close calls = %d, reused descriptor = %d; want one reuse", p.calls, p.reusedFD)
+	}
+	var descriptorStat unix.Stat_t
+	var sentinelStat unix.Stat_t
+	if err := unix.Fstat(p.reusedFD, &descriptorStat); err != nil {
+		t.Fatalf("reused sentinel descriptor was closed: %v", err)
+	}
+	if err := unix.Stat(p.sentinel, &sentinelStat); err != nil ||
+		!sameStateIdentity(stateIdentityFromStat(descriptorStat), stateIdentityFromStat(sentinelStat)) {
+		t.Fatalf("reused descriptor no longer identifies the sentinel: %v", err)
 	}
 }
 

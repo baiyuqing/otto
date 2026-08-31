@@ -39,6 +39,7 @@ const (
 	stateEventProfileCreated
 	stateEventProfileWrite
 	stateEventCleanup
+	stateEventFinalValidation
 )
 
 type stateEvent struct {
@@ -66,6 +67,7 @@ type state struct {
 	profileIdentity stateIdentity
 	event           func(stateEvent)
 	lstat           func(string) (fs.FileInfo, error)
+	closeFD         func(int) error
 	mu              sync.Mutex
 	closed          bool
 	closeOnce       sync.Once
@@ -78,6 +80,7 @@ type stateOperations struct {
 	currentUID   func() int
 	randomBytes  func([]byte) error
 	mkdirat      func(int, string, uint32) error
+	closeFD      func(int) error
 	event        func(stateEvent)
 }
 
@@ -91,6 +94,7 @@ func defaultStateOperations() stateOperations {
 			return err
 		},
 		mkdirat: unix.Mkdirat,
+		closeFD: unix.Close,
 	}
 }
 
@@ -132,13 +136,16 @@ func createStateWithOperations(workspace, cacheBase string, operations stateOper
 	var rootFile *os.File
 	var rootIdentity stateIdentity
 	rootIdentityKnown := false
+	childIdentities := make(map[string]stateIdentity, stateRootChildrenSize)
+	var profileIdentity stateIdentity
+	profileIdentityKnown := false
 	constructionComplete := false
 	defer func() {
 		if constructionComplete {
 			return
 		}
 		if rootFile != nil && rootIdentityKnown {
-			_ = cleanupStateRoot(parentFile, rootFile, rootName, rootIdentity, nil)
+			_ = cleanupPartialStateRoot(parentFile, rootFile, rootName, rootIdentity, childIdentities, profileIdentity, profileIdentityKnown)
 		} else {
 			_ = removeExpectedStateEdge(int(parentFile.Fd()), rootName, rootEdge)
 		}
@@ -169,7 +176,6 @@ func createStateWithOperations(workspace, cacheBase string, operations stateOper
 		Cache: filepath.Join(rootPath, "cache"),
 	}
 	profiles := filepath.Join(rootPath, "profiles")
-	childIdentities := make(map[string]stateIdentity, stateRootChildrenSize)
 	var profilesFile *os.File
 	for _, child := range []struct {
 		name string
@@ -181,10 +187,12 @@ func createStateWithOperations(workspace, cacheBase string, operations stateOper
 		{name: "profiles", path: profiles},
 	} {
 		childFile, identity, createErr := createStateDirectoryAt(rootFile, child.name, child.path, operations)
+		if identity != (stateIdentity{}) {
+			childIdentities[child.name] = identity
+		}
 		if createErr != nil {
 			return nil, errStateCreate
 		}
-		childIdentities[child.name] = identity
 		if child.name == "profiles" {
 			profilesFile = childFile
 			continue
@@ -198,15 +206,21 @@ func createStateWithOperations(workspace, cacheBase string, operations stateOper
 	}
 
 	profilePath := filepath.Join(profiles, "profile.sb")
-	profileIdentity, err := createStateProfileAt(profilesFile, profilePath, operations)
+	profileIdentity, err = createStateProfileAt(profilesFile, profilePath, operations)
+	profileIdentityKnown = profileIdentity != (stateIdentity{})
 	profilesCloseErr := profilesFile.Close()
 	if err != nil || profilesCloseErr != nil {
 		return nil, errStateCreate
 	}
+	emitStateEvent(operations.event, stateEvent{kind: stateEventFinalValidation, name: rootName, path: rootPath})
 	if !stateEdgeMatches(int(parentFile.Fd()), rootName, rootIdentity, true, stateDirectoryMode, operations.currentUID()) ||
 		!stateDescriptorPathMatches(canonicalCache, parentFile, operations) ||
 		!stateDescriptorPathMatches(rootPath, rootFile, operations) ||
-		pathWithin(canonicalWorkspace, rootPath) {
+		pathWithin(canonicalWorkspace, rootPath) ||
+		!stateConstructionEntriesMatch(rootFile, childIdentities, profileIdentity, operations.currentUID()) ||
+		!stateEdgeMatches(int(parentFile.Fd()), rootName, rootIdentity, true, stateDirectoryMode, operations.currentUID()) ||
+		!stateDescriptorPathMatches(canonicalCache, parentFile, operations) ||
+		!stateDescriptorPathMatches(rootPath, rootFile, operations) {
 		return nil, errStateCreate
 	}
 
@@ -225,6 +239,7 @@ func createStateWithOperations(workspace, cacheBase string, operations stateOper
 		profileIdentity: profileIdentity,
 		event:           operations.event,
 		lstat:           operations.lstat,
+		closeFD:         operations.closeFD,
 	}, nil
 }
 
@@ -286,7 +301,7 @@ func (s *state) writeProfile(profile []byte) error {
 	profileOpen := true
 	defer func() {
 		if profileOpen {
-			_ = unix.Close(profileFD)
+			_ = s.closeFD(profileFD)
 		}
 	}()
 	profileStat, err := stateFDStat(profileFD)
@@ -309,15 +324,15 @@ func (s *state) writeProfile(profile []byte) error {
 		}
 		profile = profile[written:]
 	}
-	if err := unix.Close(profileFD); err != nil {
+	profileOpen = false
+	if err := s.closeFD(profileFD); err != nil {
 		return errStateCreate
 	}
-	profileOpen = false
 	return nil
 }
 
 func (s *state) validShape() bool {
-	return s.parentFile != nil && s.rootFile != nil && s.lstat != nil && safeStateLeaf(s.rootParent, s.directories.Root) &&
+	return s.parentFile != nil && s.rootFile != nil && s.lstat != nil && s.closeFD != nil && safeStateLeaf(s.rootParent, s.directories.Root) &&
 		s.rootName == filepath.Base(s.directories.Root) &&
 		s.directories.Home == filepath.Join(s.directories.Root, "home") &&
 		s.directories.Temp == filepath.Join(s.directories.Root, "tmp") &&
@@ -373,7 +388,7 @@ func (s *state) close() error {
 
 func validStateOperations(operations stateOperations) bool {
 	return operations.canonicalize != nil && operations.lstat != nil && operations.currentUID != nil &&
-		operations.randomBytes != nil && operations.mkdirat != nil
+		operations.randomBytes != nil && operations.mkdirat != nil && operations.closeFD != nil
 }
 
 func canonicalStateDirectory(path string, operations stateOperations) (string, fs.FileInfo, error) {
@@ -471,18 +486,19 @@ func createStateDirectoryAt(parentFile *os.File, name, path string, operations s
 	if err := unix.Fstatat(int(parentFile.Fd()), name, &createdEdge, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return nil, stateIdentity{}, errStateCreate
 	}
+	createdIdentity := stateIdentityFromStat(createdEdge)
 	emitStateEvent(operations.event, stateEvent{kind: stateEventDirectoryCreated, name: name, path: path})
 	file, err := openStateDirectoryAt(int(parentFile.Fd()), name)
 	if err != nil {
-		return nil, stateIdentity{}, errStateCreate
+		return nil, createdIdentity, errStateCreate
 	}
 	stat, err := stateDescriptorStat(file)
 	identity := stateIdentityFromStat(stat)
 	if err != nil || !secureStateStat(stat, true, stateDirectoryMode, operations.currentUID()) ||
-		!sameStateIdentity(identity, stateIdentityFromStat(createdEdge)) ||
+		!sameStateIdentity(identity, createdIdentity) ||
 		!stateEdgeMatches(int(parentFile.Fd()), name, identity, true, stateDirectoryMode, operations.currentUID()) {
 		_ = file.Close()
-		return nil, stateIdentity{}, errStateCreate
+		return nil, createdIdentity, errStateCreate
 	}
 	return file, identity, nil
 }
@@ -495,7 +511,7 @@ func createStateProfileAt(profilesFile *os.File, path string, operations stateOp
 	open := true
 	defer func() {
 		if open {
-			_ = unix.Close(fd)
+			_ = operations.closeFD(fd)
 		}
 	}()
 	emitStateEvent(operations.event, stateEvent{kind: stateEventProfileCreated, name: "profile.sb", path: path})
@@ -503,13 +519,66 @@ func createStateProfileAt(profilesFile *os.File, path string, operations stateOp
 	identity := stateIdentityFromStat(stat)
 	if err != nil || !secureStateStat(stat, false, stateProfileFileMode, operations.currentUID()) || stat.Nlink != 1 ||
 		!stateEdgeMatches(int(profilesFile.Fd()), "profile.sb", identity, false, stateProfileFileMode, operations.currentUID()) {
-		return stateIdentity{}, errStateCreate
-	}
-	if err := unix.Close(fd); err != nil {
-		return stateIdentity{}, errStateCreate
+		return identity, errStateCreate
 	}
 	open = false
+	if err := operations.closeFD(fd); err != nil {
+		return identity, errStateCreate
+	}
 	return identity, nil
+}
+
+func stateConstructionEntriesMatch(rootFile *os.File, childIdentities map[string]stateIdentity, profileIdentity stateIdentity, uid int) (matches bool) {
+	if rootFile == nil || len(childIdentities) != stateRootChildrenSize || profileIdentity == (stateIdentity{}) {
+		return false
+	}
+
+	children := make(map[string]*os.File, stateRootChildrenSize)
+	defer func() {
+		for _, file := range children {
+			if err := file.Close(); err != nil {
+				matches = false
+			}
+		}
+	}()
+	for _, name := range []string{"home", "tmp", "cache", "profiles"} {
+		identity, ok := childIdentities[name]
+		if !ok {
+			return false
+		}
+		file, err := openStateDirectoryAt(int(rootFile.Fd()), name)
+		if err != nil {
+			return false
+		}
+		children[name] = file
+		if !stateDescriptorMatchesExpected(file, identity, true, stateDirectoryMode, uid) ||
+			!stateEdgeMatches(int(rootFile.Fd()), name, identity, true, stateDirectoryMode, uid) {
+			return false
+		}
+	}
+
+	profilesFile := children["profiles"]
+	profileFD, err := unix.Openat(int(profilesFile.Fd()), "profile.sb", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return false
+	}
+	profileStat, statErr := stateFDStat(profileFD)
+	profileMatches := statErr == nil && secureStateStat(profileStat, false, stateProfileFileMode, uid) && profileStat.Nlink == 1 &&
+		sameStateIdentity(stateIdentityFromStat(profileStat), profileIdentity) &&
+		stateEdgeMatches(int(profilesFile.Fd()), "profile.sb", profileIdentity, false, stateProfileFileMode, uid)
+	closeErr := unix.Close(profileFD)
+	if !profileMatches || closeErr != nil {
+		return false
+	}
+
+	for _, name := range []string{"home", "tmp", "cache", "profiles"} {
+		identity := childIdentities[name]
+		if !stateDescriptorMatchesExpected(children[name], identity, true, stateDirectoryMode, uid) ||
+			!stateEdgeMatches(int(rootFile.Fd()), name, identity, true, stateDirectoryMode, uid) {
+			return false
+		}
+	}
+	return stateEdgeMatches(int(profilesFile.Fd()), "profile.sb", profileIdentity, false, stateProfileFileMode, uid)
 }
 
 func stateDescriptorStat(file *os.File) (unix.Stat_t, error) {
@@ -618,13 +687,38 @@ func safeStateLeaf(parent, root string) bool {
 	return strings.HasPrefix(leaf, stateLeafPrefix) && len(leaf) > len(stateLeafPrefix)
 }
 
+type stateCleanupExpectation struct {
+	identity stateIdentity
+	children map[string]stateCleanupExpectation
+}
+
 func cleanupStateRoot(parentFile, rootFile *os.File, rootName string, rootIdentity stateIdentity, expectedChildren map[string]stateIdentity) error {
+	expectations := make(map[string]stateCleanupExpectation, len(expectedChildren))
+	for name, identity := range expectedChildren {
+		expectations[name] = stateCleanupExpectation{identity: identity}
+	}
+	return cleanupStateRootWithExpectations(parentFile, rootFile, rootName, rootIdentity, expectations, false)
+}
+
+func cleanupPartialStateRoot(parentFile, rootFile *os.File, rootName string, rootIdentity stateIdentity, childIdentities map[string]stateIdentity, profileIdentity stateIdentity, profileIdentityKnown bool) error {
+	expectations := make(map[string]stateCleanupExpectation, len(childIdentities))
+	for name, identity := range childIdentities {
+		children := make(map[string]stateCleanupExpectation)
+		if name == "profiles" && profileIdentityKnown {
+			children["profile.sb"] = stateCleanupExpectation{identity: profileIdentity}
+		}
+		expectations[name] = stateCleanupExpectation{identity: identity, children: children}
+	}
+	return cleanupStateRootWithExpectations(parentFile, rootFile, rootName, rootIdentity, expectations, true)
+}
+
+func cleanupStateRootWithExpectations(parentFile, rootFile *os.File, rootName string, rootIdentity stateIdentity, expectedChildren map[string]stateCleanupExpectation, strict bool) error {
 	if parentFile == nil || rootFile == nil || !validStateEntryName(rootName) ||
 		!stateDescriptorMatchesExpected(rootFile, rootIdentity, true, stateDirectoryMode, os.Geteuid()) {
 		return errStateCleanup
 	}
 	edgeMatches := stateEdgeMatches(int(parentFile.Fd()), rootName, rootIdentity, true, stateDirectoryMode, os.Geteuid())
-	contentsErr := removeStateDirectoryContents(int(rootFile.Fd()), expectedChildren)
+	contentsErr := removeStateDirectoryContents(int(rootFile.Fd()), expectedChildren, strict)
 	if contentsErr != nil || !edgeMatches ||
 		!stateEdgeMatches(int(parentFile.Fd()), rootName, rootIdentity, true, stateDirectoryMode, os.Geteuid()) {
 		return errStateCleanup
@@ -635,7 +729,7 @@ func cleanupStateRoot(parentFile, rootFile *os.File, rootName string, rootIdenti
 	return nil
 }
 
-func removeStateDirectoryContents(directoryFD int, expectedChildren map[string]stateIdentity) error {
+func removeStateDirectoryContents(directoryFD int, expectedChildren map[string]stateCleanupExpectation, strict bool) error {
 	readFD, err := unix.Openat(directoryFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return errStateCleanup
@@ -652,11 +746,11 @@ func removeStateDirectoryContents(directoryFD int, expectedChildren map[string]s
 	}
 	childrenOK := true
 	for _, entry := range entries {
-		var expected *stateIdentity
-		if identity, tracked := expectedChildren[entry.Name()]; tracked {
-			expected = &identity
+		var expected *stateCleanupExpectation
+		if expectation, tracked := expectedChildren[entry.Name()]; tracked {
+			expected = &expectation
 		}
-		if err := removeStateEntry(directoryFD, entry.Name(), expected); err != nil {
+		if err := removeStateEntry(directoryFD, entry.Name(), expected, strict); err != nil {
 			childrenOK = false
 		}
 	}
@@ -687,7 +781,7 @@ func removeExpectedStateEdge(parentFD int, name string, expected unix.Stat_t) er
 	return nil
 }
 
-func removeStateEntry(parentFD int, name string, expected *stateIdentity) error {
+func removeStateEntry(parentFD int, name string, expected *stateCleanupExpectation, strict bool) error {
 	if parentFD < 0 || !validStateEntryName(name) {
 		return errStateCleanup
 	}
@@ -702,7 +796,7 @@ func removeStateEntry(parentFD int, name string, expected *stateIdentity) error 
 		}
 		statIdentity := stateIdentityFromStat(stat)
 		isDirectory := uint32(stat.Mode)&uint32(unix.S_IFMT) == uint32(unix.S_IFDIR)
-		if expected != nil && !sameStateIdentity(statIdentity, *expected) && isDirectory {
+		if isDirectory && (strict && expected == nil || expected != nil && !sameStateIdentity(statIdentity, expected.identity)) {
 			return errStateCleanup
 		}
 		if !isDirectory {
@@ -732,11 +826,15 @@ func removeStateEntry(parentFD int, name string, expected *stateIdentity) error 
 		openedStat, openedStatErr := stateDescriptorStat(directoryFile)
 		openedIdentity := stateIdentityFromStat(openedStat)
 		if openedStatErr != nil || !sameStateIdentity(openedIdentity, statIdentity) ||
-			expected != nil && !sameStateIdentity(openedIdentity, *expected) {
+			expected != nil && !sameStateIdentity(openedIdentity, expected.identity) {
 			_ = directoryFile.Close()
 			continue
 		}
-		removeErr := removeStateDirectoryContents(int(directoryFile.Fd()), nil)
+		var expectedContents map[string]stateCleanupExpectation
+		if expected != nil {
+			expectedContents = expected.children
+		}
+		removeErr := removeStateDirectoryContents(int(directoryFile.Fd()), expectedContents, strict)
 		closeErr := directoryFile.Close()
 		if closeErr != nil {
 			return errStateCleanup

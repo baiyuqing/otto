@@ -5,11 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unsafe"
+
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/direct"
 )
 
 func TestBashRunsInWorkspaceAndReportsExitCode(t *testing.T) {
@@ -209,6 +216,622 @@ func TestBashReportsConfiguredShellFailure(t *testing.T) {
 	if !result.IsError || !strings.Contains(result.Content, "missing-shell") {
 		t.Fatalf("unexpected result: %#v", result)
 	}
+}
+
+func TestBashSandboxedDelegatesExactRequestAndClonesInputs(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	fake := &fakeBashExecutor{
+		stdoutChunks: [][]byte{[]byte("split-"), []byte("secret")},
+		stderrChunks: [][]byte{[]byte("problem")},
+		status:       sandbox.ExitStatus{Code: 7},
+	}
+
+	shellStorage := []byte("/bin/sh")
+	environmentStorage := []byte("FIRST=original")
+	redactionStorage := []byte("split-secret")
+	shell := unsafe.String(unsafe.SliceData(shellStorage), len(shellStorage))
+	environment := []string{
+		unsafe.String(unsafe.SliceData(environmentStorage), len(environmentStorage)),
+		"SECOND=preserved",
+	}
+	redactions := []string{unsafe.String(unsafe.SliceData(redactionStorage), len(redactionStorage))}
+
+	bash, err := NewSandboxedBashTool(workspace, fake, shell, environment, 3*time.Second, 1024, redactions)
+	if err != nil {
+		t.Fatalf("NewSandboxedBashTool() error = %v", err)
+	}
+
+	copy(shellStorage, "/bad/sh")
+	copy(environmentStorage, "FIRST=modified")
+	for i := range redactionStorage {
+		redactionStorage[i] = 'x'
+	}
+	environment[1] = "SECOND=caller-mutated"
+	redactions[0] = "caller-mutated-secret"
+
+	first := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "first command"}))
+	if first.IsError {
+		t.Fatalf("first Execute() = %#v", first)
+	}
+	if first.Content != "stdout:\n[REDACTED]\nstderr:\nproblem\nexit_code: 7" {
+		t.Fatalf("first Execute() content = %q", first.Content)
+	}
+
+	fake.mutateRetainedRequest(0)
+	second := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "second command"}))
+	if second.IsError {
+		t.Fatalf("second Execute() = %#v", second)
+	}
+
+	requests := fake.Requests()
+	wantRequests := []sandbox.Request{
+		{Argv: []string{"/bin/sh", "-lc", "first command"}, Dir: workspace.root, Env: []string{"FIRST=original", "SECOND=preserved"}},
+		{Argv: []string{"/bin/sh", "-lc", "second command"}, Dir: workspace.root, Env: []string{"FIRST=original", "SECOND=preserved"}},
+	}
+	if !reflect.DeepEqual(requests, wantRequests) {
+		t.Fatalf("captured requests = %#v, want %#v", requests, wantRequests)
+	}
+	for i, request := range requests {
+		if request.Env == nil {
+			t.Fatalf("request %d environment is nil", i)
+		}
+	}
+
+	streams := fake.Streams()
+	if len(streams) != 2 {
+		t.Fatalf("captured streams = %d, want 2", len(streams))
+	}
+	if streams[0].Stdout == streams[0].Stderr || streams[1].Stdout == streams[1].Stderr {
+		t.Fatal("stdout and stderr writers were not independent")
+	}
+	if streams[0].Stdout == streams[1].Stdout || streams[0].Stderr == streams[1].Stderr {
+		t.Fatal("separate calls reused stream writers")
+	}
+}
+
+func TestBashSandboxedReportsIndependentCapsExitCodeAndSignal(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+
+	t.Run("independent stream caps and nonzero exit", func(t *testing.T) {
+		fake := &fakeBashExecutor{
+			stdoutChunks: [][]byte{[]byte("1234567890abcdef")},
+			stderrChunks: [][]byte{[]byte("abcdefghijklmnop")},
+			status:       sandbox.ExitStatus{Code: 7, Signal: "must-be-ignored"},
+		}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 12, nil)
+
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		want := "stdout:\n1234567890ab\n[truncated: 4 bytes omitted]\nstderr:\nabcdefghijkl\n[truncated: 4 bytes omitted]\nexit_code: 7"
+		if result.IsError || result.Content != want {
+			t.Fatalf("Execute() = %#v, want content %q", result, want)
+		}
+		if strings.Contains(result.Content, "must-be-ignored") {
+			t.Fatalf("nonsignaled status exposed Signal: %q", result.Content)
+		}
+	})
+
+	t.Run("signaled exit", func(t *testing.T) {
+		fake := &fakeBashExecutor{status: sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, nil)
+
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		want := "stdout:\n\nstderr:\n\nexit_code: -1; signal: killed"
+		if result.IsError || result.Content != want {
+			t.Fatalf("Execute() = %#v, want content %q", result, want)
+		}
+	})
+
+	t.Run("signal is defense-in-depth redacted", func(t *testing.T) {
+		const secret = "signal-secret-value"
+		fake := &fakeBashExecutor{status: sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed-" + secret}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{secret})
+
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		if result.IsError || strings.Contains(result.Content, secret) || !strings.Contains(result.Content, "signal: killed-[REDACTED]") {
+			t.Fatalf("Execute() exposed signal redaction value: %#v", result)
+		}
+	})
+}
+
+func TestBashSandboxedRedactsSplitOverlappingSecretsBeforeCaps(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	longSecret := "credential-" + strings.Repeat("z", 32)
+	overlapFirst := "overlap-secret"
+	overlapSecond := "secret-tail"
+	fake := &fakeBashExecutor{
+		stdoutChunks: [][]byte{
+			[]byte(longSecret[:8]),
+			[]byte(longSecret[8:]),
+			[]byte(" | overlap-"),
+			[]byte("secret-tail | "),
+			[]byte(strings.Repeat("x", 48)),
+			[]byte(longSecret),
+		},
+		stderrChunks: [][]byte{
+			[]byte("overlap-"),
+			[]byte("secret-tail | "),
+			[]byte(strings.Repeat("y", 48)),
+			[]byte(longSecret),
+		},
+		status: sandbox.ExitStatus{Code: 0},
+	}
+	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 32, []string{longSecret, overlapFirst, overlapSecond})
+
+	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+	if result.IsError {
+		t.Fatalf("Execute() = %#v", result)
+	}
+	for _, forbidden := range []string{longSecret, longSecret[:32], overlapFirst, overlapSecond} {
+		if strings.Contains(result.Content, forbidden) {
+			t.Fatalf("Execute() leaked %q: %q", forbidden, result.Content)
+		}
+	}
+	if !strings.Contains(result.Content, "stdout:\n[REDACTED]") || !strings.Contains(result.Content, "stderr:\n[REDACTED]") {
+		t.Fatalf("split redaction markers missing: %q", result.Content)
+	}
+	if got := strings.Count(result.Content, "[truncated:"); got != 2 {
+		t.Fatalf("truncation notices = %d, want 2: %q", got, result.Content)
+	}
+}
+
+func TestBashSandboxedRejectsArgumentsAndPreCancellationWithoutExecution(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	fake := &fakeBashExecutor{}
+	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, nil)
+
+	for _, test := range []struct {
+		name      string
+		arguments json.RawMessage
+		want      string
+	}{
+		{name: "invalid JSON", arguments: json.RawMessage(`{"command":"unterminated"`), want: "invalid JSON: unexpected EOF"},
+		{name: "unknown field", arguments: json.RawMessage(`{"command":"true","extra":true}`), want: `json: unknown field "extra"`},
+		{name: "missing command", arguments: json.RawMessage(`{}`), want: "missing required argument: command"},
+		{name: "blank command", arguments: json.RawMessage(`{"command":" \t "}`), want: "missing required argument: command"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result := bash.Execute(context.Background(), test.arguments)
+			if !result.IsError || result.Content != test.want {
+				t.Fatalf("Execute() = %#v, want error %q", result, test.want)
+			}
+		})
+	}
+	if calls := fake.CallCount(); calls != 0 {
+		t.Fatalf("invalid arguments delegated %d calls", calls)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := bash.Execute(ctx, mustJSON(t, map[string]string{"command": "must not run"}))
+	want := "stdout:\n\nstderr:\n\nstatus: cancelled"
+	if result.IsError || result.Content != want {
+		t.Fatalf("pre-cancelled Execute() = %#v, want content %q", result, want)
+	}
+	if calls := fake.CallCount(); calls != 0 {
+		t.Fatalf("pre-cancelled context delegated %d calls", calls)
+	}
+}
+
+func TestBashSandboxedDistinguishesCancellationAndTimeout(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+
+	t.Run("caller cancellation", func(t *testing.T) {
+		started := make(chan struct{})
+		fake := &fakeBashExecutor{execute: func(ctx context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+			close(started)
+			<-ctx.Done()
+			if _, err := io.WriteString(streams.Stdout, "partial output"); err != nil {
+				return sandbox.ExitStatus{}, err
+			}
+			return sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}, context.Canceled
+		}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{"longer-than-partial-output-secret"})
+		ctx, cancel := context.WithCancel(context.Background())
+		resultCh := executeBashAsync(bash, ctx, mustJSON(t, map[string]string{"command": "wait"}))
+		<-started
+		cancel()
+
+		result := <-resultCh
+		want := "stdout:\npartial output\nstderr:\n\nstatus: cancelled; signal: killed"
+		if result.IsError || result.Content != want {
+			t.Fatalf("Execute() = %#v, want content %q", result, want)
+		}
+	})
+
+	t.Run("adapter timeout cause", func(t *testing.T) {
+		fake := &fakeBashExecutor{execute: func(ctx context.Context, _ sandbox.Request, _ sandbox.Streams) (sandbox.ExitStatus, error) {
+			<-ctx.Done()
+			return sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}, context.Canceled
+		}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, nil)
+		triggerReady := make(chan func())
+		causeSeen := make(chan error, 1)
+		bash.deadlineContext = func(parent context.Context, _ time.Duration, timeoutCause error) (context.Context, context.CancelFunc) {
+			child, cancelCause := context.WithCancelCause(parent)
+			causeSeen <- timeoutCause
+			triggerReady <- func() { cancelCause(timeoutCause) }
+			return child, func() { cancelCause(context.Canceled) }
+		}
+
+		resultCh := executeBashAsync(bash, context.Background(), mustJSON(t, map[string]string{"command": "wait"}))
+		trigger := <-triggerReady
+		trigger()
+		result := <-resultCh
+		cause := <-causeSeen
+		if cause == nil || cause == context.Canceled || cause == context.DeadlineExceeded {
+			t.Fatalf("timeout cause = %v, want unique cause", cause)
+		}
+		want := "stdout:\n\nstderr:\n\nstatus: timed out after 3s; signal: killed"
+		if result.IsError || result.Content != want {
+			t.Fatalf("Execute() = %#v, want content %q", result, want)
+		}
+	})
+
+	t.Run("fired timeout survives successful cleanup", func(t *testing.T) {
+		fake := &fakeBashExecutor{execute: func(ctx context.Context, _ sandbox.Request, _ sandbox.Streams) (sandbox.ExitStatus, error) {
+			<-ctx.Done()
+			return sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}, nil
+		}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, nil)
+		triggerReady := make(chan func())
+		bash.deadlineContext = func(parent context.Context, _ time.Duration, timeoutCause error) (context.Context, context.CancelFunc) {
+			child, cancelCause := context.WithCancelCause(parent)
+			triggerReady <- func() { cancelCause(timeoutCause) }
+			return child, func() { cancelCause(context.Canceled) }
+		}
+
+		resultCh := executeBashAsync(bash, context.Background(), mustJSON(t, map[string]string{"command": "wait"}))
+		trigger := <-triggerReady
+		trigger()
+		result := <-resultCh
+		if result.IsError || !strings.Contains(result.Content, "status: timed out after 3s; signal: killed") {
+			t.Fatalf("Execute() = %#v", result)
+		}
+	})
+
+	t.Run("parent cancellation wins timeout race", func(t *testing.T) {
+		observedCancellation := make(chan struct{})
+		release := make(chan struct{})
+		fake := &fakeBashExecutor{execute: func(ctx context.Context, _ sandbox.Request, _ sandbox.Streams) (sandbox.ExitStatus, error) {
+			<-ctx.Done()
+			close(observedCancellation)
+			<-release
+			return sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}, context.Canceled
+		}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, nil)
+		triggerReady := make(chan func())
+		bash.deadlineContext = func(parent context.Context, _ time.Duration, timeoutCause error) (context.Context, context.CancelFunc) {
+			child, cancelCause := context.WithCancelCause(parent)
+			triggerReady <- func() { cancelCause(timeoutCause) }
+			return child, func() { cancelCause(context.Canceled) }
+		}
+		parent, cancelParent := context.WithCancel(context.Background())
+		resultCh := executeBashAsync(bash, parent, mustJSON(t, map[string]string{"command": "wait"}))
+		trigger := <-triggerReady
+		trigger()
+		<-observedCancellation
+		cancelParent()
+		close(release)
+
+		result := <-resultCh
+		if result.IsError || !strings.Contains(result.Content, "status: cancelled; signal: killed") || strings.Contains(result.Content, "timed out") {
+			t.Fatalf("Execute() did not prefer parent cancellation: %#v", result)
+		}
+	})
+
+	t.Run("successful return cancels deadline before inspecting it", func(t *testing.T) {
+		fake := &fakeBashExecutor{status: sandbox.ExitStatus{Code: 0}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, nil)
+		cancelCalled := make(chan struct{})
+		bash.deadlineContext = func(parent context.Context, _ time.Duration, timeoutCause error) (context.Context, context.CancelFunc) {
+			child, cancelCause := context.WithCancelCause(parent)
+			wrapped := &cancelOnFirstErrContext{
+				Context: child,
+				cancel:  func() { cancelCause(timeoutCause) },
+			}
+			return wrapped, func() {
+				cancelCause(context.Canceled)
+				close(cancelCalled)
+			}
+		}
+
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "true"}))
+		<-cancelCalled
+		if result.IsError || !strings.Contains(result.Content, "exit_code: 0") || strings.Contains(result.Content, "timed out") {
+			t.Fatalf("Execute() = %#v", result)
+		}
+	})
+}
+
+func TestBashSandboxedInfrastructureErrorsAreFixedAndDiscardDiagnostics(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	const secret = "infrastructure-secret-value"
+
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "launch", err: sandbox.ErrChildLaunch},
+		{name: "wait", err: sandbox.ErrChildWait},
+		{name: "terminate", err: sandbox.ErrChildTerminate},
+		{name: "closed", err: sandbox.ErrClosed},
+		{name: "unavailable", err: &sandbox.UnavailableError{Reason: sandbox.ReasonRuntimeFailure}},
+		{name: "invalid boundary", err: sandbox.ErrInvalidRequest},
+		{name: "environment", err: sandbox.ErrEnvironmentUnsafe},
+		{name: "unsupported policy", err: sandbox.ErrUnsupportedPolicy},
+		{name: "raw", err: errors.New("raw launch detail " + secret)},
+		{name: "wrapped cancellation", err: fmt.Errorf("raw wrapper %s: %w", secret, context.Canceled)},
+		{name: "joined cancellation and infrastructure", err: errors.Join(context.Canceled, sandbox.ErrChildTerminate, errors.New("raw "+secret))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeBashExecutor{
+				stdoutChunks: [][]byte{[]byte("diagnostic-"), []byte(secret)},
+				stderrChunks: [][]byte{[]byte("raw stderr " + secret)},
+				err:          test.err,
+			}
+			bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 8, []string{secret})
+			result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+			if !result.IsError || result.Content != "sandbox execution unavailable" {
+				t.Fatalf("Execute() = %#v", result)
+			}
+			if strings.Contains(result.Content, secret) || strings.Contains(result.Content, "raw") || strings.Contains(result.Content, "diagnostic") {
+				t.Fatalf("Execute() exposed diagnostics: %#v", result)
+			}
+		})
+	}
+
+	t.Run("capture failure is fixed and safe", func(t *testing.T) {
+		fake := &fakeBashExecutor{execute: func(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+			writer, ok := streams.Stdout.(*exactRedactingWriter)
+			if !ok {
+				return sandbox.ExitStatus{}, errors.New("unexpected writer type")
+			}
+			writer.err = errors.New("raw capture failure " + secret)
+			return sandbox.ExitStatus{Code: 0}, nil
+		}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{secret})
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		if !result.IsError || result.Content != "sandbox execution unavailable" {
+			t.Fatalf("Execute() = %#v", result)
+		}
+	})
+
+	t.Run("infrastructure wins ended context", func(t *testing.T) {
+		started := make(chan struct{})
+		fake := &fakeBashExecutor{execute: func(ctx context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+			close(started)
+			<-ctx.Done()
+			_, _ = io.WriteString(streams.Stdout, secret)
+			return sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}, errors.Join(context.Canceled, sandbox.ErrChildTerminate)
+		}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{secret})
+		ctx, cancel := context.WithCancel(context.Background())
+		resultCh := executeBashAsync(bash, ctx, mustJSON(t, map[string]string{"command": "wait"}))
+		<-started
+		cancel()
+		result := <-resultCh
+		if !result.IsError || result.Content != "sandbox execution unavailable" {
+			t.Fatalf("Execute() = %#v", result)
+		}
+	})
+}
+
+func TestBashSandboxedConcurrentCallsKeepOutputAndRedactionIndependent(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	arrived := make(chan string, 2)
+	release := make(chan struct{})
+	fake := &fakeBashExecutor{execute: func(_ context.Context, request sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+		name := request.Argv[2]
+		if _, err := io.WriteString(streams.Stdout, name+":shared-"); err != nil {
+			return sandbox.ExitStatus{}, err
+		}
+		arrived <- name
+		<-release
+		if _, err := io.WriteString(streams.Stdout, "secret"); err != nil {
+			return sandbox.ExitStatus{}, err
+		}
+		if _, err := io.WriteString(streams.Stderr, "stderr-"+name); err != nil {
+			return sandbox.ExitStatus{}, err
+		}
+		return sandbox.ExitStatus{Code: 0}, nil
+	}}
+	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{"shared-secret"})
+
+	type namedResult struct {
+		name   string
+		result Result
+	}
+	results := make(chan namedResult, 2)
+	for _, name := range []string{"first", "second"} {
+		name := name
+		go func() {
+			results <- namedResult{name: name, result: bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": name}))}
+		}()
+	}
+	seen := map[string]bool{<-arrived: true, <-arrived: true}
+	if !seen["first"] || !seen["second"] {
+		t.Fatalf("arrivals = %#v", seen)
+	}
+	close(release)
+
+	for range 2 {
+		got := <-results
+		other := "first"
+		if got.name == "first" {
+			other = "second"
+		}
+		if got.result.IsError || !strings.Contains(got.result.Content, got.name+":[REDACTED]") || !strings.Contains(got.result.Content, "stderr-"+got.name) {
+			t.Fatalf("%s Execute() = %#v", got.name, got.result)
+		}
+		if strings.Contains(got.result.Content, other+":") || strings.Contains(got.result.Content, "stderr-"+other) || strings.Contains(got.result.Content, "shared-secret") {
+			t.Fatalf("%s result mixed concurrent state: %q", got.name, got.result.Content)
+		}
+	}
+}
+
+func TestBashSandboxedDirectIntegration(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	driver := direct.New()
+	executor, err := sandbox.NewExecutor(driver, sandbox.Policy{
+		Filesystem: sandbox.FilesystemUnconfined,
+		Network:    sandbox.NetworkAllow,
+	}, workspace.root)
+	if err != nil {
+		t.Fatalf("sandbox.NewExecutor() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := executor.Close(); err != nil {
+			t.Errorf("Executor.Close() error = %v", err)
+		}
+	})
+
+	environment := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=",
+		"ENV=",
+		"LC_ALL=C",
+		"OTTO_DIRECT_VALUE=deterministic",
+	}
+	bash, err := NewSandboxedBashTool(workspace, executor, "/bin/sh", environment, 3*time.Second, 4096, []string{})
+	if err != nil {
+		t.Fatalf("NewSandboxedBashTool() error = %v", err)
+	}
+	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{
+		"command": `printf 'cwd='; /bin/pwd; printf 'env=%s\n' "$OTTO_DIRECT_VALUE"; printf 'problem\n' >&2; exit 7`,
+	}))
+	if result.IsError {
+		t.Fatalf("Execute() = %#v", result)
+	}
+	for _, expected := range []string{
+		"stdout:\ncwd=" + workspace.root,
+		"env=deterministic",
+		"stderr:\nproblem",
+		"exit_code: 7",
+	} {
+		if !strings.Contains(result.Content, expected) {
+			t.Fatalf("Execute() missing %q: %q", expected, result.Content)
+		}
+	}
+}
+
+func mustSandboxedBashTool(t *testing.T, workspace *Workspace, executor sandbox.CommandExecutor, environment []string, maxOutputBytes int, redactions []string) *sandboxedBashTool {
+	t.Helper()
+	constructed, err := NewSandboxedBashTool(workspace, executor, "/bin/sh", environment, 3*time.Second, maxOutputBytes, redactions)
+	if err != nil {
+		t.Fatalf("NewSandboxedBashTool() error = %v", err)
+	}
+	bash, ok := constructed.(*sandboxedBashTool)
+	if !ok {
+		t.Fatalf("NewSandboxedBashTool() type = %T, want *sandboxedBashTool", constructed)
+	}
+	return bash
+}
+
+func executeBashAsync(bash Tool, ctx context.Context, arguments json.RawMessage) <-chan Result {
+	result := make(chan Result, 1)
+	go func() {
+		result <- bash.Execute(ctx, arguments)
+	}()
+	return result
+}
+
+type cancelOnFirstErrContext struct {
+	context.Context
+	once   sync.Once
+	cancel func()
+}
+
+func (c *cancelOnFirstErrContext) Err() error {
+	c.once.Do(c.cancel)
+	return c.Context.Err()
+}
+
+type fakeBashExecutor struct {
+	mu sync.Mutex
+
+	requests         []sandbox.Request
+	retainedRequests []sandbox.Request
+	streams          []sandbox.Streams
+	stdoutChunks     [][]byte
+	stderrChunks     [][]byte
+	status           sandbox.ExitStatus
+	err              error
+	execute          func(context.Context, sandbox.Request, sandbox.Streams) (sandbox.ExitStatus, error)
+}
+
+func (f *fakeBashExecutor) Execute(ctx context.Context, request sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+	f.mu.Lock()
+	f.requests = append(f.requests, request.Clone())
+	f.retainedRequests = append(f.retainedRequests, request)
+	f.streams = append(f.streams, streams)
+	execute := f.execute
+	stdoutChunks := cloneByteChunks(f.stdoutChunks)
+	stderrChunks := cloneByteChunks(f.stderrChunks)
+	status := f.status
+	err := f.err
+	f.mu.Unlock()
+
+	if execute != nil {
+		return execute(ctx, request, streams)
+	}
+	if writeErr := writeFakeChunks(streams.Stdout, stdoutChunks); writeErr != nil {
+		return status, writeErr
+	}
+	if writeErr := writeFakeChunks(streams.Stderr, stderrChunks); writeErr != nil {
+		return status, writeErr
+	}
+	return status, err
+}
+
+func (f *fakeBashExecutor) Requests() []sandbox.Request {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	requests := make([]sandbox.Request, len(f.requests))
+	for i := range f.requests {
+		requests[i] = f.requests[i].Clone()
+	}
+	return requests
+}
+
+func (f *fakeBashExecutor) Streams() []sandbox.Streams {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]sandbox.Streams(nil), f.streams...)
+}
+
+func (f *fakeBashExecutor) CallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
+func (f *fakeBashExecutor) mutateRetainedRequest(index int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	request := &f.retainedRequests[index]
+	request.Argv[0] = "executor-mutated-shell"
+	request.Env[0] = "FIRST=executor-mutated"
+}
+
+func cloneByteChunks(chunks [][]byte) [][]byte {
+	cloned := make([][]byte, len(chunks))
+	for i := range chunks {
+		cloned[i] = append([]byte(nil), chunks[i]...)
+	}
+	return cloned
+}
+
+func writeFakeChunks(destination io.Writer, chunks [][]byte) error {
+	for _, chunk := range chunks {
+		n, err := destination.Write(chunk)
+		if err != nil {
+			return err
+		}
+		if n != len(chunk) {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 func mustJSON(t *testing.T, value any) json.RawMessage {

@@ -92,6 +92,18 @@ func (w *exactRedactingWriter) Flush() error {
 	return w.err
 }
 
+func redactExactText(value string, redactionValues []string) (string, error) {
+	var redacted strings.Builder
+	writer := newExactRedactingWriter(&redacted, redactionValues)
+	if _, err := io.WriteString(writer, value); err != nil {
+		return "", err
+	}
+	if err := writer.Flush(); err != nil {
+		return "", err
+	}
+	return redacted.String(), nil
+}
+
 func (w *exactRedactingWriter) process(final bool) {
 	for w.err == nil && w.pending != "" {
 		matchIndex := -1

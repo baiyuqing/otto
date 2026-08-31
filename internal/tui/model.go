@@ -147,6 +147,12 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	vp := viewport.New()
 	vp.MouseWheelEnabled = true
 	vp.SoftWrap = true
+	// The transcript viewport must never consume typing keys. Its default
+	// keymap binds space (and f/j/k/u/d/b/h/l) to scrolling, which would fire
+	// while the composer is focused because unhandled key presses are forwarded
+	// to the viewport before the editor. Scrolling is handled explicitly by the
+	// TUI keymap (PgUp/PgDn/Home/End) and the mouse wheel.
+	vp.KeyMap = viewport.KeyMap{}
 
 	model := Model{
 		rootCtx:            ctx,

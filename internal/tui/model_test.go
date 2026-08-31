@@ -603,6 +603,41 @@ func TestExpandedToolPreservesArgumentAndOutputWhitespace(t *testing.T) {
 	}
 }
 
+func TestTypingKeysDoNotScrollViewport(t *testing.T) {
+	history := make([]model.Message, 0, 24)
+	for i := range 24 {
+		history = append(history, model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: fmt.Sprintf("entry %02d", i)}}})
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{
+		info:    app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: history,
+	}), 80, 10)
+	m.viewport.SetYOffset(6)
+	m.autoFollow = false
+	before := m.viewport.YOffset()
+
+	// Space, letters, and digits are ordinary composer input and must not
+	// trigger the viewport's default pager bindings (space/f/b/u/d/j/k/h/l).
+	spacePress := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Text: " "})
+	updated, _ := m.Update(spacePress)
+	got := updated.(Model)
+	if got.viewport.YOffset() != before {
+		t.Fatalf("typing space scrolled viewport: offset %d -> %d", before, got.viewport.YOffset())
+	}
+	m = got
+	for _, code := range []rune{'f', 'b', 'u', 'd', 'j', 'k', 'h', 'l', 'a', '1'} {
+		updated, _ := m.Update(keyPress(code))
+		got := updated.(Model)
+		if got.viewport.YOffset() != before {
+			t.Fatalf("typing %q scrolled viewport: offset %d -> %d", string(code), before, got.viewport.YOffset())
+		}
+		m = got
+	}
+	if got := m.editor.Value(); got != " fbudjkhla1" {
+		t.Fatalf("composer value = %q, want all typed keys inserted", got)
+	}
+}
+
 func TestViewportScrollDisablesAutoFollow(t *testing.T) {
 	history := make([]model.Message, 0, 16)
 	for i := range 16 {

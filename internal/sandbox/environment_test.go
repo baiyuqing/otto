@@ -122,6 +122,34 @@ func TestResolveEnvironmentNeverRestoresLoaderOrShellInjection(t *testing.T) {
 	}
 }
 
+func TestResolveEnvironmentNeverRestoresInternalOrControlVariables(t *testing.T) {
+	names := []string{
+		"OTTO_SANDBOX",
+		"otto_sandbox_profile_path",
+		"SSH_AUTH_SOCK",
+		"docker_host",
+		"CONTAINER_HOST",
+	}
+	host := make([]string, 0, len(names)+1)
+	originalValues := make([]string, 0, len(names))
+	for index, name := range names {
+		value := fmt.Sprintf("non-restorable-value-%02d", index)
+		host = append(host, name+"="+value)
+		originalValues = append(originalValues, value)
+	}
+	host = append(host, "SANDBOX_PROFILE=preserved")
+
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{
+		HostEntries: host,
+		AllowNames:  slices.Clone(names),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEnvironmentNames(t, snapshot, []string{"SANDBOX_PROFILE"})
+	assertRedactionsContain(t, snapshot.RedactionValues(), originalValues)
+}
+
 func TestResolveEnvironmentClassifiesSensitiveSuffixesCaseInsensitively(t *testing.T) {
 	names := []string{
 		"BUILD_TOKEN",

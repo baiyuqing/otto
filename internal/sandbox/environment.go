@@ -182,8 +182,12 @@ func classifyEnvironmentName(name string, providerNames environmentNameSet) envi
 }
 
 func isNonRestorableEnvironmentName(upperName string) bool {
+	if upperName == "OTTO_SANDBOX" || strings.HasPrefix(upperName, "OTTO_SANDBOX_") {
+		return true
+	}
 	switch upperName {
-	case "BASH_ENV", "ENV", "ZDOTDIR", "PROMPT_COMMAND", "CDPATH", "SHELLOPTS", "BASHOPTS", "SSH_AUTH_SOCK":
+	case "BASH_ENV", "ENV", "ZDOTDIR", "PROMPT_COMMAND", "CDPATH", "SHELLOPTS", "BASHOPTS",
+		"SSH_AUTH_SOCK", "DOCKER_HOST", "CONTAINER_HOST":
 		return true
 	default:
 		return false

@@ -2491,6 +2491,23 @@ func TestFooterStatusShowsHumanReadableElapsedWhileRunning(t *testing.T) {
 	}
 }
 
+func TestFooterStatusHidesElapsedUnderTenSeconds(t *testing.T) {
+	clock := newFakeClock(time.Unix(100, 0))
+	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.running = true
+	m.turnStartedAt = clock.Now().Add(-5 * time.Second)
+
+	status := m.footerStatus()
+	if !strings.Contains(status, "working") {
+		t.Fatalf("footer status = %q, want 'working'", status)
+	}
+	if strings.Contains(status, "5s") {
+		t.Fatalf("footer status = %q, should not show elapsed time under 10s", status)
+	}
+}
+
 func TestTurnCompletionSetsCompletedInDuration(t *testing.T) {
 	clock := newFakeClock(time.Unix(100, 0))
 	backend := &fakeBackend{

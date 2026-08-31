@@ -88,7 +88,7 @@ func TestProfileRejectsEveryExternalRootOverlappingPrivateState(t *testing.T) {
 		{
 			name: "fixed automatic ancestor",
 			mutate: func(fixture *profileFixture) {
-				fixture.dependencies.fixedPaths = []string{fixture.state.rootParent}
+				fixture.dependencies.fixedPaths = []profileAutomaticPath{{path: fixture.state.rootParent, kind: profilePathDirectory}}
 			},
 		},
 		{
@@ -247,6 +247,107 @@ func TestProfileAutomaticPATHSkipsBroadAndSensitiveAnchors(t *testing.T) {
 	}
 }
 
+func TestProfileAutomaticFixedRootsRequireDeclaredTypes(t *testing.T) {
+	fixture := newProfileFixture(t)
+	regularTarget := makeProfileTestFile(t, filepath.Join(fixture.base, "automatic-types", "regular"), 0o600)
+	directoryTarget := makeProfileTestDirectory(t, filepath.Join(fixture.base, "automatic-types", "directory"))
+
+	for _, test := range []struct {
+		name     string
+		source   string
+		expected profilePathKind
+		resolved resolvedProfilePath
+	}{
+		{
+			name:     "fixed directory resolved to regular file",
+			source:   "/usr/bin",
+			expected: profilePathDirectory,
+			resolved: resolvedProfilePath{path: regularTarget, kind: profilePathRegular},
+		},
+		{
+			name:     "exact runtime file resolved to directory",
+			source:   "/private/etc/hosts",
+			expected: profilePathRegular,
+			resolved: resolvedProfilePath{path: directoryTarget, kind: profilePathDirectory},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			options := fixture.options
+			dependencies := fixture.dependencies
+			dependencies.fixedPaths = []profileAutomaticPath{{path: test.source, kind: test.expected}}
+			baseResolve := dependencies.resolve
+			dependencies.resolve = func(path string) (resolvedProfilePath, error) {
+				if path == test.source {
+					return test.resolved, nil
+				}
+				return baseResolve(path)
+			}
+			if profile, err := generateProfileWithDependencies(options, dependencies); err == nil || profile != nil {
+				t.Fatalf("mismatched automatic type generated %d profile bytes", len(profile))
+			}
+		})
+	}
+}
+
+func TestProfileCanonicalAutomaticTargetsCannotGrantForbiddenAnchors(t *testing.T) {
+	for _, class := range []string{"fixed", "developer", "PATH"} {
+		t.Run(class, func(t *testing.T) {
+			fixture := newProfileFixture(t)
+			forbiddenTarget := fixture.options.Home
+			if class != "PATH" {
+				forbiddenTarget = makeProfileTestDirectory(t, filepath.Join(fixture.options.Home, "sensitive", class))
+			}
+			alias := filepath.Join(fixture.base, "automatic-alias-"+class)
+			if err := os.Symlink(forbiddenTarget, alias); err != nil {
+				t.Fatal(err)
+			}
+			switch class {
+			case "fixed":
+				fixture.dependencies.fixedPaths = []profileAutomaticPath{{path: alias, kind: profilePathDirectory}}
+			case "developer":
+				fixture.dependencies.developerRoot = func() (string, bool, error) {
+					return alias, true, nil
+				}
+			case "PATH":
+				fixture.options.HostEntries = []string{"PATH=" + alias}
+			}
+
+			profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+			readData := profileTestSection(t, profile, "READ-DATA")
+			if strings.Contains(readData, profileTestQuote(forbiddenTarget)) || strings.Contains(readData, profileTestQuote(alias)) {
+				t.Fatalf("canonical automatic %s target inside the user home was granted", class)
+			}
+		})
+	}
+}
+
+func TestProfileCanonicalAutomaticSymlinksToBroadAnchorAreSkipped(t *testing.T) {
+	for _, class := range []string{"fixed", "developer", "PATH"} {
+		t.Run(class, func(t *testing.T) {
+			fixture := newProfileFixture(t)
+			alias := filepath.Join(fixture.base, "broad-root-alias-"+class)
+			if err := os.Symlink(string(filepath.Separator), alias); err != nil {
+				t.Fatal(err)
+			}
+			switch class {
+			case "fixed":
+				fixture.dependencies.fixedPaths = []profileAutomaticPath{{path: alias, kind: profilePathDirectory}}
+			case "developer":
+				fixture.dependencies.developerRoot = func() (string, bool, error) {
+					return alias, true, nil
+				}
+			case "PATH":
+				fixture.options.HostEntries = []string{"PATH=" + alias}
+			}
+
+			profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+			if strings.Contains(profileTestSection(t, profile, "READ-DATA"), profileTestFilter("subpath", string(filepath.Separator))) {
+				t.Fatalf("canonical automatic %s symlink target granted the filesystem root", class)
+			}
+		})
+	}
+}
+
 func TestProfileConfiguredShellIsOneCanonicalExecutableLiteral(t *testing.T) {
 	fixture := newProfileFixture(t)
 	shellTarget := makeProfileTestFile(t, filepath.Join(fixture.base, "shells", "real shell"), 0o700)
@@ -264,6 +365,37 @@ func TestProfileConfiguredShellIsOneCanonicalExecutableLiteral(t *testing.T) {
 	if strings.Contains(shellSection, shellAlias) ||
 		strings.Contains(shellSection, profileTestFilter("subpath", filepath.Dir(shellTarget))) {
 		t.Fatal("shell alias or shell parent received a grant")
+	}
+}
+
+func TestProfileRejectsConfiguredShellOverlappingPrivateState(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		shellPath func(profileFixture) string
+	}{
+		{
+			name: "state root executable",
+			shellPath: func(fixture profileFixture) string {
+				return filepath.Join(fixture.options.Directories.Root, "private-shell")
+			},
+		},
+		{
+			name: "profiles executable",
+			shellPath: func(fixture profileFixture) string {
+				return filepath.Join(fixture.state.profiles, "private-shell")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newProfileFixture(t)
+			privateShell := makeProfileTestFile(t, test.shellPath(fixture), 0o700)
+			fixture.options.Shell = privateShell
+
+			profile, err := generateProfileWithDependencies(fixture.options, fixture.dependencies)
+			if err == nil || profile != nil {
+				t.Fatalf("private-state shell generated %d bytes containing a shell/profile grant", len(profile))
+			}
+		})
 	}
 }
 
@@ -419,6 +551,41 @@ func TestProfileEscapesDynamicLiteralsWithoutInjection(t *testing.T) {
 	}
 }
 
+func TestProfileMarkerLikePathTextRendersWithoutTemplateReprocessing(t *testing.T) {
+	fixture := newProfileFixture(t)
+	markers := []string{profileReadMarker, profileWriteMarker, profileNetworkMarker, profileShellMarker}
+	markerName := strings.Join(markers, "-")
+	readDirectory := makeProfileTestDirectory(t, filepath.Join(fixture.base, "marker-paths", markerName))
+	shell := makeProfileTestFile(t, filepath.Join(fixture.base, "marker-shells", markerName), 0o700)
+	fixture.options.ReadPaths = []string{readDirectory}
+	fixture.options.Shell = shell
+
+	first := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	second := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	if first != second {
+		t.Fatal("marker-like path text rendered nondeterministically")
+	}
+	if !strings.Contains(profileTestSection(t, first, "READ-DATA"), profileTestFilter("subpath", readDirectory)) ||
+		!strings.Contains(profileTestSection(t, first, "SHELL"), profileTestFilter("literal", shell)) {
+		t.Fatal("marker-like filenames were not rendered as escaped literal path text")
+	}
+	for _, marker := range markers {
+		if strings.Count(first, marker) != 2 {
+			t.Fatalf("marker-like text %q count = %d, want only the two dynamic path occurrences", marker, strings.Count(first, marker))
+		}
+	}
+	for _, section := range []string{"READ", "WRITE", "NETWORK", "SHELL"} {
+		if strings.Count(first, "; OTTO-DYNAMIC-"+section+"-BEGIN") != 1 ||
+			strings.Count(first, "; OTTO-DYNAMIC-"+section+"-END") != 1 {
+			t.Fatalf("marker-like text changed the %s section structure", section)
+		}
+	}
+	if strings.Count(first, "(version 1)") != 1 || strings.Count(first, "(deny default)") != 1 ||
+		strings.Contains(first, "(allow network-outbound)\n") {
+		t.Fatal("marker-like path text injected or changed fixed profile forms")
+	}
+}
+
 func TestProfileAncestorMetadataDoesNotGrantAncestorContents(t *testing.T) {
 	fixture := newProfileFixture(t)
 	ancestor := makeProfileTestDirectory(t, filepath.Join(fixture.base, "metadata-only"))
@@ -508,13 +675,20 @@ func TestProfileEquivalentSemanticInputsRenderByteIdentically(t *testing.T) {
 	firstOptions.ReadPaths = []string{child, alias, parent, child}
 	firstOptions.HostEntries = []string{"PATH=" + pathOne + string(os.PathListSeparator) + pathTwo}
 	firstDependencies := fixture.dependencies
-	firstDependencies.fixedPaths = []string{pathTwo, pathOne}
+	firstDependencies.fixedPaths = []profileAutomaticPath{
+		{path: pathTwo, kind: profilePathDirectory},
+		{path: pathOne, kind: profilePathDirectory},
+	}
 
 	secondOptions := fixture.options
 	secondOptions.ReadPaths = []string{parent}
 	secondOptions.HostEntries = []string{"LANG=C", "PATH=" + pathTwo + string(os.PathListSeparator) + pathOne}
 	secondDependencies := fixture.dependencies
-	secondDependencies.fixedPaths = []string{pathOne, pathTwo, pathOne}
+	secondDependencies.fixedPaths = []profileAutomaticPath{
+		{path: pathOne, kind: profilePathDirectory},
+		{path: pathTwo, kind: profilePathDirectory},
+		{path: pathOne, kind: profilePathDirectory},
+	}
 
 	first := renderProfileForTest(t, firstOptions, firstDependencies)
 	second := renderProfileForTest(t, secondOptions, secondDependencies)

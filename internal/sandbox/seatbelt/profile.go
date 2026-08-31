@@ -90,9 +90,14 @@ type resolvedProfilePath struct {
 	executable bool
 }
 
+type profileAutomaticPath struct {
+	path string
+	kind profilePathKind
+}
+
 type profileDependencies struct {
 	resolve       func(string) (resolvedProfilePath, error)
-	fixedPaths    []string
+	fixedPaths    []profileAutomaticPath
 	developerRoot func() (string, bool, error)
 }
 
@@ -106,9 +111,13 @@ type resolvedProfileOptions struct {
 
 //lint:ignore U1000 Task 5's Darwin Driver consumes this production profile boundary.
 func generateProfile(options profileOptions) ([]byte, error) {
-	fixedPaths := make([]string, 0, len(reviewedAutomaticPaths)+len(reviewedRuntimeFiles))
-	fixedPaths = append(fixedPaths, reviewedAutomaticPaths...)
-	fixedPaths = append(fixedPaths, reviewedRuntimeFiles...)
+	fixedPaths := make([]profileAutomaticPath, 0, len(reviewedAutomaticPaths)+len(reviewedRuntimeFiles))
+	for _, path := range reviewedAutomaticPaths {
+		fixedPaths = append(fixedPaths, profileAutomaticPath{path: path, kind: profilePathDirectory})
+	}
+	for _, path := range reviewedRuntimeFiles {
+		fixedPaths = append(fixedPaths, profileAutomaticPath{path: path, kind: profilePathRegular})
+	}
 	return generateProfileWithDependencies(options, profileDependencies{
 		resolve:       resolveProfilePath,
 		fixedPaths:    fixedPaths,
@@ -165,21 +174,17 @@ func generateProfileWithDependencies(options profileOptions, dependencies profil
 		return nil, errProfileRejected
 	}
 
-	profile := profileTemplate
-	for _, replacement := range []struct {
-		marker string
-		value  string
-	}{
-		{profileReadMarker, readRules},
-		{profileWriteMarker, writeRules},
-		{profileNetworkMarker, networkRules},
-		{profileShellMarker, shellRule},
-	} {
-		if strings.Count(profile, replacement.marker) != 1 {
+	for _, marker := range []string{profileReadMarker, profileWriteMarker, profileNetworkMarker, profileShellMarker} {
+		if strings.Count(profileTemplate, marker) != 1 {
 			return nil, errProfileRejected
 		}
-		profile = strings.Replace(profile, replacement.marker, replacement.value, 1)
 	}
+	profile := strings.NewReplacer(
+		profileReadMarker, readRules,
+		profileWriteMarker, writeRules,
+		profileNetworkMarker, networkRules,
+		profileShellMarker, shellRule,
+	).Replace(profileTemplate)
 	return []byte(profile), nil
 }
 
@@ -223,7 +228,7 @@ func resolveRequiredProfileOptions(options profileOptions, resolve func(string) 
 	if directories.Home != filepath.Join(root, "home") ||
 		directories.Temp != filepath.Join(root, "tmp") ||
 		directories.Cache != filepath.Join(root, "cache") ||
-		pathsOverlap(workspace, root) {
+		pathsOverlap(workspace, root) || pathsOverlap(shell.path, root) {
 		return resolvedProfileOptions{}, errProfileRejected
 	}
 	if options.Network != sandbox.NetworkAllow && options.Network != sandbox.NetworkDeny {
@@ -248,16 +253,22 @@ func resolveRequiredProfileDirectory(path string, resolve func(string) (resolved
 
 func discoverProfileReadRoots(options profileOptions, resolved resolvedProfileOptions, dependencies profileDependencies) ([]resolvedProfilePath, error) {
 	roots := make([]resolvedProfilePath, 0, len(dependencies.fixedPaths)+len(options.ReadPaths)+8)
-	for _, path := range dependencies.fixedPaths {
-		candidate, present, err := resolveAutomaticProfilePath(path, dependencies.resolve)
+	for _, automatic := range dependencies.fixedPaths {
+		candidate, present, err := resolveAutomaticProfilePath(automatic.path, automatic.kind, dependencies.resolve)
 		if err != nil {
 			return nil, errProfileRejected
 		}
 		if !present {
 			continue
 		}
+		if exactBroadAutomaticAnchor(candidate.path, resolved.home) {
+			continue
+		}
 		if pathsOverlap(candidate.path, resolved.directories.Root) {
 			return nil, errProfileRejected
+		}
+		if !safeFixedAutomaticRoot(automatic, candidate.path, resolved.home) {
+			continue
 		}
 		roots = append(roots, candidate)
 	}
@@ -268,11 +279,17 @@ func discoverProfileReadRoots(options profileOptions, resolved resolvedProfileOp
 	}
 	if present {
 		candidate, resolveErr := dependencies.resolve(developerRoot)
-		if resolveErr != nil || !validResolvedProfilePath(candidate) || candidate.kind != profilePathDirectory ||
-			pathsOverlap(candidate.path, resolved.directories.Root) {
+		if resolveErr != nil || !validResolvedProfilePath(candidate) || candidate.kind != profilePathDirectory {
 			return nil, errProfileRejected
 		}
-		roots = append(roots, candidate)
+		if !exactBroadAutomaticAnchor(candidate.path, resolved.home) {
+			if pathsOverlap(candidate.path, resolved.directories.Root) {
+				return nil, errProfileRejected
+			}
+			if safeAutomaticDirectoryRoot(candidate.path, resolved.home, false) {
+				roots = append(roots, candidate)
+			}
+		}
 	}
 
 	pathEntries, err := profilePATHEntries(options.HostEntries)
@@ -283,23 +300,20 @@ func discoverProfileReadRoots(options profileOptions, resolved resolvedProfileOp
 		if path == "" || !filepath.IsAbs(path) {
 			continue
 		}
-		candidate, present, resolveErr := resolveAutomaticProfilePath(path, dependencies.resolve)
+		candidate, present, resolveErr := resolveAutomaticProfilePath(path, profilePathDirectory, dependencies.resolve)
 		if resolveErr != nil {
 			return nil, errProfileRejected
 		}
 		if !present {
 			continue
 		}
-		if candidate.kind != profilePathDirectory {
-			return nil, errProfileRejected
-		}
-		if exactBroadAutomaticPATHAnchor(candidate.path, resolved.home) {
+		if exactBroadAutomaticAnchor(candidate.path, resolved.home) {
 			continue
 		}
 		if pathsOverlap(candidate.path, resolved.directories.Root) {
 			return nil, errProfileRejected
 		}
-		if !safeAutomaticPATHRoot(candidate.path, resolved.home) {
+		if !safeAutomaticDirectoryRoot(candidate.path, resolved.home, true) {
 			continue
 		}
 		roots = append(roots, candidate)
@@ -321,16 +335,16 @@ func discoverProfileReadRoots(options profileOptions, resolved resolvedProfileOp
 	return roots, nil
 }
 
-func resolveAutomaticProfilePath(path string, resolve func(string) (resolvedProfilePath, error)) (resolvedProfilePath, bool, error) {
-	if !validProfilePathText(path) || !filepath.IsAbs(path) {
+func resolveAutomaticProfilePath(path string, expectedKind profilePathKind, resolve func(string) (resolvedProfilePath, error)) (resolvedProfilePath, bool, error) {
+	if !validProfilePathText(path) || !filepath.IsAbs(path) ||
+		(expectedKind != profilePathDirectory && expectedKind != profilePathRegular) {
 		return resolvedProfilePath{}, false, errProfileRejected
 	}
 	resolved, err := resolve(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return resolvedProfilePath{}, false, nil
 	}
-	if err != nil || !validResolvedProfilePath(resolved) ||
-		(resolved.kind != profilePathDirectory && resolved.kind != profilePathRegular) {
+	if err != nil || !validResolvedProfilePath(resolved) || resolved.kind != expectedKind {
 		return resolvedProfilePath{}, false, errProfileRejected
 	}
 	return resolved, true, nil
@@ -371,7 +385,7 @@ func expandProfileReadPath(path, home string) (string, error) {
 	return path, nil
 }
 
-func exactBroadAutomaticPATHAnchor(path, home string) bool {
+func exactBroadAutomaticAnchor(path, home string) bool {
 	if path == home {
 		return true
 	}
@@ -385,12 +399,12 @@ func exactBroadAutomaticPATHAnchor(path, home string) bool {
 	}
 }
 
-func safeAutomaticPATHRoot(path, home string) bool {
-	if exactBroadAutomaticPATHAnchor(path, home) {
+func safeAutomaticDirectoryRoot(path, home string, allowHomeDescendant bool) bool {
+	if exactBroadAutomaticAnchor(path, home) {
 		return false
 	}
 	if pathWithin(home, path) {
-		return path != home
+		return allowHomeDescendant && path != home
 	}
 	if pathWithin("/Users", path) || pathWithin("/Network", path) || pathWithin("/Volumes", path) ||
 		pathWithin("/dev", path) || pathWithin("/private/etc", path) || pathWithin("/private/tmp", path) ||
@@ -398,6 +412,26 @@ func safeAutomaticPATHRoot(path, home string) bool {
 		pathWithin("/opt/homebrew/var", path) || pathWithin("/usr/local/etc", path) ||
 		pathWithin("/usr/local/var", path) {
 		return false
+	}
+	return true
+}
+
+func safeFixedAutomaticRoot(automatic profileAutomaticPath, canonical, home string) bool {
+	if automatic.kind == profilePathDirectory {
+		return safeAutomaticDirectoryRoot(canonical, home, false)
+	}
+	if automatic.kind != profilePathRegular || exactBroadAutomaticAnchor(canonical, home) ||
+		pathWithin(home, canonical) || pathWithin("/Users", canonical) || pathWithin("/Network", canonical) ||
+		pathWithin("/Volumes", canonical) || pathWithin("/dev", canonical) || pathWithin("/private/tmp", canonical) ||
+		pathWithin("/opt/homebrew/etc", canonical) || pathWithin("/opt/homebrew/var", canonical) ||
+		pathWithin("/usr/local/etc", canonical) || pathWithin("/usr/local/var", canonical) {
+		return false
+	}
+	if pathWithin("/private/etc", canonical) {
+		return strings.HasPrefix(automatic.path, "/private/etc/")
+	}
+	if pathWithin("/private/var", canonical) {
+		return automatic.path == "/private/etc/resolv.conf" && canonical == "/private/var/run/resolv.conf"
 	}
 	return true
 }

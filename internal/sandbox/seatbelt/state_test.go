@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestStateCreatesOwnerOnlyCanonicalTreeOutsideWorkspace(t *testing.T) {
@@ -118,12 +120,12 @@ func TestStateRejectsSymlinkCandidateWithoutFollowing(t *testing.T) {
 	}
 
 	operations := defaultStateOperations()
-	operations.mkdirTemp = func(parent, pattern string) (string, error) {
-		candidate := filepath.Join(parent, "otto-sandbox-symlink")
-		if err := os.Symlink(outside, candidate); err != nil {
-			return "", err
+	mkdirat := operations.mkdirat
+	operations.mkdirat = func(parentFD int, name string, mode uint32) error {
+		if strings.HasPrefix(name, stateLeafPrefix) {
+			return unix.Symlinkat(outside, parentFD, name)
 		}
-		return candidate, nil
+		return mkdirat(parentFD, name, mode)
 	}
 
 	if state, err := createStateWithOperations(workspace, cache, operations); err == nil || state != nil {
@@ -143,54 +145,40 @@ func TestStateFailsClosedWhenCreationStripsOwnerBits(t *testing.T) {
 		{
 			name: "root",
 			mutate: func(operations *stateOperations) {
-				mkdirTemp := operations.mkdirTemp
-				operations.mkdirTemp = func(parent, pattern string) (string, error) {
-					path, err := mkdirTemp(parent, pattern)
-					if err == nil {
-						err = os.Chmod(path, 0o600)
+				operations.event = func(event stateEvent) {
+					if event.kind == stateEventRootCreated {
+						_ = os.Chmod(event.path, 0o600)
 					}
-					return path, err
 				}
 			},
 		},
 		{
 			name: "root special mode bits",
 			mutate: func(operations *stateOperations) {
-				mkdirTemp := operations.mkdirTemp
-				operations.mkdirTemp = func(parent, pattern string) (string, error) {
-					path, err := mkdirTemp(parent, pattern)
-					if err == nil {
-						err = os.Chmod(path, fs.ModeSticky|0o700)
+				operations.event = func(event stateEvent) {
+					if event.kind == stateEventRootCreated {
+						_ = os.Chmod(event.path, fs.ModeSticky|0o700)
 					}
-					return path, err
 				}
 			},
 		},
 		{
 			name: "child directory",
 			mutate: func(operations *stateOperations) {
-				mkdir := operations.mkdir
-				operations.mkdir = func(path string, mode fs.FileMode) error {
-					if err := mkdir(path, mode); err != nil {
-						return err
+				operations.event = func(event stateEvent) {
+					if event.kind == stateEventDirectoryCreated && event.name == "home" {
+						_ = os.Chmod(event.path, 0o600)
 					}
-					if filepath.Base(path) == "home" {
-						return os.Chmod(path, 0o600)
-					}
-					return nil
 				}
 			},
 		},
 		{
 			name: "profile",
 			mutate: func(operations *stateOperations) {
-				openFile := operations.openFile
-				operations.openFile = func(path string, flags int, mode fs.FileMode) (*os.File, error) {
-					file, err := openFile(path, flags, mode)
-					if err == nil {
-						err = file.Chmod(0o400)
+				operations.event = func(event stateEvent) {
+					if event.kind == stateEventProfileCreated {
+						_ = os.Chmod(event.path, 0o400)
 					}
-					return file, err
 				}
 			},
 		},
@@ -217,12 +205,12 @@ func TestStateCleansPartialConstructionFailure(t *testing.T) {
 	workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
 	cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
 	operations := defaultStateOperations()
-	mkdir := operations.mkdir
-	operations.mkdir = func(path string, mode fs.FileMode) error {
-		if filepath.Base(path) == "cache" {
+	mkdirat := operations.mkdirat
+	operations.mkdirat = func(parentFD int, name string, mode uint32) error {
+		if name == "cache" {
 			return fs.ErrPermission
 		}
-		return mkdir(path, mode)
+		return mkdirat(parentFD, name, mode)
 	}
 
 	if state, err := createStateWithOperations(workspace, cache, operations); err == nil || state != nil {
@@ -372,6 +360,122 @@ func TestStateCloseIsIdempotentAndNeverFollowsSymlinks(t *testing.T) {
 	}
 }
 
+func TestStateConstructionDoesNotFollowRootReplacementAfterValidation(t *testing.T) {
+	base := t.TempDir()
+	workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
+	cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
+	outside := makeStateTestDirectory(t, filepath.Join(base, "outside"), 0o700)
+
+	operations := defaultStateOperations()
+	movedRoot := ""
+	operations.event = func(event stateEvent) {
+		if event.kind != stateEventRootValidated || movedRoot != "" {
+			return
+		}
+		movedRoot = event.path + ".validated"
+		if err := os.Rename(event.path, movedRoot); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, event.path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(movedRoot)
+	})
+
+	created, err := createStateWithOperations(workspace, cache, operations)
+	if created != nil {
+		_ = created.close()
+	}
+	if err == nil || created != nil {
+		t.Fatalf("createStateWithOperations() = (%v, %v), want replacement rejection", created, err)
+	}
+	for _, relative := range []string{"home", "tmp", "cache", "profiles", filepath.Join("profiles", "profile.sb")} {
+		if _, statErr := os.Lstat(filepath.Join(outside, relative)); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Fatalf("external state entry %q was created or followed: %v", relative, statErr)
+		}
+	}
+}
+
+func TestStateWriteProfileDoesNotUseSubstitutedRootInode(t *testing.T) {
+	base := t.TempDir()
+	workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
+	cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
+	outsideProfile := makeProfileTestFile(t, filepath.Join(base, "outside", "profile.sb"), 0o600)
+	operations := defaultStateOperations()
+	movedRoot := ""
+	operations.event = func(event stateEvent) {
+		if event.kind != stateEventProfileWrite || movedRoot != "" {
+			return
+		}
+		movedRoot = event.path + ".validated"
+		if err := os.Rename(event.path, movedRoot); err != nil {
+			t.Fatal(err)
+		}
+		makeStateReplacementTree(t, event.path, outsideProfile)
+	}
+	state, err := createStateWithOperations(workspace, cache, operations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(state.directories.Root)
+		_ = os.Rename(movedRoot, state.directories.Root)
+		_ = state.close()
+		_ = os.RemoveAll(movedRoot)
+	})
+
+	writeErr := state.writeProfile([]byte("substituted write"))
+	contents, readErr := os.ReadFile(outsideProfile)
+	if writeErr == nil || readErr != nil || string(contents) != "fixture" {
+		t.Fatalf("writeProfile() error = %v, external profile = %q, %v; want rejection without external write", writeErr, contents, readErr)
+	}
+}
+
+func TestStateCloseDoesNotRemoveSubstitutedRootInode(t *testing.T) {
+	base := t.TempDir()
+	workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace"), 0o700)
+	cache := makeStateTestDirectory(t, filepath.Join(base, "user-cache"), 0o700)
+	operations := defaultStateOperations()
+	movedRoot := ""
+	operations.event = func(event stateEvent) {
+		if event.kind != stateEventCleanup || movedRoot != "" {
+			return
+		}
+		movedRoot = event.path + ".validated"
+		if err := os.Rename(event.path, movedRoot); err != nil {
+			t.Fatal(err)
+		}
+		makeStateReplacementTree(t, event.path, "")
+		if err := os.WriteFile(filepath.Join(event.path, "replacement-marker"), []byte("keep"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := createStateWithOperations(workspace, cache, operations)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outsideAlias := filepath.Join(base, "outside-root-alias")
+	if err := os.Symlink(state.directories.Root, outsideAlias); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(state.directories.Root)
+		_ = os.RemoveAll(movedRoot)
+		_ = os.Remove(outsideAlias)
+	})
+
+	firstErr := state.close()
+	secondErr := state.close()
+	contents, readErr := os.ReadFile(filepath.Join(outsideAlias, "replacement-marker"))
+	if firstErr == nil || secondErr == nil || firstErr.Error() != secondErr.Error() ||
+		readErr != nil || string(contents) != "keep" {
+		t.Fatalf("close errors = (%v, %v), substituted marker = %q, %v; want stable rejection without cleanup escape", firstErr, secondErr, contents, readErr)
+	}
+}
+
 func TestStateCloseReturnsStableBoundedPathFreeError(t *testing.T) {
 	base := t.TempDir()
 	workspace := makeStateTestDirectory(t, filepath.Join(base, "workspace-private-name"), 0o700)
@@ -397,6 +501,28 @@ func TestStateCloseReturnsStableBoundedPathFreeError(t *testing.T) {
 		strings.Contains(message, filepath.Base(state.directories.Root)) ||
 		strings.Contains(message, "profile.sb") {
 		t.Fatalf("close error is not bounded and path-free: %q", message)
+	}
+}
+
+func makeStateReplacementTree(t *testing.T, root, externalProfile string) {
+	t.Helper()
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"home", "tmp", "cache", "profiles"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	profilePath := filepath.Join(root, "profiles", "profile.sb")
+	if externalProfile != "" {
+		if err := os.Link(externalProfile, profilePath); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := os.WriteFile(profilePath, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

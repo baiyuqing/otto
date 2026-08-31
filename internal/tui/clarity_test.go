@@ -9,19 +9,19 @@ import (
 
 func TestToolSummaryUsesLeadingStatesAndDecodedBashCommand(t *testing.T) {
 	entry := Entry{Kind: EntryTool, ToolName: "bash", ToolArgs: `{"command":"git status --short"}`}
-	if got := strings.TrimRight(ansi.Strip(renderToolBlock(entry, 80, false)), " "); got != "… bash  git status --short" {
+	if got := strings.TrimRight(ansi.Strip(renderToolBlock(entry, 80, false, false)), " "); got != "… bash  git status --short" {
 		t.Fatalf("running summary = %q", got)
 	}
 	entry.ToolDone = true
-	if got := strings.TrimRight(ansi.Strip(renderToolBlock(entry, 80, false)), " "); got != "✓ bash  git status --short" {
+	if got := strings.TrimRight(ansi.Strip(renderToolBlock(entry, 80, false, false)), " "); got != "✓ bash  git status --short" {
 		t.Fatalf("success summary = %q", got)
 	}
 	entry.ToolError = true
-	if got := strings.TrimRight(ansi.Strip(renderToolBlock(entry, 80, false)), " "); got != "✗ bash  git status --short" {
+	if got := strings.TrimRight(ansi.Strip(renderToolBlock(entry, 80, false, false)), " "); got != "✗ bash  git status --short" {
 		t.Fatalf("error summary = %q", got)
 	}
 
-	styled := renderToolBlock(Entry{Kind: EntryTool, ToolName: "bash", ToolArgs: `{"command":"ls"}`, ToolDone: true}, 80, false)
+	styled := renderToolBlock(Entry{Kind: EntryTool, ToolName: "bash", ToolArgs: `{"command":"ls"}`, ToolDone: true}, 80, false, false)
 	if styled == ansi.Strip(styled) {
 		t.Fatal("tool summary should contain ANSI styling")
 	}
@@ -42,7 +42,7 @@ func TestAssistantTurnShowsOttoOnceAcrossTool(t *testing.T) {
 		t.Fatalf("transcript = %q, want bold Otto label", got)
 	}
 	stripped := ansi.Strip(got)
-	if !strings.Contains(stripped, "  ✓ read") || strings.Contains(stripped, "> read") {
+	if !strings.Contains(stripped, "│ ✓ read") || strings.Contains(stripped, "> read") {
 		t.Fatalf("transcript = %q, want indented tool row without prompt marker", got)
 	}
 }
@@ -57,7 +57,7 @@ func TestAssistantTitleJoinsFirstTextWithoutBlankLine(t *testing.T) {
 
 func TestIndentedToolSummaryFitsTerminalAnd120CellLimit(t *testing.T) {
 	for _, width := range []int{1, 12, 80, 240} {
-		got := indentToolBlock(renderToolBlock(Entry{Kind: EntryTool, ToolName: "bash", ToolArgs: strings.Repeat("x", 300)}, width, false), width)
+		got := indentToolBlock(renderToolBlock(Entry{Kind: EntryTool, ToolName: "bash", ToolArgs: strings.Repeat("x", 300)}, width, false, false), width)
 		for _, line := range strings.Split(got, "\n") {
 			if ansi.StringWidth(line) > min(120, width) {
 				t.Fatalf("width %d tool line = %d, want <= %d: %q", width, ansi.StringWidth(line), min(120, width), line)
@@ -75,7 +75,7 @@ func TestEmptyTranscriptHintIncludesLogo(t *testing.T) {
 
 func TestExpandedToolWrapsIndentedDetailsWithoutDroppingTail(t *testing.T) {
 	entry := Entry{Kind: EntryTool, ToolName: "write", ToolArgs: "argument-head-" + strings.Repeat("a", 60) + "-argument-tail", ToolOutput: "output-head-" + strings.Repeat("b", 60) + "-output-tail", ToolDone: true}
-	got := indentToolBlock(renderToolBlock(entry, 30, true), 30)
+	got := indentToolBlock(renderToolBlock(entry, 30, true, false), 30)
 	if !strings.Contains(got, "argument-tail") || !strings.Contains(got, "output-tail") {
 		t.Fatalf("expanded details = %q, want complete argument/output tails", got)
 	}
@@ -116,7 +116,7 @@ func TestToolArgumentPreviewExtractsHumanReadableSummary(t *testing.T) {
 }
 
 func TestToolSummaryWithoutPreviewPadsToWidth(t *testing.T) {
-	got := ansi.Strip(renderToolBlock(Entry{Kind: EntryTool, ToolName: "read", ToolDone: true}, 30, false))
+	got := ansi.Strip(renderToolBlock(Entry{Kind: EntryTool, ToolName: "read", ToolDone: true}, 30, false, false))
 	if strings.TrimRight(got, " ") != "✓ read" {
 		t.Fatalf("summary = %q, want '✓ read' (possibly padded)", got)
 	}
@@ -156,7 +156,7 @@ func TestAssistantProseMaxWidthButCompactionUsesAvailableWidth(t *testing.T) {
 	if width := proseWidth(160); width != 100 {
 		t.Fatalf("prose width = %d, want 100", width)
 	}
-	if ansi.StringWidth(renderToolBlock(Entry{Kind: EntryTool, ToolName: "bash", ToolArgs: strings.Repeat("x", 300)}, 160, false)) > 120 {
+	if ansi.StringWidth(renderToolBlock(Entry{Kind: EntryTool, ToolName: "bash", ToolArgs: strings.Repeat("x", 300)}, 160, false, false)) > 120 {
 		t.Fatal("tool summary exceeds 120 cells")
 	}
 }

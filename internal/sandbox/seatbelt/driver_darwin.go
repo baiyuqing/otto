@@ -40,13 +40,16 @@ type Options struct {
 }
 
 type Driver struct {
-	workspace   string
-	shell       string
-	network     sandbox.NetworkMode
-	state       *state
-	profilePath string
-	profile     []byte
-	processes   *nativeprocess.Manager
+	workspace    string
+	shell        string
+	network      sandbox.NetworkMode
+	state        *state
+	profilePath  string
+	profile      []byte
+	processes    *nativeprocess.Manager
+	runExecution func(context.Context, *nativeprocess.Manager, nativeprocess.Spec) (nativeprocess.Result, error)
+	closeManager func(*nativeprocess.Manager) error
+	closeState   func(*state) error
 
 	mu        sync.Mutex
 	closed    bool
@@ -102,18 +105,41 @@ type selfTestProbeResult struct {
 type selfTestProbeRunner func(context.Context, *nativeprocess.Manager, selfTestProbe) (selfTestProbeResult, error)
 
 type driverDependencies struct {
-	inspectSandboxExec func(string) (sandboxExecIdentity, error)
-	userCacheDir       func() (string, error)
-	runProbe           selfTestProbeRunner
+	inspectSandboxExec  func(string) (sandboxExecIdentity, error)
+	userCacheDir        func() (string, error)
+	createState         func(string, string) (*state, error)
+	generateProfile     func(profileOptions) ([]byte, error)
+	writeProfile        func(*state, []byte) error
+	runProbe            selfTestProbeRunner
+	runExecution        func(context.Context, *nativeprocess.Manager, nativeprocess.Spec) (nativeprocess.Result, error)
+	closeManager        func(*nativeprocess.Manager) error
+	closeState          func(*state) error
+	selfTestRandomBytes func(selfTestFixtureKind, []byte) error
+	selfTestEvent       func(selfTestFixtureEvent)
 }
 
 func defaultDriverDependencies() driverDependencies {
 	return driverDependencies{
 		inspectSandboxExec: inspectProductionSandboxExec,
 		userCacheDir:       os.UserCacheDir,
+		createState:        createState,
+		generateProfile:    generateProfile,
+		writeProfile: func(privateState *state, profile []byte) error {
+			return privateState.writeProfile(profile)
+		},
+		closeManager: func(manager *nativeprocess.Manager) error {
+			return manager.Close()
+		},
+		closeState: func(privateState *state) error {
+			return privateState.close()
+		},
+		selfTestRandomBytes: productionSelfTestRandomBytes,
 		runProbe: func(ctx context.Context, manager *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
 			result, err := manager.Run(ctx, probe.spec)
 			return selfTestProbeResult{result: result, leaderReaped: true}, err
+		},
+		runExecution: func(ctx context.Context, manager *nativeprocess.Manager, spec nativeprocess.Spec) (nativeprocess.Result, error) {
+			return manager.Run(ctx, spec)
 		},
 	}
 }
@@ -129,23 +155,36 @@ func openWithDependencies(ctx context.Context, options Options, dependencies dri
 	if err := driverContextError(ctx); err != nil {
 		return nil, err
 	}
-	if dependencies.inspectSandboxExec == nil || dependencies.userCacheDir == nil || dependencies.runProbe == nil {
+	if !validDriverDependencies(dependencies) {
 		return nil, unavailable(sandbox.ReasonRuntimeFailure)
 	}
-	identity, err := dependencies.inspectSandboxExec(sandboxExecPath)
-	if err != nil || !validSandboxExecIdentity(identity) {
+
+	identity, operationErr := dependencies.inspectSandboxExec(sandboxExecPath)
+	if err := driverContextError(ctx); err != nil {
+		return nil, err
+	}
+	if operationErr != nil || !validSandboxExecIdentity(identity) {
 		return nil, unavailable(sandbox.ReasonSeatbeltMissing)
 	}
 
 	workspace, ok := resolveDriverDirectory(options.Workspace)
+	if err := driverContextError(ctx); err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, unavailable(sandbox.ReasonPolicyUnsupported)
 	}
-	shell, err := resolveProfilePath(options.Shell)
-	if err != nil || !validResolvedProfilePath(shell) || shell.kind != profilePathRegular || !shell.executable {
+	shell, operationErr := resolveProfilePath(options.Shell)
+	if err := driverContextError(ctx); err != nil {
+		return nil, err
+	}
+	if operationErr != nil || !validResolvedProfilePath(shell) || shell.kind != profilePathRegular || !shell.executable {
 		return nil, unavailable(sandbox.ReasonInvalidShell)
 	}
 	home, ok := resolveDriverDirectory(options.Home)
+	if err := driverContextError(ctx); err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, unavailable(sandbox.ReasonPolicyUnsupported)
 	}
@@ -156,22 +195,23 @@ func openWithDependencies(ctx context.Context, options Options, dependencies dri
 		return nil, err
 	}
 
-	cacheBase, err := dependencies.userCacheDir()
-	if err != nil {
+	cacheBase, operationErr := dependencies.userCacheDir()
+	if err := driverContextError(ctx); err != nil {
+		return nil, err
+	}
+	if operationErr != nil {
 		return nil, unavailable(sandbox.ReasonSelfTestFailed)
 	}
-	privateState, err := createState(workspace, cacheBase)
-	if err != nil {
-		return nil, unavailable(sandbox.ReasonSelfTestFailed)
-	}
-	stateOwned := true
-	defer func() {
-		if stateOwned {
-			_ = privateState.close()
-		}
-	}()
 
-	profile, err := generateProfile(profileOptions{
+	privateState, operationErr := dependencies.createState(workspace, cacheBase)
+	if err := driverContextError(ctx); err != nil {
+		return nil, joinOpenFailure(err, cleanupPartialOpen(dependencies, nil, privateState))
+	}
+	if operationErr != nil || privateState == nil {
+		return nil, joinOpenFailure(unavailable(sandbox.ReasonSelfTestFailed), cleanupPartialOpen(dependencies, nil, privateState))
+	}
+
+	profile, operationErr := dependencies.generateProfile(profileOptions{
 		Workspace:   workspace,
 		Directories: privateState.directories,
 		Shell:       shell.path,
@@ -180,41 +220,65 @@ func openWithDependencies(ctx context.Context, options Options, dependencies dri
 		ReadPaths:   append([]string(nil), options.ReadPaths...),
 		Network:     options.Network,
 	})
-	if err != nil || privateState.writeProfile(profile) != nil {
-		return nil, unavailable(sandbox.ReasonSelfTestFailed)
-	}
 	if err := driverContextError(ctx); err != nil {
-		return nil, err
+		return nil, joinOpenFailure(err, cleanupPartialOpen(dependencies, nil, privateState))
+	}
+	if operationErr != nil {
+		return nil, joinOpenFailure(unavailable(sandbox.ReasonSelfTestFailed), cleanupPartialOpen(dependencies, nil, privateState))
+	}
+	operationErr = dependencies.writeProfile(privateState, profile)
+	if err := driverContextError(ctx); err != nil {
+		return nil, joinOpenFailure(err, cleanupPartialOpen(dependencies, nil, privateState))
+	}
+	if operationErr != nil {
+		return nil, joinOpenFailure(unavailable(sandbox.ReasonSelfTestFailed), cleanupPartialOpen(dependencies, nil, privateState))
 	}
 
 	manager := nativeprocess.New()
 	driver := &Driver{
-		workspace:   workspace,
-		shell:       shell.path,
-		network:     options.Network,
-		state:       privateState,
-		profilePath: privateState.profilePath,
-		profile:     append([]byte(nil), profile...),
-		processes:   manager,
-		closeDone:   make(chan struct{}),
+		workspace:    workspace,
+		shell:        shell.path,
+		network:      options.Network,
+		state:        privateState,
+		profilePath:  privateState.profilePath,
+		profile:      append([]byte(nil), profile...),
+		processes:    manager,
+		runExecution: dependencies.runExecution,
+		closeManager: dependencies.closeManager,
+		closeState:   dependencies.closeState,
+		closeDone:    make(chan struct{}),
 	}
-	if err := runStartupSelfTest(ctx, driver, dependencies.runProbe); err != nil {
-		_ = manager.Close()
-		_ = privateState.close()
-		stateOwned = false
-		if callerErr := driverContextError(ctx); callerErr != nil {
-			return nil, callerErr
-		}
-		return nil, unavailable(sandbox.ReasonSelfTestFailed)
-	}
+	selfTestErr := runStartupSelfTest(ctx, driver, dependencies)
 	if err := driverContextError(ctx); err != nil {
-		_ = manager.Close()
-		_ = privateState.close()
-		stateOwned = false
-		return nil, err
+		return nil, joinOpenFailure(err, cleanupPartialOpen(dependencies, manager, privateState))
 	}
-	stateOwned = false
+	if selfTestErr != nil {
+		return nil, joinOpenFailure(unavailable(sandbox.ReasonSelfTestFailed), cleanupPartialOpen(dependencies, manager, privateState))
+	}
 	return driver, nil
+}
+
+func validDriverDependencies(dependencies driverDependencies) bool {
+	return dependencies.inspectSandboxExec != nil && dependencies.userCacheDir != nil &&
+		dependencies.createState != nil && dependencies.generateProfile != nil && dependencies.writeProfile != nil &&
+		dependencies.runProbe != nil && dependencies.runExecution != nil && dependencies.closeManager != nil &&
+		dependencies.closeState != nil && dependencies.selfTestRandomBytes != nil
+}
+
+func cleanupPartialOpen(dependencies driverDependencies, manager *nativeprocess.Manager, privateState *state) error {
+	var managerErr error
+	if manager != nil {
+		managerErr = dependencies.closeManager(manager)
+	}
+	var stateErr error
+	if privateState != nil {
+		stateErr = dependencies.closeState(privateState)
+	}
+	return boundedCloseError(managerErr, stateErr)
+}
+
+func joinOpenFailure(primary, cleanup error) error {
+	return joinBoundedDriverErrors(primary, cleanup)
 }
 
 func inspectProductionSandboxExec(path string) (sandboxExecIdentity, error) {
@@ -246,7 +310,7 @@ func resolveDriverDirectory(path string) (string, bool) {
 	return resolved.path, err == nil && validResolvedProfilePath(resolved) && resolved.kind == profilePathDirectory
 }
 
-func runStartupSelfTest(caller context.Context, driver *Driver, run selfTestProbeRunner) error {
+func runStartupSelfTest(caller context.Context, driver *Driver, dependencies driverDependencies) error {
 	ctx, cancel := context.WithTimeout(caller, selfTestTimeout)
 	defer cancel()
 
@@ -255,62 +319,61 @@ func runStartupSelfTest(caller context.Context, driver *Driver, run selfTestProb
 		allowedWriteContents = "otto-seatbelt-allowed-write"
 		deniedContents       = "otto-seatbelt-denied-fixture"
 	)
-	allowedRead := filepath.Join(driver.state.directories.Home, ".otto-self-test-read")
-	allowedWorkspaceWrite := filepath.Join(driver.workspace, ".otto-self-test-write")
-	allowedPrivateWrite := filepath.Join(driver.state.directories.Temp, ".otto-self-test-write")
-	deniedRead := filepath.Join(driver.state.profiles, ".otto-self-test-denied-read")
-	deniedWrite := filepath.Join(driver.state.profiles, ".otto-self-test-denied-write")
-	fixtures := []string{allowedRead, allowedWorkspaceWrite, allowedPrivateWrite, deniedRead, deniedWrite}
-	defer func() {
-		for _, path := range fixtures {
-			_ = os.Remove(path)
-		}
-	}()
-	for path, contents := range map[string]string{
-		allowedRead: allowedReadContents,
-		deniedRead:  deniedContents,
-		deniedWrite: deniedContents,
-	} {
-		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-			return sandbox.ErrUnavailable
-		}
+	fixtures, err := prepareSelfTestFixtures(driver, dependencies, allowedReadContents, deniedContents)
+	if err != nil {
+		return sandbox.ErrUnavailable
 	}
 
-	if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, run, selfTestProfileStart, []string{"/bin/sh", "-c", "exit 0"}); err != nil || !successfulProbe(result) || len(stdout) != 0 {
-		return sandbox.ErrUnavailable
-	}
-	if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, run, selfTestAllowedRead, []string{"/bin/cat", allowedRead}); err != nil || !successfulProbe(result) || string(stdout) != allowedReadContents {
-		return sandbox.ErrUnavailable
-	}
-	if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, run, selfTestAllowedWrite, []string{
-		"/bin/sh", "-c", `printf %s "$1" > "$2" && printf %s "$1" > "$3"`, "probe",
-		allowedWriteContents, allowedWorkspaceWrite, allowedPrivateWrite,
-	}); err != nil || !successfulProbe(result) || len(stdout) != 0 {
-		return sandbox.ErrUnavailable
-	}
-	for _, path := range []string{allowedWorkspaceWrite, allowedPrivateWrite} {
-		if contents, err := os.ReadFile(path); err != nil || string(contents) != allowedWriteContents {
+	probeErr := func() error {
+		allowedRead := fixtures.fixture(selfTestAllowedReadFixture)
+		allowedWorkspaceWrite := fixtures.fixture(selfTestAllowedWorkspaceWriteFixture)
+		allowedPrivateWrite := fixtures.fixture(selfTestAllowedPrivateWriteFixture)
+		deniedRead := fixtures.fixture(selfTestDeniedReadFixture)
+		deniedWrite := fixtures.fixture(selfTestDeniedWriteFixture)
+		if allowedRead == nil || allowedWorkspaceWrite == nil || allowedPrivateWrite == nil || deniedRead == nil || deniedWrite == nil {
 			return sandbox.ErrUnavailable
 		}
-	}
-	if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, run, selfTestDeniedRead, []string{"/bin/cat", deniedRead}); err != nil || !deniedProbe(result) || len(stdout) != 0 {
-		return sandbox.ErrUnavailable
-	}
-	if contents, err := os.ReadFile(deniedRead); err != nil || string(contents) != deniedContents {
-		return sandbox.ErrUnavailable
-	}
-	if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, run, selfTestDeniedWrite, []string{
-		"/bin/sh", "-c", `printf changed > "$1"`, "probe", deniedWrite,
-	}); err != nil || !deniedProbe(result) || len(stdout) != 0 {
-		return sandbox.ErrUnavailable
-	}
-	if contents, err := os.ReadFile(deniedWrite); err != nil || string(contents) != deniedContents {
+
+		if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, dependencies.runProbe, selfTestProfileStart, []string{"/bin/sh", "-c", "exit 0"}, nil); err != nil || !successfulProbe(result) || len(stdout) != 0 {
+			return sandbox.ErrUnavailable
+		}
+		if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, dependencies.runProbe, selfTestAllowedRead, []string{"/bin/cat", allowedRead.path}, nil); err != nil || !successfulProbe(result) || string(stdout) != allowedReadContents || allowedRead.validateContents(allowedReadContents) != nil {
+			return sandbox.ErrUnavailable
+		}
+		proveWriteTargetsAbsent := func() error {
+			if err := allowedWorkspaceWrite.proveAbsent(); err != nil {
+				return err
+			}
+			return allowedPrivateWrite.proveAbsent()
+		}
+		if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, dependencies.runProbe, selfTestAllowedWrite, []string{
+			"/usr/bin/perl", "-MFcntl=O_WRONLY,O_CREAT,O_EXCL,O_NOFOLLOW", "-e",
+			`for my $path (@ARGV[1,2]) { sysopen(my $fh, $path, O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW, 0600) or exit 65; chmod(0600, $fh) == 1 or exit 66; my $value = $ARGV[0]; syswrite($fh, $value, length($value)) == length($value) or exit 67; close($fh) or exit 68; }`,
+			allowedWriteContents, allowedWorkspaceWrite.path, allowedPrivateWrite.path,
+		}, proveWriteTargetsAbsent); err != nil || !successfulProbe(result) || len(stdout) != 0 {
+			return sandbox.ErrUnavailable
+		}
+		if allowedWorkspaceWrite.adoptChildCreated(allowedWriteContents) != nil || allowedPrivateWrite.adoptChildCreated(allowedWriteContents) != nil {
+			return sandbox.ErrUnavailable
+		}
+		if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, dependencies.runProbe, selfTestDeniedRead, []string{"/bin/cat", deniedRead.path}, nil); err != nil || !deniedProbe(result) || len(stdout) != 0 || deniedRead.validateContents(deniedContents) != nil {
+			return sandbox.ErrUnavailable
+		}
+		if result, stdout, err := executeSelfTestProbe(caller, ctx, driver, dependencies.runProbe, selfTestDeniedWrite, []string{
+			"/bin/sh", "-c", `printf changed > "$1"`, "probe", deniedWrite.path,
+		}, nil); err != nil || !deniedProbe(result) || len(stdout) != 0 || deniedWrite.validateContents(deniedContents) != nil {
+			return sandbox.ErrUnavailable
+		}
+		return nil
+	}()
+	cleanupErr := fixtures.cleanup()
+	if probeErr != nil || cleanupErr != nil {
 		return sandbox.ErrUnavailable
 	}
 	return nil
 }
 
-func executeSelfTestProbe(caller, child context.Context, driver *Driver, run selfTestProbeRunner, kind selfTestProbeKind, argv []string) (nativeprocess.Result, []byte, error) {
+func executeSelfTestProbe(caller, child context.Context, driver *Driver, run selfTestProbeRunner, kind selfTestProbeKind, argv []string, beforeDispatch func() error) (nativeprocess.Result, []byte, error) {
 	if err := driverContextError(caller); err != nil {
 		return nativeprocess.Result{}, nil, err
 	}
@@ -345,6 +408,17 @@ func executeSelfTestProbe(caller, child context.Context, driver *Driver, run sel
 	}
 	if err := driverContextError(child); err != nil {
 		return nativeprocess.Result{}, nil, err
+	}
+	if beforeDispatch != nil {
+		if err := beforeDispatch(); err != nil {
+			return nativeprocess.Result{}, nil, sandbox.ErrUnavailable
+		}
+		if err := driverContextError(caller); err != nil {
+			return nativeprocess.Result{}, nil, err
+		}
+		if err := driverContextError(child); err != nil {
+			return nativeprocess.Result{}, nil, err
+		}
 	}
 	outcome, err := run(child, driver.processes, probe)
 	finishErr := filteredStderr.finish()
@@ -408,11 +482,11 @@ func (d *Driver) Execute(ctx context.Context, request sandbox.Request, streams s
 	profilePath := d.profilePath
 	d.mu.Unlock()
 
-	filteredStderr := newInfrastructureStderrFilter(streams.Stderr)
+	filteredStderr := newInfrastructureStderrFilter(streams.Stderr, d.latchPoisoned)
 	args := make([]string, 0, len(request.Argv)+3)
 	args = append(args, "-f", profilePath, "--")
 	args = append(args, request.Argv...)
-	result, err := manager.Run(ctx, nativeprocess.Spec{
+	result, err := d.runExecution(ctx, manager, nativeprocess.Spec{
 		Path:        sandboxExecPath,
 		Args:        args,
 		Directory:   request.Dir,
@@ -421,15 +495,95 @@ func (d *Driver) Execute(ctx context.Context, request sandbox.Request, streams s
 		Stderr:      filteredStderr,
 	})
 	finishErr := filteredStderr.finish()
-	if filteredStderr.infrastructureFailure() || errors.Is(err, sandbox.ErrChildLaunch) {
+	infrastructureFailure := filteredStderr.infrastructureFailure() || managerInfrastructureFailure(err) || finishErr != nil
+	if infrastructureFailure {
 		d.latchPoisoned()
-		return sandbox.ExitStatus{}, unavailable(sandbox.ReasonRuntimeFailure)
 	}
 	status := sandbox.ExitStatus{Code: result.Code, Signaled: result.Signaled, Signal: result.Signal}
-	if finishErr != nil {
-		return status, sandbox.ErrChildWait
+	if cancellationErr := driverContextError(ctx); cancellationErr != nil {
+		var secondary []error
+		if infrastructureFailure {
+			secondary = append(secondary, unavailable(sandbox.ReasonRuntimeFailure))
+		}
+		if finishErr != nil {
+			secondary = append(secondary, sandbox.ErrChildWait)
+		}
+		return status, joinBoundedDriverErrors(cancellationErr, secondary...)
 	}
-	return status, err
+	if infrastructureFailure {
+		return sandbox.ExitStatus{}, unavailable(sandbox.ReasonRuntimeFailure)
+	}
+	return status, boundedManagerExecutionError(err)
+}
+
+func managerInfrastructureFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, sandbox.ErrChildLaunch) || errors.Is(err, sandbox.ErrChildWait) || errors.Is(err, sandbox.ErrChildTerminate) {
+		return true
+	}
+	return managerErrorHasUnknownLeaf(err)
+}
+
+func managerErrorHasUnknownLeaf(err error) bool {
+	if err == nil || err == context.Canceled || err == context.DeadlineExceeded || err == sandbox.ErrClosed {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if managerErrorHasUnknownLeaf(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return managerErrorHasUnknownLeaf(wrapped.Unwrap())
+	}
+	return true
+}
+
+func boundedManagerExecutionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, sandbox.ErrClosed) {
+		return sandbox.ErrClosed
+	}
+	return unavailable(sandbox.ReasonRuntimeFailure)
+}
+
+type boundedDriverError struct {
+	display    error
+	identities []error
+}
+
+func (err *boundedDriverError) Error() string {
+	return err.display.Error()
+}
+
+func (err *boundedDriverError) Unwrap() []error {
+	return append([]error(nil), err.identities...)
+}
+
+func joinBoundedDriverErrors(primary error, secondary ...error) error {
+	values := []error{primary}
+	for _, value := range secondary {
+		if value != nil {
+			values = append(values, value)
+		}
+	}
+	if len(values) == 1 {
+		return primary
+	}
+	return &boundedDriverError{display: primary, identities: values}
 }
 
 func (d *Driver) latchPoisoned() {
@@ -462,15 +616,17 @@ func (d *Driver) Close() error {
 	done := d.closeDone
 	manager := d.processes
 	privateState := d.state
+	closeManager := d.closeManager
+	closeState := d.closeState
 	d.mu.Unlock()
 
 	var managerErr error
-	if manager != nil {
-		managerErr = manager.Close()
+	if manager != nil && closeManager != nil {
+		managerErr = closeManager(manager)
 	}
 	var stateErr error
-	if privateState != nil {
-		stateErr = privateState.close()
+	if privateState != nil && closeState != nil {
+		stateErr = closeState(privateState)
 	}
 	closeErr := boundedCloseError(managerErr, stateErr)
 
@@ -483,10 +639,18 @@ func (d *Driver) Close() error {
 
 func boundedCloseError(managerErr, stateErr error) error {
 	var values []error
-	for _, identity := range []error{sandbox.ErrChildWait, sandbox.ErrChildTerminate, errStateCleanup} {
-		if errors.Is(managerErr, identity) || errors.Is(stateErr, identity) {
-			values = append(values, identity)
+	if managerErr != nil {
+		for _, identity := range []error{sandbox.ErrChildWait, sandbox.ErrChildTerminate} {
+			if errors.Is(managerErr, identity) {
+				values = append(values, identity)
+			}
 		}
+		if len(values) == 0 {
+			values = append(values, sandbox.ErrChildWait)
+		}
+	}
+	if stateErr != nil {
+		values = append(values, errStateCleanup)
 	}
 	switch len(values) {
 	case 0:
@@ -624,23 +788,29 @@ var (
 )
 
 type infrastructureStderrFilter struct {
-	mu             sync.Mutex
-	destination    io.Writer
-	pending        []byte
-	ordinary       bool
-	infrastructure bool
-	writeFailed    bool
+	mu               sync.Mutex
+	destination      io.Writer
+	pending          []byte
+	ordinary         bool
+	infrastructure   bool
+	execvpSuppressed bool
+	writeFailed      bool
+	onInfrastructure func()
 }
 
-func newInfrastructureStderrFilter(destination io.Writer) *infrastructureStderrFilter {
-	return &infrastructureStderrFilter{destination: destination}
+func newInfrastructureStderrFilter(destination io.Writer, callbacks ...func()) *infrastructureStderrFilter {
+	filter := &infrastructureStderrFilter{destination: destination}
+	if len(callbacks) > 0 {
+		filter.onInfrastructure = callbacks[0]
+	}
+	return filter
 }
 
 func (filter *infrastructureStderrFilter) Write(data []byte) (int, error) {
 	filter.mu.Lock()
 	defer filter.mu.Unlock()
 	original := len(data)
-	if filter.infrastructure {
+	if filter.infrastructure || filter.execvpSuppressed {
 		return original, nil
 	}
 	if filter.ordinary {
@@ -650,7 +820,7 @@ func (filter *infrastructureStderrFilter) Write(data []byte) (int, error) {
 		return original, nil
 	}
 
-	for len(data) > 0 && !filter.ordinary && !filter.infrastructure {
+	for len(data) > 0 && !filter.ordinary && !filter.infrastructure && !filter.execvpSuppressed {
 		remaining := stderrDecisionLimit - len(filter.pending)
 		if remaining <= 0 {
 			filter.classifyPending()
@@ -672,7 +842,7 @@ func (filter *infrastructureStderrFilter) Write(data []byte) (int, error) {
 			filter.classifyPending()
 		}
 	}
-	if filter.infrastructure {
+	if filter.infrastructure || filter.execvpSuppressed {
 		return original, nil
 	}
 	if filter.ordinary {
@@ -691,10 +861,10 @@ func (filter *infrastructureStderrFilter) Write(data []byte) (int, error) {
 func (filter *infrastructureStderrFilter) finish() error {
 	filter.mu.Lock()
 	defer filter.mu.Unlock()
-	if !filter.ordinary && !filter.infrastructure && len(filter.pending) > 0 {
+	if !filter.ordinary && !filter.infrastructure && !filter.execvpSuppressed && len(filter.pending) > 0 {
 		filter.classifyPending()
 	}
-	if filter.infrastructure {
+	if filter.infrastructure || filter.execvpSuppressed {
 		filter.pending = nil
 		return nil
 	}
@@ -710,10 +880,17 @@ func (filter *infrastructureStderrFilter) finish() error {
 }
 
 func (filter *infrastructureStderrFilter) classifyPending() {
-	if bytes.HasPrefix(filter.pending, sandboxExecDiagnosticPrefix) &&
-		!bytes.HasPrefix(filter.pending, sandboxExecPolicyExecPrefix) {
+	if bytes.HasPrefix(filter.pending, sandboxExecPolicyExecPrefix) {
+		filter.execvpSuppressed = true
+		filter.pending = nil
+		return
+	}
+	if bytes.HasPrefix(filter.pending, sandboxExecDiagnosticPrefix) {
 		filter.infrastructure = true
 		filter.pending = nil
+		if filter.onInfrastructure != nil {
+			filter.onInfrastructure()
+		}
 		return
 	}
 	filter.ordinary = true
@@ -734,6 +911,12 @@ func (filter *infrastructureStderrFilter) infrastructureFailure() bool {
 	filter.mu.Lock()
 	defer filter.mu.Unlock()
 	return filter.infrastructure
+}
+
+func (filter *infrastructureStderrFilter) execvpDiagnosticSuppressed() bool {
+	filter.mu.Lock()
+	defer filter.mu.Unlock()
+	return filter.execvpSuppressed
 }
 
 func couldBeginSandboxExecDiagnostic(value []byte) bool {

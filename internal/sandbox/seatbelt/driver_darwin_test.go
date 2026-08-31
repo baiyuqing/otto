@@ -275,6 +275,378 @@ func TestOpenRejectsUnreapedOrOversizedSelfTestProbe(t *testing.T) {
 	}
 }
 
+func TestOpenSelfTestNeverTouchesPreexistingFixedWorkspaceEntries(t *testing.T) {
+	for _, entryType := range []string{"regular", "symlink", "hardlink"} {
+		t.Run(entryType, func(t *testing.T) {
+			workspace, home, _, dependencies := driverOpenFixture(t)
+			fixedProbePath := filepath.Join(workspace, ".otto-self-test-write")
+			trackedPath := filepath.Join(workspace, "tracked-"+entryType)
+			const trackedContents = "preexisting-workspace-entry-must-survive"
+			if err := os.WriteFile(trackedPath, []byte(trackedContents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			switch entryType {
+			case "regular":
+				if err := os.WriteFile(fixedProbePath, []byte(trackedContents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink(trackedPath, fixedProbePath); err != nil {
+					t.Fatal(err)
+				}
+			case "hardlink":
+				if err := os.Link(trackedPath, fixedProbePath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			trackedBefore, err := os.Lstat(trackedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edgeBefore, err := os.Lstat(fixedProbePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			driver, openErr := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			if openErr != nil {
+				t.Fatalf("Open() error = %v", openErr)
+			}
+			if err := driver.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+
+			trackedAfter, err := os.Lstat(trackedPath)
+			if err != nil || !os.SameFile(trackedBefore, trackedAfter) {
+				t.Fatalf("tracked inode changed: before=%v after=%v error=%v", trackedBefore, trackedAfter, err)
+			}
+			edgeAfter, err := os.Lstat(fixedProbePath)
+			if err != nil || !os.SameFile(edgeBefore, edgeAfter) || edgeAfter.Mode()&os.ModeType != edgeBefore.Mode()&os.ModeType {
+				t.Fatalf("preexisting edge changed: before=%v after=%v error=%v", edgeBefore, edgeAfter, err)
+			}
+			contents, err := os.ReadFile(trackedPath)
+			if err != nil || string(contents) != trackedContents {
+				t.Fatalf("tracked contents changed: contents=%q error=%v", contents, err)
+			}
+			edgeContents, err := os.ReadFile(fixedProbePath)
+			if err != nil || string(edgeContents) != trackedContents {
+				t.Fatalf("preexisting edge contents changed: contents=%q error=%v", edgeContents, err)
+			}
+		})
+	}
+}
+
+func TestOpenSelfTestRetriesRandomWorkspaceCollisionsWithoutMutation(t *testing.T) {
+	for _, entryType := range []string{"regular", "symlink", "hardlink"} {
+		t.Run(entryType, func(t *testing.T) {
+			workspace, home, _, dependencies := driverOpenFixture(t)
+			productionRandom := dependencies.selfTestRandomBytes
+			randomCalls := 0
+			dependencies.selfTestRandomBytes = func(kind selfTestFixtureKind, destination []byte) error {
+				if kind != selfTestAllowedWorkspaceWriteFixture {
+					return productionRandom(kind, destination)
+				}
+				randomCalls++
+				for index := range destination {
+					destination[index] = byte(randomCalls)
+				}
+				return nil
+			}
+
+			trackedPath := filepath.Join(workspace, "collision-tracked-"+entryType)
+			const trackedContents = "random-collision-entry-must-survive"
+			if err := os.WriteFile(trackedPath, []byte(trackedContents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var collisionPath string
+			dependencies.selfTestEvent = func(event selfTestFixtureEvent) {
+				if event.stage != selfTestFixtureCandidate || event.kind != selfTestAllowedWorkspaceWriteFixture || collisionPath != "" {
+					return
+				}
+				collisionPath = event.path
+				switch entryType {
+				case "regular":
+					if err := os.WriteFile(collisionPath, []byte(trackedContents), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(trackedPath, collisionPath); err != nil {
+						t.Fatal(err)
+					}
+				case "hardlink":
+					if err := os.Link(trackedPath, collisionPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			if err != nil {
+				t.Fatalf("Open() error = %v", err)
+			}
+			if randomCalls < 2 || collisionPath == "" {
+				t.Fatalf("workspace random collision attempts = %d, collision path %q", randomCalls, collisionPath)
+			}
+			edgeBeforeClose, err := os.Lstat(collisionPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := driver.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			edgeAfterClose, err := os.Lstat(collisionPath)
+			if err != nil || !os.SameFile(edgeBeforeClose, edgeAfterClose) {
+				t.Fatalf("collision edge changed: before=%v after=%v error=%v", edgeBeforeClose, edgeAfterClose, err)
+			}
+			contents, err := os.ReadFile(trackedPath)
+			if err != nil || string(contents) != trackedContents {
+				t.Fatalf("collision target changed: contents=%q error=%v", contents, err)
+			}
+			edgeContents, err := os.ReadFile(collisionPath)
+			if err != nil || string(edgeContents) != trackedContents {
+				t.Fatalf("collision edge contents changed: contents=%q error=%v", edgeContents, err)
+			}
+		})
+	}
+}
+
+func TestOpenRejectsInvalidChildCreatedWorkspaceFixtureWithoutDeletingIt(t *testing.T) {
+	for _, entryType := range []string{"wrong-mode", "symlink", "hardlink"} {
+		t.Run(entryType, func(t *testing.T) {
+			workspace, home, cache, dependencies := driverOpenFixture(t)
+			productionProbe := dependencies.runProbe
+			trackedPath := filepath.Join(workspace, "invalid-child-target-"+entryType)
+			const contents = "otto-seatbelt-allowed-write"
+			if err := os.WriteFile(trackedPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var invalidPath string
+			dependencies.runProbe = func(ctx context.Context, manager *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
+				if probe.kind != selfTestAllowedWrite {
+					return productionProbe(ctx, manager, probe)
+				}
+				if len(probe.spec.Args) < 2 {
+					t.Fatal("allowed-write probe lacks targets")
+				}
+				workspaceTarget := probe.spec.Args[len(probe.spec.Args)-2]
+				privateTarget := probe.spec.Args[len(probe.spec.Args)-1]
+				for _, path := range []string{workspaceTarget, privateTarget} {
+					if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+						t.Fatalf("child-created target was not absent before dispatch: path=%q error=%v", path, err)
+					}
+				}
+				invalidPath = workspaceTarget
+				switch entryType {
+				case "wrong-mode":
+					if err := os.WriteFile(workspaceTarget, []byte(contents), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(trackedPath, workspaceTarget); err != nil {
+						t.Fatal(err)
+					}
+				case "hardlink":
+					if err := os.Link(trackedPath, workspaceTarget); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(privateTarget, []byte(contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return selfTestProbeResult{result: nativeprocess.Result{Code: 0}, leaderReaped: true}, nil
+			}
+
+			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			assertUnavailableReason(t, driver, err, sandbox.ReasonSelfTestFailed)
+			if invalidPath == "" {
+				t.Fatal("allowed-write probe did not run")
+			}
+			if _, statErr := os.Lstat(invalidPath); statErr != nil {
+				t.Fatalf("untrusted child-created edge was deleted: %v", statErr)
+			}
+			got, readErr := os.ReadFile(trackedPath)
+			if readErr != nil || string(got) != contents {
+				t.Fatalf("tracked target changed: contents=%q error=%v", got, readErr)
+			}
+			assertNoStateLeaves(t, cache)
+		})
+	}
+}
+
+func TestOpenSelfTestChildWriteRaceNeverFollowsOrDeletesInjectedEntry(t *testing.T) {
+	for _, entryType := range []string{"regular", "symlink", "hardlink"} {
+		t.Run(entryType, func(t *testing.T) {
+			workspace, home, cache, dependencies := driverOpenFixture(t)
+			productionProbe := dependencies.runProbe
+			trackedPath := filepath.Join(workspace, "write-race-tracked-"+entryType)
+			const trackedContents = "write-race-entry-must-survive"
+			if err := os.WriteFile(trackedPath, []byte(trackedContents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var injectedPath string
+			var injectedBefore fs.FileInfo
+			dependencies.runProbe = func(ctx context.Context, manager *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
+				if probe.kind != selfTestAllowedWrite {
+					return productionProbe(ctx, manager, probe)
+				}
+				injectedPath = probe.spec.Args[len(probe.spec.Args)-2]
+				if _, err := os.Lstat(injectedPath); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("workspace target was not absent at post-check injection: %v", err)
+				}
+				switch entryType {
+				case "regular":
+					if err := os.WriteFile(injectedPath, []byte(trackedContents), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(trackedPath, injectedPath); err != nil {
+						t.Fatal(err)
+					}
+				case "hardlink":
+					if err := os.Link(trackedPath, injectedPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				injectedBefore, err = os.Lstat(injectedPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return productionProbe(ctx, manager, probe)
+			}
+
+			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			assertUnavailableReason(t, driver, err, sandbox.ReasonSelfTestFailed)
+			injectedAfter, statErr := os.Lstat(injectedPath)
+			if statErr != nil || !os.SameFile(injectedBefore, injectedAfter) || injectedAfter.Mode()&os.ModeType != injectedBefore.Mode()&os.ModeType {
+				t.Fatalf("injected workspace edge changed: before=%v after=%v error=%v", injectedBefore, injectedAfter, statErr)
+			}
+			tracked, readErr := os.ReadFile(trackedPath)
+			injected, injectedReadErr := os.ReadFile(injectedPath)
+			if readErr != nil || injectedReadErr != nil || string(tracked) != trackedContents || string(injected) != trackedContents {
+				t.Fatalf("write-race contents changed: tracked=%q/%v injected=%q/%v", tracked, readErr, injected, injectedReadErr)
+			}
+			assertNoStateLeaves(t, cache)
+		})
+	}
+}
+
+func TestOpenRejectsInvalidChildCreatedPrivateFixtureWithoutFollowingIt(t *testing.T) {
+	for _, entryType := range []string{"wrong-mode", "symlink", "hardlink"} {
+		t.Run(entryType, func(t *testing.T) {
+			workspace, home, cache, dependencies := driverOpenFixture(t)
+			productionProbe := dependencies.runProbe
+			trackedPath := filepath.Join(workspace, "invalid-private-target-"+entryType)
+			const contents = "otto-seatbelt-allowed-write"
+			if err := os.WriteFile(trackedPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			trackedBefore, err := os.Lstat(trackedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dependencies.runProbe = func(ctx context.Context, manager *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
+				if probe.kind != selfTestAllowedWrite {
+					return productionProbe(ctx, manager, probe)
+				}
+				workspaceTarget := probe.spec.Args[len(probe.spec.Args)-2]
+				privateTarget := probe.spec.Args[len(probe.spec.Args)-1]
+				for _, path := range []string{workspaceTarget, privateTarget} {
+					if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+						t.Fatalf("child-created target was not absent before dispatch: path=%q error=%v", path, err)
+					}
+				}
+				if err := os.WriteFile(workspaceTarget, []byte(contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				switch entryType {
+				case "wrong-mode":
+					if err := os.WriteFile(privateTarget, []byte(contents), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(trackedPath, privateTarget); err != nil {
+						t.Fatal(err)
+					}
+				case "hardlink":
+					if err := os.Link(trackedPath, privateTarget); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return selfTestProbeResult{result: nativeprocess.Result{Code: 0}, leaderReaped: true}, nil
+			}
+
+			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			assertUnavailableReason(t, driver, err, sandbox.ReasonSelfTestFailed)
+			trackedAfter, statErr := os.Lstat(trackedPath)
+			got, readErr := os.ReadFile(trackedPath)
+			if statErr != nil || readErr != nil || !os.SameFile(trackedBefore, trackedAfter) || string(got) != contents {
+				t.Fatalf("invalid private fixture was followed: info=%v statErr=%v contents=%q readErr=%v", trackedAfter, statErr, got, readErr)
+			}
+			assertNoStateLeaves(t, cache)
+		})
+	}
+}
+
+func TestOpenSelfTestDoesNotDeleteSubstitutedWorkspaceFixture(t *testing.T) {
+	for _, entryType := range []string{"regular", "symlink", "hardlink"} {
+		t.Run(entryType, func(t *testing.T) {
+			workspace, home, cache, dependencies := driverOpenFixture(t)
+			trackedPath := filepath.Join(workspace, "cleanup-substitute-target-"+entryType)
+			const trackedContents = "cleanup-substitute-must-survive"
+			if err := os.WriteFile(trackedPath, []byte(trackedContents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			movedPath := filepath.Join(workspace, "moved-self-test-owned-"+entryType)
+			var substitutedPath string
+			dependencies.selfTestEvent = func(event selfTestFixtureEvent) {
+				if event.stage != selfTestFixtureBeforeCleanup || event.kind != selfTestAllowedWorkspaceWriteFixture || substitutedPath != "" {
+					return
+				}
+				substitutedPath = event.path
+				if err := os.Rename(event.path, movedPath); err != nil {
+					t.Fatal(err)
+				}
+				switch entryType {
+				case "regular":
+					if err := os.WriteFile(event.path, []byte(trackedContents), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink":
+					if err := os.Symlink(trackedPath, event.path); err != nil {
+						t.Fatal(err)
+					}
+				case "hardlink":
+					if err := os.Link(trackedPath, event.path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			assertUnavailableReason(t, driver, err, sandbox.ReasonSelfTestFailed)
+			if substitutedPath == "" {
+				t.Fatal("workspace fixture was not substituted")
+			}
+			if _, err := os.Lstat(substitutedPath); err != nil {
+				t.Fatalf("substitute edge was deleted: %v", err)
+			}
+			if _, err := os.Lstat(movedPath); err != nil {
+				t.Fatalf("moved original fixture was deleted or followed: %v", err)
+			}
+			got, readErr := os.ReadFile(trackedPath)
+			if readErr != nil || string(got) != trackedContents {
+				t.Fatalf("substitute target changed: contents=%q error=%v", got, readErr)
+			}
+			substituteContents, readErr := os.ReadFile(substitutedPath)
+			if readErr != nil || string(substituteContents) != trackedContents {
+				t.Fatalf("substitute edge contents changed: contents=%q error=%v", substituteContents, readErr)
+			}
+			assertNoStateLeaves(t, cache)
+		})
+	}
+}
+
 func TestOpenSelfTestUsesOnlyMinimalPrivateEnvironment(t *testing.T) {
 	workspace, home, _, dependencies := driverOpenFixture(t)
 	productionProbe := dependencies.runProbe
@@ -299,6 +671,9 @@ func TestOpenSelfTestUsesOnlyMinimalPrivateEnvironment(t *testing.T) {
 			argv := strings.Join(probe.spec.Args, "\x00")
 			if !strings.Contains(argv, workspace) || !strings.Contains(argv, probe.directories.Temp) {
 				t.Fatal("allowed-write self-test did not cover both workspace and private temporary storage")
+			}
+			if probe.spec.Args[3] != "/usr/bin/perl" || !strings.Contains(argv, "O_EXCL") || !strings.Contains(argv, "O_NOFOLLOW") || strings.Contains(argv, "umask") {
+				t.Fatalf("allowed-write self-test lacks exclusive no-follow creation without umask mutation: %q", probe.spec.Args)
 			}
 		}
 		return productionProbe(ctx, manager, probe)
@@ -367,6 +742,139 @@ func TestOpenCancellationAfterFinalProbeCleansState(t *testing.T) {
 	assertNoStateLeaves(t, cache)
 }
 
+func TestOpenCancellationIdentityWinsEveryInjectedBoundaryFailure(t *testing.T) {
+	for _, cancellation := range []struct {
+		name  string
+		cause error
+		want  error
+	}{
+		{name: "cancel", cause: context.Canceled, want: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded, want: context.DeadlineExceeded},
+	} {
+		for _, boundary := range []string{"inspect", "cache", "create", "profile-generate", "profile-write", "self-test"} {
+			t.Run(cancellation.name+"/"+boundary, func(t *testing.T) {
+				workspace, home, cache, dependencies := driverOpenFixture(t)
+				ctx, cancel := context.WithCancelCause(context.Background())
+				const rawDetail = "raw injected cancellation boundary detail"
+				rawErr := errors.New(rawDetail)
+				trigger := func() { cancel(cancellation.cause) }
+
+				switch boundary {
+				case "inspect":
+					production := dependencies.inspectSandboxExec
+					dependencies.inspectSandboxExec = func(path string) (sandboxExecIdentity, error) {
+						identity, err := production(path)
+						if err != nil {
+							return sandboxExecIdentity{}, err
+						}
+						trigger()
+						return identity, rawErr
+					}
+				case "cache":
+					dependencies.userCacheDir = func() (string, error) {
+						trigger()
+						return cache, rawErr
+					}
+				case "create":
+					production := dependencies.createState
+					dependencies.createState = func(workspace, cacheBase string) (*state, error) {
+						privateState, err := production(workspace, cacheBase)
+						if err != nil {
+							return nil, err
+						}
+						trigger()
+						return privateState, rawErr
+					}
+				case "profile-generate":
+					dependencies.generateProfile = func(profileOptions) ([]byte, error) {
+						trigger()
+						return nil, rawErr
+					}
+				case "profile-write":
+					production := dependencies.writeProfile
+					dependencies.writeProfile = func(privateState *state, profile []byte) error {
+						if err := production(privateState, profile); err != nil {
+							return err
+						}
+						trigger()
+						return rawErr
+					}
+				case "self-test":
+					dependencies.runProbe = func(_ context.Context, _ *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
+						trigger()
+						_, _ = io.WriteString(probe.spec.Stderr, "sandbox-exec: "+rawDetail+" at "+workspace+"\n")
+						return selfTestProbeResult{leaderReaped: true}, rawErr
+					}
+				}
+
+				driver, err := openWithDependencies(ctx, driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+				if driver != nil {
+					_ = driver.Close()
+					t.Fatal("cancelled Open returned a Driver")
+				}
+				if !errors.Is(err, cancellation.want) {
+					t.Fatalf("Open cancellation error = %v, want identity %v", err, cancellation.want)
+				}
+				assertSafeDriverError(t, err, rawDetail, workspace, home, cache)
+				assertNoStateLeaves(t, cache)
+			})
+		}
+	}
+}
+
+func TestOpenPartialCleanupFailuresAreOrderedBoundedAndJoined(t *testing.T) {
+	for _, cancellation := range []bool{false, true} {
+		name := "self-test"
+		if cancellation {
+			name = "cancellation"
+		}
+		t.Run(name, func(t *testing.T) {
+			workspace, home, cache, dependencies := driverOpenFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			var order []string
+			productionManagerClose := dependencies.closeManager
+			dependencies.closeManager = func(manager *nativeprocess.Manager) error {
+				order = append(order, "manager")
+				_ = productionManagerClose(manager)
+				return errors.Join(sandbox.ErrChildTerminate, errors.New("raw manager cleanup detail"))
+			}
+			productionStateClose := dependencies.closeState
+			dependencies.closeState = func(privateState *state) error {
+				order = append(order, "state")
+				_ = productionStateClose(privateState)
+				return errors.New("raw state cleanup detail")
+			}
+			dependencies.runProbe = func(context.Context, *nativeprocess.Manager, selfTestProbe) (selfTestProbeResult, error) {
+				if cancellation {
+					cancel()
+				}
+				return selfTestProbeResult{leaderReaped: true}, errors.New("raw primary self-test detail")
+			}
+
+			driver, err := openWithDependencies(ctx, driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			if driver != nil {
+				_ = driver.Close()
+				t.Fatal("partial Open returned a Driver")
+			}
+			if cancellation {
+				if !errors.Is(err, context.Canceled) || err.Error() != context.Canceled.Error() {
+					t.Fatalf("partial Open error = %v, want cancellation precedence with cleanup identities", err)
+				}
+			} else if !errors.Is(err, sandbox.ErrUnavailable) {
+				t.Fatalf("partial Open error = %v, want self-test unavailable", err)
+			}
+			if !errors.Is(err, sandbox.ErrChildTerminate) || !errors.Is(err, errStateCleanup) {
+				t.Fatalf("partial Open cleanup identities = %v, want terminate and state cleanup", err)
+			}
+			if !slices.Equal(order, []string{"manager", "state"}) {
+				t.Fatalf("partial cleanup order = %v, want manager then state", order)
+			}
+			assertSafeDriverError(t, err, workspace, home, cache, "raw manager", "raw state", "raw primary")
+			assertNoStateLeaves(t, cache)
+		})
+	}
+}
+
 func TestDriverCloseCleansStateAndIsIdempotent(t *testing.T) {
 	driver := openDriverForTest(t, sandbox.NetworkDeny)
 	root := driver.PrivateDirectories().Root
@@ -419,18 +927,43 @@ func TestDriverInfrastructureStderrFilterIsBoundedAndFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("exec policy diagnostic is ordinary child stderr", func(t *testing.T) {
+	t.Run("execvp diagnostic is suppressed without infrastructure poisoning", func(t *testing.T) {
 		var destination bytes.Buffer
 		filter := newInfrastructureStderrFilter(&destination)
-		diagnostic := "sandbox-exec: execvp() of '/workspace/denied' failed: Operation not permitted\n"
+		diagnostic := "sandbox-exec: execvp() of '/workspace/private executable' failed: Operation not permitted\n"
 		if _, err := filter.Write([]byte(diagnostic)); err != nil {
 			t.Fatal(err)
 		}
 		if err := filter.finish(); err != nil {
 			t.Fatal(err)
 		}
-		if filter.infrastructureFailure() || destination.String() != diagnostic {
-			t.Fatalf("ordinary exec policy diagnostic changed: %q", destination.String())
+		if filter.infrastructureFailure() || !filter.execvpDiagnosticSuppressed() || destination.Len() != 0 {
+			t.Fatalf("execvp diagnostic classification/output = (infrastructure=%t, suppressed=%t, %q)", filter.infrastructureFailure(), filter.execvpDiagnosticSuppressed(), destination.String())
+		}
+	})
+
+	t.Run("bounded multiline execvp diagnostic never exposes later paths", func(t *testing.T) {
+		var destination bytes.Buffer
+		filter := newInfrastructureStderrFilter(&destination)
+		diagnostic := append([]byte("sandbox-exec: execvp() of '/private/workspace/tool' failed: Operation not permitted\nBacktrace: /private/state/profile.sb\n"), bytes.Repeat([]byte("private-path\n"), stderrDecisionLimit)...)
+		for len(diagnostic) > 0 {
+			chunk := 97
+			if chunk > len(diagnostic) {
+				chunk = len(diagnostic)
+			}
+			if _, err := filter.Write(diagnostic[:chunk]); err != nil {
+				t.Fatal(err)
+			}
+			diagnostic = diagnostic[chunk:]
+			if len(filter.pending) > stderrDecisionLimit {
+				t.Fatalf("execvp decision buffer grew to %d bytes", len(filter.pending))
+			}
+		}
+		if err := filter.finish(); err != nil {
+			t.Fatal(err)
+		}
+		if filter.infrastructureFailure() || !filter.execvpDiagnosticSuppressed() || destination.Len() != 0 {
+			t.Fatalf("multiline execvp diagnostic leaked or poisoned: %q", destination.String())
 		}
 	})
 
@@ -494,6 +1027,30 @@ func TestDriverSuppressesSandboxExecInfrastructureDiagnostics(t *testing.T) {
 	assertSafeDriverError(t, err, private.Root, driver.profilePath, string(malformed), "unbound variable", "Backtrace", "line 2")
 }
 
+func TestDriverSuppressesExecvpDiagnosticsWithoutPoisoning(t *testing.T) {
+	driver := openDriverForTest(t, sandbox.NetworkDeny)
+	t.Cleanup(func() { _ = driver.Close() })
+	for _, missing := range []string{
+		filepath.Join(driver.workspace, "missing executable with private name"),
+		filepath.Join(driver.PrivateDirectories().Home, "missing-private-executable"),
+	} {
+		var stdout, stderr bytes.Buffer
+		status, err := driver.Execute(context.Background(), basicDriverRequest(driver, []string{missing}), sandbox.Streams{Stdout: &stdout, Stderr: &stderr})
+		if err != nil || status.Code == 0 || status.Signaled {
+			t.Fatalf("missing executable result = (%+v, %v)", status, err)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("execvp diagnostic escaped: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	}
+
+	var stderr bytes.Buffer
+	status, err := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "printf 'ordinary child stderr after execvp\\n' >&2"}), sandbox.Streams{Stdout: io.Discard, Stderr: &stderr})
+	if err != nil || status.Code != 0 || stderr.String() != "ordinary child stderr after execvp\n" {
+		t.Fatalf("later ordinary stderr = (%+v, %v, %q)", status, err, stderr.String())
+	}
+}
+
 func TestDriverMissingProfileFailsClosedWithoutExposingItsPath(t *testing.T) {
 	driver := openDriverForTest(t, sandbox.NetworkDeny)
 	t.Cleanup(func() { _ = driver.Close() })
@@ -512,6 +1069,171 @@ func TestDriverMissingProfileFailsClosedWithoutExposingItsPath(t *testing.T) {
 		t.Fatalf("missing-profile failure = (%+v, stdout %q, stderr %q)", status, stdout.String(), stderr.String())
 	}
 	assertSafeDriverError(t, err, private.Root, driver.profilePath, "No such file", "sandbox-exec:")
+}
+
+func TestDriverPoisonsAdmissionBeforeInfrastructureClassificationReturns(t *testing.T) {
+	workspace, home, _, dependencies := driverOpenFixture(t)
+	classified := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var callsMu sync.Mutex
+	calls := 0
+	dependencies.runExecution = func(_ context.Context, _ *nativeprocess.Manager, spec nativeprocess.Spec) (nativeprocess.Result, error) {
+		callsMu.Lock()
+		calls++
+		call := calls
+		callsMu.Unlock()
+		if call != 1 {
+			return nativeprocess.Result{Code: 0}, nil
+		}
+		if _, err := io.WriteString(spec.Stderr, "sandbox-exec: sandbox_apply: classified infrastructure\n"); err != nil {
+			return nativeprocess.Result{}, err
+		}
+		close(classified)
+		<-releaseFirst
+		return nativeprocess.Result{Code: 65}, nil
+	}
+	driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = driver.Close() })
+
+	firstResult := make(chan driverExecution, 1)
+	go func() {
+		status, executeErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 0"}), driverDiscardStreams())
+		firstResult <- driverExecution{status: status, err: executeErr}
+	}()
+	awaitDriverSignal(t, classified, "infrastructure classification")
+	secondStatus, secondErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 0"}), driverDiscardStreams())
+	assertUnavailableRuntime(t, secondErr)
+	if secondStatus != (sandbox.ExitStatus{}) {
+		t.Fatalf("second poisoned status = %+v", secondStatus)
+	}
+	callsMu.Lock()
+	gotCalls := calls
+	callsMu.Unlock()
+	if gotCalls != 1 {
+		t.Fatalf("execution runner calls after classification = %d, want 1", gotCalls)
+	}
+	close(releaseFirst)
+	first := awaitDriverExecution(t, firstResult, "classified infrastructure execution")
+	assertUnavailableRuntime(t, first.err)
+}
+
+func TestDriverManagerInfrastructureFailurePoisonsLaterCalls(t *testing.T) {
+	for _, infrastructureErr := range []error{sandbox.ErrChildWait, sandbox.ErrChildTerminate, errors.New("raw manager infrastructure detail")} {
+		name := infrastructureErr.Error()
+		t.Run(name, func(t *testing.T) {
+			workspace, home, _, dependencies := driverOpenFixture(t)
+			calls := 0
+			dependencies.runExecution = func(context.Context, *nativeprocess.Manager, nativeprocess.Spec) (nativeprocess.Result, error) {
+				calls++
+				if calls == 1 {
+					return nativeprocess.Result{}, infrastructureErr
+				}
+				return nativeprocess.Result{Code: 0}, nil
+			}
+			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer driver.Close()
+
+			_, firstErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 0"}), driverDiscardStreams())
+			assertUnavailableRuntime(t, firstErr)
+			assertSafeDriverError(t, firstErr, infrastructureErr.Error())
+			_, secondErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 0"}), driverDiscardStreams())
+			assertUnavailableRuntime(t, secondErr)
+			if calls != 1 {
+				t.Fatalf("poisoned runner calls = %d, want 1", calls)
+			}
+		})
+	}
+}
+
+func TestDriverOrdinaryNonzeroResultDoesNotPoison(t *testing.T) {
+	workspace, home, _, dependencies := driverOpenFixture(t)
+	calls := 0
+	dependencies.runExecution = func(context.Context, *nativeprocess.Manager, nativeprocess.Spec) (nativeprocess.Result, error) {
+		calls++
+		if calls == 1 {
+			return nativeprocess.Result{Code: 77}, nil
+		}
+		return nativeprocess.Result{Code: 0}, nil
+	}
+	driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer driver.Close()
+	first, firstErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 77"}), driverDiscardStreams())
+	if firstErr != nil || first.Code != 77 || first.Signaled {
+		t.Fatalf("ordinary nonzero result = (%+v, %v)", first, firstErr)
+	}
+	second, secondErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 0"}), driverDiscardStreams())
+	if secondErr != nil || second.Code != 0 || calls != 2 {
+		t.Fatalf("later result after ordinary nonzero = (%+v, %v), calls=%d", second, secondErr, calls)
+	}
+}
+
+func TestDriverCancellationIdentityWinsInfrastructureAndFinishRaces(t *testing.T) {
+	for _, cancellation := range []struct {
+		name  string
+		cause error
+		want  error
+	}{
+		{name: "cancel", cause: context.Canceled, want: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded, want: context.DeadlineExceeded},
+	} {
+		for _, race := range []string{"infrastructure", "finish"} {
+			t.Run(cancellation.name+"/"+race, func(t *testing.T) {
+				workspace, home, _, dependencies := driverOpenFixture(t)
+				ctx, cancel := context.WithCancelCause(context.Background())
+				calls := 0
+				const rawDetail = "raw cancellation race detail"
+				dependencies.runExecution = func(_ context.Context, _ *nativeprocess.Manager, spec nativeprocess.Spec) (nativeprocess.Result, error) {
+					calls++
+					if calls > 1 {
+						return nativeprocess.Result{Code: 0}, nil
+					}
+					if race == "infrastructure" {
+						_, _ = io.WriteString(spec.Stderr, "sandbox-exec: "+rawDetail+" at "+workspace+"\n")
+						cancel(cancellation.cause)
+						return nativeprocess.Result{}, errors.Join(sandbox.ErrChildTerminate, errors.New(rawDetail))
+					}
+					_, _ = io.WriteString(spec.Stderr, "ordinary child stderr")
+					cancel(cancellation.cause)
+					return nativeprocess.Result{Code: -1, Signaled: true, Signal: "killed"}, context.Canceled
+				}
+				driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer driver.Close()
+
+				stderr := io.Writer(io.Discard)
+				if race == "finish" {
+					stderr = driverWriterFunc(func([]byte) (int, error) { return 0, errors.New(rawDetail) })
+				}
+				_, executeErr := driver.Execute(ctx, basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 0"}), sandbox.Streams{Stdout: io.Discard, Stderr: stderr})
+				if !errors.Is(executeErr, cancellation.want) || executeErr.Error() != cancellation.want.Error() {
+					t.Fatalf("Execute cancellation race error = %v, want precedence identity %v", executeErr, cancellation.want)
+				}
+				assertSafeDriverError(t, executeErr, rawDetail, workspace, driver.profilePath)
+				if !errors.Is(executeErr, sandbox.ErrUnavailable) {
+					t.Fatalf("cancellation race error = %v, want bounded unavailable join", executeErr)
+				}
+				if race == "finish" && !errors.Is(executeErr, sandbox.ErrChildWait) {
+					t.Fatalf("finish race error = %v, want bounded wait identity", executeErr)
+				}
+				_, laterErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", "exit 0"}), driverDiscardStreams())
+				assertUnavailableRuntime(t, laterErr)
+				if calls != 1 {
+					t.Fatalf("poisoned runner calls = %d, want 1", calls)
+				}
+			})
+		}
+	}
 }
 
 func TestDriverInfrastructureFailurePoisonsLaterCalls(t *testing.T) {
@@ -761,6 +1483,132 @@ printf cache > "$4"
 	}
 }
 
+func TestDriverExplicitAndPATHExternalRootsRemainReadOnly(t *testing.T) {
+	base := t.TempDir()
+	workspace := canonicalDriverTestDirectory(t, filepath.Join(base, "workspace"))
+	home := canonicalDriverTestDirectory(t, filepath.Join(base, "host-home"))
+	cache := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "cache"))
+	explicitRoot := canonicalDriverTestDirectory(t, filepath.Join(base, "explicit-readable"))
+	pathRoot := canonicalDriverTestDirectory(t, filepath.Join(home, ".local", "bin"))
+	explicitFile := filepath.Join(explicitRoot, "tracked-explicit")
+	pathTool := filepath.Join(pathRoot, "tracked-path-tool")
+	const explicitContents = "explicit-read-only"
+	const toolContents = "#!/bin/sh\nprintf path-read-only"
+	if err := os.WriteFile(explicitFile, []byte(explicitContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathTool, []byte(toolContents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	explicitBefore, err := os.Lstat(explicitFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolBefore, err := os.Lstat(pathTool)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dependencies := defaultDriverDependencies()
+	dependencies.userCacheDir = func() (string, error) { return cache, nil }
+	options := driverOptions(workspace, home, sandbox.NetworkDeny, explicitRoot)
+	options.HostEntries = []string{"PATH=" + pathRoot + ":/usr/bin:/bin", "LC_ALL=C"}
+	driver, err := openWithDependencies(context.Background(), options, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = driver.Close() })
+
+	request := basicDriverRequest(driver, []string{"/bin/cat", explicitFile})
+	request.Env[0] = "PATH=" + pathRoot + ":/usr/bin:/bin"
+	var stdout bytes.Buffer
+	status, err := driver.Execute(context.Background(), request, sandbox.Streams{Stdout: &stdout, Stderr: io.Discard})
+	if err != nil || status.Code != 0 || stdout.String() != explicitContents {
+		t.Fatalf("explicit read-only root read = (%+v, %v, %q)", status, err, stdout.String())
+	}
+	request = basicDriverRequest(driver, []string{"tracked-path-tool"})
+	request.Env[0] = "PATH=" + pathRoot + ":/usr/bin:/bin"
+	stdout.Reset()
+	status, err = driver.Execute(context.Background(), request, sandbox.Streams{Stdout: &stdout, Stderr: io.Discard})
+	if err != nil || status.Code != 0 || stdout.String() != "path-read-only" {
+		t.Fatalf("PATH read-only root execution = (%+v, %v, %q)", status, err, stdout.String())
+	}
+
+	for _, fixture := range []struct {
+		name     string
+		root     string
+		existing string
+		before   fs.FileInfo
+		contents string
+	}{
+		{name: "explicit", root: explicitRoot, existing: explicitFile, before: explicitBefore, contents: explicitContents},
+		{name: "PATH", root: pathRoot, existing: pathTool, before: toolBefore, contents: toolContents},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			status, executeErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", `printf changed > "$1"`, "child", fixture.existing}), driverDiscardStreams())
+			if executeErr != nil || status.Code == 0 || status.Signaled {
+				t.Fatalf("modify existing read-only file = (%+v, %v)", status, executeErr)
+			}
+			created := filepath.Join(fixture.root, "must-not-create")
+			status, executeErr = driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", `printf created > "$1"`, "child", created}), driverDiscardStreams())
+			if executeErr != nil || status.Code == 0 || status.Signaled {
+				t.Fatalf("create in read-only root = (%+v, %v)", status, executeErr)
+			}
+			if _, statErr := os.Lstat(created); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Fatalf("read-only root creation target exists: %v", statErr)
+			}
+			after, statErr := os.Lstat(fixture.existing)
+			contents, readErr := os.ReadFile(fixture.existing)
+			if statErr != nil || readErr != nil || !os.SameFile(fixture.before, after) || string(contents) != fixture.contents {
+				t.Fatalf("read-only fixture changed: info=%v statErr=%v contents=%q readErr=%v", after, statErr, contents, readErr)
+			}
+		})
+	}
+}
+
+func TestDriverDeniesSystemVolumesDataReadAlias(t *testing.T) {
+	driver := openDriverForTest(t, sandbox.NetworkDeny)
+	t.Cleanup(func() { _ = driver.Close() })
+
+	directory := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "ungranted-host-data"))
+	target := filepath.Join(directory, "tracked-secret")
+	const contents = "system-volumes-data-alias-must-not-read"
+	if err := os.WriteFile(target, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	relativeTarget := strings.TrimPrefix(target, string(filepath.Separator))
+	alias := filepath.Join("/System/Volumes/Data", relativeTarget)
+	dottedAlias := "/System/Volumes/Data/./" + relativeTarget
+	targetInfo, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, aliasPath := range []string{alias, dottedAlias} {
+		aliasInfo, err := os.Lstat(aliasPath)
+		if err != nil || !os.SameFile(targetInfo, aliasInfo) {
+			t.Fatalf("test-owned Data-volume alias is unavailable: alias=%q info=%v error=%v", aliasPath, aliasInfo, err)
+		}
+	}
+
+	for name, path := range map[string]string{
+		"direct ungranted path": target,
+		"Data volume alias":     alias,
+		"dotted Data alias":     dottedAlias,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			status, executeErr := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/cat", path}), sandbox.Streams{Stdout: &stdout, Stderr: io.Discard})
+			if executeErr != nil || status.Code == 0 || stdout.Len() != 0 {
+				t.Fatalf("denied read Execute() = (%+v, %v, stdout %q)", status, executeErr, stdout.String())
+			}
+			got, readErr := os.ReadFile(target)
+			if readErr != nil || string(got) != contents {
+				t.Fatalf("tracked alias target changed: contents=%q error=%v", got, readErr)
+			}
+		})
+	}
+}
+
 func TestDriverDeniesAbsoluteAndRelativeSymlinkEscapes(t *testing.T) {
 	driver := openDriverForTest(t, sandbox.NetworkDeny)
 	t.Cleanup(func() { _ = driver.Close() })
@@ -902,6 +1750,11 @@ func TestDriverDeniesDockerAndSSHAgentUnixSocketsInsideWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = driver.Close() })
+	var readiness bytes.Buffer
+	readyStatus, readyErr := driver.Execute(context.Background(), helperDriverRequest(driver, executable, "ready", "none", "none"), sandbox.Streams{Stdout: &readiness, Stderr: io.Discard})
+	if readyErr != nil || readyStatus.Code != 0 || readiness.String() != "seatbelt-helper-ready\n" {
+		t.Fatalf("Unix helper readiness = (%+v, %v, %q)", readyStatus, readyErr, readiness.String())
+	}
 	for _, name := range []string{"docker.sock", "ssh-agent.sock"} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(driver.workspace, name)
@@ -911,9 +1764,13 @@ func TestDriverDeniesDockerAndSSHAgentUnixSocketsInsideWorkspace(t *testing.T) {
 			}
 			accepted := driverAcceptOne(listener)
 			status, executeErr := driver.Execute(context.Background(), helperDriverRequest(driver, executable, "dial", "unix", path), driverDiscardStreams())
-			if executeErr != nil || status.Code == 0 {
+			if executeErr != nil || status.Code == 0 || status.Signaled {
 				_ = listener.Close()
-				t.Fatalf("Unix socket Execute() = (%+v, %v), want policy denial", status, executeErr)
+				t.Fatalf("Unix socket Execute() = (%+v, %v), want operation denial after readiness", status, executeErr)
+			}
+			if info, statErr := os.Lstat(path); statErr != nil || info.Mode()&os.ModeSocket == 0 {
+				_ = listener.Close()
+				t.Fatalf("denied Unix socket target changed: info=%v error=%v", info, statErr)
 			}
 			if err := listener.Close(); err != nil {
 				t.Fatal(err)
@@ -968,13 +1825,17 @@ func TestDriverDeniesOpenOsaScriptAndNestedSandboxWidening(t *testing.T) {
 
 func TestDriverCopiedEscapeBrokersCannotBypassOperations(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		source string
-		argv   func(string, string) []string
+		name      string
+		source    string
+		readiness func(string) ([]string, string)
+		argv      func(string, string) []string
 	}{
 		{
 			name:   "Launch Services operation",
 			source: "/usr/bin/open",
+			readiness: func(copy string) ([]string, string) {
+				return []string{"/bin/sh", "-c", `"$1" -h >/dev/null 2>&1; code=$?; test "$code" -eq 1 && printf copied-open-ready`, "probe", copy}, "copied-open-ready"
+			},
 			argv: func(copy, _ string) []string {
 				return []string{copy, "-Ra", "Finder"}
 			},
@@ -982,13 +1843,19 @@ func TestDriverCopiedEscapeBrokersCannotBypassOperations(t *testing.T) {
 		{
 			name:   "Apple Event operation",
 			source: "/usr/bin/osascript",
+			readiness: func(copy string) ([]string, string) {
+				return []string{copy, "-e", `return "copied-osascript-ready"`}, "copied-osascript-ready\n"
+			},
 			argv: func(copy, _ string) []string {
-				return []string{copy, "-e", `tell application "Finder" to get name`}
+				return []string{copy, "-e", `tell application "Finder" to count windows`}
 			},
 		},
 		{
 			name:   "nested permissive sandbox",
 			source: sandboxExecPath,
+			readiness: func(copy string) ([]string, string) {
+				return []string{"/bin/sh", "-c", `"$1" -h >/dev/null 2>&1; code=$?; test "$code" -eq 64 && printf copied-sandbox-ready`, "probe", copy}, "copied-sandbox-ready"
+			},
 			argv: func(copy, outside string) []string {
 				return []string{copy, "-p", "(version 1)\n(allow default)", "--", "/bin/cat", outside}
 			},
@@ -1005,17 +1872,32 @@ func TestDriverCopiedEscapeBrokersCannotBypassOperations(t *testing.T) {
 			if err := os.WriteFile(copyPath, contents, 0o700); err != nil {
 				t.Fatal(err)
 			}
+			adHocSignDriverTestExecutable(t, copyPath)
+			readyArgv, readyMarker := test.readiness(copyPath)
+			var readiness bytes.Buffer
+			readyStatus, readyErr := driver.Execute(context.Background(), basicDriverRequest(driver, readyArgv), sandbox.Streams{Stdout: &readiness, Stderr: io.Discard})
+			if readyErr != nil || readyStatus.Code != 0 || readiness.String() != readyMarker {
+				t.Fatalf("copied broker readiness = (%+v, %v, %q), want marker %q", readyStatus, readyErr, readiness.String(), readyMarker)
+			}
+
 			outside := filepath.Join(filepath.Dir(driver.workspace), "copied-broker-outside")
-			if err := os.WriteFile(outside, []byte("must-not-escape"), 0o600); err != nil {
+			const outsideContents = "must-not-escape"
+			if err := os.WriteFile(outside, []byte(outsideContents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outsideBefore, err := os.Lstat(outside)
+			if err != nil {
 				t.Fatal(err)
 			}
 			var stdout bytes.Buffer
 			status, executeErr := driver.Execute(context.Background(), basicDriverRequest(driver, test.argv(copyPath, outside)), sandbox.Streams{Stdout: &stdout, Stderr: io.Discard})
-			if executeErr == nil && status.Code == 0 || strings.Contains(stdout.String(), "must-not-escape") || strings.TrimSpace(stdout.String()) == "Finder" {
-				t.Fatalf("copied broker bypassed operation policy: status=%+v error=%v stdout=%q", status, executeErr, stdout.String())
+			if executeErr != nil || status.Code == 0 || status.Signaled || strings.Contains(stdout.String(), outsideContents) || strings.TrimSpace(stdout.String()) == "Finder" {
+				t.Fatalf("copied broker operation denial = (%+v, %v, stdout %q), want nonzero policy status", status, executeErr, stdout.String())
 			}
-			if executeErr != nil {
-				assertUnavailableRuntime(t, executeErr)
+			outsideAfter, statErr := os.Lstat(outside)
+			contents, readErr := os.ReadFile(outside)
+			if statErr != nil || readErr != nil || !os.SameFile(outsideBefore, outsideAfter) || string(contents) != outsideContents {
+				t.Fatalf("forbidden-operation target changed: info=%v statErr=%v contents=%q readErr=%v", outsideAfter, statErr, contents, readErr)
 			}
 		})
 	}
@@ -1059,6 +1941,13 @@ func TestDriverSandboxChildCanSignalOwnChildButNotHostProcess(t *testing.T) {
 }
 
 func TestDriverShellAndGitCompatibilityWithoutHostConfig(t *testing.T) {
+	gitInfo, gitStatErr := os.Stat("/usr/bin/git")
+	if errors.Is(gitStatErr, fs.ErrNotExist) {
+		t.Skip("/usr/bin/git is absent")
+	}
+	if gitStatErr != nil || !gitInfo.Mode().IsRegular() || gitInfo.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("/usr/bin/git is present but invalid: info=%v error=%v", gitInfo, gitStatErr)
+	}
 	gitPreflightHome := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "git-preflight-home"))
 	gitPreflightTemp := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "git-preflight-temp"))
 	gitPreflight := exec.Command("/usr/bin/git", "--version")
@@ -1072,8 +1961,8 @@ func TestDriverShellAndGitCompatibilityWithoutHostConfig(t *testing.T) {
 		"GIT_CONFIG_COUNT=0",
 		"xcrun_nocache=1",
 	}
-	if err := gitPreflight.Run(); err != nil {
-		t.Skipf("Git toolchain is absent: %v", err)
+	if output, err := gitPreflight.CombinedOutput(); err != nil {
+		t.Fatalf("present Git toolchain preflight failed: %v (%q)", err, output)
 	}
 
 	driver := openDriverForTest(t, sandbox.NetworkDeny)
@@ -1134,8 +2023,12 @@ func TestDriverShellAndGitCompatibilityWithoutHostConfig(t *testing.T) {
 }
 
 func TestDriverXcrunAndClangCompatibility(t *testing.T) {
-	if info, err := os.Lstat("/usr/bin/xcrun"); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-		t.Skip("xcrun is absent")
+	xcrunInfo, xcrunStatErr := os.Stat("/usr/bin/xcrun")
+	if errors.Is(xcrunStatErr, fs.ErrNotExist) {
+		t.Skip("/usr/bin/xcrun is absent")
+	}
+	if xcrunStatErr != nil || !xcrunInfo.Mode().IsRegular() || xcrunInfo.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("/usr/bin/xcrun is present but invalid: info=%v error=%v", xcrunInfo, xcrunStatErr)
 	}
 	preflightHome := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "xcrun-preflight-home"))
 	preflightTemp := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "xcrun-preflight-temp"))
@@ -1147,14 +2040,21 @@ func TestDriverXcrunAndClangCompatibility(t *testing.T) {
 		"LC_ALL=C",
 		"xcrun_nocache=1",
 	}
-	output, err := find.Output()
+	output, err := find.CombinedOutput()
 	if err != nil {
-		t.Skipf("Clang toolchain is absent: %v", err)
+		if strings.Contains(string(output), `unable to find utility "clang"`) {
+			t.Skip("xcrun proved that the Clang utility is absent")
+		}
+		t.Fatalf("present xcrun/Clang preflight failed: %v (%q)", err, output)
 	}
 	clang := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(clang) || filepath.Clean(clang) != clang {
+		t.Fatalf("xcrun returned invalid Clang path %q", clang)
+	}
 	canonicalClang, err := filepath.EvalSymlinks(clang)
-	if err != nil {
-		t.Fatalf("canonicalize xcrun Clang result: %v", err)
+	clangInfo, clangStatErr := os.Stat(canonicalClang)
+	if err != nil || clangStatErr != nil || !clangInfo.Mode().IsRegular() || clangInfo.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("xcrun Clang result is present but invalid: path=%q canonical=%q info=%v evalErr=%v statErr=%v", clang, canonicalClang, clangInfo, err, clangStatErr)
 	}
 
 	driver := openDriverForTest(t, sandbox.NetworkDeny)
@@ -1188,61 +2088,95 @@ func TestDriverXcrunAndClangCompatibility(t *testing.T) {
 	}
 }
 
+type homebrewGoCompatibilityCandidate struct {
+	executable string
+	bin        string
+	cellar     string
+}
+
+func homebrewGoCompatibilityCandidates() []homebrewGoCompatibilityCandidate {
+	return []homebrewGoCompatibilityCandidate{
+		{executable: "/opt/homebrew/bin/go", bin: "/opt/homebrew/bin", cellar: "/opt/homebrew/Cellar/go"},
+		{executable: "/usr/local/bin/go", bin: "/usr/local/bin", cellar: "/usr/local/Cellar/go"},
+	}
+}
+
+func TestHomebrewGoCompatibilityCandidatesCoverBothCanonicalPrefixes(t *testing.T) {
+	candidates := homebrewGoCompatibilityCandidates()
+	var paths []string
+	for _, candidate := range candidates {
+		paths = append(paths, candidate.executable)
+	}
+	if !slices.Equal(paths, []string{"/opt/homebrew/bin/go", "/usr/local/bin/go"}) {
+		t.Fatalf("Homebrew Go compatibility candidates = %v", paths)
+	}
+}
+
 func TestDriverCanonicalHomebrewGoCompatibility(t *testing.T) {
-	const homebrewGo = "/opt/homebrew/bin/go"
-	info, err := os.Lstat(homebrewGo)
-	if errors.Is(err, fs.ErrNotExist) {
-		t.Skip("canonical Apple Silicon Homebrew Go is absent")
-	}
-	if err != nil || info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("Homebrew Go is present but invalid: info=%v error=%v", info, err)
-	}
-	canonicalGo, err := filepath.EvalSymlinks(homebrewGo)
-	if err != nil || !pathWithin("/opt/homebrew/Cellar/go", canonicalGo) {
-		t.Fatalf("Homebrew Go canonical target = %q, %v", canonicalGo, err)
-	}
+	present := 0
+	for _, candidate := range homebrewGoCompatibilityCandidates() {
+		candidate := candidate
+		if _, err := os.Lstat(candidate.executable); errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			t.Fatalf("inspect present Homebrew Go candidate %q: %v", candidate.executable, err)
+		}
+		present++
+		t.Run(candidate.executable, func(t *testing.T) {
+			canonicalGo, err := filepath.EvalSymlinks(candidate.executable)
+			info, statErr := os.Stat(canonicalGo)
+			if err != nil || statErr != nil || !filepath.IsAbs(canonicalGo) || canonicalGo == candidate.cellar ||
+				!pathWithin(candidate.cellar, canonicalGo) || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				t.Fatalf("Homebrew Go is present but not a canonical executable Cellar target: path=%q canonical=%q info=%v evalErr=%v statErr=%v", candidate.executable, canonicalGo, info, err, statErr)
+			}
 
-	driver := openDriverForTest(t, sandbox.NetworkDeny)
-	t.Cleanup(func() { _ = driver.Close() })
-	private := driver.PrivateDirectories()
-	goBuild := canonicalDriverTestDirectory(t, filepath.Join(private.Cache, "go-build"))
-	goMod := canonicalDriverTestDirectory(t, filepath.Join(private.Cache, "go-mod"))
-	goPath := canonicalDriverTestDirectory(t, filepath.Join(private.Home, "go"))
-	goEnvironment := []string{
-		"PATH=/opt/homebrew/bin:/usr/bin:/bin",
-		"HOME=" + private.Home,
-		"TMPDIR=" + private.Temp,
-		"LC_ALL=C",
-		"GOCACHE=" + goBuild,
-		"GOMODCACHE=" + goMod,
-		"GOPATH=" + goPath,
-		"GOTOOLCHAIN=local",
-		"GOPROXY=off",
-		"GOSUMDB=off",
-		"GOTELEMETRY=off",
-	}
-	request := basicDriverRequest(driver, []string{homebrewGo, "version"})
-	request.Env = slices.Clone(goEnvironment)
-	var stdout bytes.Buffer
-	status, err := driver.Execute(context.Background(), request, sandbox.Streams{Stdout: &stdout, Stderr: io.Discard})
-	if err != nil || status.Code != 0 || !strings.HasPrefix(stdout.String(), "go version go") {
-		t.Fatalf("Homebrew go version = (%+v, %v, %q)", status, err, stdout.String())
-	}
+			driver := openDriverForTest(t, sandbox.NetworkDeny)
+			t.Cleanup(func() { _ = driver.Close() })
+			private := driver.PrivateDirectories()
+			goBuild := canonicalDriverTestDirectory(t, filepath.Join(private.Cache, "go-build"))
+			goMod := canonicalDriverTestDirectory(t, filepath.Join(private.Cache, "go-mod"))
+			goPath := canonicalDriverTestDirectory(t, filepath.Join(private.Home, "go"))
+			goEnvironment := []string{
+				"PATH=" + candidate.bin + ":/usr/bin:/bin",
+				"HOME=" + private.Home,
+				"TMPDIR=" + private.Temp,
+				"LC_ALL=C",
+				"GOCACHE=" + goBuild,
+				"GOMODCACHE=" + goMod,
+				"GOPATH=" + goPath,
+				"GOTOOLCHAIN=local",
+				"GOPROXY=off",
+				"GOSUMDB=off",
+				"GOTELEMETRY=off",
+			}
+			request := basicDriverRequest(driver, []string{candidate.executable, "version"})
+			request.Env = slices.Clone(goEnvironment)
+			var stdout, stderr bytes.Buffer
+			status, err := driver.Execute(context.Background(), request, sandbox.Streams{Stdout: &stdout, Stderr: &stderr})
+			if err != nil || status.Code != 0 || !strings.HasPrefix(stdout.String(), "go version go") {
+				t.Fatalf("Homebrew go version = (%+v, %v, stdout %q, stderr %q)", status, err, stdout.String(), stderr.String())
+			}
 
-	if err := os.WriteFile(filepath.Join(driver.workspace, "go.mod"), []byte("module example.invalid/seatbelttest\n\ngo 1.20\n"), 0o600); err != nil {
-		t.Fatal(err)
+			if err := os.WriteFile(filepath.Join(driver.workspace, "go.mod"), []byte("module example.invalid/seatbelttest\n\ngo 1.20\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(driver.workspace, "answer.go"), []byte("package answer\n\nfunc Value() int { return 42 }\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(driver.workspace, "answer_test.go"), []byte("package answer\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != 42 { t.Fatal(Value()) } }\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			request = basicDriverRequest(driver, []string{candidate.executable, "test", "./..."})
+			request.Env = slices.Clone(goEnvironment)
+			stderr.Reset()
+			status, err = driver.Execute(context.Background(), request, sandbox.Streams{Stdout: io.Discard, Stderr: &stderr})
+			if err != nil || status.Code != 0 {
+				t.Fatalf("dependency-free Homebrew go test = (%+v, %v, stderr %q)", status, err, stderr.String())
+			}
+		})
 	}
-	if err := os.WriteFile(filepath.Join(driver.workspace, "answer.go"), []byte("package answer\n\nfunc Value() int { return 42 }\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(driver.workspace, "answer_test.go"), []byte("package answer\n\nimport \"testing\"\n\nfunc TestValue(t *testing.T) { if Value() != 42 { t.Fatal(Value()) } }\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	request = basicDriverRequest(driver, []string{homebrewGo, "test", "./..."})
-	request.Env = slices.Clone(goEnvironment)
-	status, err = driver.Execute(context.Background(), request, driverDiscardStreams())
-	if err != nil || status.Code != 0 {
-		t.Fatalf("dependency-free Homebrew go test = (%+v, %v)", status, err)
+	if present == 0 {
+		t.Skip("canonical Homebrew Go is absent from both /opt/homebrew and /usr/local")
 	}
 }
 
@@ -1258,6 +2192,11 @@ func TestSeatbeltHelperProcess(t *testing.T) {
 	network := os.Args[separator+2]
 	address := os.Args[separator+3]
 	switch mode {
+	case "ready":
+		if _, err := fmt.Fprintln(os.Stdout, "seatbelt-helper-ready"); err != nil {
+			os.Exit(74)
+		}
+		os.Exit(0)
 	case "dial":
 		dialer := net.Dialer{Timeout: 5 * time.Second}
 		connection, err := dialer.Dial(network, address)
@@ -1539,6 +2478,20 @@ func canonicalDriverTestDirectory(t testing.TB, path string) string {
 		t.Fatal(err)
 	}
 	return canonical
+}
+
+func adHocSignDriverTestExecutable(t testing.TB, path string) {
+	t.Helper()
+	for _, arguments := range [][]string{
+		{"--remove-signature", path},
+		{"--force", "--sign", "-", path},
+	} {
+		command := exec.Command("/usr/bin/codesign", arguments...)
+		command.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("ad-hoc sign copied Apple executable: %v (%q)", err, output)
+		}
+	}
 }
 
 func writeDriverTestExecutable(t testing.TB, path, command string) {

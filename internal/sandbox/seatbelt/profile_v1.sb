@@ -1,6 +1,11 @@
 (version 1)
 (deny default)
 
+; /System is a reviewed runtime root, but its Data-volume subtree aliases host
+; files outside that root. This narrow deny wins over the later /System allow.
+(deny file-read*
+  (subpath "/System/Volumes"))
+
 ; These broker operations are explicit because they can ask an unsandboxed
 ; application to act on the child's behalf even when ordinary IPC is closed.
 (deny appleevent-send)
@@ -47,8 +52,7 @@
 ; Exact identity and resolver services used by libc.
 (allow mach-lookup
   (global-name "com.apple.system.opendirectoryd.libinfo")
-  (global-name "com.apple.system.opendirectoryd.membership")
-  (global-name "com.apple.mDNSResponder"))
+  (global-name "com.apple.system.opendirectoryd.membership"))
 
 ; Every supported command inherits a cwd; exact-root access lets libc resolve it
 ; without granting file contents beneath the filesystem root.

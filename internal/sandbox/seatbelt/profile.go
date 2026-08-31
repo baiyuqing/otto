@@ -571,6 +571,8 @@ func renderProfileNetworkRules(network sandbox.NetworkMode) (string, error) {
 	case sandbox.NetworkAllow:
 		return strings.Join([]string{
 			"; OTTO-DYNAMIC-NETWORK-BEGIN",
+			"(allow mach-lookup",
+			"  (global-name \"com.apple.mDNSResponder\"))",
 			"(allow network-outbound",
 			"  (remote ip))",
 			"(allow network-bind",

@@ -140,6 +140,12 @@ func TestProfileNetworkRulesAreIPOnly(t *testing.T) {
 	if !strings.Contains(allow, "(remote ip)") || !strings.Contains(allow, "(local ip)") {
 		t.Fatal("NetworkAllow is missing filtered remote/local IP grants")
 	}
+	const mdnsLookup = `(allow mach-lookup
+  (global-name "com.apple.mDNSResponder"))`
+	allowNetwork := profileTestSection(t, allow, "NETWORK")
+	if strings.Count(allow, mdnsLookup) != 1 || !strings.Contains(allowNetwork, mdnsLookup) {
+		t.Fatal("NetworkAllow does not contain exactly one marker-scoped mDNS broker lookup")
+	}
 	for _, forbidden := range []string{
 		"(allow network-outbound)",
 		"(allow network-inbound)",
@@ -155,8 +161,8 @@ func TestProfileNetworkRulesAreIPOnly(t *testing.T) {
 	fixture.options.Network = sandbox.NetworkDeny
 	deny := renderProfileForTest(t, fixture.options, fixture.dependencies)
 	if strings.Contains(deny, "(remote ip)") || strings.Contains(deny, "(local ip)") ||
-		strings.Contains(deny, "allow network-") {
-		t.Fatal("NetworkDeny emitted a network grant")
+		strings.Contains(deny, "allow network-") || strings.Contains(deny, "com.apple.mDNSResponder") {
+		t.Fatal("NetworkDeny emitted an IP or mDNS broker grant")
 	}
 
 	fixture.options.Network = sandbox.NetworkMode(99)
@@ -173,6 +179,22 @@ func TestProfileGrantsExactGoRuntimePageSizeSysctl(t *testing.T) {
 	}
 	if strings.Contains(profile, "sysctl-name-prefix") || strings.Contains(profile, "(allow sysctl-read)") {
 		t.Fatal("Go runtime compatibility broadened the exact sysctl allowlist")
+	}
+}
+
+func TestProfileDeniesSystemVolumesReadAliases(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	const carveOut = `(deny file-read*
+  (subpath "/System/Volumes"))`
+	if strings.Count(profile, carveOut) != 1 {
+		t.Fatalf("profile contains %d exact /System/Volumes read carve-outs, want 1", strings.Count(profile, carveOut))
+	}
+	if strings.Contains(profile, `(allow file-read*
+  (subpath "/System/Volumes"))`) ||
+		strings.Contains(profile, `(allow file-read-data
+  (subpath "/System/Volumes"))`) {
+		t.Fatal("profile grants the /System/Volumes alias subtree")
 	}
 }
 

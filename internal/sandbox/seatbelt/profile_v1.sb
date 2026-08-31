@@ -1,0 +1,54 @@
+(version 1)
+(deny default)
+
+; Descendants inherit this policy. Signals stay within the same policy.
+(allow process-fork)
+(allow process-exec)
+(allow signal (target same-sandbox))
+
+; Exact host facts used by common compilers and runtimes.
+(allow sysctl-read
+  (sysctl-name "hw.activecpu")
+  (sysctl-name "hw.byteorder")
+  (sysctl-name "hw.cachelinesize")
+  (sysctl-name "hw.cpufamily")
+  (sysctl-name "hw.cputype")
+  (sysctl-name "hw.logicalcpu")
+  (sysctl-name "hw.logicalcpu_max")
+  (sysctl-name "hw.machine")
+  (sysctl-name "hw.memsize")
+  (sysctl-name "hw.ncpu")
+  (sysctl-name "hw.pagesize")
+  (sysctl-name "hw.physicalcpu")
+  (sysctl-name "hw.physicalcpu_max")
+  (sysctl-name "kern.hostname")
+  (sysctl-name "kern.maxfilesperproc")
+  (sysctl-name "kern.osproductversion")
+  (sysctl-name "kern.osrelease")
+  (sysctl-name "kern.ostype")
+  (sysctl-name "kern.osversion")
+  (sysctl-name "kern.version"))
+
+; Exact identity and resolver services used by libc.
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.mDNSResponder"))
+
+; Inherited streams and non-stateful character devices.
+(allow file-read*
+  (literal "/dev/null")
+  (literal "/dev/random")
+  (literal "/dev/urandom"))
+(allow file-write*
+  (literal "/dev/null")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr"))
+
+@@OTTO_PROFILE_READ_RULES@@
+
+@@OTTO_PROFILE_WRITE_RULES@@
+
+@@OTTO_PROFILE_NETWORK_RULES@@
+
+@@OTTO_PROFILE_SHELL_RULE@@

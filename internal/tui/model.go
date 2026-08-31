@@ -109,6 +109,7 @@ type Model struct {
 	newSessionPending      bool
 	newSessionGeneration   uint64
 	resume                 resumePickerState
+	archive                archivePickerState
 	activeTurnStream       *turnStream
 	activeTurnChannel      <-chan turnEnvelope
 	activeAssistant        int
@@ -209,6 +210,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.resume.selected = clamp(m.resume.selected, 0, len(m.resume.sessions)-1)
 		}
+		if len(m.archive.sessions) == 0 {
+			m.archive.selected = 0
+		} else {
+			m.archive.selected = clamp(m.archive.selected, 0, len(m.archive.sessions)-1)
+		}
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
 	case tea.KeyboardEnhancementsMsg:
@@ -235,9 +241,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case newSessionResultMsg:
 		return m.applyNewSessionResult(msg)
 	case sessionListResultMsg:
-		return m.applySessionListResult(msg)
+		if m.resume.listPending && msg.generation == m.resume.generation {
+			return m.applySessionListResult(msg)
+		}
+		if m.archive.listPending && msg.generation == m.archive.generation {
+			return m.applyArchiveListResult(msg)
+		}
+		return m, nil
 	case sessionResumeResultMsg:
 		return m.applySessionResumeResult(msg)
+	case archiveSessionResultMsg:
+		return m.applyArchiveSessionResult(msg)
 	case ctrlCArmExpiredMsg:
 		if m.ctrlCArmed && msg.generation == m.ctrlCArmGeneration {
 			m.clearCtrlCArm()
@@ -258,11 +272,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKeyPress(msg, previousYOffset, previousEditorHeight, viewportBefore)
 	case tea.PasteMsg:
-		if m.resume.active() || m.overlay != overlayNone {
+		if m.resume.active() || m.archive.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	case tea.MouseMsg:
-		if m.resume.active() || m.overlay != overlayNone {
+		if m.resume.active() || m.archive.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	}
@@ -303,6 +317,9 @@ func (m Model) View() tea.View {
 	}
 	if m.resume.active() {
 		return newRootView(m, renderResumePicker(m.width, m.height, m.resume, m.spinner.View(), m.now()))
+	}
+	if m.archive.active() {
+		return newRootView(m, renderArchivePicker(m.width, m.height, m.archive, m.spinner.View(), m.now()))
 	}
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
@@ -378,6 +395,9 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 		return m.handleCtrlC(previousEditorHeight)
 	}
 	if updated, cmd, handled := m.handleResumeKeyPress(msg); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := m.handleArchiveKeyPress(msg); handled {
 		return updated, cmd
 	}
 	if m.overlay != overlayNone {
@@ -593,7 +613,7 @@ func newRootView(m Model, content string) tea.View {
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
 	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()))
-	if !layout.tooSmall && !m.resume.active() && m.overlay == overlayNone {
+	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
 			cursor.Y += layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
 			if layout.inputBoxed {
@@ -654,6 +674,8 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
 	case slashCommandResume:
 		return m.handleResumeCommand()
+	case slashCommandArchive:
+		return m.handleArchiveCommand()
 	case slashCommandCompact:
 		if m.running || m.newSessionPending {
 			m.statusText = app.ErrPromptActive.Error()
@@ -1760,7 +1782,7 @@ func (m *Model) abandonActiveTurn() {
 }
 
 func (m Model) reservedStateActive() bool {
-	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.activeTurnStream != nil || m.ctrlCArmed || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.archive.active() || m.archive.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.activeTurnStream != nil || m.ctrlCArmed || m.fatalErr != nil
 }
 
 // boxedInput renders the composer as a bordered panel that anchors the screen

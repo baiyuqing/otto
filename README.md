@@ -119,6 +119,14 @@ Run a single prompt headless with `--approve` and exit:
 ./otto --approve "explain main.go" --thinking max --continue
 ```
 
+Manage sessions without touching the workspace:
+
+```bash
+./otto --cwd /path/to/project --continue
+./otto --cwd /path/to/project --resume /path/to/session.jsonl
+./otto --cwd /path/to/project --archive /path/to/active-session.jsonl
+```
+
 ## Configuration and precedence
 
 Otto auto-discovers only the global config file at `~/.config/otto/config.toml`. It does not auto-discover project-local configuration, but you can explicitly select any path with `--config`.
@@ -140,7 +148,7 @@ Startup resolution is field-specific:
 
 Startup `--continue` / `--resume` therefore restores session provider/model only as defaults: direct flags and `OTTO_PROVIDER` / `OTTO_MODEL` can override them as described above. In contrast, an in-process TUI `/resume` restores the selected session's stored provider/model and ignores the process's provider/model/profile/base-URL overrides and `OTTO_PROVIDER` / `OTTO_MODEL`; its stored profile selects the endpoint and key environment. Agent-limit overrides remain in effect. `/new` returns to the runtime resolved at process startup.
 
-`--no-session` cannot be combined with `--continue` or `--resume`.
+`--no-session` cannot be combined with `--continue`, `--resume`, or `--archive`.
 
 UI mode precedence:
 
@@ -340,11 +348,11 @@ Notes:
 - `/resume` is TUI-only and shows at most the recent 20 sessions in the current workspace; controls are documented above.
 - `/session` shows the exact session path.
 - `--no-session` keeps history in memory only.
-- **Archiving** moves an active session into a sibling `archive/` directory: `~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. The file is preserved byte-for-byte with its `0600` mode and nothing is deleted. Archived sessions disappear from `/resume`, `--continue`, and `/archive`, but remain resumable by explicit path:
+- **Archiving** moves an active session into a sibling `archive/` directory: `~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. The move is atomic and preserves the file byte-for-byte with its `0600` mode; nothing is deleted and no disk space is reclaimed. The `archive/` directory is created `0700` on the first archive and is scoped to that workspace. Archived sessions disappear from `/resume`, `--continue`, and `/archive`, but remain resumable by explicit path:
   ```bash
   ./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
   ```
-  `--archive PATH` archives one active session for the current `--cwd` and exits. It cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`.
+  `--archive PATH` archives one active session for the current `--cwd` and exits. It cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`. In `--no-session` mode `/archive` reports that session persistence is disabled.
 - Manual and automatic compaction append Pi v3 `type: "compaction"` checkpoints. Checkpoints carry `firstKeptEntryId`, `tokensBefore`, optional usage, and bounded file metadata; writes remain append-only.
 - Session files contain sensitive prompt text, assistant responses, compaction summaries, tool calls, tool arguments, tool results, and file metadata. Protect them like source data. Session records do not contain API-key, OAuth-token, or authorization-header fields.
 - Stage 1 has no session tree/fork UI, naming, deletion, or search.

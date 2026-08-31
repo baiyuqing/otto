@@ -97,9 +97,9 @@ OTTO_API_KEY=your-key ./otto \
 | `--ui MODE` | Frontend mode: `auto`, `tui`, or `repl`. |
 | `--shell-timeout D` | Shell command timeout (for the `bash` tool). Must be greater than zero. |
 | `--max-output-bytes N` | Maximum tool output bytes. Must be greater than zero. |
-| `--no-session` | Keep history in memory only; do not persist a session. Cannot be combined with `--continue` or `--resume`. |
-| `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume` or `--no-session`. |
-| `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue` or `--no-session`. |
+| `--no-session` | Keep history in memory only; do not persist a session. Cannot be combined with `--continue`, `--resume`, or `--archive`. |
+| `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
+| `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`. |
 
 ## Environment variables
@@ -267,7 +267,10 @@ TUI-only commands:
 - `/archive` opens the same modal to archive a session. `Enter` on a non-current
   session moves it into `archive/` and shows `archived session <id>`. `Enter` on
   the current session archives it and starts a fresh session. `Esc` closes
-  without archiving.
+  without archiving. It is accepted only while idle (a turn, `/new`, or
+  `/resume` in progress is rejected) and reports `no active sessions found`
+  when the workspace has none. In `--no-session` mode it reports that session
+  persistence is disabled.
 
 In the REPL, `/archive` archives the current session and starts a fresh one,
 printing the archived path and the new session ID.
@@ -289,6 +292,7 @@ without a prompt leaves no session file behind.
 ```bash
 ./otto --cwd /path/to/project --continue
 ./otto --cwd /path/to/project --resume /absolute/path/to/session.jsonl
+./otto --cwd /path/to/project --archive /absolute/path/to/active-session.jsonl
 ./otto --cwd /path/to/project --no-session
 ```
 
@@ -303,13 +307,18 @@ Notes:
 - `--no-session` keeps history in memory only.
 - **Archiving** moves an active session into a sibling `archive/` directory:
   `~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. The move is
-  atomic, the file is preserved byte-for-byte with its `0600` mode, and nothing
-  is deleted. Archived sessions are excluded from `/resume`, `--continue`, and
-  the `/archive` picker, but remain resumable by explicit path:
+  atomic and preserves the file byte-for-byte with its `0600` mode; nothing is
+  deleted and no disk space is reclaimed. The `archive/` directory is created
+  `0700` on the first archive and is scoped to that workspace, so archiving one
+  workspace never affects another. Archived sessions are excluded from
+  `/resume`, `--continue`, and the `/archive` picker, but remain resumable by
+  explicit path:
   ```bash
   ./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
   ```
-  `--archive PATH` archives one active session for the current `--cwd` and exits.
+  `--archive PATH` archives one active session for the current `--cwd` and
+  exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
+  or `--approve`.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.
@@ -418,8 +427,8 @@ read the prompt from a file (bounded to 1 MiB).
 ./otto --approve "explain main.go" --thinking max --continue
 ```
 
-`--approve` cannot be combined with `--ui tui`, and composes with `--continue`,
-`--resume`, and `--no-session`.
+`--approve` cannot be combined with `--ui tui` or `--archive`, and composes with
+`--continue`, `--resume`, and `--no-session`.
 
 ## Memory core
 
@@ -459,3 +468,15 @@ context error. If you still hit a hard input limit:
 - set profile `context_window` / `compaction_window` for private or unknown
   model IDs,
 - or choose a model/profile with a larger working window.
+
+### A session disappeared from `/resume` or `--continue`
+
+The session was likely archived. Archive moves the file (not deletion) into
+`~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. To reopen it:
+
+```bash
+./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
+```
+
+The file is still intact; only the active-session surfaces (`/resume`,
+`--continue`, and the `/archive` picker) exclude it.

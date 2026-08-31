@@ -8,9 +8,10 @@ import (
 type UIMode string
 
 const (
-	UIAuto UIMode = "auto"
-	UITUI  UIMode = "tui"
-	UIRepl UIMode = "repl"
+	UIAuto   UIMode = "auto"
+	UIInline UIMode = "inline"
+	UITUI    UIMode = "tui"
+	UIRepl   UIMode = "repl"
 )
 
 type UI struct {
@@ -39,9 +40,11 @@ func parseUIMode(value string) (UIMode, bool, error) {
 		return UIAuto, true, nil
 	case UITUI:
 		return UITUI, true, nil
+	case UIInline:
+		return UIInline, true, nil
 	case UIRepl:
 		return UIRepl, true, nil
 	default:
-		return "", false, fmt.Errorf("invalid ui mode %q: must be one of auto, tui, repl", value)
+		return "", false, fmt.Errorf("invalid ui mode %q: must be one of auto, inline, tui, repl", value)
 	}
 }

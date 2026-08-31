@@ -3,13 +3,12 @@
 package seatbelt
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
@@ -37,6 +36,8 @@ type selfTestFixtureEventStage uint8
 
 const (
 	selfTestFixtureCandidate selfTestFixtureEventStage = iota + 1
+	selfTestFixtureBeforeDispatch
+	selfTestFixtureBeforeReadback
 	selfTestFixtureBeforeCleanup
 )
 
@@ -54,6 +55,10 @@ type selfTestFixture struct {
 	path       string
 	identity   stateIdentity
 	owned      bool
+
+	retainedFD   int
+	retainedOpen bool
+	closeFD      func(int) error
 }
 
 type selfTestFixtures struct {
@@ -72,16 +77,22 @@ func prepareSelfTestFixtures(driver *Driver, dependencies driverDependencies, al
 		kind       selfTestFixtureKind
 		parentPath string
 		contents   string
-		hostCreate bool
 	}{
-		{kind: selfTestAllowedReadFixture, parentPath: driver.state.directories.Home, contents: allowedReadContents, hostCreate: true},
+		{kind: selfTestAllowedReadFixture, parentPath: driver.state.directories.Home, contents: allowedReadContents},
 		{kind: selfTestAllowedWorkspaceWriteFixture, parentPath: driver.workspace},
 		{kind: selfTestAllowedPrivateWriteFixture, parentPath: driver.state.directories.Temp},
-		{kind: selfTestDeniedReadFixture, parentPath: driver.state.profiles, contents: deniedContents, hostCreate: true},
-		{kind: selfTestDeniedWriteFixture, parentPath: driver.state.profiles, contents: deniedContents, hostCreate: true},
+		{kind: selfTestDeniedReadFixture, parentPath: driver.state.profiles, contents: deniedContents},
+		{kind: selfTestDeniedWriteFixture, parentPath: driver.state.profiles, contents: deniedContents},
 	}
 	for _, definition := range definitions {
-		fixture, err := prepareSelfTestFixture(definition.kind, definition.parentPath, definition.contents, definition.hostCreate, dependencies.selfTestRandomBytes, dependencies.selfTestEvent)
+		fixture, err := prepareSelfTestFixture(
+			definition.kind,
+			definition.parentPath,
+			definition.contents,
+			dependencies.selfTestRandomBytes,
+			dependencies.selfTestCloseFD,
+			dependencies.selfTestEvent,
+		)
 		if fixture != nil {
 			fixtures.values = append(fixtures.values, fixture)
 		}
@@ -93,7 +104,7 @@ func prepareSelfTestFixtures(driver *Driver, dependencies driverDependencies, al
 	return fixtures, nil
 }
 
-func prepareSelfTestFixture(kind selfTestFixtureKind, parentPath, contents string, hostCreate bool, randomBytes func(selfTestFixtureKind, []byte) error, event func(selfTestFixtureEvent)) (*selfTestFixture, error) {
+func prepareSelfTestFixture(kind selfTestFixtureKind, parentPath, contents string, randomBytes func(selfTestFixtureKind, []byte) error, closeFD func(int) error, event func(selfTestFixtureEvent)) (*selfTestFixture, error) {
 	parent, err := openStateDirectoryPath(parentPath)
 	if err != nil || !stateDescriptorPathMatchesWithLstat(parentPath, parent, os.Lstat) {
 		if parent != nil {
@@ -101,7 +112,13 @@ func prepareSelfTestFixture(kind selfTestFixtureKind, parentPath, contents strin
 		}
 		return nil, sandboxSelfTestFixtureError()
 	}
-	fixture := &selfTestFixture{kind: kind, parentPath: parentPath, parent: parent}
+	fixture := &selfTestFixture{
+		kind:       kind,
+		parentPath: parentPath,
+		parent:     parent,
+		retainedFD: -1,
+		closeFD:    closeFD,
+	}
 	for attempt := 0; attempt < selfTestFixtureMaxAttempts; attempt++ {
 		random := make([]byte, selfTestFixtureRandomBytes)
 		if err := randomBytes(kind, random); err != nil {
@@ -110,59 +127,40 @@ func prepareSelfTestFixture(kind selfTestFixtureKind, parentPath, contents strin
 		fixture.name = selfTestFixturePrefix + hex.EncodeToString(random)
 		fixture.path = filepath.Join(parentPath, fixture.name)
 		emitSelfTestFixtureEvent(event, selfTestFixtureEvent{stage: selfTestFixtureCandidate, kind: kind, path: fixture.path})
-		if hostCreate {
-			created, createErr := createHostSelfTestFixture(fixture, []byte(contents))
-			if errors.Is(createErr, unix.EEXIST) {
-				continue
-			}
-			if createErr != nil || !created {
-				return fixture, sandboxSelfTestFixtureError()
-			}
-			return fixture, nil
+		created, createErr := createHostSelfTestFixture(fixture, []byte(contents))
+		if errors.Is(createErr, unix.EEXIST) {
+			continue
 		}
-
-		var stat unix.Stat_t
-		err := unix.Fstatat(int(parent.Fd()), fixture.name, &stat, unix.AT_SYMLINK_NOFOLLOW)
-		if errors.Is(err, unix.ENOENT) {
-			return fixture, nil
-		}
-		if err != nil {
+		if createErr != nil || !created {
 			return fixture, sandboxSelfTestFixtureError()
 		}
+		return fixture, nil
 	}
 	return fixture, sandboxSelfTestFixtureError()
 }
 
 func createHostSelfTestFixture(fixture *selfTestFixture, contents []byte) (bool, error) {
-	fd, err := unix.Openat(int(fixture.parent.Fd()), fixture.name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, selfTestFixtureMode)
+	if fixture == nil || fixture.parent == nil || fixture.closeFD == nil || fixture.retainedOpen {
+		return false, sandboxSelfTestFixtureError()
+	}
+	fd, err := unix.Openat(int(fixture.parent.Fd()), fixture.name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, selfTestFixtureMode)
 	if err != nil {
 		return false, err
 	}
-	open := true
-	defer func() {
-		if open {
-			_ = unix.Close(fd)
-		}
-	}()
+	fixture.retainedFD = fd
+	fixture.retainedOpen = true
 
 	stat, statErr := stateFDStat(fd)
-	if statErr == nil {
-		fixture.identity = stateIdentityFromStat(stat)
-	}
-	if statErr != nil || unix.Fchmod(fd, selfTestFixtureMode) != nil {
+	if statErr != nil {
 		return false, sandboxSelfTestFixtureError()
 	}
-	stat, statErr = stateFDStat(fd)
 	fixture.identity = stateIdentityFromStat(stat)
-	fixture.owned = statErr == nil && validSelfTestFixtureStat(stat, fixture.identity)
-	if !fixture.owned || !writeSelfTestFixture(fd, contents) {
+	fixture.owned = validSelfTestFixtureIdentityStat(stat, fixture.identity) && fixture.edgeIdentityMatches()
+	if !fixture.owned || unix.Fchmod(fd, selfTestFixtureMode) != nil {
 		return false, sandboxSelfTestFixtureError()
 	}
-	open = false
-	if err := unix.Close(fd); err != nil {
-		return false, sandboxSelfTestFixtureError()
-	}
-	if !fixture.edgeMatches() {
+	if !fixture.descriptorMatches() || !fixture.edgeMatches() || !writeSelfTestFixture(fd, contents) ||
+		!fixture.descriptorMatches() || !fixture.edgeMatches() {
 		return false, sandboxSelfTestFixtureError()
 	}
 	return true, nil
@@ -194,76 +192,130 @@ func (fixtures *selfTestFixtures) fixture(kind selfTestFixtureKind) *selfTestFix
 	return nil
 }
 
-func (fixture *selfTestFixture) proveAbsent() error {
-	if fixture == nil || fixture.parent == nil || fixture.owned || !stateDescriptorPathMatchesWithLstat(fixture.parentPath, fixture.parent, os.Lstat) {
+func (fixtures *selfTestFixtures) writeProbeArguments() ([]string, error) {
+	if fixtures == nil {
+		return nil, sandboxSelfTestFixtureError()
+	}
+	arguments := make([]string, 0, 14)
+	for _, kind := range []selfTestFixtureKind{selfTestAllowedWorkspaceWriteFixture, selfTestAllowedPrivateWriteFixture} {
+		fixture := fixtures.fixture(kind)
+		values, err := fixture.writeProbeArguments()
+		if err != nil {
+			return nil, err
+		}
+		arguments = append(arguments, values...)
+	}
+	return arguments, nil
+}
+
+func (fixture *selfTestFixture) writeProbeArguments() ([]string, error) {
+	if fixture == nil || !fixture.owned || !fixture.descriptorMatches() || !fixture.edgeMatches() {
+		return nil, sandboxSelfTestFixtureError()
+	}
+	return []string{
+		fixture.path,
+		strconv.FormatUint(fixture.identity.device, 10),
+		strconv.FormatUint(fixture.identity.inode, 10),
+		strconv.FormatUint(uint64(unix.S_IFREG), 10),
+		strconv.Itoa(os.Geteuid()),
+		strconv.FormatUint(uint64(selfTestFixtureMode), 10),
+		"1",
+	}, nil
+}
+
+func (fixtures *selfTestFixtures) validateBeforeWriteDispatch() error {
+	if fixtures == nil {
 		return sandboxSelfTestFixtureError()
 	}
-	var stat unix.Stat_t
-	err := unix.Fstatat(int(fixture.parent.Fd()), fixture.name, &stat, unix.AT_SYMLINK_NOFOLLOW)
-	if !errors.Is(err, unix.ENOENT) {
-		return sandboxSelfTestFixtureError()
+	writeFixtures := []*selfTestFixture{
+		fixtures.fixture(selfTestAllowedWorkspaceWriteFixture),
+		fixtures.fixture(selfTestAllowedPrivateWriteFixture),
+	}
+	for _, fixture := range writeFixtures {
+		if fixture == nil {
+			return sandboxSelfTestFixtureError()
+		}
+		emitSelfTestFixtureEvent(fixtures.event, selfTestFixtureEvent{stage: selfTestFixtureBeforeDispatch, kind: fixture.kind, path: fixture.path})
+	}
+	for _, fixture := range writeFixtures {
+		if !fixture.descriptorMatches() || !fixture.edgeMatches() {
+			return sandboxSelfTestFixtureError()
+		}
 	}
 	return nil
 }
 
-func (fixture *selfTestFixture) adoptChildCreated(contents string) error {
-	if fixture == nil || fixture.parent == nil || fixture.owned || !stateDescriptorPathMatchesWithLstat(fixture.parentPath, fixture.parent, os.Lstat) {
+func (fixtures *selfTestFixtures) validateWrittenContents(contents string) error {
+	if fixtures == nil {
 		return sandboxSelfTestFixtureError()
 	}
-	var edge unix.Stat_t
-	if err := unix.Fstatat(int(fixture.parent.Fd()), fixture.name, &edge, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return sandboxSelfTestFixtureError()
+	writeFixtures := []*selfTestFixture{
+		fixtures.fixture(selfTestAllowedWorkspaceWriteFixture),
+		fixtures.fixture(selfTestAllowedPrivateWriteFixture),
 	}
-	identity := stateIdentityFromStat(edge)
-	if !validSelfTestFixtureStat(edge, identity) {
-		return sandboxSelfTestFixtureError()
+	for _, fixture := range writeFixtures {
+		if fixture == nil {
+			return sandboxSelfTestFixtureError()
+		}
+		emitSelfTestFixtureEvent(fixtures.event, selfTestFixtureEvent{stage: selfTestFixtureBeforeReadback, kind: fixture.kind, path: fixture.path})
 	}
-	fd, err := unix.Openat(int(fixture.parent.Fd()), fixture.name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return sandboxSelfTestFixtureError()
-	}
-	file := os.NewFile(uintptr(fd), "")
-	if file == nil {
-		_ = unix.Close(fd)
-		return sandboxSelfTestFixtureError()
-	}
-	data, readErr := io.ReadAll(io.LimitReader(file, int64(len(contents)+1)))
-	stat, statErr := stateDescriptorStat(file)
-	closeErr := file.Close()
-	if readErr != nil || statErr != nil || closeErr != nil || !bytes.Equal(data, []byte(contents)) ||
-		!validSelfTestFixtureStat(stat, identity) {
-		return sandboxSelfTestFixtureError()
-	}
-	fixture.identity = identity
-	fixture.owned = true
-	if !fixture.edgeMatches() {
-		fixture.owned = false
-		return sandboxSelfTestFixtureError()
+	for _, fixture := range writeFixtures {
+		if err := fixture.validateContents(contents); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (fixture *selfTestFixture) validateContents(contents string) error {
-	if fixture == nil || !fixture.owned || !fixture.edgeMatches() {
+	if fixture == nil || !fixture.owned || !fixture.descriptorMatches() || !fixture.edgeMatches() {
 		return sandboxSelfTestFixtureError()
 	}
-	fd, err := unix.Openat(int(fixture.parent.Fd()), fixture.name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return sandboxSelfTestFixtureError()
-	}
-	file := os.NewFile(uintptr(fd), "")
-	if file == nil {
-		_ = unix.Close(fd)
-		return sandboxSelfTestFixtureError()
-	}
-	data, readErr := io.ReadAll(io.LimitReader(file, int64(len(contents)+1)))
-	stat, statErr := stateDescriptorStat(file)
-	closeErr := file.Close()
-	if readErr != nil || statErr != nil || closeErr != nil || !bytes.Equal(data, []byte(contents)) ||
-		!validSelfTestFixtureStat(stat, fixture.identity) || !fixture.edgeMatches() {
+	data, err := readSelfTestFixture(fixture.retainedFD, len(contents)+1)
+	if err != nil || string(data) != contents || !fixture.descriptorMatches() || !fixture.edgeMatches() {
 		return sandboxSelfTestFixtureError()
 	}
 	return nil
+}
+
+func readSelfTestFixture(fd, limit int) ([]byte, error) {
+	if fd < 0 || limit < 0 {
+		return nil, sandboxSelfTestFixtureError()
+	}
+	data := make([]byte, 0, limit)
+	buffer := make([]byte, limit)
+	for len(data) < limit {
+		read, err := unix.Pread(fd, buffer[len(data):], int64(len(data)))
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if read == 0 {
+			break
+		}
+		data = append(data, buffer[len(data):len(data)+read]...)
+	}
+	return data, nil
+}
+
+func (fixture *selfTestFixture) descriptorMatches() bool {
+	if fixture == nil || !fixture.retainedOpen || fixture.retainedFD < 0 || fixture.identity == (stateIdentity{}) {
+		return false
+	}
+	stat, err := stateFDStat(fixture.retainedFD)
+	return err == nil && validSelfTestFixtureStat(stat, fixture.identity)
+}
+
+func (fixture *selfTestFixture) edgeIdentityMatches() bool {
+	if fixture == nil || fixture.parent == nil || fixture.identity == (stateIdentity{}) ||
+		!stateDescriptorPathMatchesWithLstat(fixture.parentPath, fixture.parent, os.Lstat) {
+		return false
+	}
+	var stat unix.Stat_t
+	return unix.Fstatat(int(fixture.parent.Fd()), fixture.name, &stat, unix.AT_SYMLINK_NOFOLLOW) == nil &&
+		validSelfTestFixtureIdentityStat(stat, fixture.identity)
 }
 
 func (fixture *selfTestFixture) edgeMatches() bool {
@@ -274,6 +326,11 @@ func (fixture *selfTestFixture) edgeMatches() bool {
 	var stat unix.Stat_t
 	return unix.Fstatat(int(fixture.parent.Fd()), fixture.name, &stat, unix.AT_SYMLINK_NOFOLLOW) == nil &&
 		validSelfTestFixtureStat(stat, fixture.identity)
+}
+
+func validSelfTestFixtureIdentityStat(stat unix.Stat_t, identity stateIdentity) bool {
+	return uint32(stat.Mode)&uint32(unix.S_IFMT) == uint32(unix.S_IFREG) && int(stat.Uid) == os.Geteuid() && stat.Nlink == 1 &&
+		sameStateIdentity(stateIdentityFromStat(stat), identity)
 }
 
 func validSelfTestFixtureStat(stat unix.Stat_t, identity stateIdentity) bool {
@@ -293,7 +350,7 @@ func (fixtures *selfTestFixtures) cleanup() error {
 		}
 		if fixture.owned {
 			emitSelfTestFixtureEvent(fixtures.event, selfTestFixtureEvent{stage: selfTestFixtureBeforeCleanup, kind: fixture.kind, path: fixture.path})
-			if !fixture.edgeMatches() {
+			if !fixture.descriptorMatches() || !fixture.edgeMatches() {
 				failed = true
 			} else {
 				unlinkErr := unix.Unlinkat(int(fixture.parent.Fd()), fixture.name, 0)
@@ -303,6 +360,9 @@ func (fixtures *selfTestFixtures) cleanup() error {
 					failed = true
 				}
 			}
+		}
+		if err := fixture.retireRetainedFD(); err != nil {
+			failed = true
 		}
 		if fixture.parent != nil {
 			if err := fixture.parent.Close(); err != nil {
@@ -315,6 +375,19 @@ func (fixtures *selfTestFixtures) cleanup() error {
 		return sandboxSelfTestFixtureError()
 	}
 	return nil
+}
+
+func (fixture *selfTestFixture) retireRetainedFD() error {
+	if fixture == nil || !fixture.retainedOpen {
+		return nil
+	}
+	fd := fixture.retainedFD
+	fixture.retainedFD = -1
+	fixture.retainedOpen = false
+	if fixture.closeFD == nil || fd < 0 {
+		return sandboxSelfTestFixtureError()
+	}
+	return fixture.closeFD(fd)
 }
 
 func emitSelfTestFixtureEvent(event func(selfTestFixtureEvent), value selfTestFixtureEvent) {

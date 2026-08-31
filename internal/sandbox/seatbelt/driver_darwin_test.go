@@ -410,71 +410,8 @@ func TestOpenSelfTestRetriesRandomWorkspaceCollisionsWithoutMutation(t *testing.
 	}
 }
 
-func TestOpenRejectsInvalidChildCreatedWorkspaceFixtureWithoutDeletingIt(t *testing.T) {
-	for _, entryType := range []string{"wrong-mode", "symlink", "hardlink"} {
-		t.Run(entryType, func(t *testing.T) {
-			workspace, home, cache, dependencies := driverOpenFixture(t)
-			productionProbe := dependencies.runProbe
-			trackedPath := filepath.Join(workspace, "invalid-child-target-"+entryType)
-			const contents = "otto-seatbelt-allowed-write"
-			if err := os.WriteFile(trackedPath, []byte(contents), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			var invalidPath string
-			dependencies.runProbe = func(ctx context.Context, manager *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
-				if probe.kind != selfTestAllowedWrite {
-					return productionProbe(ctx, manager, probe)
-				}
-				if len(probe.spec.Args) < 2 {
-					t.Fatal("allowed-write probe lacks targets")
-				}
-				workspaceTarget := probe.spec.Args[len(probe.spec.Args)-2]
-				privateTarget := probe.spec.Args[len(probe.spec.Args)-1]
-				for _, path := range []string{workspaceTarget, privateTarget} {
-					if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
-						t.Fatalf("child-created target was not absent before dispatch: path=%q error=%v", path, err)
-					}
-				}
-				invalidPath = workspaceTarget
-				switch entryType {
-				case "wrong-mode":
-					if err := os.WriteFile(workspaceTarget, []byte(contents), 0o644); err != nil {
-						t.Fatal(err)
-					}
-				case "symlink":
-					if err := os.Symlink(trackedPath, workspaceTarget); err != nil {
-						t.Fatal(err)
-					}
-				case "hardlink":
-					if err := os.Link(trackedPath, workspaceTarget); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if err := os.WriteFile(privateTarget, []byte(contents), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				return selfTestProbeResult{result: nativeprocess.Result{Code: 0}, leaderReaped: true}, nil
-			}
-
-			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
-			assertUnavailableReason(t, driver, err, sandbox.ReasonSelfTestFailed)
-			if invalidPath == "" {
-				t.Fatal("allowed-write probe did not run")
-			}
-			if _, statErr := os.Lstat(invalidPath); statErr != nil {
-				t.Fatalf("untrusted child-created edge was deleted: %v", statErr)
-			}
-			got, readErr := os.ReadFile(trackedPath)
-			if readErr != nil || string(got) != contents {
-				t.Fatalf("tracked target changed: contents=%q error=%v", got, readErr)
-			}
-			assertNoStateLeaves(t, cache)
-		})
-	}
-}
-
 func TestOpenSelfTestChildWriteRaceNeverFollowsOrDeletesInjectedEntry(t *testing.T) {
-	for _, entryType := range []string{"regular", "symlink", "hardlink"} {
+	for _, entryType := range []string{"regular", "wrong-mode", "symlink", "hardlink"} {
 		t.Run(entryType, func(t *testing.T) {
 			workspace, home, cache, dependencies := driverOpenFixture(t)
 			productionProbe := dependencies.runProbe
@@ -483,32 +420,58 @@ func TestOpenSelfTestChildWriteRaceNeverFollowsOrDeletesInjectedEntry(t *testing
 			if err := os.WriteFile(trackedPath, []byte(trackedContents), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			var injectedPath string
-			var injectedBefore fs.FileInfo
+			trackedBefore, err := os.Lstat(trackedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fixturePath, movedPath string
+			var originalBefore, injectedBefore fs.FileInfo
+			dependencies.selfTestEvent = func(event selfTestFixtureEvent) {
+				if event.stage == selfTestFixtureCandidate && event.kind == selfTestAllowedWorkspaceWriteFixture {
+					fixturePath = event.path
+				}
+			}
 			dependencies.runProbe = func(ctx context.Context, manager *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
 				if probe.kind != selfTestAllowedWrite {
 					return productionProbe(ctx, manager, probe)
 				}
-				injectedPath = probe.spec.Args[len(probe.spec.Args)-2]
-				if _, err := os.Lstat(injectedPath); !errors.Is(err, fs.ErrNotExist) {
-					t.Fatalf("workspace target was not absent at post-check injection: %v", err)
+				if fixturePath == "" {
+					t.Fatal("host-created workspace fixture was not observed")
+				}
+				contents, err := os.ReadFile(fixturePath)
+				if err != nil || len(contents) != 0 {
+					t.Fatalf("workspace fixture before child open = %q, %v; want empty", contents, err)
+				}
+				originalBefore, err = os.Lstat(fixturePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				movedPath = filepath.Join(workspace, "moved-write-race-original-"+entryType)
+				if err := os.Rename(fixturePath, movedPath); err != nil {
+					t.Fatal(err)
 				}
 				switch entryType {
 				case "regular":
-					if err := os.WriteFile(injectedPath, []byte(trackedContents), 0o600); err != nil {
+					if err := os.WriteFile(fixturePath, contents, selfTestFixtureMode); err != nil {
+						t.Fatal(err)
+					}
+				case "wrong-mode":
+					if err := os.WriteFile(fixturePath, contents, 0o644); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(fixturePath, 0o644); err != nil {
 						t.Fatal(err)
 					}
 				case "symlink":
-					if err := os.Symlink(trackedPath, injectedPath); err != nil {
+					if err := os.Symlink(trackedPath, fixturePath); err != nil {
 						t.Fatal(err)
 					}
 				case "hardlink":
-					if err := os.Link(trackedPath, injectedPath); err != nil {
+					if err := os.Link(trackedPath, fixturePath); err != nil {
 						t.Fatal(err)
 					}
 				}
-				var err error
-				injectedBefore, err = os.Lstat(injectedPath)
+				injectedBefore, err = os.Lstat(fixturePath)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -517,71 +480,27 @@ func TestOpenSelfTestChildWriteRaceNeverFollowsOrDeletesInjectedEntry(t *testing
 
 			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
 			assertUnavailableReason(t, driver, err, sandbox.ReasonSelfTestFailed)
-			injectedAfter, statErr := os.Lstat(injectedPath)
+			injectedAfter, statErr := os.Lstat(fixturePath)
 			if statErr != nil || !os.SameFile(injectedBefore, injectedAfter) || injectedAfter.Mode()&os.ModeType != injectedBefore.Mode()&os.ModeType {
 				t.Fatalf("injected workspace edge changed: before=%v after=%v error=%v", injectedBefore, injectedAfter, statErr)
 			}
-			tracked, readErr := os.ReadFile(trackedPath)
-			injected, injectedReadErr := os.ReadFile(injectedPath)
-			if readErr != nil || injectedReadErr != nil || string(tracked) != trackedContents || string(injected) != trackedContents {
-				t.Fatalf("write-race contents changed: tracked=%q/%v injected=%q/%v", tracked, readErr, injected, injectedReadErr)
+			originalAfter, statErr := os.Lstat(movedPath)
+			originalContents, originalReadErr := os.ReadFile(movedPath)
+			if statErr != nil || originalReadErr != nil || !os.SameFile(originalBefore, originalAfter) || len(originalContents) != 0 {
+				t.Fatalf("trusted original was touched: before=%v after=%v statErr=%v contents=%q readErr=%v", originalBefore, originalAfter, statErr, originalContents, originalReadErr)
 			}
-			assertNoStateLeaves(t, cache)
-		})
-	}
-}
-
-func TestOpenRejectsInvalidChildCreatedPrivateFixtureWithoutFollowingIt(t *testing.T) {
-	for _, entryType := range []string{"wrong-mode", "symlink", "hardlink"} {
-		t.Run(entryType, func(t *testing.T) {
-			workspace, home, cache, dependencies := driverOpenFixture(t)
-			productionProbe := dependencies.runProbe
-			trackedPath := filepath.Join(workspace, "invalid-private-target-"+entryType)
-			const contents = "otto-seatbelt-allowed-write"
-			if err := os.WriteFile(trackedPath, []byte(contents), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			trackedBefore, err := os.Lstat(trackedPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			dependencies.runProbe = func(ctx context.Context, manager *nativeprocess.Manager, probe selfTestProbe) (selfTestProbeResult, error) {
-				if probe.kind != selfTestAllowedWrite {
-					return productionProbe(ctx, manager, probe)
-				}
-				workspaceTarget := probe.spec.Args[len(probe.spec.Args)-2]
-				privateTarget := probe.spec.Args[len(probe.spec.Args)-1]
-				for _, path := range []string{workspaceTarget, privateTarget} {
-					if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
-						t.Fatalf("child-created target was not absent before dispatch: path=%q error=%v", path, err)
-					}
-				}
-				if err := os.WriteFile(workspaceTarget, []byte(contents), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				switch entryType {
-				case "wrong-mode":
-					if err := os.WriteFile(privateTarget, []byte(contents), 0o644); err != nil {
-						t.Fatal(err)
-					}
-				case "symlink":
-					if err := os.Symlink(trackedPath, privateTarget); err != nil {
-						t.Fatal(err)
-					}
-				case "hardlink":
-					if err := os.Link(trackedPath, privateTarget); err != nil {
-						t.Fatal(err)
-					}
-				}
-				return selfTestProbeResult{result: nativeprocess.Result{Code: 0}, leaderReaped: true}, nil
-			}
-
-			driver, err := openWithDependencies(context.Background(), driverOptions(workspace, home, sandbox.NetworkDeny), dependencies)
-			assertUnavailableReason(t, driver, err, sandbox.ReasonSelfTestFailed)
 			trackedAfter, statErr := os.Lstat(trackedPath)
-			got, readErr := os.ReadFile(trackedPath)
-			if statErr != nil || readErr != nil || !os.SameFile(trackedBefore, trackedAfter) || string(got) != contents {
-				t.Fatalf("invalid private fixture was followed: info=%v statErr=%v contents=%q readErr=%v", trackedAfter, statErr, got, readErr)
+			tracked, readErr := os.ReadFile(trackedPath)
+			if statErr != nil || readErr != nil || !os.SameFile(trackedBefore, trackedAfter) || string(tracked) != trackedContents {
+				t.Fatalf("write-race target changed: before=%v after=%v statErr=%v contents=%q readErr=%v", trackedBefore, trackedAfter, statErr, tracked, readErr)
+			}
+			injected, injectedReadErr := os.ReadFile(fixturePath)
+			wantInjected := ""
+			if entryType == "symlink" || entryType == "hardlink" {
+				wantInjected = trackedContents
+			}
+			if injectedReadErr != nil || string(injected) != wantInjected {
+				t.Fatalf("injected edge was touched: contents=%q error=%v, want %q", injected, injectedReadErr, wantInjected)
 			}
 			assertNoStateLeaves(t, cache)
 		})
@@ -672,8 +591,9 @@ func TestOpenSelfTestUsesOnlyMinimalPrivateEnvironment(t *testing.T) {
 			if !strings.Contains(argv, workspace) || !strings.Contains(argv, probe.directories.Temp) {
 				t.Fatal("allowed-write self-test did not cover both workspace and private temporary storage")
 			}
-			if probe.spec.Args[3] != "/usr/bin/perl" || !strings.Contains(argv, "O_EXCL") || !strings.Contains(argv, "O_NOFOLLOW") || strings.Contains(argv, "umask") {
-				t.Fatalf("allowed-write self-test lacks exclusive no-follow creation without umask mutation: %q", probe.spec.Args)
+			if probe.spec.Args[3] != "/usr/bin/perl" || !strings.Contains(argv, "O_NOFOLLOW") || !strings.Contains(argv, "stat($fh)") || !strings.Contains(argv, "truncate($fh, 0)") ||
+				strings.Contains(argv, "O_CREAT") || strings.Contains(argv, "O_EXCL") || strings.Contains(argv, "umask") {
+				t.Fatalf("allowed-write self-test does not validate and write host-created no-follow fixtures: %q", probe.spec.Args)
 			}
 		}
 		return productionProbe(ctx, manager, probe)

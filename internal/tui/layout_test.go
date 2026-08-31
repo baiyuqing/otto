@@ -97,7 +97,7 @@ func TestRenderFooterShowsContextPercentageStates(t *testing.T) {
 		want        string
 		wantMissing []string
 	}{
-		{name: "known latest context", info: app.Info{Profile: base.Profile, Model: base.Model, SessionID: base.SessionID, ContextWindow: base.ContextWindow, ContextInputTokens: 29_952, ContextInputTokensPresent: true}, want: "ctx 23.4%"},
+		{name: "known latest context", info: app.Info{Profile: base.Profile, Model: base.Model, SessionID: base.SessionID, ContextWindow: base.ContextWindow, ContextInputTokens: 29_952, ContextInputTokensPresent: true}, want: "23.4%"},
 		{name: "pending after compaction", info: app.Info{Profile: base.Profile, Model: base.Model, SessionID: base.SessionID, ContextWindow: base.ContextWindow, ContextInputTokensPending: true}, want: "ctx ?%"},
 		{name: "unknown window hides field", info: app.Info{Profile: base.Profile, Model: base.Model, SessionID: base.SessionID, ContextInputTokens: 29_952, ContextInputTokensPresent: true}, wantMissing: []string{"ctx "}},
 		{name: "omitted prompt usage hides field", info: base, wantMissing: []string{"ctx "}},
@@ -135,6 +135,49 @@ func TestFormatFooterContextPercentage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := formatFooterContextPercentage(tt.input, tt.window); got != tt.want {
 				t.Fatalf("formatFooterContextPercentage(%d, %d) = %q, want %q", tt.input, tt.window, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFooterContextFieldRendersProgressBar(t *testing.T) {
+	tests := []struct {
+		name    string
+		info    app.Info
+		wantBar bool   // expect bar characters (▌ or ░)
+		wantPct string // percentage text that must appear
+	}{
+		{
+			name:    "low usage shows bar and percentage",
+			info:    app.Info{Profile: "p", Model: "m", ContextWindow: 128_000, ContextInputTokens: 29_952, ContextInputTokensPresent: true},
+			wantBar: true,
+			wantPct: "23.4%",
+		},
+		{
+			name:    "high usage shows bar and percentage",
+			info:    app.Info{Profile: "p", Model: "m", ContextWindow: 100_000, ContextInputTokens: 90_000, ContextInputTokensPresent: true},
+			wantBar: true,
+			wantPct: "90.0%",
+		},
+		{
+			name:    "pending shows no bar",
+			info:    app.Info{Profile: "p", Model: "m", ContextWindow: 128_000, ContextInputTokensPending: true},
+			wantBar: false,
+			wantPct: "?%",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			field := footerContextField(tt.info)
+			if !strings.Contains(field, tt.wantPct) {
+				t.Fatalf("field = %q, want percentage %q", field, tt.wantPct)
+			}
+			hasBar := strings.ContainsRune(field, '▌') || strings.ContainsRune(field, '░')
+			if tt.wantBar && !hasBar {
+				t.Fatalf("field = %q, want progress bar characters", field)
+			}
+			if !tt.wantBar && hasBar {
+				t.Fatalf("field = %q, want no bar characters in pending state", field)
 			}
 		})
 	}

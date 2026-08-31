@@ -1,4 +1,4 @@
-package render
+package tui
 
 import (
 	"errors"
@@ -9,12 +9,12 @@ import (
 
 func TestMarkdownStripsOnlyTrailingLayoutNewline(t *testing.T) {
 	renderer := &stubMarkdownRenderer{rendered: "hello\n\n"}
-	got, err := RenderMarkdown(renderer, "**hello**", 18)
+	got, err := renderMarkdown(renderer, "**hello**", 18)
 	if err != nil {
-		t.Fatalf("RenderMarkdown() error = %v", err)
+		t.Fatalf("renderMarkdown() error = %v", err)
 	}
 	if got != "hello\n" {
-		t.Fatalf("RenderMarkdown() = %q, want %q", got, "hello\n")
+		t.Fatalf("renderMarkdown() = %q, want %q", got, "hello\n")
 	}
 	if renderer.markdown != "**hello**" || renderer.width != 18 {
 		t.Fatalf("renderer saw markdown=%q width=%d", renderer.markdown, renderer.width)
@@ -23,9 +23,9 @@ func TestMarkdownStripsOnlyTrailingLayoutNewline(t *testing.T) {
 
 func TestMarkdownFallsBackToSafePlainTextOnFailure(t *testing.T) {
 	renderer := &stubMarkdownRenderer{err: errors.New("boom")}
-	got, err := RenderMarkdown(renderer, "hello\x1b[31m\n\tworld", 24)
+	got, err := renderMarkdown(renderer, "hello\x1b[31m\n\tworld", 24)
 	if !errors.Is(err, renderer.err) {
-		t.Fatalf("RenderMarkdown() error = %v, want %v", err, renderer.err)
+		t.Fatalf("renderMarkdown() error = %v, want %v", err, renderer.err)
 	}
 	if strings.Contains(got, "\x1b[31m") {
 		t.Fatalf("fallback should escape terminal control sequences: %q", got)
@@ -41,7 +41,7 @@ func TestMarkdownFallsBackToSafePlainTextOnFailure(t *testing.T) {
 func TestMarkdownEscapesUntrustedControlsBeforeRenderer(t *testing.T) {
 	renderer := &stubMarkdownRenderer{rendered: "ignored"}
 	input := "line\x1b]52;c;owned\a\u009b31m\x7f\n\tnext"
-	_, err := RenderMarkdown(renderer, input, 40)
+	_, err := renderMarkdown(renderer, input, 40)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestMarkdownEscapesUntrustedControlsBeforeRenderer(t *testing.T) {
 
 func TestMarkdownFallbackDoesNotDoubleEscapeSanitizedInput(t *testing.T) {
 	renderer := &stubMarkdownRenderer{err: errors.New("boom")}
-	got, err := RenderMarkdown(renderer, "entity &#27; and bad\x1b[31m", 40)
+	got, err := renderMarkdown(renderer, "entity &#27; and bad\x1b[31m", 40)
 	if !errors.Is(err, renderer.err) {
 		t.Fatalf("error = %v, want %v", err, renderer.err)
 	}
@@ -73,17 +73,17 @@ func TestMarkdownFallbackDoesNotDoubleEscapeSanitizedInput(t *testing.T) {
 }
 
 func TestMarkdownFallsBackWhenRendererIsNil(t *testing.T) {
-	got, err := RenderMarkdown(nil, "plain", 12)
+	got, err := renderMarkdown(nil, "plain", 12)
 	if err == nil {
-		t.Fatal("RenderMarkdown() error = nil, want nonfatal fallback error")
+		t.Fatal("renderMarkdown() error = nil, want nonfatal fallback error")
 	}
 	if !strings.Contains(got, "plain") || !strings.Contains(got, markdownFallbackMarker) {
-		t.Fatalf("RenderMarkdown() = %q, want plain fallback with marker", got)
+		t.Fatalf("renderMarkdown() = %q, want plain fallback with marker", got)
 	}
 }
 
 func TestMarkdownGlamourRendererRendersMarkdown(t *testing.T) {
-	got, err := NewGlamourRenderer(true).Render("**hello**", 40)
+	got, err := newGlamourRenderer(true).Render("**hello**", 40)
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
@@ -120,14 +120,14 @@ func TestTerminalOutputFilterPreservesOnlySafeFormatting(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := FilterTerminalOutput(test.input); got != test.want {
-				t.Fatalf("FilterTerminalOutput() = %q, want %q", got, test.want)
+			if got := filterTerminalOutput(test.input); got != test.want {
+				t.Fatalf("filterTerminalOutput() = %q, want %q", got, test.want)
 			}
 		})
 	}
 
 	overlong := "before\x1b[" + strings.Repeat("1", 256) + "mafter"
-	if got := FilterTerminalOutput(overlong); got != "beforeafter" {
+	if got := filterTerminalOutput(overlong); got != "beforeafter" {
 		t.Fatalf("overlong SGR survived filtering: %q", got)
 	}
 }
@@ -150,8 +150,8 @@ func TestTerminalOutputFilterRecoversFromMalformedTerminalStrings(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := FilterTerminalOutput(test.input); got != test.want {
-				t.Fatalf("FilterTerminalOutput() = %q, want %q", got, test.want)
+			if got := filterTerminalOutput(test.input); got != test.want {
+				t.Fatalf("filterTerminalOutput() = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -159,7 +159,7 @@ func TestTerminalOutputFilterRecoversFromMalformedTerminalStrings(t *testing.T) 
 
 func TestTerminalOutputFilterBoundsUnterminatedTerminalStrings(t *testing.T) {
 	input := "before\x1b]" + strings.Repeat("x", maximumTerminalStringBytes) + "VISIBLE"
-	got := FilterTerminalOutput(input)
+	got := filterTerminalOutput(input)
 	if got != "beforeVISIBLE" {
 		t.Fatalf("overlong terminal string swallowed trailing visible text: %q", got)
 	}
@@ -167,16 +167,16 @@ func TestTerminalOutputFilterBoundsUnterminatedTerminalStrings(t *testing.T) {
 }
 
 func TestTerminalOutputFilterEndsWithResetAfterRetainedSGR(t *testing.T) {
-	got := FilterTerminalOutput("\x1b[31mred")
+	got := filterTerminalOutput("\x1b[31mred")
 	if got != "\x1b[31mred\x1b[0m" {
-		t.Fatalf("FilterTerminalOutput() = %q, want retained red followed by reset", got)
+		t.Fatalf("filterTerminalOutput() = %q, want retained red followed by reset", got)
 	}
 }
 
 func TestMarkdownRecoversFromExactUnterminatedEntityAttack(t *testing.T) {
-	got, err := RenderMarkdown(NewGlamourRenderer(true), "&#27;[31mred&#27;]unterminated", 100)
+	got, err := renderMarkdown(newGlamourRenderer(true), "&#27;[31mred&#27;]unterminated", 100)
 	if err != nil {
-		t.Fatalf("RenderMarkdown() error = %v", err)
+		t.Fatalf("renderMarkdown() error = %v", err)
 	}
 	if !strings.Contains(got, "red") {
 		t.Fatalf("rendered attack lost visible content: %q", got)
@@ -198,9 +198,9 @@ func TestMarkdownFiltersControlsSynthesizedByFormatting(t *testing.T) {
 		"~~&**#27;**]52;c;owned&**#7;**~~",
 	}, "\n")
 
-	got, err := RenderMarkdown(NewGlamourRenderer(true), input, 100)
+	got, err := renderMarkdown(newGlamourRenderer(true), input, 100)
 	if err != nil {
-		t.Fatalf("RenderMarkdown() error = %v", err)
+		t.Fatalf("renderMarkdown() error = %v", err)
 	}
 	if !strings.Contains(got, "safe bold") {
 		t.Fatalf("rendered markdown lost ordinary content: %q", got)
@@ -211,9 +211,9 @@ func TestMarkdownFiltersControlsSynthesizedByFormatting(t *testing.T) {
 func TestMarkdownPreservesEntityCodeAndLinkSemantics(t *testing.T) {
 	const link = "https://example.com/docs?a=1&copy;=2"
 	input := "Copyright &copy;. Code `&copy;` and `&#27;`. **bold** [docs](" + link + ")"
-	got, err := RenderMarkdown(NewGlamourRenderer(true), input, 100)
+	got, err := renderMarkdown(newGlamourRenderer(true), input, 100)
 	if err != nil {
-		t.Fatalf("RenderMarkdown() error = %v", err)
+		t.Fatalf("renderMarkdown() error = %v", err)
 	}
 	if strings.Count(got, "©") < 2 || !strings.Contains(got, `\x1b`) {
 		t.Fatalf("rendered entities/code changed semantics: %q", got)
@@ -271,8 +271,8 @@ func assertOnlySGRControls(t *testing.T, rendered string) {
 }
 
 func TestGlamourRendererUsesCachedExplicitBackgroundStyle(t *testing.T) {
-	dark := NewGlamourRenderer(true)
-	light := NewGlamourRenderer(false)
+	dark := newGlamourRenderer(true)
+	light := newGlamourRenderer(false)
 	if dark.styleName != "dark" || light.styleName != "light" {
 		t.Fatalf("style names = %q/%q, want dark/light", dark.styleName, light.styleName)
 	}

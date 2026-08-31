@@ -6,7 +6,6 @@ import (
 
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
-	"github.com/baiyuqing/otto/internal/render"
 )
 
 const terminalInjectionPayload = "safe\x1b]52;c;owned\a\u009b31m\x7f"
@@ -165,9 +164,9 @@ func TestResumePickerSanitizesInjectionInRenderedErrorModesAndPathFallback(t *te
 
 func TestCompactionSecurityExpandedDetailsSanitizeTerminalControlsAndPreserveWhitespace(t *testing.T) {
 	raw := "## Goal\n\tkeep" + terminalInjectionPayload + "\n  exact trailing space  \n"
-	rendered, err := render.RenderMarkdown(rendererFunc(func(text string, _ int) (string, error) { return text, nil }), raw, 80)
+	rendered, err := renderMarkdown(rendererFunc(func(text string, _ int) (string, error) { return text, nil }), raw, 80)
 	if err != nil {
-		t.Fatalf("render.RenderMarkdown() error = %v", err)
+		t.Fatalf("renderMarkdown() error = %v", err)
 	}
 	entry := Entry{Kind: EntryCompaction, Raw: raw, Rendered: rendered, TokensBefore: 258000}
 	expanded := renderCompactionBlock(entry, 80, true)
@@ -184,11 +183,11 @@ func TestCompactionSecurityExpandedDetailsSanitizeTerminalControlsAndPreserveWhi
 }
 
 func TestSingleLineSanitizerEscapesAllLineBreakingControls(t *testing.T) {
-	if got, want := render.EscapeSingleLineText("one\ntwo\rthree\tfour"), `one\x0atwo\x0dthree\x09four`; got != want {
-		t.Fatalf("render.EscapeSingleLineText() = %q, want %q", got, want)
+	if got, want := escapeSingleLineText("one\ntwo\rthree\tfour"), `one\x0atwo\x0dthree\x09four`; got != want {
+		t.Fatalf("escapeSingleLineText() = %q, want %q", got, want)
 	}
-	if got, want := render.EscapePlainText("one\ntwo\tthree"), "one\ntwo\tthree"; got != want {
-		t.Fatalf("render.EscapePlainText() = %q, want multiline content preserved", got)
+	if got, want := escapePlainText("one\ntwo\tthree"), "one\ntwo\tthree"; got != want {
+		t.Fatalf("escapePlainText() = %q, want multiline content preserved", got)
 	}
 }
 

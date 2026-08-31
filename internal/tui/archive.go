@@ -10,7 +10,6 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/app"
-	"github.com/baiyuqing/otto/internal/render"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
@@ -286,7 +285,7 @@ func renderArchivePicker(width, height int, state archivePickerState, spinnerTex
 		title += " · Archiving"
 	case archiveError:
 		if state.errText != "" {
-			title += " · Error: " + render.EscapeSingleLineText(state.errText)
+			title += " · Error: " + escapeSingleLineText(state.errText)
 		}
 	}
 	title = clipSingleLineText(title, innerWidth)

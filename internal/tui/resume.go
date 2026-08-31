@@ -12,7 +12,6 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/app"
-	"github.com/baiyuqing/otto/internal/render"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -358,7 +357,7 @@ func renderResumePicker(width, height int, state resumePickerState, spinnerText 
 		title += " · Resuming"
 	case resumeResumeError:
 		if state.errText != "" {
-			title += " · Error: " + render.EscapeSingleLineText(state.errText)
+			title += " · Error: " + escapeSingleLineText(state.errText)
 		}
 	}
 	title = clipSingleLineText(title, innerWidth)
@@ -432,13 +431,13 @@ func renderResumeSessionRow(info session.SessionInfo, selected bool, width int, 
 
 	metadata := make([]string, 0, 3)
 	if width >= 60 {
-		profileModel := strings.Trim(render.EscapeSingleLineText(info.Profile)+"/"+render.EscapeSingleLineText(info.Model), "/")
+		profileModel := strings.Trim(escapeSingleLineText(info.Profile)+"/"+escapeSingleLineText(info.Model), "/")
 		if profileModel != "" {
 			metadata = append(metadata, ansi.Truncate(profileModel, 18, "…"))
 		}
 	}
 	if width >= 84 && info.Provider != "" {
-		metadata = append(metadata, ansi.Truncate(render.EscapeSingleLineText(info.Provider), 18, "…"))
+		metadata = append(metadata, ansi.Truncate(escapeSingleLineText(info.Provider), 18, "…"))
 	}
 	if width >= 104 {
 		metadata = append(metadata, fmt.Sprintf("%d msgs", max(0, info.MessageCount)))

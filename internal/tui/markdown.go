@@ -1,4 +1,4 @@
-package render
+package tui
 
 import (
 	"errors"
@@ -31,7 +31,7 @@ type GlamourRenderer struct {
 
 var _ MarkdownRenderer = GlamourRenderer{}
 
-func NewGlamourRenderer(darkBackground bool) GlamourRenderer {
+func newGlamourRenderer(darkBackground bool) GlamourRenderer {
 	styleName := glamourstyles.LightStyle
 	if darkBackground {
 		styleName = glamourstyles.DarkStyle
@@ -55,8 +55,8 @@ func (g GlamourRenderer) Render(markdown string, width int) (string, error) {
 	return renderer.Render(markdown)
 }
 
-func RenderMarkdown(renderer MarkdownRenderer, markdown string, width int) (string, error) {
-	safePlainText := EscapePlainText(markdown)
+func renderMarkdown(renderer MarkdownRenderer, markdown string, width int) (string, error) {
+	safePlainText := escapePlainText(markdown)
 	if renderer == nil {
 		return fallbackMarkdown(safePlainText), errNilMarkdownRenderer
 	}
@@ -66,7 +66,7 @@ func RenderMarkdown(renderer MarkdownRenderer, markdown string, width int) (stri
 	}
 	// Goldmark and Glamour can decode character references after the direct-input
 	// sanitizer runs. Trust only the SGR sequences Glamour uses for visual style.
-	return FilterTerminalOutput(strings.TrimSuffix(rendered, "\n")), nil
+	return filterTerminalOutput(strings.TrimSuffix(rendered, "\n")), nil
 }
 
 func markdownWidth(width int) int {
@@ -76,7 +76,7 @@ func markdownWidth(width int) int {
 	return width
 }
 
-// fallbackMarkdown receives plain text already escaped by RenderMarkdown.
+// fallbackMarkdown receives plain text already escaped by renderMarkdown.
 // Keeping sanitization at that boundary avoids double-escaping untrusted input.
 func fallbackMarkdown(safeMarkdown string) string {
 	if safeMarkdown == "" {
@@ -85,11 +85,11 @@ func fallbackMarkdown(safeMarkdown string) string {
 	return safeMarkdown + "\n\n" + markdownFallbackMarker
 }
 
-func EscapePlainText(text string) string {
+func escapePlainText(text string) string {
 	return escapeTextControls(text, true)
 }
 
-func EscapeSingleLineText(text string) string {
+func escapeSingleLineText(text string) string {
 	return escapeTextControls(text, false)
 }
 
@@ -110,7 +110,7 @@ func escapeTextControls(text string, preserveMultilineWhitespace bool) string {
 	return builder.String()
 }
 
-func FilterTerminalOutput(output string) string {
+func filterTerminalOutput(output string) string {
 	var builder strings.Builder
 	builder.Grow(len(output))
 	retainedSGR := false

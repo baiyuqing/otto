@@ -9,9 +9,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/app"
-	"github.com/baiyuqing/otto/internal/command"
 	otmodel "github.com/baiyuqing/otto/internal/model"
-	"github.com/baiyuqing/otto/internal/render"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -91,13 +89,13 @@ func smallTerminalView(width, height int) string {
 }
 
 func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) string {
-	profileModel := strings.Trim(strings.Trim(render.EscapeSingleLineText(info.Profile)+"/"+render.EscapeSingleLineText(info.Model), "/"), " ")
+	profileModel := strings.Trim(strings.Trim(escapeSingleLineText(info.Profile)+"/"+escapeSingleLineText(info.Model), "/"), " ")
 	if profileModel == "" {
 		profileModel = "unknown/unknown"
 	}
 
 	fields := []string{profileModel}
-	if workspace := render.EscapeSingleLineText(footerWorkspace(info.Workspace)); workspace != "" && width >= 72 {
+	if workspace := escapeSingleLineText(footerWorkspace(info.Workspace)); workspace != "" && width >= 72 {
 		fields = append([]string{workspace}, fields...)
 	}
 	if width >= 48 {
@@ -111,10 +109,10 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 		}
 	}
 	if info.SessionID != "" && width >= 60 {
-		fields = append(fields, render.EscapeSingleLineText(info.SessionID))
+		fields = append(fields, escapeSingleLineText(info.SessionID))
 	}
 	if status != "" {
-		fields = append([]string{render.EscapeSingleLineText(status)}, fields...)
+		fields = append([]string{escapeSingleLineText(status)}, fields...)
 	}
 
 	for len(fields) > 1 && lipgloss.Width(strings.Join(fields, " | ")) > max(0, width) {
@@ -199,7 +197,7 @@ func footerWorkspace(workspace string) string {
 	return base
 }
 
-func renderCommandSuggestions(width int, suggestions []command.Command, selected, height int) string {
+func renderCommandSuggestions(width int, suggestions []slashCommand, selected, height int) string {
 	if width <= 0 || height <= 0 || len(suggestions) == 0 {
 		return ""
 	}
@@ -264,10 +262,10 @@ func helpOverlayContent(width, height int) string {
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
 	}
-	commandNames := make([]string, 0, len(command.Commands))
-	for _, c := range command.Commands {
-		full = append(full, c.Name+" "+c.Description)
-		commandNames = append(commandNames, c.Name)
+	commandNames := make([]string, 0, len(slashCommands))
+	for _, command := range slashCommands {
+		full = append(full, command.Name+" "+command.Description)
+		commandNames = append(commandNames, command.Name)
 	}
 	if height-2 >= len(full) {
 		return strings.Join(full, "\n")
@@ -294,7 +292,7 @@ func sessionOverlayContent(info app.Info) string {
 		if value == "" {
 			return
 		}
-		lines = append(lines, fmt.Sprintf("%s: %s", name, render.EscapeSingleLineText(value)))
+		lines = append(lines, fmt.Sprintf("%s: %s", name, escapeSingleLineText(value)))
 	}
 	appendField("ID", info.SessionID)
 	appendField("Path", info.SessionPath)
@@ -355,7 +353,7 @@ func clipSingleLineText(text string, width int) string {
 	if width <= 0 || text == "" {
 		return ""
 	}
-	safe := render.EscapeSingleLineText(text)
+	safe := escapeSingleLineText(text)
 	if ansi.StringWidth(safe) <= width {
 		return safe
 	}

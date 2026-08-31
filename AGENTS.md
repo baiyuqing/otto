@@ -36,6 +36,10 @@ Rules:
 - Keep `bash` unsandboxed, but start it in the selected workspace.
 - Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store. The memory core is currently unwired — do not document it as a user-facing Stage 1 feature until config/tool/frontend wiring lands.
 
+## Working preferences
+
+- Consider cost and efficiency when choosing models: default to the cheapest adequate model for routine work and escalate to a more capable model only when the task requires it.
+
 ## Development isolation
 
 - Use a dedicated Git worktree and development branch for every feature or bug fix. Never implement directly on `main`.

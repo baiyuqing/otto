@@ -104,6 +104,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string, deps runDependencies) int {
+	if len(args) > 0 && args[0] == "memory" {
+		return runMemoryCommand(ctx, args[1:], stdout, stderr, getenv)
+	}
 	if deps.detectTerminal == nil {
 		deps.detectTerminal = detectTerminalIO
 	}
@@ -195,6 +198,24 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
 
+	memoryCfg, err := config.ResolveMemory(configFile, environment, config.Overrides{})
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	memoryService, memoryUserScope, memoryUsable, err := openMemoryService(ctx, memoryCfg, stderr)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	defer func() { _ = memoryService.Close() }()
+	memoryWorkspaceScope, err := workspaceMemoryScope(memoryCfg, workspacePath)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	builder.memoryService = memoryService
+	builder.memoryUsable = memoryUsable
+	builder.memoryUserScope = memoryUserScope
+	builder.memoryWorkspaceScope = memoryWorkspaceScope
+
 	var (
 		metadata        *session.RuntimeMetadata
 		preparedInitial preparedSession
@@ -265,12 +286,15 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		}
 		return runner
 	}
-	controllerOptions := []app.Option{app.WithRuntimeInfo(app.RuntimeInfo{
-		Provider:      runtime.Provider,
-		Profile:       runtime.Profile,
-		Model:         runtime.Model,
-		ContextWindow: runtime.Compaction.ContextWindow,
-	})}
+	controllerOptions := []app.Option{
+		app.WithRuntimeInfo(app.RuntimeInfo{
+			Provider:      runtime.Provider,
+			Profile:       runtime.Profile,
+			Model:         runtime.Model,
+			ContextWindow: runtime.Compaction.ContextWindow,
+		}),
+		app.WithMemory(memoryService),
+	}
 	if !options.noSession {
 		controllerOptions = append(controllerOptions,
 			app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {

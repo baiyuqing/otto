@@ -36,7 +36,7 @@ func TestToolRenderingEscapesNameArgumentsAndOutput(t *testing.T) {
 		ToolOutput: "output-" + terminalInjectionPayload + "\n\tkept",
 		ToolDone:   true,
 	}
-	rendered := renderToolBlock(entry, 80, true)
+	rendered := renderToolBlock(entry, 80, true, false)
 	assertNoRawTerminalControls(t, rendered)
 	if got := strings.Count(rendered, `\x1b]52;c;owned`); got != 3 {
 		t.Fatalf("escaped OSC count = %d, want 3 in %q", got, rendered)

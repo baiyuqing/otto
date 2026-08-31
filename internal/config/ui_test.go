@@ -32,7 +32,7 @@ func TestResolveUIModePrecedence(t *testing.T) {
 
 func TestResolveUIModeRejectsUnknownValue(t *testing.T) {
 	_, err := ResolveUIMode(File{}, map[string]string{"OTTO_UI": "graphical"}, "")
-	if err == nil || !strings.Contains(err.Error(), "auto, inline, tui, repl") {
+	if err == nil || !strings.Contains(err.Error(), "auto, tui, repl") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

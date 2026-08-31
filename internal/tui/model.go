@@ -110,6 +110,7 @@ type Model struct {
 	newSessionGeneration   uint64
 	resume                 resumePickerState
 	archive                archivePickerState
+	memoryGeneration       uint64
 	activeTurnStream       *turnStream
 	activeTurnChannel      <-chan turnEnvelope
 	activeAssistant        int
@@ -252,6 +253,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applySessionResumeResult(msg)
 	case archiveSessionResultMsg:
 		return m.applyArchiveSessionResult(msg)
+	case memoryCommandResultMsg:
+		return m.applyMemoryCommandResult(msg)
 	case ctrlCArmExpiredMsg:
 		if m.ctrlCArmed && msg.generation == m.ctrlCArmGeneration {
 			m.clearCtrlCArm()
@@ -645,7 +648,8 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 	command, argument, ok := parseSlashCommand(value)
-	if !ok || (argument != "" && command.Kind != slashCommandCompact) {
+	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember
+	if !ok || (argument != "" && !argumentAllowed) {
 		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
 	}
@@ -682,6 +686,10 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.startCompaction(argument)
+	case slashCommandMemory:
+		return m.handleMemoryCommand(argument)
+	case slashCommandRemember:
+		return m.handleRememberCommand(argument)
 	case slashCommandExit:
 		if m.running {
 			return m, nil
@@ -1057,6 +1065,13 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 	case agent.EventCompactionStarted, agent.EventCompactionPlanned, agent.EventCompactionCompleted, agent.EventCompactionWarning:
 		if m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent) {
 			m.refreshViewportContent(!m.autoFollow)
+		}
+		return m, waitTurn(stream)
+	case agent.EventMemoryWarning:
+		if event.Err != nil {
+			m.statusText = event.Err.Error()
+		} else {
+			m.statusText = "memory recall warning"
 		}
 		return m, waitTurn(stream)
 	case agent.EventAgentFinished:

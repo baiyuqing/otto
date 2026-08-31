@@ -11,6 +11,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
@@ -43,19 +44,29 @@ func (p *preparedStore) Close() error {
 }
 
 type runtimeBuilder struct {
-	config               config.File
-	environment          map[string]string
-	workspace            *tool.Workspace
-	workspacePath        string
-	sessionRoot          string
-	shell                string
-	noSession            bool
-	stderr               io.Writer
-	deps                 runDependencies
-	prepareSession       func(context.Context, string, string) (preparedSession, error)
-	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
-	buildRunnerOverride  func(session.Session, config.Runtime) (app.Runner, error)
-	runtimeOverrides     config.Overrides
+	config                  config.File
+	environment             map[string]string
+	workspace               *tool.Workspace
+	workspacePath           string
+	sessionRoot             string
+	shell                   string
+	noSession               bool
+	stderr                  io.Writer
+	deps                    runDependencies
+	prepareSession          func(context.Context, string, string) (preparedSession, error)
+	prepareListedSession    func(context.Context, string, string, string) (preparedSession, error)
+	buildRunnerOverride     func(session.Session, config.Runtime) (app.Runner, error)
+	runtimeOverrides        config.Overrides
+	memoryService           memory.Service
+	memoryUsable            bool
+	memoryUserScope         memory.Scope
+	memoryWorkspaceScope    memory.Scope
+	memoryRecallLimit       int
+	memoryRecallTokenBudget int
+	// extraTools is test-only: appended before registry construction so
+	// tests can force tool.NewRegistry to fail (e.g. a duplicate name) and
+	// exercise the memory-binding cleanup path deterministically.
+	extraTools []tool.Tool
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
@@ -97,7 +108,7 @@ func (b runtimeBuilder) resolveSession(metadata session.RuntimeMetadata) (config
 	return runtime, nil
 }
 
-func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runtime) (app.Runner, error) {
+func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session, runtime config.Runtime) (app.Runner, error) {
 	if b.buildRunnerOverride != nil {
 		runner, err := b.buildRunnerOverride(current, runtime)
 		if err != nil {
@@ -108,7 +119,7 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 	if b.workspace == nil {
 		return nil, errors.New("workspace is required")
 	}
-	registry, err := tool.NewRegistry(
+	tools := []tool.Tool{
 		tool.NewReadTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewGrepTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewFindTool(b.workspace, runtime.MaxOutputBytes),
@@ -119,8 +130,30 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 			RemoveEnv:    b.credentialEnvironmentNames(runtime.APIKeyEnv),
 			RedactValues: b.secretValues(&runtime),
 		}),
-	)
+	}
+	var binding memory.Binding
+	if b.memoryUsable {
+		memoryScopes := []memory.Scope{b.memoryUserScope, b.memoryWorkspaceScope}
+		tools = append(tools,
+			tool.NewMemorySearchTool(b.memoryService, memoryScopes, runtime.MaxOutputBytes),
+			tool.NewRememberTool(b.memoryService, b.memoryWorkspaceScope),
+			tool.NewForgetTool(b.memoryService, memoryScopes),
+		)
+		bound, err := b.memoryService.Bind(ctx, memory.BindOptions{
+			Scopes:            memoryScopes,
+			DefaultWriteScope: b.memoryWorkspaceScope,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("bind memory: %w", err)
+		}
+		binding = bound
+	}
+	tools = append(tools, b.extraTools...)
+	registry, err := tool.NewRegistry(tools...)
 	if err != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
 	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
@@ -134,6 +167,9 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 			ReserveTokens:    runtime.Compaction.ReserveTokens,
 			KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
 		},
+		Memory:                  binding,
+		MemoryRecallLimit:       b.memoryRecallLimit,
+		MemoryRecallTokenBudget: b.memoryRecallTokenBudget,
 	}, redactor), nil
 }
 
@@ -163,7 +199,7 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
 
-	runner, err := b.buildRunner(candidate, runtime)
+	runner, err := b.buildRunner(ctx, candidate, runtime)
 	if err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
@@ -208,7 +244,7 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 	if err != nil {
 		return app.SessionReplacement{}, err
 	}
-	runner, err := b.buildRunner(candidate, runtime)
+	runner, err := b.buildRunner(ctx, candidate, runtime)
 	if err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
@@ -380,8 +416,16 @@ func (b runtimeBuilder) credentialEnvironmentNames(runtimeAPIKeyEnv string) []st
 }
 
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
+	return collectSecretValues(b.config, b.environment, runtime)
+}
+
+// collectSecretValues gathers the API keys and URL-embedded secrets known
+// from static config (every profile) and, when provided, a resolved
+// runtime. It has no receiver so callers without a full runtimeBuilder
+// (e.g. the standalone "otto memory" CLI) can build the same list.
+func collectSecretValues(cfg config.File, environment map[string]string, runtime *config.Runtime) []string {
 	seen := make(map[string]struct{})
-	values := make([]string, 0, len(b.config.Profiles)+2)
+	values := make([]string, 0, len(cfg.Profiles)+2)
 	add := func(value string) {
 		if value == "" {
 			return
@@ -392,10 +436,10 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 		seen[value] = struct{}{}
 		values = append(values, value)
 	}
-	add(b.environment["OTTO_API_KEY"])
-	for _, profile := range b.config.Profiles {
+	add(environment["OTTO_API_KEY"])
+	for _, profile := range cfg.Profiles {
 		if profile.APIKeyEnv != "" {
-			add(b.environment[profile.APIKeyEnv])
+			add(environment[profile.APIKeyEnv])
 		}
 		collectURLSecretValues(profile.BaseURL, add)
 	}

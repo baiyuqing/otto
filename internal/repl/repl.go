@@ -231,7 +231,7 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if args != "" {
 			break
 		}
-		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/archive  archive current session and start a new one\n/compact [focus] compact context\n")
+		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/archive  archive current session and start a new one\n/compact [focus] compact context\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n")
 		return false, nil
 	case "exit":
 		if args != "" {
@@ -279,6 +279,10 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 			return false, err
 		}
 		return false, nil
+	case "memory":
+		return r.memoryCommand(ctx, args)
+	case "remember":
+		return r.rememberCommand(ctx, args)
 	}
 	_, _ = fmt.Fprintf(r.stderr, "unknown command: %s\n", command)
 	return false, nil
@@ -343,6 +347,10 @@ func (r *REPL) renderEvent(event agent.Event) bool {
 			r.renderCompaction(*event.Compaction)
 		}
 	case agent.EventCompactionWarning:
+		if event.Err != nil {
+			_, _ = fmt.Fprintln(r.stderr, event.Err)
+		}
+	case agent.EventMemoryWarning:
 		if event.Err != nil {
 			_, _ = fmt.Fprintln(r.stderr, event.Err)
 		}

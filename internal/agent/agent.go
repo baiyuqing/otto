@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/session"
@@ -40,6 +41,12 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 			options.RequestSizer = requestSizer
 		}
 	}
+	if options.MemoryRecallLimit <= 0 {
+		options.MemoryRecallLimit = defaultMemoryRecallLimit
+	}
+	if options.MemoryRecallTokenBudget <= 0 {
+		options.MemoryRecallTokenBudget = defaultMemoryRecallTokenBudget
+	}
 	var redactor *Redactor
 	if len(redactors) > 0 {
 		redactor = redactors[0]
@@ -48,6 +55,14 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 		redactor = NewRedactor(nil)
 	}
 	return &Agent{provider: completionProvider, registry: registry, session: memory, options: options, redactor: redactor}
+}
+
+// Close releases resources held by the agent's memory binding, if any.
+func (a *Agent) Close() error {
+	if a.options.Memory == nil {
+		return nil
+	}
+	return a.options.Memory.Close()
 }
 
 func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) error {
@@ -70,6 +85,19 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 	}
 
 	dispatchState := runDispatchState{}
+	if a.options.Memory != nil {
+		result, err := a.options.Memory.Recall(ctx, memory.RecallRequest{
+			Query:       userText,
+			Limit:       a.options.MemoryRecallLimit,
+			TokenBudget: a.options.MemoryRecallTokenBudget,
+		})
+		if err != nil {
+			a.emit(emit, Event{Type: EventMemoryWarning, Err: err})
+		} else {
+			dispatchState.memoryContext = a.redactor.RedactString(renderMemoryContext(result.Records))
+		}
+	}
+
 	for {
 		response, err := a.dispatchNormalProviderStep(ctx, emit, &dispatchState)
 		if err != nil {
@@ -116,14 +144,25 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 				result = a.registry.Execute(ctx, block.ToolName, cloneArguments(block.Arguments))
 			}
 			result.Content = a.redactor.RedactString(result.Content)
+			if result.PersistedContent != "" {
+				result.PersistedContent = a.redactor.RedactString(result.PersistedContent)
+			}
 			a.emit(emit, Event{Type: EventToolCallFinished, ToolName: block.ToolName, ToolCallID: block.ToolCallID, ToolResult: result})
+			persistedText := result.Content
+			if result.PersistedContent != "" {
+				persistedText = result.PersistedContent
+				if dispatchState.toolResultOverlay == nil {
+					dispatchState.toolResultOverlay = make(map[string]string)
+				}
+				dispatchState.toolResultOverlay[block.ToolCallID] = result.Content
+			}
 			if err := a.session.Append(durabilityCtx, model.Message{
 				ID:        a.options.NewID(),
 				Role:      model.RoleTool,
 				CreatedAt: a.options.Now(),
 				Blocks: []model.Block{{
 					Type:       model.BlockToolResult,
-					Text:       result.Content,
+					Text:       persistedText,
 					ToolCallID: block.ToolCallID,
 					ToolName:   block.ToolName,
 					IsError:    result.IsError,
@@ -143,7 +182,7 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 }
 
 func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event), state *runDispatchState) (provider.Response, error) {
-	request, estimate := a.buildNormalProviderRequest()
+	request, estimate := a.buildNormalProviderRequest(state)
 	softTrigger, hardTrigger, knownLimits := automaticCompactionTriggers(a.options.Compaction)
 
 	if a.options.Compaction.Auto && knownLimits && estimate > softTrigger {
@@ -166,7 +205,7 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 				if err := ctx.Err(); err != nil {
 					return provider.Response{}, err
 				}
-				request, estimate = a.buildNormalProviderRequest()
+				request, estimate = a.buildNormalProviderRequest(state)
 				if estimate > hardTrigger {
 					return provider.Response{}, newAutomaticDispatchError(automaticCompactionStillTooLargeMessage)
 				}
@@ -196,7 +235,7 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 		return provider.Response{}, err
 	}
 
-	retryRequest, retryEstimate := a.buildNormalProviderRequest()
+	retryRequest, retryEstimate := a.buildNormalProviderRequest(state)
 	if _, hardTrigger, knownLimits := automaticCompactionTriggers(a.options.Compaction); knownLimits && retryEstimate > hardTrigger {
 		return provider.Response{}, newAutomaticDispatchError(automaticCompactionStillTooLargeMessage, originalOverflow)
 	}
@@ -207,16 +246,51 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 	return response, err
 }
 
-func (a *Agent) buildNormalProviderRequest() (provider.Request, int) {
+func (a *Agent) buildNormalProviderRequest(state *runDispatchState) (provider.Request, int) {
+	messages := cloneMessages(a.session.Messages())
+	if state != nil {
+		applyToolResultOverlay(messages, state.toolResultOverlay)
+	}
+	if state != nil && state.memoryContext != "" {
+		memoryMessage := model.Message{
+			Role:   model.RoleUser,
+			Blocks: []model.Block{{Type: model.BlockText, Text: state.memoryContext}},
+		}
+		messages = append([]model.Message{memoryMessage}, messages...)
+	}
 	request := provider.Request{
 		Model:        a.options.Model,
 		SystemPrompt: a.options.SystemPrompt,
 		Thinking:     a.options.Thinking,
-		Messages:     cloneMessages(a.session.Messages()),
+		Messages:     messages,
 		Tools:        cloneTools(a.registry.Definitions()),
 	}
 	latest, hasLatest := a.session.LatestCompaction()
 	return request, estimateRequest(request, latest, hasLatest)
+}
+
+// applyToolResultOverlay substitutes the full tool result text held in
+// overlay back into cloned tool-result blocks, in place. messages must
+// already be a deep clone (as returned by cloneMessages) — a.session's
+// stored blocks are never mutated.
+func applyToolResultOverlay(messages []model.Message, overlay map[string]string) {
+	if len(overlay) == 0 {
+		return
+	}
+	for i := range messages {
+		if messages[i].Role != model.RoleTool {
+			continue
+		}
+		for j := range messages[i].Blocks {
+			block := &messages[i].Blocks[j]
+			if block.Type != model.BlockToolResult {
+				continue
+			}
+			if full, ok := overlay[block.ToolCallID]; ok {
+				block.Text = full
+			}
+		}
+	}
 }
 
 func (a *Agent) completeNormalProviderAttempt(ctx context.Context, request provider.Request, emit func(Event)) (provider.Response, bool, error) {

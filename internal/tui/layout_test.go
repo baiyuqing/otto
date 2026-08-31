@@ -12,7 +12,7 @@ import (
 )
 
 func TestResponsiveHelpOverlayDescribesDetailToggle(t *testing.T) {
-	content := helpOverlayContent(100, 20)
+	content := helpOverlayContent(100, 22)
 	if !strings.Contains(content, "toggle details") {
 		t.Fatalf("help overlay = %q, want detail toggle wording", content)
 	}

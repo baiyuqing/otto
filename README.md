@@ -214,28 +214,45 @@ The 272K GPT working boundary is intentional. Otto compacts well before the hard
 
 If a model ID is unknown to Otto, proactive safe-limit automation is disabled because no trustworthy local window is available. Reactive one-shot recovery can still happen after a typed provider overflow. For private deployments, set `context_window` and optionally `compaction_window` on the selected profile to restore deterministic proactive behavior.
 
-## Memory (extensible core)
+## Memory
 
-Otto ships the foundation of an extensible memory subsystem as **internal infrastructure only**; it is not yet wired into the CLI.
+Otto has a local, per-workspace/per-user memory store backed by SQLite/FTS5 (`internal/memory`, `internal/memory/sqlite`). It is enabled by default.
 
-Implemented in this phase:
+Config (`[memory]` in TOML; all keys optional):
 
-- `internal/memory` — neutral contracts (`Scope`, `Record`, `Candidate`, and the `TurnMemory`/`Store`/`Retriever`/`Policy` interfaces), hard limits, validation, content/secret guards, a conservative policy, and a `NullService` for disabled/unavailable degradation.
-- `internal/memory/sqlite` — a secure local SQLite/FTS5 store and bounded retriever behind those contracts, with conditional revisions, opaque pagination, observation idempotency, and strict file-permission/symlink enforcement.
+```toml
+[memory]
+enabled = true          # default true
+backend = "sqlite"      # only supported value
+required = false        # true: fail startup if the store can't open; false: degrade to disabled with a warning
+recall_tokens = 2000
+max_results = 12
+require_encryption = false
 
-Not yet implemented in this phase:
+[memory.sqlite]
+path = "~/.otto/memory/memory.db"   # default when unset
+busy_timeout = "5s"
 
-- No `--memory-*` flags, `[memory]` TOML keys, or standalone `otto memory` commands.
-- No `/memory`-style slash commands in the TUI or REPL.
-- No `memory_search`/`remember`/`forget` agent tools, and no automatic extraction or recall in the agent loop.
-- Nothing in `cmd/otto`, `internal/config`, `internal/tool`, `internal/agent`, or either frontend references the memory core yet.
+[memory.workspace_ids]
+"/canonical/path/to/workspace" = "stable-id"   # keeps records when a workspace moves
+```
 
-The approved design and implementation plan are:
+There are no `--memory-*` CLI flags.
 
-- [`docs/superpowers/specs/2026-08-29-extensible-memory-design.md`](docs/superpowers/specs/2026-08-29-extensible-memory-design.md)
-- [`docs/superpowers/plans/2026-08-29-extensible-memory-core.md`](docs/superpowers/plans/2026-08-29-extensible-memory-core.md)
+What's wired:
 
-Per that design, future wiring will keep recalled memory request-local: it will never be written into Pi session files, compaction summaries, logs, or session metadata.
+- **Recall:** before every turn, Otto searches the store (user and workspace scopes) with the user's message and injects matching records as a request-local, untrusted context block. It is never written to the Pi session JSONL, compaction summaries, or logs. A recall failure emits a warning and the turn continues without memory context.
+- **Agent-facing tools:** `memory_search`, `remember`, `forget` are registered for the model. Writes from these tools always land as **pending candidates** — the record has no effect until a human reviews it with `/memory review <id> accept|reject` (or its rejection).
+- **Human-facing commands** (TUI and REPL): `/memory search <query>`, `/memory forget <id>`, `/memory review <id> accept|reject`, and `/remember [--scope user|workspace] [--kind K] [--key K] <text>`. Unlike the model's tools, `/remember` and `/memory forget` take effect immediately — no review step, since a human typing the command is the review.
+- **Standalone CLI:** `otto memory status` prints whether memory is enabled/usable and its store path; `otto memory forget <id>` deletes a record (tries the user scope, then the workspace scope).
+
+Not yet implemented:
+
+- No automatic extraction — nothing calls `Binding.Observe`; only explicit `remember`/`/remember` writes exist today.
+- No backup/restore/verify (`Maintenance` is a permanent stub) and no multi-process locking beyond SQLite's own.
+- No `otto memory backup|backups|verify|restore` subcommands.
+
+Design reference: [`docs/superpowers/specs/2026-08-29-extensible-memory-design.md`](docs/superpowers/specs/2026-08-29-extensible-memory-design.md).
 
 ## Frontends
 

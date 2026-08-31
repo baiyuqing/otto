@@ -8,13 +8,16 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/sandbox"
+	"golang.org/x/sys/unix"
 )
 
 type Spec struct {
@@ -48,9 +51,8 @@ type process struct {
 	stderr  *ownedPipeReader
 	done    chan struct{}
 
-	mu              sync.Mutex
-	cleanupErr      error
-	terminationSent atomic.Bool
+	mu         sync.Mutex
+	cleanupErr error
 }
 
 type commandFiles struct {
@@ -207,6 +209,10 @@ func (m *Manager) Close() error {
 
 func prepareCommand(spec Spec) (*exec.Cmd, commandFiles, error) {
 	var files commandFiles
+	commandPath, err := resolveExecutable(spec)
+	if err != nil {
+		return nil, files, err
+	}
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {
 		return nil, files, err
@@ -223,7 +229,8 @@ func prepareCommand(spec Spec) (*exec.Cmd, commandFiles, error) {
 		return nil, commandFiles{}, err
 	}
 
-	command := exec.Command(spec.Path, append([]string(nil), spec.Args...)...)
+	command := exec.Command(commandPath, append([]string(nil), spec.Args...)...)
+	command.Args[0] = spec.Path
 	command.Dir = spec.Directory
 	command.Env = make([]string, len(spec.Environment))
 	copy(command.Env, spec.Environment)
@@ -232,6 +239,48 @@ func prepareCommand(spec Spec) (*exec.Cmd, commandFiles, error) {
 	command.Stderr = files.stderrWrite
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return command, files, nil
+}
+
+func resolveExecutable(spec Spec) (string, error) {
+	if strings.ContainsRune(spec.Path, filepath.Separator) {
+		return spec.Path, nil
+	}
+
+	requestPath, found := environmentValue(spec.Environment, "PATH")
+	if !found {
+		return "", sandbox.ErrChildLaunch
+	}
+	base, err := filepath.Abs(spec.Directory)
+	if err != nil {
+		return "", sandbox.ErrChildLaunch
+	}
+	for _, directory := range filepath.SplitList(requestPath) {
+		if directory == "" {
+			directory = "."
+		}
+		if !filepath.IsAbs(directory) {
+			directory = filepath.Join(base, directory)
+		}
+		candidate := filepath.Join(directory, spec.Path)
+		info, statErr := os.Stat(candidate)
+		if statErr != nil || info.IsDir() {
+			continue
+		}
+		if accessErr := unix.Access(candidate, unix.X_OK); accessErr == nil {
+			return candidate, nil
+		}
+	}
+	return "", sandbox.ErrChildLaunch
+}
+
+func environmentValue(environment []string, name string) (string, bool) {
+	prefix := name + "="
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix), true
+		}
+	}
+	return "", false
 }
 
 func closeStartedChildFiles(files commandFiles) error {
@@ -329,17 +378,15 @@ func copyInfrastructureError(err error) error {
 func (m *Manager) terminate(proc *process) error {
 	pid := proc.command.Process.Pid
 	err := m.kill(-pid, syscall.SIGKILL)
-	if err == nil {
-		proc.terminationSent.Store(true)
+	if err == nil || errors.Is(err, syscall.ESRCH) {
 		return nil
 	}
-	if errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-	// Darwin can report EPERM for the final kill after a successful group kill
-	// has already terminated every signalable member and the leader was reaped.
-	if runtime.GOOS == "darwin" && errors.Is(err, syscall.EPERM) && proc.terminationSent.Load() {
-		return nil
+	// Darwin can report EPERM after the leader was reaped. Accept it only when
+	// one deterministic postcondition check proves that the group is absent.
+	if runtime.GOOS == "darwin" && errors.Is(err, syscall.EPERM) {
+		if probeErr := m.kill(-pid, 0); errors.Is(probeErr, syscall.ESRCH) {
+			return nil
+		}
 	}
 	return sandbox.ErrChildTerminate
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,6 +122,75 @@ func TestManagerReportsZeroAndNonzeroExit(t *testing.T) {
 	}
 }
 
+func TestManagerSlashlessExecutableUsesOnlyRequestPATH(t *testing.T) {
+	workspace := t.TempDir()
+	hostBin := t.TempDir()
+	requestBin := filepath.Join(workspace, "request-bin")
+	if err := os.Mkdir(requestBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const executable = "otto-path-contract"
+	writeTestExecutable(t, filepath.Join(hostBin, executable), "host-path-trap")
+	writeTestExecutable(t, filepath.Join(requestBin, executable), "request-path")
+	writeTestExecutable(t, filepath.Join(workspace, executable), "explicit-path")
+	t.Setenv("PATH", hostBin)
+
+	for _, test := range []struct {
+		name        string
+		path        string
+		environment []string
+		wantOutput  string
+		wantLaunch  bool
+	}{
+		{
+			name:        "relative request PATH wins over host PATH",
+			path:        executable,
+			environment: []string{"PATH=request-bin", "LC_ALL=C"},
+			wantOutput:  "request-path",
+		},
+		{
+			name:        "missing request PATH does not fall back to host PATH",
+			path:        executable,
+			environment: []string{"PATH=missing-request-bin", "LC_ALL=C"},
+			wantLaunch:  true,
+		},
+		{
+			name:        "path containing a separator stays explicit",
+			path:        "./" + executable,
+			environment: []string{"PATH=request-bin", "LC_ALL=C"},
+			wantOutput:  "explicit-path",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager := New()
+			t.Cleanup(func() { _ = manager.Close() })
+			var stdout bytes.Buffer
+			result, err := manager.Run(context.Background(), Spec{
+				Path:        test.path,
+				Directory:   workspace,
+				Environment: test.environment,
+				Stdout:      &stdout,
+				Stderr:      io.Discard,
+			})
+			if test.wantLaunch {
+				if !errors.Is(err, sandbox.ErrChildLaunch) || err.Error() != sandbox.ErrChildLaunch.Error() {
+					t.Fatalf("Run() error = %v, want fixed ErrChildLaunch", err)
+				}
+				if stdout.Len() != 0 {
+					t.Fatal("host PATH trap was executed")
+				}
+				return
+			}
+			if err != nil || result.Code != 0 || result.Signaled {
+				t.Fatalf("Run() = (%+v, %v)", result, err)
+			}
+			if got := stdout.String(); got != test.wantOutput {
+				t.Fatalf("stdout = %q, want %q", got, test.wantOutput)
+			}
+		})
+	}
+}
+
 func TestManagerUsesNullStdinAndForwardsBothStreams(t *testing.T) {
 	manager := New()
 	t.Cleanup(func() { _ = manager.Close() })
@@ -180,6 +250,98 @@ func TestManagerDeadlineCancellationTerminatesAndReapsProcessGroup(t *testing.T)
 	assertProcessGoneOnce(t, pid)
 }
 
+func TestManagerDarwinFinalEPERMRequiresAbsentProcessGroup(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin-specific EPERM regression")
+	}
+
+	manager := New()
+	realKill := manager.kill
+	var hookMu sync.Mutex
+	var groupPID int
+	groupKillCalls := 0
+	probeCalls := 0
+	var forcedCleanupErr error
+	manager.kill = func(pid int, signal syscall.Signal) error {
+		hookMu.Lock()
+		defer hookMu.Unlock()
+
+		switch signal {
+		case syscall.SIGKILL:
+			groupKillCalls++
+			if groupPID == 0 {
+				groupPID = pid
+			}
+			switch groupKillCalls {
+			case 1:
+				// Reap the leader while deliberately leaving another group
+				// member alive, then report a successful group signal.
+				return realKill(-pid, signal)
+			case 2:
+				return syscall.EPERM
+			}
+		case 0:
+			probeCalls++
+			err := realKill(pid, 0)
+			if err == nil {
+				forcedCleanupErr = realKill(pid, syscall.SIGKILL)
+			}
+			return err
+		}
+		return realKill(pid, signal)
+	}
+	t.Cleanup(func() {
+		hookMu.Lock()
+		pid := groupPID
+		hookMu.Unlock()
+		if pid != 0 {
+			_ = realKill(pid, syscall.SIGKILL)
+		}
+		_ = manager.Close()
+	})
+
+	workspace := t.TempDir()
+	blocked := makeFIFO(t, workspace, "eperm-blocked")
+	stdout := newPIDWriter()
+	ctx, cancel := context.WithCancel(context.Background())
+	outcome := make(chan runOutcome, 1)
+	go func() {
+		result, err := manager.Run(ctx, Spec{
+			Path:        "/bin/sh",
+			Args:        []string{"-c", `/bin/sh -c 'echo "$$"; exec /bin/cat "$1"' child "$1" & wait`, "parent", blocked},
+			Directory:   workspace,
+			Environment: testEnvironment(),
+			Stdout:      stdout,
+			Stderr:      io.Discard,
+		})
+		outcome <- runOutcome{result: result, err: err}
+	}()
+	descendantPID := awaitPID(t, stdout)
+
+	cancel()
+	completed := awaitRun(t, outcome, "Run after final EPERM")
+	if !errors.Is(completed.err, sandbox.ErrChildTerminate) || !errors.Is(completed.err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want ErrChildTerminate and context.Canceled", completed.err)
+	}
+	if completed.err.Error() != errors.Join(sandbox.ErrChildTerminate, context.Canceled).Error() {
+		t.Fatalf("Run() error = %q, want only fixed identities", completed.err)
+	}
+	assertKilledResult(t, completed.result)
+
+	hookMu.Lock()
+	gotGroupKills := groupKillCalls
+	gotProbes := probeCalls
+	cleanupErr := forcedCleanupErr
+	hookMu.Unlock()
+	if gotGroupKills != 2 || gotProbes != 1 {
+		t.Fatalf("kill sequence = %d SIGKILL calls and %d signal-0 calls, want 2 and 1", gotGroupKills, gotProbes)
+	}
+	if cleanupErr != nil && !errors.Is(cleanupErr, syscall.ESRCH) {
+		t.Fatalf("forced group cleanup error = %v", cleanupErr)
+	}
+	assertProcessGoneOnce(t, descendantPID)
+}
+
 func TestManagerTerminationFailurePreservesCancellationIdentity(t *testing.T) {
 	manager := New()
 	realKill := manager.kill
@@ -202,6 +364,36 @@ func TestManagerTerminationFailurePreservesCancellationIdentity(t *testing.T) {
 	completed := awaitRun(t, outcome, "Run after synthetic termination failure")
 	if !errors.Is(completed.err, sandbox.ErrChildTerminate) || !errors.Is(completed.err, context.Canceled) {
 		t.Fatalf("Run() error = %v, want ErrChildTerminate and context.Canceled", completed.err)
+	}
+	if strings.Contains(completed.err.Error(), synthetic.Error()) {
+		t.Fatalf("Run() exposed raw termination detail: %v", completed.err)
+	}
+	assertKilledResult(t, completed.result)
+	assertProcessGoneOnce(t, pid)
+}
+
+func TestManagerTerminationFailurePreservesDeadlineIdentity(t *testing.T) {
+	manager := New()
+	realKill := manager.kill
+	synthetic := errors.New("synthetic syscall detail")
+	var injectOnce sync.Once
+	manager.kill = func(pid int, signal syscall.Signal) error {
+		err := realKill(pid, signal)
+		injected := false
+		injectOnce.Do(func() { injected = true })
+		if injected {
+			return synthetic
+		}
+		return err
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	outcome, pid := startBlockingDescendant(t, manager, ctx)
+	cancel(context.DeadlineExceeded)
+	completed := awaitRun(t, outcome, "Run after deadline termination failure")
+	if !errors.Is(completed.err, sandbox.ErrChildTerminate) || !errors.Is(completed.err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want ErrChildTerminate and context.DeadlineExceeded", completed.err)
 	}
 	if strings.Contains(completed.err.Error(), synthetic.Error()) {
 		t.Fatalf("Run() exposed raw termination detail: %v", completed.err)
@@ -341,6 +533,14 @@ func startBlockingDescendant(t *testing.T, manager *Manager, ctx context.Context
 		outcome <- runOutcome{result: result, err: err}
 	}()
 	return outcome, awaitPID(t, stdout)
+}
+
+func writeTestExecutable(t *testing.T, path, output string) {
+	t.Helper()
+	content := "#!/bin/sh\nprintf '" + output + "'\n"
+	if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
+		t.Fatalf("write test executable: %v", err)
+	}
 }
 
 func makeFIFO(t *testing.T, directory, name string) string {

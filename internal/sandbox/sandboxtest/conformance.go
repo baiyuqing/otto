@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,113 @@ type Case struct {
 type execution struct {
 	status sandbox.ExitStatus
 	err    error
+}
+
+type contractExecutorFactory struct {
+	testCase     Case
+	fixture      Fixture
+	capabilities sandbox.Capabilities
+}
+
+func newContractExecutorFactory(testCase Case, fixture Fixture, capabilities sandbox.Capabilities) contractExecutorFactory {
+	return contractExecutorFactory{testCase: testCase, fixture: fixture, capabilities: capabilities}
+}
+
+func (f contractExecutorFactory) open(t testing.TB, policy sandbox.Policy) (sandbox.Driver, *sandbox.Executor, Fixture) {
+	return f.openDecorated(t, policy, nil)
+}
+
+func (f contractExecutorFactory) openDecorated(t testing.TB, policy sandbox.Policy, decorate func(sandbox.Driver) sandbox.Driver) (sandbox.Driver, *sandbox.Executor, Fixture) {
+	t.Helper()
+	fixture := f.fixture
+	fixture.Policy = policy
+	base := f.testCase.NewDriver(t, fixture)
+	if isNilDriver(base) {
+		t.Fatal("NewDriver returned nil")
+	}
+	if got := base.Capabilities(); got != f.capabilities {
+		_ = base.Close()
+		t.Fatalf("Driver capabilities changed between constructions: got %+v want %+v", got, f.capabilities)
+	}
+	driver := base
+	if decorate != nil {
+		driver = decorate(base)
+		if isNilDriver(driver) {
+			_ = base.Close()
+			t.Fatal("Driver decorator returned nil")
+		}
+	}
+	executor, err := sandbox.NewExecutor(driver, policy, fixture.Workspace)
+	if err != nil {
+		_ = driver.Close()
+		t.Fatalf("sandbox.NewExecutor() error = %v", err)
+	}
+	t.Cleanup(func() { _ = executor.Close() })
+	return driver, executor, fixture
+}
+
+type closeDrainObservation struct {
+	err           error
+	beforeRelease bool
+}
+
+type closeDrainObserver struct {
+	driver        sandbox.Driver
+	release       <-chan struct{}
+	closeStarted  chan struct{}
+	closeReturned chan closeDrainObservation
+}
+
+func newCloseDrainObserver(driver sandbox.Driver, release <-chan struct{}, closeCallers int) *closeDrainObserver {
+	return &closeDrainObserver{
+		driver:        driver,
+		release:       release,
+		closeStarted:  make(chan struct{}, closeCallers),
+		closeReturned: make(chan closeDrainObservation, closeCallers),
+	}
+}
+
+func (d *closeDrainObserver) ID() sandbox.DriverID { return d.driver.ID() }
+
+func (d *closeDrainObserver) Capabilities() sandbox.Capabilities { return d.driver.Capabilities() }
+
+func (d *closeDrainObserver) Execute(ctx context.Context, request sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+	return d.driver.Execute(ctx, request, streams)
+}
+
+func (d *closeDrainObserver) Close() error {
+	d.closeStarted <- struct{}{}
+	err := d.driver.Close()
+	observation := closeDrainObservation{err: err, beforeRelease: true}
+	select {
+	case <-d.release:
+		observation.beforeRelease = false
+	default:
+	}
+	d.closeReturned <- observation
+	return err
+}
+
+type releaseWriter struct {
+	*synchronizedWriter
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func newReleaseWriter(release <-chan struct{}) *releaseWriter {
+	return &releaseWriter{
+		synchronizedWriter: newSynchronizedWriter(),
+		entered:            make(chan struct{}),
+		release:            release,
+	}
+}
+
+func (w *releaseWriter) Write(data []byte) (int, error) {
+	written, err := w.synchronizedWriter.Write(data)
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return written, err
 }
 
 type synchronizedWriter struct {
@@ -85,28 +193,16 @@ func RunDriverContract(t *testing.T, testCase Case) {
 	if isNilDriver(probe) {
 		t.Fatal("NewDriver returned nil")
 	}
+	t.Cleanup(func() { _ = probe.Close() })
 	capabilities := probe.Capabilities()
 	fixture.Policy = policyForCapabilities(t, capabilities)
 	if err := probe.Close(); err != nil {
 		t.Fatalf("probe Driver.Close() error = %v", err)
 	}
 
+	factory := newContractExecutorFactory(testCase, fixture, capabilities)
 	newExecutor := func(t *testing.T) (sandbox.Driver, *sandbox.Executor) {
-		t.Helper()
-		driver := testCase.NewDriver(t, fixture)
-		if isNilDriver(driver) {
-			t.Fatal("NewDriver returned nil")
-		}
-		if got := driver.Capabilities(); got != capabilities {
-			_ = driver.Close()
-			t.Fatalf("Driver capabilities changed between constructions: got %+v want %+v", got, capabilities)
-		}
-		executor, err := sandbox.NewExecutor(driver, fixture.Policy, fixture.Workspace)
-		if err != nil {
-			_ = driver.Close()
-			t.Fatalf("sandbox.NewExecutor() error = %v", err)
-		}
-		t.Cleanup(func() { _ = executor.Close() })
+		driver, executor, _ := factory.open(t, fixture.Policy)
 		return driver, executor
 	}
 
@@ -135,17 +231,24 @@ func RunDriverContract(t *testing.T, testCase Case) {
 		}
 	})
 
-	t.Run("supplied environment replaces host environment", func(t *testing.T) {
+	t.Run("supplied environment exactly replaces host environment", func(t *testing.T) {
+		t.Setenv("HOME", "/host-only-home")
+		t.Setenv("USER", "host-only-user")
 		t.Setenv("OTTO_SANDBOX_CONFORMANCE_HOST_ONLY", "must-not-reach-child")
 		_, executor := newExecutor(t)
 		var stdout bytes.Buffer
-		request := shellRequest(t, testCase, fixture, `printf '%s|%s' "$SANDBOX_CONFORMANCE_VISIBLE" "${OTTO_SANDBOX_CONFORMANCE_HOST_ONLY-unset}"`)
+		request := testCase.Request(t, fixture, []string{"/usr/bin/env"})
+		for _, entry := range request.Env {
+			if strings.ContainsAny(entry, "\r\n") {
+				t.Fatal("environment fixture contains a newline")
+			}
+		}
 		status, err := executor.Execute(context.Background(), request, sandbox.Streams{Stdout: &stdout, Stderr: io.Discard})
 		if err != nil || status.Code != 0 {
 			t.Fatalf("Execute() = (%+v, %v)", status, err)
 		}
-		if got := stdout.String(); got != "visible-value|unset" {
-			t.Fatalf("child environment output = %q", got)
+		if !environmentDumpMatches(stdout.String(), request.Env) {
+			t.Fatal("complete child environment differs from Request.Env")
 		}
 	})
 
@@ -207,18 +310,28 @@ func RunDriverContract(t *testing.T, testCase Case) {
 	})
 
 	t.Run("driver close drains active work and is idempotent", func(t *testing.T) {
-		driver, executor := newExecutor(t)
-		blocked := makeFIFO(t, fixture.Workspace, "close-blocked")
-		local := fixtureWithEnvironment(fixture, "SANDBOX_CONFORMANCE_BLOCK_FIFO", blocked)
-		stdout := newSynchronizedWriter()
+		const closeCallers = 12
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseExecution := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseExecution()
+
+		var observer *closeDrainObserver
+		driver, executor, local := factory.openDecorated(t, fixture.Policy, func(base sandbox.Driver) sandbox.Driver {
+			observer = newCloseDrainObserver(base, release, closeCallers)
+			return observer
+		})
+		blocked := makeFIFO(t, local.Workspace, "close-blocked")
+		local = fixtureWithEnvironment(local, "SANDBOX_CONFORMANCE_BLOCK_FIFO", blocked)
+		stdout := newReleaseWriter(release)
 		executeResult := make(chan execution, 1)
 		go func() {
 			status, err := executor.Execute(context.Background(), shellRequest(t, testCase, local, `/bin/sh -c 'echo "$$"; exec /bin/cat "$SANDBOX_CONFORMANCE_BLOCK_FIFO"' descendant & wait`), sandbox.Streams{Stdout: stdout, Stderr: io.Discard})
 			executeResult <- execution{status: status, err: err}
 		}()
 		pid := parsePID(t, awaitLine(t, stdout.lines, "close descendant PID"))
+		awaitSignal(t, stdout.entered, "active Execute output barrier")
 
-		const closeCallers = 12
 		start := make(chan struct{})
 		closeResults := make(chan error, closeCallers)
 		for range closeCallers {
@@ -229,17 +342,31 @@ func RunDriverContract(t *testing.T, testCase Case) {
 		}
 		close(start)
 		for range closeCallers {
-			if err := awaitError(t, closeResults, "concurrent Driver.Close"); err != nil {
-				t.Fatalf("Driver.Close() error = %v", err)
-			}
+			awaitSignal(t, observer.closeStarted, "concurrent Driver.Close admission")
 		}
-		completed := awaitExecution(t, executeResult, "execution during Driver.Close")
+		select {
+		case returned := <-observer.closeReturned:
+			t.Fatalf("Driver.Close() returned before active execution release: %v", returned.err)
+		default:
+		}
+
+		releaseExecution()
+		completed := awaitExecution(t, executeResult, "released execution during Driver.Close")
 		if completed.err != nil {
 			t.Fatalf("active Execute() error = %v", completed.err)
 		}
 		assertSignaled(t, completed.status)
 		assertGoneOnce(t, pid)
-		if _, err := executor.Execute(context.Background(), shellRequest(t, testCase, fixture, "exit 0"), discardStreams()); !errors.Is(err, sandbox.ErrClosed) {
+		for range closeCallers {
+			observation := awaitCloseDrainObservation(t, observer.closeReturned)
+			if observation.beforeRelease || observation.err != nil {
+				t.Fatalf("Driver.Close() observation = %+v", observation)
+			}
+			if err := awaitError(t, closeResults, "concurrent Driver.Close"); err != nil {
+				t.Fatalf("Driver.Close() error = %v", err)
+			}
+		}
+		if _, err := executor.Execute(context.Background(), shellRequest(t, testCase, local, "exit 0"), discardStreams()); !errors.Is(err, sandbox.ErrClosed) {
 			t.Fatalf("Execute() after Driver.Close error = %v, want ErrClosed", err)
 		}
 	})
@@ -332,10 +459,18 @@ func RunDriverContract(t *testing.T, testCase Case) {
 		runFilesystemCapabilityChecks(t, testCase, fixture, capabilities, newExecutor)
 	}
 	if capabilities.NetworkAllow {
-		runTCPAllowCheck(t, testCase, fixture, newExecutor)
+		policy, ok := policyForNetworkCapability(capabilities, sandbox.NetworkAllow)
+		if !ok {
+			t.Fatal("Driver advertises NetworkAllow without a matching conformance policy")
+		}
+		runTCPAllowCheck(t, testCase, factory, policy)
 	}
 	if capabilities.NetworkDeny {
-		runTCPDenyCheck(t, testCase, fixture, newExecutor)
+		policy, ok := policyForNetworkCapability(capabilities, sandbox.NetworkDeny)
+		if !ok {
+			t.Fatal("Driver advertises NetworkDeny without a matching conformance policy")
+		}
+		runTCPDenyCheck(t, testCase, factory, policy)
 	}
 	if capabilities.UnixSocketDeny {
 		runUnixDenyCheck(t, testCase, fixture, newExecutor)
@@ -405,7 +540,7 @@ func runFilesystemCapabilityChecks(t *testing.T, testCase Case, fixture Fixture,
 	}
 }
 
-func runTCPAllowCheck(t *testing.T, testCase Case, fixture Fixture, newExecutor func(*testing.T) (sandbox.Driver, *sandbox.Executor)) {
+func runTCPAllowCheck(t *testing.T, testCase Case, factory contractExecutorFactory, policy sandbox.Policy) {
 	t.Helper()
 	t.Run("advertised local TCP allow", func(t *testing.T) {
 		if testCase.TCPClient == nil {
@@ -417,7 +552,7 @@ func runTCPAllowCheck(t *testing.T, testCase Case, fixture Fixture, newExecutor 
 		}
 		defer listener.Close()
 		accepted := acceptOne(listener)
-		_, executor := newExecutor(t)
+		_, executor, fixture := factory.open(t, policy)
 		request := testCase.Request(t, fixture, testCase.TCPClient(t, listener.Addr().String()))
 		status, err := executor.Execute(context.Background(), request, discardStreams())
 		if err != nil || status.Code != 0 {
@@ -429,7 +564,7 @@ func runTCPAllowCheck(t *testing.T, testCase Case, fixture Fixture, newExecutor 
 	})
 }
 
-func runTCPDenyCheck(t *testing.T, testCase Case, fixture Fixture, newExecutor func(*testing.T) (sandbox.Driver, *sandbox.Executor)) {
+func runTCPDenyCheck(t *testing.T, testCase Case, factory contractExecutorFactory, policy sandbox.Policy) {
 	t.Helper()
 	t.Run("advertised local TCP deny", func(t *testing.T) {
 		if testCase.TCPClient == nil {
@@ -440,7 +575,7 @@ func runTCPDenyCheck(t *testing.T, testCase Case, fixture Fixture, newExecutor f
 			t.Fatal(err)
 		}
 		accepted := acceptOne(listener)
-		_, executor := newExecutor(t)
+		_, executor, fixture := factory.open(t, policy)
 		request := testCase.Request(t, fixture, testCase.TCPClient(t, listener.Addr().String()))
 		status, err := executor.Execute(context.Background(), request, discardStreams())
 		if err != nil || status.Code == 0 {
@@ -535,21 +670,36 @@ func newFixture(t *testing.T) Fixture {
 
 func policyForCapabilities(t *testing.T, capabilities sandbox.Capabilities) sandbox.Policy {
 	t.Helper()
-	if capabilities.ReadConfinement && capabilities.WriteConfinement && capabilities.UnixSocketDeny {
-		switch {
-		case capabilities.NetworkAllow:
-			return sandbox.Policy{Filesystem: sandbox.FilesystemWorkspaceWrite, Network: sandbox.NetworkAllow}
-		case capabilities.NetworkDeny:
-			return sandbox.Policy{Filesystem: sandbox.FilesystemWorkspaceWrite, Network: sandbox.NetworkDeny}
-		default:
-			t.Fatal("confining Driver advertises no network capability")
-		}
+	if policy, ok := policyForNetworkCapability(capabilities, sandbox.NetworkAllow); ok {
+		return policy
 	}
-	if capabilities.NetworkAllow {
-		return sandbox.Policy{Filesystem: sandbox.FilesystemUnconfined, Network: sandbox.NetworkAllow}
+	if policy, ok := policyForNetworkCapability(capabilities, sandbox.NetworkDeny); ok {
+		return policy
 	}
 	t.Fatal("Driver capabilities cannot satisfy a conformance policy")
 	return sandbox.Policy{}
+}
+
+func policyForNetworkCapability(capabilities sandbox.Capabilities, network sandbox.NetworkMode) (sandbox.Policy, bool) {
+	confined := capabilities.ReadConfinement && capabilities.WriteConfinement && capabilities.UnixSocketDeny
+	switch network {
+	case sandbox.NetworkAllow:
+		if !capabilities.NetworkAllow {
+			return sandbox.Policy{}, false
+		}
+		filesystem := sandbox.FilesystemUnconfined
+		if confined {
+			filesystem = sandbox.FilesystemWorkspaceWrite
+		}
+		return sandbox.Policy{Filesystem: filesystem, Network: network}, true
+	case sandbox.NetworkDeny:
+		if !capabilities.NetworkDeny || !confined {
+			return sandbox.Policy{}, false
+		}
+		return sandbox.Policy{Filesystem: sandbox.FilesystemWorkspaceWrite, Network: network}, true
+	default:
+		return sandbox.Policy{}, false
+	}
 }
 
 func shellRequest(t testing.TB, testCase Case, fixture Fixture, script string) sandbox.Request {
@@ -561,6 +711,22 @@ func fixtureWithEnvironment(fixture Fixture, name, value string) Fixture {
 	fixture.Environment = append([]string{}, fixture.Environment...)
 	fixture.Environment = append(fixture.Environment, name+"="+value)
 	return fixture
+}
+
+func environmentDumpMatches(dump string, expected []string) bool {
+	if len(expected) == 0 {
+		return dump == ""
+	}
+	for _, entry := range expected {
+		if strings.ContainsAny(entry, "\r\n") {
+			return false
+		}
+	}
+	if !strings.HasSuffix(dump, "\n") {
+		return false
+	}
+	actual := strings.Split(strings.TrimSuffix(dump, "\n"), "\n")
+	return slices.Equal(actual, expected)
 }
 
 func makeFIFO(t *testing.T, directory, name string) string {
@@ -616,6 +782,26 @@ func acceptOne(listener net.Listener) <-chan error {
 		result <- err
 	}()
 	return result
+}
+
+func awaitSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func awaitCloseDrainObservation(t *testing.T, result <-chan closeDrainObservation) closeDrainObservation {
+	t.Helper()
+	select {
+	case observation := <-result:
+		return observation
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Driver.Close observation")
+		return closeDrainObservation{}
+	}
 }
 
 func awaitLine(t *testing.T, lines <-chan string, description string) string {

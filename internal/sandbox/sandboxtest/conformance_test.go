@@ -12,75 +12,118 @@ import (
 	"github.com/baiyuqing/otto/internal/sandbox"
 )
 
-type nonDrainingDriver struct {
-	executeStarted chan struct{}
-	executeRelease chan struct{}
-	closeRelease   chan struct{}
-	startedOnce    sync.Once
+type streamWorkDriver struct {
+	drainClose bool
+	workDone   chan struct{}
+	doneOnce   sync.Once
 }
 
-func (d *nonDrainingDriver) ID() sandbox.DriverID { return "non-draining" }
+func (d *streamWorkDriver) ID() sandbox.DriverID { return "stream-work" }
 
-func (d *nonDrainingDriver) Capabilities() sandbox.Capabilities {
+func (d *streamWorkDriver) Capabilities() sandbox.Capabilities {
 	return sandbox.Capabilities{NetworkAllow: true}
 }
 
-func (d *nonDrainingDriver) Execute(context.Context, sandbox.Request, sandbox.Streams) (sandbox.ExitStatus, error) {
-	d.startedOnce.Do(func() { close(d.executeStarted) })
-	<-d.executeRelease
-	return sandbox.ExitStatus{}, nil
+func (d *streamWorkDriver) Execute(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+	_, err := streams.Stdout.Write([]byte("driver-owned work"))
+	d.doneOnce.Do(func() { close(d.workDone) })
+	return sandbox.ExitStatus{}, err
 }
 
-func (d *nonDrainingDriver) Close() error {
-	<-d.closeRelease
+func (d *streamWorkDriver) Close() error {
+	if d.drainClose {
+		<-d.workDone
+	}
 	return nil
 }
 
-func TestCloseDrainObserverDetectsReturnBeforeExecuteCompletion(t *testing.T) {
-	closeRelease := make(chan struct{})
-	executeRelease := make(chan struct{})
-	var closeReleaseOnce sync.Once
-	var executeReleaseOnce sync.Once
-	releaseClose := func() { closeReleaseOnce.Do(func() { close(closeRelease) }) }
-	releaseExecute := func() { executeReleaseOnce.Do(func() { close(executeRelease) }) }
-	defer releaseClose()
-	defer releaseExecute()
+type testDriverWorkBarrierWriter struct {
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
 
-	base := &nonDrainingDriver{
-		executeStarted: make(chan struct{}),
-		executeRelease: executeRelease,
-		closeRelease:   closeRelease,
-	}
-	observer := newCloseDrainObserver(base, executeRelease, 1)
+func (w *testDriverWorkBarrierWriter) Write(data []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return len(data), nil
+}
+
+func TestCloseDrainObserverDetectsReturnWhileDriverWorkIsBlocked(t *testing.T) {
+	workRelease := make(chan struct{})
+	var workReleaseOnce sync.Once
+	releaseWork := func() { workReleaseOnce.Do(func() { close(workRelease) }) }
+	defer releaseWork()
+
+	base := &streamWorkDriver{workDone: make(chan struct{})}
+	observer := newCloseDrainObserver(base, workRelease, 1)
+	writer := &testDriverWorkBarrierWriter{entered: make(chan struct{}), release: workRelease}
 	executeResult := make(chan execution, 1)
 	go func() {
-		status, err := observer.Execute(context.Background(), sandbox.Request{}, sandbox.Streams{})
+		status, err := observer.Execute(context.Background(), sandbox.Request{}, sandbox.Streams{Stdout: writer})
 		executeResult <- execution{status: status, err: err}
-		observer.observeExecuteCompletion()
 	}()
-	awaitSignal(t, base.executeStarted, "instrumented Execute start")
+	awaitSignal(t, writer.entered, "blocked Driver-owned stream work")
 
 	closeResult := make(chan error, 1)
 	go func() { closeResult <- observer.Close() }()
-	awaitSignal(t, observer.underlyingCloseInvoked, "underlying Close invocation")
-	releaseClose()
+	awaitSignal(t, observer.closeDelegateEntered, "Driver.Close observation delegate entry")
 	observation := awaitCloseDrainObservation(t, observer.closeReturned)
-	if !observation.beforeExecuteCompletion {
-		t.Fatal("observer missed Close returning before active Execute completed")
+	if !observation.returnedWhileDriverWorkBlocked {
+		t.Fatal("observer missed Close returning while Driver-owned work was blocked")
 	}
-	select {
-	case completed := <-executeResult:
-		t.Fatalf("Execute() completed before its deterministic release: %+v", completed)
-	default:
+	if err := awaitError(t, closeResult, "non-draining Close return while Driver work is blocked"); err != nil {
+		t.Fatalf("Close() error = %v", err)
 	}
 
-	releaseExecute()
+	releaseWork()
 	completed := awaitExecution(t, executeResult, "instrumented Execute completion")
 	if completed.err != nil {
 		t.Fatalf("Execute() error = %v", completed.err)
 	}
-	if err := awaitError(t, closeResult, "instrumented Close completion"); err != nil {
+}
+
+func TestCloseDrainObserverAcceptsReturnAfterDriverWorkBeforeCallerAcknowledgment(t *testing.T) {
+	workRelease := make(chan struct{})
+	callerAcknowledge := make(chan struct{})
+	var workReleaseOnce sync.Once
+	var callerAcknowledgeOnce sync.Once
+	releaseWork := func() { workReleaseOnce.Do(func() { close(workRelease) }) }
+	acknowledgeCaller := func() { callerAcknowledgeOnce.Do(func() { close(callerAcknowledge) }) }
+	defer acknowledgeCaller()
+	defer releaseWork()
+
+	base := &streamWorkDriver{drainClose: true, workDone: make(chan struct{})}
+	observer := newCloseDrainObserver(base, workRelease, 1)
+	writer := &testDriverWorkBarrierWriter{entered: make(chan struct{}), release: workRelease}
+	awaitingCallerAcknowledgment := make(chan struct{})
+	executeResult := make(chan execution, 1)
+	go func() {
+		status, err := observer.Execute(context.Background(), sandbox.Request{}, sandbox.Streams{Stdout: writer})
+		close(awaitingCallerAcknowledgment)
+		<-callerAcknowledge
+		executeResult <- execution{status: status, err: err}
+	}()
+	awaitSignal(t, writer.entered, "blocked Driver-owned stream work")
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- observer.Close() }()
+	awaitSignal(t, observer.closeDelegateEntered, "Driver.Close observation delegate entry")
+	releaseWork()
+	awaitSignal(t, awaitingCallerAcknowledgment, "external Execute caller acknowledgment barrier")
+
+	observation := awaitCloseDrainObservation(t, observer.closeReturned)
+	if observation.returnedWhileDriverWorkBlocked || observation.err != nil {
+		t.Fatalf("Close observation after Driver work drained = %+v", observation)
+	}
+	if err := awaitError(t, closeResult, "Close before external caller acknowledgment"); err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+
+	acknowledgeCaller()
+	completed := awaitExecution(t, executeResult, "acknowledged Execute result")
+	if completed.err != nil {
+		t.Fatalf("Execute() error = %v", completed.err)
 	}
 }
 
@@ -94,13 +137,12 @@ func TestDecoratedExecutorCleanupBypassesUndrainedCloseObservation(t *testing.T)
 		capabilities: sandbox.Capabilities{NetworkAllow: true},
 		closed:       make(chan struct{}),
 	}
-	executeReturnRelease := make(chan struct{})
-	close(executeReturnRelease)
-	observer := newCloseDrainObserver(base, executeReturnRelease, observedCloseCallers)
+	driverWorkReleased := make(chan struct{})
+	close(driverWorkReleased)
+	observer := newCloseDrainObserver(base, driverWorkReleased, observedCloseCallers)
 	if _, err := observer.Execute(context.Background(), sandbox.Request{}, sandbox.Streams{}); err != nil {
 		t.Fatalf("observed Execute() error = %v", err)
 	}
-	observer.observeExecuteCompletion()
 	executor, err := sandbox.NewExecutor(observer, sandbox.Policy{
 		Filesystem: sandbox.FilesystemUnconfined,
 		Network:    sandbox.NetworkAllow,
@@ -116,7 +158,7 @@ func TestDecoratedExecutorCleanupBypassesUndrainedCloseObservation(t *testing.T)
 		}
 	}
 	for range observedCloseCallers {
-		awaitSignal(t, observer.underlyingCloseInvoked, "underlying Close invocation")
+		awaitSignal(t, observer.closeDelegateEntered, "Driver.Close observation delegate entry")
 	}
 	if len(observer.closeReturned) != cap(observer.closeReturned) {
 		t.Fatal("test did not fill the undrained Close observation channel")

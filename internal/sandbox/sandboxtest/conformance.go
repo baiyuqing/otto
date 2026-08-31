@@ -98,66 +98,51 @@ func contractExecutorCleanup(base sandbox.Driver, executor *sandbox.Executor, de
 }
 
 type closeDrainObservation struct {
-	err                     error
-	beforeExecuteCompletion bool
+	err                            error
+	returnedWhileDriverWorkBlocked bool
 }
 
-// closeInvocationObserver is the callee beneath closeDrainObserver. Its
-// invocation event therefore proves that the outer Close crossed the delegate
-// call boundary rather than merely reaching a point before that call.
+// closeInvocationObserver is the callee beneath closeDrainObserver. Entering
+// it proves that the outer Close crossed the observation boundary. The return
+// observation is recorded immediately after the wrapped Driver.Close returns.
 type closeInvocationObserver struct {
 	sandbox.Driver
-	invoked                   chan<- struct{}
-	returned                  chan<- closeDrainObservation
-	executeReturnRelease      <-chan struct{}
-	executeCompletionObserved <-chan struct{}
+	entered            chan<- struct{}
+	returned           chan<- closeDrainObservation
+	driverWorkReleased <-chan struct{}
 }
 
 func (d *closeInvocationObserver) Close() error {
-	d.invoked <- struct{}{}
+	d.entered <- struct{}{}
 	err := d.Driver.Close()
 	observation := closeDrainObservation{err: err}
-	// A return while the explicit Execute-return gate remains closed is a
-	// deterministic return-before-completion. Once that gate is released, hold
-	// the observed Close until the caller has itself observed Execute return.
 	select {
-	case <-d.executeCompletionObserved:
+	case <-d.driverWorkReleased:
 	default:
-		select {
-		case <-d.executeReturnRelease:
-			<-d.executeCompletionObserved
-		default:
-			observation.beforeExecuteCompletion = true
-		}
+		observation.returnedWhileDriverWorkBlocked = true
 	}
 	d.returned <- observation
-	<-d.executeCompletionObserved
 	return err
 }
 
 type closeDrainObserver struct {
-	driver                    sandbox.Driver
-	underlyingCloseInvoked    chan struct{}
-	closeReturned             chan closeDrainObservation
-	executeCompletionObserved chan struct{}
-	executeCompletionOnce     sync.Once
+	driver               sandbox.Driver
+	closeDelegateEntered chan struct{}
+	closeReturned        chan closeDrainObservation
 }
 
-func newCloseDrainObserver(driver sandbox.Driver, executeReturnRelease <-chan struct{}, closeCallers int) *closeDrainObserver {
-	underlyingCloseInvoked := make(chan struct{}, closeCallers)
+func newCloseDrainObserver(driver sandbox.Driver, driverWorkReleased <-chan struct{}, closeCallers int) *closeDrainObserver {
+	closeDelegateEntered := make(chan struct{}, closeCallers)
 	closeReturned := make(chan closeDrainObservation, closeCallers)
-	executeCompletionObserved := make(chan struct{})
 	return &closeDrainObserver{
 		driver: &closeInvocationObserver{
-			Driver:                    driver,
-			invoked:                   underlyingCloseInvoked,
-			returned:                  closeReturned,
-			executeReturnRelease:      executeReturnRelease,
-			executeCompletionObserved: executeCompletionObserved,
+			Driver:             driver,
+			entered:            closeDelegateEntered,
+			returned:           closeReturned,
+			driverWorkReleased: driverWorkReleased,
 		},
-		underlyingCloseInvoked:    underlyingCloseInvoked,
-		closeReturned:             closeReturned,
-		executeCompletionObserved: executeCompletionObserved,
+		closeDelegateEntered: closeDelegateEntered,
+		closeReturned:        closeReturned,
 	}
 }
 
@@ -169,40 +154,29 @@ func (d *closeDrainObserver) Execute(ctx context.Context, request sandbox.Reques
 	return d.driver.Execute(ctx, request, streams)
 }
 
-func (d *closeDrainObserver) observeExecuteCompletion() {
-	d.executeCompletionOnce.Do(func() { close(d.executeCompletionObserved) })
-}
-
 func (d *closeDrainObserver) Close() error {
 	return d.driver.Close()
 }
 
-type executeReturnBarrierWriter struct {
+type driverWorkBarrierWriter struct {
 	*synchronizedWriter
-	entered              chan struct{}
-	streamRelease        <-chan struct{}
-	executeReturnBlocked chan struct{}
-	executeReturnRelease <-chan struct{}
-	enteredOnce          sync.Once
-	blockedOnce          sync.Once
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
 }
 
-func newExecuteReturnBarrierWriter(streamRelease, executeReturnRelease <-chan struct{}) *executeReturnBarrierWriter {
-	return &executeReturnBarrierWriter{
-		synchronizedWriter:   newSynchronizedWriter(),
-		entered:              make(chan struct{}),
-		streamRelease:        streamRelease,
-		executeReturnBlocked: make(chan struct{}),
-		executeReturnRelease: executeReturnRelease,
+func newDriverWorkBarrierWriter(release <-chan struct{}) *driverWorkBarrierWriter {
+	return &driverWorkBarrierWriter{
+		synchronizedWriter: newSynchronizedWriter(),
+		entered:            make(chan struct{}),
+		release:            release,
 	}
 }
 
-func (w *executeReturnBarrierWriter) Write(data []byte) (int, error) {
+func (w *driverWorkBarrierWriter) Write(data []byte) (int, error) {
 	written, err := w.synchronizedWriter.Write(data)
-	w.enteredOnce.Do(func() { close(w.entered) })
-	<-w.streamRelease
-	w.blockedOnce.Do(func() { close(w.executeReturnBlocked) })
-	<-w.executeReturnRelease
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
 	return written, err
 }
 
@@ -366,31 +340,33 @@ func RunDriverContract(t *testing.T, testCase Case) {
 
 	t.Run("driver close drains active work and is idempotent", func(t *testing.T) {
 		const closeCallers = 12
-		streamRelease := make(chan struct{})
-		executeReturnRelease := make(chan struct{})
-		var streamReleaseOnce sync.Once
-		var executeReturnReleaseOnce sync.Once
-		releaseStream := func() { streamReleaseOnce.Do(func() { close(streamRelease) }) }
-		releaseExecuteReturn := func() { executeReturnReleaseOnce.Do(func() { close(executeReturnRelease) }) }
-		defer releaseStream()
-		defer releaseExecuteReturn()
+		driverWorkRelease := make(chan struct{})
+		executeResultPublication := make(chan struct{})
+		var driverWorkReleaseOnce sync.Once
+		var executeResultPublicationOnce sync.Once
+		releaseDriverWork := func() { driverWorkReleaseOnce.Do(func() { close(driverWorkRelease) }) }
+		publishExecuteResult := func() { executeResultPublicationOnce.Do(func() { close(executeResultPublication) }) }
+		defer publishExecuteResult()
+		defer releaseDriverWork()
 
 		var observer *closeDrainObserver
 		driver, executor, local := factory.openDecorated(t, fixture.Policy, func(base sandbox.Driver) sandbox.Driver {
-			observer = newCloseDrainObserver(base, executeReturnRelease, closeCallers)
+			observer = newCloseDrainObserver(base, driverWorkRelease, closeCallers)
 			return observer
 		})
 		blocked := makeFIFO(t, local.Workspace, "close-blocked")
 		local = fixtureWithEnvironment(local, "SANDBOX_CONFORMANCE_BLOCK_FIFO", blocked)
-		stdout := newExecuteReturnBarrierWriter(streamRelease, executeReturnRelease)
+		stdout := newDriverWorkBarrierWriter(driverWorkRelease)
+		executeAwaitingPublication := make(chan struct{})
 		executeResult := make(chan execution, 1)
 		go func() {
 			status, err := executor.Execute(context.Background(), shellRequest(t, testCase, local, `echo "$$"; exec /bin/cat "$SANDBOX_CONFORMANCE_BLOCK_FIFO"`), sandbox.Streams{Stdout: stdout, Stderr: io.Discard})
+			close(executeAwaitingPublication)
+			<-executeResultPublication
 			executeResult <- execution{status: status, err: err}
-			observer.observeExecuteCompletion()
 		}()
 		pid := parsePID(t, awaitLine(t, stdout.lines, "close leader PID"))
-		awaitSignal(t, stdout.entered, "active Execute output barrier")
+		awaitSignal(t, stdout.entered, "blocked Driver-owned stream work")
 
 		start := make(chan struct{})
 		closeResults := make(chan error, closeCallers)
@@ -402,33 +378,28 @@ func RunDriverContract(t *testing.T, testCase Case) {
 		}
 		close(start)
 		for range closeCallers {
-			awaitSignal(t, observer.underlyingCloseInvoked, "underlying Driver.Close invocation")
+			awaitSignal(t, observer.closeDelegateEntered, "Driver.Close observation delegate entry")
 		}
 
-		releaseStream()
-		awaitSignal(t, stdout.executeReturnBlocked, "post-stream Execute return barrier")
-		select {
-		case returned := <-observer.closeReturned:
-			t.Fatalf("Driver.Close() returned while active Execute was causally blocked: %v", returned.err)
-		default:
-		}
-
-		releaseExecuteReturn()
-		completed := awaitExecution(t, executeResult, "active Execute completion during Driver.Close")
-		if completed.err != nil {
-			t.Fatalf("active Execute() error = %v", completed.err)
-		}
-		assertSignaled(t, completed.status)
-		assertGoneOnce(t, pid)
+		releaseDriverWork()
 		for range closeCallers {
 			observation := awaitCloseDrainObservation(t, observer.closeReturned)
-			if observation.beforeExecuteCompletion || observation.err != nil {
+			if observation.returnedWhileDriverWorkBlocked || observation.err != nil {
 				t.Fatalf("Driver.Close() observation = %+v", observation)
 			}
 			if err := awaitError(t, closeResults, "concurrent Driver.Close"); err != nil {
 				t.Fatalf("Driver.Close() error = %v", err)
 			}
 		}
+		assertGoneOnce(t, pid)
+		awaitSignal(t, executeAwaitingPublication, "external Execute result-publication barrier")
+
+		publishExecuteResult()
+		completed := awaitExecution(t, executeResult, "active Execute result publication after Driver.Close")
+		if completed.err != nil {
+			t.Fatalf("active Execute() error = %v", completed.err)
+		}
+		assertSignaled(t, completed.status)
 		if err := driver.Close(); err != nil {
 			t.Fatalf("idempotent Driver.Close() error = %v", err)
 		}

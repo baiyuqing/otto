@@ -35,6 +35,14 @@ func openMemoryService(ctx context.Context, cfg config.MemoryRuntime, stderr io.
 		return memory.NewNullService(openErr), memory.Scope{}, false, nil
 	}
 
+	// require_encryption is a security requirement, not an availability
+	// preference: fail startup outright rather than degrading to an
+	// unencrypted store, regardless of cfg.Required.
+	if cfg.RequireEncryption && !components.Capabilities.EncryptionAtRest {
+		_ = components.Store.Close()
+		return nil, memory.Scope{}, false, fmt.Errorf("memory backend %q does not support encryption at rest, but require_encryption is set", cfg.Backend)
+	}
+
 	identity, identityErr := components.Store.Identity(ctx)
 	if identityErr != nil {
 		_ = components.Store.Close()

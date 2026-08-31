@@ -122,6 +122,26 @@ func TestOpenMemoryServiceSuccessReturnsStableUserScope(t *testing.T) {
 	}
 }
 
+func TestOpenMemoryServiceRequireEncryptionFailsWhenBackendCannotSatisfyIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory", "memory.db")
+	cfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", RequireEncryption: true, SQLitePath: path}
+
+	var stderr bytes.Buffer
+	service, _, usable, err := openMemoryService(context.Background(), cfg, &stderr)
+	if err == nil {
+		t.Fatalf("openMemoryService() error = nil, want an error: sqlite does not advertise EncryptionAtRest")
+	}
+	if !strings.Contains(err.Error(), "encrypt") {
+		t.Fatalf("error = %v, want it to mention encryption", err)
+	}
+	if service != nil {
+		t.Fatalf("service = %v, want nil on encryption-requirement failure", service)
+	}
+	if usable {
+		t.Fatalf("usable = true, want false")
+	}
+}
+
 func TestWorkspaceMemoryScopeUsesConfiguredOverride(t *testing.T) {
 	cfg := config.MemoryRuntime{WorkspaceIDs: map[string]string{"/work/otto": "custom-id"}}
 	scope, err := workspaceMemoryScope(cfg, "/work/otto")

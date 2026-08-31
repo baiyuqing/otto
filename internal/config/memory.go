@@ -41,6 +41,20 @@ type MemoryRuntime struct {
 	SQLiteBusyTimeout time.Duration
 }
 
+// homeFromEnv prefers the injected HOME (so callers stay hermetic under
+// test), falling back to the real process environment only when the caller
+// did not supply one.
+func homeFromEnv(env map[string]string) string {
+	if home := env["HOME"]; home != "" {
+		return home
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
+}
+
 func ResolveMemory(file File, env map[string]string, overrides Overrides) (MemoryRuntime, error) {
 	enabled := true
 	if file.Memory.Enabled != nil {
@@ -73,12 +87,11 @@ func ResolveMemory(file File, env map[string]string, overrides Overrides) (Memor
 
 	sqlitePath := file.Memory.SQLite.Path
 	if sqlitePath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
-			sqlitePath = filepath.Join("~", ".otto", "memory", "memory.db")
-		} else {
-			sqlitePath = filepath.Join(home, ".otto", "memory", "memory.db")
+		home := homeFromEnv(env)
+		if home == "" {
+			return MemoryRuntime{}, fmt.Errorf("resolve home directory for default memory sqlite path: $HOME is not defined")
 		}
+		sqlitePath = filepath.Join(home, ".otto", "memory", "memory.db")
 	}
 
 	var busyTimeout time.Duration

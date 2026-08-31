@@ -580,6 +580,7 @@ func loadConfig(options cliOptions, home string) (config.File, error) {
 
 func configEnvironment(file config.File, getenv func(string) string) map[string]string {
 	keys := map[string]struct{}{
+		"HOME":          {},
 		"OTTO_PROVIDER": {},
 		"OTTO_MODEL":    {},
 		"OTTO_API_KEY":  {},

@@ -9,9 +9,8 @@ import (
 
 func TestResolveMemoryDefaults(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
-	t.Setenv("HOME", home)
 
-	runtime, err := ResolveMemory(File{}, nil, Overrides{})
+	runtime, err := ResolveMemory(File{}, map[string]string{"HOME": home}, Overrides{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +25,35 @@ func TestResolveMemoryDefaults(t *testing.T) {
 		runtime.MaxResults != want.MaxResults || runtime.SQLitePath != want.SQLitePath ||
 		runtime.SQLiteBusyTimeout != want.SQLiteBusyTimeout || runtime.WorkspaceIDs != nil {
 		t.Fatalf("ResolveMemory() = %+v, want %+v", runtime, want)
+	}
+}
+
+// TestResolveMemoryDefaultPathUsesInjectedHomeNotProcessEnv guards against
+// ResolveMemory reaching past its env parameter to the real process
+// environment (via os.UserHomeDir) for the default SQLite path, which would
+// make it non-hermetic under test harnesses that inject HOME only through a
+// map (as cmd/otto's tests do) rather than via t.Setenv.
+func TestResolveMemoryDefaultPathUsesInjectedHomeNotProcessEnv(t *testing.T) {
+	realHome := filepath.Join(t.TempDir(), "real-home")
+	t.Setenv("HOME", realHome)
+	injectedHome := filepath.Join(t.TempDir(), "injected-home")
+
+	runtime, err := ResolveMemory(File{}, map[string]string{"HOME": injectedHome}, Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(injectedHome, ".otto", "memory", "memory.db")
+	if runtime.SQLitePath != want {
+		t.Fatalf("SQLitePath = %q, want %q (from injected env, not real process HOME %q)", runtime.SQLitePath, want, realHome)
+	}
+}
+
+func TestResolveMemoryRejectsUnresolvableHome(t *testing.T) {
+	t.Setenv("HOME", "")
+
+	_, err := ResolveMemory(File{}, map[string]string{"HOME": ""}, Overrides{})
+	if err == nil || !strings.Contains(err.Error(), "home") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

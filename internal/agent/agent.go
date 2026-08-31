@@ -151,6 +151,10 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 			persistedText := result.Content
 			if result.PersistedContent != "" {
 				persistedText = result.PersistedContent
+				if dispatchState.toolResultOverlay == nil {
+					dispatchState.toolResultOverlay = make(map[string]string)
+				}
+				dispatchState.toolResultOverlay[block.ToolCallID] = result.Content
 			}
 			if err := a.session.Append(durabilityCtx, model.Message{
 				ID:        a.options.NewID(),
@@ -244,6 +248,9 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 
 func (a *Agent) buildNormalProviderRequest(state *runDispatchState) (provider.Request, int) {
 	messages := cloneMessages(a.session.Messages())
+	if state != nil {
+		applyToolResultOverlay(messages, state.toolResultOverlay)
+	}
 	if state != nil && state.memoryContext != "" {
 		memoryMessage := model.Message{
 			Role:   model.RoleUser,
@@ -260,6 +267,30 @@ func (a *Agent) buildNormalProviderRequest(state *runDispatchState) (provider.Re
 	}
 	latest, hasLatest := a.session.LatestCompaction()
 	return request, estimateRequest(request, latest, hasLatest)
+}
+
+// applyToolResultOverlay substitutes the full tool result text held in
+// overlay back into cloned tool-result blocks, in place. messages must
+// already be a deep clone (as returned by cloneMessages) — a.session's
+// stored blocks are never mutated.
+func applyToolResultOverlay(messages []model.Message, overlay map[string]string) {
+	if len(overlay) == 0 {
+		return
+	}
+	for i := range messages {
+		if messages[i].Role != model.RoleTool {
+			continue
+		}
+		for j := range messages[i].Blocks {
+			block := &messages[i].Blocks[j]
+			if block.Type != model.BlockToolResult {
+				continue
+			}
+			if full, ok := overlay[block.ToolCallID]; ok {
+				block.Text = full
+			}
+		}
+	}
 }
 
 func (a *Agent) completeNormalProviderAttempt(ctx context.Context, request provider.Request, emit func(Event)) (provider.Response, bool, error) {

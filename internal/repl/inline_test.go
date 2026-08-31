@@ -285,6 +285,143 @@ func TestInlineModelCompactCommand(t *testing.T) {
 	}
 }
 
+func TestInlineModelHistoryRecallsPreviousPrompt(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+
+	typeText(&m, "hello")
+	m, _ = updateInline(m, keyEnter())
+	m.running = false // submitting a real prompt sets running=true; not under test here
+
+	m, _ = updateInline(m, keyUp())
+	if got := m.editor.Value(); got != "hello" {
+		t.Fatalf("editor value = %q, want %q", got, "hello")
+	}
+}
+
+func TestInlineModelHistoryCyclesThroughEntries(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+
+	typeText(&m, "first")
+	m, _ = updateInline(m, keyEnter())
+	m.running = false
+	typeText(&m, "second")
+	m, _ = updateInline(m, keyEnter())
+	m.running = false
+
+	m, _ = updateInline(m, keyUp())
+	if got := m.editor.Value(); got != "second" {
+		t.Fatalf("editor value = %q, want %q", got, "second")
+	}
+	m, _ = updateInline(m, keyUp())
+	if got := m.editor.Value(); got != "first" {
+		t.Fatalf("editor value = %q, want %q", got, "first")
+	}
+}
+
+func TestInlineModelHistoryDownReturnsToDraft(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+
+	typeText(&m, "hello")
+	m, _ = updateInline(m, keyEnter())
+	m.running = false
+
+	typeText(&m, "draft")
+	m, _ = updateInline(m, keyUp())
+	if got := m.editor.Value(); got != "hello" {
+		t.Fatalf("editor value = %q, want %q", got, "hello")
+	}
+	m, _ = updateInline(m, keyDown())
+	if got := m.editor.Value(); got != "draft" {
+		t.Fatalf("editor value = %q, want %q", got, "draft")
+	}
+	if m.historyIndex != -1 {
+		t.Fatalf("historyIndex = %d, want -1", m.historyIndex)
+	}
+}
+
+func TestInlineModelHistoryUpOnEmptyHistoryIsNoop(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+
+	m, cmd := updateInline(m, keyUp())
+	if got := m.editor.Value(); got != "" {
+		t.Fatalf("editor value = %q, want empty", got)
+	}
+	if cmd != nil {
+		t.Fatal("expected nil cmd when history is empty")
+	}
+}
+
+func TestInlineModelHistoryExcludesCommands(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+
+	typeText(&m, "/help")
+	m, _ = updateInline(m, keyEnter())
+
+	m, _ = updateInline(m, keyUp())
+	if got := m.editor.Value(); got != "" {
+		t.Fatalf("editor value = %q, want empty (commands should not enter history)", got)
+	}
+}
+
+func TestInlineModelSuggestionsShowOnPartialCommand(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+	typeText(&m, "/he")
+
+	found := false
+	for _, s := range m.suggestions {
+		if s.Name == "/help" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("suggestions = %+v, want /help present", m.suggestions)
+	}
+}
+
+func TestInlineModelTabAcceptsSuggestion(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+	typeText(&m, "/he")
+
+	m, _ = updateInline(m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.editor.Value() != "/help" {
+		t.Fatalf("editor value = %q, want /help", m.editor.Value())
+	}
+	if len(m.suggestions) != 0 {
+		t.Fatalf("suggestions not cleared after accept: %+v", m.suggestions)
+	}
+}
+
+func TestInlineModelEscapeClearsSuggestions(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+	typeText(&m, "/he")
+	if len(m.suggestions) == 0 {
+		t.Fatal("expected suggestions before escape")
+	}
+
+	m, _ = updateInline(m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if len(m.suggestions) != 0 {
+		t.Fatalf("suggestions not cleared after escape: %+v", m.suggestions)
+	}
+}
+
+func TestInlineModelNoSuggestionsForNonCommandText(t *testing.T) {
+	m := newInlineModel(context.Background(), &fakeBackend{})
+	m.width = 80
+	typeText(&m, "hello")
+
+	if len(m.suggestions) != 0 {
+		t.Fatalf("suggestions = %+v, want none", m.suggestions)
+	}
+}
+
 // helpers
 
 func updateInline(m inlineModel, msg tea.Msg) (inlineModel, tea.Cmd) {
@@ -301,6 +438,14 @@ func typeText(m *inlineModel, text string) {
 
 func keyEnter() tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: tea.KeyEnter}
+}
+
+func keyUp() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: tea.KeyUp}
+}
+
+func keyDown() tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: tea.KeyDown}
 }
 
 func ctrlC() tea.KeyPressMsg {

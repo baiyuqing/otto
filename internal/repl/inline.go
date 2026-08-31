@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/command"
 	"github.com/baiyuqing/otto/internal/render"
 	"github.com/baiyuqing/otto/internal/session"
 )
@@ -31,6 +32,13 @@ type inlineModel struct {
 	turnCh    <-chan inlineTurnEnvelope
 	streamBuf string
 	turnErr   error
+
+	history      []string
+	historyIndex int
+	historyDraft string
+
+	suggestions     []command.Command
+	suggestionIndex int
 
 	fatalErr error
 	exitReq  bool
@@ -57,10 +65,11 @@ func newInlineModel(ctx context.Context, backend app.Backend) inlineModel {
 	_ = editor.Focus()
 
 	return inlineModel{
-		rootCtx:  ctx,
-		backend:  backend,
-		editor:   editor,
-		renderer: render.NewGlamourRenderer(true),
+		rootCtx:      ctx,
+		backend:      backend,
+		editor:       editor,
+		renderer:     render.NewGlamourRenderer(true),
+		historyIndex: -1,
 	}
 }
 
@@ -104,17 +113,117 @@ func (m inlineModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	if msg.Key().Code == tea.KeyEnter && msg.Key().Mod == 0 && !m.running {
-		return m.handleSubmit()
-	}
-
 	if m.running {
 		return m, nil
 	}
 
+	if len(m.suggestions) > 0 {
+		switch msg.Key().Code {
+		case tea.KeyUp:
+			m.suggestionIndex = (m.suggestionIndex - 1 + len(m.suggestions)) % len(m.suggestions)
+			return m, nil
+		case tea.KeyDown:
+			m.suggestionIndex = (m.suggestionIndex + 1) % len(m.suggestions)
+			return m, nil
+		case tea.KeyEscape:
+			m.suggestions = nil
+			m.suggestionIndex = 0
+			return m, nil
+		case tea.KeyTab, tea.KeyEnter:
+			if msg.Key().Mod == 0 {
+				return m.acceptSuggestion()
+			}
+		}
+	}
+
+	if msg.Key().Code == tea.KeyEnter && msg.Key().Mod == 0 {
+		return m.handleSubmit()
+	}
+
+	switch msg.Key().Code {
+	case tea.KeyUp:
+		if next, handled := m.handleHistoryUp(); handled {
+			return next, nil
+		}
+	case tea.KeyDown:
+		if next, handled := m.handleHistoryDown(); handled {
+			return next, nil
+		}
+	}
+
 	var cmd tea.Cmd
 	m.editor, cmd = m.editor.Update(msg)
+	m.refreshSuggestions()
 	return m, cmd
+}
+
+// acceptSuggestion completes the editor value to the selected command,
+// appending a trailing space for commands that take an argument.
+func (m inlineModel) acceptSuggestion() (tea.Model, tea.Cmd) {
+	selected := m.suggestions[m.suggestionIndex]
+	value := selected.Name
+	if commandTakesArgs(selected.Kind) {
+		value += " "
+	}
+	m.editor.SetValue(value)
+	m.suggestions = nil
+	m.suggestionIndex = 0
+	return m, nil
+}
+
+func commandTakesArgs(kind command.Kind) bool {
+	switch kind {
+	case command.KindResume, command.KindCompact, command.KindMemory, command.KindRemember:
+		return true
+	default:
+		return false
+	}
+}
+
+// refreshSuggestions recomputes the visible suggestion list from the current
+// editor value, hiding it once the value is already an exact command match.
+func (m *inlineModel) refreshSuggestions() {
+	matches := command.Match(m.editor.Value())
+	if len(matches) == 1 && matches[0].Name == m.editor.Value() {
+		matches = nil
+	}
+	m.suggestions = matches
+	if m.suggestionIndex >= len(m.suggestions) {
+		m.suggestionIndex = 0
+	}
+}
+
+// handleHistoryUp recalls the previous history entry when the cursor is on
+// the editor's first line. It returns handled=false so the key falls through
+// to normal cursor movement otherwise (e.g. multi-line editing, empty history).
+func (m inlineModel) handleHistoryUp() (inlineModel, bool) {
+	if len(m.history) == 0 || m.editor.Line() != 0 {
+		return m, false
+	}
+	if m.historyIndex == -1 {
+		m.historyDraft = m.editor.Value()
+		m.historyIndex = len(m.history) - 1
+	} else if m.historyIndex > 0 {
+		m.historyIndex--
+	}
+	m.editor.SetValue(m.history[m.historyIndex])
+	return m, true
+}
+
+// handleHistoryDown steps forward through history, or restores the saved
+// draft once the newest entry is passed. It is a no-op when not browsing.
+func (m inlineModel) handleHistoryDown() (inlineModel, bool) {
+	if m.historyIndex == -1 {
+		return m, false
+	}
+	if m.historyIndex < len(m.history)-1 {
+		m.historyIndex++
+		m.editor.SetValue(m.history[m.historyIndex])
+	} else {
+		m.historyIndex = -1
+		m.editor.SetValue(m.historyDraft)
+	}
+	return m, true
 }
 
 func (m inlineModel) handleSubmit() (tea.Model, tea.Cmd) {
@@ -123,11 +232,15 @@ func (m inlineModel) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.editor.SetValue("")
+	m.suggestions = nil
+	m.suggestionIndex = 0
 
 	if strings.HasPrefix(value, "/") {
 		return m.handleCommand(value)
 	}
 
+	m.history = append(m.history, value)
+	m.historyIndex = -1
 	return m.startTurn(value)
 }
 
@@ -448,7 +561,23 @@ func (m inlineModel) View() tea.View {
 	if m.running {
 		return tea.NewView("")
 	}
-	return tea.NewView(m.editor.View())
+	content := m.editor.View()
+	if len(m.suggestions) > 0 {
+		content += "\n" + renderInlineSuggestions(m.suggestions, m.suggestionIndex)
+	}
+	return tea.NewView(content)
+}
+
+func renderInlineSuggestions(suggestions []command.Command, selected int) string {
+	lines := make([]string, 0, len(suggestions))
+	for i, c := range suggestions {
+		if i == selected {
+			lines = append(lines, fmt.Sprintf("\x1b[1m> %-10s %s\x1b[0m", c.Name, c.Description))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("  %-10s %s", c.Name, c.Description))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // RunInline starts the interactive inline REPL using Bubble Tea without alt screen.

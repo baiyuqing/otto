@@ -36,9 +36,10 @@ type interruptSubscription struct {
 type frontendKind string
 
 const (
-	frontendTUI  frontendKind = "tui"
-	frontendREPL frontendKind = "repl"
-	frontendOnce frontendKind = "once"
+	frontendTUI    frontendKind = "tui"
+	frontendInline frontendKind = "inline"
+	frontendREPL   frontendKind = "repl"
+	frontendOnce   frontendKind = "once"
 )
 
 type terminalDetector func(io.Reader, io.Writer) bool
@@ -364,6 +365,8 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 
 	var runErr error
 	switch frontend {
+	case frontendInline:
+		runErr = repl.RunInline(processCtx, stdin, stdout, controller)
 	case frontendTUI:
 		runErr = deps.runTUI(processCtx, stdin, stdout, controller)
 	case frontendOnce:
@@ -400,8 +403,8 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err := closeController(); err != nil {
 		return fail(stderr, "close session: %v", err)
 	}
-	if frontend == frontendTUI && errors.Is(runErr, session.ErrFatalPersistence) {
-		return fail(stderr, "TUI: %v", runErr)
+	if errors.Is(runErr, session.ErrFatalPersistence) {
+		return fail(stderr, "%v", runErr)
 	}
 	if processCanceledBeforeFrontendExit || frontendCanceled {
 		return 130
@@ -414,10 +417,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "%v", runErr)
 	}
 	if runErr != nil {
-		if frontend == frontendTUI {
-			return fail(stderr, "TUI: %v", runErr)
-		}
-		return fail(stderr, "REPL: %v", runErr)
+		return fail(stderr, "%v", runErr)
 	}
 	return 0
 }
@@ -528,7 +528,7 @@ Options:
   --model NAME           model override
   --thinking LEVEL       model thinking effort: low, medium, high, xhigh, or max
   --approve PROMPT       run PROMPT (or @FILE) without interaction and exit
-  --ui MODE              frontend mode: auto, tui, or repl
+  --ui MODE              frontend mode: auto, inline, tui, or repl
   --shell-timeout D      shell command timeout
   --max-output-bytes N   maximum tool output bytes
   --no-session           use an in-memory session
@@ -620,9 +620,14 @@ func selectFrontend(mode config.UIMode, input io.Reader, output io.Writer, detec
 	switch mode {
 	case config.UIAuto:
 		if detect(input, output) {
-			return frontendTUI, nil
+			return frontendInline, nil
 		}
 		return frontendREPL, nil
+	case config.UIInline:
+		if detect(input, output) {
+			return frontendInline, nil
+		}
+		return "", errors.New("--ui inline requires terminal stdin and stdout; use --ui repl for redirected input")
 	case config.UITUI:
 		if detect(input, output) {
 			return frontendTUI, nil

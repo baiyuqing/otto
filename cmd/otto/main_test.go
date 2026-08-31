@@ -1913,3 +1913,41 @@ func writeSSE(w http.ResponseWriter, chunk string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
 }
+
+func TestSelectFrontend(t *testing.T) {
+	tty := func(io.Reader, io.Writer) bool { return true }
+	noTTY := func(io.Reader, io.Writer) bool { return false }
+
+	tests := []struct {
+		name    string
+		mode    config.UIMode
+		detect  terminalDetector
+		want    frontendKind
+		wantErr bool
+	}{
+		{name: "auto+tty", mode: config.UIAuto, detect: tty, want: frontendInline},
+		{name: "auto+notty", mode: config.UIAuto, detect: noTTY, want: frontendREPL},
+		{name: "inline+tty", mode: config.UIInline, detect: tty, want: frontendInline},
+		{name: "inline+notty", mode: config.UIInline, detect: noTTY, wantErr: true},
+		{name: "tui+tty", mode: config.UITUI, detect: tty, want: frontendTUI},
+		{name: "tui+notty", mode: config.UITUI, detect: noTTY, wantErr: true},
+		{name: "repl", mode: config.UIRepl, detect: tty, want: frontendREPL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := selectFrontend(tt.mode, nil, nil, tt.detect)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

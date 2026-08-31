@@ -18,7 +18,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/command"
 	otmodel "github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/render"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -49,7 +51,7 @@ func (realClock) After(d time.Duration) <-chan time.Time {
 
 type Option func(*Model)
 
-func WithRenderer(renderer MarkdownRenderer) Option {
+func WithRenderer(renderer render.MarkdownRenderer) Option {
 	return func(model *Model) {
 		model.renderer = renderer
 		model.rendererInjected = true
@@ -92,7 +94,7 @@ type Model struct {
 	expandedDetails        bool
 	overlay                overlayKind
 	autoFollow             bool
-	renderer               MarkdownRenderer
+	renderer               render.MarkdownRenderer
 	rendererInjected       bool
 	darkBackground         bool
 	clock                  Clock
@@ -168,7 +170,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 		expandedDetails:    false,
 		autoFollow:         true,
 		darkBackground:     true,
-		renderer:           newGlamourRenderer(true),
+		renderer:           render.NewGlamourRenderer(true),
 		clock:              realClock{},
 		operationCleanup:   newOperationCleanup(),
 		activeAssistant:    -1,
@@ -194,7 +196,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		m.darkBackground = msg.IsDark()
 		if !m.rendererInjected {
-			m.renderer = newGlamourRenderer(m.darkBackground)
+			m.renderer = render.NewGlamourRenderer(m.darkBackground)
 			m.invalidateMarkdownRenders()
 			m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		}
@@ -456,11 +458,11 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 	return m.updateComponents(msg, previousYOffset, previousEditorHeight, viewportBefore)
 }
 
-func (m Model) commandSuggestions() []slashCommand {
+func (m Model) commandSuggestions() []command.Command {
 	if m.overlay != overlayNone {
 		return nil
 	}
-	return matchingSlashCommands(m.editor.Value())
+	return command.Match(m.editor.Value())
 }
 
 func (m Model) handleCommandSuggestionKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
@@ -647,24 +649,24 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
-	command, argument, ok := parseSlashCommand(value)
-	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember
+	cmd, argument, ok := command.Parse(value)
+	argumentAllowed := cmd.Kind == command.KindCompact || cmd.Kind == command.KindMemory || cmd.Kind == command.KindRemember
 	if !ok || (argument != "" && !argumentAllowed) {
 		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
 	}
-	switch command.Kind {
-	case slashCommandHelp:
+	switch cmd.Kind {
+	case command.KindHelp:
 		m.clearEditor()
 		m.overlay = overlayHelp
 		m.statusText = ""
 		return m, nil
-	case slashCommandSession:
+	case command.KindSession:
 		m.clearEditor()
 		m.overlay = overlaySession
 		m.statusText = ""
 		return m, nil
-	case slashCommandNew:
+	case command.KindNew:
 		if m.running {
 			m.statusText = app.ErrPromptActive.Error()
 			return m, nil
@@ -676,21 +678,21 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 		m.newSessionPending = true
 		m.statusText = ""
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
-	case slashCommandResume:
+	case command.KindResume:
 		return m.handleResumeCommand()
-	case slashCommandArchive:
+	case command.KindArchive:
 		return m.handleArchiveCommand()
-	case slashCommandCompact:
+	case command.KindCompact:
 		if m.running || m.newSessionPending {
 			m.statusText = app.ErrPromptActive.Error()
 			return m, nil
 		}
 		return m.startCompaction(argument)
-	case slashCommandMemory:
+	case command.KindMemory:
 		return m.handleMemoryCommand(argument)
-	case slashCommandRemember:
+	case command.KindRemember:
 		return m.handleRememberCommand(argument)
-	case slashCommandExit:
+	case command.KindExit:
 		if m.running {
 			return m, nil
 		}
@@ -1521,7 +1523,7 @@ func (m *Model) renderEntryAt(index int, width int) {
 		if entry.RenderWidth == renderWidth && (entry.Rendered != "" || entry.Raw == "") {
 			return
 		}
-		rendered, _ := renderMarkdown(m.renderer, entry.Raw, renderWidth)
+		rendered, _ := render.RenderMarkdown(m.renderer, entry.Raw, renderWidth)
 		entry.Rendered = rendered
 		entry.RenderWidth = renderWidth
 	case EntryTool:
@@ -1530,7 +1532,7 @@ func (m *Model) renderEntryAt(index int, width int) {
 		if entry.RenderWidth == width && (entry.Rendered != "" || entry.Raw == "") {
 			return
 		}
-		entry.Rendered = escapePlainText(entry.Raw)
+		entry.Rendered = render.EscapePlainText(entry.Raw)
 		entry.RenderWidth = width
 	}
 }
@@ -1644,7 +1646,7 @@ func renderCompactionBlock(entry Entry, width int, expanded bool) string {
 }
 
 func renderToolBlock(entry Entry, width int, expanded bool) string {
-	name := escapeSingleLineText(entry.ToolName)
+	name := render.EscapeSingleLineText(entry.ToolName)
 	if name == "" {
 		name = "tool"
 	}
@@ -1655,10 +1657,10 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	if entry.ToolError {
 		status = "error"
 	}
-	args := escapePlainText(entry.ToolArgs)
+	args := render.EscapePlainText(entry.ToolArgs)
 	preview := toolArgumentPreview(entry.ToolName, entry.ToolArgs)
 	if entry.ToolError && entry.ToolOutput != "" {
-		preview += " — " + strings.Join(strings.Fields(escapePlainText(entry.ToolOutput)), " ")
+		preview += " — " + strings.Join(strings.Fields(render.EscapePlainText(entry.ToolOutput)), " ")
 	}
 	summary := renderToolSummary(name, preview, status, max(1, min(118, width-2)))
 	if !expanded {
@@ -1668,7 +1670,7 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	if args != "" {
 		lines = append(lines, "", "Arguments:", args)
 	}
-	if output := escapePlainText(entry.ToolOutput); output != "" {
+	if output := render.EscapePlainText(entry.ToolOutput); output != "" {
 		lines = append(lines, "", "Output:", output)
 	}
 	return strings.Join(lines, "\n")
@@ -1680,10 +1682,10 @@ func toolArgumentPreview(name, raw string) string {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal([]byte(raw), &args) == nil && args.Command != "" {
-			return escapePlainText(args.Command)
+			return render.EscapePlainText(args.Command)
 		}
 	}
-	return escapePlainText(raw)
+	return render.EscapePlainText(raw)
 }
 
 func renderToolSummary(name, args, status string, width int) string {

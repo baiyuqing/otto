@@ -23,15 +23,17 @@ type fakeDriver struct {
 	closedForCalls bool
 	closeErr       error
 
-	started      chan struct{}
-	release      chan struct{}
-	closeStarted chan struct{}
-	closeRelease chan struct{}
-	closed       chan struct{}
+	started         chan struct{}
+	release         chan struct{}
+	executeFinished chan struct{}
+	closeStarted    chan struct{}
+	closeRelease    chan struct{}
+	closed          chan struct{}
 
-	startedOnce      sync.Once
-	closeStartedOnce sync.Once
-	closedOnce       sync.Once
+	startedOnce         sync.Once
+	executeFinishedOnce sync.Once
+	closeStartedOnce    sync.Once
+	closedOnce          sync.Once
 }
 
 func newFakeDriver() *fakeDriver {
@@ -44,9 +46,10 @@ func newFakeDriver() *fakeDriver {
 			NetworkAllow:     true,
 			UnixSocketDeny:   true,
 		},
-		started:      make(chan struct{}),
-		closeStarted: make(chan struct{}),
-		closed:       make(chan struct{}),
+		started:         make(chan struct{}),
+		executeFinished: make(chan struct{}),
+		closeStarted:    make(chan struct{}),
+		closed:          make(chan struct{}),
 	}
 }
 
@@ -55,9 +58,11 @@ func (d *fakeDriver) ID() DriverID { return d.id }
 func (d *fakeDriver) Capabilities() Capabilities { return d.caps }
 
 func (d *fakeDriver) Execute(ctx context.Context, request Request, _ Streams) (ExitStatus, error) {
+	defer d.executeFinishedOnce.Do(func() { close(d.executeFinished) })
+
 	d.mu.Lock()
 	d.executeCalls++
-	d.requests = append(d.requests, request)
+	d.requests = append(d.requests, request.Clone())
 	release := d.release
 	d.mu.Unlock()
 
@@ -110,6 +115,22 @@ func (*nilDriver) Close() error { return nil }
 type nilWriter struct{}
 
 func (*nilWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestFakeDriverRecordsClonedRequest(t *testing.T) {
+	driver := newFakeDriver()
+	request := Request{Argv: []string{"original"}, Env: []string{"NAME=original"}}
+
+	if _, err := driver.Execute(context.Background(), request, Streams{}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	request.Argv[0] = "mutated"
+	request.Env[0] = "NAME=mutated"
+
+	recorded, _, _ := driver.snapshot()
+	if recorded[0].Argv[0] != "original" || recorded[0].Env[0] != "NAME=original" {
+		t.Fatalf("recorded request retained caller storage: Argv=%q Env=%q", recorded[0].Argv, recorded[0].Env)
+	}
+}
 
 func TestNewExecutorRejectsNilAndTypedNilDriver(t *testing.T) {
 	workspace := t.TempDir()
@@ -322,11 +343,12 @@ func TestExecutorRejectsNoncanonicalOrEscapedDirectory(t *testing.T) {
 }
 
 func TestExecutorRejectsMalformedOrDuplicateEnvironment(t *testing.T) {
-	_, executor, workspace := newTestExecutor(t)
+	driver, executor, workspace := newTestExecutor(t)
 	for _, test := range []struct {
 		name string
 		env  []string
 	}{
+		{name: "nil environment", env: nil},
 		{name: "missing equals", env: []string{"NAME"}},
 		{name: "empty name", env: []string{"=value"}},
 		{name: "invalid name", env: []string{"BAD-NAME=value"}},
@@ -344,6 +366,21 @@ func TestExecutorRejectsMalformedOrDuplicateEnvironment(t *testing.T) {
 	}
 
 	request := validRequest(workspace)
+	request.Env = make([]string, 0)
+	if _, err := executor.Execute(context.Background(), request, validStreams()); err != nil {
+		t.Fatalf("Execute(explicit empty environment) error = %v", err)
+	}
+	recorded, _, _ := driver.snapshot()
+	if recorded[len(recorded)-1].Env == nil {
+		t.Fatal("Driver request environment = nil, want explicit empty environment")
+	}
+
+	clone := request.Clone()
+	if clone.Env == nil {
+		t.Fatal("Request.Clone() environment = nil, want explicit empty environment")
+	}
+
+	request = validRequest(workspace)
 	request.Argv = []string{"sh", "bad\x00argument"}
 	if _, err := executor.Execute(context.Background(), request, validStreams()); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("Execute(NUL argument) error = %v, want ErrInvalidRequest", err)
@@ -435,37 +472,42 @@ func TestExecutorCloseIsConcurrentAndIdempotent(t *testing.T) {
 
 func TestExecutorExecuteRacingCloseNeverRunsAfterClose(t *testing.T) {
 	driver, executor, workspace := newTestExecutor(t)
-	driver.closeRelease = make(chan struct{})
+	driver.release = make(chan struct{})
+	driver.closeRelease = driver.executeFinished
+	var releaseOnce sync.Once
+	releaseExecute := func() { releaseOnce.Do(func() { close(driver.release) }) }
+	defer releaseExecute()
+
+	executeResult := make(chan error, 1)
+	go func() {
+		_, err := executor.Execute(context.Background(), validRequest(workspace), validStreams())
+		executeResult <- err
+	}()
+	awaitSignal(t, driver.started, "Driver.Execute start")
+
 	closeResult := make(chan error, 1)
 	go func() { closeResult <- executor.Close() }()
-	awaitSignal(t, driver.closeStarted, "Driver.Close start")
+	awaitSignal(t, driver.closeStarted, "Driver.Close start while Execute is active")
 
-	const callers = 32
-	var wg sync.WaitGroup
-	errs := make(chan error, callers)
-	for range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, err := executor.Execute(context.Background(), validRequest(workspace), validStreams())
-			errs <- err
-		}()
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close() returned before Driver.Execute drained: %v", err)
+	default:
 	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if !errors.Is(err, ErrClosed) {
-			t.Fatalf("Execute() error = %v, want ErrClosed", err)
-		}
+	if _, err := executor.Execute(context.Background(), validRequest(workspace), validStreams()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Execute() during close error = %v, want ErrClosed", err)
 	}
 	_, executeCalls, _ := driver.snapshot()
-	if executeCalls != 0 {
-		t.Fatalf("Driver.Execute() calls after close began = %d, want 0", executeCalls)
+	if executeCalls != 1 {
+		t.Fatalf("Driver.Execute() calls = %d, want only the admitted active call", executeCalls)
 	}
 
-	close(driver.closeRelease)
-	if err := <-closeResult; err != nil {
-		t.Fatalf("Close() error = %v", err)
+	releaseExecute()
+	awaitErrorResult(t, executeResult, nil, "active Execute completion")
+	awaitErrorResult(t, closeResult, nil, "Close completion after active Execute drained")
+
+	if _, err := executor.Execute(context.Background(), validRequest(workspace), validStreams()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Execute() after close error = %v, want ErrClosed", err)
 	}
 	select {
 	case <-driver.closed:
@@ -505,6 +547,21 @@ func awaitSignal(t *testing.T, signal <-chan struct{}, description string) {
 	t.Helper()
 	select {
 	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func awaitErrorResult(t *testing.T, result <-chan error, want error, description string) {
+	t.Helper()
+	select {
+	case err := <-result:
+		if want == nil && err != nil {
+			t.Fatalf("%s error = %v, want nil", description, err)
+		}
+		if want != nil && !errors.Is(err, want) {
+			t.Fatalf("%s error = %v, want %v", description, err, want)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timed out waiting for %s", description)
 	}

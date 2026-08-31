@@ -176,6 +176,9 @@ func canonicalDirectory(path string) (string, error) {
 }
 
 func validEnvironment(environment []string) bool {
+	if environment == nil {
+		return false
+	}
 	names := make(map[string]struct{}, len(environment))
 	for _, entry := range environment {
 		if strings.IndexByte(entry, 0) >= 0 {

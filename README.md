@@ -8,6 +8,8 @@ Otto is a minimal macOS coding agent written in Go.
 
 Stage 1 ships adaptive frontends (a full-screen Charmbracelet TUI or a line-oriented REPL), append-only JSONL sessions, manual and automatic context compaction, workspace-bound file tools, an unsandboxed `bash` tool, TOML profiles, and an OpenAI-compatible Chat Completions provider.
 
+For the full usage reference, see the [Otto user manual](docs/user-manual.md).
+
 ## Stage 1 status
 
 ### Included
@@ -198,6 +200,29 @@ Important boundaries:
 The 272K GPT working boundary is intentional. Otto compacts well before the hard ceiling to keep regular turns in a cost-aware range. A checkpoint also changes the prompt prefix, so provider prompt-cache hits can reset once immediately after compaction.
 
 If a model ID is unknown to Otto, proactive safe-limit automation is disabled because no trustworthy local window is available. Reactive one-shot recovery can still happen after a typed provider overflow. For private deployments, set `context_window` and optionally `compaction_window` on the selected profile to restore deterministic proactive behavior.
+
+## Memory (extensible core)
+
+Otto ships the foundation of an extensible memory subsystem as **internal infrastructure only**; it is not yet wired into the CLI.
+
+Implemented in this phase:
+
+- `internal/memory` — neutral contracts (`Scope`, `Record`, `Candidate`, and the `TurnMemory`/`Store`/`Retriever`/`Policy` interfaces), hard limits, validation, content/secret guards, a conservative policy, and a `NullService` for disabled/unavailable degradation.
+- `internal/memory/sqlite` — a secure local SQLite/FTS5 store and bounded retriever behind those contracts, with conditional revisions, opaque pagination, observation idempotency, and strict file-permission/symlink enforcement.
+
+Not yet implemented in this phase:
+
+- No `--memory-*` flags, `[memory]` TOML keys, or standalone `otto memory` commands.
+- No `/memory`-style slash commands in the TUI or REPL.
+- No `memory_search`/`remember`/`forget` agent tools, and no automatic extraction or recall in the agent loop.
+- Nothing in `cmd/otto`, `internal/config`, `internal/tool`, `internal/agent`, or either frontend references the memory core yet.
+
+The approved design and implementation plan are:
+
+- [`docs/superpowers/specs/2026-08-29-extensible-memory-design.md`](docs/superpowers/specs/2026-08-29-extensible-memory-design.md)
+- [`docs/superpowers/plans/2026-08-29-extensible-memory-core.md`](docs/superpowers/plans/2026-08-29-extensible-memory-core.md)
+
+Per that design, future wiring will keep recalled memory request-local: it will never be written into Pi session files, compaction summaries, logs, or session metadata.
 
 ## Frontends
 

@@ -276,7 +276,7 @@ func helpOverlayContent(width, height int) string {
 		"Ctrl+O | PgUp/PgDn | Home/End",
 		"Esc close | Ctrl+C cancel/clear/quit",
 	}
-	const commandsPerLine = 4
+	const commandsPerLine = 5
 	for len(commandNames) > 0 {
 		count := min(commandsPerLine, len(commandNames))
 		compact = append(compact, strings.Join(commandNames[:count], " "))

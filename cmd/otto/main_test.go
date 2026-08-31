@@ -1259,7 +1259,7 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 			for _, item := range payload.Tools {
 				names = append(names, item.Function.Name)
 			}
-			if !reflect.DeepEqual(names, []string{"read", "grep", "find", "ls", "write", "edit", "bash"}) {
+			if !reflect.DeepEqual(names, []string{"read", "grep", "find", "ls", "write", "edit", "bash", "memory_search", "remember", "forget"}) {
 				t.Errorf("tool names = %v", names)
 			}
 			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write","arguments":"{\"path\":\"created.txt\",\"content\":\"hello\"}"}}]},"finish_reason":"tool_calls"}]}`)

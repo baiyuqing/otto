@@ -1561,7 +1561,7 @@ func (m Model) transcriptContent(width int) string {
 				blocks = append(blocks, renderMessageBlock("Otto", ""))
 			}
 			if entry.Kind == EntryTool {
-				blocks = append(blocks, indentToolBlock(renderToolBlock(entry, width, m.expandedDetails), width))
+				blocks = append(blocks, indentToolBlock(renderToolBlock(entry, width, m.expandedDetails, m.darkBackground), width))
 			} else {
 				blocks = append(blocks, entry.Rendered)
 			}
@@ -1593,7 +1593,7 @@ func (m Model) renderEntry(entry Entry, width int) string {
 	case EntryAssistant:
 		return renderMessageBlock("Otto", entry.Rendered)
 	case EntryTool:
-		return renderToolBlock(entry, width, m.expandedDetails)
+		return renderToolBlock(entry, width, m.expandedDetails, m.darkBackground)
 	case EntryCompaction:
 		return renderCompactionBlock(entry, width, m.expandedDetails)
 	case EntryError:
@@ -1633,7 +1633,7 @@ func indentToolBlock(block string, width int) string {
 	for _, line := range strings.Split(block, "\n") {
 		wrapped := ansi.Wrap(line, max(1, width-2), "")
 		for _, part := range strings.Split(wrapped, "\n") {
-			lines = append(lines, ansi.Truncate("  "+part, max(0, width), ""))
+			lines = append(lines, ansi.Truncate("│ "+part, max(0, width), ""))
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -1647,7 +1647,7 @@ func renderCompactionBlock(entry Entry, width int, expanded bool) string {
 	return summary + "\n\n" + entry.Rendered
 }
 
-func renderToolBlock(entry Entry, width int, expanded bool) string {
+func renderToolBlock(entry Entry, width int, expanded bool, dark bool) string {
 	name := escapeSingleLineText(entry.ToolName)
 	if name == "" {
 		name = "tool"
@@ -1664,7 +1664,7 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	if entry.ToolError && entry.ToolOutput != "" {
 		preview += " — " + strings.Join(strings.Fields(escapePlainText(entry.ToolOutput)), " ")
 	}
-	summary := renderToolSummary(name, preview, status, max(1, min(118, width-2)))
+	summary := renderToolSummary(name, preview, status, max(1, min(118, width-2)), dark)
 	if !expanded {
 		return summary
 	}
@@ -1754,13 +1754,7 @@ func toolArgumentPreview(name, raw string) string {
 	return escapePlainText(raw)
 }
 
-var (
-	toolLineRunning  = lipgloss.NewStyle().Faint(true)
-	toolLineComplete = lipgloss.NewStyle().Foreground(lipgloss.Color("#166534")).Background(lipgloss.Color("#DCFCE7"))
-	toolLineError    = lipgloss.NewStyle().Foreground(lipgloss.Color("#991B1B")).Background(lipgloss.Color("#FEE2E2"))
-)
-
-func renderToolSummary(name, args, status string, width int) string {
+func renderToolSummary(name, args, status string, width int, dark bool) string {
 	if width <= 0 {
 		return ""
 	}
@@ -1789,14 +1783,13 @@ func renderToolSummary(name, args, status string, width int) string {
 		}
 	}
 
-	var lineStyle lipgloss.Style
-	switch status {
-	case "complete":
-		lineStyle = toolLineComplete
-	case "error":
-		lineStyle = toolLineError
-	default:
-		lineStyle = toolLineRunning
+	bg := "254"
+	if dark {
+		bg = "237"
+	}
+	lineStyle := lipgloss.NewStyle().Background(lipgloss.Color(bg))
+	if status == "running" {
+		lineStyle = lineStyle.Faint(true)
 	}
 	return lineStyle.Width(width).MaxWidth(width).MaxHeight(1).Render(base)
 }

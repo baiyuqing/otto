@@ -569,7 +569,7 @@ func TestCollapsedToolSummaryIsSingleLineBoundedAndExpandable(t *testing.T) {
 	}
 
 	const width = 40
-	collapsed := renderToolBlock(entry, width, false)
+	collapsed := renderToolBlock(entry, width, false, false)
 	if strings.Contains(collapsed, "\n") || ansi.StringWidth(collapsed) > width {
 		t.Fatalf("collapsed summary = %q width=%d, want one bounded line", collapsed, ansi.StringWidth(collapsed))
 	}
@@ -577,7 +577,7 @@ func TestCollapsedToolSummaryIsSingleLineBoundedAndExpandable(t *testing.T) {
 		t.Fatalf("collapsed summary = %q, want concise name/argument preview without full details", collapsed)
 	}
 
-	expanded := renderToolBlock(entry, width, true)
+	expanded := renderToolBlock(entry, width, true, false)
 	for _, want := range []string{`{"path":"README.md",`, `"content":"long argument SECOND-TAIL"}`, "complete output THIRD-TAIL"} {
 		if !strings.Contains(expanded, want) {
 			t.Fatalf("expanded tool = %q, want %q", expanded, want)
@@ -594,7 +594,7 @@ func TestExpandedToolPreservesArgumentAndOutputWhitespace(t *testing.T) {
 		ToolDone:   true,
 	}
 
-	expanded := renderToolBlock(entry, 80, true)
+	expanded := renderToolBlock(entry, 80, true, false)
 	if !strings.Contains(expanded, "Arguments:\n\n  {\"command\":\"printf hi\"}\t\n") {
 		t.Fatalf("expanded tool = %q, want exact argument boundary whitespace", expanded)
 	}

@@ -149,7 +149,19 @@ func TestManagerSlashlessExecutableUsesOnlyRequestPATH(t *testing.T) {
 			wantOutput:  "request-path",
 		},
 		{
-			name:        "missing request PATH does not fall back to host PATH",
+			name:        "exactly empty request PATH resolves from request directory",
+			path:        executable,
+			environment: []string{"PATH=", "LC_ALL=C"},
+			wantOutput:  "explicit-path",
+		},
+		{
+			name:        "absent request PATH does not fall back to host PATH",
+			path:        executable,
+			environment: []string{"LC_ALL=C"},
+			wantLaunch:  true,
+		},
+		{
+			name:        "unresolvable request PATH does not fall back to host PATH",
 			path:        executable,
 			environment: []string{"PATH=missing-request-bin", "LC_ALL=C"},
 			wantLaunch:  true,

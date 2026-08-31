@@ -15,6 +15,7 @@ import (
 type nonDrainingDriver struct {
 	executeStarted chan struct{}
 	executeRelease chan struct{}
+	closeRelease   chan struct{}
 	startedOnce    sync.Once
 }
 
@@ -30,33 +31,105 @@ func (d *nonDrainingDriver) Execute(context.Context, sandbox.Request, sandbox.St
 	return sandbox.ExitStatus{}, nil
 }
 
-func (*nonDrainingDriver) Close() error { return nil }
+func (d *nonDrainingDriver) Close() error {
+	<-d.closeRelease
+	return nil
+}
 
-func TestCloseDrainObserverDetectsReturnBeforeExecutionRelease(t *testing.T) {
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseExecution := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseExecution()
-	base := &nonDrainingDriver{executeStarted: make(chan struct{}), executeRelease: release}
-	observer := newCloseDrainObserver(base, release, 1)
+func TestCloseDrainObserverDetectsReturnBeforeExecuteCompletion(t *testing.T) {
+	closeRelease := make(chan struct{})
+	executeRelease := make(chan struct{})
+	var closeReleaseOnce sync.Once
+	var executeReleaseOnce sync.Once
+	releaseClose := func() { closeReleaseOnce.Do(func() { close(closeRelease) }) }
+	releaseExecute := func() { executeReleaseOnce.Do(func() { close(executeRelease) }) }
+	defer releaseClose()
+	defer releaseExecute()
+
+	base := &nonDrainingDriver{
+		executeStarted: make(chan struct{}),
+		executeRelease: executeRelease,
+		closeRelease:   closeRelease,
+	}
+	observer := newCloseDrainObserver(base, executeRelease, 1)
 	executeResult := make(chan execution, 1)
 	go func() {
 		status, err := observer.Execute(context.Background(), sandbox.Request{}, sandbox.Streams{})
 		executeResult <- execution{status: status, err: err}
+		observer.observeExecuteCompletion()
 	}()
 	awaitSignal(t, base.executeStarted, "instrumented Execute start")
 
-	if err := observer.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- observer.Close() }()
+	awaitSignal(t, observer.underlyingCloseInvoked, "underlying Close invocation")
+	releaseClose()
 	observation := awaitCloseDrainObservation(t, observer.closeReturned)
-	if !observation.beforeRelease {
-		t.Fatal("observer missed Close returning before active execution release")
+	if !observation.beforeExecuteCompletion {
+		t.Fatal("observer missed Close returning before active Execute completed")
 	}
-	releaseExecution()
-	completed := awaitExecution(t, executeResult, "instrumented Execute release")
+	select {
+	case completed := <-executeResult:
+		t.Fatalf("Execute() completed before its deterministic release: %+v", completed)
+	default:
+	}
+
+	releaseExecute()
+	completed := awaitExecution(t, executeResult, "instrumented Execute completion")
 	if completed.err != nil {
 		t.Fatalf("Execute() error = %v", completed.err)
+	}
+	if err := awaitError(t, closeResult, "instrumented Close completion"); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func TestDecoratedExecutorCleanupBypassesUndrainedCloseObservation(t *testing.T) {
+	const observedCloseCallers = 12
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &recordingPolicyDriver{
+		capabilities: sandbox.Capabilities{NetworkAllow: true},
+		closed:       make(chan struct{}),
+	}
+	executeReturnRelease := make(chan struct{})
+	close(executeReturnRelease)
+	observer := newCloseDrainObserver(base, executeReturnRelease, observedCloseCallers)
+	if _, err := observer.Execute(context.Background(), sandbox.Request{}, sandbox.Streams{}); err != nil {
+		t.Fatalf("observed Execute() error = %v", err)
+	}
+	observer.observeExecuteCompletion()
+	executor, err := sandbox.NewExecutor(observer, sandbox.Policy{
+		Filesystem: sandbox.FilesystemUnconfined,
+		Network:    sandbox.NetworkAllow,
+	}, workspace)
+	if err != nil {
+		t.Fatalf("sandbox.NewExecutor() error = %v", err)
+	}
+	cleanup := contractExecutorCleanup(base, executor, true)
+
+	for range observedCloseCallers {
+		if err := observer.Close(); err != nil {
+			t.Fatalf("observed Close() error = %v", err)
+		}
+	}
+	for range observedCloseCallers {
+		awaitSignal(t, observer.underlyingCloseInvoked, "underlying Close invocation")
+	}
+	if len(observer.closeReturned) != cap(observer.closeReturned) {
+		t.Fatal("test did not fill the undrained Close observation channel")
+	}
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		cleanup()
+		close(cleanupDone)
+	}()
+	awaitSignal(t, cleanupDone, "decorated Executor raw-Driver cleanup")
+	if got := base.closeCallCount(); got != observedCloseCallers+1 {
+		t.Fatalf("raw Driver.Close() calls = %d, want %d observed closes plus cleanup", got, observedCloseCallers)
 	}
 }
 
@@ -64,6 +137,8 @@ type recordingPolicyDriver struct {
 	capabilities sandbox.Capabilities
 	closeOnce    sync.Once
 	closed       chan struct{}
+	mu           sync.Mutex
+	closeCalls   int
 }
 
 func (d *recordingPolicyDriver) ID() sandbox.DriverID { return "policy-recorder" }
@@ -75,8 +150,17 @@ func (d *recordingPolicyDriver) Execute(context.Context, sandbox.Request, sandbo
 }
 
 func (d *recordingPolicyDriver) Close() error {
+	d.mu.Lock()
+	d.closeCalls++
+	d.mu.Unlock()
 	d.closeOnce.Do(func() { close(d.closed) })
 	return nil
+}
+
+func (d *recordingPolicyDriver) closeCallCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closeCalls
 }
 
 func TestEnvironmentDumpMatchesCompleteRequestEnvironment(t *testing.T) {

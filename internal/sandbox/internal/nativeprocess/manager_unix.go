@@ -254,7 +254,11 @@ func resolveExecutable(spec Spec) (string, error) {
 	if err != nil {
 		return "", sandbox.ErrChildLaunch
 	}
-	for _, directory := range filepath.SplitList(requestPath) {
+	directories := filepath.SplitList(requestPath)
+	if requestPath == "" {
+		directories = []string{""}
+	}
+	for _, directory := range directories {
 		if directory == "" {
 			directory = "."
 		}

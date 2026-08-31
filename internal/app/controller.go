@@ -87,9 +87,11 @@ func WithSessionArchiver(archive ArchiveFactory) Option {
 	}
 }
 
-func WithMemory(manager memory.Manager) Option {
+func WithMemory(manager memory.Manager, userScope, workspaceScope memory.Scope) Option {
 	return func(controller *Controller) {
 		controller.memoryManager = manager
+		controller.memoryUserScope = userScope
+		controller.memoryWorkspaceScope = workspaceScope
 	}
 }
 
@@ -181,27 +183,29 @@ type activeOperation struct {
 }
 
 type Controller struct {
-	mu                  sync.Mutex
-	current             session.Session
-	currentPath         string
-	currentWorkspace    string
-	runner              Runner
-	create              SessionFactory
-	build               RunnerFactory
-	listSessions        SessionLister
-	resumeSession       ResumeFactory
-	newSession          NewSessionBuilder
-	archiveSession      ArchiveFactory
-	memoryManager       memory.Manager
-	active              *activeOperation
-	replace             *replacementState
-	closed              bool
-	closeDone           chan struct{}
-	closeComplete       bool
-	closeErr            error
-	reentrantCloseOwner uint64
-	ownerIDSource       func() uint64
-	runtimeInfo         *RuntimeInfo
+	mu                   sync.Mutex
+	current              session.Session
+	currentPath          string
+	currentWorkspace     string
+	runner               Runner
+	create               SessionFactory
+	build                RunnerFactory
+	listSessions         SessionLister
+	resumeSession        ResumeFactory
+	newSession           NewSessionBuilder
+	archiveSession       ArchiveFactory
+	memoryManager        memory.Manager
+	memoryUserScope      memory.Scope
+	memoryWorkspaceScope memory.Scope
+	active               *activeOperation
+	replace              *replacementState
+	closed               bool
+	closeDone            chan struct{}
+	closeComplete        bool
+	closeErr             error
+	reentrantCloseOwner  uint64
+	ownerIDSource        func() uint64
+	runtimeInfo          *RuntimeInfo
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
@@ -573,6 +577,27 @@ func (c *Controller) ReviewMemoryCandidate(ctx context.Context, request memory.R
 		return memory.ReviewResult{}, ErrMemoryUnavailable
 	}
 	return manager.Review(ctx, request)
+}
+
+// MemoryScopes returns the user and workspace scopes the bound memory
+// manager was configured with, and whether a manager is bound at all.
+func (c *Controller) MemoryScopes() (memory.Scope, memory.Scope, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.memoryManager == nil {
+		return memory.Scope{}, memory.Scope{}, false
+	}
+	return c.memoryUserScope, c.memoryWorkspaceScope, true
+}
+
+func (c *Controller) GetMemory(ctx context.Context, ref memory.RecordRef) (memory.Record, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.Record{}, ErrMemoryUnavailable
+	}
+	return manager.Get(ctx, ref)
 }
 
 func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {

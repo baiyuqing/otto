@@ -1044,9 +1044,11 @@ func TestControllerMemoryFacadeDelegatesToManager(t *testing.T) {
 		forgetResult:   memory.ForgetResult{Tombstone: memory.Tombstone{ID: "rec-3"}},
 		reviewResult:   memory.ReviewResult{Record: &memory.Record{ID: "rec-4"}},
 	}
+	userScope := memory.Scope{Namespace: "user", ID: "u1"}
+	workspaceScope := memory.Scope{Namespace: "workspace", ID: "w1"}
 	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
-	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager))
+	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager, userScope, workspaceScope))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1081,6 +1083,42 @@ func TestControllerMemoryFacadeDelegatesToManager(t *testing.T) {
 	}
 	if manager.reviewRequest.Ref.ID != "cand-1" || reviewResult.Record == nil || reviewResult.Record.ID != "rec-4" {
 		t.Fatalf("ReviewMemoryCandidate() = %#v, request = %#v", reviewResult, manager.reviewRequest)
+	}
+}
+
+func TestControllerMemoryScopesReportsUnavailableWithoutManager(t *testing.T) {
+	controller := newTestController(t, &recordingRunner{})
+
+	if _, _, ok := controller.MemoryScopes(); ok {
+		t.Fatal("MemoryScopes() ok = true, want false without a bound manager")
+	}
+	if _, err := controller.GetMemory(context.Background(), memory.RecordRef{ID: "rec-1"}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("GetMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+}
+
+func TestControllerMemoryScopesAndGetDelegateToManager(t *testing.T) {
+	manager := &fakeMemoryManager{getResult: memory.Record{ID: "rec-1", Revision: 3}}
+	userScope := memory.Scope{Namespace: "user", ID: "u1"}
+	workspaceScope := memory.Scope{Namespace: "workspace", ID: "w1"}
+	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager, userScope, workspaceScope))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotUser, gotWorkspace, ok := controller.MemoryScopes()
+	if !ok || gotUser != userScope || gotWorkspace != workspaceScope {
+		t.Fatalf("MemoryScopes() = %#v, %#v, %v, want %#v, %#v, true", gotUser, gotWorkspace, ok, userScope, workspaceScope)
+	}
+
+	record, err := controller.GetMemory(context.Background(), memory.RecordRef{Scope: userScope, ID: "rec-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.getRequest.ID != "rec-1" || record.Revision != 3 {
+		t.Fatalf("GetMemory() = %#v, request = %#v", record, manager.getRequest)
 	}
 }
 
@@ -2421,9 +2459,13 @@ func testHeader(id string) session.Header {
 }
 
 // fakeMemoryManager is a minimal memory.Manager test double: it records the
-// last request passed to each of the four methods Controller exposes and
-// returns canned results/errors.
+// last request passed to each of the methods Controller exposes and returns
+// canned results/errors.
 type fakeMemoryManager struct {
+	getRequest memory.RecordRef
+	getResult  memory.Record
+	getErr     error
+
 	searchRequest memory.SearchRequest
 	searchResult  memory.SearchResult
 	searchErr     error
@@ -2441,8 +2483,9 @@ type fakeMemoryManager struct {
 	reviewErr     error
 }
 
-func (m *fakeMemoryManager) Get(context.Context, memory.RecordRef) (memory.Record, error) {
-	return memory.Record{}, nil
+func (m *fakeMemoryManager) Get(_ context.Context, ref memory.RecordRef) (memory.Record, error) {
+	m.getRequest = ref
+	return m.getResult, m.getErr
 }
 
 func (m *fakeMemoryManager) GetByKey(context.Context, memory.RecordKey) (memory.Record, error) {

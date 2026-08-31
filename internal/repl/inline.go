@@ -40,6 +40,8 @@ type inlineModel struct {
 	suggestions     []command.Command
 	suggestionIndex int
 
+	picker *inlinePicker
+
 	fatalErr error
 	exitReq  bool
 }
@@ -93,6 +95,12 @@ func (m inlineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case inlineTurnMsg:
 		return m.handleTurnEvent(msg)
+
+	case pickerListMsg:
+		return m.handlePickerList(msg)
+
+	case pickerDoneMsg:
+		return m.handlePickerDone(msg)
 	}
 
 	if !m.running {
@@ -115,6 +123,10 @@ func (m inlineModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	if m.running {
 		return m, nil
+	}
+
+	if updated, cmd, handled := m.handlePickerKey(msg); handled {
+		return updated, cmd
 	}
 
 	if len(m.suggestions) > 0 {
@@ -173,7 +185,7 @@ func (m inlineModel) acceptSuggestion() (tea.Model, tea.Cmd) {
 
 func commandTakesArgs(kind command.Kind) bool {
 	switch kind {
-	case command.KindResume, command.KindCompact, command.KindMemory, command.KindRemember:
+	case command.KindCompact, command.KindMemory, command.KindRemember:
 		return true
 	default:
 		return false
@@ -402,7 +414,8 @@ func (m inlineModel) handleCommand(input string) (tea.Model, tea.Cmd) {
 				"/exit     exit Otto\n" +
 				"/new      start a new session\n" +
 				"/session  show session details\n" +
-				"/archive  archive current session and start a new one\n" +
+				"/resume   resume a previous session\n" +
+				"/archive  archive a session\n" +
 				"/compact [focus] compact context\n" +
 				"/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n" +
 				"/remember [--scope user|workspace] [--kind K] [--key K] <text>")
@@ -427,11 +440,14 @@ func (m inlineModel) handleCommand(input string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "resume":
+		return m.startPicker(pickerResume)
+
 	case "archive":
 		if args != "" {
-			break
+			return m.handleArchiveCommand()
 		}
-		return m.handleArchiveCommand()
+		return m.startPicker(pickerArchive)
 
 	case "compact":
 		return m.handleCompactCommand(strings.TrimSpace(args))
@@ -560,6 +576,9 @@ func (m inlineModel) View() tea.View {
 	}
 	if m.running {
 		return tea.NewView("")
+	}
+	if m.picker.active() {
+		return tea.NewView(renderPickerView(m.picker, m.width))
 	}
 	content := m.editor.View()
 	if len(m.suggestions) > 0 {

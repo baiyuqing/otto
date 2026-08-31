@@ -45,29 +45,33 @@ func (c *cappedByteCollector) Discarded() int {
 	return c.discarded
 }
 
+const legacyExactRedactionMarker = "[REDACTED]"
+
 type exactRedactingWriter struct {
 	destination io.Writer
 	values      []string
+	marker      string
 	pending     string
-	maxValueLen int
 	err         error
 }
 
 func newExactRedactingWriter(destination io.Writer, values []string) *exactRedactingWriter {
-	writer := &exactRedactingWriter{destination: destination}
+	return newExactRedactingWriterWithMarker(destination, values, legacyExactRedactionMarker)
+}
+
+func newExactRedactingWriterWithMarker(destination io.Writer, values []string, marker string) *exactRedactingWriter {
+	writer := &exactRedactingWriter{destination: destination, marker: strings.Clone(marker)}
 	seen := make(map[string]struct{})
 	for _, value := range values {
 		if value == "" {
 			continue
 		}
+		value = strings.Clone(value)
 		if _, exists := seen[value]; exists {
 			continue
 		}
 		seen[value] = struct{}{}
 		writer.values = append(writer.values, value)
-		if len(value) > writer.maxValueLen {
-			writer.maxValueLen = len(value)
-		}
 	}
 	return writer
 }
@@ -92,9 +96,9 @@ func (w *exactRedactingWriter) Flush() error {
 	return w.err
 }
 
-func redactExactText(value string, redactionValues []string) (string, error) {
+func redactExactText(value string, redactionValues []string, marker string) (string, error) {
 	var redacted strings.Builder
-	writer := newExactRedactingWriter(&redacted, redactionValues)
+	writer := newExactRedactingWriterWithMarker(&redacted, redactionValues, marker)
 	if _, err := io.WriteString(writer, value); err != nil {
 		return "", err
 	}
@@ -106,33 +110,46 @@ func redactExactText(value string, redactionValues []string) (string, error) {
 
 func (w *exactRedactingWriter) process(final bool) {
 	for w.err == nil && w.pending != "" {
-		matchIndex := -1
-		matchValue := ""
-		for _, value := range w.values {
-			index := strings.Index(w.pending, value)
-			if index >= 0 && (matchIndex < 0 || index < matchIndex || index == matchIndex && len(value) > len(matchValue)) {
-				matchIndex = index
-				matchValue = value
-			}
-		}
-		if matchIndex >= 0 {
-			w.write(w.pending[:matchIndex])
-			w.write("[REDACTED]")
-			w.pending = w.pending[matchIndex+len(matchValue):]
-			continue
-		}
-
-		keep := w.maxValueLen - 1
-		if final {
-			keep = 0
-		}
-		if len(w.pending) <= keep {
+		matchIndex, matchValue, unresolved := w.leftmostCandidate(final)
+		if matchIndex < 0 {
+			w.write(w.pending)
+			w.pending = ""
 			return
 		}
-		writeLength := len(w.pending) - keep
-		w.write(w.pending[:writeLength])
-		w.pending = w.pending[writeLength:]
+		if matchIndex > 0 {
+			w.write(w.pending[:matchIndex])
+			w.pending = w.pending[matchIndex:]
+			continue
+		}
+		if unresolved {
+			return
+		}
+
+		w.write(w.marker)
+		w.pending = w.pending[len(matchValue):]
 	}
+}
+
+func (w *exactRedactingWriter) leftmostCandidate(final bool) (int, string, bool) {
+	for index := 0; index < len(w.pending); index++ {
+		remaining := w.pending[index:]
+		longestMatch := ""
+		unresolved := false
+		for _, value := range w.values {
+			switch {
+			case strings.HasPrefix(remaining, value):
+				if len(value) > len(longestMatch) {
+					longestMatch = value
+				}
+			case !final && len(remaining) < len(value) && strings.HasPrefix(value, remaining):
+				unresolved = true
+			}
+		}
+		if longestMatch != "" || unresolved {
+			return index, longestMatch, unresolved
+		}
+	}
+	return -1, "", false
 }
 
 func (w *exactRedactingWriter) write(value string) {

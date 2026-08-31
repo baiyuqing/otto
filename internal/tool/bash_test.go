@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/baiyuqing/otto/internal/sandbox"
@@ -221,14 +224,14 @@ func TestBashReportsConfiguredShellFailure(t *testing.T) {
 func TestBashSandboxedDelegatesExactRequestAndClonesInputs(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	fake := &fakeBashExecutor{
-		stdoutChunks: [][]byte{[]byte("split-"), []byte("secret")},
+		stdoutChunks: [][]byte{[]byte("split-*"), []byte("secret")},
 		stderrChunks: [][]byte{[]byte("problem")},
 		status:       sandbox.ExitStatus{Code: 7},
 	}
 
 	shellStorage := []byte("/bin/sh")
 	environmentStorage := []byte("FIRST=original")
-	redactionStorage := []byte("split-secret")
+	redactionStorage := []byte("split-*secret")
 	shell := unsafe.String(unsafe.SliceData(shellStorage), len(shellStorage))
 	environment := []string{
 		unsafe.String(unsafe.SliceData(environmentStorage), len(environmentStorage)),
@@ -253,14 +256,18 @@ func TestBashSandboxedDelegatesExactRequestAndClonesInputs(t *testing.T) {
 	if first.IsError {
 		t.Fatalf("first Execute() = %#v", first)
 	}
-	if first.Content != "stdout:\n[REDACTED]\nstderr:\nproblem\nexit_code: 7" {
-		t.Fatalf("first Execute() content = %q", first.Content)
+	firstMarker := sandboxedBashStdout(t, first.Content)
+	if utf8.RuneCountInString(firstMarker) != 1 || firstMarker == "*" || strings.Contains(first.Content, "split-*secret") {
+		t.Fatalf("first Execute() did not retain collision-safe cloned redaction state: %q", first.Content)
 	}
 
 	fake.mutateRetainedRequest(0)
 	second := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "second command"}))
 	if second.IsError {
 		t.Fatalf("second Execute() = %#v", second)
+	}
+	if secondMarker := sandboxedBashStdout(t, second.Content); secondMarker != firstMarker || strings.Contains(second.Content, "split-*secret") {
+		t.Fatalf("second Execute() reused mutable caller or prior-call redactor state: %q", second.Content)
 	}
 
 	requests := fake.Requests()
@@ -327,7 +334,7 @@ func TestBashSandboxedReportsIndependentCapsExitCodeAndSignal(t *testing.T) {
 		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{secret})
 
 		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
-		if result.IsError || strings.Contains(result.Content, secret) || !strings.Contains(result.Content, "signal: killed-[REDACTED]") {
+		if result.IsError || strings.Contains(result.Content, secret) || !strings.Contains(result.Content, "signal: killed-*") {
 			t.Fatalf("Execute() exposed signal redaction value: %#v", result)
 		}
 	})
@@ -366,11 +373,227 @@ func TestBashSandboxedRedactsSplitOverlappingSecretsBeforeCaps(t *testing.T) {
 			t.Fatalf("Execute() leaked %q: %q", forbidden, result.Content)
 		}
 	}
-	if !strings.Contains(result.Content, "stdout:\n[REDACTED]") || !strings.Contains(result.Content, "stderr:\n[REDACTED]") {
+	if !strings.Contains(result.Content, "stdout:\n*") || !strings.Contains(result.Content, "stderr:\n*") {
 		t.Fatalf("split redaction markers missing: %q", result.Content)
 	}
 	if got := strings.Count(result.Content, "[truncated:"); got != 2 {
 		t.Fatalf("truncation notices = %d, want 2: %q", got, result.Content)
+	}
+}
+
+func TestBashSandboxedUsesCollisionSafeSingleRuneMarker(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	tests := []struct {
+		name       string
+		stdout     string
+		values     []string
+		prefix     string
+		suffix     string
+		wantMarker string
+	}{
+		{
+			name:       "stable preferred marker",
+			stdout:     "TOKEN",
+			values:     []string{"TOKEN"},
+			wantMarker: "*",
+		},
+		{
+			name:   "preferred marker is itself a secret",
+			stdout: "*",
+			values: []string{"*", "[REDACTED]"},
+		},
+		{
+			name:   "preferred marker occurs in a secret and would synthesize another",
+			stdout: "leftTOKENright",
+			values: []string{"TOKEN", "left*right", "left!right", "[REDACTED]"},
+			prefix: "left",
+			suffix: "right",
+		},
+		{
+			name:   "legacy marker is itself a secret",
+			stdout: "[REDACTED]",
+			values: []string{"[REDACTED]"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeBashExecutor{
+				stdoutChunks: [][]byte{[]byte(test.stdout)},
+				status: sandbox.ExitStatus{
+					Code:     -1,
+					Signaled: true,
+					Signal:   "signal-" + test.values[0],
+				},
+			}
+			bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, test.values)
+
+			result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+			if result.IsError {
+				t.Fatalf("Execute() = %#v", result)
+			}
+			for _, value := range test.values {
+				if strings.Contains(result.Content, value) {
+					t.Fatalf("Execute() synthesized or exposed configured value %q: %q", value, result.Content)
+				}
+			}
+
+			body := sandboxedBashStdout(t, result.Content)
+			if !strings.HasPrefix(body, test.prefix) || !strings.HasSuffix(body, test.suffix) || len(body) < len(test.prefix)+len(test.suffix) {
+				t.Fatalf("stdout body = %q, want surrounding fragments %q and %q", body, test.prefix, test.suffix)
+			}
+			marker := body[len(test.prefix) : len(body)-len(test.suffix)]
+			r, size := utf8.DecodeRuneInString(marker)
+			if marker == "" || size != len(marker) || r == utf8.RuneError && size == 1 || unicode.IsControl(r) {
+				t.Fatalf("replacement marker = %q, want one valid non-control rune", marker)
+			}
+			if test.wantMarker != "" && marker != test.wantMarker {
+				t.Fatalf("replacement marker = %q, want stable default %q", marker, test.wantMarker)
+			}
+			for _, value := range test.values {
+				for _, markerByte := range []byte(marker) {
+					if bytes.IndexByte([]byte(value), markerByte) >= 0 {
+						t.Fatalf("marker byte %#x occurs in configured value %q", markerByte, value)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBashSandboxedCollisionSafeMarkerSurvivesEveryByteCap(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	var printableASCII strings.Builder
+	for value := byte(0x20); value <= 0x7e; value++ {
+		printableASCII.WriteByte(value)
+	}
+	values := []string{"TOKEN", printableASCII.String()}
+
+	resultForCap := func(cap int) Result {
+		t.Helper()
+		fake := &fakeBashExecutor{
+			stdoutChunks: [][]byte{[]byte("TOKEN")},
+			status:       sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "signal-TOKEN"},
+		}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, cap, values)
+		return bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+	}
+
+	full := resultForCap(1024)
+	if full.IsError {
+		t.Fatalf("Execute() = %#v", full)
+	}
+	marker := sandboxedBashStdout(t, full.Content)
+	r, size := utf8.DecodeRuneInString(marker)
+	if size != len(marker) || size <= 1 || unicode.IsControl(r) {
+		t.Fatalf("fallback marker = %q, want one multibyte non-control rune", marker)
+	}
+	for _, markerByte := range []byte(marker) {
+		for _, value := range values {
+			if bytes.IndexByte([]byte(value), markerByte) >= 0 {
+				t.Fatalf("fallback marker byte %#x occurs in configured value", markerByte)
+			}
+		}
+	}
+
+	for cap := 1; cap <= len(marker)+1; cap++ {
+		result := resultForCap(cap)
+		if result.IsError {
+			t.Fatalf("cap %d: Execute() = %#v", cap, result)
+		}
+		for _, value := range values {
+			if strings.Contains(result.Content, value) {
+				t.Fatalf("cap %d: Execute() exposed configured value %q: %q", cap, value, result.Content)
+			}
+		}
+		wantLength := cap
+		if wantLength > len(marker) {
+			wantLength = len(marker)
+		}
+		if body := sandboxedBashStdout(t, result.Content); body != marker[:wantLength] {
+			t.Fatalf("cap %d: stdout = %q, want marker prefix %q", cap, body, marker[:wantLength])
+		}
+	}
+}
+
+func TestBashSandboxedHoldsEarlierFragmentBeforeLaterMatchAndCap(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	const longSecret = "credential-zzSHORT-rest"
+	values := []string{longSecret, "SHORT"}
+
+	for split := 0; split <= len(longSecret); split++ {
+		fake := &fakeBashExecutor{
+			stdoutChunks: [][]byte{[]byte(longSecret[:split]), []byte(longSecret[split:])},
+			status:       sandbox.ExitStatus{Code: 0},
+		}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 12, values)
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		if result.IsError {
+			t.Fatalf("split %d: Execute() = %#v", split, result)
+		}
+		if body := sandboxedBashStdout(t, result.Content); body != "*" {
+			t.Fatalf("split %d: stdout = %q, want only the redaction marker", split, body)
+		}
+		if strings.Contains(result.Content, "credential-") {
+			t.Fatalf("split %d: pre-truncation credential bytes escaped: %q", split, result.Content)
+		}
+		for _, value := range values {
+			if strings.Contains(result.Content, value) {
+				t.Fatalf("split %d: configured value %q escaped: %q", split, value, result.Content)
+			}
+		}
+	}
+}
+
+func TestBashSandboxedRedactsStrictJSONErrorsWithoutDelegating(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	tests := []struct {
+		name      string
+		secret    string
+		arguments json.RawMessage
+		wantText  string
+	}{
+		{
+			name:      "unknown field name and value",
+			secret:    "private-field",
+			arguments: json.RawMessage(`{"command":"true","private-field":"private-field"}`),
+			wantText:  "json: unknown field",
+		},
+		{
+			name:      "JSON value kind",
+			secret:    "number",
+			arguments: json.RawMessage(`{"command":123}`),
+			wantText:  "invalid JSON:",
+		},
+		{
+			name:      "malformed text fragment",
+			secret:    "X",
+			arguments: json.RawMessage(`{"command":"true"}X`),
+			wantText:  "invalid JSON:",
+		},
+		{
+			name:      "required argument name",
+			secret:    "command",
+			arguments: json.RawMessage(`{}`),
+			wantText:  "missing required argument:",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeBashExecutor{}
+			bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{test.secret})
+			result := bash.Execute(context.Background(), test.arguments)
+			if !result.IsError || !strings.Contains(result.Content, test.wantText) {
+				t.Fatalf("Execute() = %#v, want fixed argument semantics containing %q", result, test.wantText)
+			}
+			if strings.Contains(result.Content, test.secret) {
+				t.Fatalf("Execute() exposed strict-JSON value %q: %q", test.secret, result.Content)
+			}
+			if calls := fake.CallCount(); calls != 0 {
+				t.Fatalf("strict-JSON error delegated %d calls", calls)
+			}
+		})
 	}
 }
 
@@ -660,7 +883,7 @@ func TestBashSandboxedConcurrentCallsKeepOutputAndRedactionIndependent(t *testin
 		if got.name == "first" {
 			other = "second"
 		}
-		if got.result.IsError || !strings.Contains(got.result.Content, got.name+":[REDACTED]") || !strings.Contains(got.result.Content, "stderr-"+got.name) {
+		if got.result.IsError || !strings.Contains(got.result.Content, got.name+":*") || !strings.Contains(got.result.Content, "stderr-"+got.name) {
 			t.Fatalf("%s Execute() = %#v", got.name, got.result)
 		}
 		if strings.Contains(got.result.Content, other+":") || strings.Contains(got.result.Content, "stderr-"+other) || strings.Contains(got.result.Content, "shared-secret") {
@@ -832,6 +1055,22 @@ func writeFakeChunks(destination io.Writer, chunks [][]byte) error {
 		}
 	}
 	return nil
+}
+
+func sandboxedBashStdout(t *testing.T, content string) string {
+	t.Helper()
+	const prefix = "stdout:\n"
+	if !strings.HasPrefix(content, prefix) {
+		t.Fatalf("sandboxed Bash content lacks stdout prefix: %q", content)
+	}
+	stdout, _, ok := strings.Cut(strings.TrimPrefix(content, prefix), "\nstderr:\n")
+	if !ok {
+		t.Fatalf("sandboxed Bash content lacks stderr delimiter: %q", content)
+	}
+	if captured, _, truncated := strings.Cut(stdout, "\n[truncated:"); truncated {
+		return captured
+	}
+	return stdout
 }
 
 func mustJSON(t *testing.T, value any) json.RawMessage {

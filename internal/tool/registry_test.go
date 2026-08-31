@@ -119,6 +119,30 @@ func TestBashSandboxedConstructorRejectsEveryInvalidBoundaryWithOneSafeError(t *
 	}
 }
 
+func TestBashSandboxedConstructorRejectsWhenNoCollisionSafeMarkerExists(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	allBytes := make([]byte, 256)
+	for i := range allBytes {
+		allBytes[i] = byte(i)
+	}
+
+	constructed, err := NewSandboxedBashTool(
+		workspace,
+		&fakeBashExecutor{},
+		"/bin/sh",
+		[]string{},
+		time.Second,
+		1024,
+		[]string{string(allBytes)},
+	)
+	if constructed != nil {
+		t.Fatalf("NewSandboxedBashTool() tool = %T, want nil", constructed)
+	}
+	if err != errInvalidSandboxedBashConfiguration {
+		t.Fatalf("NewSandboxedBashTool() error = %v, want fixed configuration error", err)
+	}
+}
+
 func TestBashSandboxedConstructorRegistersWithExplicitEmptyEnvironment(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	fake := &fakeBashExecutor{status: sandbox.ExitStatus{Code: 0}}

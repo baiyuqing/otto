@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/sandbox"
@@ -65,16 +67,20 @@ var (
 	errSandboxedBashTimeout              = errors.New("sandboxed bash timeout")
 )
 
-const sandboxExecutionUnavailable = "sandbox execution unavailable"
+const (
+	sandboxExecutionUnavailable     = "sandbox execution unavailable"
+	preferredSandboxRedactionMarker = '*'
+)
 
 type sandboxedBashTool struct {
-	workspace      *Workspace
-	executor       sandbox.CommandExecutor
-	shell          string
-	environment    []string
-	timeout        time.Duration
-	maxOutputBytes int
-	redactValues   []string
+	workspace       *Workspace
+	executor        sandbox.CommandExecutor
+	shell           string
+	environment     []string
+	timeout         time.Duration
+	maxOutputBytes  int
+	redactValues    []string
+	redactionMarker string
 
 	deadlineContext func(context.Context, time.Duration, error) (context.Context, context.CancelFunc)
 }
@@ -98,6 +104,12 @@ func NewSandboxedBashTool(
 		return nil, errInvalidSandboxedBashConfiguration
 	}
 
+	redactValues := cloneSandboxedBashStrings(redactionValues)
+	redactionMarker, ok := collisionSafeSandboxRedactionMarker(redactValues)
+	if !ok {
+		return nil, errInvalidSandboxedBashConfiguration
+	}
+
 	return &sandboxedBashTool{
 		workspace: &Workspace{
 			root:        strings.Clone(workspace.root),
@@ -108,7 +120,8 @@ func NewSandboxedBashTool(
 		environment:     cloneSandboxedBashStrings(environment),
 		timeout:         timeout,
 		maxOutputBytes:  maxOutputBytes,
-		redactValues:    cloneSandboxedBashStrings(redactionValues),
+		redactValues:    redactValues,
+		redactionMarker: redactionMarker,
 		deadlineContext: context.WithTimeoutCause,
 	}, nil
 }
@@ -134,10 +147,10 @@ func (t *sandboxedBashTool) Definition() model.ToolDefinition {
 func (t *sandboxedBashTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args bashArgs
 	if err := decodeStrictJSON(arguments, &args, "command"); err != nil {
-		return Result{Content: err.Error(), IsError: true}
+		return t.sandboxedArgumentError(err.Error())
 	}
 	if strings.TrimSpace(args.Command) == "" {
-		return Result{Content: "missing required argument: command", IsError: true}
+		return t.sandboxedArgumentError("missing required argument: command")
 	}
 	if isNilSandboxedBashBoundary(ctx) {
 		return sandboxedBashInfrastructureResult()
@@ -153,8 +166,8 @@ func (t *sandboxedBashTool) Execute(ctx context.Context, arguments json.RawMessa
 
 	stdout := newCappedByteCollector(t.maxOutputBytes)
 	stderr := newCappedByteCollector(t.maxOutputBytes)
-	redactedStdout := newExactRedactingWriter(stdout, t.redactValues)
-	redactedStderr := newExactRedactingWriter(stderr, t.redactValues)
+	redactedStdout := newExactRedactingWriterWithMarker(stdout, t.redactValues, t.redactionMarker)
+	redactedStderr := newExactRedactingWriterWithMarker(stderr, t.redactValues, t.redactionMarker)
 
 	commandCtx, cancel := t.deadlineContext(ctx, t.timeout, errSandboxedBashTimeout)
 	if isNilSandboxedBashBoundary(commandCtx) || cancel == nil {
@@ -198,11 +211,19 @@ func (t *sandboxedBashTool) Execute(ctx context.Context, arguments json.RawMessa
 	}
 }
 
+func (t *sandboxedBashTool) sandboxedArgumentError(message string) Result {
+	redacted, err := redactExactText(message, t.redactValues, t.redactionMarker)
+	if err != nil {
+		return sandboxedBashInfrastructureResult()
+	}
+	return Result{Content: redacted, IsError: true}
+}
+
 func (t *sandboxedBashTool) sandboxedResult(stdout, stderr *cappedByteCollector, status sandbox.ExitStatus, summary string) Result {
 	if status.Signaled && status.Signal != "" {
 		summary += "; signal: " + status.Signal
 	}
-	redactedSummary, err := redactExactText(summary, t.redactValues)
+	redactedSummary, err := redactExactText(summary, t.redactValues, t.redactionMarker)
 	if err != nil {
 		return sandboxedBashInfrastructureResult()
 	}
@@ -259,6 +280,58 @@ func cloneSandboxedBashStrings(values []string) []string {
 		cloned[i] = strings.Clone(value)
 	}
 	return cloned
+}
+
+func collisionSafeSandboxRedactionMarker(values []string) (string, bool) {
+	var usedBytes [256]bool
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		for _, valueByte := range []byte(value) {
+			usedBytes[valueByte] = true
+		}
+	}
+
+	isSafe := func(candidate rune) (string, bool) {
+		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
+			return "", false
+		}
+		var encoded [utf8.UTFMax]byte
+		length := utf8.EncodeRune(encoded[:], candidate)
+		for _, candidateByte := range encoded[:length] {
+			if usedBytes[candidateByte] {
+				return "", false
+			}
+		}
+		return string(encoded[:length]), true
+	}
+
+	if marker, ok := isSafe(preferredSandboxRedactionMarker); ok {
+		return marker, true
+	}
+	for candidate := rune('!'); candidate <= '~'; candidate++ {
+		if candidate == preferredSandboxRedactionMarker {
+			continue
+		}
+		if marker, ok := isSafe(candidate); ok {
+			return marker, true
+		}
+	}
+	for candidate := rune(utf8.RuneSelf); candidate <= utf8.MaxRune; candidate++ {
+		if !unicode.IsGraphic(candidate) || unicode.IsSpace(candidate) {
+			continue
+		}
+		if marker, ok := isSafe(candidate); ok {
+			return marker, true
+		}
+	}
+	for candidate := rune(utf8.RuneSelf); candidate <= utf8.MaxRune; candidate++ {
+		if marker, ok := isSafe(candidate); ok {
+			return marker, true
+		}
+	}
+	return isSafe(' ')
 }
 
 func (t *bashTool) Definition() model.ToolDefinition {

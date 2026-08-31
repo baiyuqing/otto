@@ -96,6 +96,67 @@ unknown = true
 	}
 }
 
+func TestLoadSandboxPreservesAbsentAndExplicitValues(t *testing.T) {
+	path := writeConfig(t, "")
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Sandbox.Driver != nil || file.Sandbox.Network != nil || file.Sandbox.ReadPaths != nil || file.Sandbox.AllowEnv != nil {
+		t.Fatalf("absent sandbox config = %#v, want zero value", file.Sandbox)
+	}
+
+	path = writeConfig(t, `[sandbox]
+driver = ""
+network = ""
+read_paths = ["/opt/sdk", "~/source"]
+allow_env = ["PATH", "PROJECT_TOKEN"]
+`)
+	file, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Sandbox.Driver == nil || *file.Sandbox.Driver != "" {
+		t.Fatalf("sandbox driver = %#v, want explicit empty string", file.Sandbox.Driver)
+	}
+	if file.Sandbox.Network == nil || *file.Sandbox.Network != "" {
+		t.Fatalf("sandbox network = %#v, want explicit empty string", file.Sandbox.Network)
+	}
+	if got := strings.Join(file.Sandbox.ReadPaths, ","); got != "/opt/sdk,~/source" {
+		t.Fatalf("sandbox read_paths = %q, want decoded values", got)
+	}
+	if got := strings.Join(file.Sandbox.AllowEnv, ","); got != "PATH,PROJECT_TOKEN" {
+		t.Fatalf("sandbox allow_env = %q, want decoded values", got)
+	}
+}
+
+func TestLoadSandboxDecodesValidTable(t *testing.T) {
+	path := writeConfig(t, `[sandbox]
+driver = "seatbelt"
+network = "deny"
+read_paths = ["/Library/Developer"]
+allow_env = ["PROJECT_TOKEN"]
+`)
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Sandbox.Driver == nil || *file.Sandbox.Driver != "seatbelt" ||
+		file.Sandbox.Network == nil || *file.Sandbox.Network != "deny" {
+		t.Fatalf("sandbox modes were not decoded: %#v", file.Sandbox)
+	}
+}
+
+func TestLoadSandboxRejectsUnknownFields(t *testing.T) {
+	path := writeConfig(t, `[sandbox]
+driver = "auto"
+unknown = true
+`)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("expected unknown sandbox field error, got %v", err)
+	}
+}
+
 func TestLoadRejectsRawSecretField(t *testing.T) {
 	path := writeConfig(t, `[profiles.bad]
 provider = "openai-compatible"

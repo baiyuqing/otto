@@ -1,9 +1,12 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/baiyuqing/otto/internal/sandbox"
 )
 
 func TestResolvePrecedence(t *testing.T) {
@@ -367,6 +370,189 @@ func TestResolveAppliesAgentDefaults(t *testing.T) {
 	}
 	if runtime.ShellTimeout != 120*time.Second || runtime.MaxOutputBytes != 51200 {
 		t.Fatalf("unexpected defaults: %#v", runtime)
+	}
+}
+
+func TestResolveSandboxDefaults(t *testing.T) {
+	got, err := ResolveSandbox(SandboxConfig{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sandbox.Settings{
+		Driver:    sandbox.DriverAuto,
+		Network:   sandbox.NetworkAllow,
+		ReadPaths: []string{},
+		AllowEnv:  []string{},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveSandbox() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveSandboxAcceptsAndSortsValidSettings(t *testing.T) {
+	driver := "seatbelt"
+	network := "deny"
+	raw := SandboxConfig{
+		Driver:    &driver,
+		Network:   &network,
+		ReadPaths: []string{"~/zeta", "/opt/zeta", "/opt/alpha"},
+		AllowEnv:  []string{"ZETA_TOKEN", "ALPHA_TOKEN"},
+	}
+	got, err := ResolveSandbox(raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sandbox.Settings{
+		Driver:    sandbox.DriverSeatbelt,
+		Network:   sandbox.NetworkDeny,
+		ReadPaths: []string{"/opt/alpha", "/opt/zeta", "~/zeta"},
+		AllowEnv:  []string{"ALPHA_TOKEN", "ZETA_TOKEN"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveSandbox() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveSandboxRejectsExplicitEmptyModes(t *testing.T) {
+	empty := ""
+	tests := []struct {
+		name string
+		raw  SandboxConfig
+		cli  *string
+	}{
+		{name: "TOML driver", raw: SandboxConfig{Driver: &empty}},
+		{name: "TOML network", raw: SandboxConfig{Network: &empty}},
+		{name: "CLI driver", cli: &empty},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ResolveSandbox(test.raw, test.cli); err == nil {
+				t.Fatal("ResolveSandbox() accepted an explicit empty mode")
+			}
+		})
+	}
+}
+
+func TestResolveSandboxRejectsInvalidDriverValues(t *testing.T) {
+	for _, value := range []string{"docker", "apple-container", "podman", "AUTO", "unknown"} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := ResolveSandbox(SandboxConfig{Driver: &value}, nil); err == nil || !strings.Contains(err.Error(), "driver") {
+				t.Fatalf("ResolveSandbox() error = %v, want driver validation error", err)
+			}
+		})
+	}
+}
+
+func TestResolveSandboxRejectsInvalidNetworkValues(t *testing.T) {
+	for _, value := range []string{"block", "ALLOW", "off", "unknown"} {
+		t.Run(value, func(t *testing.T) {
+			if _, err := ResolveSandbox(SandboxConfig{Network: &value}, nil); err == nil || !strings.Contains(err.Error(), "network") {
+				t.Fatalf("ResolveSandbox() error = %v, want network validation error", err)
+			}
+		})
+	}
+}
+
+func TestResolveSandboxRejectsInvalidReadPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "relative", path: "relative/path"},
+		{name: "dot", path: "."},
+		{name: "bare tilde", path: "~"},
+		{name: "named home", path: "~someone/source"},
+		{name: "environment expansion", path: "$HOME/source"},
+		{name: "NUL", path: "/safe\x00unsafe"},
+		{name: "32 KiB plus one", path: "/" + strings.Repeat("x", 32*1024)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ResolveSandbox(SandboxConfig{ReadPaths: []string{test.path}}, nil)
+			if err == nil || !strings.Contains(err.Error(), "read_paths") {
+				t.Fatalf("ResolveSandbox() error = %v, want read_paths validation error", err)
+			}
+		})
+	}
+
+	boundary := "/" + strings.Repeat("x", 32*1024-1)
+	got, err := ResolveSandbox(SandboxConfig{ReadPaths: []string{boundary}}, nil)
+	if err != nil {
+		t.Fatalf("ResolveSandbox() rejected a 32-KiB textual path: %v", err)
+	}
+	if len(got.ReadPaths) != 1 || got.ReadPaths[0] != boundary {
+		t.Fatal("ResolveSandbox() did not preserve the boundary-length path")
+	}
+}
+
+func TestResolveSandboxRejectsInvalidOrDuplicateAllowEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		names []string
+	}{
+		{name: "empty", names: []string{""}},
+		{name: "wildcard", names: []string{"*_TOKEN"}},
+		{name: "suffix wildcard", names: []string{"PROJECT_*"}},
+		{name: "leading digit", names: []string{"1PROJECT"}},
+		{name: "punctuation", names: []string{"PROJECT-TOKEN"}},
+		{name: "duplicate", names: []string{"PROJECT_TOKEN", "PROJECT_TOKEN"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ResolveSandbox(SandboxConfig{AllowEnv: test.names}, nil)
+			if err == nil || !strings.Contains(err.Error(), "allow_env") {
+				t.Fatalf("ResolveSandbox() error = %v, want allow_env validation error", err)
+			}
+		})
+	}
+}
+
+func TestResolveSandboxClonesInputs(t *testing.T) {
+	readPaths := []string{"~/zeta", "/opt/alpha"}
+	allowEnv := []string{"ZETA_TOKEN", "ALPHA_TOKEN"}
+	raw := SandboxConfig{ReadPaths: readPaths, AllowEnv: allowEnv}
+
+	got, err := ResolveSandbox(raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(readPaths, []string{"~/zeta", "/opt/alpha"}) ||
+		!reflect.DeepEqual(allowEnv, []string{"ZETA_TOKEN", "ALPHA_TOKEN"}) {
+		t.Fatal("ResolveSandbox() sorted caller-owned slices in place")
+	}
+
+	readPaths[0] = "/mutated"
+	allowEnv[0] = "MUTATED_TOKEN"
+	if !reflect.DeepEqual(got.ReadPaths, []string{"/opt/alpha", "~/zeta"}) ||
+		!reflect.DeepEqual(got.AllowEnv, []string{"ALPHA_TOKEN", "ZETA_TOKEN"}) {
+		t.Fatalf("resolved settings retained caller storage: %#v", got)
+	}
+
+	got.ReadPaths[0] = "/result-mutated"
+	got.AllowEnv[0] = "RESULT_MUTATED"
+	if raw.ReadPaths[1] != "/opt/alpha" || raw.AllowEnv[1] != "ALPHA_TOKEN" {
+		t.Fatal("resolved settings share storage with raw config")
+	}
+}
+
+func TestResolveSandboxCLIDriverPrecedence(t *testing.T) {
+	driver := "seatbelt"
+	network := "deny"
+	cli := "off"
+	raw := SandboxConfig{
+		Driver:    &driver,
+		Network:   &network,
+		ReadPaths: []string{"/opt/sdk"},
+		AllowEnv:  []string{"PROJECT_TOKEN"},
+	}
+	got, err := ResolveSandbox(raw, &cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Driver != sandbox.DriverOff || got.Network != sandbox.NetworkDeny ||
+		!reflect.DeepEqual(got.ReadPaths, []string{"/opt/sdk"}) ||
+		!reflect.DeepEqual(got.AllowEnv, []string{"PROJECT_TOKEN"}) {
+		t.Fatalf("CLI override changed non-driver settings: %#v", got)
 	}
 }
 

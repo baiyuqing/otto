@@ -2,9 +2,14 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
+	"github.com/baiyuqing/otto/internal/sandbox"
 )
 
 const (
@@ -14,7 +19,103 @@ const (
 	defaultCompactionKeep    = 20_000
 	minimumCompactionWindow  = 4_096
 	minimumCompactionTarget  = 1_024
+	maxSandboxReadPathBytes  = 32 * 1024
 )
+
+func ResolveSandbox(raw SandboxConfig, cliDriver *string) (sandbox.Settings, error) {
+	driverValue := string(sandbox.DriverAuto)
+	if raw.Driver != nil {
+		driverValue = *raw.Driver
+	}
+	if cliDriver != nil {
+		driverValue = *cliDriver
+	}
+	driver, ok := sandboxDriverMode(driverValue)
+	if !ok {
+		return sandbox.Settings{}, fmt.Errorf("invalid sandbox driver")
+	}
+
+	networkValue := "allow"
+	if raw.Network != nil {
+		networkValue = *raw.Network
+	}
+	network, ok := sandboxNetworkMode(networkValue)
+	if !ok {
+		return sandbox.Settings{}, fmt.Errorf("invalid sandbox network")
+	}
+
+	readPaths := append([]string{}, raw.ReadPaths...)
+	for _, path := range readPaths {
+		if !validSandboxReadPath(path) {
+			return sandbox.Settings{}, fmt.Errorf("invalid sandbox read_paths")
+		}
+	}
+	slices.Sort(readPaths)
+
+	allowEnv := append([]string{}, raw.AllowEnv...)
+	seenNames := make(map[string]struct{}, len(allowEnv))
+	for _, name := range allowEnv {
+		if !validSandboxEnvironmentName(name) {
+			return sandbox.Settings{}, fmt.Errorf("invalid sandbox allow_env")
+		}
+		if _, duplicate := seenNames[name]; duplicate {
+			return sandbox.Settings{}, fmt.Errorf("invalid sandbox allow_env")
+		}
+		seenNames[name] = struct{}{}
+	}
+	slices.Sort(allowEnv)
+
+	return sandbox.Settings{
+		Driver:    driver,
+		Network:   network,
+		ReadPaths: readPaths,
+		AllowEnv:  allowEnv,
+	}, nil
+}
+
+func sandboxDriverMode(value string) (sandbox.DriverMode, bool) {
+	switch sandbox.DriverMode(value) {
+	case sandbox.DriverAuto:
+		return sandbox.DriverAuto, true
+	case sandbox.DriverSeatbelt:
+		return sandbox.DriverSeatbelt, true
+	case sandbox.DriverOff:
+		return sandbox.DriverOff, true
+	default:
+		return "", false
+	}
+}
+
+func sandboxNetworkMode(value string) (sandbox.NetworkMode, bool) {
+	switch value {
+	case "allow":
+		return sandbox.NetworkAllow, true
+	case "deny":
+		return sandbox.NetworkDeny, true
+	default:
+		return 0, false
+	}
+}
+
+func validSandboxReadPath(path string) bool {
+	if path == "" || len(path) > maxSandboxReadPathBytes || !utf8.ValidString(path) || strings.IndexByte(path, 0) >= 0 {
+		return false
+	}
+	return filepath.IsAbs(path) || strings.HasPrefix(path, "~/")
+}
+
+func validSandboxEnvironmentName(name string) bool {
+	if name == "" || !utf8.ValidString(name) || !(name[0] == '_' || name[0] >= 'A' && name[0] <= 'Z' || name[0] >= 'a' && name[0] <= 'z') {
+		return false
+	}
+	for index := 1; index < len(name); index++ {
+		character := name[index]
+		if character != '_' && (character < 'A' || character > 'Z') && (character < 'a' || character > 'z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
 
 func Resolve(file File, env map[string]string, session SessionDefaults, overrides Overrides) (Runtime, error) {
 	runtime := Runtime{

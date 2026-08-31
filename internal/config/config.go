@@ -14,7 +14,15 @@ type File struct {
 	DefaultProfile string             `toml:"default_profile"`
 	UI             UI                 `toml:"ui"`
 	Agent          Agent              `toml:"agent"`
+	Sandbox        SandboxConfig      `toml:"sandbox"`
 	Profiles       map[string]Profile `toml:"profiles"`
+}
+
+type SandboxConfig struct {
+	Driver    *string  `toml:"driver"`
+	Network   *string  `toml:"network"`
+	ReadPaths []string `toml:"read_paths"`
+	AllowEnv  []string `toml:"allow_env"`
 }
 
 type Agent struct {

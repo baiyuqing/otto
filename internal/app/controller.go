@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 )
@@ -19,6 +20,7 @@ var (
 	ErrPromptActive        = errors.New("prompt already active")
 	ErrClosed              = errors.New("controller is closed")
 	ErrPersistenceDisabled = errors.New("session persistence is disabled")
+	ErrMemoryUnavailable   = errors.New("memory is not available")
 )
 
 type Runner interface {
@@ -82,6 +84,12 @@ func WithNewSessionBuilder(build NewSessionBuilder) Option {
 func WithSessionArchiver(archive ArchiveFactory) Option {
 	return func(controller *Controller) {
 		controller.archiveSession = archive
+	}
+}
+
+func WithMemory(manager memory.Manager) Option {
+	return func(controller *Controller) {
+		controller.memoryManager = manager
 	}
 }
 
@@ -184,6 +192,7 @@ type Controller struct {
 	resumeSession       ResumeFactory
 	newSession          NewSessionBuilder
 	archiveSession      ArchiveFactory
+	memoryManager       memory.Manager
 	active              *activeOperation
 	replace             *replacementState
 	closed              bool
@@ -520,6 +529,50 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 		return session.ArchiveResult{}, err
 	}
 	return archiveResult, nil
+}
+
+// SearchMemory, RememberMemory, ForgetMemory, and ReviewMemoryCandidate
+// delegate straight to the injected memory.Manager. The manager owns its own
+// concurrency (store-level locking), so these do not touch c.mu's
+// replacement state machine.
+func (c *Controller) SearchMemory(ctx context.Context, request memory.SearchRequest) (memory.SearchResult, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.SearchResult{}, ErrMemoryUnavailable
+	}
+	return manager.Search(ctx, request)
+}
+
+func (c *Controller) RememberMemory(ctx context.Context, request memory.RememberRequest) (memory.Record, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.Record{}, ErrMemoryUnavailable
+	}
+	return manager.Remember(ctx, request)
+}
+
+func (c *Controller) ForgetMemory(ctx context.Context, request memory.ForgetRequest) (memory.ForgetResult, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.ForgetResult{}, ErrMemoryUnavailable
+	}
+	return manager.Forget(ctx, request)
+}
+
+func (c *Controller) ReviewMemoryCandidate(ctx context.Context, request memory.ReviewRequest) (memory.ReviewResult, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.ReviewResult{}, ErrMemoryUnavailable
+	}
+	return manager.Review(ctx, request)
 }
 
 func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {

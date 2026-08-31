@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 )
@@ -1016,6 +1017,70 @@ func TestControllerListSessionsAndResumeReportPersistenceDisabled(t *testing.T) 
 	}
 	if _, err := browser.ResumeSession(context.Background(), "/sessions/next.jsonl"); !errors.Is(err, ErrPersistenceDisabled) {
 		t.Fatalf("ResumeSession() error = %v, want ErrPersistenceDisabled", err)
+	}
+}
+
+func TestControllerMemoryFacadeReportsUnavailableWithoutManager(t *testing.T) {
+	controller := newTestController(t, &recordingRunner{})
+
+	if _, err := controller.SearchMemory(context.Background(), memory.SearchRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("SearchMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.RememberMemory(context.Background(), memory.RememberRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("RememberMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.ForgetMemory(context.Background(), memory.ForgetRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("ForgetMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.ReviewMemoryCandidate(context.Background(), memory.ReviewRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("ReviewMemoryCandidate() error = %v, want ErrMemoryUnavailable", err)
+	}
+}
+
+func TestControllerMemoryFacadeDelegatesToManager(t *testing.T) {
+	manager := &fakeMemoryManager{
+		searchResult:   memory.SearchResult{Records: []memory.Record{{ID: "rec-1"}}},
+		rememberResult: memory.Record{ID: "rec-2"},
+		forgetResult:   memory.ForgetResult{Tombstone: memory.Tombstone{ID: "rec-3"}},
+		reviewResult:   memory.ReviewResult{Record: &memory.Record{ID: "rec-4"}},
+	}
+	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	searchResult, err := controller.SearchMemory(context.Background(), memory.SearchRequest{Query: "vim"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.searchRequest.Query != "vim" || len(searchResult.Records) != 1 || searchResult.Records[0].ID != "rec-1" {
+		t.Fatalf("SearchMemory() = %#v, request = %#v", searchResult, manager.searchRequest)
+	}
+
+	rememberResult, err := controller.RememberMemory(context.Background(), memory.RememberRequest{Key: "editor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.rememberRequest.Key != "editor" || rememberResult.ID != "rec-2" {
+		t.Fatalf("RememberMemory() = %#v, request = %#v", rememberResult, manager.rememberRequest)
+	}
+
+	forgetResult, err := controller.ForgetMemory(context.Background(), memory.ForgetRequest{Ref: memory.RecordRef{ID: "rec-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.forgetRequest.Ref.ID != "rec-1" || forgetResult.Tombstone.ID != "rec-3" {
+		t.Fatalf("ForgetMemory() = %#v, request = %#v", forgetResult, manager.forgetRequest)
+	}
+
+	reviewResult, err := controller.ReviewMemoryCandidate(context.Background(), memory.ReviewRequest{Ref: memory.CandidateRef{ID: "cand-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.reviewRequest.Ref.ID != "cand-1" || reviewResult.Record == nil || reviewResult.Record.ID != "rec-4" {
+		t.Fatalf("ReviewMemoryCandidate() = %#v, request = %#v", reviewResult, manager.reviewRequest)
 	}
 }
 
@@ -2353,6 +2418,63 @@ func (r *lifecycleRunner) CloseCalls() int {
 
 func testHeader(id string) session.Header {
 	return session.Header{Version: 1, ID: id, Workspace: "/workspace", Provider: "openai-compatible", Profile: "test", Model: "model", CreatedAt: time.Unix(1, 0).UTC()}
+}
+
+// fakeMemoryManager is a minimal memory.Manager test double: it records the
+// last request passed to each of the four methods Controller exposes and
+// returns canned results/errors.
+type fakeMemoryManager struct {
+	searchRequest memory.SearchRequest
+	searchResult  memory.SearchResult
+	searchErr     error
+
+	rememberRequest memory.RememberRequest
+	rememberResult  memory.Record
+	rememberErr     error
+
+	forgetRequest memory.ForgetRequest
+	forgetResult  memory.ForgetResult
+	forgetErr     error
+
+	reviewRequest memory.ReviewRequest
+	reviewResult  memory.ReviewResult
+	reviewErr     error
+}
+
+func (m *fakeMemoryManager) Get(context.Context, memory.RecordRef) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (m *fakeMemoryManager) GetByKey(context.Context, memory.RecordKey) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (m *fakeMemoryManager) GetTombstone(context.Context, memory.RecordRef) (memory.Tombstone, error) {
+	return memory.Tombstone{}, nil
+}
+
+func (m *fakeMemoryManager) GetCandidate(context.Context, memory.CandidateRef) (memory.Candidate, error) {
+	return memory.Candidate{}, nil
+}
+
+func (m *fakeMemoryManager) Search(_ context.Context, request memory.SearchRequest) (memory.SearchResult, error) {
+	m.searchRequest = request
+	return m.searchResult, m.searchErr
+}
+
+func (m *fakeMemoryManager) Remember(_ context.Context, request memory.RememberRequest) (memory.Record, error) {
+	m.rememberRequest = request
+	return m.rememberResult, m.rememberErr
+}
+
+func (m *fakeMemoryManager) Forget(_ context.Context, request memory.ForgetRequest) (memory.ForgetResult, error) {
+	m.forgetRequest = request
+	return m.forgetResult, m.forgetErr
+}
+
+func (m *fakeMemoryManager) Review(_ context.Context, request memory.ReviewRequest) (memory.ReviewResult, error) {
+	m.reviewRequest = request
+	return m.reviewResult, m.reviewErr
 }
 
 type recordingRunner struct {

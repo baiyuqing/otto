@@ -544,32 +544,91 @@ func TestREPLSandboxStatusAppearsAtStartupAndInSessionCommand(t *testing.T) {
 	}
 }
 
-func TestREPLSandboxUnavailableReasonIsFixedAndControlSafe(t *testing.T) {
+func TestREPLSandboxReasonRenderingRequiresExplicitUnavailableMode(t *testing.T) {
 	payload := "raw\x1b]52;c;owned\a\nSandbox reason: forged"
-	info := app.Info{
-		SessionID: "sandbox-session",
-		Sandbox: app.SandboxInfo{
-			Mode:          app.SandboxUnavailable,
-			Network:       app.SandboxNetwork(payload),
-			BashAvailable: false,
-			Reason:        app.SandboxReason(payload),
+	tests := []struct {
+		name       string
+		info       app.SandboxInfo
+		wantReason string
+		forbidden  []string
+	}{
+		{
+			name: "valid available",
+			info: app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone},
+		},
+		{
+			name:      "malformed seatbelt with approved reason",
+			info:      app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonSelfTestFailed},
+			forbidden: []string{"self-test-failed"},
+		},
+		{
+			name:      "malformed off with control reason",
+			info:      app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: false, Reason: app.SandboxReason(payload)},
+			forbidden: []string{payload},
+		},
+		{
+			name:      "unknown mode with approved reason",
+			info:      app.SandboxInfo{Mode: app.SandboxMode("future-mode"), Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonSeatbeltMissing},
+			forbidden: []string{"future-mode", "seatbelt-missing"},
+		},
+		{
+			name:      "control mode and reason",
+			info:      app.SandboxInfo{Mode: app.SandboxMode(payload), Network: app.SandboxNetwork(payload), Reason: app.SandboxReason(payload)},
+			forbidden: []string{payload},
+		},
+		{
+			name:       "unavailable valid",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonSelfTestFailed},
+			wantReason: "self-test-failed",
+		},
+		{
+			name:       "unavailable empty reason",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonNone},
+			wantReason: "runtime-failure",
+		},
+		{
+			name:       "unavailable invalid reason",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReason(payload)},
+			wantReason: "runtime-failure",
+			forbidden:  []string{payload},
+		},
+		{
+			name:       "unavailable with Bash",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonSelfTestFailed},
+			wantReason: "runtime-failure",
+			forbidden:  []string{"self-test-failed"},
 		},
 	}
-	var output bytes.Buffer
-	r := New(strings.NewReader("/session\n/exit\n"), &output, &output, &fakeBackend{info: info})
-	if err := r.Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 
-	rendered := output.String()
-	if !strings.Contains(rendered, "Sandbox: bash disabled · sandbox unavailable") {
-		t.Fatalf("output missing safe unavailable summary: %q", rendered)
-	}
-	if !strings.Contains(rendered, "Sandbox reason: runtime-failure") {
-		t.Fatalf("output missing safe unavailable reason: %q", rendered)
-	}
-	if strings.Contains(rendered, payload) || strings.ContainsAny(rendered, "\x1b\a") {
-		t.Fatalf("output leaked control-bearing Sandbox state: %q", rendered)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			info := app.Info{SessionID: "sandbox-session", Sandbox: tt.info}
+			r := New(strings.NewReader("/session\n/exit\n"), &output, &output, &fakeBackend{info: info})
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			rendered := output.String()
+			if !strings.Contains(rendered, "Sandbox: "+tt.info.Summary()) {
+				t.Fatalf("output missing safe summary: %q", rendered)
+			}
+			if tt.wantReason == "" {
+				if strings.Contains(rendered, "Sandbox reason:") {
+					t.Fatalf("output rendered a reason outside explicit unavailable mode: %q", rendered)
+				}
+			} else if !strings.Contains(rendered, "Sandbox reason: "+tt.wantReason) {
+				t.Fatalf("output missing reason %q: %q", tt.wantReason, rendered)
+			}
+			for _, forbidden := range tt.forbidden {
+				if strings.Contains(rendered, forbidden) {
+					t.Fatalf("output leaked raw or inconsistent state %q: %q", forbidden, rendered)
+				}
+			}
+			if strings.ContainsAny(rendered, "\x1b\a\r") {
+				t.Fatalf("output contains raw Sandbox controls: %q", rendered)
+			}
+		})
 	}
 }
 

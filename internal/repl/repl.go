@@ -62,6 +62,8 @@ func NewWithInput(input *Input, stdout, stderr io.Writer, backend app.Backend) *
 	return &REPL{input: input, stdout: stdout, stderr: stderr, backend: backend}
 }
 
+const ottoMark = "(●ᴥ●)  otto"
+
 const logo = `     ____  __  __
     / __ \/ /_/ /____
    / /_/ / __/ __/ __ \

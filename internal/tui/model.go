@@ -361,7 +361,7 @@ func (m Model) overlayContent() string {
 	case overlayHelp:
 		return helpOverlayContent(m.width, m.height, infoFromBackend(m.backend).Sandbox)
 	case overlaySession:
-		return sessionOverlayContent(infoFromBackend(m.backend))
+		return sessionOverlayContent(m.width, m.height, infoFromBackend(m.backend))
 	default:
 		return ""
 	}

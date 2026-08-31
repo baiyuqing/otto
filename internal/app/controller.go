@@ -94,13 +94,11 @@ func (s SandboxInfo) Badge() string {
 }
 
 func (s SandboxInfo) ReasonCode() string {
-	switch {
-	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkAllowed && s.BashAvailable && s.Reason == SandboxReasonNone:
+	if s.Mode != SandboxUnavailable {
 		return ""
-	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkDenied && s.BashAvailable && s.Reason == SandboxReasonNone:
-		return ""
-	case s.Mode == SandboxOff && s.Network == SandboxNetworkUnconfined && s.BashAvailable && s.Reason == SandboxReasonNone:
-		return ""
+	}
+	if s.BashAvailable {
+		return "runtime-failure"
 	}
 
 	switch s.Reason {

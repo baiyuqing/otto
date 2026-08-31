@@ -82,10 +82,13 @@ func TestLongSessionOverlayAndFooterStayWithinBounds(t *testing.T) {
 	m.overlay = overlaySession
 	content := m.View().Content
 	assertRenderedBounds(t, content, 40, 8)
-	for _, field := range []string{"Session", "Sandbox:", "ID:", "Path:", "Provider:", "Profile:"} {
+	for _, field := range []string{"Session", "Sandbox:", "unsandboxed", "ID:", "Path:", "Provider:"} {
 		if !strings.Contains(content, field) {
 			t.Fatalf("session overlay = %q, want bounded %s field", content, field)
 		}
+	}
+	if strings.Contains(content, "Profile:") {
+		t.Fatalf("session overlay retained lower-priority Profile after wrapping Sandbox policy: %q", content)
 	}
 
 	footer := renderFooter(40, backend.info, model.Usage{}, "status-"+long)

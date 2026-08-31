@@ -2294,7 +2294,6 @@ func TestSandboxInfoRenderingUsesOnlyFixedLiterals(t *testing.T) {
 			info:        SandboxInfo{},
 			wantSummary: "bash disabled · sandbox unavailable",
 			wantBadge:   "no-bash",
-			wantReason:  "runtime-failure",
 		},
 		{
 			name: "invalid and control bearing values fall back safely",
@@ -2306,21 +2305,18 @@ func TestSandboxInfoRenderingUsesOnlyFixedLiterals(t *testing.T) {
 			},
 			wantSummary: "bash disabled · sandbox unavailable",
 			wantBadge:   "no-bash",
-			wantReason:  "runtime-failure",
 		},
 		{
 			name:        "inconsistent seatbelt state falls back safely",
 			info:        SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonNone},
 			wantSummary: "bash disabled · sandbox unavailable",
 			wantBadge:   "no-bash",
-			wantReason:  "runtime-failure",
 		},
 		{
 			name:        "inconsistent off state falls back safely",
 			info:        SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: false, Reason: SandboxReasonNone},
 			wantSummary: "bash disabled · sandbox unavailable",
 			wantBadge:   "no-bash",
-			wantReason:  "runtime-failure",
 		},
 	}
 
@@ -2344,8 +2340,68 @@ func TestSandboxInfoRenderingUsesOnlyFixedLiterals(t *testing.T) {
 	}
 }
 
-func TestSandboxInfoReasonCodeAllowsOnlyApprovedUnavailableReasons(t *testing.T) {
-	approved := []SandboxReason{
+func TestSandboxInfoReasonCodeAllowsOnlyApprovedExplicitUnavailableReasons(t *testing.T) {
+	controlPayload := "raw\x1b]52;c;owned\a\nforged"
+	tests := []struct {
+		name string
+		info SandboxInfo
+		want string
+	}{
+		{
+			name: "valid available",
+			info: SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkAllowed, BashAvailable: true, Reason: SandboxReasonNone},
+		},
+		{
+			name: "malformed seatbelt with approved reason",
+			info: SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonSelfTestFailed},
+		},
+		{
+			name: "malformed off with control reason",
+			info: SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: false, Reason: SandboxReason(controlPayload)},
+		},
+		{
+			name: "unknown mode with approved reason",
+			info: SandboxInfo{Mode: SandboxMode("future"), Network: SandboxNetworkDenied, Reason: SandboxReasonSeatbeltMissing},
+		},
+		{
+			name: "control mode and reason",
+			info: SandboxInfo{Mode: SandboxMode(controlPayload), Network: SandboxNetwork(controlPayload), Reason: SandboxReason(controlPayload)},
+		},
+		{
+			name: "unavailable valid",
+			info: SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: false, Reason: SandboxReasonSelfTestFailed},
+			want: "self-test-failed",
+		},
+		{
+			name: "unavailable empty reason",
+			info: SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: false, Reason: SandboxReasonNone},
+			want: "runtime-failure",
+		},
+		{
+			name: "unavailable invalid reason",
+			info: SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: false, Reason: SandboxReason(controlPayload)},
+			want: "runtime-failure",
+		},
+		{
+			name: "unavailable with Bash",
+			info: SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: true, Reason: SandboxReasonSelfTestFailed},
+			want: "runtime-failure",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.info.ReasonCode()
+			if got != tt.want {
+				t.Fatalf("ReasonCode() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, controlPayload) || strings.ContainsAny(got, "\x00\x1b\a\n\r\t") {
+				t.Fatalf("ReasonCode() leaked raw state: %q", got)
+			}
+		})
+	}
+
+	for _, reason := range []SandboxReason{
 		SandboxReasonUnsupportedPlatform,
 		SandboxReasonSeatbeltMissing,
 		SandboxReasonSelfTestFailed,
@@ -2353,21 +2409,13 @@ func TestSandboxInfoReasonCodeAllowsOnlyApprovedUnavailableReasons(t *testing.T)
 		SandboxReasonInvalidShell,
 		SandboxReasonEnvironmentRejected,
 		SandboxReasonPolicyUnsupported,
-	}
-	for _, reason := range approved {
-		info := SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: false, Reason: reason}
-		if got := info.ReasonCode(); got != string(reason) {
-			t.Fatalf("ReasonCode() = %q, want approved code %q", got, reason)
-		}
-	}
-
-	available := SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkAllowed, BashAvailable: true, Reason: SandboxReasonRuntimeFailure}
-	if got := available.ReasonCode(); got != "runtime-failure" {
-		t.Fatalf("inconsistent available ReasonCode() = %q, want safe unavailable fallback", got)
-	}
-	available.Reason = SandboxReasonNone
-	if got := available.ReasonCode(); got != "" {
-		t.Fatalf("available ReasonCode() = %q, want empty", got)
+	} {
+		t.Run("approved "+string(reason), func(t *testing.T) {
+			info := SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, BashAvailable: false, Reason: reason}
+			if got := info.ReasonCode(); got != string(reason) {
+				t.Fatalf("ReasonCode() = %q, want approved code %q", got, reason)
+			}
+		})
 	}
 }
 
@@ -2454,6 +2502,55 @@ func TestControllerSandboxInfoIsCopiedAndPreservedAcrossReplacementAndRollback(t
 	}
 	if got := controller.Info(); got.SessionID != "sandbox-resumed" || got.Sandbox != processSandbox {
 		t.Fatalf("Info() after replacement rollback = %#v", got)
+	}
+}
+
+func TestControllerCanceledResumeKeepsProcessSandboxDespiteConflictingRuntime(t *testing.T) {
+	processSandbox := SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkDenied, BashAvailable: true, Reason: SandboxReasonNone}
+	conflictingSandbox := SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonNone}
+	old := &fakeSession{header: testHeader("sandbox-cancel-old")}
+	candidate := &fakeSession{header: testHeader("sandbox-cancel-candidate")}
+	factoryEntered := make(chan struct{})
+	releaseFactory := make(chan struct{})
+
+	controller, err := New(old, func() (session.Session, error) {
+		return nil, errors.New("legacy create must not run")
+	}, func(session.Session) Runner {
+		return &recordingRunner{}
+	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "model", Sandbox: processSandbox}),
+		WithSessionBrowser(nil, func(context.Context, string) (SessionReplacement, error) {
+			close(factoryEntered)
+			<-releaseFactory
+			return SessionReplacement{
+				Session: candidate,
+				Runner:  &recordingRunner{},
+				RuntimeInfo: RuntimeInfo{
+					Provider: "openai-compatible", Profile: "conflict", Model: "conflict-model", Sandbox: conflictingSandbox,
+				},
+			}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resumeDone := make(chan error, 1)
+	go func() {
+		_, resumeErr := controller.ResumeSession(ctx, candidate.Path())
+		resumeDone <- resumeErr
+	}()
+	awaitSignal(t, factoryEntered, "canceled Sandbox resume factory")
+	cancel()
+	close(releaseFactory)
+	if err := awaitError(t, resumeDone, "canceled Sandbox resume"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ResumeSession() error = %v, want context.Canceled", err)
+	}
+
+	if got := controller.Info(); got.SessionID != "sandbox-cancel-old" || got.Sandbox != processSandbox {
+		t.Fatalf("Info() after canceled resume = %#v, want old session and process Sandbox %#v", got, processSandbox)
+	}
+	if old.CloseCalls() != 0 || candidate.CloseCalls() != 1 {
+		t.Fatalf("close calls = old %d, candidate %d; want 0 and 1", old.CloseCalls(), candidate.CloseCalls())
 	}
 }
 

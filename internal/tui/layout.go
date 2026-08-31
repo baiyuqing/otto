@@ -307,8 +307,7 @@ func renderOverlay(width, height int, content string) string {
 	if width < 4 || height < 3 {
 		return fitToBounds(content, width, height)
 	}
-	innerWidth := width - 4 // border plus one cell of horizontal padding per side
-	innerHeight := height - 2
+	innerWidth, innerHeight := overlayContentBounds(width, height)
 	content = truncateAndClipLines(content, innerWidth, innerHeight)
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -319,10 +318,30 @@ func renderOverlay(width, height int, content string) string {
 	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box), width, height)
 }
 
+func overlayContentBounds(width, height int) (int, int) {
+	width = max(0, width)
+	height = max(0, height)
+	if width < 4 || height < 3 {
+		return width, height
+	}
+	// The overlay has a one-cell border and one cell of horizontal padding
+	// on each side. Its border consumes the two vertical cells.
+	return width - 4, height - 2
+}
+
+func sandboxOverlayLines(innerWidth int, info app.SandboxInfo) []string {
+	if innerWidth <= 0 {
+		return nil
+	}
+	return strings.Split(ansi.Wrap("Sandbox: "+info.Summary(), innerWidth, ""), "\n")
+}
+
 func helpOverlayContent(width, height int, info app.SandboxInfo) string {
-	full := []string{
-		"Help (? or /help)",
-		"Sandbox: " + info.Summary(),
+	innerWidth, innerHeight := overlayContentBounds(width, height)
+	sandboxLines := sandboxOverlayLines(innerWidth, info)
+	full := []string{"Help (? or /help)"}
+	full = append(full, sandboxLines...)
+	full = append(full,
 		"",
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
@@ -332,29 +351,30 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 		"Home/End transcript top/bottom",
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
-	}
+	)
 	for _, command := range slashCommands {
 		full = append(full, command.Name+" "+command.Description)
 	}
-	if height-2 >= len(full) {
-		return strings.Join(full, "\n")
+	if len(full) <= innerHeight {
+		return truncateAndClipLines(strings.Join(full, "\n"), innerWidth, innerHeight)
 	}
-	compact := []string{
+
+	compactDetails := []string{
 		"Help ? /help Enter Shift+Enter",
 		"Alt+Enter Ctrl+O PgUp/PgDn Home/End",
 		"Esc Ctrl+C /session /new /exit",
 		"/resume /compact",
 	}
-	innerWidth := max(0, width-4)
-	if innerWidth > 0 {
-		sandbox := ansi.Wrap("Sandbox: "+info.Summary(), innerWidth, "")
-		compact = append(compact, strings.Split(sandbox, "\n")...)
-	}
-	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, max(0, height-2))
+	detailLimit := max(0, innerHeight-len(sandboxLines))
+	compactDetails = compactDetails[:min(len(compactDetails), detailLimit)]
+	compact := append(compactDetails, sandboxLines...)
+	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, innerHeight)
 }
 
-func sessionOverlayContent(info app.Info) string {
-	lines := []string{"Session", "Sandbox: " + info.Sandbox.Summary()}
+func sessionOverlayContent(width, height int, info app.Info) string {
+	innerWidth, innerHeight := overlayContentBounds(width, height)
+	lines := []string{"Session"}
+	lines = append(lines, sandboxOverlayLines(innerWidth, info.Sandbox)...)
 	if reason := info.Sandbox.ReasonCode(); reason != "" {
 		lines = append(lines, "Sandbox reason: "+reason)
 	}
@@ -369,7 +389,7 @@ func sessionOverlayContent(info app.Info) string {
 	appendField("Provider", info.Provider)
 	appendField("Profile", info.Profile)
 	appendField("Model", info.Model)
-	return strings.Join(lines, "\n")
+	return truncateAndClipLines(strings.Join(lines, "\n"), innerWidth, innerHeight)
 }
 
 func wrapAndClip(content string, width, height int) string {

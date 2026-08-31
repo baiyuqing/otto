@@ -5,34 +5,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/memory"
 )
-
-const (
-	memorySearchLimit       = 20
-	memorySearchTokenBudget = 4000
-	memoryDefaultKind       = "note"
-	memoryUsage             = "usage: /memory search <query> | /memory forget <id> | /memory review <id> accept|reject"
-	rememberUsage           = "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>"
-)
-
-type memoryManager interface {
-	SearchMemory(ctx context.Context, request memory.SearchRequest) (memory.SearchResult, error)
-	RememberMemory(ctx context.Context, request memory.RememberRequest) (memory.Record, error)
-	ForgetMemory(ctx context.Context, request memory.ForgetRequest) (memory.ForgetResult, error)
-	ReviewMemoryCandidate(ctx context.Context, request memory.ReviewRequest) (memory.ReviewResult, error)
-	GetMemory(ctx context.Context, ref memory.RecordRef) (memory.Record, error)
-	MemoryScopes() (memory.Scope, memory.Scope, bool)
-}
-
-func memoryManagerFromBackend(backend app.Backend) (memoryManager, bool) {
-	manager, ok := backend.(memoryManager)
-	return manager, ok
-}
 
 type memoryCommandResultMsg struct {
 	generation uint64
@@ -45,7 +22,7 @@ func (m Model) handleMemoryCommand(argument string) (tea.Model, tea.Cmd) {
 		m.statusText = app.ErrPromptActive.Error()
 		return m, nil
 	}
-	manager, userScope, workspaceScope, ok := memoryManagerAndScopes(m.backend)
+	manager, userScope, workspaceScope, ok := app.MemoryManagerAndScopes(m.backend)
 	if !ok {
 		m.statusText = app.ErrMemoryUnavailable.Error()
 		return m, nil
@@ -53,7 +30,7 @@ func (m Model) handleMemoryCommand(argument string) (tea.Model, tea.Cmd) {
 
 	fields := strings.Fields(argument)
 	if len(fields) == 0 {
-		m.statusText = memoryUsage
+		m.statusText = app.MemoryUsage
 		return m, nil
 	}
 	scopes := []memory.Scope{userScope, workspaceScope}
@@ -68,7 +45,7 @@ func (m Model) handleMemoryCommand(argument string) (tea.Model, tea.Cmd) {
 		return m, runMemorySearchCommand(m.rootCtx, manager, generation, strings.Join(rest, " "), scopes)
 	case "forget":
 		if len(rest) != 1 {
-			m.statusText = memoryUsage
+			m.statusText = app.MemoryUsage
 			return m, nil
 		}
 		m.clearEditor()
@@ -78,7 +55,7 @@ func (m Model) handleMemoryCommand(argument string) (tea.Model, tea.Cmd) {
 		return m, runMemoryForgetCommand(m.rootCtx, manager, generation, rest[0], scopes)
 	case "review":
 		if len(rest) != 2 || (rest[1] != string(memory.ReviewAccept) && rest[1] != string(memory.ReviewReject)) {
-			m.statusText = memoryUsage
+			m.statusText = app.MemoryUsage
 			return m, nil
 		}
 		decision := memory.ReviewDecision(rest[1])
@@ -88,7 +65,7 @@ func (m Model) handleMemoryCommand(argument string) (tea.Model, tea.Cmd) {
 		m.statusText = ""
 		return m, runMemoryReviewCommand(m.rootCtx, manager, generation, rest[0], decision, scopes)
 	default:
-		m.statusText = memoryUsage
+		m.statusText = app.MemoryUsage
 		return m, nil
 	}
 }
@@ -98,15 +75,15 @@ func (m Model) handleRememberCommand(argument string) (tea.Model, tea.Cmd) {
 		m.statusText = app.ErrPromptActive.Error()
 		return m, nil
 	}
-	manager, userScope, workspaceScope, ok := memoryManagerAndScopes(m.backend)
+	manager, userScope, workspaceScope, ok := app.MemoryManagerAndScopes(m.backend)
 	if !ok {
 		m.statusText = app.ErrMemoryUnavailable.Error()
 		return m, nil
 	}
 
-	scopeFlag, kind, key, text := parseRememberArgument(argument)
+	scopeFlag, kind, key, text := app.ParseRememberArgument(argument)
 	if text == "" {
-		m.statusText = rememberUsage
+		m.statusText = app.RememberUsage
 		return m, nil
 	}
 	scope := workspaceScope
@@ -128,75 +105,23 @@ func (m Model) handleRememberCommand(argument string) (tea.Model, tea.Cmd) {
 	})
 }
 
-func memoryManagerAndScopes(backend app.Backend) (memoryManager, memory.Scope, memory.Scope, bool) {
-	manager, ok := memoryManagerFromBackend(backend)
-	if !ok {
-		return nil, memory.Scope{}, memory.Scope{}, false
-	}
-	userScope, workspaceScope, ok := manager.MemoryScopes()
-	if !ok {
-		return nil, memory.Scope{}, memory.Scope{}, false
-	}
-	return manager, userScope, workspaceScope, true
-}
-
-func parseRememberArgument(argument string) (scopeFlag, kind, key, text string) {
-	kind = memoryDefaultKind
-	remaining := argument
-	for {
-		trimmed := strings.TrimSpace(remaining)
-		switch {
-		case strings.HasPrefix(trimmed, "--scope "):
-			scopeFlag, remaining = splitFirstToken(strings.TrimPrefix(trimmed, "--scope "))
-		case strings.HasPrefix(trimmed, "--kind "):
-			kind, remaining = splitFirstToken(strings.TrimPrefix(trimmed, "--kind "))
-		case strings.HasPrefix(trimmed, "--key "):
-			key, remaining = splitFirstToken(strings.TrimPrefix(trimmed, "--key "))
-		default:
-			text = trimmed
-			return
-		}
-	}
-}
-
-func splitFirstToken(value string) (first, rest string) {
-	value = strings.TrimSpace(value)
-	if index := strings.IndexFunc(value, unicode.IsSpace); index >= 0 {
-		return value[:index], strings.TrimSpace(value[index:])
-	}
-	return value, ""
-}
-
-func runMemorySearchCommand(ctx context.Context, manager memoryManager, generation uint64, query string, scopes []memory.Scope) tea.Cmd {
+func runMemorySearchCommand(ctx context.Context, manager app.MemoryManager, generation uint64, query string, scopes []memory.Scope) tea.Cmd {
 	return func() tea.Msg {
 		result, err := manager.SearchMemory(rootContext(ctx), memory.SearchRequest{
 			Query:       query,
 			Scopes:      scopes,
-			Limit:       memorySearchLimit,
-			TokenBudget: memorySearchTokenBudget,
+			Limit:       app.MemorySearchLimit,
+			TokenBudget: app.MemorySearchTokenBudget,
 			Now:         time.Now().UTC(),
 		})
 		if err != nil {
 			return memoryCommandResultMsg{generation: generation, errText: err.Error()}
 		}
-		return memoryCommandResultMsg{generation: generation, text: renderMemorySearchResult(result)}
+		return memoryCommandResultMsg{generation: generation, text: app.RenderMemorySearchResult(result)}
 	}
 }
 
-func renderMemorySearchResult(result memory.SearchResult) string {
-	if len(result.Records) == 0 {
-		return "no matching records"
-	}
-	var content strings.Builder
-	fmt.Fprintf(&content, "%d records:\n", len(result.Records))
-	for _, record := range result.Records {
-		fmt.Fprintf(&content, "id=%s scope=%s/%s kind=%s key=%s revision=%d text=%s\n",
-			record.ID, record.Scope.Namespace, record.Scope.ID, record.Kind, record.Key, record.Revision, record.Text)
-	}
-	return strings.TrimRight(content.String(), "\n")
-}
-
-func runMemoryForgetCommand(ctx context.Context, manager memoryManager, generation uint64, id string, scopes []memory.Scope) tea.Cmd {
+func runMemoryForgetCommand(ctx context.Context, manager app.MemoryManager, generation uint64, id string, scopes []memory.Scope) tea.Cmd {
 	return func() tea.Msg {
 		resolved := rootContext(ctx)
 		var lastErr error
@@ -217,7 +142,7 @@ func runMemoryForgetCommand(ctx context.Context, manager memoryManager, generati
 	}
 }
 
-func runMemoryReviewCommand(ctx context.Context, manager memoryManager, generation uint64, id string, decision memory.ReviewDecision, scopes []memory.Scope) tea.Cmd {
+func runMemoryReviewCommand(ctx context.Context, manager app.MemoryManager, generation uint64, id string, decision memory.ReviewDecision, scopes []memory.Scope) tea.Cmd {
 	return func() tea.Msg {
 		resolved := rootContext(ctx)
 		var lastErr error
@@ -236,7 +161,7 @@ func runMemoryReviewCommand(ctx context.Context, manager memoryManager, generati
 	}
 }
 
-func runMemoryRememberCommand(ctx context.Context, manager memoryManager, generation uint64, request memory.RememberRequest) tea.Cmd {
+func runMemoryRememberCommand(ctx context.Context, manager app.MemoryManager, generation uint64, request memory.RememberRequest) tea.Cmd {
 	return func() tea.Msg {
 		record, err := manager.RememberMemory(rootContext(ctx), request)
 		if err != nil {

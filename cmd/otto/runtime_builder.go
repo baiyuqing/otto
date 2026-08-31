@@ -44,23 +44,29 @@ func (p *preparedStore) Close() error {
 }
 
 type runtimeBuilder struct {
-	config               config.File
-	environment          map[string]string
-	workspace            *tool.Workspace
-	workspacePath        string
-	sessionRoot          string
-	shell                string
-	noSession            bool
-	stderr               io.Writer
-	deps                 runDependencies
-	prepareSession       func(context.Context, string, string) (preparedSession, error)
-	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
-	buildRunnerOverride  func(session.Session, config.Runtime) (app.Runner, error)
-	runtimeOverrides     config.Overrides
-	memoryService        memory.Service
-	memoryUsable         bool
-	memoryUserScope      memory.Scope
-	memoryWorkspaceScope memory.Scope
+	config                  config.File
+	environment             map[string]string
+	workspace               *tool.Workspace
+	workspacePath           string
+	sessionRoot             string
+	shell                   string
+	noSession               bool
+	stderr                  io.Writer
+	deps                    runDependencies
+	prepareSession          func(context.Context, string, string) (preparedSession, error)
+	prepareListedSession    func(context.Context, string, string, string) (preparedSession, error)
+	buildRunnerOverride     func(session.Session, config.Runtime) (app.Runner, error)
+	runtimeOverrides        config.Overrides
+	memoryService           memory.Service
+	memoryUsable            bool
+	memoryUserScope         memory.Scope
+	memoryWorkspaceScope    memory.Scope
+	memoryRecallLimit       int
+	memoryRecallTokenBudget int
+	// extraTools is test-only: appended before registry construction so
+	// tests can force tool.NewRegistry to fail (e.g. a duplicate name) and
+	// exercise the memory-binding cleanup path deterministically.
+	extraTools []tool.Tool
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
@@ -142,8 +148,12 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 		binding = bound
 	}
+	tools = append(tools, b.extraTools...)
 	registry, err := tool.NewRegistry(tools...)
 	if err != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
 	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
@@ -157,7 +167,9 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 			ReserveTokens:    runtime.Compaction.ReserveTokens,
 			KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
 		},
-		Memory: binding,
+		Memory:                  binding,
+		MemoryRecallLimit:       b.memoryRecallLimit,
+		MemoryRecallTokenBudget: b.memoryRecallTokenBudget,
 	}, redactor), nil
 }
 

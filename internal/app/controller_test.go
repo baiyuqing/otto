@@ -1244,6 +1244,9 @@ func TestControllerResumeRejectsInvalidCandidateAndKeepsCurrent(t *testing.T) {
 			if tt.candidate != nil && tt.candidate.CloseCalls() != 1 {
 				t.Fatalf("candidate close calls = %d, want 1", tt.candidate.CloseCalls())
 			}
+			if r, ok := tt.runner.(*recordingRunner); ok && tt.candidate != nil && r.CloseCalls() != 1 {
+				t.Fatalf("candidate runner close calls = %d, want 1", r.CloseCalls())
+			}
 			if err := controller.Prompt(context.Background(), "still works", nil); err != nil {
 				t.Fatal(err)
 			}
@@ -1353,17 +1356,21 @@ func TestControllerResumeCancellationCleansCandidateAndPreservesCurrent(t *testi
 	t.Run("canceled after complete candidate before old close", func(t *testing.T) {
 		old := &fakeSession{header: testHeader("old")}
 		candidate := &fakeSession{header: testHeader("next")}
+		candidateRunner := &recordingRunner{}
 		ctx, cancel := context.WithCancel(context.Background())
 		controller := newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
 			func(context.Context, string) (SessionReplacement, error) {
 				cancel()
-				return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+				return SessionReplacement{Session: candidate, Runner: candidateRunner}, nil
 			})
 		if _, err := controller.ResumeSession(ctx, candidate.Path()); !errors.Is(err, context.Canceled) {
 			t.Fatalf("ResumeSession() error = %v, want context.Canceled", err)
 		}
 		if candidate.CloseCalls() != 1 || old.CloseCalls() != 0 {
 			t.Fatalf("close calls = candidate %d, old %d", candidate.CloseCalls(), old.CloseCalls())
+		}
+		if candidateRunner.CloseCalls() != 1 {
+			t.Fatalf("candidate runner close calls = %d, want 1", candidateRunner.CloseCalls())
 		}
 	})
 }

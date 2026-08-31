@@ -5,49 +5,19 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/memory"
 )
 
-const (
-	memorySearchLimit       = 20
-	memorySearchTokenBudget = 4000
-	memoryDefaultKind       = "note"
-	memoryUsage             = "usage: /memory search <query> | /memory forget <id> | /memory review <id> accept|reject"
-	rememberUsage           = "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>"
-)
-
-type memoryManager interface {
-	SearchMemory(ctx context.Context, request memory.SearchRequest) (memory.SearchResult, error)
-	RememberMemory(ctx context.Context, request memory.RememberRequest) (memory.Record, error)
-	ForgetMemory(ctx context.Context, request memory.ForgetRequest) (memory.ForgetResult, error)
-	ReviewMemoryCandidate(ctx context.Context, request memory.ReviewRequest) (memory.ReviewResult, error)
-	GetMemory(ctx context.Context, ref memory.RecordRef) (memory.Record, error)
-	MemoryScopes() (memory.Scope, memory.Scope, bool)
-}
-
-func memoryManagerAndScopes(backend app.Backend) (memoryManager, memory.Scope, memory.Scope, bool) {
-	manager, ok := backend.(memoryManager)
-	if !ok {
-		return nil, memory.Scope{}, memory.Scope{}, false
-	}
-	userScope, workspaceScope, ok := manager.MemoryScopes()
-	if !ok {
-		return nil, memory.Scope{}, memory.Scope{}, false
-	}
-	return manager, userScope, workspaceScope, true
-}
-
 func (r *REPL) memoryCommand(ctx context.Context, args string) (bool, error) {
-	manager, userScope, workspaceScope, ok := memoryManagerAndScopes(r.backend)
+	manager, userScope, workspaceScope, ok := app.MemoryManagerAndScopes(r.backend)
 	if !ok {
 		return false, &commandError{command: "/memory", err: app.ErrMemoryUnavailable}
 	}
 	fields := strings.Fields(args)
 	if len(fields) == 0 {
-		_, _ = fmt.Fprintln(r.stderr, memoryUsage)
+		_, _ = fmt.Fprintln(r.stderr, app.MemoryUsage)
 		return false, nil
 	}
 	scopes := []memory.Scope{userScope, workspaceScope}
@@ -58,18 +28,18 @@ func (r *REPL) memoryCommand(ctx context.Context, args string) (bool, error) {
 		result, err := manager.SearchMemory(ctx, memory.SearchRequest{
 			Query:       strings.Join(rest, " "),
 			Scopes:      scopes,
-			Limit:       memorySearchLimit,
-			TokenBudget: memorySearchTokenBudget,
+			Limit:       app.MemorySearchLimit,
+			TokenBudget: app.MemorySearchTokenBudget,
 			Now:         time.Now().UTC(),
 		})
 		if err != nil {
 			return false, &commandError{command: "/memory search", err: err}
 		}
-		_, _ = fmt.Fprintln(r.stdout, renderMemorySearchResult(result))
+		_, _ = fmt.Fprintln(r.stdout, app.RenderMemorySearchResult(result))
 		return false, nil
 	case "forget":
 		if len(rest) != 1 {
-			_, _ = fmt.Fprintln(r.stderr, memoryUsage)
+			_, _ = fmt.Fprintln(r.stderr, app.MemoryUsage)
 			return false, nil
 		}
 		id := rest[0]
@@ -91,7 +61,7 @@ func (r *REPL) memoryCommand(ctx context.Context, args string) (bool, error) {
 		return false, &commandError{command: "/memory forget", err: fmt.Errorf("record %s not found: %w", id, lastErr)}
 	case "review":
 		if len(rest) != 2 || (rest[1] != string(memory.ReviewAccept) && rest[1] != string(memory.ReviewReject)) {
-			_, _ = fmt.Fprintln(r.stderr, memoryUsage)
+			_, _ = fmt.Fprintln(r.stderr, app.MemoryUsage)
 			return false, nil
 		}
 		id := rest[0]
@@ -111,19 +81,19 @@ func (r *REPL) memoryCommand(ctx context.Context, args string) (bool, error) {
 		}
 		return false, &commandError{command: "/memory review", err: fmt.Errorf("candidate %s not found: %w", id, lastErr)}
 	default:
-		_, _ = fmt.Fprintln(r.stderr, memoryUsage)
+		_, _ = fmt.Fprintln(r.stderr, app.MemoryUsage)
 		return false, nil
 	}
 }
 
 func (r *REPL) rememberCommand(ctx context.Context, args string) (bool, error) {
-	manager, userScope, workspaceScope, ok := memoryManagerAndScopes(r.backend)
+	manager, userScope, workspaceScope, ok := app.MemoryManagerAndScopes(r.backend)
 	if !ok {
 		return false, &commandError{command: "/remember", err: app.ErrMemoryUnavailable}
 	}
-	scopeFlag, kind, key, text := parseRememberArgument(args)
+	scopeFlag, kind, key, text := app.ParseRememberArgument(args)
 	if text == "" {
-		_, _ = fmt.Fprintln(r.stderr, rememberUsage)
+		_, _ = fmt.Fprintln(r.stderr, app.RememberUsage)
 		return false, nil
 	}
 	scope := workspaceScope
@@ -141,44 +111,4 @@ func (r *REPL) rememberCommand(ctx context.Context, args string) (bool, error) {
 	}
 	_, _ = fmt.Fprintf(r.stdout, "remembered %s (scope=%s/%s kind=%s)\n", record.ID, record.Scope.Namespace, record.Scope.ID, record.Kind)
 	return false, nil
-}
-
-func renderMemorySearchResult(result memory.SearchResult) string {
-	if len(result.Records) == 0 {
-		return "no matching records"
-	}
-	var content strings.Builder
-	fmt.Fprintf(&content, "%d records:\n", len(result.Records))
-	for _, record := range result.Records {
-		fmt.Fprintf(&content, "id=%s scope=%s/%s kind=%s key=%s revision=%d text=%s\n",
-			record.ID, record.Scope.Namespace, record.Scope.ID, record.Kind, record.Key, record.Revision, record.Text)
-	}
-	return strings.TrimRight(content.String(), "\n")
-}
-
-func parseRememberArgument(argument string) (scopeFlag, kind, key, text string) {
-	kind = memoryDefaultKind
-	remaining := argument
-	for {
-		trimmed := strings.TrimSpace(remaining)
-		switch {
-		case strings.HasPrefix(trimmed, "--scope "):
-			scopeFlag, remaining = splitFirstToken(strings.TrimPrefix(trimmed, "--scope "))
-		case strings.HasPrefix(trimmed, "--kind "):
-			kind, remaining = splitFirstToken(strings.TrimPrefix(trimmed, "--kind "))
-		case strings.HasPrefix(trimmed, "--key "):
-			key, remaining = splitFirstToken(strings.TrimPrefix(trimmed, "--key "))
-		default:
-			text = trimmed
-			return
-		}
-	}
-}
-
-func splitFirstToken(value string) (first, rest string) {
-	value = strings.TrimSpace(value)
-	if index := strings.IndexFunc(value, unicode.IsSpace); index >= 0 {
-		return value[:index], strings.TrimSpace(value[index:])
-	}
-	return value, ""
 }

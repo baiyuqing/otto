@@ -621,7 +621,7 @@ func (c *Controller) runReplacement(
 	validateWorkspace bool,
 ) (ResumeResult, error) {
 	if err := ctx.Err(); err != nil {
-		c.abortReplacement(state, nil)
+		c.abortReplacement(state, SessionReplacement{})
 		return ResumeResult{}, err
 	}
 
@@ -638,26 +638,26 @@ func (c *Controller) runReplacement(
 	c.mu.Unlock()
 	warnings := cloneWarnings(replacement.Warnings)
 	if err != nil {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, err
 	}
 	if replacement.Session == nil {
-		c.abortReplacement(state, nil)
+		c.abortReplacement(state, SessionReplacement{})
 		return ResumeResult{}, errors.New("resume factory returned nil session")
 	}
 	if replacement.Runner == nil {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, errors.New("resume factory returned nil runner")
 	}
 
 	if !c.registerReplacement(state, replacement.Session) {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, ErrClosed
 	}
 
 	replacementPath := replacement.Session.Path()
 	if validateWorkspace && replacementPath == "" {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, errors.New("replacement session path is required")
 	}
 	if replacementPath != "" {
@@ -665,7 +665,7 @@ func (c *Controller) runReplacement(
 	}
 	replacementWorkspace := canonicalSessionPath(replacement.Session.Header().Workspace)
 	if validateWorkspace && replacementWorkspace != state.currentWorkspace {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, errors.New("replacement session workspace does not match current workspace")
 	}
 
@@ -675,11 +675,11 @@ func (c *Controller) runReplacement(
 	switch {
 	case c.replace != state || c.closed:
 		c.mu.Unlock()
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, ErrClosed
 	case cancelErr != nil || channelClosed(cancelDone):
 		c.mu.Unlock()
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		if cancelErr == nil {
 			cancelErr = ctx.Err()
 			if cancelErr == nil {
@@ -763,9 +763,15 @@ func (c *Controller) registerReplacement(state *replacementState, replacement se
 	return true
 }
 
-func (c *Controller) abortReplacement(state *replacementState, replacement session.Session) {
+// abortReplacement discards a candidate SessionReplacement that will never
+// become the controller's current session or runner. It closes both the
+// candidate session and the candidate runner (which may hold its own
+// resources, such as a bound memory.Binding) — otherwise a runner built
+// during a rejected /new or /resume leaks whatever buildRunner allocated
+// for it.
+func (c *Controller) abortReplacement(state *replacementState, replacement SessionReplacement) {
 	c.mu.Lock()
-	shouldClose := replacement != nil && !state.replacementClosed
+	shouldClose := replacement.Session != nil && !state.replacementClosed
 	if shouldClose {
 		state.replacementClosed = true
 		if c.replace == state {
@@ -775,7 +781,8 @@ func (c *Controller) abortReplacement(state *replacementState, replacement sessi
 	c.mu.Unlock()
 
 	if shouldClose {
-		_ = replacement.Close()
+		_ = replacement.Session.Close()
+		_ = closeRunner(replacement.Runner)
 	}
 
 	c.mu.Lock()

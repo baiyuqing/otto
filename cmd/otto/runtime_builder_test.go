@@ -19,10 +19,39 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
+
+// bindSpyService wraps a real memory.Service and records the last Binding
+// returned by Bind, wrapped in a spyBinding, so tests can assert it was
+// closed on an error path that must not leak it.
+type bindSpyService struct {
+	memory.Service
+	lastBinding *spyBinding
+}
+
+func (s *bindSpyService) Bind(ctx context.Context, options memory.BindOptions) (memory.Binding, error) {
+	bound, err := s.Service.Bind(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	spy := &spyBinding{Binding: bound}
+	s.lastBinding = spy
+	return spy, nil
+}
+
+type spyBinding struct {
+	memory.Binding
+	closed bool
+}
+
+func (b *spyBinding) Close() error {
+	b.closed = true
+	return b.Binding.Close()
+}
 
 func TestRuntimeBuilderUsesStoredProfileProviderAndModel(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default", "resumed"))
@@ -554,6 +583,32 @@ func TestRuntimeBuilderBuildRunnerMapsResolvedCompactionAndKeepsClientRequestSiz
 	}
 }
 
+func TestRuntimeBuilderBuildRunnerMapsConfiguredMemoryRecallLimits(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.memoryRecallLimit = 7
+	builder.memoryRecallTokenBudget = 999
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "recall-limits", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "m", CreatedAt: time.Now().UTC(),
+	})
+	runtime := config.Runtime{
+		Profile: "default", Provider: "openai-compatible", BaseURL: "https://default.example/v1",
+		Model: "m", ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	}
+
+	runner, err := builder.buildRunner(context.Background(), current, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := reflect.ValueOf(runner).Elem().FieldByName("options")
+	if got := options.FieldByName("MemoryRecallLimit").Int(); got != 7 {
+		t.Fatalf("MemoryRecallLimit = %d, want 7 (from configured memory.max_results)", got)
+	}
+	if got := options.FieldByName("MemoryRecallTokenBudget").Int(); got != 999 {
+		t.Fatalf("MemoryRecallTokenBudget = %d, want 999 (from configured memory.recall_tokens)", got)
+	}
+}
+
 func TestRuntimeBuilderBuildRunnerSkipsMemoryToolsWhenNotUsable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -653,6 +708,52 @@ func TestRuntimeBuilderBuildRunnerRegistersAndBindsMemoryWhenUsable(t *testing.T
 	}
 	if !strings.Contains(toolContent, "no matching records") {
 		t.Fatalf("tool result = %q, want a real (empty) memory search result", toolContent)
+	}
+}
+
+func TestRuntimeBuilderBuildRunnerClosesMemoryBindingWhenToolRegistryFails(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	dbPath := filepath.Join(t.TempDir(), "memory", "memory.db")
+	memoryCfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: dbPath}
+	realService, userScope, usable, err := openMemoryService(context.Background(), memoryCfg, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("openMemoryService() error = %v", err)
+	}
+	if !usable {
+		t.Fatal("openMemoryService() usable = false, want true")
+	}
+	t.Cleanup(func() { _ = realService.Close() })
+	workspaceScope, err := workspaceMemoryScope(memoryCfg, builder.workspacePath)
+	if err != nil {
+		t.Fatalf("workspaceMemoryScope() error = %v", err)
+	}
+	spy := &bindSpyService{Service: realService}
+	builder.memoryService = spy
+	builder.memoryUsable = true
+	builder.memoryUserScope = userScope
+	builder.memoryWorkspaceScope = workspaceScope
+	// A duplicate "read" tool forces tool.NewRegistry to fail after the
+	// memory binding has already succeeded, exercising the cleanup path.
+	builder.extraTools = []tool.Tool{tool.NewReadTool(builder.workspace, 64<<10)}
+
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "leak-check", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "m", CreatedAt: time.Now().UTC(),
+	})
+	runtime := config.Runtime{
+		Profile: "default", Provider: "openai-compatible", BaseURL: "https://default.example/v1",
+		Model: "m", ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	}
+
+	_, err = builder.buildRunner(context.Background(), current, runtime)
+	if err == nil {
+		t.Fatal("buildRunner() error = nil, want a tool-registry error from the duplicate \"read\" tool")
+	}
+	if spy.lastBinding == nil {
+		t.Fatal("memory.Service.Bind was never called")
+	}
+	if !spy.lastBinding.closed {
+		t.Fatal("bound memory.Binding leaked: not closed after tool registry construction failed")
 	}
 }
 

@@ -215,6 +215,8 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	builder.memoryUsable = memoryUsable
 	builder.memoryUserScope = memoryUserScope
 	builder.memoryWorkspaceScope = memoryWorkspaceScope
+	builder.memoryRecallLimit = memoryCfg.MaxResults
+	builder.memoryRecallTokenBudget = memoryCfg.RecallTokens
 
 	var (
 		metadata        *session.RuntimeMetadata

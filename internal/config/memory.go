@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/baiyuqing/otto/internal/memory"
 )
 
 const (
@@ -74,6 +76,9 @@ func ResolveMemory(file File, env map[string]string, overrides Overrides) (Memor
 		if *file.Memory.RecallTokens <= 0 {
 			return MemoryRuntime{}, fmt.Errorf("invalid memory recall_tokens: must be greater than zero")
 		}
+		if *file.Memory.RecallTokens > memory.MaxTokenBudget {
+			return MemoryRuntime{}, fmt.Errorf("invalid memory recall_tokens: must be at most %d", memory.MaxTokenBudget)
+		}
 		recallTokens = *file.Memory.RecallTokens
 	}
 
@@ -81,6 +86,9 @@ func ResolveMemory(file File, env map[string]string, overrides Overrides) (Memor
 	if file.Memory.MaxResults != nil {
 		if *file.Memory.MaxResults <= 0 {
 			return MemoryRuntime{}, fmt.Errorf("invalid memory max_results: must be greater than zero")
+		}
+		if *file.Memory.MaxResults > memory.MaxRecallRecords {
+			return MemoryRuntime{}, fmt.Errorf("invalid memory max_results: must be at most %d", memory.MaxRecallRecords)
 		}
 		maxResults = *file.Memory.MaxResults
 	}

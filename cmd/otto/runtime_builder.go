@@ -137,7 +137,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		tools = append(tools,
 			tool.NewMemorySearchTool(b.memoryService, memoryScopes, runtime.MaxOutputBytes),
 			tool.NewRememberTool(b.memoryService, b.memoryWorkspaceScope),
-			tool.NewForgetTool(b.memoryService),
+			tool.NewForgetTool(b.memoryService, memoryScopes),
 		)
 		bound, err := b.memoryService.Bind(ctx, memory.BindOptions{
 			Scopes:            memoryScopes,
@@ -416,8 +416,16 @@ func (b runtimeBuilder) credentialEnvironmentNames(runtimeAPIKeyEnv string) []st
 }
 
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
+	return collectSecretValues(b.config, b.environment, runtime)
+}
+
+// collectSecretValues gathers the API keys and URL-embedded secrets known
+// from static config (every profile) and, when provided, a resolved
+// runtime. It has no receiver so callers without a full runtimeBuilder
+// (e.g. the standalone "otto memory" CLI) can build the same list.
+func collectSecretValues(cfg config.File, environment map[string]string, runtime *config.Runtime) []string {
 	seen := make(map[string]struct{})
-	values := make([]string, 0, len(b.config.Profiles)+2)
+	values := make([]string, 0, len(cfg.Profiles)+2)
 	add := func(value string) {
 		if value == "" {
 			return
@@ -428,10 +436,10 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 		seen[value] = struct{}{}
 		values = append(values, value)
 	}
-	add(b.environment["OTTO_API_KEY"])
-	for _, profile := range b.config.Profiles {
+	add(environment["OTTO_API_KEY"])
+	for _, profile := range cfg.Profiles {
 		if profile.APIKeyEnv != "" {
-			add(b.environment[profile.APIKeyEnv])
+			add(environment[profile.APIKeyEnv])
 		}
 		collectURLSecretValues(profile.BaseURL, add)
 	}

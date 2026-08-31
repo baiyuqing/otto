@@ -11,6 +11,7 @@ import (
 
 type forgetTool struct {
 	proposer memory.Proposer
+	scopes   []memory.Scope
 }
 
 type forgetArgs struct {
@@ -21,8 +22,8 @@ type forgetArgs struct {
 	Reason         string `json:"reason,omitempty"`
 }
 
-func NewForgetTool(proposer memory.Proposer) Tool {
-	return &forgetTool{proposer: proposer}
+func NewForgetTool(proposer memory.Proposer, scopes []memory.Scope) Tool {
+	return &forgetTool{proposer: proposer, scopes: scopes}
 }
 
 func (t *forgetTool) Definition() model.ToolDefinition {
@@ -52,9 +53,13 @@ func (t *forgetTool) Execute(ctx context.Context, arguments json.RawMessage) Res
 	if err := ctx.Err(); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
+	scope := memory.Scope{Namespace: args.ScopeNamespace, ID: args.ScopeID}
+	if !scopeBound(t.scopes, scope) {
+		return Result{Content: "scope is not one of the scopes this session is bound to", IsError: true}
+	}
 	batch, err := t.proposer.Propose(ctx, memory.ProposeRequest{
 		Action:       memory.CandidateForget,
-		Scope:        memory.Scope{Namespace: args.ScopeNamespace, ID: args.ScopeID},
+		Scope:        scope,
 		TargetID:     args.ID,
 		BaseRevision: args.Revision,
 		Reason:       args.Reason,
@@ -68,6 +73,15 @@ func (t *forgetTool) Execute(ctx context.Context, arguments json.RawMessage) Res
 	}
 	candidate := batch.Candidates[0]
 	return Result{Content: fmt.Sprintf("candidate %s queued for human review (state=%s)", candidate.ID, candidate.State)}
+}
+
+func scopeBound(bound []memory.Scope, scope memory.Scope) bool {
+	for _, candidate := range bound {
+		if candidate == scope {
+			return true
+		}
+	}
+	return false
 }
 
 var _ Tool = (*forgetTool)(nil)

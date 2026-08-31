@@ -27,7 +27,7 @@ func unopenableMemoryPath(t *testing.T) string {
 
 func TestOpenMemoryServiceDisabledReturnsUnusableNullService(t *testing.T) {
 	var stderr bytes.Buffer
-	service, scope, usable, err := openMemoryService(context.Background(), config.MemoryRuntime{Enabled: false}, &stderr)
+	service, scope, usable, err := openMemoryService(context.Background(), config.MemoryRuntime{Enabled: false}, nil, &stderr)
 	if err != nil {
 		t.Fatalf("openMemoryService() error = %v, want nil", err)
 	}
@@ -50,7 +50,7 @@ func TestOpenMemoryServiceOpenFailureNotRequiredDegradesToNull(t *testing.T) {
 	unwritable := unopenableMemoryPath(t)
 	var stderr bytes.Buffer
 	cfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", Required: false, SQLitePath: unwritable}
-	service, scope, usable, err := openMemoryService(context.Background(), cfg, &stderr)
+	service, scope, usable, err := openMemoryService(context.Background(), cfg, nil, &stderr)
 	if err != nil {
 		t.Fatalf("openMemoryService() error = %v, want nil (should degrade)", err)
 	}
@@ -73,7 +73,7 @@ func TestOpenMemoryServiceOpenFailureRequiredReturnsError(t *testing.T) {
 	unwritable := unopenableMemoryPath(t)
 	var stderr bytes.Buffer
 	cfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", Required: true, SQLitePath: unwritable}
-	service, _, usable, err := openMemoryService(context.Background(), cfg, &stderr)
+	service, _, usable, err := openMemoryService(context.Background(), cfg, nil, &stderr)
 	if err == nil {
 		t.Fatalf("openMemoryService() error = nil, want an error when required and open fails")
 	}
@@ -94,7 +94,7 @@ func TestOpenMemoryServiceSuccessReturnsStableUserScope(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory", "memory.db")
 	cfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: path}
 
-	service, scope, usable, err := openMemoryService(context.Background(), cfg, &bytes.Buffer{})
+	service, scope, usable, err := openMemoryService(context.Background(), cfg, nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("openMemoryService() error = %v, want nil", err)
 	}
@@ -109,7 +109,7 @@ func TestOpenMemoryServiceSuccessReturnsStableUserScope(t *testing.T) {
 	}
 
 	// Reopening the same database must yield the same installation-local ID.
-	reopened, scope2, usable2, err := openMemoryService(context.Background(), cfg, &bytes.Buffer{})
+	reopened, scope2, usable2, err := openMemoryService(context.Background(), cfg, nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("openMemoryService() (reopen) error = %v, want nil", err)
 	}
@@ -127,7 +127,7 @@ func TestOpenMemoryServiceRequireEncryptionFailsWhenBackendCannotSatisfyIt(t *te
 	cfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", RequireEncryption: true, SQLitePath: path}
 
 	var stderr bytes.Buffer
-	service, _, usable, err := openMemoryService(context.Background(), cfg, &stderr)
+	service, _, usable, err := openMemoryService(context.Background(), cfg, nil, &stderr)
 	if err == nil {
 		t.Fatalf("openMemoryService() error = nil, want an error: sqlite does not advertise EncryptionAtRest")
 	}
@@ -136,6 +136,45 @@ func TestOpenMemoryServiceRequireEncryptionFailsWhenBackendCannotSatisfyIt(t *te
 	}
 	if service != nil {
 		t.Fatalf("service = %v, want nil on encryption-requirement failure", service)
+	}
+	if usable {
+		t.Fatalf("usable = true, want false")
+	}
+}
+
+func TestOpenMemoryServiceRejectsSecretValuesInRememberedText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory", "memory.db")
+	cfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: path}
+
+	service, scope, usable, err := openMemoryService(context.Background(), cfg, []string{"sk-configured-secret"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("openMemoryService() error = %v, want nil", err)
+	}
+	defer service.Close()
+	if !usable {
+		t.Fatalf("usable = false, want true")
+	}
+
+	_, err = service.Remember(context.Background(), memory.RememberRequest{
+		Scope: scope,
+		Kind:  "preference",
+		Text:  "the api key is sk-configured-secret",
+	})
+	if !errors.Is(err, memory.ErrSensitiveMemory) {
+		t.Fatalf("Remember() error = %v, want ErrSensitiveMemory", err)
+	}
+}
+
+func TestOpenMemoryServiceInvalidSecretValueFailsToOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory", "memory.db")
+	cfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: path}
+
+	service, _, usable, err := openMemoryService(context.Background(), cfg, []string{""}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatalf("openMemoryService() error = nil, want an error for an invalid secret value")
+	}
+	if service != nil {
+		t.Fatalf("service = %v, want nil", service)
 	}
 	if usable {
 		t.Fatalf("usable = true, want false")

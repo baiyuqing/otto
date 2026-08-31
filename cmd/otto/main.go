@@ -202,7 +202,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
-	memoryService, memoryUserScope, memoryUsable, err := openMemoryService(ctx, memoryCfg, stderr)
+	memoryService, memoryUserScope, memoryUsable, err := openMemoryService(ctx, memoryCfg, builder.secretValues(nil), stderr)
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -358,6 +359,25 @@ func TestRememberCommandRejectsEmptyText(t *testing.T) {
 	}
 	if !strings.Contains(got.statusText, "usage:") {
 		t.Fatalf("status = %q", got.statusText)
+	}
+}
+
+func TestMemoryWarningEventSetsStatusDuringPrompt(t *testing.T) {
+	warningErr := errors.New("memory recall failed: query too long")
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventMemoryWarning, Err: warningErr})
+		emit(agent.Event{Type: agent.EventTextDelta, Text: "done"})
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	state := updated.(Model)
+
+	updated, _ = state.Update(runCommandWithin(t, cmd, time.Second))
+	state = updated.(Model)
+	if state.statusText != warningErr.Error() {
+		t.Fatalf("warning status = %q", state.statusText)
 	}
 }
 

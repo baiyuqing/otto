@@ -50,7 +50,7 @@ func TestRunMemoryCommandForgetRemovesRecordFromWorkspaceScope(t *testing.T) {
 	configPath := writeMemoryConfig(t, dbPath)
 
 	memoryCfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: dbPath}
-	service, _, usable, err := openMemoryService(context.Background(), memoryCfg, &bytes.Buffer{})
+	service, _, usable, err := openMemoryService(context.Background(), memoryCfg, nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("openMemoryService() error = %v", err)
 	}
@@ -82,7 +82,7 @@ func TestRunMemoryCommandForgetRemovesRecordFromWorkspaceScope(t *testing.T) {
 		t.Fatalf("stdout = %q, want it to mention forgotten record %s", stdout.String(), record.ID)
 	}
 
-	reopened, _, usable, err := openMemoryService(context.Background(), memoryCfg, &bytes.Buffer{})
+	reopened, _, usable, err := openMemoryService(context.Background(), memoryCfg, nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("openMemoryService() (reopen) error = %v", err)
 	}

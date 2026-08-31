@@ -350,6 +350,10 @@ func (r *REPL) renderEvent(event agent.Event) bool {
 		if event.Err != nil {
 			_, _ = fmt.Fprintln(r.stderr, event.Err)
 		}
+	case agent.EventMemoryWarning:
+		if event.Err != nil {
+			_, _ = fmt.Fprintln(r.stderr, event.Err)
+		}
 	case agent.EventAgentError:
 		if event.Err != nil {
 			_, _ = fmt.Fprintln(r.stderr, event.Err)

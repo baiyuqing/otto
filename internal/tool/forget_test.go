@@ -11,7 +11,8 @@ import (
 
 func TestForgetToolProposesForgetCandidate(t *testing.T) {
 	proposer := &fakeMemoryProposer{batch: memory.CandidateBatch{Candidates: []memory.Candidate{{ID: "cand-3", State: memory.CandidatePending}}}}
-	forgetSubject := NewForgetTool(proposer)
+	scopes := []memory.Scope{{Namespace: "user", ID: "u1"}, {Namespace: "workspace", ID: "ws1"}}
+	forgetSubject := NewForgetTool(proposer, scopes)
 
 	result := forgetSubject.Execute(context.Background(), json.RawMessage(`{"scope_namespace":"user","scope_id":"u1","id":"rec-1","revision":2}`))
 	if result.IsError {
@@ -33,9 +34,23 @@ func TestForgetToolProposesForgetCandidate(t *testing.T) {
 
 func TestForgetToolRequiresIdentifyingFields(t *testing.T) {
 	proposer := &fakeMemoryProposer{}
-	forgetSubject := NewForgetTool(proposer)
+	forgetSubject := NewForgetTool(proposer, []memory.Scope{{Namespace: "user", ID: "u1"}})
 	result := forgetSubject.Execute(context.Background(), json.RawMessage(`{"id":"rec-1"}`))
 	if !result.IsError {
 		t.Fatalf("expected error for missing scope fields")
+	}
+}
+
+func TestForgetToolRejectsScopeOutsideBoundScopes(t *testing.T) {
+	proposer := &fakeMemoryProposer{batch: memory.CandidateBatch{Candidates: []memory.Candidate{{ID: "cand-3", State: memory.CandidatePending}}}}
+	scopes := []memory.Scope{{Namespace: "user", ID: "u1"}, {Namespace: "workspace", ID: "ws1"}}
+	forgetSubject := NewForgetTool(proposer, scopes)
+
+	result := forgetSubject.Execute(context.Background(), json.RawMessage(`{"scope_namespace":"workspace","scope_id":"someone-elses-workspace","id":"rec-1","revision":2}`))
+	if !result.IsError {
+		t.Fatalf("expected error for scope outside bound scopes, got %+v", result)
+	}
+	if proposer.got.TargetID != "" {
+		t.Fatalf("proposer should not have been called, got %#v", proposer.got)
 	}
 }

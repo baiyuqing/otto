@@ -52,24 +52,25 @@ func runMemoryCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
+	secretValues := collectSecretValues(configFile, environment, nil)
 
 	switch subcommand {
 	case "status":
-		return runMemoryStatus(ctx, memoryCfg, stdout, stderr)
+		return runMemoryStatus(ctx, memoryCfg, secretValues, stdout, stderr)
 	case "forget":
 		workspacePath, err := canonicalDirectory(*cwd)
 		if err != nil {
 			return fail(stderr, "resolve cwd: %v", err)
 		}
-		return runMemoryForget(ctx, memoryCfg, workspacePath, recordID, stdout, stderr)
+		return runMemoryForget(ctx, memoryCfg, secretValues, workspacePath, recordID, stdout, stderr)
 	default:
 		return fail(stderr, "unknown memory subcommand %q", subcommand)
 	}
 }
 
-func runMemoryStatus(ctx context.Context, cfg config.MemoryRuntime, stdout, stderr io.Writer) int {
+func runMemoryStatus(ctx context.Context, cfg config.MemoryRuntime, secretValues []string, stdout, stderr io.Writer) int {
 	var warning bytes.Buffer
-	service, _, usable, err := openMemoryService(ctx, cfg, &warning)
+	service, _, usable, err := openMemoryService(ctx, cfg, secretValues, &warning)
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
@@ -84,9 +85,9 @@ func runMemoryStatus(ctx context.Context, cfg config.MemoryRuntime, stdout, stde
 	return 0
 }
 
-func runMemoryForget(ctx context.Context, cfg config.MemoryRuntime, workspacePath, id string, stdout, stderr io.Writer) int {
+func runMemoryForget(ctx context.Context, cfg config.MemoryRuntime, secretValues []string, workspacePath, id string, stdout, stderr io.Writer) int {
 	var warning bytes.Buffer
-	service, userScope, usable, err := openMemoryService(ctx, cfg, &warning)
+	service, userScope, usable, err := openMemoryService(ctx, cfg, secretValues, &warning)
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}

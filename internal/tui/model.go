@@ -1067,6 +1067,13 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 			m.refreshViewportContent(!m.autoFollow)
 		}
 		return m, waitTurn(stream)
+	case agent.EventMemoryWarning:
+		if event.Err != nil {
+			m.statusText = event.Err.Error()
+		} else {
+			m.statusText = "memory recall warning"
+		}
+		return m, waitTurn(stream)
 	case agent.EventAgentFinished:
 		m.turnDuration = m.now().Sub(m.turnStartedAt)
 		if m.statusText == "" {

@@ -15,16 +15,23 @@ import (
 // degrades to a NullService with a stderr warning instead of failing
 // startup. usable reports whether the returned service is backed by a live
 // store (and so worth exposing to the agent), as opposed to a NullService
-// that always reports memory as disabled or unavailable.
-func openMemoryService(ctx context.Context, cfg config.MemoryRuntime, stderr io.Writer) (service memory.Service, userScope memory.Scope, usable bool, err error) {
+// that always reports memory as disabled or unavailable. secretValues are
+// exact-matched against remembered content (via memory.NewExactGuard) so
+// configured provider credentials can't be written into memory.
+func openMemoryService(ctx context.Context, cfg config.MemoryRuntime, secretValues []string, stderr io.Writer) (service memory.Service, userScope memory.Scope, usable bool, err error) {
 	if !cfg.Enabled {
 		return memory.NewNullService(memory.ErrDisabled), memory.Scope{}, false, nil
+	}
+
+	exactGuard, err := memory.NewExactGuard(secretValues)
+	if err != nil {
+		return nil, memory.Scope{}, false, fmt.Errorf("build memory secret guard: %w", err)
 	}
 
 	options := sqlite.Options{
 		BusyTimeout: cfg.SQLiteBusyTimeout,
 		NewID:       memory.NewID,
-		Guard:       memory.NewCompositeGuard(memory.DefaultGuard{}),
+		Guard:       memory.NewCompositeGuard(memory.DefaultGuard{}, exactGuard),
 	}
 	components, openErr := sqlite.NewFactory(cfg.SQLitePath, options).Open(ctx)
 	if openErr != nil {

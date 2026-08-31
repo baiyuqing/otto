@@ -21,6 +21,12 @@ func (f funcExtractor) Extract(ctx context.Context, request memory.ExtractReques
 	return f(ctx, request)
 }
 
+type funcPolicy func(context.Context, memory.PolicyRequest) (memory.PolicyDecision, error)
+
+func (f funcPolicy) Decide(ctx context.Context, request memory.PolicyRequest) (memory.PolicyDecision, error) {
+	return f(ctx, request)
+}
+
 func newTestStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "memory", "memory.db")
@@ -94,6 +100,36 @@ func TestServiceRememberCreateAndUpdate(t *testing.T) {
 	}
 }
 
+func TestServiceRememberWithKeyAndNoExpectedRevisionUpdatesExistingRecord(t *testing.T) {
+	svc := newTestService(t)
+	userScope := memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}
+	ctx := context.Background()
+
+	created, err := svc.Remember(ctx, memory.RememberRequest{Scope: userScope, Kind: "preference", Key: "editor", Text: "vim"})
+	if err != nil {
+		t.Fatalf("Remember create: %v", err)
+	}
+
+	again, err := svc.Remember(ctx, memory.RememberRequest{Scope: userScope, Kind: "preference", Key: "editor", Text: "neovim"})
+	if err != nil {
+		t.Fatalf("Remember again: %v", err)
+	}
+	if again.ID != created.ID {
+		t.Fatalf("Remember again created a new record: got ID %q, want existing ID %q", again.ID, created.ID)
+	}
+	if again.Revision != 2 || again.Text != "neovim" || !again.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("updated record = %+v", again)
+	}
+
+	list, err := svc.Search(ctx, memory.SearchRequest{Scopes: []memory.Scope{userScope}, Kinds: []string{"preference"}, Limit: 10, TokenBudget: 1000, Now: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(list.Records) != 1 {
+		t.Fatalf("records = %#v, want exactly one (no duplicate)", list.Records)
+	}
+}
+
 func TestServiceRememberRejectsSensitiveContent(t *testing.T) {
 	svc := newTestService(t)
 	userScope := memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}
@@ -160,6 +196,31 @@ func TestServiceProposeRejectsNonPendingOrigin(t *testing.T) {
 	})
 	if !errors.Is(err, memory.ErrInvalidRequest) {
 		t.Fatalf("error = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestServiceProposeReturnsErrorWhenPolicyDoesNotPend(t *testing.T) {
+	store := newTestStore(t)
+	userScope := memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}
+
+	for _, decision := range []memory.PolicyDecision{memory.PolicyReject, memory.PolicyAccept} {
+		policy := funcPolicy(func(context.Context, memory.PolicyRequest) (memory.PolicyDecision, error) {
+			return decision, nil
+		})
+		svc, err := memory.NewService(store, store, policy)
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+
+		batch, err := svc.Propose(context.Background(), memory.ProposeRequest{
+			Action: memory.CandidateCreate, Scope: userScope, Kind: "preference", Text: "vim", Source: memory.Provenance{Origin: memory.OriginModel},
+		})
+		if err == nil {
+			t.Fatalf("decision %q: expected error, got batch=%+v", decision, batch)
+		}
+		if len(batch.Candidates) != 0 {
+			t.Fatalf("decision %q: batch = %+v, want no candidates", decision, batch)
+		}
 	}
 }
 
@@ -420,5 +481,108 @@ func TestServiceCloseClosesStoreAndInvalidatesBindings(t *testing.T) {
 	}
 	if _, err := binding.Recall(ctx, memory.RecallRequest{Query: "x", Limit: 1, TokenBudget: 100}); !errors.Is(err, memory.ErrClosed) {
 		t.Fatalf("Recall after service close error = %v, want ErrClosed", err)
+	}
+}
+
+type blockingRetriever struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingRetriever) Retrieve(context.Context, memory.RetrievalRequest) (memory.RetrievalResult, error) {
+	close(r.started)
+	<-r.release
+	return memory.RetrievalResult{}, nil
+}
+
+func TestServiceCloseWaitsForInFlightBindingOperation(t *testing.T) {
+	store := newTestStore(t)
+	retriever := &blockingRetriever{started: make(chan struct{}), release: make(chan struct{})}
+	svc, err := memory.NewService(store, retriever, memory.DefaultPolicy{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	userScope := memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}
+	ctx := context.Background()
+
+	bound, err := svc.Bind(ctx, memory.BindOptions{Scopes: []memory.Scope{userScope}, DefaultWriteScope: userScope})
+	if err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	recallDone := make(chan error, 1)
+	go func() {
+		_, err := bound.Recall(ctx, memory.RecallRequest{Query: "x", Limit: 1, TokenBudget: 100})
+		recallDone <- err
+	}()
+	<-retriever.started
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- svc.Close() }()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while a binding operation was still in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(retriever.release)
+
+	if err := <-recallDone; err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after the in-flight operation finished")
+	}
+}
+
+// TestServiceCloseWaitsForInFlightManagerOperation covers the Manager and
+// Proposer methods called directly on *service (by app.Controller's memory
+// facade, the standalone "otto memory" CLI, and the agent's memory tools),
+// as opposed to TestServiceCloseWaitsForInFlightBindingOperation above,
+// which only covers Binding.Recall/Observe.
+func TestServiceCloseWaitsForInFlightManagerOperation(t *testing.T) {
+	store := newTestStore(t)
+	retriever := &blockingRetriever{started: make(chan struct{}), release: make(chan struct{})}
+	svc, err := memory.NewService(store, retriever, memory.DefaultPolicy{})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	userScope := memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}
+	ctx := context.Background()
+
+	searchDone := make(chan error, 1)
+	go func() {
+		_, err := svc.Search(ctx, memory.SearchRequest{Query: "x", Scopes: []memory.Scope{userScope}, Limit: 1, TokenBudget: 100, Now: time.Now().UTC()})
+		searchDone <- err
+	}()
+	<-retriever.started
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- svc.Close() }()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while a manager operation was still in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(retriever.release)
+
+	if err := <-searchDone; err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after the in-flight operation finished")
 	}
 }

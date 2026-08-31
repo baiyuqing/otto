@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/baiyuqing/otto/internal/memory"
 )
 
 func TestResolveMemoryDefaults(t *testing.T) {
@@ -111,6 +113,20 @@ func TestResolveMemoryRejectsNonPositiveRecallTokens(t *testing.T) {
 
 func TestResolveMemoryRejectsNonPositiveMaxResults(t *testing.T) {
 	_, err := ResolveMemory(File{Memory: Memory{MaxResults: intPointer(-1)}}, nil, Overrides{})
+	if err == nil || !strings.Contains(err.Error(), "max_results") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveMemoryRejectsRecallTokensAboveCeiling(t *testing.T) {
+	_, err := ResolveMemory(File{Memory: Memory{RecallTokens: intPointer(memory.MaxTokenBudget + 1)}}, nil, Overrides{})
+	if err == nil || !strings.Contains(err.Error(), "recall_tokens") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestResolveMemoryRejectsMaxResultsAboveCeiling(t *testing.T) {
+	_, err := ResolveMemory(File{Memory: Memory{MaxResults: intPointer(memory.MaxRecallRecords + 1)}}, nil, Overrides{})
 	if err == nil || !strings.Contains(err.Error(), "max_results") {
 		t.Fatalf("unexpected error: %v", err)
 	}

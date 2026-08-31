@@ -663,7 +663,7 @@ func TestRuntimeBuilderBuildRunnerRegistersAndBindsMemoryWhenUsable(t *testing.T
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 	dbPath := filepath.Join(t.TempDir(), "memory", "memory.db")
 	memoryCfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: dbPath}
-	service, userScope, usable, err := openMemoryService(context.Background(), memoryCfg, &bytes.Buffer{})
+	service, userScope, usable, err := openMemoryService(context.Background(), memoryCfg, nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("openMemoryService() error = %v", err)
 	}
@@ -715,7 +715,7 @@ func TestRuntimeBuilderBuildRunnerClosesMemoryBindingWhenToolRegistryFails(t *te
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 	dbPath := filepath.Join(t.TempDir(), "memory", "memory.db")
 	memoryCfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: dbPath}
-	realService, userScope, usable, err := openMemoryService(context.Background(), memoryCfg, &bytes.Buffer{})
+	realService, userScope, usable, err := openMemoryService(context.Background(), memoryCfg, nil, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("openMemoryService() error = %v", err)
 	}

@@ -104,6 +104,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string, deps runDependencies) int {
+	if len(args) > 0 && args[0] == "memory" {
+		return runMemoryCommand(ctx, args[1:], stdout, stderr, getenv)
+	}
 	if deps.detectTerminal == nil {
 		deps.detectTerminal = detectTerminalIO
 	}
@@ -195,6 +198,26 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
 
+	memoryCfg, err := config.ResolveMemory(configFile, environment, config.Overrides{})
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	memoryService, memoryUserScope, memoryUsable, err := openMemoryService(ctx, memoryCfg, builder.secretValues(nil), stderr)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	defer func() { _ = memoryService.Close() }()
+	memoryWorkspaceScope, err := workspaceMemoryScope(memoryCfg, workspacePath)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	builder.memoryService = memoryService
+	builder.memoryUsable = memoryUsable
+	builder.memoryUserScope = memoryUserScope
+	builder.memoryWorkspaceScope = memoryWorkspaceScope
+	builder.memoryRecallLimit = memoryCfg.MaxResults
+	builder.memoryRecallTokenBudget = memoryCfg.RecallTokens
+
 	var (
 		metadata        *session.RuntimeMetadata
 		preparedInitial preparedSession
@@ -244,7 +267,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	printWarnings(stderr, startupWarnings)
 
-	initialRunner, err := builder.buildRunner(initialSession, runtime)
+	initialRunner, err := builder.buildRunner(ctx, initialSession, runtime)
 	if err != nil {
 		_ = initialSession.Close()
 		return fail(stderr, "%v", builder.redactError(err, &runtime))
@@ -259,18 +282,21 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 			initialRunnerPending = false
 			return initialRunner
 		}
-		runner, buildErr := builder.buildRunner(current, runtime)
+		runner, buildErr := builder.buildRunner(context.Background(), current, runtime)
 		if buildErr != nil {
 			return nil
 		}
 		return runner
 	}
-	controllerOptions := []app.Option{app.WithRuntimeInfo(app.RuntimeInfo{
-		Provider:      runtime.Provider,
-		Profile:       runtime.Profile,
-		Model:         runtime.Model,
-		ContextWindow: runtime.Compaction.ContextWindow,
-	})}
+	controllerOptions := []app.Option{
+		app.WithRuntimeInfo(app.RuntimeInfo{
+			Provider:      runtime.Provider,
+			Profile:       runtime.Profile,
+			Model:         runtime.Model,
+			ContextWindow: runtime.Compaction.ContextWindow,
+		}),
+		app.WithMemory(memoryService, memoryUserScope, memoryWorkspaceScope),
+	}
 	if !options.noSession {
 		controllerOptions = append(controllerOptions,
 			app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
@@ -556,6 +582,7 @@ func loadConfig(options cliOptions, home string) (config.File, error) {
 
 func configEnvironment(file config.File, getenv func(string) string) map[string]string {
 	keys := map[string]struct{}{
+		"HOME":          {},
 		"OTTO_PROVIDER": {},
 		"OTTO_MODEL":    {},
 		"OTTO_API_KEY":  {},

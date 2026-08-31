@@ -20,6 +20,13 @@ var errAutomaticCompactionWarning = errors.New(automaticCompactionWarningMessage
 
 type runDispatchState struct {
 	proactiveAttempted bool
+	memoryContext      string
+	// toolResultOverlay holds the full (redacted) tool result content, keyed
+	// by ToolCallID, for tool calls whose PersistedContent placeholder
+	// differs from what the model should see. It is substituted into
+	// provider requests only, never into a.session, and discarded when Run
+	// returns since runDispatchState is turn-scoped.
+	toolResultOverlay map[string]string
 }
 
 type automaticDispatchError struct {

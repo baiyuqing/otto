@@ -127,7 +127,7 @@ func runSessionResumeCommand(ctx context.Context, browser app.SessionBrowser, ge
 }
 
 func (m Model) handleResumeCommand() (tea.Model, tea.Cmd) {
-	if m.running || m.newSessionPending || m.resume.active() || m.resume.listPending {
+	if m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.archive.active() || m.archive.listPending {
 		m.statusText = app.ErrPromptActive.Error()
 		return m, nil
 	}
@@ -314,6 +314,7 @@ func (m Model) failClosedStaleResume() (tea.Model, tea.Cmd) {
 
 func (m Model) quit() (tea.Model, tea.Cmd) {
 	m.cancelSessionListWorker()
+	m.cancelArchiveListWorker()
 	m.abandonActiveTurn()
 	return m, tea.Quit
 }

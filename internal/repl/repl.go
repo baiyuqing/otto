@@ -231,7 +231,7 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if args != "" {
 			break
 		}
-		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/compact [focus] compact context\n")
+		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/archive  archive current session and start a new one\n/compact [focus] compact context\n")
 		return false, nil
 	case "exit":
 		if args != "" {
@@ -245,6 +245,23 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if err := r.backend.NewSession(); err != nil {
 			return false, &commandError{command: command, err: err}
 		}
+		if info := r.backend.Info(); info.SessionID != "" {
+			_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
+		}
+		return false, nil
+	case "archive":
+		if args != "" {
+			break
+		}
+		archiver, ok := r.backend.(app.SessionArchiver)
+		if !ok {
+			return false, &commandError{command: command, err: app.ErrPersistenceDisabled}
+		}
+		result, err := archiver.ArchiveCurrentSession(ctx)
+		if err != nil {
+			return false, &commandError{command: command, err: err}
+		}
+		_, _ = fmt.Fprintf(r.stdout, "Archived: %s\n", result.Path)
 		if info := r.backend.Info(); info.SessionID != "" {
 			_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 		}

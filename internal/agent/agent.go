@@ -116,14 +116,21 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 				result = a.registry.Execute(ctx, block.ToolName, cloneArguments(block.Arguments))
 			}
 			result.Content = a.redactor.RedactString(result.Content)
+			if result.PersistedContent != "" {
+				result.PersistedContent = a.redactor.RedactString(result.PersistedContent)
+			}
 			a.emit(emit, Event{Type: EventToolCallFinished, ToolName: block.ToolName, ToolCallID: block.ToolCallID, ToolResult: result})
+			persistedText := result.Content
+			if result.PersistedContent != "" {
+				persistedText = result.PersistedContent
+			}
 			if err := a.session.Append(durabilityCtx, model.Message{
 				ID:        a.options.NewID(),
 				Role:      model.RoleTool,
 				CreatedAt: a.options.Now(),
 				Blocks: []model.Block{{
 					Type:       model.BlockToolResult,
-					Text:       result.Content,
+					Text:       persistedText,
 					ToolCallID: block.ToolCallID,
 					ToolName:   block.ToolName,
 					IsError:    result.IsError,

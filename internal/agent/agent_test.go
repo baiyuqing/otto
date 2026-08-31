@@ -493,6 +493,42 @@ func TestRunPreservesProviderCancellation(t *testing.T) {
 	}
 }
 
+func TestRunPersistsPersistedContentPlaceholderInsteadOfFullContent(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}, FinishReason: model.FinishToolCalls}},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	recorder := &recordingTool{name: "recorder", execute: func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "3 records: id1, id2, id3", PersistedContent: "3 records (ids omitted)"}
+	}}
+	registry, err := tool.NewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
+
+	var finished Event
+	if err := runner.Run(context.Background(), "inspect", func(event Event) {
+		if event.Type == EventToolCallFinished {
+			finished = event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if finished.ToolResult.Content != "3 records: id1, id2, id3" {
+		t.Fatalf("live event content = %q, want full content", finished.ToolResult.Content)
+	}
+	messages := memory.Messages()
+	if got := messages[2].Blocks[0].Text; got != "3 records (ids omitted)" {
+		t.Fatalf("persisted tool result = %q, want placeholder", got)
+	}
+	if got := fakeProvider.requests[1].Messages[2].Blocks[0].Text; got != "3 records (ids omitted)" {
+		t.Fatalf("provider history tool result = %q, want placeholder", got)
+	}
+}
+
 func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testing.T) {
 	credential := fmt.Sprintf("credential-%d", time.Now().UnixNano())
 	workspaceRoot := t.TempDir()

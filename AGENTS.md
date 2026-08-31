@@ -19,6 +19,8 @@ Keep responsibilities split along the current Go package layout:
 - `internal/app`: shared frontend/backend lifecycle, prompt serialization, session replacement, and exported session info/history access
 - `internal/config`: TOML loading and runtime resolution
 - `internal/model`: provider-neutral message/tool types
+- `internal/memory`: neutral memory contracts, validation/secret guards, conservative policy, null service, and the shared Store conformance harness
+- `internal/memory/sqlite`: secure local SQLite/FTS5 store and retriever implementing the memory contracts
 - `internal/provider`: neutral provider contract
 - `internal/provider/openaicompat`: all Stage 1 provider-specific HTTP/JSON/SSE code
 - `internal/repl`: line-oriented REPL rendering and commands
@@ -32,6 +34,7 @@ Rules:
 - Keep file-tool workspace enforcement inside `internal/tool`.
 - Keep session persistence append-only.
 - Keep `bash` unsandboxed, but start it in the selected workspace.
+- Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store. The memory core is currently unwired — do not document it as a user-facing Stage 1 feature until config/tool/frontend wiring lands.
 
 ## Development isolation
 

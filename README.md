@@ -17,11 +17,12 @@ For the full usage reference, see the [Otto user manual](docs/user-manual.md).
 - `otto` CLI for macOS
 - OpenAI-compatible provider support only
 - Adaptive UI selection: full-screen TUI on terminal stdin/stdout, REPL otherwise
-- Streaming TUI and REPL with `/help`, `/exit`, `/new`, `/session`, and `/compact`; the TUI also provides `/resume`
+- Streaming TUI and REPL with `/help`, `/exit`, `/new`, `/session`, and `/compact`; the TUI also provides `/resume` and `/archive`
 - Manual `/compact [focus]` plus automatic proactive and typed-overflow context compaction
 - Folded compaction checkpoints and collapsible tool output in the TUI (`Ctrl+O`)
 - Built-in `read`, `grep`, `find`, `ls`, `write`, `edit`, and `bash` tools
 - Persistent append-only Pi v3 JSONL sessions with `--continue` and `--resume`
+- Non-destructive session archiving with `/archive`, `--archive PATH`, and the `archive/` storage directory
 - Global TOML configuration at `~/.config/otto/config.toml`
 - `--thinking` pass-through for model reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
 - `--approve` headless mode for non-interactive single-prompt runs
@@ -34,6 +35,10 @@ For the full usage reference, see the [Otto user manual](docs/user-manual.md).
 - Plugins, skills, or project-local config
 - Windows or Linux support commitments
 - Session trees/forks, session naming, deletion, or search
+
+Archiving (moving a finished session into `archive/`) is distinct from deletion:
+archived files are preserved byte-for-byte, excluded from `/resume`, `--continue`,
+and `/archive`, and remain resumable by explicit `--resume PATH`.
 
 ### Planned providers
 
@@ -290,9 +295,10 @@ Shared commands:
 - `/compact [focus]` creates a manual context checkpoint or reports `[context] no-op` when nothing can be compacted.
 - `/exit` exits when idle. In the REPL, EOF also exits.
 
-TUI-only command:
+TUI-only commands:
 
 - `/resume` opens a modal containing up to the 20 most recently modified valid sessions for the current canonical workspace. Use `↑`/`↓` or `PgUp`/`PgDn` to navigate, `Enter` to resume, and `Esc` to close it. It does not search other workspaces or session contents.
+- `/archive` opens the same picker to archive a session. `Enter` on a non-current session moves it into `archive/` and shows `archived session <id>`; `Enter` on the current session archives it and starts a fresh session. `Esc` closes without archiving.
 
 ## REPL behavior
 
@@ -300,6 +306,7 @@ TUI-only command:
 - `/help` shows commands.
 - `/session` prints the current session ID, path, provider, and model.
 - `/new` closes the current session and starts a fresh one in the same process.
+- `/archive` archives the current session and starts a fresh one, printing the archived path and the new session ID.
 - `/compact [focus]` creates a manual context checkpoint or reports `[context] no-op`.
 - `/exit` or EOF exits.
 - `Ctrl+C` during an active provider call, tool run, or manual compaction cancels only that turn and returns you to the prompt.
@@ -333,6 +340,11 @@ Notes:
 - `/resume` is TUI-only and shows at most the recent 20 sessions in the current workspace; controls are documented above.
 - `/session` shows the exact session path.
 - `--no-session` keeps history in memory only.
+- **Archiving** moves an active session into a sibling `archive/` directory: `~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. The file is preserved byte-for-byte with its `0600` mode and nothing is deleted. Archived sessions disappear from `/resume`, `--continue`, and `/archive`, but remain resumable by explicit path:
+  ```bash
+  ./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
+  ```
+  `--archive PATH` archives one active session for the current `--cwd` and exits. It cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`.
 - Manual and automatic compaction append Pi v3 `type: "compaction"` checkpoints. Checkpoints carry `firstKeptEntryId`, `tokensBefore`, optional usage, and bounded file metadata; writes remain append-only.
 - Session files contain sensitive prompt text, assistant responses, compaction summaries, tool calls, tool arguments, tool results, and file metadata. Protect them like source data. Session records do not contain API-key, OAuth-token, or authorization-header fields.
 - Stage 1 has no session tree/fork UI, naming, deletion, or search.

@@ -100,6 +100,7 @@ OTTO_API_KEY=your-key ./otto \
 | `--no-session` | Keep history in memory only; do not persist a session. Cannot be combined with `--continue` or `--resume`. |
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume` or `--no-session`. |
 | `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue` or `--no-session`. |
+| `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`. |
 
 ## Environment variables
 
@@ -258,11 +259,18 @@ Shared commands:
   `[context] no-op` when nothing can be compacted.
 - `/exit` exits when idle (REPL EOF also exits).
 
-TUI-only command:
+TUI-only commands:
 
 - `/resume` opens a modal of the up to 20 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,
   `Enter` to resume, `Esc` to close. It does not search other workspaces.
+- `/archive` opens the same modal to archive a session. `Enter` on a non-current
+  session moves it into `archive/` and shows `archived session <id>`. `Enter` on
+  the current session archives it and starts a fresh session. `Esc` closes
+  without archiving.
+
+In the REPL, `/archive` archives the current session and starts a fresh one,
+printing the archived path and the new session ID.
 
 ## Sessions
 
@@ -293,6 +301,15 @@ Notes:
 - Old Otto v1 files are left untouched, are not listed by `/resume`, and cannot
   be resumed.
 - `--no-session` keeps history in memory only.
+- **Archiving** moves an active session into a sibling `archive/` directory:
+  `~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. The move is
+  atomic, the file is preserved byte-for-byte with its `0600` mode, and nothing
+  is deleted. Archived sessions are excluded from `/resume`, `--continue`, and
+  the `/archive` picker, but remain resumable by explicit path:
+  ```bash
+  ./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
+  ```
+  `--archive PATH` archives one active session for the current `--cwd` and exits.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.

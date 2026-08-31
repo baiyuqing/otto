@@ -16,7 +16,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/command"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/render"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 	"github.com/charmbracelet/x/ansi"
@@ -211,15 +213,14 @@ func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
 		{ID: "checkpoint", Role: model.RoleContext, ContextType: "compaction", Display: true, ContextTokensBefore: 9000, Blocks: []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Compaction history"}}},
 	}})
 	// Remove the injected test renderer so this test exercises the production renderer.
-	m.renderer = newGlamourRenderer(true)
+	m.renderer = render.NewGlamourRenderer(true)
 	m.rendererInjected = false
 	m.rerenderAndRefreshViewportContent(false)
 	beforeAssistant, beforeCompaction := m.entries[0].Rendered, m.entries[1].Rendered
 
 	updated, _ := m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}})
 	light := updated.(Model)
-	lightRenderer, ok := light.renderer.(GlamourRenderer)
-	if !ok || light.darkBackground || lightRenderer.styleName != "light" {
+	if _, ok := light.renderer.(render.GlamourRenderer); !ok || light.darkBackground {
 		t.Fatalf("light renderer = %#v dark=%v", light.renderer, light.darkBackground)
 	}
 	if light.entries[0].Rendered == beforeAssistant {
@@ -232,8 +233,7 @@ func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
 
 	updated, _ = light.Update(tea.BackgroundColorMsg{Color: color.RGBA{A: 0xff}})
 	dark := updated.(Model)
-	darkRenderer, ok := dark.renderer.(GlamourRenderer)
-	if !ok || !dark.darkBackground || darkRenderer.styleName != "dark" {
+	if _, ok := dark.renderer.(render.GlamourRenderer); !ok || !dark.darkBackground {
 		t.Fatalf("dark renderer = %#v dark=%v", dark.renderer, dark.darkBackground)
 	}
 	if dark.entries[0].Rendered == lightAssistant || dark.entries[1].Rendered == lightCompaction {
@@ -2353,8 +2353,8 @@ func TestPromptHistoryBrowsingDoesNotInterfereWithSlashSuggestions(t *testing.T)
 
 	updated, _ := m.Update(keyPress(tea.KeyUp))
 	got := updated.(Model)
-	if got.commandSuggestionIndex != len(slashCommands)-1 {
-		t.Fatalf("suggestion selection = %d, want %d", got.commandSuggestionIndex, len(slashCommands)-1)
+	if got.commandSuggestionIndex != len(command.Commands)-1 {
+		t.Fatalf("suggestion selection = %d, want %d", got.commandSuggestionIndex, len(command.Commands)-1)
 	}
 	if got.editor.Value() != "/" || got.promptHistoryIndex != -1 {
 		t.Fatalf("up interfered with history: editor=%q index=%d", got.editor.Value(), got.promptHistoryIndex)

@@ -35,6 +35,8 @@ type ResumeFactory func(context.Context, string) (SessionReplacement, error)
 
 type NewSessionBuilder func(context.Context, RuntimeInfo) (SessionReplacement, error)
 
+type ArchiveFactory func(context.Context, string) (session.ArchiveResult, error)
+
 type RuntimeInfo struct {
 	Provider      string
 	Profile       string
@@ -76,6 +78,12 @@ func WithNewSessionBuilder(build NewSessionBuilder) Option {
 	}
 }
 
+func WithSessionArchiver(archive ArchiveFactory) Option {
+	return func(controller *Controller) {
+		controller.archiveSession = archive
+	}
+}
+
 type Info struct {
 	SessionID                 string
 	SessionPath               string
@@ -102,6 +110,12 @@ type Backend interface {
 type SessionBrowser interface {
 	ListSessions(context.Context, int) (session.ListResult, error)
 	ResumeSession(context.Context, string) (ResumeResult, error)
+}
+
+type SessionArchiver interface {
+	SessionBrowser
+	ArchiveSession(context.Context, string) (session.ArchiveResult, error)
+	ArchiveCurrentSession(context.Context) (session.ArchiveResult, error)
 }
 
 type replacementPhase uint8
@@ -144,6 +158,7 @@ type Controller struct {
 	listSessions        SessionLister
 	resumeSession       ResumeFactory
 	newSession          NewSessionBuilder
+	archiveSession      ArchiveFactory
 	active              *activeOperation
 	replace             *replacementState
 	closed              bool
@@ -291,7 +306,6 @@ func (c *Controller) NewSession() error {
 		return ErrPromptActive
 	}
 	state := c.beginReplacementLocked(owner)
-	builder := c.newSession
 	current := c.current
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
@@ -306,33 +320,38 @@ func (c *Controller) NewSession() error {
 	}
 
 	_, err := c.runReplacement(context.Background(), state, func() (SessionReplacement, error) {
-		if builder != nil {
-			return builder(context.Background(), *runtimeInfo)
-		}
-		replacement, createErr := c.create()
-		if createErr != nil {
-			return SessionReplacement{Session: replacement}, createErr
-		}
-		if replacement == nil {
-			return SessionReplacement{}, errors.New("session factory returned nil session")
-		}
-		runner := c.build(replacement)
-		if runner == nil {
-			return SessionReplacement{Session: replacement}, errors.New("runner factory returned nil runner")
-		}
-		header := replacement.Header()
-		return SessionReplacement{
-			Session: replacement,
-			Runner:  runner,
-			RuntimeInfo: RuntimeInfo{
-				Provider:      header.Provider,
-				Profile:       header.Profile,
-				Model:         header.Model,
-				ContextWindow: runtimeInfo.ContextWindow,
-			},
-		}, nil
+		return c.buildReplacement(context.Background(), runtimeInfo)
 	}, true, false)
 	return err
+}
+
+func (c *Controller) buildReplacement(ctx context.Context, runtimeInfo *RuntimeInfo) (SessionReplacement, error) {
+	builder := c.newSession
+	if builder != nil {
+		return builder(ctx, *runtimeInfo)
+	}
+	replacement, createErr := c.create()
+	if createErr != nil {
+		return SessionReplacement{Session: replacement}, createErr
+	}
+	if replacement == nil {
+		return SessionReplacement{}, errors.New("session factory returned nil session")
+	}
+	runner := c.build(replacement)
+	if runner == nil {
+		return SessionReplacement{Session: replacement}, errors.New("runner factory returned nil runner")
+	}
+	header := replacement.Header()
+	return SessionReplacement{
+		Session: replacement,
+		Runner:  runner,
+		RuntimeInfo: RuntimeInfo{
+			Provider:      header.Provider,
+			Profile:       header.Profile,
+			Model:         header.Model,
+			ContextWindow: runtimeInfo.ContextWindow,
+		},
+	}, nil
 }
 
 func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListResult, error) {
@@ -384,6 +403,97 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 	return c.runReplacement(ctx, state, func() (SessionReplacement, error) {
 		return factory(ctx, path)
 	}, true, true)
+}
+
+// ArchiveSession archives an active session file without touching the current
+// session state. Selecting the current session delegates to ArchiveCurrentSession
+// so picker "current" rows behave identically to /archive on the current session.
+func (c *Controller) ArchiveSession(ctx context.Context, path string) (session.ArchiveResult, error) {
+	requestedPath := canonicalSessionPath(path)
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrClosed
+	}
+	if c.active != nil || c.replace != nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPromptActive
+	}
+	factory := c.archiveSession
+	if factory == nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
+	}
+	currentPath := c.currentPath
+	c.mu.Unlock()
+
+	if requestedPath != "" && requestedPath == currentPath {
+		return c.ArchiveCurrentSession(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return session.ArchiveResult{}, err
+	}
+	return factory(ctx, path)
+}
+
+// ArchiveCurrentSession archives the current session file and starts a fresh
+// session in its place. The fresh session is built before the archive move so
+// every failure path leaves the current session fully intact; the only committed
+// state change is the atomic file move, which happens last.
+func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.ArchiveResult, error) {
+	owner := c.ownerID()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrClosed
+	}
+	if c.active != nil || c.replace != nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPromptActive
+	}
+	factory := c.archiveSession
+	if factory == nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
+	}
+	current := c.current
+	currentPath := c.currentPath
+	if currentPath == "" {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
+	}
+	state := c.beginReplacementLocked(owner)
+	var runtimeInfo *RuntimeInfo
+	if c.runtimeInfo != nil {
+		copy := *c.runtimeInfo
+		runtimeInfo = &copy
+	}
+	c.mu.Unlock()
+
+	if runtimeInfo == nil {
+		header := current.Header()
+		runtimeInfo = &RuntimeInfo{Provider: header.Provider, Profile: header.Profile, Model: header.Model}
+	}
+
+	var archiveResult session.ArchiveResult
+	_, err := c.runReplacement(ctx, state, func() (SessionReplacement, error) {
+		replacement, buildErr := c.buildReplacement(ctx, runtimeInfo)
+		if buildErr != nil {
+			return SessionReplacement{}, buildErr
+		}
+		archive, archiveErr := factory(ctx, currentPath)
+		if archiveErr != nil {
+			return SessionReplacement{Session: replacement.Session}, archiveErr
+		}
+		archiveResult = archive
+		return replacement, nil
+	}, true, false)
+	if err != nil {
+		return session.ArchiveResult{}, err
+	}
+	return archiveResult, nil
 }
 
 func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {

@@ -31,6 +31,8 @@ Otto is a macOS coding-agent CLI. The wiring, from process start to a rendered r
 
 5. **`internal/session`** — append-only JSONL in the **Pi session format v3** (`pi_codec.go`/`pi_types.go`), stored under `~/.otto/sessions/<workspace-key>/`. Files are created lazily on the first user prompt (`prepared.go`); `memory.go` backs `--no-session`. `scripts/pi-session-interop.mjs` is an opt-in compatibility probe against a real Pi install — never invoked by default tests.
 
-6. **Frontends** — `internal/tui` (full-screen Bubble Tea: transcript, Markdown rendering, slash-command completion, `/resume` modal) and `internal/repl` (line-oriented fallback for non-TTY). Selection is `--ui` > `OTTO_UI` > `[ui].mode` > auto (TUI only when stdin **and** stdout are terminals).
+6. **`internal/memory` + `internal/memory/sqlite`** — an extensible memory core: neutral contracts (`internal/memory`) and a secure local SQLite/FTS5 store/retriever (`internal/memory/sqlite`). This phase is intentionally **unwired** — no CLI flags, config keys, agent-loop integration, or frontend commands reference it yet, so it never affects the user-facing runtime. See `docs/superpowers/specs/2026-08-29-extensible-memory-design.md`.
+
+7. **Frontends** — `internal/tui` (full-screen Bubble Tea: transcript, Markdown rendering, slash-command completion, `/resume` modal) and `internal/repl` (line-oriented fallback for non-TTY). Selection is `--ui` > `OTTO_UI` > `[ui].mode` > auto (TUI only when stdin **and** stdout are terminals).
 
 Cross-cutting: `agent.Redactor` scrubs API-key values from text before it reaches the session file; `internal/tool` enforces workspace confinement (canonical paths, symlink resolution) for `read`/`grep`/`find`/`ls`/`write`/`edit`, while `bash` is deliberately unsandboxed.

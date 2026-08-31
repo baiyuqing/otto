@@ -1138,7 +1138,7 @@ func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 	if got.editor.Value() != "" || got.usage.InputTokens != 7 || got.usage.OutputTokens != 9 {
 		t.Fatalf("editor=%q usage=%#v", got.editor.Value(), got.usage)
 	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") || !strings.Contains(content, "ctx ?%") || strings.Contains(content, "ctx 23.4%") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") || !strings.Contains(content, "ctx ?%") || strings.Contains(content, "23.4%") {
 		t.Fatalf("view = %q", content)
 	}
 }

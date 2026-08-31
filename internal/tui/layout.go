@@ -2,10 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"math/big"
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/app"
@@ -124,17 +126,42 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
 }
 
+const contextBarWidth = 10
+
 func footerContextField(info app.Info) string {
 	if info.ContextWindow <= 0 {
 		return ""
 	}
 	if info.ContextInputTokensPresent {
-		return "ctx " + formatFooterContextPercentage(info.ContextInputTokens, info.ContextWindow)
+		pct := float64(info.ContextInputTokens) / float64(info.ContextWindow)
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 1 {
+			pct = 1
+		}
+		bar := progress.New(
+			progress.WithWidth(contextBarWidth),
+			progress.WithoutPercentage(),
+			progress.WithColorFunc(contextBarColor),
+		).ViewAs(pct)
+		return "ctx " + bar + " " + formatFooterContextPercentage(info.ContextInputTokens, info.ContextWindow)
 	}
 	if info.ContextInputTokensPending {
 		return "ctx ?%"
 	}
 	return ""
+}
+
+func contextBarColor(total, _ float64) color.Color {
+	switch {
+	case total >= 0.8:
+		return lipgloss.Color("#EF4444")
+	case total >= 0.6:
+		return lipgloss.Color("#EAB308")
+	default:
+		return lipgloss.Color("#22C55E")
+	}
 }
 
 func formatFooterContextPercentage(inputTokens, contextWindow int) string {

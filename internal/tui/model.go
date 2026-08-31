@@ -351,7 +351,11 @@ func (m Model) footerStatus() string {
 	if !m.running {
 		return m.statusText
 	}
-	running := m.spinner.View() + " working " + formatTurnSeconds(m.now().Sub(m.turnStartedAt))
+	elapsed := m.now().Sub(m.turnStartedAt)
+	running := m.spinner.View() + " working"
+	if elapsed >= 10*time.Second {
+		running += " " + formatTurnSeconds(elapsed)
+	}
 	if m.statusText == "" {
 		return running
 	}
@@ -1675,44 +1679,126 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 }
 
 func toolArgumentPreview(name, raw string) string {
-	if name == "bash" {
-		var args struct {
-			Command string `json:"command"`
+	var fields struct {
+		Command   string `json:"command"`
+		Path      string `json:"path"`
+		FilePath  string `json:"file_path"`
+		Pattern   string `json:"pattern"`
+		Glob      string `json:"glob"`
+		Query     string `json:"query"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+	}
+	if json.Unmarshal([]byte(raw), &fields) != nil {
+		return escapePlainText(raw)
+	}
+	path := fields.Path
+	if path == "" {
+		path = fields.FilePath
+	}
+
+	switch name {
+	case "bash":
+		if fields.Command != "" {
+			return escapePlainText(fields.Command)
 		}
-		if json.Unmarshal([]byte(raw), &args) == nil && args.Command != "" {
-			return escapePlainText(args.Command)
+	case "read", "write", "ls":
+		if path != "" {
+			return escapePlainText(path)
+		}
+	case "grep":
+		parts := make([]string, 0, 3)
+		if fields.Pattern != "" {
+			parts = append(parts, fields.Pattern)
+		}
+		if path != "" && path != "." {
+			parts = append(parts, path)
+		}
+		if fields.Glob != "" {
+			parts = append(parts, fields.Glob)
+		}
+		if len(parts) > 0 {
+			return escapePlainText(strings.Join(parts, " "))
+		}
+	case "find":
+		parts := make([]string, 0, 2)
+		if fields.Pattern != "" {
+			parts = append(parts, fields.Pattern)
+		}
+		if path != "" && path != "." {
+			parts = append(parts, "in "+path)
+		}
+		if len(parts) > 0 {
+			return escapePlainText(strings.Join(parts, " "))
+		}
+	case "edit":
+		parts := make([]string, 0, 2)
+		if path != "" {
+			parts = append(parts, path)
+		}
+		if fields.OldString != "" {
+			preview := strings.Join(strings.Fields(fields.OldString), " ")
+			if len(preview) > 40 {
+				preview = preview[:40] + "…"
+			}
+			parts = append(parts, preview+" → …")
+		}
+		if len(parts) > 0 {
+			return escapePlainText(strings.Join(parts, " "))
+		}
+	case "memory_search":
+		if fields.Query != "" {
+			return escapePlainText(fields.Query)
 		}
 	}
 	return escapePlainText(raw)
 }
+
+var (
+	toolLineRunning  = lipgloss.NewStyle().Faint(true)
+	toolLineComplete = lipgloss.NewStyle().Foreground(lipgloss.Color("#166534")).Background(lipgloss.Color("#DCFCE7"))
+	toolLineError    = lipgloss.NewStyle().Foreground(lipgloss.Color("#991B1B")).Background(lipgloss.Color("#FEE2E2"))
+)
 
 func renderToolSummary(name, args, status string, width int) string {
 	if width <= 0 {
 		return ""
 	}
 	marker := "…"
-	if status == "complete" {
+	switch status {
+	case "complete":
 		marker = "✓"
-	} else if status == "error" {
+	case "error":
 		marker = "✗"
 	}
+
 	prefix := marker + " "
-	minimum := prefix + name
-	if ansi.StringWidth(minimum) > width {
-		nameWidth := max(1, width-ansi.StringWidth(prefix))
+	prefixWidth := 2 // marker + space
+	if prefixWidth+ansi.StringWidth(name) > width {
+		nameWidth := max(1, width-prefixWidth)
 		name = ansi.Truncate(name, nameWidth, "…")
 	}
 
-	base := prefix + name + " "
-	remaining := width - ansi.StringWidth(base)
+	base := prefix + name
+	baseWidth := prefixWidth + ansi.StringWidth(name)
 	preview := strings.Join(strings.Fields(args), " ")
-	if preview == "" {
-		return strings.TrimRight(base, " ")
+	if preview != "" {
+		remaining := width - baseWidth - 2 // "  " separator
+		if remaining > 1 {
+			base += "  " + ansi.Truncate(preview, remaining, "…")
+		}
 	}
-	if remaining > 1 {
-		base += " " + ansi.Truncate(preview, remaining-1, "…")
+
+	var lineStyle lipgloss.Style
+	switch status {
+	case "complete":
+		lineStyle = toolLineComplete
+	case "error":
+		lineStyle = toolLineError
+	default:
+		lineStyle = toolLineRunning
 	}
-	return ansi.Truncate(base, width, "")
+	return lineStyle.Width(width).MaxWidth(width).MaxHeight(1).Render(base)
 }
 
 func (m *Model) scrollViewport(delta int) {

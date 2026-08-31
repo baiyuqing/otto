@@ -11,6 +11,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
@@ -56,6 +57,10 @@ type runtimeBuilder struct {
 	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
 	buildRunnerOverride  func(session.Session, config.Runtime) (app.Runner, error)
 	runtimeOverrides     config.Overrides
+	memoryService        memory.Service
+	memoryUsable         bool
+	memoryUserScope      memory.Scope
+	memoryWorkspaceScope memory.Scope
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
@@ -97,7 +102,7 @@ func (b runtimeBuilder) resolveSession(metadata session.RuntimeMetadata) (config
 	return runtime, nil
 }
 
-func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runtime) (app.Runner, error) {
+func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session, runtime config.Runtime) (app.Runner, error) {
 	if b.buildRunnerOverride != nil {
 		runner, err := b.buildRunnerOverride(current, runtime)
 		if err != nil {
@@ -108,7 +113,7 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 	if b.workspace == nil {
 		return nil, errors.New("workspace is required")
 	}
-	registry, err := tool.NewRegistry(
+	tools := []tool.Tool{
 		tool.NewReadTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewGrepTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewFindTool(b.workspace, runtime.MaxOutputBytes),
@@ -119,7 +124,25 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 			RemoveEnv:    b.credentialEnvironmentNames(runtime.APIKeyEnv),
 			RedactValues: b.secretValues(&runtime),
 		}),
-	)
+	}
+	var binding memory.Binding
+	if b.memoryUsable {
+		memoryScopes := []memory.Scope{b.memoryUserScope, b.memoryWorkspaceScope}
+		tools = append(tools,
+			tool.NewMemorySearchTool(b.memoryService, memoryScopes, runtime.MaxOutputBytes),
+			tool.NewRememberTool(b.memoryService, b.memoryWorkspaceScope),
+			tool.NewForgetTool(b.memoryService),
+		)
+		bound, err := b.memoryService.Bind(ctx, memory.BindOptions{
+			Scopes:            memoryScopes,
+			DefaultWriteScope: b.memoryWorkspaceScope,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("bind memory: %w", err)
+		}
+		binding = bound
+	}
+	registry, err := tool.NewRegistry(tools...)
 	if err != nil {
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
@@ -134,6 +157,7 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 			ReserveTokens:    runtime.Compaction.ReserveTokens,
 			KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
 		},
+		Memory: binding,
 	}, redactor), nil
 }
 
@@ -163,7 +187,7 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
 
-	runner, err := b.buildRunner(candidate, runtime)
+	runner, err := b.buildRunner(ctx, candidate, runtime)
 	if err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
@@ -208,7 +232,7 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 	if err != nil {
 		return app.SessionReplacement{}, err
 	}
-	runner, err := b.buildRunner(candidate, runtime)
+	runner, err := b.buildRunner(ctx, candidate, runtime)
 	if err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}

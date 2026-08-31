@@ -1,10 +1,22 @@
 (version 1)
 (deny default)
 
+; These broker operations are explicit because they can ask an unsandboxed
+; application to act on the child's behalf even when ordinary IPC is closed.
+(deny appleevent-send)
+(deny lsopen)
+
 ; Descendants inherit this policy. Signals stay within the same policy.
 (allow process-fork)
 (allow process-exec)
 (allow signal (target same-sandbox))
+
+; These exact broker executables can delegate to unsandboxed applications or
+; try to apply a nested permissive profile. Ordinary /usr/bin tools stay usable.
+(deny process-exec
+  (literal "/usr/bin/open")
+  (literal "/usr/bin/osascript")
+  (literal "/usr/bin/sandbox-exec"))
 
 ; Exact host facts used by common compilers and runtimes.
 (allow sysctl-read
@@ -19,6 +31,9 @@
   (sysctl-name "hw.memsize")
   (sysctl-name "hw.ncpu")
   (sysctl-name "hw.pagesize")
+  ; Go's Darwin runtime numeric HW_PAGESIZE MIB is attributed to this exact
+  ; compatibility name on Apple Silicon.
+  (sysctl-name "hw.pagesize_compat")
   (sysctl-name "hw.physicalcpu")
   (sysctl-name "hw.physicalcpu_max")
   (sysctl-name "kern.hostname")
@@ -34,6 +49,26 @@
   (global-name "com.apple.system.opendirectoryd.libinfo")
   (global-name "com.apple.system.opendirectoryd.membership")
   (global-name "com.apple.mDNSResponder"))
+
+; Every supported command inherits a cwd; exact-root access lets libc resolve it
+; without granting file contents beneath the filesystem root.
+(allow file-read-data
+  (literal "/"))
+
+; /bin/sh consults this exact Apple selector symlink before choosing its system
+; shell. Its canonical /bin target is already in the reviewed read-only roots.
+(allow file-read-metadata
+  (literal "/private/var/select/sh"))
+
+; Git's Apple shim and xcrun read this exact selector symlink through both the
+; /var firmlink spelling and its physical spelling. Ancestor metadata permits
+; traversal only; the canonical target is a separately reviewed developer root.
+(allow file-read-metadata
+  (literal "/var")
+  (literal "/var/select")
+  (literal "/private/var/select")
+  (literal "/var/select/developer_dir")
+  (literal "/private/var/select/developer_dir"))
 
 ; Inherited streams and non-stateful character devices.
 (allow file-read*

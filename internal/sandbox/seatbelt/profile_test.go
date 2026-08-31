@@ -165,6 +165,56 @@ func TestProfileNetworkRulesAreIPOnly(t *testing.T) {
 	}
 }
 
+func TestProfileGrantsExactGoRuntimePageSizeSysctl(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	if !strings.Contains(profile, `(sysctl-name "hw.pagesize_compat")`) {
+		t.Fatal("profile lacks the exact Darwin sysctl used by the Go runtime page-size MIB")
+	}
+	if strings.Contains(profile, "sysctl-name-prefix") || strings.Contains(profile, "(allow sysctl-read)") {
+		t.Fatal("Go runtime compatibility broadened the exact sysctl allowlist")
+	}
+}
+
+func TestProfileGrantsOnlyTheRootInodeForProcessCWDResolution(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	if !strings.Contains(profile, "(allow file-read-data\n  (literal \"/\"))") {
+		t.Fatal("profile lacks the exact root-inode data operation required by process cwd resolution")
+	}
+	if strings.Contains(profile, "(allow file-read*\n  (literal \"/\"))") || strings.Contains(profile, "(subpath \"/\")") {
+		t.Fatal("process cwd compatibility broadened the exact root operation or path")
+	}
+}
+
+func TestProfileDeniesExactEscapeBrokerExecutables(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	for _, executable := range []string{"/usr/bin/open", "/usr/bin/osascript", "/usr/bin/sandbox-exec"} {
+		if !strings.Contains(profile, profileTestFilter("literal", executable)) {
+			t.Fatalf("profile lacks exact process-exec denial for %q", executable)
+		}
+	}
+	if !strings.Contains(profile, "(deny process-exec") || strings.Contains(profile, `(deny process-exec\n  (subpath "/usr/bin"))`) {
+		t.Fatal("escape-broker process denial is absent or broadened to /usr/bin")
+	}
+}
+
+func TestProfileExplicitlyDeniesAppleEventsAndLaunchServices(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	for _, rule := range []string{"(deny appleevent-send)", "(deny lsopen)"} {
+		if !strings.Contains(profile, rule) {
+			t.Fatalf("profile lacks explicit escape-broker denial %q", rule)
+		}
+	}
+	for _, rule := range []string{"(allow appleevent-send", "(allow lsopen"} {
+		if strings.Contains(profile, rule) {
+			t.Fatalf("profile grants escape-broker operation %q", rule)
+		}
+	}
+}
+
 func TestProfileTemplateHasOnlyReviewedIPCAndProcessRules(t *testing.T) {
 	fixture := newProfileFixture(t)
 	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
@@ -181,8 +231,8 @@ func TestProfileTemplateHasOnlyReviewedIPCAndProcessRules(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"appleevent",
-		"lsopen",
+		"(allow appleevent",
+		"(allow lsopen",
 		"launchservices",
 		"com.apple.lsd",
 		"com.apple.coreservices",
@@ -694,6 +744,50 @@ func TestProfileEquivalentSemanticInputsRenderByteIdentically(t *testing.T) {
 	second := renderProfileForTest(t, secondOptions, secondDependencies)
 	if first != second {
 		t.Fatal("semantically equal roots rendered different profile bytes")
+	}
+}
+
+func TestProfileXcodeSelectorUsesOnlyExactReadAndTraversalMetadata(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	const exactMetadataRule = `(allow file-read-metadata
+  (literal "/var")
+  (literal "/var/select")
+  (literal "/private/var/select")
+  (literal "/var/select/developer_dir")
+  (literal "/private/var/select/developer_dir"))`
+	if !strings.Contains(profile, exactMetadataRule) {
+		t.Fatal("Git/xcrun compatibility lacks the reviewed metadata-only selector rule")
+	}
+	for _, selector := range []string{"/var/select/developer_dir", "/private/var/select/developer_dir"} {
+		if strings.Count(profile, profileTestFilter("literal", selector)) != 1 {
+			t.Fatalf("Git/xcrun compatibility lacks one exact selector grant for %q", selector)
+		}
+	}
+	for _, ancestor := range []string{"/var", "/var/select", "/private/var/select"} {
+		if !strings.Contains(profile, profileTestFilter("literal", ancestor)) {
+			t.Fatalf("developer selector lacks exact traversal metadata for %q", ancestor)
+		}
+	}
+	for _, parent := range []string{"/var", "/var/select", "/private/var", "/private/var/select"} {
+		if strings.Contains(profile, profileTestFilter("subpath", parent)) {
+			t.Fatalf("developer selector compatibility granted sensitive parent subtree %q", parent)
+		}
+	}
+}
+
+func TestProfileBinShSelectorIsOneExactReadOnlyRuntimeFile(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	const selector = "/private/var/select/sh"
+	if strings.Count(profile, profileTestFilter("literal", selector)) != 1 ||
+		!strings.Contains(profile, "(allow file-read-metadata\n  "+profileTestFilter("literal", selector)) {
+		t.Fatal("/bin/sh compatibility lacks one exact metadata-only shell-selector grant")
+	}
+	if strings.Contains(profile, "(allow file-read*\n  "+profileTestFilter("literal", selector)) ||
+		strings.Contains(profile, profileTestFilter("subpath", "/private/var/select")) ||
+		strings.Contains(profile, profileTestFilter("subpath", "/private/var")) {
+		t.Fatal("/bin/sh selector compatibility granted a writable/sensitive parent subtree")
 	}
 }
 

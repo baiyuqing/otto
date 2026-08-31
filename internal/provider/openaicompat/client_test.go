@@ -530,6 +530,32 @@ func TestCompleteTranslatesNeutralRequestToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestTranslateRequestAlwaysMarshalsContentField(t *testing.T) {
+	request := translateRequest(provider.Request{Messages: []model.Message{
+		{Role: model.RoleAssistant, Blocks: []model.Block{
+			{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{}`)},
+		}},
+		{Role: model.RoleTool, Blocks: []model.Block{
+			{Type: model.BlockToolResult, ToolCallID: "call-1", Text: ""},
+		}},
+	}})
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Messages []map[string]json.RawMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for i, message := range decoded.Messages {
+		if _, ok := message["content"]; !ok {
+			t.Fatalf("message %d missing content field in payload: %s", i, payload)
+		}
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

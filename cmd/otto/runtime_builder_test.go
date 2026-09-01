@@ -91,6 +91,19 @@ func TestRuntimeBuilderResolveSessionIgnoresProcessModelOverrides(t *testing.T) 
 	}
 }
 
+func TestRuntimeBuilderResolveSessionIgnoresProcessProfileOverrides(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default", "stored", "env"))
+	builder.environment["OTTO_PROFILE"] = "env"
+
+	runtime, err := builder.resolveSession(session.RuntimeMetadata{Profile: "stored", Provider: "openai-compatible", Model: "stored-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Profile != "stored" || runtime.APIKey != "stored-secret" || runtime.BaseURL != "https://stored.example/v1" {
+		t.Fatalf("runtime = %#v", redactedRuntime(runtime))
+	}
+}
+
 func TestRuntimeBuilderBuildNewReplacementPreservesExplicitBaseURL(t *testing.T) {
 	const overrideBaseURL = "https://cli-override.example/v1"
 	tests := []struct {
@@ -128,7 +141,7 @@ func TestRuntimeBuilderBuildNewReplacementPreservesExplicitBaseURL(t *testing.T)
 					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 				}), nil
 			}}
-			builder := newRuntimeBuilder(tt.file, tt.environment, workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{
+			builder := newRuntimeBuilder(filepath.Join(t.TempDir(), "config.toml"), tt.file, tt.environment, workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{
 				baseURL: overrideBaseURL,
 			}, nil, deps)
 			builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {

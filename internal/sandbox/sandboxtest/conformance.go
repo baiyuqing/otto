@@ -39,6 +39,25 @@ type Case struct {
 	UnixClient   func(testing.TB, string) []string
 }
 
+type ChecklistItem struct {
+	Name string
+	Run  func(*testing.T)
+}
+
+func RunChecklist(t *testing.T, items []ChecklistItem) {
+	t.Helper()
+	for _, item := range items {
+		item := item
+		t.Run(item.Name, func(t *testing.T) {
+			t.Helper()
+			if item.Run == nil {
+				t.Fatal("nil checklist item")
+			}
+			item.Run(t)
+		})
+	}
+}
+
 type execution struct {
 	status sandbox.ExitStatus
 	err    error

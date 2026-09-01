@@ -57,6 +57,12 @@ auto = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
 
+[sandbox]
+driver = "auto"
+network = "allow"
+read_paths = []
+allow_env = []
+
 [profiles.deepseek]
 provider = "openai-compatible"
 base_url = "https://api.deepseek.com/v1"
@@ -95,6 +101,7 @@ OTTO_API_KEY=your-key ./otto \
 | `--thinking LEVEL` | Model reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `--approve PROMPT` | Run one prompt without interaction, then exit. `@FILE` reads the prompt from a file (bounded to 1 MiB). |
 | `--ui MODE` | Frontend mode: `auto`, `tui`, or `repl`. |
+| `--sandbox MODE` | Sandbox driver: `auto`, `seatbelt`, or `off`. `off` is unsafe. |
 | `--shell-timeout D` | Shell command timeout (for the `bash` tool). Must be greater than zero. |
 | `--max-output-bytes N` | Maximum tool output bytes. Must be greater than zero. |
 | `--no-session` | Keep history in memory only; do not persist a session. Cannot be combined with `--continue` or `--resume`. |
@@ -119,6 +126,10 @@ must never be stored in TOML.
 Otto auto-discovers only the global config file at `~/.config/otto/config.toml`.
 You can explicitly select any path with `--config`.
 
+Review any explicit config path before you run Otto. Otto never auto-discovers
+repository-local config, but an explicit `--config` can request `driver = "off"`,
+extra `read_paths`, or `allow_env` grants on the next process start.
+
 ```toml
 default_profile = "deepseek"
 
@@ -133,6 +144,12 @@ max_output_bytes = 51200
 auto = true
 reserve_tokens = 16384
 keep_recent_tokens = 20000
+
+[sandbox]
+driver = "auto"
+network = "allow"
+read_paths = []
+allow_env = []
 
 [profiles.example]
 provider = "openai-compatible"
@@ -149,6 +166,20 @@ Key points:
   session supplies one.
 - `[ui].mode` sets the frontend mode (`auto`, `tui`, `repl`).
 - `[agent].shell_timeout` and `[agent].max_output_bytes` set default limits.
+- `[sandbox]` configures the process-wide shell boundary:
+
+  ```toml
+  [sandbox]
+  driver = "auto"
+  network = "allow"
+  read_paths = []
+  allow_env = []
+  ```
+
+  On macOS, `driver = "auto"` means Seatbelt. Otto never auto-detects or
+  auto-falls back to Docker. If Seatbelt cannot be established, Otto fails
+  closed by disabling `bash` while keeping `read`, `grep`, `find`, `ls`,
+  `write`, and `edit` available.
 - `[agent.compaction]` configures automatic context compaction (see
   [Context compaction](#context-compaction)).
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
@@ -175,6 +206,10 @@ Startup resolution is field-specific:
 - **Agent limits:** `--shell-timeout` and `--max-output-bytes` override
   `[agent]`, which override built-in defaults. These stay in effect across
   in-process `/resume` and `/new`.
+- **Sandbox:** `--sandbox auto|seatbelt|off` overrides `[sandbox].driver`;
+  otherwise `[sandbox].driver` overrides the built-in `auto`. `network`,
+  `read_paths`, and `allow_env` come from `[sandbox]` only. The effective
+  sandbox is process-wide and does not change on startup resume or `/new`.
 - **Thinking effort:** `--thinking` is sent as `reasoning_effort` on
   OpenAI-compatible requests. It has no environment variable or TOML key and is
   omitted when unset. It stays in effect across `/resume` and `/new`.
@@ -191,6 +226,15 @@ UI mode precedence:
 2. `OTTO_UI`
 3. `[ui].mode`
 4. built-in `auto`
+
+Sandbox-driver precedence:
+
+1. `--sandbox`
+2. `[sandbox].driver`
+3. built-in `auto`
+
+Future backend authors should also read the
+[Sandbox driver authoring guide](sandbox-driver-authoring.md).
 
 ## Frontends
 
@@ -298,7 +342,9 @@ Notes:
   bounded file metadata.
 - Session files contain sensitive prompt text, responses, summaries, tool
   calls, tool arguments, results, and file metadata. Protect them like source
-  data. They do not contain API keys, OAuth tokens, or authorization headers.
+  data. They do not contain provider API keys, OAuth tokens, authorization
+  headers, or cookie values, and Otto does not persist private sandbox profile
+  paths as runtime metadata.
 
 ### Optional Pi interoperability probe
 
@@ -360,7 +406,8 @@ overflow. For private deployments, set `context_window` and optionally
 
 ### File tools
 
-All file tools are enabled by default and restricted to the initial workspace:
+The six file tools are always enabled and always restricted to the initial
+canonical workspace, even when `--sandbox off` is selected:
 
 - `read` reads UTF-8 text with optional line offsets and limits; files larger
   than 64 MiB are rejected before being read into memory.
@@ -375,19 +422,61 @@ All file tools are enabled by default and restricted to the initial workspace:
 - `edit` requires exactly one exact text match and shares the 64 MiB size limit
   with `read`.
 
-Recursive `grep` and `find` skip `.git` and discovered symlinks but include other
-dotfiles. Binary files, invalid UTF-8 files, and files with lines larger than
-1 MiB are skipped by `grep`. Otto canonicalizes paths, resolves symlinks, and
-rejects workspace escapes.
+Recursive `grep` and `find` skip `.git` and discovered symlinks but include
+other dotfiles. Binary files, invalid UTF-8 files, and files with lines larger
+than 1 MiB are skipped by `grep`. Otto canonicalizes paths, resolves symlinks,
+and rejects workspace escapes.
 
-### `bash` warning
+### `bash` sandbox policy
 
-`bash` is intentionally **unsandboxed**. It starts in the selected workspace,
-but commands run as your current macOS user and can access anything that user
-can access. Treat Otto as trusted local automation, not a sandbox.
+On macOS, the default is `--sandbox auto`, which means Seatbelt. The sandboxed
+command gets whole-workspace write access plus Otto-managed private `home`,
+`tmp`, and `cache` directories beneath your user cache. Otto keeps generated
+profile files in a separate private `profiles` directory that the sandboxed
+child cannot read. Otto does not treat the workspace as protected: source,
+`.git`, tests, and generated files remain writable.
 
-Default limits: 120-second shell timeout and 50 KiB tool output cap. Override
-with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
+Host home content is not automatically readable. Git config, shell dotfiles,
+and host caches are not implicitly mounted into the command view. Add only the
+narrow absolute or `~/...` `read_paths` you need. Broad `read_paths` are high
+risk because command code can read them and, with `network = "allow"`, exfiltrate
+them. Otto rejects `read_paths` that would include Otto's private sandbox state.
+If you need tool-specific config, prefer narrow `read_paths` plus exact config
+environment variables over exposing a large home or cache subtree.
+
+`network = "allow"` is the default and permits ordinary IP networking and local
+IP binds. `network = "deny"` blocks IP networking and local binds. Phase 1 has
+no domain allowlist. Unix sockets stay blocked in both modes, so Docker/Podman
+sockets, SSH agents, and similar host control sockets are unavailable.
+
+The command environment is rebuilt from one captured process snapshot. Otto
+never restores provider API-key variables, `OTTO_API_KEY`, loader-injection
+variables, shell-startup injection variables, `SSH_AUTH_SOCK`, or Otto's own
+sandbox variables. `allow_env` restores only exact names after filtering and is
+high risk because it grants the restored value to untrusted command code.
+Restored values are still added to Otto's exact-value redactor.
+
+If Otto would need to retain more than 512 sensitive values or more than 1 MiB
+of sensitive-value bytes for exact redaction, it fails closed by disabling
+`bash` for that process. Exact-value redaction is defense in depth only: if a
+command transforms or encodes a secret, Otto may not be able to redact it.
+
+If you explicitly select `--sandbox off`, Otto prints a persistent local warning
+and `bash` runs unsandboxed as your current macOS user. In that mode,
+`network = "deny"`, private-home/cache replacement, and `read_paths` no longer
+constrain the shell.
+
+### Seatbelt limitations
+
+Stage 1 depends on Apple's deprecated `/usr/bin/sandbox-exec`. It improves
+command isolation on macOS, but it is not a VM boundary. Otto does not claim
+protection against same-user or same-kernel attacks, pre-existing hard links,
+`setsid` escaping Otto's process-group cleanup, resource exhaustion, or
+intentional damage inside the writable workspace. Docker and Apple Container are
+planned future drivers only; Stage 1 does not detect or support them.
+
+Default limits remain a 120-second shell timeout and a 50 KiB tool-output cap.
+Override them with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
 
 ## Headless mode
 
@@ -429,6 +518,20 @@ Check the selected profile, `--base-url`, and endpoint path. Otto posts to
 
 The provider or proxy is not delivering valid SSE chat-completions output.
 Confirm streaming is enabled and SSE is not buffered or rewritten.
+
+### `warning: bash is unavailable because the configured sandbox could not be established ...`
+
+On macOS, `auto` means Seatbelt. Otto does not fall back to Docker or direct
+execution unless you explicitly choose `--sandbox off` (or `driver = "off"` in
+config). Common fixes:
+
+- confirm `/usr/bin/sandbox-exec` is present and usable;
+- narrow `read_paths` so they do not include Otto's private sandbox cache root;
+- move the selected workspace outside cache-like locations if it would overlap
+  Otto's private sandbox state;
+- prefer narrow `read_paths` plus exact config variables over broad home or
+  cache access;
+- use `--sandbox off` only if you accept unsandboxed current-user execution.
 
 ### Context-length or prompt-size failures
 

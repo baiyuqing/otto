@@ -1523,6 +1523,155 @@ func TestDriverExplicitAndPATHExternalRootsRemainReadOnly(t *testing.T) {
 	}
 }
 
+func TestSeatbeltAcceptanceChecklist(t *testing.T) {
+	executable := driverTestExecutable(t)
+	sandboxtest.RunChecklist(t, []sandboxtest.ChecklistItem{
+		{
+			Name: "external and symlink escapes are denied while workspace and private writes succeed",
+			Run: func(t *testing.T) {
+				driver := openDriverForTest(t, sandbox.NetworkDeny, executable)
+				t.Cleanup(func() { _ = driver.Close() })
+				outside := filepath.Join(t.TempDir(), "outside-secret")
+				if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				status, err := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/cat", outside}), driverDiscardStreams())
+				if err != nil || status.Code == 0 {
+					t.Fatalf("external read Execute() = (%+v, %v)", status, err)
+				}
+				link := filepath.Join(driver.workspace, "escape-link")
+				if err := os.Symlink(outside, link); err != nil {
+					t.Fatal(err)
+				}
+				for _, argv := range [][]string{{"/bin/cat", link}, {"/bin/sh", "-c", `printf changed > "$1"`, "child", link}} {
+					status, err := driver.Execute(context.Background(), basicDriverRequest(driver, argv), driverDiscardStreams())
+					if err != nil || status.Code == 0 {
+						t.Fatalf("symlink Execute(%q) = (%+v, %v)", argv, status, err)
+					}
+				}
+				if got, err := os.ReadFile(outside); err != nil || string(got) != "outside" {
+					t.Fatalf("outside target = (%q, %v)", got, err)
+				}
+				workspaceWrite := filepath.Join(driver.workspace, "workspace-write.txt")
+				privateWrite := filepath.Join(driver.PrivateDirectories().Home, "private-write.txt")
+				for path, want := range map[string]string{workspaceWrite: "workspace-ok", privateWrite: "private-ok"} {
+					status, err := driver.Execute(context.Background(), basicDriverRequest(driver, []string{"/bin/sh", "-c", fmt.Sprintf(`printf %s > "$1"`, shellQuoteForTest(want)), "child", path}), driverDiscardStreams())
+					if err != nil {
+						t.Fatalf("write %q Execute() error = %v", path, err)
+					}
+					if got, readErr := os.ReadFile(path); status.Code != 0 || readErr != nil || string(got) != want {
+						t.Fatalf("write %q = status %+v file %q err %v", path, status, got, readErr)
+					}
+				}
+			},
+		},
+		{
+			Name: "network allow deny and Unix sockets follow the advertised policy",
+			Run: func(t *testing.T) {
+				allowListener, err := net.Listen("tcp4", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				allowAccepted := driverAcceptOne(allowListener)
+				allowDriver := openDriverForTest(t, sandbox.NetworkAllow, executable)
+				defer allowDriver.Close()
+				status, err := allowDriver.Execute(context.Background(), helperDriverRequest(allowDriver, executable, "dial", "tcp4", allowListener.Addr().String()), driverDiscardStreams())
+				if err != nil || status.Code != 0 {
+					_ = allowListener.Close()
+					t.Fatalf("allowed dial Execute() = (%+v, %v)", status, err)
+				}
+				if err := awaitDriverError(t, allowAccepted, "allowed IP accept"); err != nil {
+					_ = allowListener.Close()
+					t.Fatalf("allowed accept error = %v", err)
+				}
+				if err := allowListener.Close(); err != nil {
+					t.Fatal(err)
+				}
+
+				denyListener, err := net.Listen("tcp4", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				denyAccepted := driverAcceptOne(denyListener)
+				denyDriver := openDriverForTest(t, sandbox.NetworkDeny, executable)
+				defer denyDriver.Close()
+				status, err = denyDriver.Execute(context.Background(), helperDriverRequest(denyDriver, executable, "dial", "tcp4", denyListener.Addr().String()), driverDiscardStreams())
+				if err != nil || status.Code == 0 {
+					_ = denyListener.Close()
+					t.Fatalf("denied dial Execute() = (%+v, %v)", status, err)
+				}
+				if err := denyListener.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := awaitDriverError(t, denyAccepted, "denied IP accept"); err == nil {
+					t.Fatal("NetworkDeny accepted a TCP connection")
+				}
+
+				shortBase, err := os.MkdirTemp("/tmp", "otto-seatbelt-checklist-")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer os.RemoveAll(shortBase)
+				shortWorkspace := canonicalDriverTestDirectory(t, filepath.Join(shortBase, "workspace"))
+				shortHome := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "home"))
+				shortCache := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "cache"))
+				dependencies := defaultDriverDependencies()
+				dependencies.userCacheDir = func() (string, error) { return shortCache, nil }
+				shortDriver, err := openWithDependencies(context.Background(), driverOptions(shortWorkspace, shortHome, sandbox.NetworkAllow, executable), dependencies)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer shortDriver.Close()
+				socketPath := filepath.Join(shortDriver.workspace, "docker.sock")
+				unixListener, err := net.Listen("unix", socketPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unixAccepted := driverAcceptOne(unixListener)
+				status, err = shortDriver.Execute(context.Background(), helperDriverRequest(shortDriver, executable, "dial", "unix", socketPath), driverDiscardStreams())
+				if err != nil || status.Code == 0 || status.Signaled {
+					_ = unixListener.Close()
+					t.Fatalf("Unix socket Execute() = (%+v, %v)", status, err)
+				}
+				if err := unixListener.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := awaitDriverError(t, unixAccepted, "denied Unix accept"); err == nil {
+					t.Fatal("sandboxed child connected to a Unix socket")
+				}
+			},
+		},
+		{
+			Name: "cleanup removes private state and infrastructure diagnostics stay safe",
+			Run: func(t *testing.T) {
+				driver := openDriverForTest(t, sandbox.NetworkDeny, executable)
+				root := driver.PrivateDirectories().Root
+				if _, err := os.Lstat(root); err != nil {
+					t.Fatal(err)
+				}
+				var destination bytes.Buffer
+				filter := newInfrastructureStderrFilter(&destination)
+				diagnostic := "sandbox-exec: future refusal at /private/profile/path\nBacktrace: /private/profile/path\n"
+				if _, err := filter.Write([]byte(diagnostic)); err != nil {
+					t.Fatal(err)
+				}
+				if err := filter.finish(); err != nil {
+					t.Fatal(err)
+				}
+				if !filter.infrastructureFailure() || destination.Len() != 0 {
+					t.Fatalf("infrastructure diagnostic escaped: %q", destination.String())
+				}
+				if err := driver.Close(); err != nil {
+					t.Fatalf("Driver.Close() error = %v", err)
+				}
+				if _, err := os.Lstat(root); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("private root remains after Close: %v", err)
+				}
+			},
+		},
+	})
+}
+
 func TestDriverDeniesSystemVolumesDataReadAlias(t *testing.T) {
 	driver := openDriverForTest(t, sandbox.NetworkDeny)
 	t.Cleanup(func() { _ = driver.Close() })

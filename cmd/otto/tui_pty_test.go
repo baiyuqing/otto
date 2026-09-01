@@ -22,6 +22,7 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/sandboxtest"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tui"
 	"github.com/creack/pty"
@@ -47,6 +48,77 @@ const (
 	narrowFooterMarker          = footerWorkspaceName + " | " + footerProfileModel + " | unsafe | tokens 0/0"
 	ptyCompactFocus             = "focus on PTY compaction"
 )
+
+func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
+	sandboxtest.RunChecklist(t, []sandboxtest.ChecklistItem{
+		{
+			Name: "footer and help render sandbox off warning",
+			Run: func(t *testing.T) {
+				master, slave, err := pty.Open()
+				if err != nil {
+					t.Fatalf("pty.Open() error = %v", err)
+				}
+				if err := pty.Setsize(slave, &pty.Winsize{Cols: 120, Rows: 30}); err != nil {
+					t.Fatalf("pty.Setsize(120x30) error = %v", err)
+				}
+				collector := newPTYOutputCollector(master)
+				runCtx, cancelRun := context.WithCancel(context.Background())
+				backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{}), compactCh: make(chan string, 1), compactCanceledCh: make(chan struct{})}
+				runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
+				defer func() {
+					cancelRun()
+					_ = slave.Close()
+					_ = master.Close()
+					collector.Wait(t, ptyStepTimeout)
+				}()
+
+				waitForSubsequence(t, collector, 0, wideFooterMarker)
+				writePTY(t, master, "?")
+				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
+				cancelRun()
+				waitForSubsequence(t, collector, 0, altScreenExitSeq)
+				if err, ok := runResult.Wait(ptyTestTimeout); !ok {
+					t.Fatal("timed out waiting for tui.Run to return")
+				} else if err != nil && !isExpectedCleanupRunError(err) {
+					t.Fatalf("tui.Run() error = %v", err)
+				}
+			},
+		},
+		{
+			Name: "session overlay keeps sandbox status visible",
+			Run: func(t *testing.T) {
+				master, slave, err := pty.Open()
+				if err != nil {
+					t.Fatalf("pty.Open() error = %v", err)
+				}
+				if err := pty.Setsize(slave, &pty.Winsize{Cols: 120, Rows: 30}); err != nil {
+					t.Fatalf("pty.Setsize(120x30) error = %v", err)
+				}
+				collector := newPTYOutputCollector(master)
+				runCtx, cancelRun := context.WithCancel(context.Background())
+				backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{}), compactCh: make(chan string, 1), compactCanceledCh: make(chan struct{})}
+				runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
+				defer func() {
+					cancelRun()
+					_ = slave.Close()
+					_ = master.Close()
+					collector.Wait(t, ptyStepTimeout)
+				}()
+
+				waitForSubsequence(t, collector, 0, wideFooterMarker)
+				writePTY(t, master, "/session\r")
+				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
+				cancelRun()
+				waitForSubsequence(t, collector, 0, altScreenExitSeq)
+				if err, ok := runResult.Wait(ptyTestTimeout); !ok {
+					t.Fatal("timed out waiting for tui.Run to return")
+				} else if err != nil && !isExpectedCleanupRunError(err) {
+					t.Fatalf("tui.Run() error = %v", err)
+				}
+			},
+		},
+	})
+}
 
 func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

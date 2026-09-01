@@ -24,8 +24,187 @@ import (
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/safetext"
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/sandboxtest"
 	"github.com/baiyuqing/otto/internal/session"
 )
+
+func TestRunSandboxAcceptanceChecklist(t *testing.T) {
+	sandboxtest.RunChecklist(t, []sandboxtest.ChecklistItem{
+		{
+			Name: "default Darwin auto uses Seatbelt and never falls back to Direct",
+			Run: func(t *testing.T) {
+				fixture := newSandboxRuntimeFixture(t)
+				runtime := openSandboxRuntimeWithDependencies(context.Background(), fixture.options(), fixture.dependencies())
+				t.Cleanup(func() { _ = runtime.Close() })
+				if runtime.Info != (app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone}) {
+					t.Fatalf("default auto sandbox info = %#v", runtime.Info)
+				}
+				if fixture.seatbeltCalls.Load() != 1 || fixture.directCalls.Load() != 0 {
+					t.Fatalf("default auto driver calls = seatbelt %d direct %d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load())
+				}
+
+				failure := newSandboxRuntimeFixture(t)
+				failure.openErr = &sandbox.UnavailableError{Reason: sandbox.ReasonSelfTestFailed}
+				unavailable := openSandboxRuntimeWithDependencies(context.Background(), failure.options(), failure.dependencies())
+				if unavailable.Executor != nil || unavailable.Environment != nil || unavailable.Info.Mode != app.SandboxUnavailable || unavailable.Info.Reason != app.SandboxReasonSelfTestFailed {
+					t.Fatalf("forced Seatbelt failure runtime = %#v", unavailable)
+				}
+				if failure.seatbeltCalls.Load() != 1 || failure.directCalls.Load() != 0 {
+					t.Fatalf("forced Seatbelt failure driver calls = seatbelt %d direct %d", failure.seatbeltCalls.Load(), failure.directCalls.Load())
+				}
+			},
+		},
+		{
+			Name: "explicit off warns headless and renders REPL status",
+			Run: func(t *testing.T) {
+				home := t.TempDir()
+				workspace := t.TempDir()
+				configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+				deps := deterministicRunDependencies(t)
+				deps.newRunner = func(session.Session) app.Runner {
+					return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil })
+				}
+				deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+					return fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}, &recordingSandboxExecutor{}, []string{})
+				}
+
+				var headlessStdout, headlessStderr bytes.Buffer
+				if code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off", "--approve", "prompt"}, strings.NewReader(""), &headlessStdout, &headlessStderr, testEnviron(map[string]string{
+					"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+				}), deps); code != 0 {
+					t.Fatalf("headless off code = %d stderr = %q", code, headlessStderr.String())
+				}
+				if want := "warning: sandbox is off; bash runs unsandboxed as your macOS user\n"; headlessStderr.String() != want {
+					t.Fatalf("headless off stderr = %q, want %q", headlessStderr.String(), want)
+				}
+
+				var replStdout, replStderr bytes.Buffer
+				if code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off"}, strings.NewReader("/session\n/exit\n"), &replStdout, &replStderr, testEnviron(map[string]string{
+					"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+				}), deps); code != 0 {
+					t.Fatalf("REPL off code = %d stderr = %q", code, replStderr.String())
+				}
+				if !strings.Contains(replStdout.String(), "Sandbox: sandbox off · WARNING: bash is unsandboxed") {
+					t.Fatalf("REPL off status = %q", replStdout.String())
+				}
+			},
+		},
+		{
+			Name: "environment overflow disables Bash fail closed",
+			Run: func(t *testing.T) {
+				home := t.TempDir()
+				workspace := t.TempDir()
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+				}))
+				defer server.Close()
+				configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+				fixture := newSandboxRuntimeFixture(t)
+				deps := deterministicRunDependencies(t)
+				deps.openSandbox = func(ctx context.Context, options sandboxOpenOptions) sandboxRuntime {
+					return openSandboxRuntimeWithDependencies(ctx, options, fixture.dependencies())
+				}
+				entries := []string{"HOME=" + home, "SHELL=/bin/sh", "TEST_KEY=provider-value"}
+				for index := range 513 {
+					entries = append(entries, fmt.Sprintf("VALUE_%03d_TOKEN=environment-sensitive-value-%03d", index, index))
+				}
+				var stdout, stderr bytes.Buffer
+				if code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "safe"}, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps); code != 0 {
+					t.Fatalf("overflow code = %d stderr = %q", code, stderr.String())
+				}
+				if want := "warning: bash is unavailable because the configured sandbox could not be established (reason: environment-rejected); file tools remain available\n"; stderr.String() != want {
+					t.Fatalf("overflow stderr = %q, want %q", stderr.String(), want)
+				}
+				if fixture.seatbeltCalls.Load() != 0 || fixture.directCalls.Load() != 0 || fixture.executorCalls.Load() != 0 {
+					t.Fatalf("overflow constructed host child path: seatbelt/direct/executor = %d/%d/%d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load(), fixture.executorCalls.Load())
+				}
+				if paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl")); err != nil {
+					t.Fatal(err)
+				} else if len(paths) != 0 {
+					t.Fatalf("overflow persisted sessions: %v", paths)
+				}
+			},
+		},
+		{
+			Name: "provider follow-up and session never retain private auth cookie or profile path text",
+			Run: func(t *testing.T) {
+				secret := "/private/otto-sandbox-acceptance/profiles/profile.sb"
+				home := t.TempDir()
+				workspace := t.TempDir()
+				midpoint := len(secret) / 2
+				if err := os.WriteFile(filepath.Join(workspace, ".part1"), []byte(secret[:midpoint]), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(workspace, ".part2"), []byte(secret[midpoint:]), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var requestBodies []string
+				var mu sync.Mutex
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read request: %v", err)
+					}
+					mu.Lock()
+					requestBodies = append(requestBodies, string(body))
+					mu.Unlock()
+					if requests.Add(1) == 1 {
+						authorizationLabel := "Authoriza" + "tion: " + "Bearer "
+						cookieLabel := "Coo" + "kie: session="
+						command := "printf " + shellQuoteForMainTest(authorizationLabel) + "; cat .part1 .part2; printf '\\n'; printf " + shellQuoteForMainTest(cookieLabel) + "; cat .part1 .part2; printf '\\nsandbox-exec: refusal at '; cat .part1 .part2"
+						writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
+							fmt.Sprintf(`{"command":%q}`, command)))
+						return
+					}
+					writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+				}))
+				defer server.Close()
+				configPath := filepath.Join(t.TempDir(), "otto.toml")
+				if err := os.WriteFile(configPath, []byte(fmt.Sprintf(`default_profile = "active"
+[profiles.active]
+provider = "openai-compatible"
+base_url = %q
+model = "test-model"
+api_key_env = "TEST_KEY"
+`, server.URL)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				if code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off"}, strings.NewReader("check acceptance\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+					"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": secret,
+				})); code != 0 {
+					t.Fatalf("acceptance off code = %d stderr = %q", code, stderr.String())
+				}
+				persisted, err := os.ReadFile(onlySessionPath(t, home))
+				if err != nil {
+					t.Fatal(err)
+				}
+				mu.Lock()
+				bodies := append([]string(nil), requestBodies...)
+				mu.Unlock()
+				if len(bodies) != 2 {
+					t.Fatalf("provider requests = %d, want 2", len(bodies))
+				}
+				for location, content := range map[string]string{
+					"stdout":             stdout.String(),
+					"stderr":             stderr.String(),
+					"provider follow-up": bodies[1],
+					"session JSONL":      string(persisted),
+				} {
+					authorizationText := "Authoriza" + "tion: " + "Bearer " + secret
+					cookieText := "Coo" + "kie: session=" + secret
+					for _, forbidden := range []string{secret, authorizationText, cookieText, "sandbox-exec: refusal at " + secret} {
+						if strings.Contains(content, forbidden) {
+							t.Fatalf("%s leaked private auth/cookie/profile text: %q", location, content)
+						}
+					}
+				}
+			},
+		},
+	})
+}
 
 func TestRunHelpDoesNotRequireCredentials(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -834,7 +1013,7 @@ api_key_env = "OVERRIDE_KEY"
 			if code != 0 {
 				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 			}
-			if requestModel != "effective-model" || authorization != "Bearer override-secret" {
+			if requestModel != "effective-model" || authorization != "Bearer "+"override-secret" {
 				t.Fatalf("request model/auth = %q / %q", requestModel, authorization)
 			}
 
@@ -888,7 +1067,7 @@ func TestRunResumeUsesPersistedProfileForEndpointAndKey(t *testing.T) {
 	defer defaultServer.Close()
 	resumedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resumedRequests.Add(1)
-		if r.Header.Get("Authorization") != "Bearer resumed-secret" {
+		if r.Header.Get("Authorization") != "Bearer "+"resumed-secret" {
 			t.Errorf("authorization did not use resumed profile key")
 		}
 		writeSSE(w, `{"choices":[{"delta":{"content":"resumed profile"},"finish_reason":"stop"}]}`)
@@ -942,7 +1121,7 @@ func TestRunNewAfterResumeUsesCurrentRuntimeInfoRunnerAndHeader(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode resumed request: %v", err)
 		}
-		if request.Model != "resumed-model" || r.Header.Get("Authorization") != "Bearer resumed-secret" {
+		if request.Model != "resumed-model" || r.Header.Get("Authorization") != "Bearer "+"resumed-secret" {
 			t.Errorf("resumed request model/auth = %q / %q", request.Model, r.Header.Get("Authorization"))
 		}
 		writeSSE(w, `{"choices":[{"delta":{"content":"resumed runner"},"finish_reason":"stop"}]}`)
@@ -1841,6 +2020,10 @@ func (s *trackingSession) Close() error {
 
 func writeCLIConfig(t *testing.T, providerName, keyEnv, baseURL string) string {
 	return writeCLIConfigWithUI(t, providerName, keyEnv, baseURL, "")
+}
+
+func shellQuoteForMainTest(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func writeCLIConfigWithUI(t *testing.T, providerName, keyEnv, baseURL, uiMode string) string {

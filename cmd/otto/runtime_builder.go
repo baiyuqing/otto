@@ -464,8 +464,8 @@ func (b runtimeBuilder) redactedErrorMessage(err error, runtime *config.Runtime)
 	if !complete {
 		return "", false
 	}
-	marker := safetext.SharedRedactionMarker(values)
-	if marker == "" {
+	marker, dynamic := safetext.DynamicRedactionMarker(values)
+	if !dynamic {
 		return "", false
 	}
 	message := safetext.CanonicalizeUTF8(err.Error())

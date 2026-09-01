@@ -25,6 +25,7 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/sandbox/direct"
 	"github.com/baiyuqing/otto/internal/session"
@@ -2128,6 +2129,17 @@ func TestRuntimeBuilderIncompleteRedactErrorDoesNotInvokeAttackerErrorMethods(t 
 	}
 	if got := builder.redactError(context.Canceled, nil); got != context.Canceled {
 		t.Fatalf("canceled redactError() = %#v, want direct context.Canceled", got)
+	}
+
+	builder.sandboxSecretsComplete = true
+	builder.sandboxSecrets = []string{strings.Repeat("x", safetext.MaxDynamicValueBytes+1)}
+	panicErr = &panicRuntimeBuilderError{}
+	got = builder.redactError(panicErr, nil)
+	if got == nil || got.Error() != "" {
+		t.Fatalf("complex-boundary redactError() = %#v, want fixed empty error", got)
+	}
+	if panicErr.calls() != 0 {
+		t.Fatalf("complex-boundary attacker error methods were called %d times", panicErr.calls())
 	}
 }
 

@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/memory"
+	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
+	"github.com/baiyuqing/otto/internal/provider/openairesponses"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -156,7 +160,13 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
-	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
+	client, err := buildProvider(ctx, runtime)
+	if err != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
+		return nil, b.redactError(err, &runtime)
+	}
 	redactor := agent.NewRedactor(b.secretValues(&runtime))
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
@@ -173,6 +183,24 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 	}, redactor), nil
 }
 
+// buildProvider selects the completion provider for the resolved runtime.
+// openai-compatible uses base_url + API key; chatgpt uses OAuth credentials
+// loaded from the credential file with an auto-refreshing token source.
+func buildProvider(ctx context.Context, runtime config.Runtime) (provider.Provider, error) {
+	if runtime.Provider != config.ProviderChatGPT {
+		return openaicompat.New(runtime.BaseURL, runtime.APIKey, nil), nil
+	}
+	path, err := auth.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	creds, err := auth.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, nil), nil
+}
+
 func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {
 	if err := ctx.Err(); err != nil {
 		return app.SessionReplacement{}, err
@@ -183,7 +211,40 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 	if err != nil {
 		return app.SessionReplacement{}, err
 	}
+	return b.freshReplacement(ctx, runtime)
+}
 
+// buildProfileReplacement resolves the named profile as an explicit override so
+// its own provider/model/base_url win (matching startup --profile), then builds
+// a fresh session on it. Switching profile therefore also switches provider.
+// An unknown profile is rejected by config.Resolve before any session is created.
+func (b runtimeBuilder) buildProfileReplacement(ctx context.Context, profile string) (app.SessionReplacement, error) {
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, err
+	}
+	overrides := b.runtimeOverrides
+	overrides.Profile = profile
+	runtime, err := config.Resolve(b.config, b.resumeEnvironment(), config.SessionDefaults{}, overrides)
+	if err != nil {
+		return app.SessionReplacement{}, b.redactError(err, nil)
+	}
+	return b.freshReplacement(ctx, runtime)
+}
+
+// profileNames returns the configured profile names in sorted order for
+// display by the /model command.
+func (b runtimeBuilder) profileNames() []string {
+	names := make([]string, 0, len(b.config.Profiles))
+	for name := range b.config.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// freshReplacement creates a new session and runner for an already-resolved
+// runtime, shared by the /new and /model replacement paths.
+func (b runtimeBuilder) freshReplacement(ctx context.Context, runtime config.Runtime) (app.SessionReplacement, error) {
 	create := b.deps.newSession
 	if create == nil {
 		create = newSession

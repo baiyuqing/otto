@@ -78,57 +78,62 @@ type turnHistoryBaseline struct {
 }
 
 type Model struct {
-	rootCtx                context.Context
-	backend                app.Backend
-	entries                []Entry
-	viewport               viewport.Model
-	editor                 textarea.Model
-	spinner                spinner.Model
-	keymap                 KeyMap
-	width                  int
-	height                 int
-	usage                  otmodel.Usage
-	running                bool
-	expandedDetails        bool
-	overlay                overlayKind
-	autoFollow             bool
-	renderer               MarkdownRenderer
-	rendererInjected       bool
-	darkBackground         bool
-	clock                  Clock
-	statusText             string
-	supportsModifiedEnter  bool
-	dirtyStreaming         bool
-	renderTickActive       bool
-	cancel                 context.CancelFunc
-	operationCleanup       *operationCleanup
-	activeOperation        *activeOperation
-	ctrlCArmed             bool
-	ctrlCArmedAt           time.Time
-	ctrlCArmGeneration     uint64
-	newSessionPending      bool
-	newSessionGeneration   uint64
-	resume                 resumePickerState
-	archive                archivePickerState
-	memoryGeneration       uint64
-	activeTurnStream       *turnStream
-	activeTurnChannel      <-chan turnEnvelope
-	activeAssistant        int
-	turnErrorSeen          bool
-	turnEventErr           error
-	fatalErr               error
-	turnGeneration         uint64
-	operationKind          operationKind
-	compactionCompleted    bool
-	turnHistoryBaseline    turnHistoryBaseline
-	turnEntryStart         int
-	liveEntrySequence      int
-	commandSuggestionIndex int
-	promptHistory          []string
-	promptHistoryIndex     int
-	promptDraft            string
-	turnStartedAt          time.Time
-	turnDuration           time.Duration
+	rootCtx                 context.Context
+	backend                 app.Backend
+	entries                 []Entry
+	viewport                viewport.Model
+	editor                  textarea.Model
+	spinner                 spinner.Model
+	keymap                  KeyMap
+	width                   int
+	height                  int
+	usage                   otmodel.Usage
+	running                 bool
+	expandedDetails         bool
+	overlay                 overlayKind
+	autoFollow              bool
+	renderer                MarkdownRenderer
+	rendererInjected        bool
+	darkBackground          bool
+	clock                   Clock
+	statusText              string
+	supportsModifiedEnter   bool
+	dirtyStreaming          bool
+	renderTickActive        bool
+	cancel                  context.CancelFunc
+	operationCleanup        *operationCleanup
+	activeOperation         *activeOperation
+	ctrlCArmed              bool
+	ctrlCArmedAt            time.Time
+	ctrlCArmGeneration      uint64
+	newSessionPending       bool
+	newSessionGeneration    uint64
+	profileSwitchPending    bool
+	profileSwitchGeneration uint64
+	resume                  resumePickerState
+	archive                 archivePickerState
+	memoryGeneration        uint64
+	loginPending            bool
+	loginGeneration         uint64
+	loginChannel            chan loginResultMsg
+	activeTurnStream        *turnStream
+	activeTurnChannel       <-chan turnEnvelope
+	activeAssistant         int
+	turnErrorSeen           bool
+	turnEventErr            error
+	fatalErr                error
+	turnGeneration          uint64
+	operationKind           operationKind
+	compactionCompleted     bool
+	turnHistoryBaseline     turnHistoryBaseline
+	turnEntryStart          int
+	liveEntrySequence       int
+	commandSuggestionIndex  int
+	promptHistory           []string
+	promptHistoryIndex      int
+	promptDraft             string
+	turnStartedAt           time.Time
+	turnDuration            time.Duration
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
@@ -241,6 +246,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case newSessionResultMsg:
 		return m.applyNewSessionResult(msg)
+	case profileSwitchResultMsg:
+		return m.applyProfileSwitchResult(msg)
 	case sessionListResultMsg:
 		if m.resume.listPending && msg.generation == m.resume.generation {
 			return m.applySessionListResult(msg)
@@ -255,6 +262,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyArchiveSessionResult(msg)
 	case memoryCommandResultMsg:
 		return m.applyMemoryCommandResult(msg)
+	case loginResultMsg:
+		return m.applyLoginResult(msg)
 	case ctrlCArmExpiredMsg:
 		if m.ctrlCArmed && msg.generation == m.ctrlCArmGeneration {
 			m.clearCtrlCArm()
@@ -652,7 +661,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 	command, argument, ok := parseSlashCommand(value)
-	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember
+	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember || command.Kind == slashCommandLogin || command.Kind == slashCommandModel
 	if !ok || (argument != "" && !argumentAllowed) {
 		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
@@ -680,6 +689,8 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 		m.newSessionPending = true
 		m.statusText = ""
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
+	case slashCommandModel:
+		return m.handleModelCommand(argument)
 	case slashCommandResume:
 		return m.handleResumeCommand()
 	case slashCommandArchive:
@@ -694,6 +705,10 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 		return m.handleMemoryCommand(argument)
 	case slashCommandRemember:
 		return m.handleRememberCommand(argument)
+	case slashCommandLogin:
+		return m.handleLoginCommand(argument)
+	case slashCommandLogout:
+		return m.handleLogoutCommand()
 	case slashCommandExit:
 		if m.running {
 			return m, nil
@@ -742,6 +757,9 @@ func (m *Model) resetSessionViewFromBackend(status string) {
 	m.renderTickActive = false
 	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
+	m.loginPending = false
+	m.loginChannel = nil
+	m.profileSwitchPending = false
 	m.activeOperation = nil
 	m.activeAssistant = -1
 	m.turnErrorSeen = false

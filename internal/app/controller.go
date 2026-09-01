@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	ErrPromptActive        = errors.New("prompt already active")
-	ErrClosed              = errors.New("controller is closed")
-	ErrPersistenceDisabled = errors.New("session persistence is disabled")
-	ErrMemoryUnavailable   = errors.New("memory is not available")
+	ErrPromptActive             = errors.New("prompt already active")
+	ErrClosed                   = errors.New("controller is closed")
+	ErrPersistenceDisabled      = errors.New("session persistence is disabled")
+	ErrMemoryUnavailable        = errors.New("memory is not available")
+	ErrProfileSwitchUnavailable = errors.New("profile switching is not available")
 )
 
 type Runner interface {
@@ -37,6 +38,11 @@ type SessionLister func(context.Context, int) (session.ListResult, error)
 type ResumeFactory func(context.Context, string) (SessionReplacement, error)
 
 type NewSessionBuilder func(context.Context, RuntimeInfo) (SessionReplacement, error)
+
+// ProfileSwitchFactory builds a fresh session on the named configuration
+// profile. It resolves that profile's provider/model independently of the
+// current session, so switching profile also switches provider.
+type ProfileSwitchFactory func(context.Context, string) (SessionReplacement, error)
 
 type ArchiveFactory func(context.Context, string) (session.ArchiveResult, error)
 
@@ -87,6 +93,13 @@ func WithSessionArchiver(archive ArchiveFactory) Option {
 	}
 }
 
+func WithProfileSwitcher(profiles []string, switchProfile ProfileSwitchFactory) Option {
+	return func(controller *Controller) {
+		controller.profiles = append([]string(nil), profiles...)
+		controller.switchProfile = switchProfile
+	}
+}
+
 func WithMemory(manager memory.Manager, userScope, workspaceScope memory.Scope) Option {
 	return func(controller *Controller) {
 		controller.memoryManager = manager
@@ -127,6 +140,14 @@ type SessionArchiver interface {
 	SessionBrowser
 	ArchiveSession(context.Context, string) (session.ArchiveResult, error)
 	ArchiveCurrentSession(context.Context) (session.ArchiveResult, error)
+}
+
+// ProfileSwitcher exposes the configured profile names and a switch that
+// starts a fresh session on the chosen profile. Frontends type-assert it on
+// the Backend, matching how SessionBrowser and SessionArchiver are consumed.
+type ProfileSwitcher interface {
+	Profiles() []string
+	SwitchProfile(context.Context, string) (ResumeResult, error)
 }
 
 type replacementPhase uint8
@@ -194,6 +215,8 @@ type Controller struct {
 	resumeSession        ResumeFactory
 	newSession           NewSessionBuilder
 	archiveSession       ArchiveFactory
+	switchProfile        ProfileSwitchFactory
+	profiles             []string
 	memoryManager        memory.Manager
 	memoryUserScope      memory.Scope
 	memoryWorkspaceScope memory.Scope
@@ -442,6 +465,42 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 	return c.runReplacement(ctx, state, func() (SessionReplacement, error) {
 		return factory(ctx, path)
 	}, true, true)
+}
+
+// Profiles returns a defensive copy of the configured profile names.
+func (c *Controller) Profiles() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.profiles...)
+}
+
+// SwitchProfile starts a fresh session on the named profile, swapping the
+// session, runner, and runtime atomically through the same replacement path as
+// /new. Unlike /resume it does not validate the workspace, because the
+// replacement is a new session created in the current workspace.
+func (c *Controller) SwitchProfile(ctx context.Context, profile string) (ResumeResult, error) {
+	owner := c.ownerID()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrClosed
+	}
+	if c.active != nil || c.replace != nil {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrPromptActive
+	}
+	factory := c.switchProfile
+	if factory == nil {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrProfileSwitchUnavailable
+	}
+	state := c.beginReplacementLocked(owner)
+	c.mu.Unlock()
+
+	return c.runReplacement(ctx, state, func() (SessionReplacement, error) {
+		return factory(ctx, profile)
+	}, true, false)
 }
 
 // ArchiveSession archives an active session file without touching the current

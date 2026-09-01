@@ -279,7 +279,6 @@ func renderOverlay(width, height int, content string) string {
 func helpOverlayContent(width, height int) string {
 	full := []string{
 		"Help (? or /help)",
-		"",
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
 		"Ctrl+O toggle details",
@@ -289,27 +288,36 @@ func helpOverlayContent(width, height int) string {
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
 	}
-	commandNames := make([]string, 0, len(slashCommands))
 	for _, command := range slashCommands {
 		full = append(full, command.Name+" "+command.Description)
-		commandNames = append(commandNames, command.Name)
 	}
 	if height-2 >= len(full) {
 		return strings.Join(full, "\n")
 	}
-	compact := []string{
-		"Help (? /help) | Enter submit",
-		"Shift+Enter/Alt+Enter newline",
-		"Ctrl+O | PgUp/PgDn | Home/End",
-		"Esc close | Ctrl+C cancel/clear/quit",
-	}
-	const commandsPerLine = 5
-	for len(commandNames) > 0 {
-		count := min(commandsPerLine, len(commandNames))
-		compact = append(compact, strings.Join(commandNames[:count], " "))
-		commandNames = commandNames[count:]
-	}
+	// Compact form for short terminals: three dense control rows plus the
+	// command names width-packed so every command, including the last, stays
+	// visible as the registry grows.
 	innerWidth := max(0, width-4)
+	compact := []string{
+		"Help (?/help) · Enter · Esc",
+		"Shift+Enter/Alt+Enter newline",
+		"Ctrl+O PgUp/PgDn Home/End Ctrl+C",
+	}
+	line := ""
+	for _, command := range slashCommands {
+		switch {
+		case line == "":
+			line = command.Name
+		case ansi.StringWidth(line+" "+command.Name) <= innerWidth:
+			line += " " + command.Name
+		default:
+			compact = append(compact, line)
+			line = command.Name
+		}
+	}
+	if line != "" {
+		compact = append(compact, line)
+	}
 	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, max(0, height-2))
 }
 

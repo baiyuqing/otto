@@ -42,7 +42,9 @@ and `/archive`, and remain resumable by explicit `--resume PATH`.
 
 ### Planned providers
 
-- Stage 2: Codex subscription support
+- Stage 2: ChatGPT (Codex) subscription support — **implemented**, see
+  [ChatGPT subscription](#chatgpt-subscription-stage-2) below and the design
+  spec [`docs/superpowers/specs/2026-09-01-chatgpt-subscription-auth-design.md`](docs/superpowers/specs/2026-09-01-chatgpt-subscription-auth-design.md)
 - Stage 3: Claude subscription support
 
 See the approved design: [`docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md`](docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md).
@@ -51,8 +53,9 @@ See the approved design: [`docs/superpowers/specs/2026-08-26-otto-coding-agent-d
 
 - macOS
 - Go 1.26+
-- A reachable OpenAI-compatible endpoint with SSE chat-completions streaming
-- An API key exposed through an environment variable
+- One of:
+  - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming plus an API key exposed through an environment variable, or
+  - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription-stage-2))
 
 ## Build
 
@@ -127,6 +130,50 @@ Manage sessions without touching the workspace:
 ./otto --cwd /path/to/project --archive /path/to/active-session.jsonl
 ```
 
+## ChatGPT subscription (Stage 2)
+
+Otto can authorize requests with a ChatGPT Plus/Pro/Team/Enterprise subscription instead of a pay-per-token API key, using OpenAI's "Sign in with ChatGPT" OAuth flow (the same mechanism the Codex CLI uses).
+
+Sign in once:
+
+```bash
+./otto login
+```
+
+`otto login` opens your browser to the OpenAI authorization page and also prints the URL as a fallback. After you approve, credentials are stored at `~/.otto/auth/chatgpt.json` (file mode `0600`). Manage the session with:
+
+```bash
+./otto login --status   # show the signed-in account and token expiry
+./otto logout           # remove stored credentials
+```
+
+Then select the `chatgpt` provider. It needs a `model` but no `base_url` or API key:
+
+```toml
+default_profile = "chatgpt"
+
+[profiles.chatgpt]
+provider = "chatgpt"
+model = "gpt-5-codex"
+```
+
+```bash
+./otto --profile chatgpt
+```
+
+Or ad hoc, without a profile:
+
+```bash
+./otto --provider chatgpt --model gpt-5-codex
+```
+
+Notes:
+
+- Subscription traffic goes to OpenAI's Responses backend (`https://chatgpt.com/backend-api/codex/responses`), not the Chat Completions endpoint. The wire format differs from the OpenAI-compatible provider, but the CLI, tools, sessions, and compaction behave the same.
+- The access token is refreshed automatically from the stored refresh token; rotated tokens are written back to the credential file.
+- Tokens are never written to TOML, sessions, or logs, and are stripped from provider error messages.
+- This is distinct from exchanging the login for an API key, which bills as API credits rather than subscription quota. Otto does not do that.
+
 ## Configuration and precedence
 
 Otto auto-discovers only the global config file at `~/.config/otto/config.toml`. It does not auto-discover project-local configuration, but you can explicitly select any path with `--config`.
@@ -143,6 +190,7 @@ Startup resolution is field-specific:
 - **Provider and model:** explicit `--provider` / `--model` override `OTTO_PROVIDER` / `OTTO_MODEL`. Those environment variables override the selected profile and any provider/model stored in a startup-resumed session. Without direct or environment overrides, startup resume uses the stored provider/model; however, explicit `--profile` makes that profile's provider/model the baseline instead. An explicit profile does **not** outrank `OTTO_PROVIDER` or `OTTO_MODEL`.
 - **Endpoint:** `--base-url` overrides the selected profile's `base_url`. There is no base-URL environment override, and session files do not supply an endpoint.
 - **API key:** the selected profile determines `api_key_env`. A nonempty value from that environment variable wins; `OTTO_API_KEY` is its fallback. API keys have no CLI flag and must not be stored in TOML.
+- **ChatGPT subscription:** the `chatgpt` provider uses OAuth credentials from `otto login` (`~/.otto/auth/chatgpt.json`) and ignores `base_url` and API-key settings; it still requires `model`. See [ChatGPT subscription](#chatgpt-subscription-stage-2).
 - **Agent limits:** direct `--shell-timeout` and `--max-output-bytes` values override `[agent]` values, which override built-in defaults. Profiles and resumed sessions do not contain these limits.
 - **Thinking effort:** `--thinking` (`low`, `medium`, `high`, `xhigh`, or `max`) is sent as `reasoning_effort` on OpenAI-compatible requests. It has no environment variable or TOML key and is omitted from requests when unset. Like agent limits, it stays in effect across in-process `/resume` and `/new`.
 
@@ -448,6 +496,10 @@ Check the selected profile, `--base-url`, and endpoint path. Stage 1 expects an 
 
 Your provider or proxy is not delivering valid SSE chat-completions output. Confirm streaming is enabled, SSE is not buffered or rewritten, and the upstream really emits `[DONE]`.
 
+### `no chatgpt credentials; run 'otto login'`
+
+The `chatgpt` provider has no stored OAuth credentials. Run `otto login` to sign in with your ChatGPT subscription, or check state with `otto login --status`. See [ChatGPT subscription](#chatgpt-subscription-stage-2).
+
 ### Context-length or prompt-size failures
 
 Otto can now try one automatic checkpoint before the hard limit (when it knows the model window) and one typed-overflow recovery checkpoint after a provider context error. If you still hit a hard input limit:
@@ -467,7 +519,7 @@ See [`AGENTS.md`](AGENTS.md) for Go-specific contributor instructions.
 ## Roadmap
 
 - Stage 1: current OpenAI-compatible MVP
-- Stage 2: Codex subscription auth and provider adapter
+- Stage 2: ChatGPT (Codex) subscription auth and provider adapter — **implemented** ([ChatGPT subscription](#chatgpt-subscription-stage-2))
 - Stage 3: Claude subscription auth and provider adapter
 
 The full staged design lives in [`docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md`](docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md).

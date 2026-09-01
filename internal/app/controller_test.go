@@ -950,6 +950,133 @@ func TestControllerResumeBuildFailureKeepsCurrentUsable(t *testing.T) {
 	}
 }
 
+func newControllerWithProfileSwitcher(t *testing.T, initial session.Session, runner Runner, profiles []string, switchProfile ProfileSwitchFactory) *Controller {
+	t.Helper()
+	controller, err := New(initial, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("new")}, nil
+	}, func(session.Session) Runner { return runner },
+		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "old", Model: "old-model"}),
+		WithProfileSwitcher(profiles, switchProfile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller
+}
+
+func TestControllerSwitchProfileSwapsSessionRunnerAndRuntimeAtomically(t *testing.T) {
+	old := &fakeSession{header: testHeader("old")}
+	next := &fakeSession{header: testHeader("next")}
+	oldRunner := &recordingRunner{}
+	nextRunner := &recordingRunner{}
+	var gotProfile string
+	controller := newControllerWithProfileSwitcher(t, old, oldRunner, []string{"alpha", "chatgpt"},
+		func(_ context.Context, name string) (SessionReplacement, error) {
+			gotProfile = name
+			return SessionReplacement{
+				Session: next,
+				Runner:  nextRunner,
+				RuntimeInfo: RuntimeInfo{
+					Provider: "chatgpt",
+					Profile:  "chatgpt",
+					Model:    "gpt-5",
+				},
+			}, nil
+		})
+
+	result, err := controller.SwitchProfile(context.Background(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProfile != "chatgpt" {
+		t.Fatalf("factory profile = %q, want chatgpt", gotProfile)
+	}
+	if result.SessionPath != canonicalSessionPath(next.Path()) {
+		t.Fatalf("session path = %q, want %q", result.SessionPath, canonicalSessionPath(next.Path()))
+	}
+	if got := controller.Info(); got.Provider != "chatgpt" || got.Profile != "chatgpt" || got.Model != "gpt-5" {
+		t.Fatalf("info = %#v", got)
+	}
+	if old.CloseCalls() != 1 || oldRunner.CloseCalls() != 1 {
+		t.Fatalf("old close calls = session %d runner %d, want 1/1", old.CloseCalls(), oldRunner.CloseCalls())
+	}
+	if nextRunner.CloseCalls() != 0 {
+		t.Fatalf("next runner close calls = %d, want 0", nextRunner.CloseCalls())
+	}
+	if err := controller.Prompt(context.Background(), "on new profile", nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldRunner.Calls() != 0 || nextRunner.Calls() != 1 {
+		t.Fatalf("runner calls = old %d, next %d", oldRunner.Calls(), nextRunner.Calls())
+	}
+}
+
+func TestControllerSwitchProfileBuildFailureKeepsCurrentUsable(t *testing.T) {
+	buildErr := errors.New("profile \"chatgpt\" not found")
+	old := &fakeSession{header: testHeader("old")}
+	oldRunner := &recordingRunner{}
+	controller := newControllerWithProfileSwitcher(t, old, oldRunner, []string{"alpha"},
+		func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{}, buildErr
+		})
+
+	if _, err := controller.SwitchProfile(context.Background(), "chatgpt"); err != buildErr {
+		t.Fatalf("SwitchProfile() error = %v, want exact build error", err)
+	}
+	if err := controller.Prompt(context.Background(), "still works", nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldRunner.Calls() != 1 {
+		t.Fatalf("old runner calls = %d, want 1", oldRunner.Calls())
+	}
+	if old.CloseCalls() != 0 || oldRunner.CloseCalls() != 0 {
+		t.Fatalf("old close calls = session %d runner %d, want 0/0", old.CloseCalls(), oldRunner.CloseCalls())
+	}
+}
+
+func TestControllerSwitchProfileRejectedWhilePrompting(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runner := runnerFunc(func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-release
+		return nil
+	})
+	controller := newControllerWithProfileSwitcher(t, &fakeSession{header: testHeader("old")}, runner, []string{"alpha"},
+		func(context.Context, string) (SessionReplacement, error) {
+			t.Error("factory must not run while prompting")
+			return SessionReplacement{}, nil
+		})
+	done := make(chan error, 1)
+	go func() { done <- controller.Prompt(context.Background(), "one", func(agent.Event) {}) }()
+	<-started
+	if _, err := controller.SwitchProfile(context.Background(), "alpha"); !errors.Is(err, ErrPromptActive) {
+		t.Fatalf("error = %v, want ErrPromptActive", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestControllerProfilesReturnsDefensiveCopy(t *testing.T) {
+	controller := newControllerWithProfileSwitcher(t, &fakeSession{header: testHeader("old")}, &recordingRunner{}, []string{"alpha", "chatgpt"}, nil)
+	profiles := controller.Profiles()
+	if len(profiles) != 2 || profiles[0] != "alpha" || profiles[1] != "chatgpt" {
+		t.Fatalf("profiles = %#v", profiles)
+	}
+	profiles[0] = "mutated"
+	if again := controller.Profiles(); again[0] != "alpha" {
+		t.Fatalf("Profiles() mutated by caller: %#v", again)
+	}
+}
+
+func TestControllerSwitchProfileWithoutFactoryReportsUnavailable(t *testing.T) {
+	controller := newTestController(t, runnerFunc(noopRun))
+	if _, err := controller.SwitchProfile(context.Background(), "alpha"); !errors.Is(err, ErrProfileSwitchUnavailable) {
+		t.Fatalf("SwitchProfile() error = %v, want ErrProfileSwitchUnavailable", err)
+	}
+}
+
 func TestControllerListSessionsMarksCurrentOnDefensiveCopy(t *testing.T) {
 	old := &fakeSession{header: testHeader("old"), path: "/sessions/old.jsonl"}
 	listed := session.ListResult{Sessions: []session.SessionInfo{

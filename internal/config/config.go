@@ -10,6 +10,14 @@ import (
 	toml "github.com/pelletier/go-toml/v2"
 )
 
+// Provider identifiers accepted in config, env, and flags.
+const (
+	// ProviderOpenAICompatible uses a base_url + API key (Stage 1).
+	ProviderOpenAICompatible = "openai-compatible"
+	// ProviderChatGPT uses a ChatGPT subscription via OAuth credentials.
+	ProviderChatGPT = "chatgpt"
+)
+
 type File struct {
 	DefaultProfile string             `toml:"default_profile"`
 	UI             UI                 `toml:"ui"`

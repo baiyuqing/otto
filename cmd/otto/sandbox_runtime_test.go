@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -55,6 +56,28 @@ func TestOpenSandboxExplicitSeatbeltUsesSeatbelt(t *testing.T) {
 	}
 }
 
+func TestOpenSandboxRejectsInvalidNetworkBeforeEveryRuntimeConstructor(t *testing.T) {
+	for _, driver := range []sandbox.DriverMode{sandbox.DriverAuto, sandbox.DriverSeatbelt, sandbox.DriverOff} {
+		for _, network := range []sandbox.NetworkMode{0, 99} {
+			t.Run(string(driver)+"/network-"+fmt.Sprint(network), func(t *testing.T) {
+				fixture := newSandboxRuntimeFixture(t)
+				options := fixture.options()
+				options.Settings.Driver = driver
+				options.Settings.Network = network
+
+				runtime := openSandboxRuntimeWithDependencies(context.Background(), options, fixture.dependencies())
+				if runtime.Executor != nil || runtime.Info.Mode != app.SandboxUnavailable || runtime.Info.Reason != app.SandboxReasonPolicyUnsupported {
+					t.Fatalf("runtime = %#v, want policy-unsupported unavailable", runtime)
+				}
+				if fixture.classifyCalls.Load() != 0 || fixture.resolveCalls.Load() != 0 || fixture.seatbeltCalls.Load() != 0 || fixture.directCalls.Load() != 0 || fixture.executorCalls.Load() != 0 {
+					t.Fatalf("invalid network constructed state: classify/resolve/seatbelt/direct/executor = %d/%d/%d/%d/%d",
+						fixture.classifyCalls.Load(), fixture.resolveCalls.Load(), fixture.seatbeltCalls.Load(), fixture.directCalls.Load(), fixture.executorCalls.Load())
+				}
+			})
+		}
+	}
+}
+
 func TestOpenSandboxRejectsUnsupportedSeatbeltPolicyBeforeOpeningDriver(t *testing.T) {
 	fixture := newSandboxRuntimeFixture(t)
 	options := fixture.options()
@@ -66,6 +89,73 @@ func TestOpenSandboxRejectsUnsupportedSeatbeltPolicyBeforeOpeningDriver(t *testi
 	}
 	if fixture.seatbeltCalls.Load() != 0 || fixture.directCalls.Load() != 0 || fixture.executorCalls.Load() != 0 {
 		t.Fatalf("unsupported policy opened resources: seatbelt=%d direct=%d executor=%d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load(), fixture.executorCalls.Load())
+	}
+}
+
+func TestOpenSandboxUnavailableRetainsClassifiedHostRedactions(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*sandboxRuntimeFixture, *sandboxOpenOptions)
+	}{
+		{
+			name: "unsupported platform",
+			setup: func(fixture *sandboxRuntimeFixture, _ *sandboxOpenOptions) {
+				fixture.platform = "linux"
+			},
+		},
+		{
+			name: "invalid shell",
+			setup: func(_ *sandboxRuntimeFixture, options *sandboxOpenOptions) {
+				options.Shell = filepath.Join(t.TempDir(), "missing-shell")
+			},
+		},
+		{
+			name: "Seatbelt missing",
+			setup: func(fixture *sandboxRuntimeFixture, _ *sandboxOpenOptions) {
+				fixture.openErr = &sandbox.UnavailableError{Reason: sandbox.ReasonSeatbeltMissing}
+			},
+		},
+		{
+			name: "policy failure",
+			setup: func(_ *sandboxRuntimeFixture, options *sandboxOpenOptions) {
+				options.Workspace = filepath.Join(t.TempDir(), "missing-workspace")
+			},
+		},
+		{
+			name: "environment failure",
+			setup: func(fixture *sandboxRuntimeFixture, options *sandboxOpenOptions) {
+				options.HostEntries = append(options.HostEntries, "BROKEN")
+				fixture.hostEntries = append(fixture.hostEntries, "BROKEN")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSandboxRuntimeFixture(t)
+			fixture.hostEntries = append(fixture.hostEntries,
+				"AWS_SECRET_ACCESS_KEY=host-aws-secret",
+				"HTTPS_PROXY=http://raw%20user:raw%2Fpass@[::1]:8443/path",
+			)
+			options := fixture.options()
+			test.setup(fixture, &options)
+
+			runtime := openSandboxRuntimeWithDependencies(context.Background(), options, fixture.dependencies())
+			if runtime.Executor != nil || runtime.Environment != nil {
+				t.Fatalf("unavailable runtime retained command state: %#v", runtime)
+			}
+			for _, value := range []string{
+				"host-aws-secret",
+				"raw%20user:raw%2Fpass",
+				"raw%20user",
+				"raw%2Fpass",
+				"raw user:raw/pass",
+				"raw user",
+				"raw/pass",
+			} {
+				if !containsString(runtime.RedactionValues, value) {
+					t.Fatalf("redactions omitted required host value: %#v", runtime.RedactionValues)
+				}
+			}
+		})
 	}
 }
 
@@ -104,6 +194,22 @@ func TestOpenSandboxFailureDisablesBashWithoutDirectFallback(t *testing.T) {
 				t.Fatalf("Close() = %v", err)
 			}
 		})
+	}
+}
+
+func TestOpenSandboxCanceledContextConstructsNothing(t *testing.T) {
+	fixture := newSandboxRuntimeFixture(t)
+	options := fixture.options()
+	options.Settings.Driver = sandbox.DriverOff
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	runtime := openSandboxRuntimeWithDependencies(ctx, options, fixture.dependencies())
+	if runtime.Executor != nil || runtime.Environment != nil {
+		t.Fatalf("canceled open returned command state: %#v", runtime)
+	}
+	if fixture.seatbeltCalls.Load() != 0 || fixture.directCalls.Load() != 0 || fixture.executorCalls.Load() != 0 {
+		t.Fatalf("canceled open constructed resources: seatbelt/direct/executor = %d/%d/%d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load(), fixture.executorCalls.Load())
 	}
 }
 
@@ -324,6 +430,8 @@ type sandboxRuntimeFixture struct {
 	openOptions        seatbelt.Options
 	environmentOptions sandbox.EnvironmentOptions
 	executorPolicy     sandbox.Policy
+	classifyCalls      atomic.Int32
+	resolveCalls       atomic.Int32
 	seatbeltCalls      atomic.Int32
 	directCalls        atomic.Int32
 	executorCalls      atomic.Int32
@@ -380,7 +488,12 @@ func (f *sandboxRuntimeFixture) dependencies() sandboxRuntimeDependencies {
 			f.directCalls.Add(1)
 			return &sandboxRuntimeFakeDriver{id: "direct", capabilities: sandbox.Capabilities{NetworkAllow: true}}
 		},
+		classifyEnvironment: func(options sandbox.EnvironmentOptions) (sandbox.EnvironmentSnapshot, error) {
+			f.classifyCalls.Add(1)
+			return sandbox.ResolveEnvironment(options)
+		},
 		resolveEnvironment: func(options sandbox.EnvironmentOptions) (sandbox.EnvironmentSnapshot, error) {
+			f.resolveCalls.Add(1)
 			f.environmentOptions = options
 			if f.resolveErr != nil {
 				return sandbox.EnvironmentSnapshot{}, f.resolveErr

@@ -66,6 +66,40 @@ func TestParseEnvironmentRejectsMalformedEntries(t *testing.T) {
 	}
 }
 
+func TestResolveEnvironmentFailureRetainsBoundedRedactionsFromEveryValidEntry(t *testing.T) {
+	directories := newPrivateDirectories(t)
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{
+		HostEntries: []string{
+			"AWS_SECRET_ACCESS_KEY=first-aws-secret",
+			"HTTPS_PROXY=http://raw%20user:raw%2Fpass@[::1]:8443/path",
+			"BROKEN",
+			"AWS_SECRET_ACCESS_KEY=second-aws-secret",
+		},
+		PrivateDirectories: &directories,
+	})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
+		t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
+	}
+	if snapshot.Entries() != nil {
+		t.Fatalf("failed resolution returned command entries: %#v", snapshot.Entries())
+	}
+	assertRedactionsContain(t, snapshot.RedactionValues(), []string{
+		"first-aws-secret",
+		"second-aws-secret",
+		"raw%20user:raw%2Fpass",
+		"raw%20user",
+		"raw%2Fpass",
+		"raw user:raw/pass",
+		"raw user",
+		"raw/pass",
+		directories.Root,
+		directories.Home,
+		directories.Temp,
+		directories.Cache,
+	})
+	assertRedactionsSorted(t, snapshot.RedactionValues())
+}
+
 func TestResolveEnvironmentRemovesProviderCredentials(t *testing.T) {
 	host := []string{
 		"OTTO_API_KEY=otto-sensitive-value",
@@ -442,6 +476,26 @@ func TestResolveEnvironmentEnforcesSensitiveByteBoundBeforePrivatePaths(t *testi
 		if _, statErr := os.Lstat(filepath.Join(directories.Cache, name)); !os.IsNotExist(statErr) {
 			t.Fatalf("derived cache %s was created before the sensitive bound passed", name)
 		}
+	}
+}
+
+func TestResolveEnvironmentKeepsPrivatePathRedactionsInsideSensitiveByteBound(t *testing.T) {
+	directories := PrivateDirectories{
+		Root:  strings.Repeat("r", 1<<20),
+		Home:  "/known/private/home",
+		Temp:  "/known/private/temp",
+		Cache: "/known/private/cache",
+	}
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{PrivateDirectories: &directories})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || snapshot.Entries() != nil {
+		t.Fatalf("ResolveEnvironment() = (%#v, %v), want failed bounded snapshot", snapshot.Entries(), err)
+	}
+	total := 0
+	for _, value := range snapshot.RedactionValues() {
+		total += len(value)
+	}
+	if total > 1<<20 {
+		t.Fatalf("private redaction bytes = %d, want <= 1 MiB", total)
 	}
 }
 

@@ -14,6 +14,7 @@ type Options struct {
 	Workspace   string
 	Shell       string
 	Home        string
+	CacheBase   string
 	HostEntries []string
 	ReadPaths   []string
 	Network     sandbox.NetworkMode

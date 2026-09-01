@@ -6,6 +6,19 @@ import (
 	"unsafe"
 )
 
+func TestCappedByteCollectorStopsAtFirstIncompleteRune(t *testing.T) {
+	collector := newCappedByteCollector(1)
+	if _, err := collector.Write([]byte("¡")); err != nil {
+		t.Fatalf("Write(multibyte rune) error = %v", err)
+	}
+	if _, err := collector.Write([]byte("s")); err != nil {
+		t.Fatalf("Write(suffix) error = %v", err)
+	}
+	if got := string(collector.Bytes()); got != "" || collector.Discarded() != len("¡s") {
+		t.Fatalf("collector = %q with %d omitted, want empty valid prefix with %d omitted", got, collector.Discarded(), len("¡s"))
+	}
+}
+
 func TestExactRedactingWriterUsesStreamingLeftmostLongestAcrossEverySplit(t *testing.T) {
 	const marker = "[REDACTED]"
 	tests := []struct {

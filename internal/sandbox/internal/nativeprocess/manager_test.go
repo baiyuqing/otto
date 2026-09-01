@@ -236,7 +236,7 @@ func TestManagerCancellationTerminatesAndReapsProcessGroup(t *testing.T) {
 	manager := New()
 	t.Cleanup(func() { _ = manager.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
-	outcome, pid := startBlockingDescendant(t, manager, ctx)
+	outcome, descendant := startBlockingDescendant(t, manager, ctx)
 
 	cancel()
 	completed := awaitRun(t, outcome, "cancelled Run")
@@ -244,14 +244,14 @@ func TestManagerCancellationTerminatesAndReapsProcessGroup(t *testing.T) {
 		t.Fatalf("Run() error = %v, want context.Canceled", completed.err)
 	}
 	assertKilledResult(t, completed.result)
-	assertProcessGoneOnce(t, pid)
+	assertProcessExited(t, descendant)
 }
 
 func TestManagerDeadlineCancellationTerminatesAndReapsProcessGroup(t *testing.T) {
 	manager := New()
 	t.Cleanup(func() { _ = manager.Close() })
 	ctx, cancel := context.WithCancelCause(context.Background())
-	outcome, pid := startBlockingDescendant(t, manager, ctx)
+	outcome, descendant := startBlockingDescendant(t, manager, ctx)
 
 	cancel(context.DeadlineExceeded)
 	completed := awaitRun(t, outcome, "deadline-cancelled Run")
@@ -259,7 +259,7 @@ func TestManagerDeadlineCancellationTerminatesAndReapsProcessGroup(t *testing.T)
 		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", completed.err)
 	}
 	assertKilledResult(t, completed.result)
-	assertProcessGoneOnce(t, pid)
+	assertProcessExited(t, descendant)
 }
 
 func TestManagerDarwinFinalEPERMRequiresAbsentProcessGroup(t *testing.T) {
@@ -328,7 +328,7 @@ func TestManagerDarwinFinalEPERMRequiresAbsentProcessGroup(t *testing.T) {
 		})
 		outcome <- runOutcome{result: result, err: err}
 	}()
-	descendantPID := awaitPID(t, stdout)
+	descendant := observeProcessExit(t, awaitPID(t, stdout))
 
 	cancel()
 	completed := awaitRun(t, outcome, "Run after final EPERM")
@@ -351,7 +351,7 @@ func TestManagerDarwinFinalEPERMRequiresAbsentProcessGroup(t *testing.T) {
 	if cleanupErr != nil && !errors.Is(cleanupErr, syscall.ESRCH) {
 		t.Fatalf("forced group cleanup error = %v", cleanupErr)
 	}
-	assertProcessGoneOnce(t, descendantPID)
+	assertProcessExited(t, descendant)
 }
 
 func TestManagerTerminationFailurePreservesCancellationIdentity(t *testing.T) {
@@ -371,7 +371,7 @@ func TestManagerTerminationFailurePreservesCancellationIdentity(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
-	outcome, pid := startBlockingDescendant(t, manager, ctx)
+	outcome, descendant := startBlockingDescendant(t, manager, ctx)
 	cancel()
 	completed := awaitRun(t, outcome, "Run after synthetic termination failure")
 	if !errors.Is(completed.err, sandbox.ErrChildTerminate) || !errors.Is(completed.err, context.Canceled) {
@@ -381,7 +381,7 @@ func TestManagerTerminationFailurePreservesCancellationIdentity(t *testing.T) {
 		t.Fatalf("Run() exposed raw termination detail: %v", completed.err)
 	}
 	assertKilledResult(t, completed.result)
-	assertProcessGoneOnce(t, pid)
+	assertProcessExited(t, descendant)
 }
 
 func TestManagerTerminationFailurePreservesDeadlineIdentity(t *testing.T) {
@@ -401,7 +401,7 @@ func TestManagerTerminationFailurePreservesDeadlineIdentity(t *testing.T) {
 	t.Cleanup(func() { _ = manager.Close() })
 
 	ctx, cancel := context.WithCancelCause(context.Background())
-	outcome, pid := startBlockingDescendant(t, manager, ctx)
+	outcome, descendant := startBlockingDescendant(t, manager, ctx)
 	cancel(context.DeadlineExceeded)
 	completed := awaitRun(t, outcome, "Run after deadline termination failure")
 	if !errors.Is(completed.err, sandbox.ErrChildTerminate) || !errors.Is(completed.err, context.DeadlineExceeded) {
@@ -411,7 +411,7 @@ func TestManagerTerminationFailurePreservesDeadlineIdentity(t *testing.T) {
 		t.Fatalf("Run() exposed raw termination detail: %v", completed.err)
 	}
 	assertKilledResult(t, completed.result)
-	assertProcessGoneOnce(t, pid)
+	assertProcessExited(t, descendant)
 }
 
 func TestManagerNormalShellExitRemovesBackgroundDescendants(t *testing.T) {
@@ -436,7 +436,7 @@ func TestManagerNormalShellExitRemovesBackgroundDescendants(t *testing.T) {
 		outcome <- runOutcome{result: result, err: err}
 	}()
 
-	pid := awaitPID(t, stdout)
+	descendant := observeProcessExit(t, awaitPID(t, stdout))
 	writeFIFO(t, acknowledgement, "continue\n")
 	completed := awaitRun(t, outcome, "normal shell exit")
 	if completed.err != nil {
@@ -445,12 +445,12 @@ func TestManagerNormalShellExitRemovesBackgroundDescendants(t *testing.T) {
 	if completed.result.Code != 0 || completed.result.Signaled {
 		t.Fatalf("Run() result = %+v, want normal zero exit", completed.result)
 	}
-	assertProcessGoneOnce(t, pid)
+	assertProcessExited(t, descendant)
 }
 
 func TestManagerCloseTerminatesActiveGroupsAndRejectsNewRuns(t *testing.T) {
 	manager := New()
-	outcome, pid := startBlockingDescendant(t, manager, context.Background())
+	outcome, descendant := startBlockingDescendant(t, manager, context.Background())
 	closeResult := make(chan error, 1)
 	go func() { closeResult <- manager.Close() }()
 
@@ -462,7 +462,7 @@ func TestManagerCloseTerminatesActiveGroupsAndRejectsNewRuns(t *testing.T) {
 		t.Fatalf("active Run() error = %v", completed.err)
 	}
 	assertKilledResult(t, completed.result)
-	assertProcessGoneOnce(t, pid)
+	assertProcessExited(t, descendant)
 
 	if err := manager.Close(); err != nil {
 		t.Fatalf("second Close() error = %v", err)
@@ -527,7 +527,7 @@ func testEnvironment() []string {
 	return []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
 }
 
-func startBlockingDescendant(t *testing.T, manager *Manager, ctx context.Context) (<-chan runOutcome, int) {
+func startBlockingDescendant(t *testing.T, manager *Manager, ctx context.Context) (<-chan runOutcome, observedProcess) {
 	t.Helper()
 	workspace := t.TempDir()
 	blocked := makeFIFO(t, workspace, "blocked")
@@ -544,7 +544,7 @@ func startBlockingDescendant(t *testing.T, manager *Manager, ctx context.Context
 		})
 		outcome <- runOutcome{result: result, err: err}
 	}()
-	return outcome, awaitPID(t, stdout)
+	return outcome, observeProcessExit(t, awaitPID(t, stdout))
 }
 
 func writeTestExecutable(t *testing.T, path, output string) {
@@ -634,12 +634,24 @@ func assertKilledResult(t *testing.T, result Result) {
 	}
 }
 
-func assertProcessGoneOnce(t *testing.T, pid int) {
+type observedProcess struct {
+	pid  int
+	exit *processExitObserver
+}
+
+func observeProcessExit(t *testing.T, pid int) observedProcess {
 	t.Helper()
-	if err := unix.Kill(pid, 0); !errors.Is(err, unix.ESRCH) {
-		if err == nil {
-			_ = unix.Kill(pid, unix.SIGKILL)
-		}
-		t.Fatalf("signal 0 for descendant %d returned %v, want ESRCH", pid, err)
+	observer, err := newProcessExitObserver(pid)
+	if err != nil {
+		t.Fatalf("observe descendant %d: %v", pid, err)
+	}
+	t.Cleanup(func() { _ = observer.Close() })
+	return observedProcess{pid: pid, exit: observer}
+}
+
+func assertProcessExited(t *testing.T, process observedProcess) {
+	t.Helper()
+	if err := process.exit.Wait(10 * time.Second); err != nil {
+		t.Fatalf("wait for descendant %d exit event: %v", process.pid, err)
 	}
 }

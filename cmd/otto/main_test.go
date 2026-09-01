@@ -455,11 +455,17 @@ func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
 }
 
 func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
+	const maliciousToolCallID = "startup-warning-tool-call-secret"
 	home := t.TempDir()
 	workspace := t.TempDir()
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "warning-session")
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	deps := deterministicRunDependencies(t)
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.RedactionValues = []string{maliciousToolCallID}
+		return runtime
+	}
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -474,14 +480,14 @@ func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
 			info: prepared.Info(),
 			activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
 				store, warnings, err := prepared.Activate(ctx)
-				return store, append(warnings, session.Warning{Message: "startup warning"}), err
+				return store, append(warnings, session.Warning{Message: "repaired dangling tool call " + maliciousToolCallID}), err
 			},
 			close: prepared.Close,
 		}, nil
 	}
 	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, _ app.Backend) error {
-		if !strings.Contains(stderr.String(), "warning: startup warning\n") {
-			t.Fatalf("stderr before TUI = %q", stderr.String())
+		if strings.Contains(stderr.String(), maliciousToolCallID) || !strings.Contains(stderr.String(), "warning: repaired dangling tool call ") {
+			t.Fatalf("stderr before TUI was not safely redacted: %q", stderr.String())
 		}
 		return nil
 	}

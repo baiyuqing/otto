@@ -48,7 +48,11 @@ func NewRedactor(values []string) *Redactor {
 }
 
 func (r *Redactor) RedactString(text string) string {
-	if r == nil || len(r.values) == 0 || text == "" {
+	if text == "" {
+		return text
+	}
+	text = strings.ToValidUTF8(text, string(utf8.RuneError))
+	if r == nil || len(r.values) == 0 {
 		return text
 	}
 	for _, value := range r.values {
@@ -228,33 +232,49 @@ func redactJSONValueStrings(redactor *Redactor, value any) any {
 }
 
 func safeRedactionMarker(values []string) string {
-	if markerRuneAbsent(redactionMarker, values) {
+	usedRunes := make(map[rune]struct{})
+	for _, value := range values {
+		for _, candidate := range value {
+			usedRunes[candidate] = struct{}{}
+		}
+	}
+	isSafeRune := func(candidate rune) bool {
+		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
+			return false
+		}
+		_, used := usedRunes[candidate]
+		return !used
+	}
+	preferred, _ := utf8.DecodeRuneInString(redactionMarker)
+	if isSafeRune(preferred) {
 		return redactionMarker
 	}
 	for candidate := rune(0xE000); candidate <= 0xF8FF; candidate++ {
-		marker := string(candidate)
-		if markerRuneAbsent(marker, values) {
-			return marker
+		if isSafeRune(candidate) {
+			return string(candidate)
 		}
 	}
 	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
-		if utf8.ValidRune(candidate) && !unicode.IsControl(candidate) {
-			marker := string(candidate)
-			if markerRuneAbsent(marker, values) {
-				return marker
-			}
+		if isSafeRune(candidate) {
+			return string(candidate)
 		}
 	}
-	return ""
-}
 
-func markerRuneAbsent(marker string, values []string) bool {
+	longestPreferredRun := 0
 	for _, value := range values {
-		if strings.Contains(value, marker) {
-			return false
+		currentRun := 0
+		for _, candidate := range value {
+			if candidate == preferred {
+				currentRun++
+				if currentRun > longestPreferredRun {
+					longestPreferredRun = currentRun
+				}
+				continue
+			}
+			currentRun = 0
 		}
 	}
-	return true
+	return strings.Repeat(redactionMarker, longestPreferredRun+1)
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -269,8 +289,9 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 type streamRedactor struct {
-	redactor *Redactor
-	pending  string
+	redactor        *Redactor
+	pending         string
+	invalidBoundary []byte
 }
 
 func (r *Redactor) newStream() *streamRedactor {
@@ -278,10 +299,17 @@ func (r *Redactor) newStream() *streamRedactor {
 }
 
 func (s *streamRedactor) Write(text string) string {
+	if s == nil || text == "" {
+		return ""
+	}
+	return s.writeNormalized(s.normalizeUTF8(text, false))
+}
+
+func (s *streamRedactor) writeNormalized(text string) string {
 	if text == "" {
 		return ""
 	}
-	if s == nil || s.redactor == nil || len(s.redactor.values) == 0 {
+	if s.redactor == nil || len(s.redactor.values) == 0 {
 		return text
 	}
 	s.pending += text
@@ -303,12 +331,41 @@ func (s *streamRedactor) Write(text string) string {
 }
 
 func (s *streamRedactor) Flush() string {
-	if s == nil || s.pending == "" {
+	if s == nil {
 		return ""
 	}
+	normalized := s.normalizeUTF8("", true)
+	if s.redactor == nil || len(s.redactor.values) == 0 {
+		return normalized
+	}
+	s.pending += normalized
 	pending := s.pending
 	s.pending = ""
 	return s.redactor.RedactString(pending)
+}
+
+func (s *streamRedactor) normalizeUTF8(text string, final bool) string {
+	data := make([]byte, 0, len(s.invalidBoundary)+len(text))
+	data = append(data, s.invalidBoundary...)
+	data = append(data, text...)
+	s.invalidBoundary = nil
+
+	var normalized strings.Builder
+	for len(data) > 0 {
+		if !final && !utf8.FullRune(data) {
+			s.invalidBoundary = append(s.invalidBoundary, data...)
+			break
+		}
+		r, size := utf8.DecodeRune(data)
+		if r == utf8.RuneError && size == 1 {
+			normalized.WriteRune(utf8.RuneError)
+			data = data[1:]
+			continue
+		}
+		normalized.Write(data[:size])
+		data = data[size:]
+	}
+	return normalized.String()
 }
 
 func (s *streamRedactor) firstSecret() (int, string) {

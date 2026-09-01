@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
@@ -296,7 +297,16 @@ func (b runtimeBuilder) activatePrepared(ctx context.Context, prepared preparedS
 	if !activatedSessionMatchesPrepared(info, candidate.Header()) {
 		return nil, nil, b.cleanupCandidate(candidate, fmt.Errorf("%w: prepared session metadata changed during activation", session.ErrInvalidSession), runtime)
 	}
-	return candidate, cloneWarnings(warnings), nil
+	return candidate, b.redactWarnings(warnings, runtime), nil
+}
+
+func (b runtimeBuilder) redactWarnings(warnings []session.Warning, runtime *config.Runtime) []session.Warning {
+	redacted := cloneWarnings(warnings)
+	boundary := agent.NewRedactor(b.secretValues(runtime))
+	for index := range redacted {
+		redacted[index].Message = boundary.RedactString(redacted[index].Message)
+	}
+	return redacted
 }
 
 func activatedSessionMatchesPrepared(info session.SessionInfo, header session.Header) bool {
@@ -406,27 +416,105 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 }
 
 func collectURLSecretValues(raw string, add func(string)) {
-	if raw == "" {
+	if raw == "" || add == nil {
 		return
 	}
+	add(raw)
+	collectRawURLSecretValues(raw, add)
+
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return
 	}
 	if parsed.User != nil {
-		add(parsed.User.Username())
+		username := parsed.User.Username()
+		add(username)
+		decodedUserinfo := username
 		if password, ok := parsed.User.Password(); ok {
 			add(password)
+			decodedUserinfo += ":" + password
 		}
+		add(decodedUserinfo)
+		add(parsed.User.String())
 	}
 	for _, items := range parsed.Query() {
 		for _, item := range items {
 			add(item)
 		}
 	}
+	if parsed.RawFragment != "" {
+		add(parsed.RawFragment)
+	}
 	if parsed.Fragment != "" {
 		add(parsed.Fragment)
 	}
+}
+
+func collectRawURLSecretValues(raw string, add func(string)) {
+	authority := rawURLAuthority(raw)
+	if separator := strings.LastIndexByte(authority, '@'); separator >= 0 {
+		rawUserinfo := authority[:separator]
+		add(rawUserinfo)
+		rawUsername, rawPassword, hasPassword := strings.Cut(rawUserinfo, ":")
+		add(rawUsername)
+		if decoded, err := url.PathUnescape(rawUsername); err == nil {
+			add(decoded)
+		}
+		if hasPassword {
+			add(rawPassword)
+			if decoded, err := url.PathUnescape(rawPassword); err == nil {
+				add(decoded)
+			}
+		}
+		if decoded, err := url.PathUnescape(rawUserinfo); err == nil {
+			add(decoded)
+		}
+	}
+
+	queryStart := strings.IndexByte(raw, '?')
+	fragmentStart := strings.IndexByte(raw, '#')
+	if queryStart >= 0 && (fragmentStart < 0 || queryStart < fragmentStart) {
+		queryEnd := len(raw)
+		if fragmentStart >= 0 {
+			queryEnd = fragmentStart
+		}
+		for _, item := range strings.FieldsFunc(raw[queryStart+1:queryEnd], func(character rune) bool {
+			return character == '&' || character == ';'
+		}) {
+			_, value, found := strings.Cut(item, "=")
+			if !found {
+				continue
+			}
+			add(value)
+			if decoded, err := url.QueryUnescape(value); err == nil {
+				add(decoded)
+			}
+		}
+	}
+	if fragmentStart >= 0 {
+		rawFragment := raw[fragmentStart+1:]
+		add(rawFragment)
+		if decoded, err := url.PathUnescape(rawFragment); err == nil {
+			add(decoded)
+		}
+		if decoded, err := url.QueryUnescape(rawFragment); err == nil {
+			add(decoded)
+		}
+	}
+}
+
+func rawURLAuthority(raw string) string {
+	start := 0
+	if separator := strings.Index(raw, "://"); separator >= 0 {
+		start = separator + 3
+	} else if strings.HasPrefix(raw, "//") {
+		start = 2
+	}
+	end := len(raw)
+	if relativeEnd := strings.IndexAny(raw[start:], "/?#"); relativeEnd >= 0 {
+		end = start + relativeEnd
+	}
+	return raw[start:end]
 }
 
 func resolveInitialRuntime(file config.File, environment map[string]string, metadata *session.RuntimeMetadata, overrides config.Overrides) (config.Runtime, error) {

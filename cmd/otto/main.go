@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -42,7 +43,7 @@ func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) s
 		policy = "Sandbox policy: Seatbelt confines Bash to workspace-write with network denied."
 		bashUsable = true
 	case info.Mode == app.SandboxOff && info.Network == app.SandboxNetworkUnconfined && info.BashAvailable && info.Reason == app.SandboxReasonNone:
-		policy = "Sandbox policy: Bash is unsandboxed."
+		policy = "Sandbox policy: Bash is unsandboxed and has the current macOS user's access."
 		bashUsable = true
 	}
 
@@ -162,8 +163,22 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, enumerate environmentEnumerator, deps runDependencies) int {
-	hostEntries := captureEnvironment(enumerate)
-	environmentLookup := newEnvironmentLookup(hostEntries)
+	hostEntries, err := captureEnvironment(enumerate)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	environmentLookup, err := newEnvironmentLookup(hostEntries)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	processSnapshot, _ := sandbox.ResolveEnvironment(sandbox.EnvironmentOptions{
+		HostEntries:   cloneSandboxRuntimeStrings(hostEntries),
+		ProviderNames: []string{"OTTO_API_KEY"},
+	})
+	startupBoundary := runtimeBuilder{sandboxSecrets: processSnapshot.RedactionValues()}
+	redactStartupError := func(err error) error {
+		return startupBoundary.redactError(err, nil)
+	}
 
 	if deps.detectTerminal == nil {
 		deps.detectTerminal = detectTerminalIO
@@ -184,19 +199,22 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		deps.newSession = newSession
 	}
 
-	options, help, err := parseFlags(args, stdout, stderr)
+	var parseErrors bytes.Buffer
+	options, help, err := parseFlags(args, stdout, &parseErrors)
 	if help {
 		return 0
 	}
 	if err != nil {
+		_, _ = io.WriteString(stderr, redactStartupError(errors.New(parseErrors.String())).Error())
 		return 2
 	}
+	startupBoundary.runtimeOverrides.BaseURL = options.baseURL
 
 	approvePrompt := options.approve
 	if options.approveSet && strings.HasPrefix(approvePrompt, "@") {
 		data, err := os.ReadFile(strings.TrimPrefix(approvePrompt, "@"))
 		if err != nil {
-			return fail(stderr, "read approve prompt: %v", err)
+			return fail(stderr, "%v", redactStartupError(fmt.Errorf("read approve prompt: %w", err)))
 		}
 		if len(data) > maxApprovePromptBytes {
 			return fail(stderr, "read approve prompt: file is too large (%d bytes); maximum is %d bytes", len(data), maxApprovePromptBytes)
@@ -206,16 +224,16 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 
 	workspacePath, err := canonicalDirectory(options.cwd)
 	if err != nil {
-		return fail(stderr, "resolve cwd: %v", err)
+		return fail(stderr, "%v", redactStartupError(fmt.Errorf("resolve cwd: %w", err)))
 	}
 	workspace, err := tool.NewWorkspace(workspacePath)
 	if err != nil {
-		return fail(stderr, "create workspace: %v", err)
+		return fail(stderr, "%v", redactStartupError(fmt.Errorf("create workspace: %w", err)))
 	}
 
 	home, err := resolveHome(environmentLookup, deps.resolveUserHome)
 	if err != nil {
-		return fail(stderr, "%v", err)
+		return fail(stderr, "%v", redactStartupError(err))
 	}
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
@@ -224,10 +242,10 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if options.continueLast {
 		listed, listErr := session.List(ctx, sessionRoot, workspacePath, "", 1)
 		if listErr != nil {
-			return fail(stderr, "%v", listErr)
+			return fail(stderr, "%v", redactStartupError(listErr))
 		}
 		if len(listed.Sessions) == 0 {
-			return fail(stderr, "no session found for workspace %s", workspacePath)
+			return fail(stderr, "%v", redactStartupError(fmt.Errorf("no session found for workspace %s", workspacePath)))
 		}
 		sessionPath = listed.Sessions[0].Path
 		listedSessionPath = true
@@ -235,18 +253,20 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 
 	configFile, err := loadConfig(options, home)
 	if err != nil {
-		return fail(stderr, "load config: %v", err)
+		return fail(stderr, "%v", redactStartupError(fmt.Errorf("load config: %w", err)))
 	}
 	environment := configEnvironment(configFile, environmentLookup)
+	startupBoundary.config = configFile
+	startupBoundary.environment = environment
 	uiMode, err := config.ResolveUIMode(configFile, environment, options.ui)
 	if err != nil {
-		return fail(stderr, "%v", err)
+		return fail(stderr, "%v", redactStartupError(err))
 	}
 	frontend := frontendOnce
 	if !options.approveSet {
 		frontend, err = selectFrontend(uiMode, stdin, stdout, deps.detectTerminal)
 		if err != nil {
-			return fail(stderr, "%v", err)
+			return fail(stderr, "%v", redactStartupError(err))
 		}
 	}
 
@@ -258,6 +278,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		shell = canonicalShell
 	}
 	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
+	builder.sandboxSecrets = cloneSandboxRuntimeStrings(startupBoundary.sandboxSecrets)
 	var sandboxDriverOverride *string
 	if options.sandboxSet {
 		driver := strings.Clone(options.sandbox)
@@ -265,7 +286,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	sandboxSettings, err := config.ResolveSandbox(configFile.Sandbox, sandboxDriverOverride)
 	if err != nil {
-		return fail(stderr, "%v", err)
+		return fail(stderr, "%v", builder.redactError(err, nil))
 	}
 
 	var (
@@ -300,7 +321,39 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "%v", builder.redactError(err, nil))
 	}
 
-	processSandbox := deps.openSandbox(ctx, sandboxOpenOptions{
+	processCtx, cancelProcess := context.WithCancel(ctx)
+	defer cancelProcess()
+	subscription := deps.subscribeInterrupts()
+	if subscription.stop == nil {
+		subscription.stop = func() {}
+	}
+	var replMu sync.Mutex
+	var currentREPL *repl.REPL
+	signalDone := make(chan struct{})
+	signalStopped := make(chan struct{})
+	go func() {
+		defer close(signalStopped)
+		for {
+			select {
+			case <-signalDone:
+				return
+			case <-subscription.signals:
+				replMu.Lock()
+				active := currentREPL != nil && currentREPL.Interrupt()
+				replMu.Unlock()
+				if !active {
+					cancelProcess()
+				}
+			}
+		}
+	}()
+	defer func() {
+		subscription.stop()
+		close(signalDone)
+		<-signalStopped
+	}()
+
+	processSandbox := deps.openSandbox(processCtx, sandboxOpenOptions{
 		Settings:      sandboxSettings,
 		Workspace:     workspacePath,
 		Shell:         shell,
@@ -316,40 +369,76 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		sandboxClosed = true
 		return processSandbox.Close()
 	}
+	var controller *app.Controller
+	controllerClosed := false
 	defer func() {
+		cancelProcess()
+		if controller != nil && !controllerClosed {
+			controllerClosed = true
+			_ = controller.Close()
+		}
 		if !sandboxClosed {
 			_ = closeSandbox()
 		}
 	}()
+	if processCtx.Err() != nil {
+		cancelProcess()
+		_ = closeSandbox()
+		return 130
+	}
 	printSandboxRuntimeWarning(stderr, processSandbox.Info)
 
 	builder.commandExecutor = processSandbox.Executor
 	builder.sandboxEnvironment = cloneSandboxRuntimeStrings(processSandbox.Environment)
 	builder.sandboxInfo = processSandbox.Info
-	builder.sandboxSecrets = cloneSandboxRuntimeStrings(processSandbox.RedactionValues)
+	builder.sandboxSecrets = mergeSandboxRuntimeRedactions(builder.sandboxSecrets, processSandbox.RedactionValues)
+	if processCtx.Err() != nil {
+		return 130
+	}
 
 	var (
 		initialSession  session.Session
 		startupWarnings []session.Warning
 	)
 	if preparedInitial != nil {
-		initialSession, startupWarnings, err = builder.activatePrepared(ctx, preparedInitial, preparedInfo, &resolvedRuntime)
+		initialSession, startupWarnings, err = builder.activatePrepared(processCtx, preparedInitial, preparedInfo, &resolvedRuntime)
 	} else {
 		initialSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, resolvedRuntime)
+	}
+	if processCtx.Err() != nil {
+		if initialSession != nil {
+			_ = initialSession.Close()
+		}
+		return 130
 	}
 	if err != nil {
 		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
 	}
 	printWarnings(stderr, startupWarnings)
+	if processCtx.Err() != nil {
+		_ = initialSession.Close()
+		return 130
+	}
 
 	initialRunner, err := builder.buildRunner(initialSession, resolvedRuntime)
+	if processCtx.Err() != nil {
+		_ = initialSession.Close()
+		return 130
+	}
 	if err != nil {
 		_ = initialSession.Close()
 		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
 	}
-	if err := updateSessionRuntime(ctx, initialSession, resolvedRuntime); err != nil {
+	if err := updateSessionRuntime(processCtx, initialSession, resolvedRuntime); err != nil {
 		_ = initialSession.Close()
+		if processCtx.Err() != nil {
+			return 130
+		}
 		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
+	}
+	if processCtx.Err() != nil {
+		_ = initialSession.Close()
+		return 130
 	}
 	initialRunnerPending := true
 	buildRunner := func(current session.Session) app.Runner {
@@ -378,14 +467,22 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 			app.WithNewSessionBuilder(builder.buildNewReplacement),
 		)
 	}
-	controller, err := app.New(initialSession, func() (session.Session, error) {
+	controller, err = app.New(initialSession, func() (session.Session, error) {
 		return deps.newSession(options.noSession, sessionRoot, workspacePath, resolvedRuntime)
 	}, buildRunner, controllerOptions...)
 	if err != nil {
 		_ = initialSession.Close()
+		if processCtx.Err() != nil {
+			return 130
+		}
 		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
 	}
-	controllerClosed := false
+	if processCtx.Err() != nil {
+		cancelProcess()
+		controllerClosed = true
+		_ = controller.Close()
+		return 130
+	}
 	closeController := func() error {
 		if controllerClosed {
 			return nil
@@ -393,44 +490,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		controllerClosed = true
 		return controller.Close()
 	}
-	defer func() {
-		if !controllerClosed {
-			_ = controller.Close()
-		}
-	}()
-
-	processCtx, cancelProcess := context.WithCancel(ctx)
-	defer cancelProcess()
-	subscription := deps.subscribeInterrupts()
-	if subscription.stop == nil {
-		subscription.stop = func() {}
-	}
-
-	var replMu sync.Mutex
-	var currentREPL *repl.REPL
-	signalDone := make(chan struct{})
-	signalStopped := make(chan struct{})
-	go func() {
-		defer close(signalStopped)
-		for {
-			select {
-			case <-signalDone:
-				return
-			case <-subscription.signals:
-				replMu.Lock()
-				active := currentREPL != nil && currentREPL.Interrupt()
-				replMu.Unlock()
-				if !active {
-					cancelProcess()
-				}
-			}
-		}
-	}()
-	defer func() {
-		subscription.stop()
-		close(signalDone)
-		<-signalStopped
-	}()
 
 	var runErr error
 	switch frontend {
@@ -626,26 +685,52 @@ func canonicalDirectory(path string) (string, error) {
 }
 
 const (
+	// Darwin's process argument/environment budget is about 1 MiB. These
+	// ceilings are deliberately larger while still bounding injected snapshots.
 	maxLookupEnvironmentNameBytes  = 4 << 10
 	maxLookupEnvironmentEntryBytes = 1 << 20
+	maxLookupEnvironmentEntries    = 1 << 18
+	maxLookupEnvironmentBytes      = 8 << 20
+	maxCapturedEnvironmentEntries  = 1 << 19
+	maxCapturedEnvironmentBytes    = 16 << 20
 )
+
+var errEnvironmentSnapshotTooLarge = errors.New("process environment snapshot is too large")
 
 type environmentLookup map[string]string
 
-func captureEnvironment(enumerate environmentEnumerator) []string {
+func captureEnvironment(enumerate environmentEnumerator) ([]string, error) {
 	if enumerate == nil {
-		return []string{}
+		return []string{}, nil
 	}
 	entries := enumerate()
+	if len(entries) > maxCapturedEnvironmentEntries {
+		return nil, errEnvironmentSnapshotTooLarge
+	}
+	total := 0
+	for _, entry := range entries {
+		if len(entry) > maxCapturedEnvironmentBytes-total {
+			return nil, errEnvironmentSnapshotTooLarge
+		}
+		total += len(entry)
+	}
 	captured := make([]string, len(entries))
 	for index, entry := range entries {
 		captured[index] = strings.Clone(entry)
 	}
-	return captured
+	return captured, nil
 }
 
-func newEnvironmentLookup(entries []string) environmentLookup {
-	lookup := make(environmentLookup)
+func newEnvironmentLookup(entries []string) (environmentLookup, error) {
+	return newEnvironmentLookupWithLimits(entries, maxLookupEnvironmentEntries, maxLookupEnvironmentBytes)
+}
+
+func newEnvironmentLookupWithLimits(entries []string, maxEntries, maxBytes int) (environmentLookup, error) {
+	if maxEntries < 0 || maxBytes < 0 {
+		return nil, errEnvironmentSnapshotTooLarge
+	}
+	parsed := make(map[string]string)
+	total := 0
 	for _, entry := range entries {
 		if len(entry) > maxLookupEnvironmentEntryBytes || !utf8.ValidString(entry) || strings.IndexByte(entry, 0) >= 0 {
 			continue
@@ -654,9 +739,26 @@ func newEnvironmentLookup(entries []string) environmentLookup {
 		if !found || len(name) > maxLookupEnvironmentNameBytes || !validLookupEnvironmentName(name) {
 			continue
 		}
+		previous, duplicate := parsed[name]
+		if !duplicate && len(parsed) >= maxEntries {
+			return nil, errEnvironmentSnapshotTooLarge
+		}
+		nextTotal := total + len(name) + len(value)
+		if duplicate {
+			nextTotal -= len(name) + len(previous)
+		}
+		if nextTotal > maxBytes {
+			return nil, errEnvironmentSnapshotTooLarge
+		}
+		parsed[name] = value
+		total = nextTotal
+	}
+
+	lookup := make(environmentLookup, len(parsed))
+	for name, value := range parsed {
 		lookup[strings.Clone(name)] = strings.Clone(value)
 	}
-	return lookup
+	return lookup, nil
 }
 
 func (lookup environmentLookup) value(name string) string {

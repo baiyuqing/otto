@@ -14,9 +14,11 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
@@ -178,6 +180,50 @@ func TestRuntimeBuilderRejectsBaseURLUserinfoWithBoundedRedactedError(t *testing
 	}
 }
 
+func TestRuntimeBuilderCollectsEncodedAndMalformedEndpointSecretForms(t *testing.T) {
+	const (
+		encodedEndpoint   = "https://raw%2Buser:raw%2Fpass@example.test/v1?token=raw+query&encoded=percent%2Fvalue#frag%2Bvalue"
+		malformedEndpoint = "https://bad%zz:pass%2Fword@example.test/v1?token=plus+value&broken=bad%zz#raw%2Gfragment"
+	)
+	file := configWithProfiles("active")
+	file.Profiles["encoded-inactive"] = config.Profile{
+		Provider: "openai-compatible", BaseURL: encodedEndpoint, Model: "inactive", APIKeyEnv: "ENCODED_KEY",
+	}
+	file.Profiles["malformed-inactive"] = config.Profile{
+		Provider: "openai-compatible", BaseURL: malformedEndpoint, Model: "inactive", APIKeyEnv: "MALFORMED_KEY",
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	values := builder.secretValues(nil)
+	for _, want := range []string{
+		encodedEndpoint,
+		"raw%2Buser:raw%2Fpass",
+		"raw%2Buser",
+		"raw%2Fpass",
+		"raw+user:raw/pass",
+		"raw+user",
+		"raw/pass",
+		"raw+query",
+		"raw query",
+		"percent%2Fvalue",
+		"percent/value",
+		"frag%2Bvalue",
+		"frag+value",
+		malformedEndpoint,
+		"bad%zz:pass%2Fword",
+		"bad%zz",
+		"pass%2Fword",
+		"pass/word",
+		"plus+value",
+		"plus value",
+		"bad%zz",
+		"raw%2Gfragment",
+	} {
+		if !containsString(values, want) {
+			t.Fatalf("secretValues() omitted endpoint form %q", want)
+		}
+	}
+}
+
 func TestRuntimeBuilderResolveSessionRejectsMissingModel(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 
@@ -290,14 +336,16 @@ func TestRuntimeBuilderInvalidRuntimeAbandonsPreparedFileWithoutMutation(t *test
 }
 
 func TestRuntimeBuilderOpenReplacementReturnsWarningsAndRuntimeInfo(t *testing.T) {
+	const maliciousToolCallID = "malicious-warning-tool-call-id"
 	file := configWithProfiles("default", "resumed")
 	contextWindow := 131_072
 	profile := file.Profiles["resumed"]
 	profile.ContextWindow = &contextWindow
 	file.Profiles["resumed"] = profile
 	builder := newRuntimeBuilderForTest(t, file)
+	builder.sandboxSecrets = append(builder.sandboxSecrets, maliciousToolCallID)
 	path := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{Version: session.CurrentVersion, ID: "resumed-session", Workspace: builder.workspacePath, Provider: "openai-compatible", Profile: "resumed", Model: "stored-model", CreatedAt: time.Now().UTC()})
-	warnings := []session.Warning{{Message: "repaired dangling tool call"}}
+	warnings := []session.Warning{{Message: "repaired dangling tool call " + maliciousToolCallID}}
 	var captured config.Runtime
 
 	builder.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
@@ -330,11 +378,11 @@ func TestRuntimeBuilderOpenReplacementReturnsWarningsAndRuntimeInfo(t *testing.T
 	if replacement.RuntimeInfo.ContextWindow != 131_072 {
 		t.Fatalf("runtime info context window = %d, want 131072", replacement.RuntimeInfo.ContextWindow)
 	}
-	if len(replacement.Warnings) != 1 || replacement.Warnings[0].Message != warnings[0].Message {
+	if len(replacement.Warnings) != 1 || strings.Contains(replacement.Warnings[0].Message, maliciousToolCallID) || !strings.Contains(replacement.Warnings[0].Message, "repaired dangling tool call") {
 		t.Fatalf("warnings = %#v", replacement.Warnings)
 	}
 	replacement.Warnings[0].Message = "mutated"
-	if warnings[0].Message != "repaired dangling tool call" {
+	if warnings[0].Message != "repaired dangling tool call "+maliciousToolCallID {
 		t.Fatalf("warnings mutated = %#v", warnings)
 	}
 	if captured.Profile != "resumed" || captured.Model != "stored-model" || captured.APIKey != "resumed-secret" {
@@ -989,12 +1037,256 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 	}
 }
 
+func TestRuntimeBuilderRedactsInactiveEncodedAndMalformedEndpointsAcrossBoundaries(t *testing.T) {
+	const (
+		encodedEndpoint   = "https://raw%2Buser:raw%2Fpass@example.test/v1?token=raw+query&encoded=percent%2Fvalue#frag%2Bvalue"
+		malformedEndpoint = "https://bad%zz:pass%2Fword@example.test/v1?token=plus+value&broken=bad%zz#raw%2Gfragment"
+	)
+	secretForms := []string{
+		encodedEndpoint,
+		"raw%2Buser:raw%2Fpass",
+		"raw%2Buser",
+		"raw%2Fpass",
+		"raw+user:raw/pass",
+		"raw+user",
+		"raw/pass",
+		"raw+query",
+		"raw query",
+		"percent%2Fvalue",
+		"percent/value",
+		"frag%2Bvalue",
+		"frag+value",
+		malformedEndpoint,
+		"bad%zz:pass%2Fword",
+		"bad%zz",
+		"pass%2Fword",
+		"pass/word",
+		"plus+value",
+		"plus value",
+		"raw%2Gfragment",
+	}
+
+	var requestMu sync.Mutex
+	var requestBodies []string
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		requestMu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		requestMu.Unlock()
+		if requests.Add(1) == 1 {
+			payload := fmt.Sprintf(`{"choices":[{"delta":{"content":%q,"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
+				"provider event "+strings.Join(secretForms, " | "), `{"command":"ignored"}`)
+			writeSSE(w, payload)
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	file := config.File{
+		DefaultProfile: "active",
+		Profiles: map[string]config.Profile{
+			"active": {
+				Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model", APIKeyEnv: "ACTIVE_KEY",
+			},
+			"encoded-inactive": {
+				Provider: "openai-compatible", BaseURL: encodedEndpoint, Model: "inactive-model", APIKeyEnv: "ENCODED_KEY",
+			},
+			"malformed-inactive": {
+				Provider: "openai-compatible", BaseURL: malformedEndpoint, Model: "inactive-model", APIKeyEnv: "MALFORMED_KEY",
+			},
+		},
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.commandExecutor = &recordingSandboxExecutor{execute: func(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+		_, err := io.WriteString(streams.Stdout, strings.Join(secretForms, "\n"))
+		return sandbox.ExitStatus{Code: 0}, err
+	}}
+	builder.sandboxEnvironment = []string{}
+	store, err := session.Create(builder.sessionRoot, session.Header{
+		Version: session.CurrentVersion, ID: "endpoint-redaction", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "active", Model: "active-model", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner, err := builder.buildRunner(store, config.Runtime{
+		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model",
+		APIKey: "active-key", APIKeyEnv: "ACTIVE_KEY", ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	var events []agent.Event
+	if err := runner.Run(context.Background(), "inspect endpoints", func(event agent.Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestMu.Lock()
+	bodies := append([]string(nil), requestBodies...)
+	requestMu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(bodies))
+	}
+	eventJSON, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageJSON, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundaryErr := builder.redactError(fmt.Errorf("boundary: %s", strings.Join(secretForms, " | ")), nil)
+	boundaries := map[string]string{
+		"Bash and messages":  string(messageJSON),
+		"events":             string(eventJSON),
+		"provider follow-up": bodies[1],
+		"Pi JSONL":           string(persisted),
+		"boundary error":     boundaryErr.Error(),
+	}
+	for boundary, content := range boundaries {
+		for _, secret := range secretForms {
+			if strings.Contains(content, secret) {
+				t.Fatalf("%s leaked inactive endpoint form %q", boundary, secret)
+			}
+		}
+	}
+	for _, body := range bodies {
+		if strings.Contains(body, encodedEndpoint) || strings.Contains(body, malformedEndpoint) {
+			t.Fatalf("provider prompt/request exposed an inactive endpoint: %q", body)
+		}
+	}
+}
+
+func TestRuntimeBuilderMarkerExhaustionKeepsBashAndFileToolsUsable(t *testing.T) {
+	secret := markerExhaustingProviderSecret(t)
+	var requestBodies []string
+	var toolNames []string
+	var systemPrompt string
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		requestBodies = append(requestBodies, string(body))
+		if requests.Add(1) == 1 {
+			var payload struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+				Tools []struct {
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tools"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Errorf("decode first request: %v", err)
+			}
+			if len(payload.Messages) > 0 {
+				systemPrompt = payload.Messages[0].Content
+			}
+			for _, item := range payload.Tools {
+				toolNames = append(toolNames, item.Function.Name)
+			}
+			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	file := config.File{
+		DefaultProfile: "active",
+		Profiles: map[string]config.Profile{
+			"active": {
+				Provider: "openai-compatible", BaseURL: server.URL, Model: "active", APIKeyEnv: "ACTIVE_KEY",
+			},
+			"inactive": {
+				Provider: "openai-compatible", BaseURL: "https://inactive.example/v1", Model: "inactive", APIKeyEnv: "INACTIVE_KEY",
+			},
+		},
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.environment["ACTIVE_KEY"] = "active-key"
+	builder.environment["INACTIVE_KEY"] = secret
+	builder.commandExecutor = &recordingSandboxExecutor{execute: func(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+		_, err := io.WriteString(streams.Stdout, secret)
+		return sandbox.ExitStatus{Code: 0}, err
+	}}
+	builder.sandboxEnvironment = []string{}
+	store, err := session.Create(builder.sessionRoot, session.Header{
+		Version: session.CurrentVersion, ID: "marker-exhaustion", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "active", Model: "active", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner, err := builder.buildRunner(store, config.Runtime{
+		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active",
+		APIKey: "active-key", APIKeyEnv: "ACTIVE_KEY", ShellTimeout: time.Second, MaxOutputBytes: 4096,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("buildRunner() rejected marker adversary: %v", err)
+	}
+	var events []agent.Event
+	if err := runner.Run(context.Background(), "run safely", func(event agent.Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"read", "grep", "find", "ls", "write", "edit", "bash"}; !reflect.DeepEqual(toolNames, want) {
+		t.Fatalf("tool names = %#v, want %#v", toolNames, want)
+	}
+	if !strings.Contains(systemPrompt, "Bash is unsandboxed") || !strings.Contains(systemPrompt, "current macOS user's access") {
+		t.Fatalf("provider system prompt did not state Bash authority: %q", systemPrompt)
+	}
+	eventJSON, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for boundary, content := range map[string]string{
+		"events":             string(eventJSON),
+		"provider follow-up": requestBodies[1],
+		"Pi JSONL":           string(persisted),
+	} {
+		if strings.Contains(content, secret) {
+			t.Fatalf("%s leaked marker-exhausting provider secret", boundary)
+		}
+	}
+}
+
 func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t *testing.T) {
 	const (
 		apiKey          = "runtime-secret"
 		fallbackAPIKey  = "fallback-secret"
 		apiKeyEnv       = "RUNTIME_KEY"
 		unrelatedEnvKey = "OTTO_RUNTIME_BUILDER_UNRELATED"
+		shellTimeout    = time.Millisecond
 	)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1002,13 +1294,25 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 			writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
 			return
 		}
-		command := fmt.Sprintf("printf \"runtime=%%s fallback=%%s unrelated=%%s literal=%%s \" \"${%s:-missing}\" \"${OTTO_API_KEY:-missing}\" \"${%s:-missing}\" %q; printf '%%0200d' 0; sleep 1", apiKeyEnv, unrelatedEnvKey, apiKey)
-		writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
-			fmt.Sprintf(`{"command":%q}`, command)))
+		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}]}`)
 	}))
 	defer server.Close()
 
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	executionStarted := make(chan struct{})
+	builder.commandExecutor = &recordingSandboxExecutor{execute: func(ctx context.Context, request sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+		if !reflect.DeepEqual(request.Env, []string{"PATH=/usr/bin:/bin", unrelatedEnvKey + "=keep-me"}) {
+			t.Errorf("Executor environment = %#v", request.Env)
+		}
+		output := "runtime=missing fallback=missing unrelated=keep-me literal=" + apiKey + " " + strings.Repeat("0", 200)
+		if _, err := io.WriteString(streams.Stdout, output); err != nil {
+			return sandbox.ExitStatus{}, err
+		}
+		close(executionStarted)
+		<-ctx.Done()
+		return sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}, context.Canceled
+	}}
+	builder.sandboxEnvironment = []string{"PATH=/usr/bin:/bin", unrelatedEnvKey + "=keep-me"}
 	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "runtime-builder", Workspace: builder.workspacePath, Provider: "openai-compatible", Model: "runtime-model", CreatedAt: time.Now().UTC()})
 	runner, err := builder.buildRunner(memory, config.Runtime{
 		Profile:        "default",
@@ -1017,16 +1321,27 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 		Model:          "runtime-model",
 		APIKey:         apiKey,
 		APIKeyEnv:      apiKeyEnv,
-		ShellTimeout:   50 * time.Millisecond,
+		ShellTimeout:   shellTimeout,
 		MaxOutputBytes: 96,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = runner.Run(context.Background(), "run the tool", nil)
-	if err != nil {
-		t.Fatalf("Run() error = %v, want tool-turn success", err)
+	runDone := make(chan error, 1)
+	go func() { runDone <- runner.Run(context.Background(), "run the tool", nil) }()
+	select {
+	case <-executionStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fake Executor did not reach the timeout barrier")
+	}
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want tool-turn success", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deterministic fake Executor cancellation")
 	}
 	if requests.Load() != 2 {
 		t.Fatalf("provider requests = %d, want 2 (tool turn then final stop)", requests.Load())
@@ -1036,8 +1351,8 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 		t.Fatalf("messages = %#v, want user+assistant+tool+assistant", messages)
 	}
 	toolResult := messages[2].Blocks[0].Text
-	redactedLiteral := strings.Contains(toolResult, "literal=[REDACTED]") || strings.Contains(toolResult, "literal=█")
-	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !redactedLiteral || !strings.Contains(toolResult, "[truncated:") || !strings.Contains(toolResult, "status: timed out after 50ms") {
+	redactedLiteral := strings.Contains(toolResult, "literal=[REDACTED]") || strings.Contains(toolResult, "literal=█") || strings.Contains(toolResult, "literal=*")
+	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !redactedLiteral || !strings.Contains(toolResult, "[truncated:") || !strings.Contains(toolResult, "status: timed out after 1ms") {
 		t.Fatalf("tool result = %q", toolResult)
 	}
 	for _, forbidden := range []string{apiKey, fallbackAPIKey} {
@@ -1262,6 +1577,37 @@ func (s *trackedReplacementSession) Close() error {
 		close(s.closed)
 	}
 	return errors.Join(err, s.closeErr)
+}
+
+func markerExhaustingProviderSecret(t *testing.T) string {
+	t.Helper()
+	var value []byte
+	for character := byte(0x20); character <= 0x7e; character++ {
+		value = append(value, character)
+	}
+	for continuation := byte(0x80); continuation <= 0xbf; continuation++ {
+		value = append(value, 0xc2, continuation)
+	}
+	for lead := byte(0xc3); lead <= 0xdf; lead++ {
+		value = append(value, lead, 0x80)
+	}
+	value = append(value, 0xe0, 0xa0, 0x80)
+	for lead := byte(0xe1); lead <= 0xec; lead++ {
+		value = append(value, lead, 0x80, 0x80)
+	}
+	value = append(value, 0xed, 0x80, 0x80)
+	for lead := byte(0xee); lead <= 0xef; lead++ {
+		value = append(value, lead, 0x80, 0x80)
+	}
+	value = append(value, 0xf0, 0x90, 0x80, 0x80)
+	for lead := byte(0xf1); lead <= 0xf3; lead++ {
+		value = append(value, lead, 0x80, 0x80, 0x80)
+	}
+	value = append(value, 0xf4, 0x80, 0x80, 0x80)
+	if !utf8.Valid(value) {
+		t.Fatal("marker adversary is not valid UTF-8")
+	}
+	return string(value)
 }
 
 func newRuntimeBuilderForTest(t *testing.T, file config.File) runtimeBuilder {

@@ -9,6 +9,24 @@ import (
 	"unicode/utf8"
 )
 
+func TestRedactorNormalizesInvalidUTF8BeforeExactReplacement(t *testing.T) {
+	redactor := NewRedactor([]string{"prefix�"})
+	invalid := string(append([]byte("prefix"), 0xff))
+	got := redactor.RedactString(invalid)
+	if !utf8.ValidString(got) {
+		t.Fatalf("RedactString() returned invalid UTF-8: %q", got)
+	}
+	if strings.Contains(got, "prefix�") {
+		t.Fatalf("RedactString() synthesized a configured secret: %q", got)
+	}
+
+	stream := redactor.newStream()
+	streamed := stream.Write(invalid[:3]) + stream.Write(invalid[3:]) + stream.Flush()
+	if !utf8.ValidString(streamed) || strings.Contains(streamed, "prefix�") {
+		t.Fatalf("stream redaction normalized unsafely: %q", streamed)
+	}
+}
+
 func TestRedactorPreservesInvalidCompactionSummaryIdentity(t *testing.T) {
 	err := fmt.Errorf("%w: response contains secret", ErrInvalidCompactionSummary)
 	got := NewRedactor([]string{"secret"}).RedactError(err)

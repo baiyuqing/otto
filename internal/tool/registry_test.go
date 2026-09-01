@@ -119,7 +119,7 @@ func TestBashSandboxedConstructorRejectsEveryInvalidBoundaryWithOneSafeError(t *
 	}
 }
 
-func TestBashSandboxedConstructorRejectsWhenNoCollisionSafeMarkerExists(t *testing.T) {
+func TestBashSandboxedConstructorHandlesFormerByteMarkerExhaustion(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	allBytes := make([]byte, 256)
 	for i := range allBytes {
@@ -135,11 +135,8 @@ func TestBashSandboxedConstructorRejectsWhenNoCollisionSafeMarkerExists(t *testi
 		1024,
 		[]string{string(allBytes)},
 	)
-	if constructed != nil {
-		t.Fatalf("NewBashTool() tool = %T, want nil", constructed)
-	}
-	if err != errInvalidSandboxedBashConfiguration {
-		t.Fatalf("NewBashTool() error = %v, want fixed configuration error", err)
+	if err != nil || constructed == nil {
+		t.Fatalf("NewBashTool() = (%T, %v), want safe construction", constructed, err)
 	}
 }
 

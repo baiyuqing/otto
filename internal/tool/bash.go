@@ -127,6 +127,8 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	stderr := newCappedByteCollector(t.maxOutputBytes)
 	redactedStdout := newExactRedactingWriterWithMarker(stdout, t.redactValues, t.redactionMarker)
 	redactedStderr := newExactRedactingWriterWithMarker(stderr, t.redactValues, t.redactionMarker)
+	normalizedStdout := newUTF8NormalizingWriter(redactedStdout)
+	normalizedStderr := newUTF8NormalizingWriter(redactedStderr)
 
 	commandCtx, cancel := t.deadlineContext(ctx, t.timeout, errSandboxedBashTimeout)
 	if isNilSandboxedBashBoundary(commandCtx) || cancel == nil {
@@ -139,7 +141,7 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		Argv: cloneSandboxedBashStrings([]string{t.shell, "-lc", args.Command}),
 		Dir:  t.workspace.root,
 		Env:  cloneSandboxedBashStrings(t.environment),
-	}, sandbox.Streams{Stdout: redactedStdout, Stderr: redactedStderr})
+	}, sandbox.Streams{Stdout: normalizedStdout, Stderr: normalizedStderr})
 
 	cancel()
 	commandCause := context.Cause(commandCtx)
@@ -147,6 +149,12 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 
 	exactContextException := executionErr == context.Canceled || executionErr == context.DeadlineExceeded
 	if executionErr != nil && !exactContextException {
+		return sandboxedBashInfrastructureResult()
+	}
+	if err := normalizedStdout.Flush(); err != nil {
+		return sandboxedBashInfrastructureResult()
+	}
+	if err := normalizedStderr.Flush(); err != nil {
 		return sandboxedBashInfrastructureResult()
 	}
 	if err := redactedStdout.Flush(); err != nil {
@@ -242,55 +250,61 @@ func cloneSandboxedBashStrings(values []string) []string {
 }
 
 func collisionSafeSandboxRedactionMarker(values []string) (string, bool) {
-	var usedBytes [256]bool
+	usedRunes := make(map[rune]struct{})
 	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		for _, valueByte := range []byte(value) {
-			usedBytes[valueByte] = true
+		for _, candidate := range value {
+			usedRunes[candidate] = struct{}{}
 		}
 	}
-
-	isSafe := func(candidate rune) (string, bool) {
+	isSafeRune := func(candidate rune) bool {
 		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
-			return "", false
+			return false
 		}
-		var encoded [utf8.UTFMax]byte
-		length := utf8.EncodeRune(encoded[:], candidate)
-		for _, candidateByte := range encoded[:length] {
-			if usedBytes[candidateByte] {
-				return "", false
-			}
-		}
-		return string(encoded[:length]), true
+		_, used := usedRunes[candidate]
+		return !used
 	}
 
-	if marker, ok := isSafe(preferredSandboxRedactionMarker); ok {
-		return marker, true
+	preferred := string(preferredSandboxRedactionMarker)
+	if isSafeRune(preferredSandboxRedactionMarker) {
+		return preferred, true
 	}
 	for candidate := rune('!'); candidate <= '~'; candidate++ {
-		if candidate == preferredSandboxRedactionMarker {
-			continue
-		}
-		if marker, ok := isSafe(candidate); ok {
-			return marker, true
+		if candidate != preferredSandboxRedactionMarker && isSafeRune(candidate) {
+			return string(candidate), true
 		}
 	}
 	for candidate := rune(utf8.RuneSelf); candidate <= utf8.MaxRune; candidate++ {
-		if !unicode.IsGraphic(candidate) || unicode.IsSpace(candidate) {
-			continue
-		}
-		if marker, ok := isSafe(candidate); ok {
-			return marker, true
+		if unicode.IsGraphic(candidate) && !unicode.IsSpace(candidate) && isSafeRune(candidate) {
+			return string(candidate), true
 		}
 	}
 	for candidate := rune(utf8.RuneSelf); candidate <= utf8.MaxRune; candidate++ {
-		if marker, ok := isSafe(candidate); ok {
-			return marker, true
+		if isSafeRune(candidate) {
+			return string(candidate), true
 		}
 	}
-	return isSafe(' ')
+
+	longestPreferredRun := 0
+	for _, value := range values {
+		currentRun := 0
+		for _, candidate := range value {
+			if candidate == preferredSandboxRedactionMarker {
+				currentRun++
+				if currentRun > longestPreferredRun {
+					longestPreferredRun = currentRun
+				}
+				continue
+			}
+			currentRun = 0
+		}
+	}
+	marker := strings.Repeat(preferred, longestPreferredRun+1)
+	for _, value := range values {
+		if strings.Contains(value, marker) {
+			return "", false
+		}
+	}
+	return marker, true
 }
 
 func formatBashResult(stdout, stderr *cappedByteCollector, status string) string {

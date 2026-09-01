@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
@@ -495,6 +496,72 @@ func TestRunPreservesProviderCancellation(t *testing.T) {
 	}
 }
 
+func TestRunBashCapCannotSynthesizeSecretAcrossAgentProviderAndPiSession(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	workspace, err := tool.NewWorkspace(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var printableASCII strings.Builder
+	for value := byte(0x20); value <= 0x7e; value++ {
+		printableASCII.WriteByte(value)
+	}
+	secrets := []string{"TOKEN", "prefix�", printableASCII.String()}
+	executor := &fixedOutputExecutor{stdout: []byte("prefixTOKEN")}
+	bash, err := tool.NewBashTool(
+		workspace,
+		executor,
+		"/bin/sh",
+		[]string{},
+		time.Second,
+		len("prefix")+1,
+		secrets,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := tool.NewRegistry(bash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "utf8-session", Workspace: workspaceRoot, Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"ignored"}`)}}}, FinishReason: model.FinishToolCalls}},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactor(secrets))
+	var events []Event
+	if err := runner.Run(context.Background(), "check", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundaries := map[string]any{
+		"events":             events,
+		"provider follow-up": fakeProvider.requests[1],
+		"session messages":   store.Messages(),
+	}
+	for name, value := range boundaries {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if !utf8.Valid(encoded) || strings.Contains(string(encoded), "prefix�") {
+			t.Fatalf("%s synthesized a configured secret: %s", name, encoded)
+		}
+	}
+	if !utf8.Valid(persisted) || strings.Contains(string(persisted), "prefix�") || strings.Contains(string(persisted), `prefix\ufffd`) {
+		t.Fatalf("Pi JSONL synthesized a configured secret: %q", persisted)
+	}
+}
+
 func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testing.T) {
 	credential := fmt.Sprintf("credential-%d", time.Now().UnixNano())
 	workspaceRoot := t.TempDir()
@@ -854,6 +921,21 @@ func TestRunEmitsErrorForEmptyUserText(t *testing.T) {
 	if got := eventTypes(events); len(got) != 1 || got[0] != EventAgentError {
 		t.Fatalf("events = %v, want only error", got)
 	}
+}
+
+type fixedOutputExecutor struct {
+	stdout []byte
+	stderr []byte
+}
+
+func (e *fixedOutputExecutor) Execute(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+	if _, err := streams.Stdout.Write(e.stdout); err != nil {
+		return sandbox.ExitStatus{}, err
+	}
+	if _, err := streams.Stderr.Write(e.stderr); err != nil {
+		return sandbox.ExitStatus{}, err
+	}
+	return sandbox.ExitStatus{Code: 0}, nil
 }
 
 type providerScript struct {

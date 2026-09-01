@@ -260,6 +260,65 @@ func TestBashSandboxedUsesCollisionSafeSingleRuneMarker(t *testing.T) {
 	}
 }
 
+func TestBashSandboxedNormalizesBeforeFinalRedactionAndCapsCompleteUTF8(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	var printableASCII strings.Builder
+	for value := byte(0x20); value <= 0x7e; value++ {
+		printableASCII.WriteByte(value)
+	}
+	values := []string{"TOKEN", "prefix�", printableASCII.String()}
+
+	t.Run("multibyte marker cap cannot synthesize a secret", func(t *testing.T) {
+		fake := &fakeBashExecutor{stdoutChunks: [][]byte{[]byte("prefixTOKEN")}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, len("prefix")+1, values)
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		if result.IsError || !utf8.ValidString(result.Content) {
+			t.Fatalf("Execute() = %#v, want valid UTF-8", result)
+		}
+		for _, secret := range values {
+			if strings.Contains(result.Content, secret) {
+				t.Fatalf("Execute() synthesized or exposed %q: %q", secret, result.Content)
+			}
+		}
+		if body := sandboxedBashStdout(t, result.Content); body != "prefix" {
+			t.Fatalf("stdout = %q, want complete-rune prefix", body)
+		}
+		if !strings.Contains(result.Content, "[truncated: 2 bytes omitted]") {
+			t.Fatalf("Execute() did not truthfully count the omitted marker: %q", result.Content)
+		}
+	})
+
+	t.Run("an omitted atomic marker cannot join bytes into another secret", func(t *testing.T) {
+		joinValues := append(append([]string{}, values...), "prefixs")
+		fake := &fakeBashExecutor{stdoutChunks: [][]byte{[]byte("prefixTOKENsuffix")}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, len("prefix")+1, joinValues)
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		if result.IsError || !utf8.ValidString(result.Content) {
+			t.Fatalf("Execute() = %#v, want valid UTF-8", result)
+		}
+		for _, secret := range joinValues {
+			if strings.Contains(result.Content, secret) {
+				t.Fatalf("post-cap output synthesized configured value %q: %q", secret, result.Content)
+			}
+		}
+		if !strings.Contains(result.Content, "[truncated: 8 bytes omitted]") {
+			t.Fatalf("post-cap omission count was not truthful: %q", result.Content)
+		}
+	})
+
+	t.Run("arbitrary invalid child bytes are normalized then redacted", func(t *testing.T) {
+		fake := &fakeBashExecutor{stdoutChunks: [][]byte{{'p', 'r', 'e', 'f', 'i', 'x', 0xff}}}
+		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, values)
+		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+		if result.IsError || !utf8.ValidString(result.Content) {
+			t.Fatalf("Execute() = %#v, want valid UTF-8", result)
+		}
+		if strings.Contains(result.Content, "prefix�") {
+			t.Fatalf("normalization synthesized a configured secret: %q", result.Content)
+		}
+	})
+}
+
 func TestBashSandboxedCollisionSafeMarkerSurvivesEveryByteCap(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	var printableASCII strings.Builder
@@ -297,21 +356,38 @@ func TestBashSandboxedCollisionSafeMarkerSurvivesEveryByteCap(t *testing.T) {
 
 	for cap := 1; cap <= len(marker)+1; cap++ {
 		result := resultForCap(cap)
-		if result.IsError {
-			t.Fatalf("cap %d: Execute() = %#v", cap, result)
+		if result.IsError || !utf8.ValidString(result.Content) {
+			t.Fatalf("cap %d: Execute() = %#v, want valid UTF-8", cap, result)
 		}
 		for _, value := range values {
 			if strings.Contains(result.Content, value) {
 				t.Fatalf("cap %d: Execute() exposed configured value %q: %q", cap, value, result.Content)
 			}
 		}
-		wantLength := cap
-		if wantLength > len(marker) {
-			wantLength = len(marker)
+		want := marker
+		if cap < len(marker) {
+			want = ""
 		}
-		if body := sandboxedBashStdout(t, result.Content); body != marker[:wantLength] {
-			t.Fatalf("cap %d: stdout = %q, want marker prefix %q", cap, body, marker[:wantLength])
+		if body := sandboxedBashStdout(t, result.Content); body != want {
+			t.Fatalf("cap %d: stdout = %q, want complete marker %q", cap, body, want)
 		}
+		if cap < len(marker) && !strings.Contains(result.Content, fmt.Sprintf("[truncated: %d bytes omitted]", len(marker))) {
+			t.Fatalf("cap %d: truncation was not truthful: %q", cap, result.Content)
+		}
+	}
+}
+
+func TestBashSandboxedConstructsWithEveryUTF8ByteClassInSensitiveValues(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	secret := markerByteClassAdversary(t)
+	fake := &fakeBashExecutor{stdoutChunks: [][]byte{[]byte(secret)}}
+	bash, err := NewBashTool(workspace, fake, "/bin/sh", []string{}, 3*time.Second, 1024, []string{secret})
+	if err != nil {
+		t.Fatalf("NewBashTool() rejected a valid UTF-8 redaction set: %v", err)
+	}
+	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+	if result.IsError || !utf8.ValidString(result.Content) || strings.Contains(result.Content, secret) {
+		t.Fatalf("Execute() did not safely redact the adversarial value: %#v", result)
 	}
 }
 
@@ -736,6 +812,37 @@ func TestBashSandboxedDirectIntegration(t *testing.T) {
 	}
 }
 
+func markerByteClassAdversary(t *testing.T) string {
+	t.Helper()
+	var value []byte
+	for character := byte(0x20); character <= 0x7e; character++ {
+		value = append(value, character)
+	}
+	for continuation := byte(0x80); continuation <= 0xbf; continuation++ {
+		value = append(value, 0xc2, continuation)
+	}
+	for lead := byte(0xc3); lead <= 0xdf; lead++ {
+		value = append(value, lead, 0x80)
+	}
+	value = append(value, 0xe0, 0xa0, 0x80)
+	for lead := byte(0xe1); lead <= 0xec; lead++ {
+		value = append(value, lead, 0x80, 0x80)
+	}
+	value = append(value, 0xed, 0x80, 0x80)
+	for lead := byte(0xee); lead <= 0xef; lead++ {
+		value = append(value, lead, 0x80, 0x80)
+	}
+	value = append(value, 0xf0, 0x90, 0x80, 0x80)
+	for lead := byte(0xf1); lead <= 0xf3; lead++ {
+		value = append(value, lead, 0x80, 0x80, 0x80)
+	}
+	value = append(value, 0xf4, 0x80, 0x80, 0x80)
+	if !utf8.Valid(value) {
+		t.Fatal("marker adversary is not valid UTF-8")
+	}
+	return string(value)
+}
+
 func mustSandboxedBashTool(t *testing.T, workspace *Workspace, executor sandbox.CommandExecutor, environment []string, maxOutputBytes int, redactions []string) *bashTool {
 	t.Helper()
 	constructed, err := NewBashTool(workspace, executor, "/bin/sh", environment, 3*time.Second, maxOutputBytes, redactions)
@@ -868,6 +975,9 @@ func sandboxedBashStdout(t *testing.T, content string) string {
 	}
 	if captured, _, truncated := strings.Cut(stdout, "\n[truncated:"); truncated {
 		return captured
+	}
+	if strings.HasPrefix(stdout, "[truncated:") {
+		return ""
 	}
 	return stdout
 }

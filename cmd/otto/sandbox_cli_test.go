@@ -124,6 +124,7 @@ func TestRunEnumeratesEnvironmentExactlyOnceAndClonesSnapshot(t *testing.T) {
 func TestRunUsesSingleOSUserHomeFallbackWithoutReenumerating(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
+	liveHomeBefore, liveHomePresentBefore := os.LookupEnv("HOME")
 	configPath := filepath.Join(home, ".config", "otto", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -143,6 +144,10 @@ api_key_env = "TEST_KEY"
 		fallbackCalls.Add(1)
 		return home, nil
 	}
+	fixture := newSandboxRuntimeFixture(t)
+	deps.openSandbox = func(ctx context.Context, options sandboxOpenOptions) sandboxRuntime {
+		return openSandboxRuntimeWithDependencies(ctx, options, fixture.dependencies())
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := runWithDependencies(context.Background(), []string{"--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, func() []string {
@@ -154,6 +159,74 @@ api_key_env = "TEST_KEY"
 	}
 	if enumerations.Load() != 1 || fallbackCalls.Load() != 1 {
 		t.Fatalf("enumerations/fallback calls = %d/%d, want 1/1", enumerations.Load(), fallbackCalls.Load())
+	}
+	if got, want := fixture.openOptions.CacheBase, filepath.Join(home, "Library", "Caches"); got != want {
+		t.Fatalf("Seatbelt CacheBase = %q, want fallback-derived %q", got, want)
+	}
+	liveHomeAfter, liveHomePresentAfter := os.LookupEnv("HOME")
+	if liveHomeAfter != liveHomeBefore || liveHomePresentAfter != liveHomePresentBefore {
+		t.Fatalf("run mutated live HOME: before=(%q,%t) after=(%q,%t)", liveHomeBefore, liveHomePresentBefore, liveHomeAfter, liveHomePresentAfter)
+	}
+}
+
+func TestRunRedactsProcessSecretsFromErrorsBeforeSandboxConstruction(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "missing-aws-startup-secret")
+	entries := []string{"HOME=" + t.TempDir(), "AWS_SECRET_ACCESS_KEY=" + secretPath}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--cwd", secretPath}, strings.NewReader(""), &stdout, &stderr, func() []string {
+		return entries
+	}, deterministicRunDependencies(t))
+	if code != 1 {
+		t.Fatalf("code = %d stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), secretPath) || !strings.Contains(stderr.String(), "otto: resolve cwd:") {
+		t.Fatalf("startup boundary leaked process secret: %q", stderr.String())
+	}
+}
+
+func TestEnvironmentLookupBoundsMapAndSkipsMalformedEntries(t *testing.T) {
+	if maxLookupEnvironmentEntries <= (1<<20)/8 || maxLookupEnvironmentBytes <= 1<<20 {
+		t.Fatalf("production lookup ceilings must remain above Darwin process-environment limits")
+	}
+	entries := []string{
+		"BROKEN",
+		string([]byte{'I', 'N', 'V', 'A', 'L', 'I', 'D', '=', 0xff}),
+		"TOO_BIG=" + strings.Repeat("x", maxLookupEnvironmentEntryBytes),
+		"HOME=/safe/home",
+		"TEST_KEY=provider-value",
+	}
+	lookup, err := newEnvironmentLookupWithLimits(entries, 2, 64)
+	if err != nil || lookup.value("HOME") != "/safe/home" || lookup.value("TEST_KEY") != "provider-value" {
+		t.Fatalf("bounded lookup lost unrelated valid values: lookup=%#v error=%v", lookup, err)
+	}
+	if lookup.value("INVALID") != "" {
+		t.Fatal("bounded lookup retained a malformed entry")
+	}
+
+	if lookup, err := newEnvironmentLookupWithLimits(append(entries, "THIRD=value"), 2, 64); lookup != nil || !errors.Is(err, errEnvironmentSnapshotTooLarge) {
+		t.Fatalf("entry-bound lookup = (%#v, %v), want fixed failure", lookup, err)
+	}
+	if lookup, err := newEnvironmentLookupWithLimits([]string{"ONE=1234", "TWO=5678"}, 4, 10); lookup != nil || !errors.Is(err, errEnvironmentSnapshotTooLarge) {
+		t.Fatalf("byte-bound lookup = (%#v, %v), want fixed failure", lookup, err)
+	}
+}
+
+func TestRunRejectsOversizedEnvironmentLookupWithoutLosingBoundedInputs(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	entries := []string{"BROKEN", "HOME=" + home, "SHELL=/bin/sh", "TEST_KEY=provider-value"}
+	for index := range 9 {
+		name := fmt.Sprintf("OVERSIZED_%02d", index)
+		entries = append(entries, name+"="+strings.Repeat("x", (1<<20)-len(name)-2))
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, func() []string {
+		return entries
+	}, deterministicRunDependencies(t))
+	if code != 1 || stderr.String() != "otto: process environment snapshot is too large\n" {
+		t.Fatalf("code = %d stderr = %q, want bounded startup failure", code, stderr.String())
 	}
 }
 
@@ -285,6 +358,128 @@ func TestRunSandboxWarningsAreFixedAcrossFrontends(t *testing.T) {
 	}
 }
 
+func TestRunUnavailableSandboxRedactsHostSecretsAcrossEveryBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		configureOpen func(*sandboxRuntimeFixture)
+		shell         func(*testing.T) string
+		malformed     bool
+	}{
+		{
+			name: "invalid shell",
+			shell: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing-shell")
+			},
+		},
+		{
+			name: "Seatbelt opener failure",
+			configureOpen: func(fixture *sandboxRuntimeFixture) {
+				fixture.openErr = &sandbox.UnavailableError{Reason: sandbox.ReasonSeatbeltMissing}
+			},
+		},
+		{name: "malformed entry after valid secrets", malformed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const (
+				awsSecret       = "host-aws-secret-value"
+				rawUserinfo     = "raw%20user:raw%2Fpass"
+				decodedUserinfo = "raw user:raw/pass"
+			)
+			secretValues := []string{
+				awsSecret,
+				rawUserinfo,
+				"raw%20user",
+				"raw%2Fpass",
+				decodedUserinfo,
+				"raw user",
+				"raw/pass",
+			}
+			home := t.TempDir()
+			workspace := t.TempDir()
+			if err := os.WriteFile(filepath.Join(workspace, "secrets.txt"), []byte(strings.Join(secretValues, "\n")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var requestBodies []string
+			var requestMu sync.Mutex
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read request: %v", err)
+				}
+				requestMu.Lock()
+				requestBodies = append(requestBodies, string(body))
+				requestMu.Unlock()
+				if requests.Add(1) == 1 {
+					payload := fmt.Sprintf(`{"choices":[{"delta":{"content":%q,"tool_calls":[{"index":0,"id":"call-read","type":"function","function":{"name":"read","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
+						"provider event "+strings.Join(secretValues, " | "), `{"path":"secrets.txt"}`)
+					writeSSE(w, payload)
+					return
+				}
+				writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"content":%q},"finish_reason":"stop"}]}`, "final "+awsSecret))
+			}))
+			defer server.Close()
+
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+			fixture := newSandboxRuntimeFixture(t)
+			if test.configureOpen != nil {
+				test.configureOpen(fixture)
+			}
+			deps := deterministicRunDependencies(t)
+			deps.openSandbox = func(ctx context.Context, options sandboxOpenOptions) sandboxRuntime {
+				return openSandboxRuntimeWithDependencies(ctx, options, fixture.dependencies())
+			}
+			shell := "/bin/sh"
+			if test.shell != nil {
+				shell = test.shell(t)
+			}
+			entries := []string{
+				"AWS_SECRET_ACCESS_KEY=" + awsSecret,
+				"HTTPS_PROXY=http://" + rawUserinfo + "@[::1]:8443/path",
+			}
+			if test.malformed {
+				entries = append(entries, "BROKEN")
+			}
+			entries = append(entries, "HOME="+home, "SHELL="+shell, "TEST_KEY=provider-value")
+
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{
+				"--config", configPath, "--cwd", workspace, "--approve", "read the file",
+			}, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps)
+			if code != 0 || requests.Load() != 2 {
+				t.Fatalf("code/provider requests = %d/%d, stderr = %q", code, requests.Load(), stderr.String())
+			}
+			persisted, err := os.ReadFile(onlySessionPath(t, home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestMu.Lock()
+			bodies := append([]string(nil), requestBodies...)
+			requestMu.Unlock()
+			if len(bodies) != 2 {
+				t.Fatalf("provider request bodies = %d, want 2", len(bodies))
+			}
+			boundaries := map[string]string{
+				"provider events and local output": stdout.String(),
+				"stderr":                           stderr.String(),
+				"provider follow-up":               bodies[1],
+				"Pi JSONL":                         string(persisted),
+			}
+			for boundary, content := range boundaries {
+				for _, secret := range secretValues {
+					if strings.Contains(content, secret) {
+						t.Fatalf("%s leaked a host secret: %q", boundary, content)
+					}
+				}
+			}
+			if fixture.executorCalls.Load() != 0 || fixture.directCalls.Load() != 0 {
+				t.Fatalf("unavailable path constructed execution: executor/direct = %d/%d", fixture.executorCalls.Load(), fixture.directCalls.Load())
+			}
+		})
+	}
+}
+
 func TestRunInvalidShellContinuesWithExactlySixFileTools(t *testing.T) {
 	var names []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +565,101 @@ func TestRunUnavailableSandboxRejectsUnsolicitedBashWithoutExecution(t *testing.
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "must-not-exist")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unsolicited bash started host child: %v", err)
+	}
+}
+
+func TestRunStartupInterruptionOwnsPartialSandboxCleanup(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		preCanceled bool
+	}{
+		{name: "injected SIGINT"},
+		{name: "already canceled context", preCanceled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+			interrupts := make(chan os.Signal, 1)
+			subscribed := make(chan struct{})
+			openStarted := make(chan struct{})
+			abortOpen := make(chan struct{})
+			var stopCalls, sandboxCloses, sessionCalls atomic.Int32
+
+			deps := deterministicRunDependencies(t)
+			deps.subscribeInterrupts = func() interruptSubscription {
+				close(subscribed)
+				return interruptSubscription{signals: interrupts, stop: func() { stopCalls.Add(1) }}
+			}
+			deps.openSandbox = func(ctx context.Context, _ sandboxOpenOptions) sandboxRuntime {
+				close(openStarted)
+				select {
+				case <-ctx.Done():
+				case <-abortOpen:
+				}
+				return sandboxRuntime{
+					Executor:    &recordingSandboxExecutor{},
+					Environment: []string{},
+					Info:        app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true},
+					close: newSandboxRuntimeCloser(func() error {
+						sandboxCloses.Add(1)
+						return nil
+					}),
+				}
+			}
+			deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+				sessionCalls.Add(1)
+				return session.NewMemory(session.Header{
+					Version: session.CurrentVersion, ID: "must-not-construct", Workspace: workspace,
+					Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
+				}), nil
+			}
+			deps.newRunner = func(session.Session) app.Runner {
+				return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil })
+			}
+
+			parent, cancelParent := context.WithCancel(context.Background())
+			if test.preCanceled {
+				cancelParent()
+			}
+			defer cancelParent()
+			var stdout, stderr bytes.Buffer
+			codeDone := make(chan int, 1)
+			go func() {
+				codeDone <- runWithDependencies(parent, []string{
+					"--config", configPath, "--cwd", workspace, "--approve", "must not run",
+				}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
+					"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "provider-value",
+				}), deps)
+			}()
+
+			awaitSandboxRuntimeEvent(t, openStarted, "Sandbox open barrier")
+			if !test.preCanceled {
+				select {
+				case <-subscribed:
+				case <-time.After(2 * time.Second):
+					close(abortOpen)
+					<-codeDone
+					t.Fatal("interrupt subscription was not established before Sandbox open")
+				}
+				interrupts <- os.Interrupt
+			}
+			select {
+			case code := <-codeDone:
+				if code != 130 {
+					t.Fatalf("code = %d, stderr = %q, want 130", code, stderr.String())
+				}
+			case <-time.After(2 * time.Second):
+				close(abortOpen)
+				t.Fatal("startup cancellation did not release Sandbox open")
+			}
+			if sandboxCloses.Load() != 1 || sessionCalls.Load() != 0 || stopCalls.Load() != 1 {
+				t.Fatalf("closes/session/stop = %d/%d/%d, want 1/0/1", sandboxCloses.Load(), sessionCalls.Load(), stopCalls.Load())
+			}
+			if stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("startup cancellation rendered misleading output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 

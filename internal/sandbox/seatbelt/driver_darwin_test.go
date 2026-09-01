@@ -108,6 +108,43 @@ func TestOpenUsesFixedSandboxExecAndPrivateProfile(t *testing.T) {
 	}
 }
 
+func TestOpenExplicitCacheBaseBypassesLiveEnvironmentResolver(t *testing.T) {
+	workspace := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "workspace"))
+	home := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "fallback-home"))
+	cacheBase := canonicalDriverTestDirectory(t, filepath.Join(home, "Library", "Caches"))
+	dependencies := defaultDriverDependencies()
+	var resolverCalls int
+	dependencies.userCacheDir = func() (string, error) {
+		resolverCalls++
+		return "", errors.New("live HOME must not be resolved")
+	}
+	productionCreateState := dependencies.createState
+	var createdUnder string
+	dependencies.createState = func(workspace, cacheBase string) (*state, error) {
+		createdUnder = cacheBase
+		return productionCreateState(workspace, cacheBase)
+	}
+
+	driver, err := openWithDependencies(context.Background(), Options{
+		Workspace: workspace,
+		Shell:     "/bin/sh",
+		Home:      home,
+		CacheBase: cacheBase,
+		HostEntries: []string{
+			"PATH=/usr/bin:/bin",
+			"LC_ALL=C",
+		},
+		Network: sandbox.NetworkDeny,
+	}, dependencies)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = driver.Close() })
+	if resolverCalls != 0 || createdUnder != cacheBase || filepath.Dir(driver.PrivateDirectories().Root) != cacheBase {
+		t.Fatalf("resolver calls/cache/root = %d/%q/%q, want 0/%q/child", resolverCalls, createdUnder, driver.PrivateDirectories().Root, cacheBase)
+	}
+}
+
 func TestOpenRejectsMissingOrNonExecutableSandboxExec(t *testing.T) {
 	workspace := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "workspace"))
 	home := canonicalDriverTestDirectory(t, filepath.Join(t.TempDir(), "home"))

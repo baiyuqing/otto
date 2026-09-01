@@ -34,6 +34,7 @@ type Options struct {
 	Workspace   string
 	Shell       string
 	Home        string
+	CacheBase   string
 	HostEntries []string
 	ReadPaths   []string
 	Network     sandbox.NetworkMode
@@ -169,7 +170,7 @@ func openWithDependencies(ctx context.Context, options Options, dependencies dri
 	if err := driverContextError(ctx); err != nil {
 		return nil, err
 	}
-	if !validDriverDependencies(dependencies) {
+	if !validDriverDependencies(dependencies, options.CacheBase == "") {
 		return nil, unavailable(sandbox.ReasonRuntimeFailure)
 	}
 
@@ -209,12 +210,15 @@ func openWithDependencies(ctx context.Context, options Options, dependencies dri
 		return nil, err
 	}
 
-	cacheBase, operationErr := dependencies.userCacheDir()
-	if err := driverContextError(ctx); err != nil {
-		return nil, err
-	}
-	if operationErr != nil {
-		return nil, unavailable(sandbox.ReasonSelfTestFailed)
+	cacheBase := strings.Clone(options.CacheBase)
+	if cacheBase == "" {
+		cacheBase, operationErr = dependencies.userCacheDir()
+		if err := driverContextError(ctx); err != nil {
+			return nil, err
+		}
+		if operationErr != nil {
+			return nil, unavailable(sandbox.ReasonSelfTestFailed)
+		}
 	}
 
 	privateState, operationErr := dependencies.createState(workspace, cacheBase)
@@ -272,8 +276,8 @@ func openWithDependencies(ctx context.Context, options Options, dependencies dri
 	return driver, nil
 }
 
-func validDriverDependencies(dependencies driverDependencies) bool {
-	return dependencies.inspectSandboxExec != nil && dependencies.userCacheDir != nil &&
+func validDriverDependencies(dependencies driverDependencies, requireCacheResolver bool) bool {
+	return dependencies.inspectSandboxExec != nil && (!requireCacheResolver || dependencies.userCacheDir != nil) &&
 		dependencies.createState != nil && dependencies.generateProfile != nil && dependencies.writeProfile != nil &&
 		dependencies.runProbe != nil && dependencies.runExecution != nil && dependencies.closeManager != nil &&
 		dependencies.closeState != nil && dependencies.selfTestRandomBytes != nil && dependencies.selfTestCloseFD != nil

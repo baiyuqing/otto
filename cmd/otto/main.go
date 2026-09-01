@@ -107,6 +107,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if len(args) > 0 && args[0] == "memory" {
 		return runMemoryCommand(ctx, args[1:], stdout, stderr, getenv)
 	}
+	if len(args) > 0 && (args[0] == "login" || args[0] == "logout") {
+		return runAuthCommand(ctx, args, stdout, stderr, getenv)
+	}
 	if deps.detectTerminal == nil {
 		deps.detectTerminal = detectTerminalIO
 	}
@@ -514,6 +517,9 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 
 func printUsage(output io.Writer) {
 	_, _ = io.WriteString(output, `Usage: otto [options]
+       otto login [--status]   sign in with a ChatGPT subscription
+       otto logout             remove stored ChatGPT credentials
+       otto memory status|forget <id>
 
 WARNING: bash is unsandboxed and can access anything accessible to your macOS user.
 File tools stay within the selected workspace; shell commands do not.

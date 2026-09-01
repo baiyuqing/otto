@@ -10,9 +10,12 @@ import (
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/memory"
+	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
+	"github.com/baiyuqing/otto/internal/provider/openairesponses"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -156,7 +159,13 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
-	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
+	client, err := buildProvider(ctx, runtime)
+	if err != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
+		return nil, b.redactError(err, &runtime)
+	}
 	redactor := agent.NewRedactor(b.secretValues(&runtime))
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
@@ -171,6 +180,24 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		MemoryRecallLimit:       b.memoryRecallLimit,
 		MemoryRecallTokenBudget: b.memoryRecallTokenBudget,
 	}, redactor), nil
+}
+
+// buildProvider selects the completion provider for the resolved runtime.
+// openai-compatible uses base_url + API key; chatgpt uses OAuth credentials
+// loaded from the credential file with an auto-refreshing token source.
+func buildProvider(ctx context.Context, runtime config.Runtime) (provider.Provider, error) {
+	if runtime.Provider != config.ProviderChatGPT {
+		return openaicompat.New(runtime.BaseURL, runtime.APIKey, nil), nil
+	}
+	path, err := auth.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	creds, err := auth.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, nil), nil
 }
 
 func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {

@@ -1,7 +1,9 @@
 package safetext
 
 import (
+	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -43,5 +45,35 @@ func TestCanonicalizeUTF8MatchesReplacementRuneSemantics(t *testing.T) {
 	got := CanonicalizeUTF8(invalid)
 	if !utf8.ValidString(got) || got != "a���b" {
 		t.Fatalf("CanonicalizeUTF8(invalid) = %q", got)
+	}
+}
+
+func TestDynamicRedactionMarkerAvoidsNestedJSONEscapeSynthesis(t *testing.T) {
+	forms := SecretForms(`\\u003c`)
+	marker, ok := DynamicRedactionMarker(forms)
+	if !ok || marker == "" {
+		t.Fatal("DynamicRedactionMarker() did not find a safe shared marker")
+	}
+	encoded, err := json.Marshal(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, form := range forms {
+		if strings.Contains(marker, form) || strings.Contains(string(encoded[1:len(encoded)-1]), form) {
+			t.Fatalf("marker %q or encoding %s synthesized retained form %q", marker, encoded, form)
+		}
+	}
+}
+
+func TestDynamicRedactionMarkerRejectsOversizedCapabilitySets(t *testing.T) {
+	if marker, ok := DynamicRedactionMarker([]string{strings.Repeat("a", 257)}); ok || marker != "" {
+		t.Fatalf("oversized form marker = %q ok=%t, want suppression", marker, ok)
+	}
+	forms := make([]string, 65)
+	for i := range forms {
+		forms[i] = strings.Repeat("a", i) + "z"
+	}
+	if marker, ok := DynamicRedactionMarker(forms); ok || marker != "" {
+		t.Fatalf("65-form marker = %q ok=%t, want suppression", marker, ok)
 	}
 }

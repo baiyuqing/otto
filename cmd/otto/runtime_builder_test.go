@@ -252,6 +252,7 @@ func TestRuntimeBuilderRedactsJSONStringEscapeFormsFromRawProviderBody(t *testin
 		decoded string
 	}{
 		{raw: `less\u003cthan`, decoded: "less<than"},
+		{raw: `\\u003c`, decoded: `\u003c`},
 		{raw: `greater\u003Ethan`, decoded: "greater>than"},
 		{raw: `amp\u0026ersand`, decoded: "amp&ersand"},
 		{raw: `quote\"value`, decoded: `quote"value`},
@@ -370,7 +371,7 @@ func TestRuntimeBuilderConservativelyExtractsMalformedEndpointAuthorities(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var values []string
-			collectURLSecretValues(test.endpoint, func(value string) { values = append(values, value) })
+			collectURLSecretValues(test.endpoint, func(value string) bool { values = append(values, value); return true })
 			if !containsString(values, test.endpoint) {
 				t.Fatalf("complete raw endpoint was not retained: %#v", values)
 			}
@@ -404,10 +405,37 @@ func TestRuntimeBuilderMalformedConfiguredEndpointMakesBoundaryIncomplete(t *tes
 	}
 }
 
+func TestRuntimeBuilderBoundsMalformedRepeatedEndpointPrefixes(t *testing.T) {
+	var endpoint strings.Builder
+	endpoint.WriteString("http:///")
+	for index := 0; index < 600; index++ {
+		fmt.Fprintf(&endpoint, "u%03d:p%03d@", index, index)
+	}
+	endpoint.WriteString("example.test")
+	file := configWithProfiles("active")
+	file.Profiles["malformed-inactive"] = config.Profile{
+		Provider:  "openai-compatible",
+		BaseURL:   endpoint.String(),
+		Model:     "inactive",
+		APIKeyEnv: "MALFORMED_KEY",
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	values, complete := builder.boundarySecretValues(nil)
+	if complete {
+		t.Fatal("boundarySecretValues() complete = true, want bounded incomplete prefix")
+	}
+	if len(values) > 512 {
+		t.Fatalf("boundarySecretValues() count = %d, want <= 512", len(values))
+	}
+	if containsString(values, "u000:p000@u001:p001") {
+		t.Fatalf("boundarySecretValues() retained an intermediate cumulative prefix: %#v", values[:min(len(values), 8)])
+	}
+}
+
 func TestRuntimeBuilderDoesNotTreatValidEndpointPathAtAsUserinfo(t *testing.T) {
 	endpoint := "https://[2001:db8::1]:8443/path/user:pass@example.test"
 	var values []string
-	collectURLSecretValues(endpoint, func(value string) { values = append(values, value) })
+	collectURLSecretValues(endpoint, func(value string) bool { values = append(values, value); return true })
 	for _, unexpected := range []string{"user:pass", "user", "pass"} {
 		if containsString(values, unexpected) {
 			t.Fatalf("valid endpoint path @ was misclassified as userinfo %q: %#v", unexpected, values)
@@ -418,7 +446,7 @@ func TestRuntimeBuilderDoesNotTreatValidEndpointPathAtAsUserinfo(t *testing.T) {
 func TestRuntimeBuilderMalformedEndpointPathAtDoesNotInventUserinfo(t *testing.T) {
 	endpoint := "https://[2001:db8::1]:8443/path/user:pass@example.test?broken=%zz"
 	var values []string
-	collectURLSecretValues(endpoint, func(value string) { values = append(values, value) })
+	collectURLSecretValues(endpoint, func(value string) bool { values = append(values, value); return true })
 	if !containsString(values, endpoint) {
 		t.Fatalf("complete malformed endpoint was not retained: %#v", values)
 	}
@@ -1518,8 +1546,7 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 		t.Fatalf("messages = %#v, want user+assistant+tool+assistant", messages)
 	}
 	toolResult := messages[2].Blocks[0].Text
-	redactedLiteral := strings.Contains(toolResult, "literal=[REDACTED]") || strings.Contains(toolResult, "literal=█") || strings.Contains(toolResult, "literal=*")
-	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !redactedLiteral || !strings.Contains(toolResult, "[truncated:") || !strings.Contains(toolResult, "status: timed out after 1ms") {
+	if !strings.Contains(toolResult, "runtime=missing") || !strings.Contains(toolResult, "fallback=missing") || !strings.Contains(toolResult, "unrelated=keep-me") || !strings.Contains(toolResult, "literal=") || strings.Contains(toolResult, "literal="+apiKey) || !strings.Contains(toolResult, "[truncated:") || !strings.Contains(toolResult, "status: timed out after 1ms") {
 		t.Fatalf("tool result = %q", toolResult)
 	}
 	for _, forbidden := range []string{apiKey, fallbackAPIKey} {
@@ -1703,6 +1730,157 @@ func TestRuntimeBuilderReusesOneSandboxExecutorForInitialNewAndResume(t *testing
 		if !reflect.DeepEqual(request.Env, []string{"PATH=/usr/bin:/bin", "UNRELATED=preserved"}) {
 			t.Fatalf("request %d environment = %#v", index, request.Env)
 		}
+	}
+}
+
+func TestRuntimeBuilderCapsCombinedRuntimeSecretsAndSuppressesDynamicRuntime(t *testing.T) {
+	file := config.File{DefaultProfile: "p000", Profiles: map[string]config.Profile{}}
+	for index := 0; index < 513; index++ {
+		name := fmt.Sprintf("p%03d", index)
+		file.Profiles[name] = config.Profile{
+			Provider:  "openai-compatible",
+			BaseURL:   "https://shared.example/v1",
+			Model:     "shared-model",
+			APIKeyEnv: fmt.Sprintf("KEY_%03d", index),
+		}
+	}
+	workspacePath := mustCanonicalDirectory(t, t.TempDir())
+	workspace, err := tool.NewWorkspace(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := newRuntimeBuilder(file, environmentForProfiles(file), workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{}, nil, runDependencies{})
+	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true}
+	values, complete := builder.boundarySecretValues(nil)
+	if complete {
+		t.Fatal("boundarySecretValues() complete = true, want capped incomplete prefix")
+	}
+	if len(values) != 512 {
+		t.Fatalf("boundarySecretValues() count = %d, want 512 retained values", len(values))
+	}
+
+	var providerCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		writeSSE(w, `{"choices":[{"delta":{"content":"must not run"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+	builder.commandExecutor = &recordingSandboxExecutor{}
+	builder.sandboxEnvironment = []string{}
+	runtime := config.Runtime{
+		Profile: "p000", Provider: "openai-compatible", BaseURL: server.URL, Model: "shared-model",
+		APIKey: "p000-secret", APIKeyEnv: "KEY_000", ShellTimeout: time.Second, MaxOutputBytes: 4096,
+	}
+	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "capped-secrets", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()})
+	runner, err := builder.buildRunner(memory, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []agent.Event
+	if err := runner.Run(context.Background(), "inspect", func(event agent.Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+	if providerCalls.Load() != 0 || len(memory.Messages()) != 0 || !reflect.DeepEqual(runtimeBuilderEventTypes(events), []agent.EventType{agent.EventAgentStarted, agent.EventAgentFinished}) {
+		t.Fatalf("suppressed runtime crossed dynamic boundary: provider=%d messages=%#v events=%#v", providerCalls.Load(), memory.Messages(), runtimeBuilderEventTypes(events))
+	}
+}
+
+func TestRuntimeBuilderMandatoryFieldCollisionsSuppressBeforeProviderAndSessionMutation(t *testing.T) {
+	contextWindow := 131_072
+	file := configWithProfiles("active", "inactive")
+	active := file.Profiles["active"]
+	active.ContextWindow = &contextWindow
+	active.Model = "active-model"
+	file.Profiles["active"] = active
+
+	for _, test := range []struct {
+		name   string
+		secret func(runtime config.Runtime, builder runtimeBuilder) string
+	}{
+		{name: "provider", secret: func(runtime config.Runtime, _ runtimeBuilder) string { return runtime.Provider }},
+		{name: "profile", secret: func(runtime config.Runtime, _ runtimeBuilder) string { return runtime.Profile }},
+		{name: "model", secret: func(runtime config.Runtime, _ runtimeBuilder) string { return runtime.Model }},
+		{name: "thinking", secret: func(runtime config.Runtime, _ runtimeBuilder) string { return runtime.Thinking }},
+		{name: "workspace", secret: func(_ config.Runtime, builder runtimeBuilder) string { return builder.workspacePath }},
+		{name: "context-window", secret: func(runtime config.Runtime, _ runtimeBuilder) string {
+			return fmt.Sprint(runtime.Compaction.ContextWindow)
+		}},
+		{name: "system-prompt", secret: func(runtime config.Runtime, builder runtimeBuilder) string {
+			bashDefinition, err := tool.NewBashTool(builder.workspace, &recordingSandboxExecutor{}, "/bin/sh", []string{}, time.Second, runtime.MaxOutputBytes, nil)
+			if err != nil {
+				t.Fatalf("NewBashTool() error = %v", err)
+			}
+			definitions := []model.ToolDefinition{
+				tool.NewReadTool(builder.workspace, runtime.MaxOutputBytes).Definition(),
+				tool.NewGrepTool(builder.workspace, runtime.MaxOutputBytes).Definition(),
+				tool.NewFindTool(builder.workspace, runtime.MaxOutputBytes).Definition(),
+				tool.NewLSTool(builder.workspace, runtime.MaxOutputBytes).Definition(),
+				tool.NewWriteTool(builder.workspace).Definition(),
+				tool.NewEditTool(builder.workspace).Definition(),
+				bashDefinition.Definition(),
+			}
+			return systemPromptFor(definitions, builder.sandboxInfo)
+		}},
+		{name: "tool-name", secret: func(config.Runtime, runtimeBuilder) string { return "read" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var providerCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				providerCalls.Add(1)
+				writeSSE(w, `{"choices":[{"delta":{"content":"must not run"},"finish_reason":"stop"}]}`)
+			}))
+			defer server.Close()
+
+			builder := newRuntimeBuilderForTest(t, file)
+			builder.commandExecutor = &recordingSandboxExecutor{}
+			builder.sandboxEnvironment = []string{}
+			builder.runtimeOverrides.Thinking = "high"
+			builder.config.Profiles["active"] = config.Profile{Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model", APIKeyEnv: "ACTIVE_KEY", ContextWindow: &contextWindow}
+			runtime, err := config.Resolve(builder.config, builder.environment, config.SessionDefaults{}, builder.runtimeOverrides)
+			if err != nil {
+				t.Fatal(err)
+			}
+			builder.environment["INACTIVE_KEY"] = test.secret(runtime, builder)
+			if got := builder.runtimeInfo(runtime); got.Provider != "" || got.Profile != "" || got.Model != "" || got.ContextWindow != 0 {
+				t.Fatalf("runtime info exposed colliding metadata: %#v", got)
+			}
+			var createCalls atomic.Int32
+			builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+				createCalls.Add(1)
+				return session.NewMemory(session.Header{}), nil
+			}
+			activated := new(atomic.Int32)
+			builder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+				return &fakePreparedSession{info: session.SessionInfo{Path: "/sessions/collision.jsonl", CWD: builder.workspacePath, Profile: runtime.Profile, Provider: runtime.Provider, Model: runtime.Model}, activate: func(context.Context) (session.Session, []session.Warning, error) {
+					activated.Add(1)
+					return session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "collision", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()}), nil, nil
+				}}, nil
+			}
+			if _, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model}); err == nil {
+				t.Fatal("buildNewReplacement() succeeded")
+			}
+			if createCalls.Load() != 0 {
+				t.Fatalf("buildNewReplacement() created %d sessions", createCalls.Load())
+			}
+			if _, err := builder.openReplacement(context.Background(), "/sessions/collision.jsonl"); err == nil {
+				t.Fatal("openReplacement() succeeded")
+			}
+			if activated.Load() != 0 {
+				t.Fatalf("openReplacement() activated %d sessions", activated.Load())
+			}
+			memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "collision", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()})
+			runner, err := builder.buildRunner(memory, runtime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var events []agent.Event
+			if err := runner.Run(context.Background(), "inspect", func(event agent.Event) { events = append(events, event) }); err != nil {
+				t.Fatal(err)
+			}
+			if providerCalls.Load() != 0 || len(memory.Messages()) != 0 || !reflect.DeepEqual(runtimeBuilderEventTypes(events), []agent.EventType{agent.EventAgentStarted, agent.EventAgentFinished}) {
+				t.Fatalf("collision crossed dynamic boundary: provider=%d messages=%#v events=%#v", providerCalls.Load(), memory.Messages(), runtimeBuilderEventTypes(events))
+			}
+		})
 	}
 }
 
@@ -1937,6 +2115,22 @@ type trackedReplacementSession struct {
 	closeErr   error
 }
 
+func TestRuntimeBuilderIncompleteRedactErrorDoesNotInvokeAttackerErrorMethods(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.sandboxSecretsComplete = false
+	panicErr := &panicRuntimeBuilderError{}
+	got := builder.redactError(panicErr, nil)
+	if got == nil || got.Error() != "" {
+		t.Fatalf("redactError() = %#v, want fixed empty error", got)
+	}
+	if panicErr.calls() != 0 {
+		t.Fatalf("attacker error methods were called %d times", panicErr.calls())
+	}
+	if got := builder.redactError(context.Canceled, nil); got != context.Canceled {
+		t.Fatalf("canceled redactError() = %#v, want direct context.Canceled", got)
+	}
+}
+
 func (s *trackedReplacementSession) Close() error {
 	s.closeCalls.Add(1)
 	err := s.Session.Close()
@@ -1946,6 +2140,39 @@ func (s *trackedReplacementSession) Close() error {
 		close(s.closed)
 	}
 	return errors.Join(err, s.closeErr)
+}
+
+type panicRuntimeBuilderError struct {
+	errorCalls  int
+	isCalls     int
+	unwrapCalls int
+}
+
+func (e *panicRuntimeBuilderError) Error() string {
+	e.errorCalls++
+	panic("unexpected Error call")
+}
+
+func (e *panicRuntimeBuilderError) Is(error) bool {
+	e.isCalls++
+	panic("unexpected Is call")
+}
+
+func (e *panicRuntimeBuilderError) Unwrap() error {
+	e.unwrapCalls++
+	panic("unexpected Unwrap call")
+}
+
+func (e *panicRuntimeBuilderError) calls() int {
+	return e.errorCalls + e.isCalls + e.unwrapCalls
+}
+
+func runtimeBuilderEventTypes(events []agent.Event) []agent.EventType {
+	types := make([]agent.EventType, len(events))
+	for index, event := range events {
+		types[index] = event.Type
+	}
+	return types
 }
 
 func markerExhaustingProviderSecret(t *testing.T) string {

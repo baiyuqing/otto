@@ -12,11 +12,6 @@ import (
 	"github.com/baiyuqing/otto/internal/urlprivacy"
 )
 
-const (
-	maxSensitiveEnvironmentValues = 512
-	maxSensitiveEnvironmentBytes  = 1 << 20
-)
-
 type EnvironmentOptions struct {
 	HostEntries        []string
 	ProviderNames      []string
@@ -46,7 +41,7 @@ func ParseEnvironment(entries []string) (map[string]string, error) {
 }
 
 func ResolveEnvironment(options EnvironmentOptions) (EnvironmentSnapshot, error) {
-	collector := sensitiveEnvironmentValues{values: make(map[string]struct{})}
+	collector := safetext.NewSecretCollector()
 	unsafe := false
 	redactionsComplete := true
 
@@ -91,16 +86,15 @@ func ResolveEnvironment(options EnvironmentOptions) (EnvironmentSnapshot, error)
 			redactionsComplete = false
 		}
 		for _, proxyValue := range proxyValues {
-			if err := collector.addBounded(proxyValue); err != nil {
+			if !collector.Add(proxyValue) {
 				unsafe = true
 				redactionsComplete = false
+				break
 			}
 		}
-		if classifyEnvironmentName(name, providerNames) != environmentOrdinary {
-			if err := collector.addBounded(value); err != nil {
-				unsafe = true
-				redactionsComplete = false
-			}
+		if classifyEnvironmentName(name, providerNames) != environmentOrdinary && !collector.Add(value) {
+			unsafe = true
+			redactionsComplete = false
 		}
 		host[strings.Clone(name)] = strings.Clone(value)
 	}
@@ -110,14 +104,14 @@ func ResolveEnvironment(options EnvironmentOptions) (EnvironmentSnapshot, error)
 		copy := *options.PrivateDirectories
 		directories = &copy
 		for _, privatePath := range []string{copy.Root, copy.Home, copy.Temp, copy.Cache} {
-			if err := collector.addPrivate(privatePath); err != nil {
+			if !addPrivateEnvironmentRedaction(collector, privatePath) {
 				unsafe = true
 				redactionsComplete = false
 			}
 		}
 	}
 	if unsafe {
-		return failedEnvironmentSnapshot(collector.values, redactionsComplete), ErrEnvironmentUnsafe
+		return failedEnvironmentSnapshot(collector.Values(), redactionsComplete), ErrEnvironmentUnsafe
 	}
 
 	names := make([]string, 0, len(host))
@@ -137,7 +131,7 @@ func ResolveEnvironment(options EnvironmentOptions) (EnvironmentSnapshot, error)
 
 	if directories != nil {
 		if err := preparePrivateEnvironment(*directories); err != nil {
-			return failedEnvironmentSnapshot(collector.values, redactionsComplete), ErrEnvironmentUnsafe
+			return failedEnvironmentSnapshot(collector.Values(), redactionsComplete), ErrEnvironmentUnsafe
 		}
 		privateValues := map[string]string{
 			"HOME":             directories.Home,
@@ -156,7 +150,7 @@ func ResolveEnvironment(options EnvironmentOptions) (EnvironmentSnapshot, error)
 		}
 	}
 
-	return newEnvironmentSnapshot(resolved, collector.values), nil
+	return newEnvironmentSnapshot(resolved, collector.Values()), nil
 }
 
 func (s EnvironmentSnapshot) Entries() []string {
@@ -258,33 +252,14 @@ func isFixedSensitiveEnvironmentName(upperName string) bool {
 	}
 }
 
-type sensitiveEnvironmentValues struct {
-	values map[string]struct{}
-	bytes  int
-}
-
-func (s *sensitiveEnvironmentValues) addBounded(value string) error {
-	for _, form := range safetext.SecretForms(value) {
-		if _, duplicate := s.values[form]; duplicate {
-			continue
-		}
-		if len(s.values) >= maxSensitiveEnvironmentValues || len(form) > maxSensitiveEnvironmentBytes-s.bytes {
-			return ErrEnvironmentUnsafe
-		}
-		s.values[strings.Clone(form)] = struct{}{}
-		s.bytes += len(form)
-	}
-	return nil
-}
-
-func (s *sensitiveEnvironmentValues) addPrivate(value string) error {
+func addPrivateEnvironmentRedaction(collector *safetext.SecretCollector, value string) bool {
 	if value == "" {
-		return nil
+		return true
 	}
 	if !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
-		return ErrEnvironmentUnsafe
+		return false
 	}
-	return s.addBounded(value)
+	return collector.Add(value)
 }
 
 func proxyUserinfoRedactions(name, value string) ([]string, error) {
@@ -385,7 +360,7 @@ func securePrivateDirectoryInfo(info os.FileInfo) bool {
 	return ok && int(stat.Uid) == os.Geteuid()
 }
 
-func newEnvironmentSnapshot(environment map[string]string, redactionSet map[string]struct{}) EnvironmentSnapshot {
+func newEnvironmentSnapshot(environment map[string]string, redactions []string) EnvironmentSnapshot {
 	names := make([]string, 0, len(environment))
 	for name := range environment {
 		names = append(names, name)
@@ -396,23 +371,9 @@ func newEnvironmentSnapshot(environment map[string]string, redactionSet map[stri
 		entries = append(entries, name+"="+environment[name])
 	}
 
-	return EnvironmentSnapshot{entries: entries, redactions: sortedEnvironmentRedactions(redactionSet), redactionsComplete: true}
+	return EnvironmentSnapshot{entries: entries, redactions: append([]string(nil), redactions...), redactionsComplete: true}
 }
 
-func failedEnvironmentSnapshot(redactionSet map[string]struct{}, complete bool) EnvironmentSnapshot {
-	return EnvironmentSnapshot{redactions: sortedEnvironmentRedactions(redactionSet), redactionsComplete: complete}
-}
-
-func sortedEnvironmentRedactions(redactionSet map[string]struct{}) []string {
-	redactions := make([]string, 0, len(redactionSet))
-	for value := range redactionSet {
-		redactions = append(redactions, value)
-	}
-	slices.SortFunc(redactions, func(left, right string) int {
-		if len(left) != len(right) {
-			return len(right) - len(left)
-		}
-		return strings.Compare(left, right)
-	})
-	return redactions
+func failedEnvironmentSnapshot(redactions []string, complete bool) EnvironmentSnapshot {
+	return EnvironmentSnapshot{redactions: append([]string(nil), redactions...), redactionsComplete: complete}
 }

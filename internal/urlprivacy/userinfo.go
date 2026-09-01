@@ -9,6 +9,8 @@ import (
 	"github.com/baiyuqing/otto/internal/safetext"
 )
 
+const maxUserinfoInputBytes = 16 << 10
+
 // UserinfoForms returns raw and independently decoded userinfo components.
 // ambiguous reports that userinfo extraction cannot be proven complete. Values
 // without a literal '@' are complete for this credential detector even when
@@ -17,62 +19,59 @@ func UserinfoForms(raw string) (values []string, ambiguous bool) {
 	if raw == "" || !strings.ContainsRune(raw, '@') {
 		return nil, false
 	}
+	if len(raw) > maxUserinfoInputBytes {
+		return nil, true
+	}
+
+	collector := newUserinfoCollector()
+	addCandidates := func(raw string) bool {
+		return collector.addCandidates(raw)
+	}
 
 	authority, normalAuthority := normalURLAuthority(raw)
 	if normalAuthority {
 		atCount := strings.Count(authority, "@")
 		switch atCount {
 		case 0:
-			if strings.ContainsRune(raw, '\\') {
-				for _, candidate := range lexicalUserinfoCandidates(raw) {
-					values = appendUserinfoForms(values, candidate)
+			if strings.ContainsRune(raw, '\\') || !parseableAuthority(authority) {
+				if !addCandidates(lexicalUserinfoCandidates(raw)) {
+					return collector.values, true
 				}
-				return deduplicate(values), true
-			}
-			if !parseableAuthority(authority) {
-				for _, candidate := range lexicalUserinfoCandidates(raw) {
-					values = appendUserinfoForms(values, candidate)
-				}
-				return deduplicate(values), true
+				return collector.values, true
 			}
 			_, parseErr := url.Parse(raw)
 			return nil, parseErr != nil || !validPercentEscapes(raw) || strings.ContainsRune(raw, '\\')
 		case 1:
 			userinfoEnd := strings.IndexByte(authority, '@')
-			values = appendUserinfoForms(values, authority[:userinfoEnd])
+			if !collector.addForms(authority[:userinfoEnd]) {
+				return collector.values, true
+			}
 			authorityURL, authorityErr := url.Parse("//" + authority)
-			if authorityErr == nil && authorityURL.Host != "" {
-				values = appendParsedUserinfoForms(values, authorityURL.User)
+			if authorityErr == nil && authorityURL.Host != "" && !collector.addParsedUserinfoForms(authorityURL.User) {
+				return collector.values, true
 			}
 			_, parseErr := url.Parse(raw)
 			ambiguous = authorityErr != nil || authorityURL == nil || authorityURL.Host == "" ||
 				parseErr != nil || !validPercentEscapes(raw) || strings.ContainsRune(raw, '\\')
-			if strings.ContainsRune(raw, '\\') {
-				for _, candidate := range lexicalUserinfoCandidates(raw) {
-					values = appendUserinfoForms(values, candidate)
-				}
+			if strings.ContainsRune(raw, '\\') && !addCandidates(lexicalUserinfoCandidates(raw)) {
+				return collector.values, true
 			}
-			return deduplicate(values), ambiguous
+			return collector.values, ambiguous
 		default:
-			for _, candidate := range userinfoCandidates(authority) {
-				values = appendUserinfoForms(values, candidate)
+			if !addCandidates(authority) {
+				return collector.values, true
 			}
-			if strings.ContainsRune(raw, '\\') {
-				for _, candidate := range lexicalUserinfoCandidates(raw) {
-					values = appendUserinfoForms(values, candidate)
-				}
+			if strings.ContainsRune(raw, '\\') && !addCandidates(lexicalUserinfoCandidates(raw)) {
+				return collector.values, true
 			}
-			return deduplicate(values), true
+			return collector.values, true
 		}
 	}
 
-	// A malformed authority delimiter makes every segment immediately before an
-	// '@' plausible. Retain both local and cumulative interpretations so one
-	// malformed/multi-'@' spelling cannot hide an earlier credential.
-	for _, candidate := range lexicalUserinfoCandidates(raw) {
-		values = appendUserinfoForms(values, candidate)
+	if !addCandidates(lexicalUserinfoCandidates(raw)) {
+		return collector.values, true
 	}
-	return deduplicate(values), true
+	return collector.values, true
 }
 
 func normalURLAuthority(raw string) (string, bool) {
@@ -105,13 +104,13 @@ func parseableAuthority(authority string) bool {
 	return err == nil && parsed != nil && parsed.Host != ""
 }
 
-func lexicalUserinfoCandidates(raw string) []string {
+func lexicalUserinfoCandidates(raw string) string {
 	end := len(raw)
 	if queryOrFragment := strings.IndexAny(raw, "?#"); queryOrFragment >= 0 {
 		end = queryOrFragment
 	}
 	if end == 0 {
-		return nil
+		return ""
 	}
 
 	start := 0
@@ -126,13 +125,16 @@ func lexicalUserinfoCandidates(raw string) []string {
 		start++
 	}
 	if start >= end {
-		return nil
+		return ""
 	}
-	return userinfoCandidates(raw[start:end])
+	return raw[start:end]
 }
 
-func userinfoCandidates(raw string) []string {
-	var candidates []string
+func userinfoCandidateSegments(raw string) ([]string, string) {
+	var (
+		candidates    []string
+		finalBeforeAt string
+	)
 	for offset := 0; offset < len(raw); {
 		relativeAt := strings.IndexByte(raw[offset:], '@')
 		if relativeAt < 0 {
@@ -143,11 +145,11 @@ func userinfoCandidates(raw string) []string {
 		localStart := strings.LastIndexAny(beforeAt, "/\\@") + 1
 		candidates = appendUserinfoCandidate(candidates, beforeAt[localStart:])
 		if localStart > 0 {
-			candidates = appendUserinfoCandidate(candidates, beforeAt)
+			finalBeforeAt = beforeAt
 		}
 		offset = at + 1
 	}
-	return candidates
+	return candidates, finalBeforeAt
 }
 
 func appendUserinfoCandidate(candidates []string, candidate string) []string {
@@ -164,54 +166,87 @@ func appendUserinfoCandidate(candidates []string, candidate string) []string {
 	return candidates
 }
 
-func appendUserinfoForms(values []string, rawUserinfo string) []string {
-	values = append(values, rawUserinfo)
+type userinfoCollector struct {
+	values []string
+	seen   map[string]struct{}
+	bytes  int
+}
+
+func newUserinfoCollector() *userinfoCollector {
+	return &userinfoCollector{seen: make(map[string]struct{})}
+}
+
+func (c *userinfoCollector) add(value string) bool {
+	value = safetext.CanonicalizeUTF8(value)
+	if value == "" {
+		return true
+	}
+	if _, duplicate := c.seen[value]; duplicate {
+		return true
+	}
+	if len(c.values) >= safetext.MaxSecretValues || c.bytes > safetext.MaxSecretBytes-len(value) {
+		return false
+	}
+	c.seen[value] = struct{}{}
+	c.values = append(c.values, value)
+	c.bytes += len(value)
+	return true
+}
+
+func (c *userinfoCollector) addCandidates(raw string) bool {
+	locals, finalBeforeAt := userinfoCandidateSegments(raw)
+	for _, candidate := range locals {
+		if !c.addForms(candidate) {
+			return false
+		}
+	}
+	if finalBeforeAt != "" && !c.add(finalBeforeAt) {
+		return false
+	}
+	return true
+}
+
+func (c *userinfoCollector) addForms(rawUserinfo string) bool {
+	if !c.add(rawUserinfo) {
+		return false
+	}
 	rawUsername, rawPassword, hasPassword := strings.Cut(rawUserinfo, ":")
-	values = append(values, rawUsername)
-	if decoded, err := url.PathUnescape(rawUsername); err == nil {
-		values = append(values, decoded)
+	if !c.add(rawUsername) {
+		return false
+	}
+	if decoded, err := url.PathUnescape(rawUsername); err == nil && !c.add(decoded) {
+		return false
 	}
 	if hasPassword {
-		values = append(values, rawPassword)
-		if decoded, err := url.PathUnescape(rawPassword); err == nil {
-			values = append(values, decoded)
+		if !c.add(rawPassword) {
+			return false
+		}
+		if decoded, err := url.PathUnescape(rawPassword); err == nil && !c.add(decoded) {
+			return false
 		}
 	}
-	if decoded, err := url.PathUnescape(rawUserinfo); err == nil {
-		values = append(values, decoded)
+	if decoded, err := url.PathUnescape(rawUserinfo); err == nil && !c.add(decoded) {
+		return false
 	}
-	return values
+	return true
 }
 
-func appendParsedUserinfoForms(values []string, user *url.Userinfo) []string {
+func (c *userinfoCollector) addParsedUserinfoForms(user *url.Userinfo) bool {
 	if user == nil {
-		return values
+		return true
 	}
 	username := user.Username()
-	values = append(values, username)
+	if !c.add(username) {
+		return false
+	}
 	decodedUserinfo := username
 	if password, ok := user.Password(); ok {
-		values = append(values, password)
+		if !c.add(password) {
+			return false
+		}
 		decodedUserinfo += ":" + password
 	}
-	return append(values, decodedUserinfo, user.String())
-}
-
-func deduplicate(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		value = safetext.CanonicalizeUTF8(value)
-		if value == "" {
-			continue
-		}
-		if _, duplicate := seen[value]; duplicate {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, strings.Clone(value))
-	}
-	return result
+	return c.add(decodedUserinfo) && c.add(user.String())
 }
 
 func validScheme(scheme string) bool {

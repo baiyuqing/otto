@@ -136,9 +136,9 @@ func TestIncompleteRedactorSuppressesEveryDynamicBoundary(t *testing.T) {
 	if got := string(redactor.RedactJSONStrings(json.RawMessage(`{"unknown":"content"}`))); got != "null" {
 		t.Fatalf("RedactJSONStrings() = %q, want fail-closed null", got)
 	}
-	boundaryErr := redactor.RedactError(fmt.Errorf("%w: unknown-attacker-content", context.Canceled))
-	if boundaryErr == nil || boundaryErr.Error() != "" || !errors.Is(boundaryErr, context.Canceled) {
-		t.Fatalf("RedactError() = %#v, want empty cancellation-preserving error", boundaryErr)
+	boundaryErr := redactor.RedactError(context.Canceled)
+	if boundaryErr != context.Canceled {
+		t.Fatalf("RedactError() = %#v, want direct context.Canceled identity", boundaryErr)
 	}
 	stream := redactor.newStream()
 	if got := stream.Write("unknown-"); got != "" {
@@ -160,13 +160,24 @@ func TestRedactorPreservesInvalidCompactionSummaryIdentity(t *testing.T) {
 	}
 }
 
+func TestIncompleteRedactorDoesNotInvokeAttackerErrorMethods(t *testing.T) {
+	panicErr := &panicRedactionError{}
+	got := NewRedactorWithCompleteness(nil, false).RedactError(panicErr)
+	if got == nil || got.Error() != "" {
+		t.Fatalf("RedactError() = %#v, want fixed empty error", got)
+	}
+	if panicErr.calls() != 0 {
+		t.Fatalf("attacker error methods were called %d times", panicErr.calls())
+	}
+}
+
 func TestRedactorUsesStableSingleRunePreferredMarkers(t *testing.T) {
 	first := NewRedactor(nil)
 	if first.marker != redactionMarker || utf8.RuneCountInString(first.marker) != 1 {
 		t.Fatalf("default marker = %q, want stable single rune %q", first.marker, redactionMarker)
 	}
 	second := NewRedactor([]string{redactionMarker})
-	if second.marker != "\ue000" || utf8.RuneCountInString(second.marker) != 1 {
+	if second.marker != "\uE001" || utf8.RuneCountInString(second.marker) != 1 {
 		t.Fatalf("fallback marker = %q, want stable single-rune fallback", second.marker)
 	}
 }
@@ -298,7 +309,7 @@ func TestRedactorJSONKeyRedactionIsSafeAndDeterministic(t *testing.T) {
 		{
 			name:        "credential equals default marker",
 			credentials: []string{redactionMarker},
-			raw:         json.RawMessage(`{"█":"first","":"second"}`),
+			raw:         json.RawMessage(fmt.Sprintf(`{%q:"first",%q:"second"}`, redactionMarker, `\uE001`)),
 		},
 		{
 			name:        "overlapping credentials",
@@ -308,7 +319,7 @@ func TestRedactorJSONKeyRedactionIsSafeAndDeterministic(t *testing.T) {
 		{
 			name:        "root and nested collisions",
 			credentials: []string{"secret"},
-			raw:         json.RawMessage(`{"secret":"first","█":"second","nested":{"secret":1,"█":2}}`),
+			raw:         json.RawMessage(fmt.Sprintf(`{%q:"first",%q:"second","nested":{%q:1,%q:2}}`, "secret", redactionMarker, "secret", redactionMarker)),
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -330,7 +341,7 @@ func TestRedactorJSONKeyRedactionIsSafeAndDeterministic(t *testing.T) {
 					t.Fatalf("nondeterministic output: first %q, iteration %d %q", first, iteration, got)
 				}
 			}
-			if test.name == "root and nested collisions" && first != `{"nested":{"█":null},"█":null}` {
+			if test.name == "root and nested collisions" && first != `{"nested":{"`+redactionMarker+`":null},"`+redactionMarker+`":null}` {
 				t.Fatalf("collision output = %s, want deterministic semantic loss", first)
 			}
 		})
@@ -361,17 +372,17 @@ func TestRedactorJSONDuplicateAndNormalizedKeysFailClosed(t *testing.T) {
 		{
 			name: "unpaired surrogate variants",
 			raw:  json.RawMessage(`{"secret-\ud800":"first","secret-\ud801":"attacker"}`),
-			want: `{"█-�":null}`,
+			want: `{"` + redactionMarker + `-�":null}`,
 		},
 		{
 			name: "invalid UTF-8 variants",
 			raw:  json.RawMessage(invalidUTF8),
-			want: `{"█-�":null}`,
+			want: `{"` + redactionMarker + `-�":null}`,
 		},
 		{
 			name: "nested array and post-redaction collision",
-			raw:  json.RawMessage(`{"items":[{"secret":"first","█":"attacker"},{"nested":{"a":"first","\u0061":"attacker"}}]}`),
-			want: `{"items":[{"█":null},{"nested":{"a":null}}]}`,
+			raw:  json.RawMessage(fmt.Sprintf(`{"items":[{"secret":"first",%q:"attacker"},{"nested":{"a":"first","\u0061":"attacker"}}]}`, redactionMarker)),
+			want: `{"items":[{"` + redactionMarker + `":null},{"nested":{"a":null}}]}`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -464,4 +475,29 @@ func allNonControlUnicodeRunes(t *testing.T) string {
 		t.Fatal("exhaustive marker fixture is invalid or omitted the preferred rune")
 	}
 	return result
+}
+
+type panicRedactionError struct {
+	errorCalls  int
+	isCalls     int
+	unwrapCalls int
+}
+
+func (e *panicRedactionError) Error() string {
+	e.errorCalls++
+	panic("unexpected Error call")
+}
+
+func (e *panicRedactionError) Is(error) bool {
+	e.isCalls++
+	panic("unexpected Is call")
+}
+
+func (e *panicRedactionError) Unwrap() error {
+	e.unwrapCalls++
+	panic("unexpected Unwrap call")
+}
+
+func (e *panicRedactionError) calls() int {
+	return e.errorCalls + e.isCalls + e.unwrapCalls
 }

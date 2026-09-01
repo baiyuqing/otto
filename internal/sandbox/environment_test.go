@@ -712,6 +712,25 @@ func TestResolveEnvironmentKeepsPrivatePathRedactionsInsideSensitiveByteBound(t 
 	}
 }
 
+func TestResolveEnvironmentBoundsMalformedRepeatedProxyPrefixes(t *testing.T) {
+	var proxy strings.Builder
+	proxy.WriteString("http:///")
+	for index := 0; index < 600; index++ {
+		fmt.Fprintf(&proxy, "u%03d:p%03d@", index, index)
+	}
+	proxy.WriteString("example.test")
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + proxy.String()}})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || snapshot.RedactionsComplete() {
+		t.Fatalf("ResolveEnvironment() = complete %t error %v, want incomplete bounded failure", snapshot.RedactionsComplete(), err)
+	}
+	if len(snapshot.RedactionValues()) > 512 {
+		t.Fatalf("redaction count = %d, want <= 512", len(snapshot.RedactionValues()))
+	}
+	if slices.Contains(snapshot.RedactionValues(), "u000:p000@u001:p001") {
+		t.Fatalf("intermediate cumulative prefixes were retained: %#v", snapshot.RedactionValues()[:min(len(snapshot.RedactionValues()), 8)])
+	}
+}
+
 func TestResolveEnvironmentReturnsSortedImmutableClones(t *testing.T) {
 	host := []string{
 		"ZED=ordinary",

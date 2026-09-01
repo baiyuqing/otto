@@ -151,3 +151,19 @@ func TestUserinfoFormsCanonicalizesEveryIndependentlyDecodedComponent(t *testing
 		}
 	}
 }
+
+func TestUserinfoFormsMalformedMultiAtKeepsOnlyFinalFullPrefix(t *testing.T) {
+	raw := "http:///first:one@mid/second:two@tail/third:three@example"
+	values, malformed := UserinfoForms(raw)
+	if !malformed {
+		t.Fatalf("UserinfoForms() malformed = false, want true; values=%#v", values)
+	}
+	for _, want := range []string{"first:one", "second:two", "third:three", "first:one@mid/second:two@tail/third:three"} {
+		if !slices.Contains(values, want) {
+			t.Fatalf("UserinfoForms() omitted %q: %#v", want, values)
+		}
+	}
+	if slices.Contains(values, "first:one@mid/second:two") {
+		t.Fatalf("UserinfoForms() retained an intermediate cumulative prefix: %#v", values)
+	}
+}

@@ -8,14 +8,13 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
-const redactionMarker = "█"
+const redactionMarker = "\uE000"
 
 // Redactor removes resolved secret values at the provider-neutral agent
 // boundary. Its source values remain encapsulated and are never exposed
@@ -51,10 +50,9 @@ func NewRedactorWithCompleteness(values []string, complete bool) *Redactor {
 		}
 		return redactor.values[i] < redactor.values[j]
 	})
-	redactor.marker = safeRedactionMarker(redactor.values)
-	if len(redactor.values) > 0 && redactor.marker == "" {
-		redactor.values = nil
-		redactor.complete = false
+	redactor.marker, redactor.complete = safetext.DynamicRedactionMarker(redactor.values)
+	if !redactor.complete {
+		redactor.marker = ""
 	}
 	return redactor
 }
@@ -116,12 +114,11 @@ func (r *Redactor) RedactError(err error) error {
 		return err
 	}
 	if !r.complete {
-		return &redactedBoundaryError{
-			canceled:                 errors.Is(err, context.Canceled),
-			deadlineExceeded:         errors.Is(err, context.DeadlineExceeded),
-			fatalPersistence:         errors.Is(err, session.ErrFatalPersistence),
-			emptyUserText:            errors.Is(err, ErrEmptyUserText),
-			invalidCompactionSummary: errors.Is(err, ErrInvalidCompactionSummary),
+		switch err {
+		case context.Canceled, context.DeadlineExceeded, session.ErrFatalPersistence, ErrEmptyUserText, ErrInvalidCompactionSummary:
+			return err
+		default:
+			return errRedactedBoundary
 		}
 	}
 	message := r.RedactString(err.Error())
@@ -274,37 +271,7 @@ func redactJSONValueStrings(redactor *Redactor, value any) any {
 	return value
 }
 
-func safeRedactionMarker(values []string) string {
-	usedRunes := make(map[rune]struct{})
-	for _, value := range values {
-		for _, candidate := range value {
-			usedRunes[candidate] = struct{}{}
-		}
-	}
-	isSafeRune := func(candidate rune) bool {
-		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
-			return false
-		}
-		_, used := usedRunes[candidate]
-		return !used
-	}
-	preferred, _ := utf8.DecodeRuneInString(redactionMarker)
-	if isSafeRune(preferred) {
-		return redactionMarker
-	}
-	for candidate := rune(0xE000); candidate <= 0xF8FF; candidate++ {
-		if isSafeRune(candidate) {
-			return string(candidate)
-		}
-	}
-	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
-		if isSafeRune(candidate) {
-			return string(candidate)
-		}
-	}
-
-	return ""
-}
+var errRedactedBoundary = &redactedBoundaryError{}
 
 func ensureJSONEOF(decoder *json.Decoder) error {
 	var extra any

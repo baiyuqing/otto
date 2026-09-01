@@ -11,8 +11,6 @@ import (
 	"reflect"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/safetext"
@@ -28,10 +26,7 @@ var (
 	errSandboxedBashTimeout              = errors.New("sandboxed bash timeout")
 )
 
-const (
-	sandboxExecutionUnavailable     = "sandbox execution unavailable"
-	preferredSandboxRedactionMarker = '*'
-)
+const sandboxExecutionUnavailable = "sandbox execution unavailable"
 
 type bashTool struct {
 	workspace       *Workspace
@@ -67,7 +62,11 @@ func NewBashTool(
 	}
 
 	redactValues := canonicalizeSandboxedBashRedactions(redactionValues)
-	redactionMarker, dynamicContent := collisionSafeSandboxRedactionMarker(redactValues)
+	redactionMarker, dynamicContent := safetext.DynamicRedactionMarker(redactValues)
+	if !dynamicContent {
+		redactValues = nil
+		redactionMarker = ""
+	}
 
 	return &bashTool{
 		workspace: &Workspace{
@@ -296,44 +295,6 @@ func canonicalizeSandboxedBashRedactions(values []string) []string {
 		}
 	}
 	return canonical
-}
-
-func collisionSafeSandboxRedactionMarker(values []string) (string, bool) {
-	usedRunes := make(map[rune]struct{})
-	for _, value := range values {
-		for _, candidate := range value {
-			usedRunes[candidate] = struct{}{}
-		}
-	}
-	isSafeRune := func(candidate rune) bool {
-		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
-			return false
-		}
-		_, used := usedRunes[candidate]
-		return !used
-	}
-
-	preferred := string(preferredSandboxRedactionMarker)
-	if isSafeRune(preferredSandboxRedactionMarker) {
-		return preferred, true
-	}
-	for candidate := rune('!'); candidate <= '~'; candidate++ {
-		if candidate != preferredSandboxRedactionMarker && isSafeRune(candidate) {
-			return string(candidate), true
-		}
-	}
-	for candidate := rune(utf8.RuneSelf); candidate <= utf8.MaxRune; candidate++ {
-		if unicode.IsGraphic(candidate) && !unicode.IsSpace(candidate) && isSafeRune(candidate) {
-			return string(candidate), true
-		}
-	}
-	for candidate := rune(utf8.RuneSelf); candidate <= utf8.MaxRune; candidate++ {
-		if isSafeRune(candidate) {
-			return string(candidate), true
-		}
-	}
-
-	return "", false
 }
 
 func formatBashResult(stdout, stderr *cappedByteCollector, status string) string {

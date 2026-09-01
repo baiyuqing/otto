@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/sandbox/direct"
 )
@@ -133,7 +134,7 @@ func TestBashSandboxedReportsIndependentCapsExitCodeAndSignal(t *testing.T) {
 		bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 1024, []string{secret})
 
 		result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
-		if result.IsError || strings.Contains(result.Content, secret) || !strings.Contains(result.Content, "signal: killed-*") {
+		if result.IsError || strings.Contains(result.Content, secret) || !strings.Contains(result.Content, "signal: killed-"+bash.redactionMarker) {
 			t.Fatalf("Execute() exposed signal redaction value: %#v", result)
 		}
 	})
@@ -172,7 +173,7 @@ func TestBashSandboxedRedactsSplitOverlappingSecretsBeforeCaps(t *testing.T) {
 			t.Fatalf("Execute() leaked %q: %q", forbidden, result.Content)
 		}
 	}
-	if !strings.Contains(result.Content, "stdout:\n*") || !strings.Contains(result.Content, "stderr:\n*") {
+	if !strings.Contains(result.Content, "stdout:\n"+bash.redactionMarker) || !strings.Contains(result.Content, "stderr:\n"+bash.redactionMarker) {
 		t.Fatalf("split redaction markers missing: %q", result.Content)
 	}
 	if got := strings.Count(result.Content, "[truncated:"); got != 2 {
@@ -191,10 +192,9 @@ func TestBashSandboxedUsesCollisionSafeSingleRuneMarker(t *testing.T) {
 		wantMarker string
 	}{
 		{
-			name:       "stable preferred marker",
-			stdout:     "TOKEN",
-			values:     []string{"TOKEN"},
-			wantMarker: "*",
+			name:   "stable preferred marker",
+			stdout: "TOKEN",
+			values: []string{"TOKEN"},
 		},
 		{
 			name:   "preferred marker is itself a secret",
@@ -283,7 +283,7 @@ func TestBashSandboxedNormalizesBeforeFinalRedactionAndCapsCompleteUTF8(t *testi
 		if body := sandboxedBashStdout(t, result.Content); body != "prefix" {
 			t.Fatalf("stdout = %q, want complete-rune prefix", body)
 		}
-		if !strings.Contains(result.Content, "[truncated: 2 bytes omitted]") {
+		if !strings.Contains(result.Content, "[truncated: 3 bytes omitted]") {
 			t.Fatalf("Execute() did not truthfully count the omitted marker: %q", result.Content)
 		}
 	})
@@ -301,7 +301,7 @@ func TestBashSandboxedNormalizesBeforeFinalRedactionAndCapsCompleteUTF8(t *testi
 				t.Fatalf("post-cap output synthesized configured value %q: %q", secret, result.Content)
 			}
 		}
-		if !strings.Contains(result.Content, "[truncated: 8 bytes omitted]") {
+		if !strings.Contains(result.Content, "[truncated: 9 bytes omitted]") {
 			t.Fatalf("post-cap omission count was not truthful: %q", result.Content)
 		}
 	})
@@ -356,7 +356,7 @@ func TestBashSandboxedCanonicalizesInvalidRedactionsSeparatelyFromEnvironment(t 
 					t.Fatalf("Execute() retained canonical configured value %q: %q", secret, result.Content)
 				}
 			}
-			if maxOutput == 1 && (sandboxedBashStdout(t, result.Content) != "*" || !strings.Contains(result.Content, "stderr:\n*")) {
+			if maxOutput == 1 && (sandboxedBashStdout(t, result.Content) != "" || !strings.Contains(result.Content, "stdout:\n[truncated: 3 bytes omitted]") || !strings.Contains(result.Content, "stderr:\n[truncated: 3 bytes omitted]")) {
 				t.Fatalf("one-byte cap did not retain atomic redactions on both streams: %q", result.Content)
 			}
 		})
@@ -474,7 +474,11 @@ func TestBashSandboxedExhaustiveMarkerFallbackSuppressesAllResultText(t *testing
 	workspace := mustWorkspace(t, t.TempDir())
 	allRunes := allNonControlSandboxRunes(t)
 	longPrefix := strings.Repeat("a", 1<<20) + "z"
-	values := []string{allRunes, longPrefix, string(preferredSandboxRedactionMarker), "X", "ab"}
+	marker, ok := safetext.DynamicRedactionMarker(nil)
+	if !ok || marker == "" {
+		t.Fatal("DynamicRedactionMarker() did not return the shared Bash marker")
+	}
+	values := []string{allRunes, longPrefix, marker, "X", "ab"}
 	fake := &fakeBashExecutor{
 		stdoutChunks: [][]byte{[]byte("a"), []byte("X"), []byte("b")},
 		stderrChunks: [][]byte{[]byte("aX"), []byte("b")},
@@ -509,7 +513,7 @@ func TestBashSandboxedUnrepresentableOutputUsesBoundedOneByteDiscard(t *testing.
 		return sandbox.ExitStatus{Code: 0}, nil
 	}}
 	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 2*half+1, []string{
-		allNonControlSandboxRunes(t), strings.Repeat("a", 1<<20) + "z", "X", "ab",
+		strings.Repeat("a", 1<<20) + "z",
 	})
 	arguments := mustJSON(t, map[string]string{"command": "ignored"})
 	if allocations := testing.AllocsPerRun(3, func() {
@@ -536,7 +540,7 @@ func TestBashSandboxedHoldsEarlierFragmentBeforeLaterMatchAndCap(t *testing.T) {
 		if result.IsError {
 			t.Fatalf("split %d: Execute() = %#v", split, result)
 		}
-		if body := sandboxedBashStdout(t, result.Content); body != "*" {
+		if body := sandboxedBashStdout(t, result.Content); body != bash.redactionMarker {
 			t.Fatalf("split %d: stdout = %q, want only the redaction marker", split, body)
 		}
 		if strings.Contains(result.Content, "credential-") {
@@ -888,7 +892,7 @@ func TestBashSandboxedConcurrentCallsKeepOutputAndRedactionIndependent(t *testin
 		if got.name == "first" {
 			other = "second"
 		}
-		if got.result.IsError || !strings.Contains(got.result.Content, got.name+":*") || !strings.Contains(got.result.Content, "stderr-"+got.name) {
+		if got.result.IsError || !strings.Contains(got.result.Content, got.name+":"+bash.redactionMarker) || !strings.Contains(got.result.Content, "stderr-"+got.name) {
 			t.Fatalf("%s Execute() = %#v", got.name, got.result)
 		}
 		if strings.Contains(got.result.Content, other+":") || strings.Contains(got.result.Content, "stderr-"+other) || strings.Contains(got.result.Content, "shared-secret") {
@@ -952,8 +956,9 @@ func allNonControlSandboxRunes(t *testing.T) string {
 		value.WriteRune(candidate)
 	}
 	result := value.String()
-	if !utf8.ValidString(result) || !strings.ContainsRune(result, preferredSandboxRedactionMarker) {
-		t.Fatal("exhaustive marker fixture is invalid or omitted the preferred rune")
+	marker, ok := safetext.DynamicRedactionMarker(nil)
+	if !ok || marker == "" || !utf8.ValidString(result) || !strings.Contains(result, marker) {
+		t.Fatal("exhaustive marker fixture is invalid or omitted the shared marker")
 	}
 	return result
 }

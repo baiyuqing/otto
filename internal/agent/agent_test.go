@@ -653,6 +653,7 @@ func TestRunExpandsJSONStringEscapeSecretsAcrossEventsFollowUpAndRawPi(t *testin
 		decoded string
 	}{
 		{raw: `less\u003cthan`, decoded: "less<than"},
+		{raw: `\\u003c`, decoded: `\u003c`},
 		{raw: `greater\u003Ethan`, decoded: "greater>than"},
 		{raw: `amp\u0026ersand`, decoded: "amp&ersand"},
 		{raw: `quote\"value`, decoded: `quote"value`},
@@ -1005,8 +1006,8 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 			return string(encoded)
 		}(),
 	} {
-		hasMarker := strings.Contains(content, "[REDACTED]") || strings.Contains(content, "stdout:\n*\n") ||
-			strings.Contains(content, `stdout:\n*\n`)
+		hasMarker := strings.Contains(content, "[REDACTED]") || strings.Contains(content, "stdout:\n"+redactionMarker+"\n") ||
+			strings.Contains(content, `stdout:\n`+redactionMarker+`\n`)
 		if strings.Contains(content, credential) || !hasMarker {
 			t.Fatalf("%s did not safely redact credential: %q", location, content)
 		}
@@ -1024,7 +1025,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, credential, "prefix-"+credential, "Bearer "+credential, credential))
+	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first",%q:"attacker-redacted"}}`, credential, credential, "prefix-"+credential, "Bearer "+credential, credential, redactionMarker))
 	stream := []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "text "}}
 	for _, character := range credential {
 		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string(character)})

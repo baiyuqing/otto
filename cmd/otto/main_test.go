@@ -23,6 +23,7 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
@@ -1344,7 +1345,11 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requestCount == 1 {
 			textSplit := len(authorization) - 3
-			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, authorization, "prefix-"+credential, credential)
+			marker, ok := safetext.DynamicRedactionMarker(nil)
+			if !ok || marker == "" {
+				t.Fatal("DynamicRedactionMarker() did not return the shared marker")
+			}
+			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first",%q:"attacker-redacted"}}`, credential, authorization, "prefix-"+credential, credential, marker)
 			argumentSplit := strings.Index(arguments, credential) + len(credential)/2
 			chunks := []string{
 				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "authorization="+authorization[:textSplit]),
@@ -1392,8 +1397,12 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 			t.Fatalf("%s leaked successful provider credential echo or colliding tool value: %q", location, content)
 		}
 	}
+	marker, ok := safetext.DynamicRedactionMarker(nil)
+	if !ok || marker == "" {
+		t.Fatal("DynamicRedactionMarker() did not return the shared marker")
+	}
 	for _, location := range []string{"stdout events", "provider follow-up", "session JSONL"} {
-		if !strings.Contains(locations[location], "█") {
+		if !strings.Contains(locations[location], marker) {
 			t.Fatalf("%s did not retain a redaction marker: %q", location, locations[location])
 		}
 	}
@@ -1489,8 +1498,12 @@ api_key_env = %q
 			}
 		}
 	}
+	marker, ok := safetext.DynamicRedactionMarker(nil)
+	if !ok || marker == "" {
+		t.Fatal("DynamicRedactionMarker() did not return the shared marker")
+	}
 	redactedReconstruction := strings.Contains(string(persisted), "reconstructed=[REDACTED]") ||
-		strings.Contains(string(persisted), "reconstructed=█") || strings.Contains(string(persisted), "reconstructed=*")
+		strings.Contains(string(persisted), "reconstructed="+marker)
 	if !redactedReconstruction || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
 		t.Fatalf("persisted bash event/result did not redact credential while preserving unrelated environment: %s", persisted)
 	}

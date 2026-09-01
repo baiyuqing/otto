@@ -75,13 +75,12 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 				waitForSubsequence(t, collector, 0, wideFooterMarker)
 				writePTY(t, master, "?")
 				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
-				cancelRun()
+				closeOffset := collector.Len()
+				writePTY(t, master, "\x1b")
+				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+				writePTY(t, master, "/exit\r")
+				waitForRunReturn(t, runResult)
 				waitForSubsequence(t, collector, 0, altScreenExitSeq)
-				if err, ok := runResult.Wait(ptyTestTimeout); !ok {
-					t.Fatal("timed out waiting for tui.Run to return")
-				} else if err != nil && !isExpectedCleanupRunError(err) {
-					t.Fatalf("tui.Run() error = %v", err)
-				}
 			},
 		},
 		{
@@ -108,13 +107,12 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 				waitForSubsequence(t, collector, 0, wideFooterMarker)
 				writePTY(t, master, "/session\r")
 				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
-				cancelRun()
+				closeOffset := collector.Len()
+				writePTY(t, master, "\x1b")
+				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+				writePTY(t, master, "/exit\r")
+				waitForRunReturn(t, runResult)
 				waitForSubsequence(t, collector, 0, altScreenExitSeq)
-				if err, ok := runResult.Wait(ptyTestTimeout); !ok {
-					t.Fatal("timed out waiting for tui.Run to return")
-				} else if err != nil && !isExpectedCleanupRunError(err) {
-					t.Fatalf("tui.Run() error = %v", err)
-				}
 			},
 		},
 	})

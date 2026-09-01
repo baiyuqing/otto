@@ -27,20 +27,7 @@ func boundedAuthError(kind, cause error) error {
 	if cause == nil {
 		return nil
 	}
-	return authError{kind: kind}
-}
-
-type authError struct{ kind error }
-
-func (e authError) Error() string {
-	if e.kind == nil {
-		return ""
-	}
-	return e.kind.Error()
-}
-
-func (e authError) Is(target error) bool {
-	return target == e.kind
+	return kind
 }
 
 // Credentials holds the tokens obtained from the ChatGPT OAuth flow. It is

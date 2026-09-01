@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -24,8 +23,6 @@ const (
 	betaHeader = "responses=experimental"
 	originator = "codex_cli_rs"
 
-	maxErrorBody = 32 << 10
-
 	defaultDialTimeout           = 30 * time.Second
 	defaultKeepAlive             = 30 * time.Second
 	defaultTLSHandshakeTimeout   = 10 * time.Second
@@ -40,6 +37,10 @@ type Client struct {
 	tokenSource oauth2.TokenSource
 	accountID   string
 	httpClient  *http.Client
+}
+
+type contextTokenSource interface {
+	TokenContext(context.Context) (*oauth2.Token, error)
 }
 
 var (
@@ -84,8 +85,11 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 	if c.tokenSource == nil {
 		return provider.Response{}, errChatGPTAuthorizationFailed
 	}
-	token, err := c.tokenSource.Token()
+	token, err := tokenForContext(ctx, c.tokenSource)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return provider.Response{}, err
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return provider.Response{}, ctxErr
 		}
@@ -127,15 +131,7 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBody+1))
-		body = body[:min(len(body), maxErrorBody)]
-		message := strings.TrimSpace(requestRedactor.redactString(string(body)))
-		if message == "" {
-			message = fmt.Sprintf("chatgpt responses HTTP %d", response.StatusCode)
-		} else {
-			message = fmt.Sprintf("chatgpt responses HTTP %d: %s", response.StatusCode, message)
-		}
-		return provider.Response{}, errors.New(message)
+		return provider.Response{}, fmt.Errorf("chatgpt responses HTTP %d", response.StatusCode)
 	}
 
 	emitter := requestRedactor.wrapEmit(emit)
@@ -153,6 +149,13 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 	return requestRedactor.redactResponse(result), nil
 }
 
+func tokenForContext(ctx context.Context, source oauth2.TokenSource) (*oauth2.Token, error) {
+	if contextual, ok := source.(contextTokenSource); ok {
+		return contextual.TokenContext(ctx)
+	}
+	return source.Token()
+}
+
 func defaultHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -163,5 +166,10 @@ func defaultHTTPClient() *http.Client {
 			MaxResponseHeaderBytes: defaultMaxHeaderBytes,
 			ForceAttemptHTTP2:      true,
 		},
+		CheckRedirect: refuseResponsesRedirects,
 	}
+}
+
+func refuseResponsesRedirects(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }

@@ -9,16 +9,23 @@ import (
 	"io"
 	"strings"
 
+	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/memory"
 )
 
 var (
-	memoryOpenService           = openMemoryService
-	memoryWorkspaceScopeFunc    = workspaceMemoryScope
-	errMemoryCommandUnavailable = errors.New("memory command is unavailable")
+	memoryOpenService                = openMemoryService
+	memoryWorkspaceScopeFunc         = workspaceMemoryScope
+	errMemoryCommandUnavailable      = errors.New("memory command is unavailable")
+	errMemoryConfigUnavailable       = errors.New("memory configuration is invalid or unavailable")
+	errMemoryBackendUnavailable      = errors.New("memory backend is unavailable")
+	errMemoryWorkingDirectoryInvalid = errors.New("working directory is invalid or unavailable")
+	errMemoryWorkspaceUnavailable    = errors.New("memory workspace is invalid or unavailable")
 )
+
+const memoryStoreUnavailableWarning = "warning: memory store unavailable, continuing without memory"
 
 // runMemoryCommand handles the standalone "otto memory status|forget <id>"
 // CLI, dispatched before the main flag set is parsed. It builds only the
@@ -53,13 +60,13 @@ func runMemoryCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 	}
 	_, configFile, err := loadConfig(cliOptions{configPath: *configPath, explicitConfig: *configPath != ""}, home)
 	if err != nil {
-		return fail(stderr, "load config: %v", err)
+		return fail(stderr, "load config: configuration is invalid or unavailable")
 	}
 	environment := configEnvironment(configFile, lookup)
 	environment["HOME"] = home
 	memoryCfg, err := config.ResolveMemory(configFile, environment, config.Overrides{})
 	if err != nil {
-		return fail(stderr, "%v", err)
+		return fail(stderr, "%v", errMemoryConfigUnavailable)
 	}
 	capturedAuth := captureAuthCredentials(auth.PathForHome(home))
 	collector := runtimeBuilder{
@@ -79,7 +86,7 @@ func runMemoryCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 	case "forget":
 		workspacePath, err := canonicalDirectory(*cwd)
 		if err != nil {
-			return fail(stderr, "resolve cwd: %v", err)
+			return fail(stderr, "resolve cwd: %v", errMemoryWorkingDirectoryInvalid)
 		}
 		return runMemoryForget(ctx, memoryCfg, secretValues, workspacePath, recordID, stdout, stderr)
 	default:
@@ -91,15 +98,18 @@ func runMemoryStatus(ctx context.Context, cfg config.MemoryRuntime, secretValues
 	var warning bytes.Buffer
 	service, _, usable, err := memoryOpenService(ctx, cfg, secretValues, &warning)
 	if err != nil {
-		return fail(stderr, "%v", err)
+		return fail(stderr, "%v", errMemoryBackendUnavailable)
 	}
-	defer service.Close()
+	if service != nil {
+		defer service.Close()
+	}
+	redactor := agent.NewRedactorWithCompleteness(secretValues, true)
 	_, _ = fmt.Fprintf(stdout, "enabled: %t\n", cfg.Enabled)
 	_, _ = fmt.Fprintf(stdout, "backend: %s\n", cfg.Backend)
-	_, _ = fmt.Fprintf(stdout, "path: %s\n", cfg.SQLitePath)
+	_, _ = fmt.Fprintf(stdout, "path: %s\n", redactor.RedactString(cfg.SQLitePath))
 	_, _ = fmt.Fprintf(stdout, "usable: %t\n", usable)
-	if warning.Len() > 0 {
-		_, _ = io.Copy(stdout, &warning)
+	if hasMemoryWarning(warning.String()) {
+		_, _ = fmt.Fprintln(stdout, memoryStoreUnavailableWarning)
 	}
 	return 0
 }
@@ -108,15 +118,17 @@ func runMemoryForget(ctx context.Context, cfg config.MemoryRuntime, secretValues
 	var warning bytes.Buffer
 	service, userScope, usable, err := memoryOpenService(ctx, cfg, secretValues, &warning)
 	if err != nil {
-		return fail(stderr, "%v", err)
+		return fail(stderr, "%v", errMemoryBackendUnavailable)
 	}
-	defer service.Close()
+	if service != nil {
+		defer service.Close()
+	}
 	if !usable {
-		return fail(stderr, "memory is not usable: %s", strings.TrimSpace(warning.String()))
+		return fail(stderr, "memory is not usable")
 	}
 	workspaceScope, err := memoryWorkspaceScopeFunc(cfg, workspacePath)
 	if err != nil {
-		return fail(stderr, "%v", err)
+		return fail(stderr, "%v", errMemoryWorkspaceUnavailable)
 	}
 
 	var lastErr error
@@ -135,4 +147,8 @@ func runMemoryForget(ctx context.Context, cfg config.MemoryRuntime, secretValues
 		return 0
 	}
 	return fail(stderr, "record %s not found: %v", id, lastErr)
+}
+
+func hasMemoryWarning(text string) bool {
+	return strings.TrimSpace(text) != ""
 }

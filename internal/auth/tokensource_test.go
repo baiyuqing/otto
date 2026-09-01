@@ -201,9 +201,130 @@ func TestTokenSourcePreservesContextCancellation(t *testing.T) {
 	}
 }
 
+func TestTokenSourceRefreshBlocksAllRedirects(t *testing.T) {
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var sourceCalls atomic.Int32
+			var targetCalls atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetCalls.Add(1)
+				http.Error(w, "redirect target must not be reached", http.StatusInternalServerError)
+			}))
+			defer target.Close()
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sourceCalls.Add(1)
+				http.Redirect(w, r, target.URL, status)
+			}))
+			defer source.Close()
+
+			src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: source.URL}, Credentials{
+				AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+			}, filepath.Join(t.TempDir(), "chatgpt.json"))
+			_, err := src.Token()
+			if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+				t.Fatalf("Token() error = %v, want ErrAccessTokenRefreshFailed", err)
+			}
+			if sourceCalls.Load() == 0 || targetCalls.Load() != 0 {
+				t.Fatalf("source/target calls = %d/%d, want >0/0", sourceCalls.Load(), targetCalls.Load())
+			}
+		})
+	}
+}
+
+func TestTokenSourceTokenContextUsesTurnCancellation(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce atomic.Int32
+	original := oauthHTTPClientFactory
+	oauthHTTPClientFactory = func() *http.Client {
+		return &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if startedOnce.CompareAndSwap(0, 1) {
+				close(started)
+			}
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})}
+	}
+	defer func() { oauthHTTPClientFactory = original }()
+
+	src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: "https://auth.example/token"}, Credentials{
+		AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+	}, filepath.Join(t.TempDir(), "chatgpt.json"))
+	contextual, ok := src.(interface {
+		TokenContext(context.Context) (*oauth2.Token, error)
+	})
+	if !ok {
+		t.Fatal("token source does not implement TokenContext")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := contextual.TokenContext(ctx)
+		done <- err
+	}()
+
+	<-started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("TokenContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestTokenSourceTokenContextUsesBaseCancellation(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce atomic.Int32
+	original := oauthHTTPClientFactory
+	oauthHTTPClientFactory = func() *http.Client {
+		return &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if startedOnce.CompareAndSwap(0, 1) {
+				close(started)
+			}
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})}
+	}
+	defer func() { oauthHTTPClientFactory = original }()
+
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	src := newTokenSource(baseCtx, oauth2.Endpoint{TokenURL: "https://auth.example/token"}, Credentials{
+		AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+	}, filepath.Join(t.TempDir(), "chatgpt.json"))
+	contextual, ok := src.(interface {
+		TokenContext(context.Context) (*oauth2.Token, error)
+	})
+	if !ok {
+		t.Fatal("token source does not implement TokenContext")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := contextual.TokenContext(context.Background())
+		done <- err
+	}()
+
+	<-started
+	cancelBase()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("TokenContext() error = %v, want context.Canceled", err)
+	}
+}
+
 type tokenSourceFunc func() (*oauth2.Token, error)
 
 func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 type hostileAuthError struct{ callsCount atomic.Int32 }
 

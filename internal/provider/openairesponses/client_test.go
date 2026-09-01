@@ -183,14 +183,16 @@ func TestCompleteSuccessfulStreamAndResponseRedactRotatedCredentials(t *testing.
 	}
 }
 
-func TestCompleteHTTPErrorRedactsTokenAndAccountID(t *testing.T) {
+func TestCompleteHTTPErrorReturnsFixedStatusOnlyError(t *testing.T) {
 	const (
 		accessToken = "secret-abc"
 		accountID   = "acct-secret"
+		oldBoundary = 32 << 10
 	)
+	body := strings.Repeat("x", oldBoundary-len(accessToken)/2) + accessToken + " account " + accountID
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = io.WriteString(w, "invalid token "+accessToken+" account "+accountID)
+		_, _ = io.WriteString(w, body)
 	}))
 	defer server.Close()
 
@@ -202,10 +204,94 @@ func TestCompleteHTTPErrorRedactsTokenAndAccountID(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on HTTP 401")
 	}
+	if got, want := err.Error(), "chatgpt responses HTTP 401"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
 	for _, secret := range []string{accessToken, accountID} {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("error leaked %q: %q", secret, err.Error())
 		}
+	}
+}
+
+func TestCompleteNon2XXDoesNotInspectBodyReadError(t *testing.T) {
+	hostile := &hostileBoundaryError{}
+	client := newWithBaseURL("https://example.test",
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "access-token"}),
+		"acct-1",
+		&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: failingReadCloser{err: hostile}}, nil
+		})},
+	)
+	_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, nil)
+	if err == nil {
+		t.Fatal("Complete() succeeded")
+	}
+	if got, want := err.Error(), "chatgpt responses HTTP 502"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+	if hostile.calls() != 0 {
+		t.Fatalf("body read error methods called %d times", hostile.calls())
+	}
+}
+
+func TestCompleteDefaultClientBlocks307RedirectWithoutForwardingRequest(t *testing.T) {
+	var sourceCalls atomic.Int32
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls.Add(1)
+		http.Error(w, "redirect target must not be reached", http.StatusInternalServerError)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceCalls.Add(1)
+		http.Redirect(w, r, target.URL+"/responses", http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	client := newWithBaseURL(source.URL,
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "redirect-access-token"}),
+		"redirect-account-id", nil)
+	_, err := client.Complete(context.Background(), provider.Request{
+		Model:        "m",
+		SystemPrompt: "authorization and account must not reach redirect target",
+		Messages: []model.Message{{
+			Role:   model.RoleUser,
+			Blocks: []model.Block{{Type: model.BlockText, Text: "redirect body must not reach target"}},
+		}},
+	}, nil)
+	if err == nil {
+		t.Fatal("Complete() succeeded")
+	}
+	if got, want := err.Error(), "chatgpt responses HTTP 307"; got != want {
+		t.Fatalf("error = %q, want %q", got, want)
+	}
+	if sourceCalls.Load() != 1 || targetCalls.Load() != 0 {
+		t.Fatalf("source/target calls = %d/%d, want 1/0", sourceCalls.Load(), targetCalls.Load())
+	}
+}
+
+func TestCompleteUsesTurnContextAwareTokenSource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, cannedStream)
+	}))
+	defer server.Close()
+
+	type contextKey string
+	const key contextKey = "request-id"
+	source := &contextAwareTokenSource{token: &oauth2.Token{AccessToken: "ctx-token"}}
+	client := newWithBaseURL(server.URL, source, "acct-1", server.Client())
+	ctx := context.WithValue(context.Background(), key, "turn-ctx")
+	if _, err := client.Complete(ctx, provider.Request{Model: "m"}, nil); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if source.tokenCalls.Load() != 0 || source.tokenContextCalls.Load() != 1 {
+		t.Fatalf("Token/TokenContext calls = %d/%d, want 0/1", source.tokenCalls.Load(), source.tokenContextCalls.Load())
+	}
+	if got := source.lastCtx.Value(key); got != "turn-ctx" {
+		t.Fatalf("TokenContext() saw context value %v, want turn-ctx", got)
 	}
 }
 
@@ -328,6 +414,24 @@ type failingTokenSource struct {
 
 func (s failingTokenSource) Token() (*oauth2.Token, error) {
 	return s.token, s.err
+}
+
+type contextAwareTokenSource struct {
+	token             *oauth2.Token
+	tokenCalls        atomic.Int32
+	tokenContextCalls atomic.Int32
+	lastCtx           context.Context
+}
+
+func (s *contextAwareTokenSource) Token() (*oauth2.Token, error) {
+	s.tokenCalls.Add(1)
+	return nil, errors.New("Token() must not be used when TokenContext is available")
+}
+
+func (s *contextAwareTokenSource) TokenContext(ctx context.Context) (*oauth2.Token, error) {
+	s.tokenContextCalls.Add(1)
+	s.lastCtx = ctx
+	return s.token, nil
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)

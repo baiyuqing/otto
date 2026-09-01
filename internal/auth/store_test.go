@@ -130,6 +130,9 @@ func TestBoundedAuthErrorsDoNotExposeWrappedCause(t *testing.T) {
 	if !errors.Is(err, ErrCredentialsUnavailable) {
 		t.Fatalf("errors.Is(err, ErrCredentialsUnavailable) = false for %v", err)
 	}
+	if err != ErrCredentialsUnavailable {
+		t.Fatalf("boundedAuthError() = %#v, want direct sentinel %#v", err, ErrCredentialsUnavailable)
+	}
 	if errors.Unwrap(err) != nil {
 		t.Fatalf("errors.Unwrap(err) = %#v, want nil", errors.Unwrap(err))
 	}

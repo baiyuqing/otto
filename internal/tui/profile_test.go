@@ -19,6 +19,12 @@ type switchBackend struct {
 	setDefaultCalls []string
 }
 
+type suppressedModelBackend struct {
+	*switchBackend
+	infoCalls     int
+	profilesCalls int
+}
+
 func (f *switchBackend) Profiles() []string { return f.profiles }
 
 func (f *switchBackend) SwitchProfile(ctx context.Context, name string) (app.ResumeResult, error) {
@@ -32,6 +38,18 @@ func (f *switchBackend) SwitchProfile(ctx context.Context, name string) (app.Res
 func (f *switchBackend) SetDefaultProfile(_ context.Context, name string) error {
 	f.setDefaultCalls = append(f.setDefaultCalls, name)
 	return nil
+}
+
+func (s *suppressedModelBackend) DynamicContentAvailable() bool { return false }
+
+func (s *suppressedModelBackend) Info() app.Info {
+	s.infoCalls++
+	return s.switchBackend.Info()
+}
+
+func (s *suppressedModelBackend) Profiles() []string {
+	s.profilesCalls++
+	return s.switchBackend.Profiles()
 }
 
 func TestModelCommandShowsCurrentAndProfiles(t *testing.T) {
@@ -121,6 +139,27 @@ func TestModelCommandUnavailableWithoutSwitcher(t *testing.T) {
 	}
 	if !strings.Contains(got.statusText, app.ErrProfileSwitchUnavailable.Error()) {
 		t.Fatalf("statusText = %q", got.statusText)
+	}
+}
+
+func TestModelCommandUnavailableWhenDynamicContentSuppressedWithoutBackendCallbacks(t *testing.T) {
+	backend := &suppressedModelBackend{switchBackend: &switchBackend{
+		fakeBackend: fakeBackend{info: app.Info{Profile: "default", Provider: "openai-compatible", Model: "gpt-4o"}},
+		profiles:    []string{"default", "chatgpt"},
+	}}
+	m := newTestModelWithBackend(t, backend)
+	backend.infoCalls = 0
+	backend.profilesCalls = 0
+	updated, cmd := m.handleModelCommand("")
+	if cmd != nil {
+		t.Fatalf("cmd = %v, want nil", cmd)
+	}
+	got := updated.(Model)
+	if got.statusText != app.ErrProfileSwitchUnavailable.Error() {
+		t.Fatalf("statusText = %q, want %q", got.statusText, app.ErrProfileSwitchUnavailable.Error())
+	}
+	if backend.infoCalls != 0 || backend.profilesCalls != 0 || len(backend.switchCalls) != 0 || len(backend.setDefaultCalls) != 0 {
+		t.Fatalf("backend callbacks = info %d profiles %d switch %v default %v, want none", backend.infoCalls, backend.profilesCalls, backend.switchCalls, backend.setDefaultCalls)
 	}
 }
 

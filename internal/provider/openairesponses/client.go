@@ -87,9 +87,6 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 	}
 	token, err := tokenForContext(ctx, c.tokenSource)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return provider.Response{}, err
-		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return provider.Response{}, ctxErr
 		}

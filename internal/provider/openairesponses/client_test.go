@@ -322,6 +322,25 @@ func TestCompleteTokenSourceFailuresReturnFixedAuthError(t *testing.T) {
 	}
 }
 
+func TestCompleteTokenSourceFailureDoesNotInspectArbitraryError(t *testing.T) {
+	hostile := &hostileBoundaryError{}
+	client := newWithBaseURL("https://example.test",
+		failingTokenSource{err: hostile},
+		"acct-1",
+		&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("transport must not be called when authorization fails")
+			return nil, nil
+		})},
+	)
+	_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, nil)
+	if err != errChatGPTAuthorizationFailed {
+		t.Fatalf("Complete() error = %v, want fixed authorization failure", err)
+	}
+	if hostile.calls() != 0 {
+		t.Fatalf("token source error methods called %d times", hostile.calls())
+	}
+}
+
 func TestCompleteStreamReadErrorRedactsTokenAndAccountID(t *testing.T) {
 	const (
 		accessToken = "stream-token-secret"

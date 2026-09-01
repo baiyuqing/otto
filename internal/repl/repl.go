@@ -62,8 +62,6 @@ func NewWithInput(input *Input, stdout, stderr io.Writer, backend app.Backend) *
 	return &REPL{input: input, stdout: stdout, stderr: stderr, backend: backend}
 }
 
-const ottoMark = "(●ᴥ●)  otto"
-
 const logo = `     ____  __  __
     / __ \/ /_/ /____
    / /_/ / __/ __/ __ \
@@ -72,9 +70,11 @@ const logo = `     ____  __  __
 
 func (r *REPL) Run(ctx context.Context) error {
 	_, _ = io.WriteString(r.stdout, logo)
-	if info := r.backend.Info(); info.SessionID != "" {
+	info := r.backend.Info()
+	if info.SessionID != "" {
 		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 	}
+	_, _ = fmt.Fprintf(r.stdout, "Sandbox: %s\n", info.Sandbox.Summary())
 	lines := make(chan scanResult)
 	ack := make(chan struct{})
 	stop := make(chan struct{})
@@ -271,7 +271,10 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 			break
 		}
 		info := r.backend.Info()
-		_, _ = fmt.Fprintf(r.stdout, "ID: %s\nPath: %s\nProvider: %s\nModel: %s\n", info.SessionID, info.SessionPath, info.Provider, info.Model)
+		_, _ = fmt.Fprintf(r.stdout, "ID: %s\nPath: %s\nProvider: %s\nModel: %s\nSandbox: %s\n", info.SessionID, info.SessionPath, info.Provider, info.Model, info.Sandbox.Summary())
+		if reason := info.Sandbox.ReasonCode(); reason != "" {
+			_, _ = fmt.Fprintf(r.stdout, "Sandbox reason: %s\n", reason)
+		}
 		return false, nil
 	case "compact":
 		focus := strings.TrimSpace(args)
@@ -291,7 +294,7 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if args != "" {
 			break
 		}
-		return r.logoutCommand()
+		return r.logoutCommand(ctx)
 	}
 	_, _ = fmt.Fprintf(r.stderr, "unknown command: %s\n", command)
 	return false, nil

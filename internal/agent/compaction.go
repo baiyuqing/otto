@@ -35,9 +35,11 @@ func (a *Agent) Compact(ctx context.Context, focus string, emit func(Event)) (Co
 func (a *Agent) compact(ctx context.Context, reason CompactionReason, focus string, emit func(Event)) (CompactionResult, error) {
 	automatic := reason != CompactionManual
 	a.emitCompaction(emit, EventCompactionStarted, CompactionResult{Reason: reason, Automatic: automatic})
-
 	if err := ctx.Err(); err != nil {
 		return CompactionResult{}, err
+	}
+	if !a.redactor.complete {
+		return CompactionResult{}, ErrNothingToCompact
 	}
 	messages := cloneMessages(a.session.Messages())
 	latest, hasLatest := a.session.LatestCompaction()
@@ -191,7 +193,7 @@ func (a *Agent) redactCompactionSelection(selection compactionSelection) compact
 	}
 	redacted.HistoricalSource = redactMessages(selection.HistoricalSource)
 	redacted.TurnPrefixSource = redactMessages(selection.TurnPrefixSource)
-	redacted.Retained = cloneMessages(selection.Retained)
+	redacted.Retained = redactMessages(selection.Retained)
 	return redacted
 }
 

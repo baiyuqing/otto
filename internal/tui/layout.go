@@ -91,39 +91,109 @@ func smallTerminalView(width, height int) string {
 }
 
 func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) string {
+	width = max(0, width)
 	profileModel := strings.Trim(strings.Trim(escapeSingleLineText(info.Profile)+"/"+escapeSingleLineText(info.Model), "/"), " ")
 	if profileModel == "" {
 		profileModel = "unknown/unknown"
 	}
 
-	fields := []string{profileModel}
-	if workspace := escapeSingleLineText(footerWorkspace(info.Workspace)); workspace != "" && width >= 72 {
-		fields = append([]string{workspace}, fields...)
+	status = escapeSingleLineText(status)
+	badge := info.Sandbox.Badge()
+	workspace := ""
+	if width >= 72 {
+		workspace = escapeSingleLineText(footerWorkspace(info.Workspace))
 	}
+	usageField := ""
+	contextField := ""
 	if width >= 48 {
 		if usage.CachedInputTokens > 0 {
-			fields = append(fields, fmt.Sprintf("tokens %s/%s (cached %s)", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens), formatFooterTokenCount(usage.CachedInputTokens)))
+			usageField = fmt.Sprintf("tokens %s/%s (cached %s)", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens), formatFooterTokenCount(usage.CachedInputTokens))
 		} else {
-			fields = append(fields, fmt.Sprintf("tokens %s/%s", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens)))
+			usageField = fmt.Sprintf("tokens %s/%s", formatFooterTokenCount(usage.InputTokens), formatFooterTokenCount(usage.OutputTokens))
 		}
-		if context := footerContextField(info); context != "" {
-			fields = append(fields, context)
-		}
+		contextField = footerContextField(info)
 	}
+	sessionID := ""
 	if info.SessionID != "" && width >= 60 {
-		fields = append(fields, escapeSingleLineText(info.SessionID))
-	}
-	if status != "" {
-		fields = append([]string{escapeSingleLineText(status)}, fields...)
+		sessionID = escapeSingleLineText(info.SessionID)
 	}
 
-	for len(fields) > 1 && lipgloss.Width(strings.Join(fields, " | ")) > max(0, width) {
-		fields = fields[:len(fields)-1]
+	optional := map[string]string{
+		"workspace": workspace,
+		"usage":     usageField,
+		"context":   contextField,
+		"session":   sessionID,
+	}
+	buildFields := func() []string {
+		fields := make([]string, 0, 7)
+		if status != "" {
+			fields = append(fields, status)
+		}
+		if optional["workspace"] != "" {
+			fields = append(fields, optional["workspace"])
+		}
+		fields = append(fields, profileModel, badge)
+		if optional["usage"] != "" {
+			fields = append(fields, optional["usage"])
+		}
+		if optional["context"] != "" {
+			fields = append(fields, optional["context"])
+		}
+		if optional["session"] != "" {
+			fields = append(fields, optional["session"])
+		}
+		return fields
+	}
+
+	fields := buildFields()
+	for _, name := range []string{"session", "workspace", "context", "usage"} {
+		if lipgloss.Width(strings.Join(fields, " | ")) <= width {
+			break
+		}
+		if optional[name] == "" {
+			continue
+		}
+		optional[name] = ""
+		fields = buildFields()
 	}
 
 	footer := strings.Join(fields, " | ")
-	width = max(0, width)
+	if lipgloss.Width(footer) > width {
+		footer = renderFooterCore(width, status, profileModel, badge)
+	}
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
+}
+
+func renderFooterCore(width int, status, profileModel, badge string) string {
+	if width <= 0 {
+		return ""
+	}
+	const separator = " | "
+	badgeWidth := ansi.StringWidth(badge)
+	if badgeWidth >= width {
+		return ansi.Truncate(badge, width, "")
+	}
+	available := width - badgeWidth - ansi.StringWidth(separator)
+	if available <= 0 {
+		return badge
+	}
+
+	left := profileModel
+	if status != "" {
+		withProfile := status + separator + profileModel
+		if ansi.StringWidth(withProfile) <= available {
+			left = withProfile
+		} else {
+			left = status
+		}
+	}
+	if ansi.StringWidth(left) > available {
+		left = ansi.Truncate(left, available, "…")
+	}
+	if left == "" {
+		return badge
+	}
+	return left + separator + badge
 }
 
 const contextBarWidth = 10
@@ -264,8 +334,7 @@ func renderOverlay(width, height int, content string) string {
 	if width < 4 || height < 3 {
 		return fitToBounds(content, width, height)
 	}
-	innerWidth := width - 4 // border plus one cell of horizontal padding per side
-	innerHeight := height - 2
+	innerWidth, innerHeight := overlayContentBounds(width, height)
 	content = truncateAndClipLines(content, innerWidth, innerHeight)
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -276,9 +345,31 @@ func renderOverlay(width, height int, content string) string {
 	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box), width, height)
 }
 
-func helpOverlayContent(width, height int) string {
-	full := []string{
-		"Help (? or /help)",
+func overlayContentBounds(width, height int) (int, int) {
+	width = max(0, width)
+	height = max(0, height)
+	if width < 4 || height < 3 {
+		return width, height
+	}
+	// The overlay has a one-cell border and one cell of horizontal padding
+	// on each side. Its border consumes the two vertical cells.
+	return width - 4, height - 2
+}
+
+func sandboxOverlayLines(innerWidth int, info app.SandboxInfo) []string {
+	if innerWidth <= 0 {
+		return nil
+	}
+	return strings.Split(ansi.Wrap("Sandbox: "+info.Summary(), innerWidth, ""), "\n")
+}
+
+func helpOverlayContent(width, height int, info app.SandboxInfo) string {
+	innerWidth, innerHeight := overlayContentBounds(width, height)
+	sandboxLines := sandboxOverlayLines(innerWidth, info)
+	full := []string{"Help (? or /help)"}
+	full = append(full, sandboxLines...)
+	full = append(full,
+		"",
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
 		"Ctrl+O toggle details",
@@ -287,22 +378,34 @@ func helpOverlayContent(width, height int) string {
 		"Home/End transcript top/bottom",
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
-	}
+	)
 	for _, command := range slashCommands {
 		full = append(full, command.Name+" "+command.Description)
 	}
-	if height-2 >= len(full) {
-		return strings.Join(full, "\n")
+	if len(full) <= innerHeight {
+		return truncateAndClipLines(strings.Join(full, "\n"), innerWidth, innerHeight)
 	}
-	// Compact form for short terminals: three dense control rows plus the
-	// command names width-packed so every command, including the last, stays
-	// visible as the registry grows.
-	innerWidth := max(0, width-4)
+	if innerHeight <= 6 {
+		compact := []string{
+			"Help ? /help Enter Esc",
+			"Shift+Enter Alt+Enter",
+			"Ctrl+O PgUp/PgDn Home/End Ctrl+C",
+			"/session /new /exit",
+		}
+		compact = append(compact, sandboxLines...)
+		return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, innerHeight)
+	}
+
 	compact := []string{
 		"Help (?/help) · Enter · Esc",
 		"Shift+Enter/Alt+Enter newline",
-		"Ctrl+O PgUp/PgDn Home/End Ctrl+C",
+		"Ctrl+O toggle details",
+		"PgUp/PgDn · Home/End · Ctrl+C",
 	}
+	if remaining := innerHeight - len(compact); remaining > len(sandboxLines) {
+		compact = append(compact, sandboxLines...)
+	}
+	commandLines := make([]string, 0, len(slashCommands))
 	line := ""
 	for _, command := range slashCommands {
 		switch {
@@ -311,18 +414,24 @@ func helpOverlayContent(width, height int) string {
 		case ansi.StringWidth(line+" "+command.Name) <= innerWidth:
 			line += " " + command.Name
 		default:
-			compact = append(compact, line)
+			commandLines = append(commandLines, line)
 			line = command.Name
 		}
 	}
 	if line != "" {
-		compact = append(compact, line)
+		commandLines = append(commandLines, line)
 	}
-	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, max(0, height-2))
+	compact = append(compact, commandLines...)
+	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, innerHeight)
 }
 
-func sessionOverlayContent(info app.Info) string {
+func sessionOverlayContent(width, height int, info app.Info) string {
+	innerWidth, innerHeight := overlayContentBounds(width, height)
 	lines := []string{"Session"}
+	lines = append(lines, sandboxOverlayLines(innerWidth, info.Sandbox)...)
+	if reason := info.Sandbox.ReasonCode(); reason != "" {
+		lines = append(lines, "Sandbox reason: "+reason)
+	}
 	appendField := func(name, value string) {
 		if value == "" {
 			return
@@ -334,7 +443,7 @@ func sessionOverlayContent(info app.Info) string {
 	appendField("Provider", info.Provider)
 	appendField("Profile", info.Profile)
 	appendField("Model", info.Model)
-	return strings.Join(lines, "\n")
+	return truncateAndClipLines(strings.Join(lines, "\n"), innerWidth, innerHeight)
 }
 
 func wrapAndClip(content string, width, height int) string {

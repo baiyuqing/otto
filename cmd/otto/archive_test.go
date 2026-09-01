@@ -92,7 +92,7 @@ func TestRunArchiveFlagConflicts(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), test.args, strings.NewReader(""), &stdout, &stderr, func(string) string { return "" })
+			code := run(context.Background(), test.args, strings.NewReader(""), &stdout, &stderr, testEnviron(nil))
 			if code != 2 {
 				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 			}

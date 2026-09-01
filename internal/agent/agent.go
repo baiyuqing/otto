@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -54,6 +55,15 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 	if redactor == nil {
 		redactor = NewRedactor(nil)
 	}
+	if redactor.complete && !boundaryOptionsUnchanged(redactor, registry.Definitions(), options) {
+		redactor.complete = false
+		redactor.marker = ""
+		redactor.values = nil
+	}
+	if !redactor.complete {
+		options.Model = ""
+		options.Thinking = ""
+	}
 	return &Agent{provider: completionProvider, registry: registry, session: memory, options: options, redactor: redactor}
 }
 
@@ -69,6 +79,9 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 	a.operationMu.Lock()
 	defer a.operationMu.Unlock()
 
+	if !a.redactor.complete {
+		return a.runWithIncompleteRedactions(ctx, emit)
+	}
 	if text := trimSpace(userText); text == "" {
 		return a.fail(emit, ErrEmptyUserText)
 	}
@@ -321,6 +334,15 @@ func (a *Agent) emit(emit func(Event), event Event) {
 	}
 }
 
+func (a *Agent) runWithIncompleteRedactions(ctx context.Context, emit func(Event)) error {
+	a.emit(emit, Event{Type: EventAgentStarted})
+	if err := ctx.Err(); err != nil {
+		return a.fail(emit, err)
+	}
+	a.emit(emit, Event{Type: EventAgentFinished})
+	return nil
+}
+
 func (a *Agent) fail(emit func(Event), err error) error {
 	err = a.redactor.RedactError(err)
 	a.emit(emit, Event{Type: EventAgentError, Err: err})
@@ -348,6 +370,63 @@ func defaultNewID() string {
 		panic(err)
 	}
 	return hex.EncodeToString(buf)
+}
+
+func boundaryOptionsUnchanged(redactor *Redactor, definitions []model.ToolDefinition, options Options) bool {
+	if redactor == nil || !redactor.complete {
+		return false
+	}
+	for _, value := range []string{options.Model, options.SystemPrompt, options.Thinking} {
+		if redactor.RedactString(value) != value {
+			return false
+		}
+	}
+	return boundaryToolDefinitionsUnchanged(redactor, definitions)
+}
+
+func boundaryToolDefinitionsUnchanged(redactor *Redactor, value any) bool {
+	if redactor == nil || !redactor.complete || value == nil {
+		return redactor != nil && redactor.complete
+	}
+	switch value := value.(type) {
+	case string:
+		return redactor.RedactString(value) == value
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if reflected.IsNil() {
+			return true
+		}
+		return boundaryToolDefinitionsUnchanged(redactor, reflected.Elem().Interface())
+	case reflect.Struct:
+		for index := 0; index < reflected.NumField(); index++ {
+			if !boundaryToolDefinitionsUnchanged(redactor, reflected.Field(index).Interface()) {
+				return false
+			}
+		}
+		return true
+	case reflect.Slice, reflect.Array:
+		for index := 0; index < reflected.Len(); index++ {
+			if !boundaryToolDefinitionsUnchanged(redactor, reflected.Index(index).Interface()) {
+				return false
+			}
+		}
+		return true
+	case reflect.Map:
+		iter := reflected.MapRange()
+		for iter.Next() {
+			if iter.Key().Kind() == reflect.String && redactor.RedactString(iter.Key().String()) != iter.Key().String() {
+				return false
+			}
+			if !boundaryToolDefinitionsUnchanged(redactor, iter.Value().Interface()) {
+				return false
+			}
+		}
+		return true
+	default:
+		return true
+	}
 }
 
 func cloneTools(tools []model.ToolDefinition) []model.ToolDefinition {

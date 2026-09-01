@@ -24,6 +24,7 @@ Keep responsibilities split along the current Go package layout:
 - `internal/provider`: neutral provider contract
 - `internal/provider/openaicompat`: all Stage 1 provider-specific HTTP/JSON/SSE code
 - `internal/repl`: line-oriented REPL rendering and commands
+- `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
 - `internal/session`: in-memory and JSONL session storage
 - `internal/tool`: workspace validation plus `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`
 - `internal/tui`: full-screen Bubble Tea frontend, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
@@ -33,7 +34,7 @@ Rules:
 - Keep provider-specific wire structs inside `internal/provider/openaicompat`.
 - Keep file-tool workspace enforcement inside `internal/tool`.
 - Keep session persistence append-only.
-- Keep `bash` unsandboxed, but start it in the selected workspace.
+- Keep `bash` delegated through `internal/sandbox`; only explicit sandbox `off` may use direct execution, and it still starts in the selected workspace.
 - Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store directly — only through `memory.Binding`/`memory.Reader`/`memory.Proposer` or the `app.Controller` memory facade. Per-turn recall and explicit management (`memory_search`/`remember`/`forget` tools, `/memory`/`/remember` in both frontends, `otto memory status|forget`) are wired end to end via `[memory]` TOML config; model- and human-originated writes always land as pending candidates requiring review. Automatic extraction (`Binding.Observe`) and durability (backup/restore/verify) remain unwired — do not document those as working Stage 1 features.
 
 ## Working preferences
@@ -89,7 +90,7 @@ Do not add production behavior without a failing test first unless the user expl
 - Never put raw API keys, OAuth tokens, or auth headers in TOML, JSONL session fixtures, logs, docs, or tests.
 - Redact sample values in errors and examples.
 - `read`, `grep`, `find`, `ls`, `write`, and `edit` must reject workspace escapes after canonical path and symlink validation.
-- Do not describe `bash` as sandboxed. It is intentionally unsandboxed.
+- Do not describe `bash` as always unsandboxed; Stage 1 defaults to macOS Seatbelt and only explicit sandbox `off` is unsandboxed.
 
 ## Documentation expectations
 

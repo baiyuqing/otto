@@ -43,6 +43,10 @@ func profileSwitcherFromBackend(backend app.Backend) (app.ProfileSwitcher, bool)
 // profile picker in the TUI; a named profile starts a fresh session on it,
 // reusing the /new session-replacement machinery.
 func (m Model) handleModelCommand(argument string) (tea.Model, tea.Cmd) {
+	if !app.BackendDynamicContentAvailable(m.backend) {
+		m.statusText = app.ErrProfileSwitchUnavailable.Error()
+		return m, nil
+	}
 	switcher, ok := profileSwitcherFromBackend(m.backend)
 	if !ok {
 		m.statusText = app.ErrProfileSwitchUnavailable.Error()

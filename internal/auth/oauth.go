@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 
 	"golang.org/x/oauth2"
@@ -27,6 +29,23 @@ var loopbackPorts = []int{1455, 1457}
 
 func productionEndpoint() oauth2.Endpoint {
 	return oauth2.Endpoint{AuthURL: authorizeURL, TokenURL: tokenURL}
+}
+
+var oauthHTTPClientFactory = oauthHTTPClient
+
+func oauthHTTPContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, oauth2.HTTPClient, oauthHTTPClientFactory())
+}
+
+func oauthHTTPClient() *http.Client {
+	return &http.Client{CheckRedirect: refuseOAuthRedirects}
+}
+
+func refuseOAuthRedirects(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 func oauthConfig(endpoint oauth2.Endpoint, redirectURL string) *oauth2.Config {

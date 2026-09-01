@@ -12,6 +12,9 @@ import (
 // profile/provider/model and lists configured profiles; a named profile starts
 // a fresh session on it, reusing the /new session-replacement machinery.
 func (r *REPL) modelCommand(ctx context.Context, args string) (bool, error) {
+	if !app.BackendDynamicContentAvailable(r.backend) {
+		return false, &commandError{command: "/model", err: app.ErrProfileSwitchUnavailable}
+	}
 	switcher, ok := r.backend.(app.ProfileSwitcher)
 	if !ok {
 		return false, &commandError{command: "/model", err: app.ErrProfileSwitchUnavailable}

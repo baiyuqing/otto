@@ -21,6 +21,8 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/sandboxtest"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tui"
 	"github.com/creack/pty"
@@ -42,10 +44,79 @@ const (
 	footerSessionMarker         = "resize-session-marker-0123456789"
 	selectedResumeSessionID     = "pty-selected-session"
 	selectedAssistantTranscript = "assistant-only selected resume transcript marker"
-	wideFooterMarker            = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0 | " + footerSessionMarker
-	narrowFooterMarker          = footerWorkspaceName + " | " + footerProfileModel + " | tokens 0/0"
+	wideFooterMarker            = footerWorkspaceName + " | " + footerProfileModel + " | unsafe | tokens 0/0 | " + footerSessionMarker
+	narrowFooterMarker          = footerWorkspaceName + " | " + footerProfileModel + " | unsafe | tokens 0/0"
 	ptyCompactFocus             = "focus on PTY compaction"
 )
+
+func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
+	sandboxtest.RunChecklist(t, []sandboxtest.ChecklistItem{
+		{
+			Name: "footer and help render sandbox off warning",
+			Run: func(t *testing.T) {
+				master, slave, err := pty.Open()
+				if err != nil {
+					t.Fatalf("pty.Open() error = %v", err)
+				}
+				if err := pty.Setsize(slave, &pty.Winsize{Cols: 120, Rows: 30}); err != nil {
+					t.Fatalf("pty.Setsize(120x30) error = %v", err)
+				}
+				collector := newPTYOutputCollector(master)
+				runCtx, cancelRun := context.WithCancel(context.Background())
+				backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{}), compactCh: make(chan string, 1), compactCanceledCh: make(chan struct{})}
+				runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
+				defer func() {
+					cancelRun()
+					_ = slave.Close()
+					_ = master.Close()
+					collector.Wait(t, ptyStepTimeout)
+				}()
+
+				waitForSubsequence(t, collector, 0, wideFooterMarker)
+				writePTY(t, master, "?")
+				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
+				closeOffset := collector.Len()
+				writePTY(t, master, "\x1b")
+				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+				writePTY(t, master, "/exit\r")
+				waitForRunReturn(t, runResult)
+				waitForSubsequence(t, collector, 0, altScreenExitSeq)
+			},
+		},
+		{
+			Name: "session overlay keeps sandbox status visible",
+			Run: func(t *testing.T) {
+				master, slave, err := pty.Open()
+				if err != nil {
+					t.Fatalf("pty.Open() error = %v", err)
+				}
+				if err := pty.Setsize(slave, &pty.Winsize{Cols: 120, Rows: 30}); err != nil {
+					t.Fatalf("pty.Setsize(120x30) error = %v", err)
+				}
+				collector := newPTYOutputCollector(master)
+				runCtx, cancelRun := context.WithCancel(context.Background())
+				backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{}), compactCh: make(chan string, 1), compactCanceledCh: make(chan struct{})}
+				runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
+				defer func() {
+					cancelRun()
+					_ = slave.Close()
+					_ = master.Close()
+					collector.Wait(t, ptyStepTimeout)
+				}()
+
+				waitForSubsequence(t, collector, 0, wideFooterMarker)
+				writePTY(t, master, "/session\r")
+				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
+				closeOffset := collector.Len()
+				writePTY(t, master, "\x1b")
+				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+				writePTY(t, master, "/exit\r")
+				waitForRunReturn(t, runResult)
+				waitForSubsequence(t, collector, 0, altScreenExitSeq)
+			},
+		},
+	})
+}
 
 func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -82,7 +153,7 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	var stderr bytes.Buffer
 	runResult := startRunResult(func() error {
-		code := run(runCtx, []string{"--config", configPath, "--cwd", workspace, "--resume", currentPath, "--ui", "tui"}, slave, slave, &stderr, testGetenv(map[string]string{
+		code := runForTest(t, runCtx, []string{"--config", configPath, "--cwd", workspace, "--resume", currentPath, "--ui", "tui"}, slave, slave, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "PTY_TEST_KEY": "offline-test-key",
 		}))
 		if code != 0 {
@@ -445,6 +516,112 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	t.Logf("PTY compaction escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
 }
 
+func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":"{\"command\":\"touch host-child-must-not-start\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "sandboxed-bash-pty")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeCLIConfig(t, "openai-compatible", "PTY_TEST_KEY", server.URL)
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open() error = %v", err)
+	}
+	initialMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read initial terminal mode: %v", err)
+	}
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize(100x30) error = %v", err)
+	}
+
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	executor := &recordingSandboxExecutor{execute: func(ctx context.Context, _ sandbox.Request, _ sandbox.Streams) (sandbox.ExitStatus, error) {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		return sandbox.ExitStatus{Code: -1, Signaled: true, Signal: "killed"}, context.Canceled
+	}}
+	deps := deterministicRunDependencies(t)
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		return sandboxRuntime{
+			Executor: executor, Environment: []string{"PATH=/usr/bin:/bin"},
+			Info:               app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
+			RedactionsComplete: true,
+			close:              newSandboxRuntimeCloser(nil),
+		}
+	}
+
+	collector := newPTYOutputCollector(master)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	var stderr bytes.Buffer
+	runResult := startRunResult(func() error {
+		code := runWithDependencies(runCtx, []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, slave, slave, &stderr, testEnviron(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "PTY_TEST_KEY": "provider-value",
+		}), deps)
+		if code != 0 {
+			return fmt.Errorf("run exit code %d: %s", code, stderr.String())
+		}
+		return nil
+	})
+
+	t.Cleanup(func() {
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("sandboxed Bash TUI cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("sandboxed Bash TUI cleanup error: %v", err)
+		}
+	})
+
+	if _, err := collector.WaitForEvent(0, []byte(altScreenEnterSeq), ptyStepTimeout); err != nil {
+		t.Fatal(err)
+	}
+	writePTY(t, master, "run sandboxed bash\r")
+	awaitPTYEvent(t, started, "sandbox Executor start")
+	writePTY(t, master, "\x03")
+	awaitPTYEvent(t, canceled, "sandbox Executor cancellation")
+	if _, err := collector.WaitForEvent(0, []byte(contextCanceledText), ptyStepTimeout); err != nil {
+		t.Fatal(err)
+	}
+	writePTY(t, master, "/exit\r")
+	waitForRunReturn(t, runResult)
+	if _, err := collector.WaitForEvent(0, []byte(altScreenExitSeq), ptyStepTimeout); err != nil {
+		t.Fatal(err)
+	}
+
+	if executor.calls.Load() != 1 {
+		t.Fatalf("Executor calls = %d, want 1", executor.calls.Load())
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "host-child-must-not-start")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fake Seatbelt path started a host child: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("successful Seatbelt run wrote stderr: %q", stderr.String())
+	}
+	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read restored terminal mode: %v", err)
+	}
+	if *restoredMode != *initialMode {
+		t.Fatalf("terminal mode leaked after sandboxed Bash cancellation: %s", diffTermios(*initialMode, *restoredMode))
+	}
+}
+
 func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -565,6 +742,9 @@ func (b *ptySmokeBackend) Info() app.Info {
 		Profile:   "pty-profile",
 		Model:     "pty-model",
 		SessionID: footerSessionMarker,
+		Sandbox: app.SandboxInfo{
+			Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+		},
 	}
 }
 
@@ -609,6 +789,15 @@ func waitForCompactCancellation(t *testing.T, backend *ptySmokeBackend) {
 	case <-backend.compactCanceledCh:
 	case <-time.After(ptyStepTimeout):
 		t.Fatal("timed out waiting for compact cancellation")
+	}
+}
+
+func awaitPTYEvent(t *testing.T, event <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-event:
+	case <-time.After(ptyStepTimeout):
+		t.Fatalf("timed out waiting for %s", name)
 	}
 }
 
@@ -701,14 +890,15 @@ func isExpectedCleanupRunError(err error) bool {
 }
 
 type ptyOutputCollector struct {
-	mu   sync.Mutex
-	buf  []byte
-	done chan struct{}
-	err  error
+	mu      sync.Mutex
+	buf     []byte
+	done    chan struct{}
+	updated chan struct{}
+	err     error
 }
 
 func newPTYOutputCollector(master *os.File) *ptyOutputCollector {
-	collector := &ptyOutputCollector{done: make(chan struct{})}
+	collector := &ptyOutputCollector{done: make(chan struct{}), updated: make(chan struct{}, 1)}
 	go collector.readLoop(master)
 	return collector
 }
@@ -722,13 +912,22 @@ func (c *ptyOutputCollector) readLoop(master *os.File) {
 			c.mu.Lock()
 			c.buf = append(c.buf, chunk[:n]...)
 			c.mu.Unlock()
+			c.signalUpdate()
 		}
 		if err != nil {
 			c.mu.Lock()
 			c.err = err
 			c.mu.Unlock()
+			c.signalUpdate()
 			return
 		}
+	}
+}
+
+func (c *ptyOutputCollector) signalUpdate() {
+	select {
+	case c.updated <- struct{}{}:
+	default:
 	}
 }
 
@@ -742,6 +941,36 @@ func (c *ptyOutputCollector) Snapshot() []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]byte(nil), c.buf...)
+}
+
+func (c *ptyOutputCollector) WaitForEvent(after int, want []byte, timeout time.Duration) (int, error) {
+	deadline := time.After(timeout)
+	for {
+		c.mu.Lock()
+		start := min(max(after, 0), len(c.buf))
+		if index := bytes.Index(c.buf[start:], want); index >= 0 {
+			offset := start + index
+			c.mu.Unlock()
+			return offset, nil
+		}
+		snapshot := append([]byte(nil), c.buf...)
+		readErr := c.err
+		closed := false
+		select {
+		case <-c.done:
+			closed = true
+		default:
+		}
+		c.mu.Unlock()
+		if closed {
+			return -1, fmt.Errorf("output closed while waiting for %q: %v\nlast output: %s", want, readErr, tailTerminalOutput(snapshot))
+		}
+		select {
+		case <-c.updated:
+		case <-deadline:
+			return -1, fmt.Errorf("timed out waiting for %q\nlast output: %s", want, tailTerminalOutput(snapshot))
+		}
+	}
 }
 
 func (c *ptyOutputCollector) WaitFor(after int, want []byte, timeout time.Duration) (int, error) {

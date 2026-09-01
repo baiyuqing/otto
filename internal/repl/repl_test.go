@@ -371,8 +371,9 @@ func TestREPLReturnsNilAtEOF(t *testing.T) {
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run() at EOF = %v", err)
 	}
-	if got := output.String(); got != logo+"> " {
-		t.Fatalf("output = %q, want logo then prompt", got)
+	want := logo + "Sandbox: bash disabled · sandbox unavailable\n> "
+	if got := output.String(); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 
@@ -528,6 +529,151 @@ func TestREPLParentCancellationStopsIdleScan(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("idle scan did not stop after parent cancellation")
+	}
+}
+
+func TestREPLSandboxStatusAppearsAtStartupAndInSessionCommand(t *testing.T) {
+	info := app.Info{
+		SessionID: "sandbox-session", Provider: "openai-compatible", Model: "model",
+		Sandbox: app.SandboxInfo{
+			Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonNone,
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	r := New(strings.NewReader("/session\n/exit\n"), &stdout, &stderr, &fakeBackend{info: info})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	const status = "Sandbox: seatbelt · workspace-write · network denied"
+	rendered := stdout.String()
+	if got := strings.Count(rendered, status); got != 2 {
+		t.Fatalf("Sandbox status count = %d, want startup and /session output in %q", got, rendered)
+	}
+	if sessionIndex, sandboxIndex := strings.Index(rendered, "Session: sandbox-session\n"), strings.Index(rendered, status); sessionIndex < 0 || sandboxIndex < sessionIndex {
+		t.Fatalf("startup Sandbox status is not after session line: %q", rendered)
+	}
+	if strings.Contains(rendered, "Sandbox reason:") {
+		t.Fatalf("available Sandbox rendered a reason: %q", rendered)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestREPLSandboxReasonRenderingRequiresExplicitUnavailableMode(t *testing.T) {
+	payload := "raw\x1b]52;c;owned\a\nSandbox reason: forged"
+	tests := []struct {
+		name       string
+		info       app.SandboxInfo
+		wantReason string
+		forbidden  []string
+	}{
+		{
+			name: "valid available",
+			info: app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone},
+		},
+		{
+			name:      "malformed seatbelt with approved reason",
+			info:      app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonSelfTestFailed},
+			forbidden: []string{"self-test-failed"},
+		},
+		{
+			name:      "malformed off with control reason",
+			info:      app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: false, Reason: app.SandboxReason(payload)},
+			forbidden: []string{payload},
+		},
+		{
+			name:      "unknown mode with approved reason",
+			info:      app.SandboxInfo{Mode: app.SandboxMode("future-mode"), Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonSeatbeltMissing},
+			forbidden: []string{"future-mode", "seatbelt-missing"},
+		},
+		{
+			name:      "control mode and reason",
+			info:      app.SandboxInfo{Mode: app.SandboxMode(payload), Network: app.SandboxNetwork(payload), Reason: app.SandboxReason(payload)},
+			forbidden: []string{payload},
+		},
+		{
+			name:       "unavailable valid",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonSelfTestFailed},
+			wantReason: "self-test-failed",
+		},
+		{
+			name:       "unavailable empty reason",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonNone},
+			wantReason: "runtime-failure",
+		},
+		{
+			name:       "unavailable invalid reason",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReason(payload)},
+			wantReason: "runtime-failure",
+			forbidden:  []string{payload},
+		},
+		{
+			name:       "unavailable with Bash",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonSelfTestFailed},
+			wantReason: "runtime-failure",
+			forbidden:  []string{"self-test-failed"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			info := app.Info{SessionID: "sandbox-session", Sandbox: tt.info}
+			r := New(strings.NewReader("/session\n/exit\n"), &output, &output, &fakeBackend{info: info})
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			rendered := output.String()
+			if !strings.Contains(rendered, "Sandbox: "+tt.info.Summary()) {
+				t.Fatalf("output missing safe summary: %q", rendered)
+			}
+			if tt.wantReason == "" {
+				if strings.Contains(rendered, "Sandbox reason:") {
+					t.Fatalf("output rendered a reason outside explicit unavailable mode: %q", rendered)
+				}
+			} else if !strings.Contains(rendered, "Sandbox reason: "+tt.wantReason) {
+				t.Fatalf("output missing reason %q: %q", tt.wantReason, rendered)
+			}
+			for _, forbidden := range tt.forbidden {
+				if strings.Contains(rendered, forbidden) {
+					t.Fatalf("output leaked raw or inconsistent state %q: %q", forbidden, rendered)
+				}
+			}
+			if strings.ContainsAny(rendered, "\x1b\a\r") {
+				t.Fatalf("output contains raw Sandbox controls: %q", rendered)
+			}
+		})
+	}
+}
+
+func TestRunOnceTreatsSessionAsOrdinaryPromptWithoutSandboxPresentation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	calls := 0
+	backend := &fakeBackend{
+		info: app.Info{Sandbox: app.SandboxInfo{
+			Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+		}},
+		prompt: func(_ context.Context, prompt string, emit func(agent.Event)) error {
+			calls++
+			if prompt != "/session" {
+				t.Fatalf("prompt = %q, want /session", prompt)
+			}
+			emit(agent.Event{Type: agent.EventTextDelta, Text: "provider response"})
+			return nil
+		},
+	}
+	r := New(strings.NewReader(""), &stdout, &stderr, backend)
+	if err := r.RunOnce(context.Background(), "/session"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || stdout.String() != "provider response\n" {
+		t.Fatalf("calls = %d, stdout = %q", calls, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Sandbox:") || strings.Contains(stdout.String(), logo) || stderr.Len() != 0 {
+		t.Fatalf("RunOnce rendered interactive presentation: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

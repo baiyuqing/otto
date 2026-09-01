@@ -71,6 +71,9 @@ func TestLongSessionOverlayAndFooterStayWithinBounds(t *testing.T) {
 		Provider:    "openai-compatible-" + long,
 		Profile:     "profile-" + long,
 		Model:       "model-" + long,
+		Sandbox: app.SandboxInfo{
+			Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+		},
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 40, 8)
 	m.statusText = "status-" + long
@@ -79,10 +82,13 @@ func TestLongSessionOverlayAndFooterStayWithinBounds(t *testing.T) {
 	m.overlay = overlaySession
 	content := m.View().Content
 	assertRenderedBounds(t, content, 40, 8)
-	for _, field := range []string{"Session", "ID:", "Path:", "Provider:", "Profile:", "Model:"} {
+	for _, field := range []string{"Session", "Sandbox:", "unsandboxed", "ID:", "Path:", "Provider:"} {
 		if !strings.Contains(content, field) {
 			t.Fatalf("session overlay = %q, want bounded %s field", content, field)
 		}
+	}
+	if strings.Contains(content, "Profile:") {
+		t.Fatalf("session overlay retained lower-priority Profile after wrapping Sandbox policy: %q", content)
 	}
 
 	footer := renderFooter(40, backend.info, model.Usage{}, "status-"+long)

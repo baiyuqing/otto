@@ -11,12 +11,13 @@ import (
 	"github.com/baiyuqing/otto/internal/provider"
 )
 
-type streamReadError struct {
-	err error
-}
+type streamFailureKind uint8
 
-func (e *streamReadError) Error() string { return "read responses stream: " + e.err.Error() }
-func (e *streamReadError) Unwrap() error { return e.err }
+const (
+	streamFailureNone streamFailureKind = iota
+	streamFailureRead
+	streamFailureProtocol
+)
 
 type assembledToolCall struct {
 	callID    string
@@ -27,7 +28,7 @@ type assembledToolCall struct {
 // readStream consumes the Responses API SSE body, emitting incremental events
 // and assembling the final message. The Responses stream terminates with a
 // "response.completed" event and then closes; there is no [DONE] sentinel.
-func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Response, bool, error) {
+func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Response, bool, streamFailureKind, error) {
 	reader := bufio.NewReader(body)
 	var dataLines []string
 	var text strings.Builder
@@ -111,7 +112,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 			switch {
 			case line == "":
 				if dispatchErr := dispatch(); dispatchErr != nil {
-					return provider.Response{}, emitted, dispatchErr
+					return provider.Response{}, emitted, streamFailureProtocol, dispatchErr
 				}
 			case strings.HasPrefix(line, ":"), strings.HasPrefix(line, "event:"):
 				// comment or event-name line; the data payload carries type
@@ -125,18 +126,18 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 		}
 		if err != nil {
 			if err != io.EOF {
-				return provider.Response{}, emitted, &streamReadError{err: err}
+				return provider.Response{}, emitted, streamFailureRead, err
 			}
 			if len(dataLines) > 0 {
 				if dispatchErr := dispatch(); dispatchErr != nil {
-					return provider.Response{}, emitted, dispatchErr
+					return provider.Response{}, emitted, streamFailureProtocol, dispatchErr
 				}
 			}
 			break
 		}
 	}
 	if !completed {
-		return provider.Response{}, emitted, fmt.Errorf("responses stream ended without response.completed")
+		return provider.Response{}, emitted, streamFailureProtocol, fmt.Errorf("responses stream ended without response.completed")
 	}
 
 	blocks := make([]model.Block, 0, 1+len(calls))
@@ -145,7 +146,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 	}
 	for _, call := range calls {
 		if !validArguments(call.arguments) {
-			return provider.Response{}, emitted, fmt.Errorf("tool call %q has malformed arguments", call.callID)
+			return provider.Response{}, emitted, streamFailureProtocol, fmt.Errorf("tool call %q has malformed arguments", call.callID)
 		}
 		blocks = append(blocks, model.Block{
 			Type:       model.BlockToolCall,
@@ -166,7 +167,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 		},
 		FinishReason: finish,
 		Usage:        usage,
-	}, emitted, nil
+	}, emitted, streamFailureNone, nil
 }
 
 func finishReason(hasToolCalls bool, status, incompleteReason string) model.FinishReason {

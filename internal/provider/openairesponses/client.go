@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -24,8 +23,6 @@ const (
 	betaHeader = "responses=experimental"
 	originator = "codex_cli_rs"
 
-	maxErrorBody = 32 << 10
-
 	defaultDialTimeout           = 30 * time.Second
 	defaultKeepAlive             = 30 * time.Second
 	defaultTLSHandshakeTimeout   = 10 * time.Second
@@ -42,9 +39,16 @@ type Client struct {
 	httpClient  *http.Client
 }
 
+type contextTokenSource interface {
+	TokenContext(context.Context) (*oauth2.Token, error)
+}
+
 var (
 	_ provider.Provider     = (*Client)(nil)
 	_ provider.RequestSizer = (*Client)(nil)
+
+	errChatGPTAuthorizationFailed = errors.New("chatgpt authorization failed; run 'otto login'")
+	errChatGPTRequestFailed       = errors.New("chatgpt request failed")
 )
 
 // New builds a subscription provider authorized by tokenSource. accountID is
@@ -79,11 +83,24 @@ func (c *Client) SerializedRequestSize(request provider.Request) (int, error) {
 // subscription rate limits make transient failures common.
 func (c *Client) Complete(ctx context.Context, request provider.Request, emit func(provider.StreamEvent)) (provider.Response, error) {
 	if c.tokenSource == nil {
-		return provider.Response{}, errors.New("no chatgpt credentials; run 'otto login'")
+		return provider.Response{}, errChatGPTAuthorizationFailed
 	}
-	token, err := c.tokenSource.Token()
+	token, err := tokenForContext(ctx, c.tokenSource)
 	if err != nil {
-		return provider.Response{}, fmt.Errorf("authorize chatgpt request: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
+		}
+		return provider.Response{}, errChatGPTAuthorizationFailed
+	}
+	if token == nil || strings.TrimSpace(token.AccessToken) == "" || strings.TrimSpace(c.accountID) == "" {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
+		}
+		return provider.Response{}, errChatGPTAuthorizationFailed
+	}
+	requestRedactor, ok := newRequestRedactor(token.AccessToken, c.accountID)
+	if !ok {
+		return provider.Response{}, errChatGPTRequestFailed
 	}
 	payload, err := json.Marshal(translateRequest(request))
 	if err != nil {
@@ -103,38 +120,37 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		return provider.Response{}, c.redactErr(token.AccessToken, fmt.Errorf("send responses request: %w", err))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
+		}
+		return provider.Response{}, errChatGPTRequestFailed
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBody))
-		return provider.Response{}, c.redactErr(token.AccessToken,
-			fmt.Errorf("chatgpt responses HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body))))
+		return provider.Response{}, fmt.Errorf("chatgpt responses HTTP %d", response.StatusCode)
 	}
 
-	result, _, err := readStream(response.Body, emit)
+	emitter := requestRedactor.wrapEmit(emit)
+	result, _, failureKind, err := readStream(response.Body, emitter.Emit)
 	if err != nil {
-		return provider.Response{}, c.redactErr(token.AccessToken, err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
+		}
+		if failureKind == streamFailureRead {
+			return provider.Response{}, errChatGPTRequestFailed
+		}
+		return provider.Response{}, errors.New(requestRedactor.redactString(err.Error()))
 	}
-	return result, nil
+	emitter.Flush()
+	return requestRedactor.redactResponse(result), nil
 }
 
-// redactErr removes the access token from error text so it never reaches logs,
-// sessions, or the user. Tokens rotate, so the runtime redactor (built from
-// static secrets) cannot cover them; the provider redacts the value it used.
-func (c *Client) redactErr(token string, err error) error {
-	if err == nil || token == "" {
-		return err
+func tokenForContext(ctx context.Context, source oauth2.TokenSource) (*oauth2.Token, error) {
+	if contextual, ok := source.(contextTokenSource); ok {
+		return contextual.TokenContext(ctx)
 	}
-	msg := strings.ReplaceAll(err.Error(), token, "[REDACTED]")
-	if msg == err.Error() {
-		return err
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return errors.New(msg)
+	return source.Token()
 }
 
 func defaultHTTPClient() *http.Client {
@@ -147,5 +163,10 @@ func defaultHTTPClient() *http.Client {
 			MaxResponseHeaderBytes: defaultMaxHeaderBytes,
 			ForceAttemptHTTP2:      true,
 		},
+		CheckRedirect: refuseResponsesRedirects,
 	}
+}
+
+func refuseResponsesRedirects(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }

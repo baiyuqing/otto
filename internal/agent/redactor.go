@@ -8,34 +8,41 @@ import (
 	"io"
 	"sort"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
-const redactionMarker = "█"
+const redactionMarker = "\uE000"
 
 // Redactor removes resolved secret values at the provider-neutral agent
 // boundary. Its source values remain encapsulated and are never exposed
 // through agent options or errors.
 type Redactor struct {
-	values []string
-	marker string
+	values   []string
+	marker   string
+	complete bool
 }
 
 func NewRedactor(values []string) *Redactor {
+	return NewRedactorWithCompleteness(values, true)
+}
+
+func NewRedactorWithCompleteness(values []string, complete bool) *Redactor {
+	redactor := &Redactor{complete: complete}
+	if !complete {
+		return redactor
+	}
 	seen := make(map[string]struct{}, len(values))
-	redactor := &Redactor{}
 	for _, value := range values {
-		if value == "" || !utf8.ValidString(value) {
-			continue
+		for _, form := range safetext.SecretForms(value) {
+			if _, exists := seen[form]; exists {
+				continue
+			}
+			seen[form] = struct{}{}
+			redactor.values = append(redactor.values, strings.Clone(form))
 		}
-		if _, exists := seen[value]; exists {
-			continue
-		}
-		seen[value] = struct{}{}
-		redactor.values = append(redactor.values, strings.Clone(value))
 	}
 	sort.Slice(redactor.values, func(i, j int) bool {
 		if len(redactor.values[i]) != len(redactor.values[j]) {
@@ -43,13 +50,32 @@ func NewRedactor(values []string) *Redactor {
 		}
 		return redactor.values[i] < redactor.values[j]
 	})
-	redactor.marker = safeRedactionMarker(redactor.values)
+	redactor.marker, redactor.complete = safetext.DynamicRedactionMarker(redactor.values)
+	if !redactor.complete {
+		redactor.marker = ""
+	}
 	return redactor
 }
 
+// AllowsDynamicContent reports whether exact boundary redaction has a safe,
+// representable replacement. It exposes no configured values.
+func (r *Redactor) AllowsDynamicContent() bool {
+	return r == nil || r.complete
+}
+
 func (r *Redactor) RedactString(text string) string {
-	if r == nil || len(r.values) == 0 || text == "" {
+	if text == "" {
 		return text
+	}
+	if r != nil && !r.complete {
+		return ""
+	}
+	text = safetext.CanonicalizeUTF8(text)
+	if r == nil || len(r.values) == 0 {
+		return text
+	}
+	if r.marker == "" {
+		return ""
 	}
 	for _, value := range r.values {
 		text = strings.ReplaceAll(text, value, r.marker)
@@ -58,8 +84,18 @@ func (r *Redactor) RedactString(text string) string {
 }
 
 func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
+	if r != nil && !r.complete {
+		return json.RawMessage("null")
+	}
 	if r == nil || len(r.values) == 0 {
-		return append(json.RawMessage(nil), raw...)
+		if utf8.Valid(raw) {
+			return append(json.RawMessage(nil), raw...)
+		}
+		canonical := json.RawMessage(safetext.CanonicalizeUTF8(string(raw)))
+		if !json.Valid(canonical) {
+			return json.RawMessage("null")
+		}
+		return append(json.RawMessage(nil), canonical...)
 	}
 	value, err := decodePairPreservingJSON(raw)
 	if err != nil {
@@ -74,8 +110,16 @@ func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
 }
 
 func (r *Redactor) RedactError(err error) error {
-	if err == nil || r == nil || len(r.values) == 0 {
+	if err == nil || r == nil {
 		return err
+	}
+	if !r.complete {
+		switch err {
+		case context.Canceled, context.DeadlineExceeded, session.ErrFatalPersistence, ErrEmptyUserText, ErrInvalidCompactionSummary:
+			return err
+		default:
+			return errRedactedBoundary
+		}
 	}
 	message := r.RedactString(err.Error())
 	if message == err.Error() {
@@ -227,35 +271,7 @@ func redactJSONValueStrings(redactor *Redactor, value any) any {
 	return value
 }
 
-func safeRedactionMarker(values []string) string {
-	if markerRuneAbsent(redactionMarker, values) {
-		return redactionMarker
-	}
-	for candidate := rune(0xE000); candidate <= 0xF8FF; candidate++ {
-		marker := string(candidate)
-		if markerRuneAbsent(marker, values) {
-			return marker
-		}
-	}
-	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
-		if utf8.ValidRune(candidate) && !unicode.IsControl(candidate) {
-			marker := string(candidate)
-			if markerRuneAbsent(marker, values) {
-				return marker
-			}
-		}
-	}
-	return ""
-}
-
-func markerRuneAbsent(marker string, values []string) bool {
-	for _, value := range values {
-		if strings.Contains(value, marker) {
-			return false
-		}
-	}
-	return true
-}
+var errRedactedBoundary = &redactedBoundaryError{}
 
 func ensureJSONEOF(decoder *json.Decoder) error {
 	var extra any
@@ -269,8 +285,9 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 type streamRedactor struct {
-	redactor *Redactor
-	pending  string
+	redactor        *Redactor
+	pending         string
+	invalidBoundary []byte
 }
 
 func (r *Redactor) newStream() *streamRedactor {
@@ -278,13 +295,26 @@ func (r *Redactor) newStream() *streamRedactor {
 }
 
 func (s *streamRedactor) Write(text string) string {
+	if s == nil || text == "" {
+		return ""
+	}
+	if s.redactor != nil && !s.redactor.complete {
+		return ""
+	}
+	return s.writeNormalized(s.normalizeUTF8(text, false))
+}
+
+func (s *streamRedactor) writeNormalized(text string) string {
 	if text == "" {
 		return ""
 	}
-	if s == nil || s.redactor == nil || len(s.redactor.values) == 0 {
+	if s.redactor == nil || len(s.redactor.values) == 0 {
 		return text
 	}
 	s.pending += text
+	if s.redactor.marker == "" {
+		return ""
+	}
 	var output strings.Builder
 	for len(s.pending) > 0 {
 		index, secret := s.firstSecret()
@@ -303,12 +333,46 @@ func (s *streamRedactor) Write(text string) string {
 }
 
 func (s *streamRedactor) Flush() string {
-	if s == nil || s.pending == "" {
+	if s == nil {
 		return ""
 	}
+	if s.redactor != nil && !s.redactor.complete {
+		s.pending = ""
+		s.invalidBoundary = nil
+		return ""
+	}
+	normalized := s.normalizeUTF8("", true)
+	if s.redactor == nil || len(s.redactor.values) == 0 {
+		return normalized
+	}
+	s.pending += normalized
 	pending := s.pending
 	s.pending = ""
 	return s.redactor.RedactString(pending)
+}
+
+func (s *streamRedactor) normalizeUTF8(text string, final bool) string {
+	data := make([]byte, 0, len(s.invalidBoundary)+len(text))
+	data = append(data, s.invalidBoundary...)
+	data = append(data, text...)
+	s.invalidBoundary = nil
+
+	var normalized strings.Builder
+	for len(data) > 0 {
+		if !final && !utf8.FullRune(data) {
+			s.invalidBoundary = append(s.invalidBoundary, data...)
+			break
+		}
+		r, size := utf8.DecodeRune(data)
+		if r == utf8.RuneError && size == 1 {
+			normalized.WriteRune(utf8.RuneError)
+			data = data[1:]
+			continue
+		}
+		normalized.Write(data[:size])
+		data = data[size:]
+	}
+	return normalized.String()
 }
 
 func (s *streamRedactor) firstSecret() (int, string) {

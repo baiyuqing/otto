@@ -12,7 +12,9 @@ import (
 )
 
 func TestResponsiveHelpOverlayDescribesDetailToggle(t *testing.T) {
-	content := helpOverlayContent(100, 23)
+	content := helpOverlayContent(100, 20, app.SandboxInfo{
+		Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+	})
 	if !strings.Contains(content, "toggle details") {
 		t.Fatalf("help overlay = %q, want detail toggle wording", content)
 	}
@@ -206,6 +208,189 @@ func TestRenderFooterHandlesMaxIntUsageWithoutOverflow(t *testing.T) {
 	footer := renderFooter(120, info, model.Usage{InputTokens: int(^uint(0) >> 1), OutputTokens: int(^uint(0) >> 1)}, "")
 	if !strings.Contains(footer, "tokens ") || !strings.Contains(footer, "B") {
 		t.Fatalf("footer = %q, want large-token B suffix without panic", footer)
+	}
+}
+
+func TestRenderFooterKeepsSandboxBadgeAcrossSupportedWidths(t *testing.T) {
+	states := []struct {
+		name  string
+		info  app.SandboxInfo
+		badge string
+	}{
+		{
+			name:  "seatbelt",
+			info:  app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone},
+			badge: "sb",
+		},
+		{
+			name:  "off",
+			info:  app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone},
+			badge: "unsafe",
+		},
+		{
+			name:  "unavailable",
+			info:  app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, BashAvailable: false, Reason: app.SandboxReasonSelfTestFailed},
+			badge: "no-bash",
+		},
+	}
+
+	for _, state := range states {
+		for _, width := range []int{minTerminalWidth, 48, 60, 72, 120} {
+			t.Run(fmt.Sprintf("%s-width-%d", state.name, width), func(t *testing.T) {
+				info := app.Info{
+					Workspace: "/workspace/" + strings.Repeat("workspace", 20),
+					Profile:   "profile", Model: "model", SessionID: strings.Repeat("session", 20),
+					ContextWindow: 128_000, ContextInputTokens: 100_000, ContextInputTokensPresent: true,
+					Sandbox: state.info,
+				}
+				footer := renderFooter(width, info, model.Usage{InputTokens: 123_456, OutputTokens: 78_901, CachedInputTokens: 100_000}, "working")
+				assertRenderedBounds(t, footer, width, 1)
+				fields := strings.Split(strings.TrimSpace(footer), " | ")
+				found := false
+				for _, field := range fields {
+					if field == state.badge {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("footer = %q, want fixed Sandbox badge %q", footer, state.badge)
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxOverlaysRetainCompletePolicyAtSupportedSizes(t *testing.T) {
+	states := []struct {
+		name string
+		info app.SandboxInfo
+	}{
+		{
+			name: "seatbelt allowed",
+			info: app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone},
+		},
+		{
+			name: "seatbelt denied",
+			info: app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonNone},
+		},
+		{
+			name: "off",
+			info: app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone},
+		},
+		{
+			name: "unavailable",
+			info: app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, BashAvailable: false, Reason: app.SandboxReasonSelfTestFailed},
+		},
+	}
+	sizes := []struct{ width, height int }{{40, 8}, {40, 20}, {60, 12}, {100, 20}}
+
+	for _, state := range states {
+		for _, size := range sizes {
+			t.Run(fmt.Sprintf("%s-%dx%d", state.name, size.width, size.height), func(t *testing.T) {
+				backend := &fakeBackend{info: app.Info{
+					SessionID: "session", SessionPath: "/tmp/session.jsonl", Provider: "openai-compatible", Profile: "profile", Model: "model",
+					Sandbox: state.info,
+				}}
+				model := resizeModel(t, newTestModelWithBackend(t, backend), size.width, size.height)
+				for _, overlay := range []overlayKind{overlayHelp, overlaySession} {
+					model.overlay = overlay
+					rendered := model.View().Content
+					assertRenderedBounds(t, rendered, size.width, size.height)
+					for _, word := range strings.Fields("Sandbox: " + state.info.Summary()) {
+						if !strings.Contains(rendered, word) {
+							t.Fatalf("overlay %d at %dx%d omitted Sandbox policy word %q: %q", overlay, size.width, size.height, word, rendered)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxSessionOverlayReasonRequiresExplicitUnavailableMode(t *testing.T) {
+	payload := "invalid\x1b]52;c;owned\a\nforged"
+	tests := []struct {
+		name       string
+		info       app.SandboxInfo
+		wantReason string
+		forbidden  []string
+	}{
+		{
+			name: "valid available",
+			info: app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone},
+		},
+		{
+			name:      "malformed seatbelt with approved reason",
+			info:      app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonSelfTestFailed},
+			forbidden: []string{"self-test-failed"},
+		},
+		{
+			name:      "malformed off with control reason",
+			info:      app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: false, Reason: app.SandboxReason(payload)},
+			forbidden: []string{payload},
+		},
+		{
+			name:      "unknown mode with approved reason",
+			info:      app.SandboxInfo{Mode: app.SandboxMode("future-mode"), Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonSeatbeltMissing},
+			forbidden: []string{"future-mode", "seatbelt-missing"},
+		},
+		{
+			name:      "control mode and reason",
+			info:      app.SandboxInfo{Mode: app.SandboxMode(payload), Network: app.SandboxNetwork(payload), Reason: app.SandboxReason(payload)},
+			forbidden: []string{payload},
+		},
+		{
+			name:       "unavailable valid",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonSelfTestFailed},
+			wantReason: "self-test-failed",
+		},
+		{
+			name:       "unavailable empty reason",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReasonNone},
+			wantReason: "runtime-failure",
+		},
+		{
+			name:       "unavailable invalid reason",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, Reason: app.SandboxReason(payload)},
+			wantReason: "runtime-failure",
+			forbidden:  []string{payload},
+		},
+		{
+			name:       "unavailable with Bash",
+			info:       app.SandboxInfo{Mode: app.SandboxUnavailable, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonSelfTestFailed},
+			wantReason: "runtime-failure",
+			forbidden:  []string{"self-test-failed"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{info: app.Info{SessionID: "session", Sandbox: tt.info}}), 100, 20)
+			model.overlay = overlayHelp
+			help := model.View().Content
+			if strings.Contains(help, "Sandbox reason:") || tt.wantReason != "" && strings.Contains(help, tt.wantReason) {
+				t.Fatalf("help overlay exposed unavailable reason: %q", help)
+			}
+
+			model.overlay = overlaySession
+			session := model.View().Content
+			assertRenderedBounds(t, session, 100, 20)
+			if tt.wantReason == "" {
+				if strings.Contains(session, "Sandbox reason:") {
+					t.Fatalf("session overlay rendered a reason outside explicit unavailable mode: %q", session)
+				}
+			} else if !strings.Contains(session, "Sandbox reason: "+tt.wantReason) {
+				t.Fatalf("session overlay missing reason %q: %q", tt.wantReason, session)
+			}
+			for _, forbidden := range tt.forbidden {
+				if strings.Contains(session, forbidden) {
+					t.Fatalf("session overlay leaked raw or inconsistent state %q: %q", forbidden, session)
+				}
+			}
+			if strings.ContainsAny(session, "\x1b\a\r\t") {
+				t.Fatalf("session overlay contains raw Sandbox controls: %q", session)
+			}
+		})
 	}
 }
 

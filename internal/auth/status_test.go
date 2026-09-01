@@ -28,7 +28,7 @@ func TestStatusLineSignedIn(t *testing.T) {
 	if !signedIn {
 		t.Fatalf("signedIn = false, want true")
 	}
-	if !strings.Contains(line, "acct-123") || !strings.Contains(line, "expires") {
+	if strings.Contains(line, "acct-123") || !strings.Contains(line, "Signed in to ChatGPT") || !strings.Contains(line, "expires") {
 		t.Fatalf("line = %q", line)
 	}
 }

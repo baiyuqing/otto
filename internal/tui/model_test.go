@@ -482,19 +482,43 @@ func TestOverlayContentIncludesHelpAndSession(t *testing.T) {
 		SessionID:   "session-123",
 		SessionPath: "/tmp/session.jsonl",
 		Provider:    "openai-compatible",
+		Sandbox: app.SandboxInfo{
+			Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone,
+		},
 	}}
 	model := resizeModel(t, newTestModelWithBackend(t, backend), 100, 30)
 
 	updated, _ := model.Update(showHelpOverlayMsg{})
 	help := updated.(Model).View().Content
-	if !strings.Contains(help, "Ctrl+O") || !strings.Contains(help, "Shift+drag") || !strings.Contains(help, "/session") {
-		t.Fatalf("help overlay = %q, want tool and terminal-selection guidance", help)
+	if !strings.Contains(help, "Ctrl+O") || !strings.Contains(help, "Shift+drag") || !strings.Contains(help, "/session") || !strings.Contains(help, "Sandbox: seatbelt · workspace-write · network allowed") {
+		t.Fatalf("help overlay = %q, want controls and Sandbox presentation", help)
 	}
 
 	updated, _ = updated.(Model).Update(showSessionOverlayMsg{})
 	session := updated.(Model).View().Content
-	if !strings.Contains(session, "session-123") || !strings.Contains(session, "/tmp/session.jsonl") || !strings.Contains(session, "openai-compatible") {
+	if !strings.Contains(session, "session-123") || !strings.Contains(session, "/tmp/session.jsonl") || !strings.Contains(session, "openai-compatible") || !strings.Contains(session, "Sandbox: seatbelt · workspace-write · network allowed") {
 		t.Fatalf("session overlay = %q", session)
+	}
+}
+
+func TestSandboxUnavailableSessionOverlayShowsOnlySafeReason(t *testing.T) {
+	payload := "reason\x1b]52;c;owned\a\nProvider: forged"
+	backend := &fakeBackend{info: app.Info{
+		SessionID: "session",
+		Sandbox: app.SandboxInfo{
+			Mode: app.SandboxUnavailable, Network: app.SandboxNetwork(payload), BashAvailable: false, Reason: app.SandboxReason(payload),
+		},
+	}}
+	model := resizeModel(t, newTestModelWithBackend(t, backend), 100, 30)
+	updated, _ := model.Update(showSessionOverlayMsg{})
+	content := updated.(Model).View().Content
+	assertRenderedBounds(t, content, 100, 30)
+	assertNoRawTerminalControls(t, content)
+	if !strings.Contains(content, "Sandbox: bash disabled · sandbox unavailable") || !strings.Contains(content, "Sandbox reason: runtime-failure") {
+		t.Fatalf("session overlay = %q, want safe unavailable status", content)
+	}
+	if strings.Contains(content, payload) || strings.Contains(content, "Provider: forged") {
+		t.Fatalf("session overlay leaked raw Sandbox state: %q", content)
 	}
 }
 

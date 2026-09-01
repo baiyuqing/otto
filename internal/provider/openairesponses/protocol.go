@@ -40,7 +40,10 @@ type responsesItem struct {
 	CallID    string             `json:"call_id,omitempty"`
 	Name      string             `json:"name,omitempty"`
 	Arguments string             `json:"arguments,omitempty"`
-	Output    string             `json:"output,omitempty"`
+	// Output is a pointer so function_call_output items emit "output" even when
+	// the tool produced no text; the Responses API rejects the item otherwise.
+	// Other item types leave it nil and omitempty drops it.
+	Output *string `json:"output,omitempty"`
 }
 
 type responsesContent struct {
@@ -87,10 +90,11 @@ func translateRequest(request provider.Request) responsesRequest {
 		case model.RoleTool:
 			for _, block := range message.Blocks {
 				if block.Type == model.BlockToolResult {
+					output := block.Text
 					translated.Input = append(translated.Input, responsesItem{
 						Type:   "function_call_output",
 						CallID: block.ToolCallID,
-						Output: block.Text,
+						Output: &output,
 					})
 				}
 			}

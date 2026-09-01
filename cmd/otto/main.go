@@ -236,6 +236,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	startupBoundary.environment = environment
 	startupBoundary.sandboxSecrets = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, configuredSnapshot.RedactionValues())
 	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && configuredSnapshot.RedactionsComplete()
+	if (options.resumePath != "" || options.continueLast) && !startupBoundary.boundaryAllowsDynamic(nil) {
+		return fail(stderr, "%v", errSessionOperationUnavailable)
+	}
 
 	approvePrompt := options.approve
 	if options.approveSet && strings.HasPrefix(approvePrompt, "@") {
@@ -425,6 +428,10 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if processCtx.Err() != nil {
 		return 130
 	}
+	dynamicContent := builder.boundaryAllowsDynamic(&resolvedRuntime)
+	if preparedInitial != nil && !dynamicContent {
+		return fail(stderr, "%v", errSessionOperationUnavailable)
+	}
 
 	var (
 		initialSession  session.Session
@@ -432,6 +439,8 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	)
 	if preparedInitial != nil {
 		initialSession, startupWarnings, err = builder.activatePrepared(processCtx, preparedInitial, preparedInfo, &resolvedRuntime)
+	} else if !dynamicContent {
+		initialSession = session.NewMemory(session.Header{Version: session.CurrentVersion})
 	} else {
 		initialSession, err = deps.newSession(options.noSession, sessionRoot, workspacePath, resolvedRuntime)
 	}
@@ -484,16 +493,23 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	controllerOptions := []app.Option{
 		app.WithRuntimeInfo(builder.runtimeInfo(resolvedRuntime)),
-		app.WithNewSessionBuilder(builder.buildNewReplacement),
+		app.WithDynamicContent(dynamicContent),
 	}
-	if !options.noSession {
-		controllerOptions = append(controllerOptions, app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
-			return session.List(ctx, sessionRoot, workspacePath, "", limit)
-		}, builder.openReplacement))
+	if dynamicContent {
+		controllerOptions = append(controllerOptions, app.WithNewSessionBuilder(builder.buildNewReplacement))
+		if !options.noSession {
+			controllerOptions = append(controllerOptions, app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
+				return session.List(ctx, sessionRoot, workspacePath, "", limit)
+			}, builder.openReplacement))
+		}
 	}
-	controller, err = app.New(initialSession, func() (session.Session, error) {
+	createSession := func() (session.Session, error) {
+		if !dynamicContent {
+			return nil, errSessionOperationUnavailable
+		}
 		return deps.newSession(options.noSession, sessionRoot, workspacePath, resolvedRuntime)
-	}, buildRunner, controllerOptions...)
+	}
+	controller, err = app.New(initialSession, createSession, buildRunner, controllerOptions...)
 	if err != nil {
 		_ = initialSession.Close()
 		if processCtx.Err() != nil {

@@ -58,11 +58,11 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 	a.operationMu.Lock()
 	defer a.operationMu.Unlock()
 
-	if text := trimSpace(userText); text == "" {
-		return a.fail(emit, ErrEmptyUserText)
-	}
 	if !a.redactor.complete {
 		return a.runWithIncompleteRedactions(ctx, emit)
+	}
+	if text := trimSpace(userText); text == "" {
+		return a.fail(emit, ErrEmptyUserText)
 	}
 
 	a.emit(emit, Event{Type: EventAgentStarted})
@@ -267,14 +267,6 @@ func (a *Agent) runWithIncompleteRedactions(ctx context.Context, emit func(Event
 	if err := ctx.Err(); err != nil {
 		return a.fail(emit, err)
 	}
-	response, err := a.dispatchNormalProviderStep(ctx, emit, &runDispatchState{})
-	if err != nil {
-		return a.fail(emit, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return a.fail(emit, err)
-	}
-	a.emit(emit, Event{Type: EventProviderUsage, Usage: response.Usage})
 	a.emit(emit, Event{Type: EventAgentFinished})
 	return nil
 }

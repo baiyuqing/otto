@@ -276,15 +276,17 @@ func TestResolveEnvironmentExactAllowRestoresOnlyAutomaticNonProviderNames(t *te
 func TestResolveEnvironmentCollectsProxyUserinfoWithoutRewritingProxy(t *testing.T) {
 	proxy := "http://raw%20user:raw%2Fpass@[2001:db8::1]:8443/path"
 	secondProxy := "socks5://solo%20user@[::1]:9000"
+	networkPathProxy := "//network%20user:network%2Fpass@[2001:db8::2]:9443/path@ignored"
 	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{
 		"HTTPS_PROXY=" + proxy,
 		"all_proxy=" + secondProxy,
+		"http_proxy=" + networkPathProxy,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	environment := snapshotEnvironment(t, snapshot)
-	if environment["HTTPS_PROXY"] != proxy || environment["all_proxy"] != secondProxy {
+	if environment["HTTPS_PROXY"] != proxy || environment["all_proxy"] != secondProxy || environment["http_proxy"] != networkPathProxy {
 		t.Fatal("ResolveEnvironment() rewrote a proxy URI")
 	}
 	if !strings.Contains(environment["HTTPS_PROXY"], "@[2001:db8::1]") ||
@@ -298,6 +300,8 @@ func TestResolveEnvironmentCollectsProxyUserinfoWithoutRewritingProxy(t *testing
 		"raw/pass",
 		"solo%20user",
 		"solo user",
+		"network%20user:network%2Fpass",
+		"network user:network/pass",
 	})
 	assertRedactionsSorted(t, snapshot.RedactionValues())
 }
@@ -353,6 +357,16 @@ func TestResolveEnvironmentConservativelyExtractsMalformedProxyAuthorities(t *te
 			proxy: "http://bad%zz:pass%2Fword@[::1]:8080/path/user:other@example.test",
 			want:  []string{"bad%zz:pass%2Fword", "bad%zz", "pass%2Fword", "pass/word"},
 		},
+		{
+			name:  "reviewer exact multi at",
+			proxy: "http:///real%20user:real%2Fpass@proxy/path%20user:path%2Fpass@example",
+			want:  []string{"real%20user:real%2Fpass", "real user:real/pass", "path%20user:path%2Fpass", "path user:path/pass"},
+		},
+		{
+			name:  "network-like extra slash with later path at",
+			proxy: "///raw%20user:raw%2Fpass@host/path@ignored",
+			want:  []string{"raw%20user:raw%2Fpass", "raw user:raw/pass", "path"},
+		},
 	}
 
 	for _, test := range tests {
@@ -361,8 +375,8 @@ func TestResolveEnvironmentConservativelyExtractsMalformedProxyAuthorities(t *te
 			if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
 				t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
 			}
-			if snapshot.Entries() != nil {
-				t.Fatalf("malformed proxy reached command environment: %#v", snapshot.Entries())
+			if snapshot.Entries() != nil || snapshot.RedactionsComplete() {
+				t.Fatalf("ambiguous proxy snapshot = entries %#v complete %t", snapshot.Entries(), snapshot.RedactionsComplete())
 			}
 			assertRedactionsContain(t, snapshot.RedactionValues(), test.want)
 			for _, value := range snapshot.RedactionValues() {
@@ -407,26 +421,56 @@ func TestResolveEnvironmentDoesNotTreatValidProxyPathQueryOrFragmentAtAsUserinfo
 	}
 }
 
-func TestResolveEnvironmentRejectsMalformedProxyWithoutInventingPathUserinfo(t *testing.T) {
-	for _, proxy := range []string{
-		"http://[2001:db8::1]:8080/path/user:pass@example.test?broken=%zz",
+func TestResolveEnvironmentMalformedProxyPathAtIsIncompleteWithoutInventingUserinfo(t *testing.T) {
+	proxy := "http://[2001:db8::1]:8080/path/user:pass@example.test?broken=%zz"
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + proxy}})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
+		t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
+	}
+	if snapshot.Entries() != nil || snapshot.RedactionsComplete() {
+		t.Fatalf("rejected snapshot = entries %#v complete %t", snapshot.Entries(), snapshot.RedactionsComplete())
+	}
+	if len(snapshot.RedactionValues()) != 0 {
+		t.Fatalf("malformed proxy invented path userinfo: %#v", snapshot.RedactionValues())
+	}
+}
+
+func TestResolveEnvironmentPreservesProxyValuesWithoutLiteralAt(t *testing.T) {
+	for _, value := range []string{
 		"http://example.test/path%zz",
 		"http:///example.test/path",
 		`http:\\example.test\path`,
 		"example.test:8080",
+		"//example.test:8443",
+		"http://:8080",
+		"http://example.test:99999",
 	} {
-		t.Run(proxy, func(t *testing.T) {
-			snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + proxy}})
-			if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
-				t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
+		t.Run(value, func(t *testing.T) {
+			snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + value}})
+			if err != nil || !snapshot.RedactionsComplete() {
+				t.Fatalf("ResolveEnvironment() = complete %t, error %v", snapshot.RedactionsComplete(), err)
 			}
-			if snapshot.Entries() != nil || !snapshot.RedactionsComplete() {
-				t.Fatalf("rejected snapshot = entries %#v complete %t", snapshot.Entries(), snapshot.RedactionsComplete())
-			}
-			if len(snapshot.RedactionValues()) != 0 {
-				t.Fatalf("malformed proxy invented path userinfo: %#v", snapshot.RedactionValues())
+			if got := snapshotEnvironment(t, snapshot)["HTTPS_PROXY"]; got != value {
+				t.Fatalf("HTTPS_PROXY = %q, want %q", got, value)
 			}
 		})
+	}
+}
+
+func TestResolveEnvironmentPreservesNoProxyBypassListsCaseInsensitively(t *testing.T) {
+	entries := []string{
+		"NO_PROXY=localhost,127.0.0.1,.example.test,[::1],*",
+		"no_proxy=user:pass@example.test,service.local",
+	}
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: entries})
+	if err != nil || !snapshot.RedactionsComplete() {
+		t.Fatalf("ResolveEnvironment() = complete %t, error %v", snapshot.RedactionsComplete(), err)
+	}
+	if got := snapshot.Entries(); !reflect.DeepEqual(got, entries) {
+		t.Fatalf("NO_PROXY entries = %#v, want %#v", got, entries)
+	}
+	if len(snapshot.RedactionValues()) != 0 {
+		t.Fatalf("NO_PROXY values were classified as URL userinfo: %#v", snapshot.RedactionValues())
 	}
 }
 
@@ -558,6 +602,25 @@ func TestResolveEnvironmentRejectsUnsafePrivateDirectories(t *testing.T) {
 	})
 }
 
+func TestResolveEnvironmentExpandsJSONStringEscapeFormsBeforeBounds(t *testing.T) {
+	const (
+		raw     = `prefix\u003csuffix`
+		decoded = "prefix<suffix"
+	)
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"ESCAPED_TOKEN=" + raw}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRedactionsContain(t, snapshot.RedactionValues(), []string{raw, decoded})
+
+	entries := sensitiveEnvironmentEntries(511)
+	entries = append(entries, "ESCAPED_TOKEN="+raw)
+	overflow, err := ResolveEnvironment(EnvironmentOptions{HostEntries: entries})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || overflow.RedactionsComplete() {
+		t.Fatalf("expanded 513-form snapshot = complete %t error %v", overflow.RedactionsComplete(), err)
+	}
+}
+
 func TestResolveEnvironmentEnforcesSensitiveValueCountBound(t *testing.T) {
 	exactlyAtLimit := sensitiveEnvironmentEntries(512)
 	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: exactlyAtLimit})
@@ -599,8 +662,8 @@ func TestResolveEnvironmentMarksIncompleteRedactionSnapshots(t *testing.T) {
 	}
 
 	malformedProxy, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=http:///user:pass@example.test"}})
-	if !errors.Is(err, ErrEnvironmentUnsafe) || !malformedProxy.RedactionsComplete() {
-		t.Fatalf("fully extracted malformed proxy = complete %t error %v, want complete redactions with rejected environment", malformedProxy.RedactionsComplete(), err)
+	if !errors.Is(err, ErrEnvironmentUnsafe) || malformedProxy.RedactionsComplete() {
+		t.Fatalf("ambiguous malformed proxy = complete %t error %v, want incomplete redactions", malformedProxy.RedactionsComplete(), err)
 	}
 }
 

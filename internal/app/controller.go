@@ -164,6 +164,14 @@ func WithNewSessionBuilder(build NewSessionBuilder) Option {
 	}
 }
 
+// WithDynamicContent controls whether session-derived metadata, history,
+// browsing, and replacement operations may cross the frontend boundary.
+func WithDynamicContent(enabled bool) Option {
+	return func(controller *Controller) {
+		controller.dynamicContent = enabled
+	}
+}
+
 type Info struct {
 	SessionID                 string
 	SessionPath               string
@@ -243,6 +251,7 @@ type Controller struct {
 	ownerIDSource       func() uint64
 	runtimeInfo         *RuntimeInfo
 	sandboxInfo         SandboxInfo
+	dynamicContent      bool
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
@@ -270,6 +279,7 @@ func New(initial session.Session, create SessionFactory, build RunnerFactory, op
 		create:           create,
 		build:            build,
 		ownerIDSource:    currentGoroutineID,
+		dynamicContent:   true,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -376,6 +386,10 @@ func (c *Controller) NewSession() error {
 		c.mu.Unlock()
 		return ErrClosed
 	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ErrPersistenceDisabled
+	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
 		return ErrPromptActive
@@ -432,8 +446,9 @@ func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListR
 	c.mu.Lock()
 	list := c.listSessions
 	currentPath := c.currentPath
+	dynamicContent := c.dynamicContent
 	c.mu.Unlock()
-	if list == nil {
+	if !dynamicContent || list == nil {
 		return session.ListResult{}, ErrPersistenceDisabled
 	}
 
@@ -449,7 +464,6 @@ func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListR
 }
 
 func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResult, error) {
-	requestedPath := canonicalSessionPath(path)
 	owner := c.ownerID()
 
 	c.mu.Lock()
@@ -457,10 +471,15 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 		c.mu.Unlock()
 		return ResumeResult{}, ErrClosed
 	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrPersistenceDisabled
+	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
 		return ResumeResult{}, ErrPromptActive
 	}
+	requestedPath := canonicalSessionPath(path)
 	factory := c.resumeSession
 	if factory == nil {
 		c.mu.Unlock()
@@ -698,6 +717,7 @@ func (c *Controller) Info() Info {
 	current := c.current
 	currentPath := strings.Clone(c.currentPath)
 	sandboxInfo := c.sandboxInfo
+	dynamicContent := c.dynamicContent
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
@@ -705,7 +725,7 @@ func (c *Controller) Info() Info {
 		runtimeInfo = &copy
 	}
 	c.mu.Unlock()
-	if current == nil {
+	if !dynamicContent || current == nil {
 		return Info{Sandbox: sandboxInfo}
 	}
 	header := current.Header()
@@ -742,8 +762,9 @@ func (c *Controller) Info() Info {
 func (c *Controller) History() []model.Message {
 	c.mu.Lock()
 	current := c.current
+	dynamicContent := c.dynamicContent
 	c.mu.Unlock()
-	if current == nil {
+	if !dynamicContent || current == nil {
 		return nil
 	}
 	return cloneMessages(current.Messages())

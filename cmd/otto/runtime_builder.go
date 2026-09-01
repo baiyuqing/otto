@@ -19,6 +19,8 @@ import (
 	"github.com/baiyuqing/otto/internal/urlprivacy"
 )
 
+var errSessionOperationUnavailable = errors.New("session operation is unavailable")
+
 type preparedSession interface {
 	Info() session.SessionInfo
 	Activate(context.Context) (session.Session, []session.Warning, error)
@@ -160,11 +162,11 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 }
 
 func (b runtimeBuilder) bashConfigured() bool {
-	return b.sandboxSecretsComplete && b.sandboxEnvironment != nil && !isNilSandboxRuntimeValue(b.commandExecutor)
+	return b.boundaryAllowsDynamic(nil) && b.sandboxEnvironment != nil && !isNilSandboxRuntimeValue(b.commandExecutor)
 }
 
 func (b runtimeBuilder) effectiveSandboxInfo() app.SandboxInfo {
-	if !b.sandboxSecretsComplete {
+	if !b.boundaryAllowsDynamic(nil) {
 		return app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonEnvironmentRejected}
 	}
 	if b.sandboxInfo.BashAvailable && !b.bashConfigured() {
@@ -178,10 +180,11 @@ func (b runtimeBuilder) runtimeInfo(runtime config.Runtime) app.RuntimeInfo {
 		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model,
 		ContextWindow: runtime.Compaction.ContextWindow, Sandbox: b.effectiveSandboxInfo(),
 	}
-	if !b.sandboxSecretsComplete {
+	if !b.boundaryAllowsDynamic(&runtime) {
 		info.Provider = ""
 		info.Profile = ""
 		info.Model = ""
+		info.ContextWindow = 0
 	}
 	return info
 }
@@ -189,6 +192,9 @@ func (b runtimeBuilder) runtimeInfo(runtime config.Runtime) app.RuntimeInfo {
 func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {
 	if err := ctx.Err(); err != nil {
 		return app.SessionReplacement{}, err
+	}
+	if !b.boundaryAllowsDynamic(nil) {
+		return app.SessionReplacement{}, errSessionOperationUnavailable
 	}
 	runtime, err := b.resolveSession(session.RuntimeMetadata{
 		Profile: current.Profile, Provider: current.Provider, Model: current.Model,
@@ -231,6 +237,12 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 }
 
 func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.SessionReplacement, error) {
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, err
+	}
+	if !b.boundaryAllowsDynamic(nil) {
+		return app.SessionReplacement{}, errSessionOperationUnavailable
+	}
 	prepared, err := b.prepareListed(ctx, path)
 	if err != nil {
 		return app.SessionReplacement{}, b.redactError(err, nil)
@@ -332,7 +344,7 @@ func activatedSessionMatchesPrepared(info session.SessionInfo, header session.He
 }
 
 func (b runtimeBuilder) updateSessionRuntime(ctx context.Context, current session.Session, runtime config.Runtime) error {
-	if !b.sandboxSecretsComplete {
+	if !b.boundaryAllowsDynamic(&runtime) {
 		return nil
 	}
 	return updateSessionRuntime(ctx, current, runtime)
@@ -406,22 +418,36 @@ func (e redactedIdentityError) Is(target error) bool {
 }
 
 func (b runtimeBuilder) boundaryRedactor(runtime *config.Runtime) *agent.Redactor {
-	return agent.NewRedactorWithCompleteness(b.secretValues(runtime), b.sandboxSecretsComplete)
+	values, complete := b.boundarySecretValues(runtime)
+	return agent.NewRedactorWithCompleteness(values, complete)
 }
 
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
+	values, _ := b.boundarySecretValues(runtime)
+	return values
+}
+
+func (b runtimeBuilder) boundaryAllowsDynamic(runtime *config.Runtime) bool {
+	return b.boundaryRedactor(runtime).AllowsDynamicContent()
+}
+
+func (b runtimeBuilder) boundarySecretValues(runtime *config.Runtime) ([]string, bool) {
 	seen := make(map[string]struct{})
 	values := make([]string, 0, len(b.sandboxSecrets)+len(b.config.Profiles)+2)
+	complete := b.sandboxSecretsComplete
 	add := func(value string) {
-		value = safetext.CanonicalizeUTF8(value)
-		if value == "" {
-			return
+		for _, form := range safetext.SecretForms(value) {
+			if _, ok := seen[form]; ok {
+				continue
+			}
+			seen[form] = struct{}{}
+			values = append(values, form)
 		}
-		if _, ok := seen[value]; ok {
-			return
+	}
+	addURL := func(raw string) {
+		if !collectURLSecretValues(raw, add) {
+			complete = false
 		}
-		seen[value] = struct{}{}
-		values = append(values, value)
 	}
 	for _, value := range b.sandboxSecrets {
 		add(value)
@@ -433,27 +459,27 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 			add(profile.APIKeyEnv)
 			add(b.environment[profile.APIKeyEnv])
 		}
-		collectURLSecretValues(profile.BaseURL, add)
+		addURL(profile.BaseURL)
 	}
-	collectURLSecretValues(b.runtimeOverrides.BaseURL, add)
+	addURL(b.runtimeOverrides.BaseURL)
 	if runtime != nil {
 		add(runtime.APIKeyEnv)
 		add(runtime.APIKey)
-		collectURLSecretValues(runtime.BaseURL, add)
+		addURL(runtime.BaseURL)
 	}
-	return values
+	return values, complete
 }
 
-func collectURLSecretValues(raw string, add func(string)) {
+func collectURLSecretValues(raw string, add func(string)) bool {
 	if raw == "" || add == nil {
-		return
+		return true
 	}
 	add(raw)
-	collectRawURLSecretValues(raw, add)
+	complete := collectRawURLSecretValues(raw, add)
 
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return
+		return false
 	}
 	if parsed.User != nil {
 		username := parsed.User.Username()
@@ -477,10 +503,11 @@ func collectURLSecretValues(raw string, add func(string)) {
 	if parsed.Fragment != "" {
 		add(parsed.Fragment)
 	}
+	return complete
 }
 
-func collectRawURLSecretValues(raw string, add func(string)) {
-	userinfo, _ := urlprivacy.UserinfoForms(raw)
+func collectRawURLSecretValues(raw string, add func(string)) bool {
+	userinfo, ambiguous := urlprivacy.UserinfoForms(raw)
 	for _, value := range userinfo {
 		add(value)
 	}
@@ -515,6 +542,7 @@ func collectRawURLSecretValues(raw string, add func(string)) {
 			add(decoded)
 		}
 	}
+	return !ambiguous
 }
 
 func resolveInitialRuntime(file config.File, environment map[string]string, metadata *session.RuntimeMetadata, overrides config.Overrides) (config.Runtime, error) {

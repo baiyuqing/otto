@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/agent"
@@ -224,6 +225,90 @@ func TestRuntimeBuilderCollectsEncodedAndMalformedEndpointSecretForms(t *testing
 	}
 }
 
+func TestRuntimeBuilderExpandsJSONStringEscapeFormsForProviderAndEndpointSecrets(t *testing.T) {
+	const (
+		rawKey          = `key\"value`
+		decodedKey      = `key"value`
+		rawEndpoint     = `https://example.test/v1?token=endpoint\u003cvalue`
+		decodedEndpoint = `https://example.test/v1?token=endpoint<value`
+	)
+	file := configWithProfiles("active")
+	file.Profiles["escaped-inactive"] = config.Profile{
+		Provider: "openai-compatible", BaseURL: rawEndpoint, Model: "inactive", APIKeyEnv: "ESCAPED_KEY",
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.environment["ESCAPED_KEY"] = rawKey
+	values := builder.secretValues(nil)
+	for _, want := range []string{rawKey, decodedKey, rawEndpoint, decodedEndpoint, `endpoint\u003cvalue`, "endpoint<value"} {
+		if !containsString(values, want) {
+			t.Fatalf("secretValues() omitted JSON string escape form %q: %#v", want, values)
+		}
+	}
+}
+
+func TestRuntimeBuilderRedactsJSONStringEscapeFormsFromRawProviderBody(t *testing.T) {
+	tests := []struct {
+		raw     string
+		decoded string
+	}{
+		{raw: `less\u003cthan`, decoded: "less<than"},
+		{raw: `greater\u003Ethan`, decoded: "greater>than"},
+		{raw: `amp\u0026ersand`, decoded: "amp&ersand"},
+		{raw: `quote\"value`, decoded: `quote"value`},
+		{raw: `back\\slash`, decoded: `back\slash`},
+		{raw: `slash\/value`, decoded: "slash/value"},
+		{raw: `line\nbreak`, decoded: "line\nbreak"},
+		{raw: `separator\u2028value`, decoded: "separator\u2028value"},
+		{raw: `paragraph\u2029value`, decoded: "paragraph\u2029value"},
+	}
+	var requestBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		requestBody = string(body)
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	file := configWithProfiles("active")
+	active := file.Profiles["active"]
+	active.BaseURL = server.URL
+	active.APIKeyEnv = "ESCAPED_KEY_0"
+	file.Profiles["active"] = active
+	builder := newRuntimeBuilderForTest(t, file)
+	decoded := make([]string, len(tests))
+	for index, test := range tests {
+		name := fmt.Sprintf("ESCAPED_KEY_%d", index)
+		builder.environment[name] = test.raw
+		decoded[index] = test.decoded
+		if index > 0 {
+			fileProfile := config.Profile{Provider: "openai-compatible", BaseURL: "https://inactive.example/v1", Model: "inactive", APIKeyEnv: name}
+			builder.config.Profiles[fmt.Sprintf("inactive-%d", index)] = fileProfile
+		}
+	}
+	memory := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "raw-provider-body", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "active", Model: "active-model", CreatedAt: time.Now().UTC(),
+	})
+	runner, err := builder.buildRunner(memory, config.Runtime{
+		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model",
+		APIKeyEnv: "ESCAPED_KEY_0", APIKey: tests[0].raw, ShellTimeout: time.Second, MaxOutputBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Run(context.Background(), strings.Join(decoded, " | "), nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range tests {
+		if strings.Contains(requestBody, test.raw) || strings.Contains(requestBody, test.decoded) {
+			t.Fatalf("raw provider body retained JSON escape secret (%q, %q): %s", test.raw, test.decoded, requestBody)
+		}
+	}
+}
+
 func TestRuntimeBuilderCanonicalizesInvalidUTF8DecodedEndpointForms(t *testing.T) {
 	const endpoint = "https://user%FF:pass%C0%AF@example.test/v1?ff=decoded%FF&over=overlong%C0%AF#fragment%FF"
 	file := configWithProfiles("active")
@@ -275,6 +360,11 @@ func TestRuntimeBuilderConservativelyExtractsMalformedEndpointAuthorities(t *tes
 			endpoint: "https://bad%zz:pass%2Fword@[::1]:8443/v1?next=@ignored#@ignored",
 			want:     []string{"bad%zz:pass%2Fword", "bad%zz", "pass%2Fword", "pass/word"},
 		},
+		{
+			name:     "reviewer exact multi at",
+			endpoint: "http:///real%20user:real%2Fpass@proxy/path%20user:path%2Fpass@example",
+			want:     []string{"real%20user:real%2Fpass", "real user:real/pass", "path%20user:path%2Fpass", "path user:path/pass"},
+		},
 	}
 
 	for _, test := range tests {
@@ -290,6 +380,27 @@ func TestRuntimeBuilderConservativelyExtractsMalformedEndpointAuthorities(t *tes
 				}
 			}
 		})
+	}
+}
+
+func TestRuntimeBuilderMalformedConfiguredEndpointMakesBoundaryIncomplete(t *testing.T) {
+	file := configWithProfiles("active")
+	file.Profiles["malformed-inactive"] = config.Profile{
+		Provider:  "openai-compatible",
+		BaseURL:   "http:///real%20user:real%2Fpass@proxy/path%20user:path%2Fpass@example",
+		Model:     "inactive",
+		APIKeyEnv: "MALFORMED_KEY",
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+
+	if got := builder.boundaryRedactor(nil).RedactString("dynamic-provider-content"); got != "" {
+		t.Fatalf("malformed configured endpoint left boundary complete: %q", got)
+	}
+	info := builder.runtimeInfo(config.Runtime{
+		Provider: "openai-compatible", Profile: "active", Model: "model",
+	})
+	if info.Provider != "" || info.Profile != "" || info.Model != "" {
+		t.Fatalf("malformed configured endpoint exposed runtime metadata: %#v", info)
 	}
 }
 
@@ -1131,7 +1242,7 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 	}
 }
 
-func TestRuntimeBuilderRedactsInactiveEncodedAndMalformedEndpointsAcrossBoundaries(t *testing.T) {
+func TestRuntimeBuilderFailsClosedForInactiveMalformedEndpointAcrossBoundaries(t *testing.T) {
 	const (
 		encodedEndpoint   = "https://raw%2Buser:raw%2Fpass@example.test/v1?token=raw+query&encoded=percent%2Fvalue#frag%2Bvalue"
 		malformedEndpoint = "https://bad%zz:pass%2Fword@example.test/v1?token=plus+value&broken=bad%zz#raw%2Gfragment"
@@ -1233,24 +1344,21 @@ func TestRuntimeBuilderRedactsInactiveEncodedAndMalformedEndpointsAcrossBoundari
 	requestMu.Lock()
 	bodies := append([]string(nil), requestBodies...)
 	requestMu.Unlock()
-	if len(bodies) != 2 {
-		t.Fatalf("provider requests = %d, want 2", len(bodies))
+	if len(bodies) != 0 {
+		t.Fatalf("incomplete endpoint boundary made %d provider requests", len(bodies))
+	}
+	if len(messages) != 0 {
+		t.Fatalf("incomplete endpoint boundary mutated session: %#v", messages)
 	}
 	eventJSON, err := json.Marshal(events)
 	if err != nil {
 		t.Fatal(err)
 	}
-	messageJSON, err := json.Marshal(messages)
-	if err != nil {
-		t.Fatal(err)
-	}
 	boundaryErr := builder.redactError(fmt.Errorf("boundary: %s", strings.Join(secretForms, " | ")), nil)
 	boundaries := map[string]string{
-		"Bash and messages":  string(messageJSON),
-		"events":             string(eventJSON),
-		"provider follow-up": bodies[1],
-		"Pi JSONL":           string(persisted),
-		"boundary error":     boundaryErr.Error(),
+		"events":         string(eventJSON),
+		"Pi JSONL":       string(persisted),
+		"boundary error": boundaryErr.Error(),
 	}
 	for boundary, content := range boundaries {
 		for _, secret := range secretForms {
@@ -1259,50 +1367,14 @@ func TestRuntimeBuilderRedactsInactiveEncodedAndMalformedEndpointsAcrossBoundari
 			}
 		}
 	}
-	for _, body := range bodies {
-		if strings.Contains(body, encodedEndpoint) || strings.Contains(body, malformedEndpoint) {
-			t.Fatalf("provider prompt/request exposed an inactive endpoint: %q", body)
-		}
-	}
 }
 
-func TestRuntimeBuilderMarkerExhaustionKeepsBashAndFileToolsUsable(t *testing.T) {
+func TestRuntimeBuilderMarkerExhaustionDisablesDynamicRuntimeAndBash(t *testing.T) {
 	secret := markerExhaustingProviderSecret(t)
-	var requestBodies []string
-	var toolNames []string
-	var systemPrompt string
 	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read request: %v", err)
-		}
-		requestBodies = append(requestBodies, string(body))
-		if requests.Add(1) == 1 {
-			var payload struct {
-				Messages []struct {
-					Role    string `json:"role"`
-					Content string `json:"content"`
-				} `json:"messages"`
-				Tools []struct {
-					Function struct {
-						Name string `json:"name"`
-					} `json:"function"`
-				} `json:"tools"`
-			}
-			if err := json.Unmarshal(body, &payload); err != nil {
-				t.Errorf("decode first request: %v", err)
-			}
-			if len(payload.Messages) > 0 {
-				systemPrompt = payload.Messages[0].Content
-			}
-			for _, item := range payload.Tools {
-				toolNames = append(toolNames, item.Function.Name)
-			}
-			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":"{\"command\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}]}`)
-			return
-		}
-		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeSSE(w, `{"choices":[{"delta":{"content":"dynamic"},"finish_reason":"stop"}]}`)
 	}))
 	defer server.Close()
 
@@ -1320,11 +1392,24 @@ func TestRuntimeBuilderMarkerExhaustionKeepsBashAndFileToolsUsable(t *testing.T)
 	builder := newRuntimeBuilderForTest(t, file)
 	builder.environment["ACTIVE_KEY"] = "active-key"
 	builder.environment["INACTIVE_KEY"] = secret
-	builder.commandExecutor = &recordingSandboxExecutor{execute: func(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
-		_, err := io.WriteString(streams.Stdout, secret)
-		return sandbox.ExitStatus{Code: 0}, err
-	}}
+	executor := &recordingSandboxExecutor{}
+	builder.commandExecutor = executor
 	builder.sandboxEnvironment = []string{}
+	runtime := config.Runtime{
+		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active",
+		APIKey: "active-key", APIKeyEnv: "ACTIVE_KEY", ShellTimeout: time.Second, MaxOutputBytes: 4096,
+		Compaction: config.CompactionRuntime{ContextWindow: 128_000},
+	}
+	if builder.bashConfigured() {
+		t.Fatal("marker exhaustion left Bash configured")
+	}
+	if got := builder.effectiveSandboxInfo(); got.Mode != app.SandboxUnavailable || got.BashAvailable {
+		t.Fatalf("sandbox info = %#v, want unavailable Bash", got)
+	}
+	if got := builder.runtimeInfo(runtime); got.Provider != "" || got.Profile != "" || got.Model != "" || got.ContextWindow != 0 {
+		t.Fatalf("runtime info exposed dynamic metadata: %#v", got)
+	}
+
 	store, err := session.Create(builder.sessionRoot, session.Header{
 		Version: session.CurrentVersion, ID: "marker-exhaustion", Workspace: builder.workspacePath,
 		Provider: "openai-compatible", Profile: "active", Model: "active", CreatedAt: time.Now().UTC(),
@@ -1333,10 +1418,7 @@ func TestRuntimeBuilderMarkerExhaustionKeepsBashAndFileToolsUsable(t *testing.T)
 		t.Fatal(err)
 	}
 	path := store.Path()
-	runner, err := builder.buildRunner(store, config.Runtime{
-		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active",
-		APIKey: "active-key", APIKeyEnv: "ACTIVE_KEY", ShellTimeout: time.Second, MaxOutputBytes: 4096,
-	})
+	runner, err := builder.buildRunner(store, runtime)
 	if err != nil {
 		_ = store.Close()
 		t.Fatalf("buildRunner() rejected marker adversary: %v", err)
@@ -1346,6 +1428,7 @@ func TestRuntimeBuilderMarkerExhaustionKeepsBashAndFileToolsUsable(t *testing.T)
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	messages := store.Messages()
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1353,24 +1436,14 @@ func TestRuntimeBuilderMarkerExhaustionKeepsBashAndFileToolsUsable(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"read", "grep", "find", "ls", "write", "edit", "bash"}; !reflect.DeepEqual(toolNames, want) {
-		t.Fatalf("tool names = %#v, want %#v", toolNames, want)
+	if requests.Load() != 0 || executor.calls.Load() != 0 || len(messages) != 0 {
+		t.Fatalf("suppressed runtime crossed dynamic boundary: provider=%d Bash=%d messages=%#v", requests.Load(), executor.calls.Load(), messages)
 	}
-	if !strings.Contains(systemPrompt, "Bash is unsandboxed") || !strings.Contains(systemPrompt, "current macOS user's access") {
-		t.Fatalf("provider system prompt did not state Bash authority: %q", systemPrompt)
+	if len(events) != 2 || events[0].Type != agent.EventAgentStarted || events[1].Type != agent.EventAgentFinished {
+		t.Fatalf("events = %#v, want fixed lifecycle", events)
 	}
-	eventJSON, err := json.Marshal(events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for boundary, content := range map[string]string{
-		"events":             string(eventJSON),
-		"provider follow-up": requestBodies[1],
-		"Pi JSONL":           string(persisted),
-	} {
-		if strings.Contains(content, secret) {
-			t.Fatalf("%s leaked marker-exhausting provider secret", boundary)
-		}
+	if strings.Contains(string(persisted), secret) {
+		t.Fatal("Pi JSONL leaked marker-exhausting provider secret")
 	}
 }
 
@@ -1633,7 +1706,7 @@ func TestRuntimeBuilderReusesOneSandboxExecutorForInitialNewAndResume(t *testing
 	}
 }
 
-func TestRuntimeBuilderIncompleteRedactionRemainsFailClosedAcrossInitialNewAndResume(t *testing.T) {
+func TestRuntimeBuilderIncompleteRedactionRunsInitialLifecycleButRejectsNewAndResume(t *testing.T) {
 	const omitted = "omitted-runtime-builder-environment-value"
 	var requestMu sync.Mutex
 	var requestBodies []string
@@ -1670,148 +1743,116 @@ func TestRuntimeBuilderIncompleteRedactionRemainsFailClosedAcrossInitialNewAndRe
 	if err != nil {
 		t.Fatal(err)
 	}
-	paths := []string{initial.Path()}
+	initialPath := initial.Path()
+	initialBefore := mustReadFile(t, initialPath)
 	initialRunner, err := builder.buildRunner(initial, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := initialRunner.Run(context.Background(), "initial "+omitted, nil); err != nil {
+	var events []agent.Event
+	if err := initialRunner.Run(context.Background(), "initial "+omitted, func(event agent.Event) { events = append(events, event) }); err != nil {
 		t.Fatal(err)
+	}
+	if len(initial.Messages()) != 0 || len(events) != 2 || events[0].Type != agent.EventAgentStarted || events[1].Type != agent.EventAgentFinished {
+		t.Fatalf("initial suppressed run mutated state or events: messages=%#v events=%#v", initial.Messages(), events)
 	}
 	if err := initial.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if after := mustReadFile(t, initialPath); !bytes.Equal(after, initialBefore) {
+		t.Fatal("initial suppressed run mutated Pi JSONL")
+	}
 
-	newReplacement, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+	if _, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
 		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := newReplacement.Runner.Run(context.Background(), "new "+omitted, nil); err != nil {
-		_ = newReplacement.Session.Close()
-		t.Fatal(err)
-	}
-	paths = append(paths, newReplacement.Session.Path())
-	if err := newReplacement.Session.Close(); err != nil {
-		t.Fatal(err)
+	}); err == nil {
+		t.Fatal("incomplete buildNewReplacement() succeeded")
 	}
 
 	resumePath := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{
 		Version: session.CurrentVersion, ID: "incomplete-resume", Workspace: builder.workspacePath,
 		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 	})
-	resumeReplacement, err := builder.openReplacement(context.Background(), resumePath)
-	if err != nil {
-		t.Fatal(err)
+	resumeBefore := mustReadFile(t, resumePath)
+	if _, err := builder.openReplacement(context.Background(), resumePath); err == nil {
+		t.Fatal("incomplete openReplacement() succeeded")
 	}
-	if err := resumeReplacement.Runner.Run(context.Background(), "resume "+omitted, nil); err != nil {
-		_ = resumeReplacement.Session.Close()
-		t.Fatal(err)
-	}
-	paths = append(paths, resumeReplacement.Session.Path())
-	if err := resumeReplacement.Session.Close(); err != nil {
-		t.Fatal(err)
+	if after := mustReadFile(t, resumePath); !bytes.Equal(after, resumeBefore) {
+		t.Fatal("incomplete openReplacement() mutated candidate bytes")
 	}
 
 	requestMu.Lock()
 	bodies := append([]string(nil), requestBodies...)
 	requestMu.Unlock()
-	if len(bodies) != 3 {
-		t.Fatalf("provider requests = %d, want initial/new/resume", len(bodies))
-	}
-	for index, body := range bodies {
-		if strings.Contains(body, omitted) {
-			t.Fatalf("provider request %d retained omitted value", index)
-		}
-		var payload struct {
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-			Tools []json.RawMessage `json:"tools"`
-		}
-		if err := json.Unmarshal([]byte(body), &payload); err != nil {
-			t.Fatal(err)
-		}
-		if len(payload.Messages) == 0 || !strings.Contains(payload.Messages[0].Content, "Bash is unavailable") || len(payload.Tools) != 6 {
-			t.Fatalf("request %d status/tools are not truthful: %#v", index, payload)
-		}
-	}
-	for _, path := range paths {
-		persisted, err := os.ReadFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(persisted), omitted) {
-			t.Fatalf("Pi JSONL %q retained omitted value", path)
-		}
+	if len(bodies) != 0 {
+		t.Fatalf("incomplete runtime made %d provider requests", len(bodies))
 	}
 }
 
-func TestRuntimeBuilderIncompleteRedactionSkipsRuntimeMetadataWritesForNewAndResume(t *testing.T) {
-	newBuilder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
-	newBuilder.sandboxSecretsComplete = false
-	newCandidate := &runtimeUpdateTrackingSession{Session: session.NewMemory(session.Header{
-		Version: session.CurrentVersion, ID: "new-incomplete", Workspace: newBuilder.workspacePath,
-		Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
-	})}
-	newBuilder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
-		return newCandidate, nil
+func TestRuntimeBuilderIncompleteRedactionRejectsNewAndResumeBeforeMutation(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.sandboxSecretsComplete = false
+	var createCalls, prepareCalls atomic.Int32
+	builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		createCalls.Add(1)
+		return session.NewMemory(session.Header{}), nil
 	}
-	newBuilder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
-		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
-	}
-	newReplacement, err := newBuilder.buildNewReplacement(context.Background(), app.RuntimeInfo{
-		Provider: "openai-compatible", Profile: "default", Model: "stored-model",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if newCandidate.updateCalls.Load() != 0 {
-		t.Fatalf("new runtime update calls = %d, want 0", newCandidate.updateCalls.Load())
-	}
-	if newReplacement.RuntimeInfo.Provider != "" || newReplacement.RuntimeInfo.Profile != "" || newReplacement.RuntimeInfo.Model != "" {
-		t.Fatalf("new runtime info was not fail-closed: %#v", newReplacement.RuntimeInfo)
-	}
-	if err := newReplacement.Session.Close(); err != nil {
-		t.Fatal(err)
+	builder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		prepareCalls.Add(1)
+		return nil, errors.New("must not prepare")
 	}
 
-	resumeBuilder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
-	resumeBuilder.sandboxSecretsComplete = false
-	resumeBuilder.runtimeOverrides.Model = "effective-model"
-	resumeCandidate := &runtimeUpdateTrackingSession{Session: session.NewMemory(session.Header{
-		Version: session.CurrentVersion, ID: "resume-incomplete", Workspace: resumeBuilder.workspacePath,
-		Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
-	})}
-	resumeBuilder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
-		return &fakePreparedSession{
-			info: session.SessionInfo{
-				Path: "/sessions/incomplete.jsonl", ID: "resume-incomplete", CWD: resumeBuilder.workspacePath,
-				Profile: "default", Provider: "openai-compatible", Model: "stored-model",
-			},
-			activate: func(context.Context) (session.Session, []session.Warning, error) { return resumeCandidate, nil, nil },
-		}, nil
+	if _, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+		Provider: "openai-compatible", Profile: "default", Model: "stored-model", ContextWindow: 424_242,
+	}); err == nil {
+		t.Fatal("incomplete buildNewReplacement() succeeded")
 	}
-	resumeBuilder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
-		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	if _, err := builder.openReplacement(context.Background(), "/sessions/incomplete.jsonl"); err == nil {
+		t.Fatal("incomplete openReplacement() succeeded")
 	}
-	resumeReplacement, err := resumeBuilder.openReplacement(context.Background(), "/sessions/incomplete.jsonl")
-	if err != nil {
-		t.Fatal(err)
+	if createCalls.Load() != 0 || prepareCalls.Load() != 0 {
+		t.Fatalf("incomplete replacement callbacks = create %d prepare %d", createCalls.Load(), prepareCalls.Load())
 	}
-	if resumeCandidate.updateCalls.Load() != 0 {
-		t.Fatalf("resume runtime update calls = %d, want 0", resumeCandidate.updateCalls.Load())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := builder.buildNewReplacement(ctx, app.RuntimeInfo{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled buildNewReplacement() error = %v", err)
 	}
-	if resumeReplacement.RuntimeInfo.Provider != "" || resumeReplacement.RuntimeInfo.Profile != "" || resumeReplacement.RuntimeInfo.Model != "" {
-		t.Fatalf("resume runtime info was not fail-closed: %#v", resumeReplacement.RuntimeInfo)
+	if _, err := builder.openReplacement(ctx, "/sessions/incomplete.jsonl"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pre-canceled openReplacement() error = %v", err)
 	}
-	if err := resumeReplacement.Session.Close(); err != nil {
-		t.Fatal(err)
+	if createCalls.Load() != 0 || prepareCalls.Load() != 0 {
+		t.Fatalf("pre-canceled replacement callbacks = create %d prepare %d", createCalls.Load(), prepareCalls.Load())
+	}
+}
+
+func TestRuntimeBuilderIncompleteResumePreservesRepairableSessionBytes(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.sandboxSecretsComplete = false
+	fixtures := map[string][]byte{
+		"missing delimiter": []byte(`{"type":"session","version":3,"id":"missing-delimiter","timestamp":"2026-01-01T00:00:00Z","cwd":"/workspace"}`),
+		"truncated tail":    []byte("{\"type\":\"session\"}\n{\"type\":"),
+		"dangling tool call": []byte("{\"type\":\"session\"}\n" +
+			"{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"call\",\"name\":\"read\",\"arguments\":{}}]}}\n"),
+	}
+	for name, before := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "candidate.jsonl")
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := builder.openReplacement(context.Background(), path); err == nil {
+				t.Fatal("openReplacement() succeeded")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("candidate bytes changed: before %q after %q", before, after)
+			}
+		})
 	}
 }
 
@@ -1909,33 +1950,18 @@ func (s *trackedReplacementSession) Close() error {
 
 func markerExhaustingProviderSecret(t *testing.T) string {
 	t.Helper()
-	var value []byte
-	for character := byte(0x20); character <= 0x7e; character++ {
-		value = append(value, character)
+	var value strings.Builder
+	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
+		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
+			continue
+		}
+		value.WriteRune(candidate)
 	}
-	for continuation := byte(0x80); continuation <= 0xbf; continuation++ {
-		value = append(value, 0xc2, continuation)
-	}
-	for lead := byte(0xc3); lead <= 0xdf; lead++ {
-		value = append(value, lead, 0x80)
-	}
-	value = append(value, 0xe0, 0xa0, 0x80)
-	for lead := byte(0xe1); lead <= 0xec; lead++ {
-		value = append(value, lead, 0x80, 0x80)
-	}
-	value = append(value, 0xed, 0x80, 0x80)
-	for lead := byte(0xee); lead <= 0xef; lead++ {
-		value = append(value, lead, 0x80, 0x80)
-	}
-	value = append(value, 0xf0, 0x90, 0x80, 0x80)
-	for lead := byte(0xf1); lead <= 0xf3; lead++ {
-		value = append(value, lead, 0x80, 0x80, 0x80)
-	}
-	value = append(value, 0xf4, 0x80, 0x80, 0x80)
-	if !utf8.Valid(value) {
+	result := value.String()
+	if !utf8.ValidString(result) {
 		t.Fatal("marker adversary is not valid UTF-8")
 	}
-	return string(value)
+	return result
 }
 
 func newRuntimeBuilderForTest(t *testing.T, file config.File) runtimeBuilder {

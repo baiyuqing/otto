@@ -10,38 +10,65 @@ import (
 )
 
 // UserinfoForms returns raw and independently decoded userinfo components.
-// malformed reports that the nonempty value is not a normal absolute URL with
-// a parseable authority, contains invalid escape/control syntax, or uses a
-// backslash-ambiguous shape.
-func UserinfoForms(raw string) (values []string, malformed bool) {
-	if raw == "" {
+// ambiguous reports that userinfo extraction cannot be proven complete. Values
+// without a literal '@' are complete for this credential detector even when
+// they are not semantically usable proxy URLs.
+func UserinfoForms(raw string) (values []string, ambiguous bool) {
+	if raw == "" || !strings.ContainsRune(raw, '@') {
 		return nil, false
 	}
 
 	authority, normalAuthority := normalURLAuthority(raw)
-	percentValid := validPercentEscapes(raw)
 	if normalAuthority {
-		separator := strings.Index(raw, "://")
-		authorityURL, authorityErr := url.Parse(raw[:separator+3] + authority)
-		authorityParsed := authorityErr == nil && authorityURL.Scheme != "" && authorityURL.Host != ""
-		if authorityParsed {
-			if userinfoEnd := strings.LastIndexByte(authority, '@'); userinfoEnd >= 0 {
-				values = appendUserinfoForms(values, authority[:userinfoEnd])
+		atCount := strings.Count(authority, "@")
+		switch atCount {
+		case 0:
+			if strings.ContainsRune(raw, '\\') {
+				for _, candidate := range lexicalUserinfoCandidates(raw) {
+					values = appendUserinfoForms(values, candidate)
+				}
+				return deduplicate(values), true
+			}
+			if !parseableAuthority(authority) {
+				for _, candidate := range lexicalUserinfoCandidates(raw) {
+					values = appendUserinfoForms(values, candidate)
+				}
+				return deduplicate(values), true
+			}
+			_, parseErr := url.Parse(raw)
+			return nil, parseErr != nil || !validPercentEscapes(raw) || strings.ContainsRune(raw, '\\')
+		case 1:
+			userinfoEnd := strings.IndexByte(authority, '@')
+			values = appendUserinfoForms(values, authority[:userinfoEnd])
+			authorityURL, authorityErr := url.Parse("//" + authority)
+			if authorityErr == nil && authorityURL.Host != "" {
 				values = appendParsedUserinfoForms(values, authorityURL.User)
 			}
 			_, parseErr := url.Parse(raw)
-			return deduplicate(values), parseErr != nil || !percentValid || strings.ContainsRune(raw, '\\')
-		}
-		// Preserve the lexically delimited authority userinfo even when parsing
-		// that authority fails and a later path segment also contains '@'.
-		if userinfoEnd := strings.LastIndexByte(authority, '@'); userinfoEnd >= 0 {
-			values = appendUserinfoForms(values, authority[:userinfoEnd])
+			ambiguous = authorityErr != nil || authorityURL == nil || authorityURL.Host == "" ||
+				parseErr != nil || !validPercentEscapes(raw) || strings.ContainsRune(raw, '\\')
+			if strings.ContainsRune(raw, '\\') {
+				for _, candidate := range lexicalUserinfoCandidates(raw) {
+					values = appendUserinfoForms(values, candidate)
+				}
+			}
+			return deduplicate(values), ambiguous
+		default:
+			for _, candidate := range userinfoCandidates(authority) {
+				values = appendUserinfoForms(values, candidate)
+			}
+			if strings.ContainsRune(raw, '\\') {
+				for _, candidate := range lexicalUserinfoCandidates(raw) {
+					values = appendUserinfoForms(values, candidate)
+				}
+			}
+			return deduplicate(values), true
 		}
 	}
 
-	// Only scan outside the normally delimited authority when that authority
-	// cannot be established. This remains conservative for malformed proxy
-	// spellings without reclassifying a valid URL's path/query/fragment '@'.
+	// A malformed authority delimiter makes every segment immediately before an
+	// '@' plausible. Retain both local and cumulative interpretations so one
+	// malformed/multi-'@' spelling cannot hide an earlier credential.
 	for _, candidate := range lexicalUserinfoCandidates(raw) {
 		values = appendUserinfoForms(values, candidate)
 	}
@@ -49,11 +76,17 @@ func UserinfoForms(raw string) (values []string, malformed bool) {
 }
 
 func normalURLAuthority(raw string) (string, bool) {
-	separator := strings.Index(raw, "://")
-	if separator <= 0 || !validScheme(raw[:separator]) {
-		return "", false
+	start := 0
+	switch {
+	case strings.HasPrefix(raw, "//"):
+		start = 2
+	default:
+		separator := strings.Index(raw, "://")
+		if separator <= 0 || !validScheme(raw[:separator]) {
+			return "", false
+		}
+		start = separator + 3
 	}
-	start := separator + 3
 	if start >= len(raw) || raw[start] == '/' || raw[start] == '\\' {
 		return "", false
 	}
@@ -65,6 +98,11 @@ func normalURLAuthority(raw string) (string, bool) {
 		return "", false
 	}
 	return raw[start:end], true
+}
+
+func parseableAuthority(authority string) bool {
+	parsed, err := url.Parse("//" + authority)
+	return err == nil && parsed != nil && parsed.Host != ""
 }
 
 func lexicalUserinfoCandidates(raw string) []string {
@@ -90,23 +128,33 @@ func lexicalUserinfoCandidates(raw string) []string {
 	if start >= end {
 		return nil
 	}
+	return userinfoCandidates(raw[start:end])
+}
 
-	prefix := raw[start:end]
-	at := strings.LastIndexByte(prefix, '@')
-	if at < 0 {
-		return nil
+func userinfoCandidates(raw string) []string {
+	var candidates []string
+	for offset := 0; offset < len(raw); {
+		relativeAt := strings.IndexByte(raw[offset:], '@')
+		if relativeAt < 0 {
+			break
+		}
+		at := offset + relativeAt
+		beforeAt := raw[:at]
+		localStart := strings.LastIndexAny(beforeAt, "/\\@") + 1
+		candidates = appendUserinfoCandidate(candidates, beforeAt[localStart:])
+		if localStart > 0 {
+			candidates = appendUserinfoCandidate(candidates, beforeAt)
+		}
+		offset = at + 1
 	}
-	beforeAt := prefix[:at]
-	candidateStart := 0
-	if separator := strings.LastIndexAny(beforeAt, "/\\"); separator >= 0 {
-		candidateStart = separator + 1
-	}
-	candidate := beforeAt[candidateStart:]
+	return candidates
+}
+
+func appendUserinfoCandidate(candidates []string, candidate string) []string {
 	if candidate == "" {
-		return nil
+		return candidates
 	}
-	candidates := []string{candidate}
-
+	candidates = append(candidates, candidate)
 	if colon := strings.IndexByte(candidate, ':'); colon > 0 && validScheme(candidate[:colon]) {
 		alternative := strings.TrimLeft(candidate[colon+1:], "/\\")
 		if alternative != "" {

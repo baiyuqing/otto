@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -63,6 +64,50 @@ func TestRedactorCanonicalizesInvalidConfiguredValues(t *testing.T) {
 	for _, secret := range canonical {
 		if strings.Contains(boundaryErr.Error(), secret) {
 			t.Fatalf("RedactError() retained canonical configured value %q: %q", secret, boundaryErr)
+		}
+	}
+}
+
+func TestRedactorExpandsJSONStringEscapeFormsBeforeMarkerSelection(t *testing.T) {
+	tests := []struct {
+		raw     string
+		decoded string
+	}{
+		{raw: `\u003c`, decoded: "<"},
+		{raw: `\u003C`, decoded: "<"},
+		{raw: `\u003e`, decoded: ">"},
+		{raw: `\u0026`, decoded: "&"},
+		{raw: `\"`, decoded: `"`},
+		{raw: `\\`, decoded: `\`},
+		{raw: `\/`, decoded: "/"},
+		{raw: `\n`, decoded: "\n"},
+		{raw: `\u2028`, decoded: "\u2028"},
+		{raw: `\u2029`, decoded: "\u2029"},
+	}
+	excluded := make(map[rune]struct{})
+	values := make([]string, 0, len(tests)+1)
+	for _, test := range tests {
+		for _, value := range test.decoded {
+			excluded[value] = struct{}{}
+		}
+		values = append(values, test.raw)
+	}
+	values = append(values, allNonControlUnicodeRunesExcept(t, excluded))
+	redactor := NewRedactor(values)
+
+	for _, test := range tests {
+		for _, input := range []string{test.raw, test.decoded} {
+			redacted := redactor.RedactString(input)
+			if strings.Contains(redacted, test.raw) || strings.Contains(redacted, test.decoded) {
+				t.Fatalf("RedactString(%q) retained raw/decoded form: %q", input, redacted)
+			}
+			encoded, err := json.Marshal(redacted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), test.raw) {
+				t.Fatalf("JSON encoding recreated configured form %q: %s", test.raw, encoded)
+			}
 		}
 	}
 }
@@ -167,29 +212,47 @@ func TestRedactorReplacementCannotSynthesizeAnotherCredential(t *testing.T) {
 	}
 }
 
-func TestRedactorExhaustiveMarkerFallbackDeletesToFixedPointWithoutStreaming(t *testing.T) {
+func TestRedactorExhaustiveMarkerFallbackSuppressesDynamicContentInConstantWork(t *testing.T) {
 	allRunes := allNonControlUnicodeRunes(t)
-	longPreferred := strings.Repeat(redactionMarker, 1<<20)
-	redactor := NewRedactor([]string{allRunes, longPreferred, "X", "ab"})
-	if redactor.marker != "" {
-		t.Fatalf("exhaustive marker fallback = %d bytes, want explicit deletion", len(redactor.marker))
+	longPrefix := strings.Repeat("a", 1<<20) + "z"
+	redactor := NewRedactor([]string{allRunes, longPrefix, "X", "ab"})
+	if redactor.marker != "" || redactor.AllowsDynamicContent() {
+		t.Fatalf("exhaustive marker fallback = marker %q allows-dynamic %t, want suppression", redactor.marker, redactor.AllowsDynamicContent())
 	}
 
-	if got := redactor.RedactString("aXb"); got != "" {
-		t.Fatalf("fixed-point RedactString(aXb) = %q, want deletion of X then synthesized ab", got)
-	}
-	if got := redactor.RedactString("X"); len(got) > 0 {
-		t.Fatalf("deletion fallback expanded output to %d bytes", len(got))
-	}
-
-	stream := redactor.newStream()
-	for _, chunk := range []string{"a", "X", "b"} {
-		if got := stream.Write(chunk); got != "" {
-			t.Fatalf("stream Write(%q) emitted before Flush: %d bytes", chunk, len(got))
+	const half = 50_000
+	pathological := strings.Repeat("a", half) + "X" + strings.Repeat("b", half)
+	done := make(chan string, 1)
+	go func() { done <- redactor.RedactString(pathological) }()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("RedactString() = %q, want suppressed output", got)
 		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("unrepresentable RedactString exceeded constant-work deadline")
 	}
-	if got := stream.Flush(); got != "" {
-		t.Fatalf("stream Flush() = %q, want fixed-point deletion", got)
+	if allocations := testing.AllocsPerRun(10, func() {
+		if got := redactor.RedactString(pathological); got != "" {
+			t.Fatalf("RedactString() = %q", got)
+		}
+	}); allocations > 1 {
+		t.Fatalf("unrepresentable RedactString allocations = %.1f, want <= 1", allocations)
+	}
+
+	streamInput := strings.Repeat("a", 8<<10) + "X" + strings.Repeat("b", 8<<10)
+	if allocations := testing.AllocsPerRun(3, func() {
+		stream := redactor.newStream()
+		for index := range len(streamInput) {
+			if got := stream.Write(streamInput[index : index+1]); got != "" {
+				t.Fatalf("stream Write emitted %q", got)
+			}
+		}
+		if got := stream.Flush(); got != "" {
+			t.Fatalf("stream Flush() = %q", got)
+		}
+	}); allocations > 4 {
+		t.Fatalf("one-byte suppressed stream allocations = %.1f, want <= 4", allocations)
 	}
 }
 
@@ -366,6 +429,25 @@ func TestRedactorJSONOutputDoesNotAliasCompactionToolArguments(t *testing.T) {
 	if string(raw) != `{"path":"secret.go"}` {
 		t.Fatalf("redacted output aliases source tool arguments: %s", raw)
 	}
+}
+
+func allNonControlUnicodeRunesExcept(t *testing.T, excluded map[rune]struct{}) string {
+	t.Helper()
+	var value strings.Builder
+	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
+		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
+			continue
+		}
+		if _, skip := excluded[candidate]; skip {
+			continue
+		}
+		value.WriteRune(candidate)
+	}
+	result := value.String()
+	if !utf8.ValidString(result) || !strings.Contains(result, redactionMarker) {
+		t.Fatal("marker-selection fixture is invalid or omitted the preferred rune")
+	}
+	return result
 }
 
 func allNonControlUnicodeRunes(t *testing.T) string {

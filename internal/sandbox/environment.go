@@ -88,6 +88,7 @@ func ResolveEnvironment(options EnvironmentOptions) (EnvironmentSnapshot, error)
 		proxyValues, proxyErr := proxyUserinfoRedactions(name, value)
 		if proxyErr != nil {
 			unsafe = true
+			redactionsComplete = false
 		}
 		for _, proxyValue := range proxyValues {
 			if err := collector.addBounded(proxyValue); err != nil {
@@ -263,18 +264,16 @@ type sensitiveEnvironmentValues struct {
 }
 
 func (s *sensitiveEnvironmentValues) addBounded(value string) error {
-	value = safetext.CanonicalizeUTF8(value)
-	if value == "" {
-		return nil
+	for _, form := range safetext.SecretForms(value) {
+		if _, duplicate := s.values[form]; duplicate {
+			continue
+		}
+		if len(s.values) >= maxSensitiveEnvironmentValues || len(form) > maxSensitiveEnvironmentBytes-s.bytes {
+			return ErrEnvironmentUnsafe
+		}
+		s.values[strings.Clone(form)] = struct{}{}
+		s.bytes += len(form)
 	}
-	if _, duplicate := s.values[value]; duplicate {
-		return nil
-	}
-	if len(s.values) >= maxSensitiveEnvironmentValues || len(value) > maxSensitiveEnvironmentBytes-s.bytes {
-		return ErrEnvironmentUnsafe
-	}
-	s.values[strings.Clone(value)] = struct{}{}
-	s.bytes += len(value)
 	return nil
 }
 
@@ -289,11 +288,11 @@ func (s *sensitiveEnvironmentValues) addPrivate(value string) error {
 }
 
 func proxyUserinfoRedactions(name, value string) ([]string, error) {
-	if value == "" || !isProxyEnvironmentName(name) {
+	if value == "" || !isProxyEnvironmentName(name) || strings.EqualFold(name, "NO_PROXY") {
 		return nil, nil
 	}
-	values, malformed := urlprivacy.UserinfoForms(value)
-	if malformed {
+	values, ambiguous := urlprivacy.UserinfoForms(value)
+	if ambiguous {
 		return values, ErrEnvironmentUnsafe
 	}
 	return values, nil

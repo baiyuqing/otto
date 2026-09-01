@@ -168,7 +168,7 @@ func TestOpenSandboxPropagatesImmutableRedactionCompleteness(t *testing.T) {
 	}{
 		{name: "complete", hostEntries: []string{"ORDINARY=value"}, wantComplete: true},
 		{name: "malformed entry", hostEntries: []string{"BROKEN"}, wantComplete: false},
-		{name: "fully extracted malformed proxy", hostEntries: []string{"HTTPS_PROXY=http:///user:pass@example.test"}, wantComplete: true},
+		{name: "ambiguous malformed proxy", hostEntries: []string{"HTTPS_PROXY=http:///user:pass@example.test"}, wantComplete: false},
 		{name: "513 sensitive values", hostEntries: sensitiveSandboxRuntimeEntries(513), wantComplete: false},
 		{name: "over one MiB", hostEntries: []string{"LARGE_TOKEN=" + strings.Repeat("z", (1<<20)+1)}, wantComplete: false},
 	}

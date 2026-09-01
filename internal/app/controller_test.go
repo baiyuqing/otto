@@ -66,6 +66,60 @@ func TestNewValidatesRequiredDependencies(t *testing.T) {
 	}
 }
 
+func TestControllerDynamicSuppressionHidesSessionStateAndRejectsBrowsingAndReplacement(t *testing.T) {
+	const secret = "session-secret"
+	initial := &fakeSession{
+		header: session.Header{
+			Version: 1, ID: secret, Workspace: "/" + secret, Provider: secret, Profile: secret, Model: secret,
+		},
+		messages: []model.Message{{ID: secret, Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: secret}}}},
+	}
+	var createCalls, newCalls, listCalls, resumeCalls int
+	sandboxInfo := SandboxInfo{Mode: SandboxUnavailable, BashAvailable: false, Reason: SandboxReasonEnvironmentRejected}
+	controller, err := New(initial, func() (session.Session, error) {
+		createCalls++
+		return &fakeSession{header: testHeader("created")}, nil
+	}, func(session.Session) Runner { return runnerFunc(noopRun) },
+		WithRuntimeInfo(RuntimeInfo{Provider: secret, Profile: secret, Model: secret, ContextWindow: 424_242, Sandbox: sandboxInfo}),
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			newCalls++
+			return SessionReplacement{}, nil
+		}),
+		WithSessionBrowser(func(context.Context, int) (session.ListResult, error) {
+			listCalls++
+			return session.ListResult{Sessions: []session.SessionInfo{{ID: secret, LastUserText: secret}}}, nil
+		}, func(context.Context, string) (SessionReplacement, error) {
+			resumeCalls++
+			return SessionReplacement{}, nil
+		}),
+		WithDynamicContent(false),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+
+	if got := controller.Info(); !reflect.DeepEqual(got, Info{Sandbox: sandboxInfo}) {
+		t.Fatalf("Info() exposed suppressed state: %#v", got)
+	}
+	if history := controller.History(); len(history) != 0 {
+		t.Fatalf("History() exposed suppressed state: %#v", history)
+	}
+	browser := SessionBrowser(controller)
+	if _, err := browser.ListSessions(context.Background(), 20); !errors.Is(err, ErrPersistenceDisabled) {
+		t.Fatalf("ListSessions() error = %v, want ErrPersistenceDisabled", err)
+	}
+	if _, err := browser.ResumeSession(context.Background(), "/"+secret); !errors.Is(err, ErrPersistenceDisabled) {
+		t.Fatalf("ResumeSession() error = %v, want ErrPersistenceDisabled", err)
+	}
+	if err := controller.NewSession(); !errors.Is(err, ErrPersistenceDisabled) {
+		t.Fatalf("NewSession() error = %v, want ErrPersistenceDisabled", err)
+	}
+	if createCalls != 0 || newCalls != 0 || listCalls != 0 || resumeCalls != 0 {
+		t.Fatalf("suppressed callbacks = create %d new %d list %d resume %d", createCalls, newCalls, listCalls, resumeCalls)
+	}
+}
+
 func TestControllerRejectsConcurrentPrompt(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

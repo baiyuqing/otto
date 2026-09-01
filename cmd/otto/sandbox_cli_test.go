@@ -23,6 +23,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
 )
@@ -435,6 +436,217 @@ func TestRunMalformedEnvironmentDisablesBashWithoutHidingProviderValues(t *testi
 	}
 }
 
+func TestRunKnownIncompleteBoundaryRejectsResumeAndContinueBeforeSessionAccess(t *testing.T) {
+	for _, selector := range []string{"resume", "continue"} {
+		t.Run(selector, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			root := filepath.Join(home, ".otto", "sessions")
+			path := createCLISession(t, root, workspace, "known-incomplete")
+			before := bytes.TrimSuffix(mustReadFile(t, path), []byte{'\n'})
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+			entries := []string{"HOME=" + home, "SHELL=/bin/sh", "TEST_KEY=provider-value"}
+			for index := range 513 {
+				entries = append(entries, fmt.Sprintf("VALUE_%03d_TOKEN=environment-sensitive-value-%03d", index, index))
+			}
+
+			deps := deterministicRunDependencies(t)
+			var prepareCalls, prepareListedCalls, newCalls, sandboxCalls atomic.Int32
+			deps.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+				prepareCalls.Add(1)
+				return nil, errors.New("unexpected prepare")
+			}
+			deps.prepareListedSession = func(context.Context, string, string, string) (preparedSession, error) {
+				prepareListedCalls.Add(1)
+				return nil, errors.New("unexpected listed prepare")
+			}
+			deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+				newCalls.Add(1)
+				return nil, errors.New("unexpected create")
+			}
+			deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+				sandboxCalls.Add(1)
+				return fakeSandboxRuntime(app.SandboxInfo{}, nil, []string{})
+			}
+			args := []string{"--config", configPath, "--cwd", workspace}
+			if selector == "resume" {
+				args = append(args, "--resume", path)
+			} else {
+				args = append(args, "--continue")
+			}
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), args, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps)
+			if code != 1 || stderr.String() != "otto: session operation is unavailable\n" {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if prepareCalls.Load() != 0 || prepareListedCalls.Load() != 0 || newCalls.Load() != 0 || sandboxCalls.Load() != 0 {
+				t.Fatalf("callbacks = prepare %d listed %d new %d sandbox %d", prepareCalls.Load(), prepareListedCalls.Load(), newCalls.Load(), sandboxCalls.Load())
+			}
+			if after := mustReadFile(t, path); !bytes.Equal(after, before) {
+				t.Fatal("known-incomplete startup mutated session bytes")
+			}
+		})
+	}
+}
+
+func TestRunLateIncompleteBoundaryClosesPreparedResumeWithoutRepair(t *testing.T) {
+	for _, fixture := range []string{"missing delimiter", "truncated tail", "dangling tool call"} {
+		t.Run(fixture, func(t *testing.T) {
+			home := t.TempDir()
+			workspace := t.TempDir()
+			root := filepath.Join(home, ".otto", "sessions")
+			store, err := session.Create(root, session.Header{
+				Version: session.CurrentVersion, ID: "late-incomplete", Workspace: workspace,
+				Provider: "openai-compatible", Profile: "test", Model: "test-model", CreatedAt: time.Now().UTC(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := store.Path()
+			if fixture == "dangling tool call" {
+				err = store.Append(context.Background(), model.Message{
+					ID: "assistant-dangling", Role: model.RoleAssistant, CreatedAt: time.Now().UTC(), FinishReason: model.FinishToolCalls,
+					Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-dangling", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			before := mustReadFile(t, path)
+			switch fixture {
+			case "missing delimiter":
+				before = bytes.TrimSuffix(before, []byte{'\n'})
+			case "truncated tail":
+				before = append(before, []byte(`{"type":"message"`)...)
+			}
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+			deps := deterministicRunDependencies(t)
+			var activateCalls atomic.Int32
+			var wrapped *fakePreparedSession
+			deps.prepareSession = func(ctx context.Context, candidate, expectedWorkspace string) (preparedSession, error) {
+				prepared, prepareErr := prepareSession(ctx, candidate, expectedWorkspace)
+				if prepareErr != nil {
+					return nil, prepareErr
+				}
+				wrapped = &fakePreparedSession{
+					info: prepared.Info(),
+					activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
+						activateCalls.Add(1)
+						return prepared.Activate(ctx)
+					},
+					close: prepared.Close,
+				}
+				return wrapped, nil
+			}
+			deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+				runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+				runtime.RedactionsComplete = false
+				return runtime
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{
+				"--config", configPath, "--cwd", workspace, "--resume", path, "--approve", "safe",
+			}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
+				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "provider-value",
+			}), deps)
+			if code != 1 || !strings.HasSuffix(stderr.String(), "otto: session operation is unavailable\n") {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if wrapped == nil || activateCalls.Load() != 0 || wrapped.closeCalls.Load() != 1 {
+				t.Fatalf("prepared state = %#v activate=%d", wrapped, activateCalls.Load())
+			}
+			if after := mustReadFile(t, path); !bytes.Equal(after, before) {
+				t.Fatalf("late-incomplete startup repaired session: before=%d after=%d", len(before), len(after))
+			}
+		})
+	}
+}
+
+func TestRunIncompleteInitialSessionIsLazyAndFrontendStateIsSuppressed(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	var providerCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		writeSSE(w, `{"choices":[{"delta":{"content":"dynamic"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	deps := deterministicRunDependencies(t)
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	var newCalls atomic.Int32
+	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		newCalls.Add(1)
+		return nil, errors.New("unexpected persistent session creation")
+	}
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.RedactionsComplete = false
+		return runtime
+	}
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		info := backend.Info()
+		if info.SessionID != "" || info.SessionPath != "" || info.Workspace != "" || info.Provider != "" || info.Profile != "" || info.Model != "" || info.ContextWindow != 0 || info.UsagePresent {
+			return fmt.Errorf("Info exposed incomplete state: %#v", info)
+		}
+		if history := backend.History(); len(history) != 0 {
+			return fmt.Errorf("History exposed incomplete state: %#v", history)
+		}
+		browser, ok := backend.(app.SessionBrowser)
+		if !ok {
+			return errors.New("backend omitted SessionBrowser contract")
+		}
+		if _, err := browser.ListSessions(ctx, 20); !errors.Is(err, app.ErrPersistenceDisabled) {
+			return fmt.Errorf("ListSessions error = %v", err)
+		}
+		if _, err := browser.ResumeSession(ctx, filepath.Join(workspace, "secret.jsonl")); !errors.Is(err, app.ErrPersistenceDisabled) {
+			return fmt.Errorf("ResumeSession error = %v", err)
+		}
+		if err := backend.NewSession(); !errors.Is(err, app.ErrPersistenceDisabled) {
+			return fmt.Errorf("NewSession error = %v", err)
+		}
+		var events []agent.Event
+		if err := backend.Prompt(ctx, "dynamic prompt", func(event agent.Event) { events = append(events, event) }); err != nil {
+			return err
+		}
+		if len(events) != 2 || events[0].Type != agent.EventAgentStarted || events[1].Type != agent.EventAgentFinished {
+			return fmt.Errorf("events = %#v", events)
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath, "--cwd", workspace, "--ui", "tui",
+	}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "provider-value",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if providerCalls.Load() != 0 || newCalls.Load() != 0 {
+		t.Fatalf("dynamic callbacks = provider %d new %d", providerCalls.Load(), newCalls.Load())
+	}
+	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("lazy incomplete startup created sessions: %v", paths)
+	}
+}
+
 func TestRunIncompleteEnvironmentRedactionFailsClosedAcrossProviderEventsAndPi(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -514,24 +726,8 @@ func TestRunIncompleteEnvironmentRedactionFailsClosedAcrossProviderEventsAndPi(t
 					t.Fatalf("%s retained omitted environment value (content bytes %d)", boundary, len(content))
 				}
 			}
-			var payload struct {
-				Messages []struct {
-					Role    string `json:"role"`
-					Content string `json:"content"`
-				} `json:"messages"`
-				Tools []json.RawMessage `json:"tools"`
-			}
-			if err := json.Unmarshal([]byte(body), &payload); err != nil {
-				t.Fatal(err)
-			}
-			if len(payload.Tools) != 6 {
-				t.Fatalf("file tool definitions = %d, want 6", len(payload.Tools))
-			}
-			if len(payload.Messages) == 0 || payload.Messages[0].Role != "system" ||
-				!strings.Contains(payload.Messages[0].Content, "Bash is unavailable") ||
-				strings.Contains(payload.Messages[0].Content, "Bash is unsandboxed") ||
-				strings.Contains(payload.Messages[0].Content, "Seatbelt confines Bash") {
-				t.Fatalf("fail-closed system prompt was not truthful: %#v", payload.Messages)
+			if body != "" {
+				t.Fatalf("incomplete boundary made a provider request: %q", body)
 			}
 			if fixture.seatbeltCalls.Load() != 0 || fixture.directCalls.Load() != 0 || fixture.executorCalls.Load() != 0 {
 				t.Fatalf("incomplete environment constructed a host child path: seatbelt/direct/executor = %d/%d/%d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load(), fixture.executorCalls.Load())
@@ -703,6 +899,7 @@ func TestRunUnavailableSandboxRedactsHostSecretsAcrossEveryBoundary(t *testing.T
 		shell         func(*testing.T) string
 		malformed     bool
 		proxy         string
+		incomplete    bool
 		wantRequests  int32
 	}{
 		{
@@ -717,8 +914,8 @@ func TestRunUnavailableSandboxRedactsHostSecretsAcrossEveryBoundary(t *testing.T
 				fixture.openErr = &sandbox.UnavailableError{Reason: sandbox.ReasonSeatbeltMissing}
 			},
 		},
-		{name: "malformed entry after valid secrets", malformed: true, wantRequests: 1},
-		{name: "malformed proxy authority", proxy: "http:///raw%20user:raw%2Fpass@example.test/path", wantRequests: 2},
+		{name: "malformed entry after valid secrets", malformed: true, incomplete: true, wantRequests: 0},
+		{name: "malformed proxy authority", proxy: "http:///raw%20user:raw%2Fpass@example.test/path", incomplete: true, wantRequests: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			const (
@@ -796,7 +993,7 @@ func TestRunUnavailableSandboxRedactsHostSecretsAcrossEveryBoundary(t *testing.T
 				t.Fatalf("code/provider requests = %d/%d, want %d requests; stderr = %q", code, requests.Load(), test.wantRequests, stderr.String())
 			}
 			var persisted []byte
-			if test.malformed {
+			if test.incomplete {
 				paths, globErr := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
 				if globErr != nil {
 					t.Fatal(globErr)

@@ -1584,12 +1584,14 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 		}
 	}
 	var stores []*trackingSession
+	sessionCreated := make(chan struct{})
 	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
 		store := &trackingSession{Session: session.NewMemory(session.Header{
 			Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
 			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 		})}
 		stores = append(stores, store)
+		close(sessionCreated)
 		return store, nil
 	}
 
@@ -1611,6 +1613,11 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	case <-subscribed:
 	case <-time.After(time.Second):
 		t.Fatal("interrupt subscription did not start")
+	}
+	select {
+	case <-sessionCreated:
+	case <-time.After(time.Second):
+		t.Fatal("idle session was not created")
 	}
 	interrupts <- os.Interrupt
 	select {

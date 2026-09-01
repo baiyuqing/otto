@@ -647,7 +647,101 @@ func TestRunCanonicalizesInvalidConfiguredSecretsAcrossEventsFollowUpErrorsAndPi
 	}
 }
 
-func TestRunExhaustiveMarkerFallbackBuffersEventsAndDeletesProviderHistoryAndPi(t *testing.T) {
+func TestRunExpandsJSONStringEscapeSecretsAcrossEventsFollowUpAndRawPi(t *testing.T) {
+	tests := []struct {
+		raw     string
+		decoded string
+	}{
+		{raw: `less\u003cthan`, decoded: "less<than"},
+		{raw: `greater\u003Ethan`, decoded: "greater>than"},
+		{raw: `amp\u0026ersand`, decoded: "amp&ersand"},
+		{raw: `quote\"value`, decoded: `quote"value`},
+		{raw: `back\\slash`, decoded: `back\slash`},
+		{raw: `slash\/value`, decoded: "slash/value"},
+		{raw: `line\nbreak`, decoded: "line\nbreak"},
+		{raw: `separator\u2028value`, decoded: "separator\u2028value"},
+		{raw: `paragraph\u2029value`, decoded: "paragraph\u2029value"},
+	}
+	rawSecrets := make([]string, len(tests))
+	decodedSecrets := make([]string, len(tests))
+	for index, test := range tests {
+		rawSecrets[index] = test.raw
+		decodedSecrets[index] = test.decoded
+	}
+	dynamic := strings.Join(decodedSecrets, " | ")
+
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "tool " + dynamic}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "event " + dynamic}},
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "assistant " + dynamic},
+					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "json-escape-session", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactor(rawSecrets))
+	var events []Event
+	if err := runner.Run(context.Background(), "user "+dynamic, func(event Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want follow-up", len(fakeProvider.requests))
+	}
+
+	for name, value := range map[string]any{
+		"events":             events,
+		"provider first":     fakeProvider.requests[0],
+		"provider follow-up": fakeProvider.requests[1],
+		"messages":           messages,
+	} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		assertNoJSONStringEscapeSecrets(t, name, string(encoded), tests)
+	}
+	assertNoJSONStringEscapeSecrets(t, "raw Pi JSONL", string(persisted), tests)
+}
+
+func assertNoJSONStringEscapeSecrets(t *testing.T, boundary, content string, secrets []struct {
+	raw     string
+	decoded string
+}) {
+	t.Helper()
+	for _, secret := range secrets {
+		if strings.Contains(content, secret.raw) || strings.Contains(content, secret.decoded) {
+			t.Fatalf("%s retained raw/decoded JSON escape secret (%q, %q): %q", boundary, secret.raw, secret.decoded, content)
+		}
+	}
+}
+
+func TestRunUnrepresentableRedactorCallsNoProviderToolOrSessionBoundary(t *testing.T) {
 	const (
 		deleted     = "<DELETE-ME>"
 		synthesized = "leftright"
@@ -655,8 +749,8 @@ func TestRunExhaustiveMarkerFallbackBuffersEventsAndDeletesProviderHistoryAndPi(
 	allRunes := allNonControlUnicodeRunes(t)
 	longPreferred := strings.Repeat(redactionMarker, 1<<20)
 	redactor := NewRedactor([]string{allRunes, longPreferred, deleted, synthesized})
-	if redactor.marker != "" {
-		t.Fatalf("exhaustive marker fallback = %d bytes, want deletion", len(redactor.marker))
+	if redactor.marker != "" || redactor.AllowsDynamicContent() {
+		t.Fatalf("exhaustive marker fallback = marker %q allows-dynamic %t, want suppression", redactor.marker, redactor.AllowsDynamicContent())
 	}
 
 	recorder := &recordingTool{name: "echo"}
@@ -703,44 +797,25 @@ func TestRunExhaustiveMarkerFallbackBuffersEventsAndDeletesProviderHistoryAndPi(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fakeProvider.requests) != 2 {
-		t.Fatalf("provider requests = %d, want follow-up", len(fakeProvider.requests))
+	if len(fakeProvider.requests) != 0 || len(recorder.calls) != 0 || len(messages) != 0 {
+		t.Fatalf("suppressed run crossed a dynamic boundary: requests=%d tools=%d messages=%#v", len(fakeProvider.requests), len(recorder.calls), messages)
 	}
-
-	for name, value := range map[string]any{
-		"events":             events,
-		"provider follow-up": fakeProvider.requests[1],
-		"messages":           messages,
-	} {
-		encoded, marshalErr := json.Marshal(value)
-		if marshalErr != nil {
-			t.Fatal(marshalErr)
-		}
-		if len(encoded) > 64<<10 {
-			t.Fatalf("%s expanded to %d bytes in deletion mode", name, len(encoded))
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentFinished {
+		t.Fatalf("suppressed lifecycle events = %#v", events)
+	}
+	encodedEvents, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"events": string(encodedEvents), "Pi JSONL": string(persisted)} {
+		if len(content) > 64<<10 {
+			t.Fatalf("%s expanded to %d bytes in suppression mode", name, len(content))
 		}
 		for _, credential := range []string{deleted, synthesized, longPreferred} {
-			if strings.Contains(string(encoded), credential) {
+			if strings.Contains(content, credential) {
 				t.Fatalf("%s retained configured credential %q", name, credential)
 			}
 		}
-	}
-	if len(persisted) > 64<<10 {
-		t.Fatalf("Pi JSONL expanded to %d bytes in deletion mode", len(persisted))
-	}
-	for _, credential := range []string{deleted, synthesized, longPreferred} {
-		if strings.Contains(string(persisted), credential) {
-			t.Fatalf("Pi JSONL retained configured credential %q", credential)
-		}
-	}
-	var streamed []string
-	for _, event := range events {
-		if event.Type == EventTextDelta {
-			streamed = append(streamed, event.Text)
-		}
-	}
-	if len(streamed) != 1 || streamed[0] != "done" {
-		t.Fatalf("deletion-mode stream events = %#v, want only the later safe response", streamed)
 	}
 }
 
@@ -759,6 +834,7 @@ func TestRunIncompleteRedactionSnapshotSuppressesRequestsEventsAndPi(t *testing.
 				{Type: model.BlockToolCall, ToolName: "echo", ToolCallID: "call-" + omitted, Arguments: json.RawMessage(`{"value":"` + omitted + `"}`)},
 			}},
 			FinishReason: model.FinishToolCalls,
+			Usage:        model.Usage{InputTokens: 424_242, OutputTokens: 313_131, CachedInputTokens: 212_121},
 		},
 	}}}
 	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "incomplete-redaction", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "safe", CreatedAt: fixedClock()})
@@ -783,16 +859,18 @@ func TestRunIncompleteRedactionSnapshotSuppressesRequestsEventsAndPi(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fakeProvider.requests) != 1 {
-		t.Fatalf("provider requests = %d, want 1", len(fakeProvider.requests))
+	if len(fakeProvider.requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(fakeProvider.requests))
 	}
 	if len(messages) != 0 || len(recorder.calls) != 0 {
 		t.Fatalf("incomplete redaction mutated session or executed tool: messages=%#v calls=%#v", messages, recorder.calls)
 	}
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentFinished {
+		t.Fatalf("events = %#v, want fixed lifecycle only", events)
+	}
 	for name, value := range map[string]any{
-		"provider request": fakeProvider.requests[0],
-		"events":           events,
-		"messages":         messages,
+		"events":   events,
+		"messages": messages,
 	} {
 		encoded, marshalErr := json.Marshal(value)
 		if marshalErr != nil {
@@ -826,7 +904,7 @@ func TestRunIncompleteRedactionPreservesCancellationWithoutProviderOrSessionMuta
 	}
 }
 
-func TestRunIncompleteRedactionProviderErrorDoesNotMutateSession(t *testing.T) {
+func TestRunIncompleteRedactionDoesNotObserveProviderError(t *testing.T) {
 	const omitted = "omitted-provider-error-value"
 	memory := session.NewMemory(testHeader(t))
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{err: errors.New("provider exposed " + omitted)}}}
@@ -834,8 +912,11 @@ func TestRunIncompleteRedactionProviderErrorDoesNotMutateSession(t *testing.T) {
 
 	var events []Event
 	err := runner.Run(context.Background(), "user "+omitted, func(event Event) { events = append(events, event) })
-	if err == nil || err.Error() != "" || len(memory.Messages()) != 0 {
-		t.Fatalf("Run() error=%q messages=%#v", err, memory.Messages())
+	if err != nil || len(fakeProvider.requests) != 0 || len(memory.Messages()) != 0 {
+		t.Fatalf("Run() error=%v provider calls=%d messages=%#v", err, len(fakeProvider.requests), memory.Messages())
+	}
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentFinished {
+		t.Fatalf("events=%#v", events)
 	}
 	encoded, marshalErr := json.Marshal(events)
 	if marshalErr != nil {

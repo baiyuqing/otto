@@ -19,6 +19,15 @@ func TestUserinfoFormsDistinguishesAuthorityFromPathQueryAndFragment(t *testing.
 			want: []string{"raw%20user:raw%2Fpass", "raw%20user", "raw%2Fpass", "raw user:raw/pass", "raw user", "raw/pass"},
 		},
 		{
+			name: "network path authority userinfo",
+			raw:  "//raw%20user:raw%2Fpass@[2001:db8::1]:8443/path@ignored?next=@ignored#@ignored",
+			want: []string{"raw%20user:raw%2Fpass", "raw%20user", "raw%2Fpass", "raw user:raw/pass", "raw user", "raw/pass"},
+		},
+		{
+			name: "network path path query and fragment at signs",
+			raw:  "//[2001:db8::1]:8443/path/user:pass@example.test?next=user:pass@example.test#user:pass@example.test",
+		},
+		{
 			name: "valid path query and fragment at signs",
 			raw:  "https://[2001:db8::1]:8443/path/user:pass@example.test?next=user:pass@example.test#user:pass@example.test",
 		},
@@ -52,6 +61,18 @@ func TestUserinfoFormsDistinguishesAuthorityFromPathQueryAndFragment(t *testing.
 			malformed: true,
 		},
 		{
+			name:      "backslash after parseable host",
+			raw:       `https://host\raw%20user:raw%2Fpass@example.test`,
+			want:      []string{"raw%20user:raw%2Fpass", "raw user:raw/pass", "raw user", "raw/pass"},
+			malformed: true,
+		},
+		{
+			name:      "backslash after first authority userinfo",
+			raw:       `https://first:first-pass@host\second%20user:second%2Fpass@example.test`,
+			want:      []string{"first:first-pass", "first", "first-pass", "second%20user:second%2Fpass", "second user:second/pass"},
+			malformed: true,
+		},
+		{
 			name:      "missing scheme",
 			raw:       "raw%20user:raw%2Fpass@example.test/path",
 			want:      []string{"raw%20user:raw%2Fpass", "raw%20user", "raw%2Fpass", "raw user:raw/pass", "raw user", "raw/pass"},
@@ -61,6 +82,18 @@ func TestUserinfoFormsDistinguishesAuthorityFromPathQueryAndFragment(t *testing.
 			name:      "independently decodable password",
 			raw:       "https://bad%zz:pass%2Fword@[::1]:8443/path",
 			want:      []string{"bad%zz:pass%2Fword", "bad%zz", "pass%2Fword", "pass/word"},
+			malformed: true,
+		},
+		{
+			name:      "malformed multi at retains every plausible candidate",
+			raw:       "http:///real%20user:real%2Fpass@proxy/path%20user:path%2Fpass@example",
+			want:      []string{"real%20user:real%2Fpass", "real user:real/pass", "path%20user:path%2Fpass", "path user:path/pass"},
+			malformed: true,
+		},
+		{
+			name:      "malformed multi at retains adjacent candidates",
+			raw:       "missing://first%20user:first%2Fpass@proxy@host",
+			want:      []string{"first%20user:first%2Fpass", "first user:first/pass", "proxy"},
 			malformed: true,
 		},
 	}
@@ -88,17 +121,20 @@ func TestUserinfoFormsDistinguishesAuthorityFromPathQueryAndFragment(t *testing.
 	}
 }
 
-func TestUserinfoFormsReportsMalformedProxyShapesWithoutUserinfo(t *testing.T) {
+func TestUserinfoFormsPreservesEveryNoAtProxyShape(t *testing.T) {
 	for _, raw := range []string{
 		"https://example.test/path%zz",
 		"https:///example.test/path",
 		`https:\\example.test\path`,
 		"example.test:8443",
+		"//example.test:8443",
+		"http://:8080",
+		"http://example.test:99999",
 	} {
 		t.Run(raw, func(t *testing.T) {
-			values, malformed := UserinfoForms(raw)
-			if !malformed || len(values) != 0 {
-				t.Fatalf("UserinfoForms(%q) = %#v, malformed %t; want no forms and malformed", raw, values, malformed)
+			values, ambiguous := UserinfoForms(raw)
+			if ambiguous || len(values) != 0 {
+				t.Fatalf("UserinfoForms(%q) = %#v, ambiguous %t; want no forms and complete extraction", raw, values, ambiguous)
 			}
 		})
 	}

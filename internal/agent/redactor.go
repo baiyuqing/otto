@@ -37,15 +37,13 @@ func NewRedactorWithCompleteness(values []string, complete bool) *Redactor {
 	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		value = safetext.CanonicalizeUTF8(value)
-		if value == "" {
-			continue
+		for _, form := range safetext.SecretForms(value) {
+			if _, exists := seen[form]; exists {
+				continue
+			}
+			seen[form] = struct{}{}
+			redactor.values = append(redactor.values, strings.Clone(form))
 		}
-		if _, exists := seen[value]; exists {
-			continue
-		}
-		seen[value] = struct{}{}
-		redactor.values = append(redactor.values, strings.Clone(value))
 	}
 	sort.Slice(redactor.values, func(i, j int) bool {
 		if len(redactor.values[i]) != len(redactor.values[j]) {
@@ -54,35 +52,37 @@ func NewRedactorWithCompleteness(values []string, complete bool) *Redactor {
 		return redactor.values[i] < redactor.values[j]
 	})
 	redactor.marker = safeRedactionMarker(redactor.values)
+	if len(redactor.values) > 0 && redactor.marker == "" {
+		redactor.values = nil
+		redactor.complete = false
+	}
 	return redactor
+}
+
+// AllowsDynamicContent reports whether exact boundary redaction has a safe,
+// representable replacement. It exposes no configured values.
+func (r *Redactor) AllowsDynamicContent() bool {
+	return r == nil || r.complete
 }
 
 func (r *Redactor) RedactString(text string) string {
 	if text == "" {
 		return text
 	}
-	text = safetext.CanonicalizeUTF8(text)
 	if r != nil && !r.complete {
 		return ""
 	}
+	text = safetext.CanonicalizeUTF8(text)
 	if r == nil || len(r.values) == 0 {
 		return text
 	}
-	if r.marker != "" {
-		for _, value := range r.values {
-			text = strings.ReplaceAll(text, value, r.marker)
-		}
-		return text
+	if r.marker == "" {
+		return ""
 	}
-	for {
-		before := len(text)
-		for _, value := range r.values {
-			text = strings.ReplaceAll(text, value, "")
-		}
-		if len(text) == before {
-			return text
-		}
+	for _, value := range r.values {
+		text = strings.ReplaceAll(text, value, r.marker)
 	}
+	return text
 }
 
 func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
@@ -114,6 +114,15 @@ func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
 func (r *Redactor) RedactError(err error) error {
 	if err == nil || r == nil {
 		return err
+	}
+	if !r.complete {
+		return &redactedBoundaryError{
+			canceled:                 errors.Is(err, context.Canceled),
+			deadlineExceeded:         errors.Is(err, context.DeadlineExceeded),
+			fatalPersistence:         errors.Is(err, session.ErrFatalPersistence),
+			emptyUserText:            errors.Is(err, ErrEmptyUserText),
+			invalidCompactionSummary: errors.Is(err, ErrInvalidCompactionSummary),
+		}
 	}
 	message := r.RedactString(err.Error())
 	if message == err.Error() {

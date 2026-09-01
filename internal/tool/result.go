@@ -141,6 +141,9 @@ func (w *exactRedactingWriter) Flush() error {
 }
 
 func redactExactText(value string, redactionValues []string, marker string) (string, error) {
+	if marker == "" && len(redactionValues) > 0 {
+		return "", nil
+	}
 	var redacted strings.Builder
 	writer := newExactRedactingWriterWithMarker(&redacted, redactionValues, marker)
 	normalizer := newUTF8NormalizingWriter(writer)
@@ -153,26 +156,7 @@ func redactExactText(value string, redactionValues []string, marker string) (str
 	if err := writer.Flush(); err != nil {
 		return "", err
 	}
-	result := redacted.String()
-	if marker != "" {
-		return result, nil
-	}
-	canonicalValues := make([]string, 0, len(redactionValues))
-	for _, configured := range redactionValues {
-		configured = safetext.CanonicalizeUTF8(configured)
-		if configured != "" {
-			canonicalValues = append(canonicalValues, configured)
-		}
-	}
-	for {
-		before := len(result)
-		for _, configured := range canonicalValues {
-			result = strings.ReplaceAll(result, configured, "")
-		}
-		if len(result) == before {
-			return result, nil
-		}
-	}
+	return redacted.String(), nil
 }
 
 func (w *exactRedactingWriter) process(final bool) {

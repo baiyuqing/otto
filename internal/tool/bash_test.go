@@ -435,34 +435,89 @@ func TestBashSandboxedConstructsWithEveryUTF8ByteClassInSensitiveValues(t *testi
 	}
 }
 
-func TestBashSandboxedExhaustiveMarkerFallbackIsBoundedFixedPointDeletion(t *testing.T) {
+func TestBashSandboxedExpandsJSONStringEscapeRedactions(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	tests := []struct {
+		raw     string
+		decoded string
+	}{
+		{raw: `less\u003cthan`, decoded: "less<than"},
+		{raw: `greater\u003Ethan`, decoded: "greater>than"},
+		{raw: `amp\u0026ersand`, decoded: "amp&ersand"},
+		{raw: `quote\"value`, decoded: `quote"value`},
+		{raw: `back\\slash`, decoded: `back\slash`},
+		{raw: `slash\/value`, decoded: "slash/value"},
+		{raw: `line\nbreak`, decoded: "line\nbreak"},
+		{raw: `separator\u2028value`, decoded: "separator\u2028value"},
+		{raw: `paragraph\u2029value`, decoded: "paragraph\u2029value"},
+	}
+	values := make([]string, len(tests))
+	chunks := make([][]byte, len(tests))
+	for index, test := range tests {
+		values[index] = test.raw
+		chunks[index] = []byte(test.decoded + "\n")
+	}
+	fake := &fakeBashExecutor{stdoutChunks: chunks, status: sandbox.ExitStatus{Code: 0}}
+	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 64<<10, values)
+	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+	if result.IsError {
+		t.Fatalf("Execute() = %#v", result)
+	}
+	for _, test := range tests {
+		if strings.Contains(result.Content, test.raw) || strings.Contains(result.Content, test.decoded) {
+			t.Fatalf("Execute() retained raw/decoded JSON escape secret (%q, %q): %q", test.raw, test.decoded, result.Content)
+		}
+	}
+}
+
+func TestBashSandboxedExhaustiveMarkerFallbackSuppressesAllResultText(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	allRunes := allNonControlSandboxRunes(t)
-	longPreferred := strings.Repeat(string(preferredSandboxRedactionMarker), 1<<20)
-	values := []string{allRunes, longPreferred, string(preferredSandboxRedactionMarker), "X", "ab"}
+	longPrefix := strings.Repeat("a", 1<<20) + "z"
+	values := []string{allRunes, longPrefix, string(preferredSandboxRedactionMarker), "X", "ab"}
 	fake := &fakeBashExecutor{
 		stdoutChunks: [][]byte{[]byte("a"), []byte("X"), []byte("b")},
 		stderrChunks: [][]byte{[]byte("aX"), []byte("b")},
 	}
 	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 2<<20, values)
-	if bash.redactionMarker != "" {
-		t.Fatalf("exhaustive marker fallback = %d bytes, want explicit deletion", len(bash.redactionMarker))
+	if bash.redactionMarker != "" || bash.dynamicContent {
+		t.Fatalf("exhaustive marker fallback = marker %q dynamic %t, want suppression", bash.redactionMarker, bash.dynamicContent)
 	}
 
 	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
-	if result.IsError || !utf8.ValidString(result.Content) {
-		t.Fatalf("Execute() = %#v, want valid UTF-8", result)
+	if result.Content != "" || fake.CallCount() != 1 {
+		t.Fatalf("Execute() = %#v calls=%d, want one execution with empty result", result, fake.CallCount())
 	}
-	if len(result.Content) > 1024 {
-		t.Fatalf("deletion fallback expanded bounded result to %d bytes", len(result.Content))
+	invalid := bash.Execute(context.Background(), json.RawMessage(`{"command":123,"X":"X"}`))
+	if invalid.Content != "" || !invalid.IsError || fake.CallCount() != 1 {
+		t.Fatalf("invalid Execute() = %#v calls=%d, want fixed-free rejection", invalid, fake.CallCount())
 	}
-	for _, credential := range []string{string(preferredSandboxRedactionMarker), "X", "ab", longPreferred} {
-		if strings.Contains(result.Content, credential) {
-			t.Fatalf("Execute() retained configured credential %q in %q", credential, result.Content)
+}
+
+func TestBashSandboxedUnrepresentableOutputUsesBoundedOneByteDiscard(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	const half = 4 << 10
+	byteA, byteX, byteB := []byte("a"), []byte("X"), []byte("b")
+	fake := &fakeBashExecutor{execute: func(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+		for range half {
+			_, _ = streams.Stdout.Write(byteA)
 		}
-	}
-	if body := sandboxedBashStdout(t, result.Content); body != "" {
-		t.Fatalf("stdout = %q, want fixed-point deletion", body)
+		_, _ = streams.Stdout.Write(byteX)
+		for range half {
+			_, _ = streams.Stdout.Write(byteB)
+		}
+		return sandbox.ExitStatus{Code: 0}, nil
+	}}
+	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 2*half+1, []string{
+		allNonControlSandboxRunes(t), strings.Repeat("a", 1<<20) + "z", "X", "ab",
+	})
+	arguments := mustJSON(t, map[string]string{"command": "ignored"})
+	if allocations := testing.AllocsPerRun(3, func() {
+		if result := bash.Execute(context.Background(), arguments); result.Content != "" {
+			t.Fatalf("Execute() retained suppressed content: %#v", result)
+		}
+	}); allocations > 64 {
+		t.Fatalf("one-byte suppressed Bash allocations = %.1f, want <= 64", allocations)
 	}
 }
 

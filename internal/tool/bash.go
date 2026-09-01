@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,6 +42,7 @@ type bashTool struct {
 	maxOutputBytes  int
 	redactValues    []string
 	redactionMarker string
+	dynamicContent  bool
 
 	deadlineContext func(context.Context, time.Duration, error) (context.Context, context.CancelFunc)
 }
@@ -65,10 +67,7 @@ func NewBashTool(
 	}
 
 	redactValues := canonicalizeSandboxedBashRedactions(redactionValues)
-	redactionMarker, ok := collisionSafeSandboxRedactionMarker(redactValues)
-	if !ok {
-		return nil, errInvalidSandboxedBashConfiguration
-	}
+	redactionMarker, dynamicContent := collisionSafeSandboxRedactionMarker(redactValues)
 
 	return &bashTool{
 		workspace: &Workspace{
@@ -82,6 +81,7 @@ func NewBashTool(
 		maxOutputBytes:  maxOutputBytes,
 		redactValues:    redactValues,
 		redactionMarker: redactionMarker,
+		dynamicContent:  dynamicContent,
 		deadlineContext: context.WithTimeoutCause,
 	}, nil
 }
@@ -111,6 +111,9 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	}
 	if strings.TrimSpace(args.Command) == "" {
 		return t.sandboxedArgumentError("missing required argument: command")
+	}
+	if !t.dynamicContent {
+		return t.executeWithoutDynamicContent(ctx, args.Command)
 	}
 	if isNilSandboxedBashBoundary(ctx) {
 		return sandboxedBashInfrastructureResult()
@@ -179,7 +182,33 @@ func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	}
 }
 
+func (t *bashTool) executeWithoutDynamicContent(ctx context.Context, command string) Result {
+	if isNilSandboxedBashBoundary(ctx) || ctx.Err() != nil {
+		return Result{}
+	}
+	commandCtx, cancel := t.deadlineContext(ctx, t.timeout, errSandboxedBashTimeout)
+	if isNilSandboxedBashBoundary(commandCtx) || cancel == nil {
+		if cancel != nil {
+			cancel()
+		}
+		return Result{IsError: true}
+	}
+	_, executionErr := t.executor.Execute(commandCtx, sandbox.Request{
+		Argv: cloneSandboxedBashStrings([]string{t.shell, "-lc", command}),
+		Dir:  t.workspace.root,
+		Env:  cloneSandboxedBashStrings(t.environment),
+	}, sandbox.Streams{Stdout: io.Discard, Stderr: io.Discard})
+	cancel()
+	if executionErr != nil && executionErr != context.Canceled && executionErr != context.DeadlineExceeded {
+		return Result{IsError: true}
+	}
+	return Result{}
+}
+
 func (t *bashTool) sandboxedArgumentError(message string) Result {
+	if !t.dynamicContent {
+		return Result{IsError: true}
+	}
 	redacted, err := redactExactText(message, t.redactValues, t.redactionMarker)
 	if err != nil {
 		return sandboxedBashInfrastructureResult()
@@ -255,9 +284,16 @@ func canonicalizeSandboxedBashRedactions(values []string) []string {
 	if values == nil {
 		return nil
 	}
-	canonical := make([]string, len(values))
-	for index, value := range values {
-		canonical[index] = strings.Clone(safetext.CanonicalizeUTF8(value))
+	canonical := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		for _, form := range safetext.SecretForms(value) {
+			if _, duplicate := seen[form]; duplicate {
+				continue
+			}
+			seen[form] = struct{}{}
+			canonical = append(canonical, strings.Clone(form))
+		}
 	}
 	return canonical
 }
@@ -297,7 +333,7 @@ func collisionSafeSandboxRedactionMarker(values []string) (string, bool) {
 		}
 	}
 
-	return "", true
+	return "", false
 }
 
 func formatBashResult(stdout, stderr *cappedByteCollector, status string) string {

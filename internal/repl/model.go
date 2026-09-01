@@ -29,8 +29,11 @@ func (r *REPL) modelCommand(ctx context.Context, args string) (bool, error) {
 	if _, err := switcher.SwitchProfile(ctx, args); err != nil {
 		return false, &commandError{command: "/model", err: err}
 	}
+	if err := switcher.SetDefaultProfile(ctx, args); err != nil {
+		return false, &commandError{command: "/model", err: err}
+	}
 	info := r.backend.Info()
-	_, _ = fmt.Fprintf(r.stdout, "Switched to profile %s (provider %s, model %s).\n", info.Profile, info.Provider, info.Model)
+	_, _ = fmt.Fprintf(r.stdout, "Switched to profile %s (provider %s, model %s). Set as default profile.\n", info.Profile, info.Provider, info.Model)
 	if info.SessionID != "" {
 		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 	}

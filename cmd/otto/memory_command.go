@@ -43,7 +43,7 @@ func runMemoryCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
-	configFile, err := loadConfig(cliOptions{configPath: *configPath, explicitConfig: *configPath != ""}, home)
+	_, configFile, err := loadConfig(cliOptions{configPath: *configPath, explicitConfig: *configPath != ""}, home)
 	if err != nil {
 		return fail(stderr, "load config: %v", err)
 	}

@@ -14,9 +14,10 @@ import (
 // /model tests can drive profile listing and switching offline.
 type fakeSwitchBackend struct {
 	fakeBackend
-	profiles      []string
-	switchProfile func(context.Context, string) (app.ResumeResult, error)
-	switchCalls   []string
+	profiles        []string
+	switchProfile   func(context.Context, string) (app.ResumeResult, error)
+	switchCalls     []string
+	setDefaultCalls []string
 }
 
 func (f *fakeSwitchBackend) Profiles() []string { return f.profiles }
@@ -27,6 +28,11 @@ func (f *fakeSwitchBackend) SwitchProfile(ctx context.Context, name string) (app
 		return app.ResumeResult{}, nil
 	}
 	return f.switchProfile(ctx, name)
+}
+
+func (f *fakeSwitchBackend) SetDefaultProfile(_ context.Context, name string) error {
+	f.setDefaultCalls = append(f.setDefaultCalls, name)
+	return nil
 }
 
 func TestREPLModelShowsCurrentAndProfiles(t *testing.T) {
@@ -67,6 +73,9 @@ func TestREPLModelSwitchesProfile(t *testing.T) {
 	}
 	if len(backend.switchCalls) != 1 || backend.switchCalls[0] != "chatgpt" {
 		t.Fatalf("switch calls = %v", backend.switchCalls)
+	}
+	if len(backend.setDefaultCalls) != 1 || backend.setDefaultCalls[0] != "chatgpt" {
+		t.Fatalf("set default calls = %v", backend.setDefaultCalls)
 	}
 	out := stdout.String()
 	if !strings.Contains(out, "chatgpt") || !strings.Contains(out, "gpt-5") {

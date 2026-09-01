@@ -124,6 +124,10 @@ func runProfileSwitchCommand(ctx context.Context, switcher app.ProfileSwitcher, 
 			return profileSwitchResultMsg{generation: generation, err: errors.New("profile switcher is required")}
 		}
 		_, err := switcher.SwitchProfile(rootContext(ctx), name)
+		if err != nil {
+			return profileSwitchResultMsg{generation: generation, err: err}
+		}
+		err = switcher.SetDefaultProfile(rootContext(ctx), name)
 		return profileSwitchResultMsg{generation: generation, err: err}
 	}
 }
@@ -141,7 +145,7 @@ func (m Model) applyProfileSwitchResult(msg profileSwitchResultMsg) (tea.Model, 
 		return m, nil
 	}
 	info := m.backend.Info()
-	status := fmt.Sprintf("switched to profile %s (provider %s, model %s)", info.Profile, info.Provider, info.Model)
+	status := fmt.Sprintf("switched to profile %s (provider %s, model %s); set as default", info.Profile, info.Provider, info.Model)
 	m.resetSessionViewFromBackend(status)
 	return m, nil
 }

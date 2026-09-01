@@ -44,6 +44,8 @@ type NewSessionBuilder func(context.Context, RuntimeInfo) (SessionReplacement, e
 // current session, so switching profile also switches provider.
 type ProfileSwitchFactory func(context.Context, string) (SessionReplacement, error)
 
+type DefaultProfileSetter func(context.Context, string) error
+
 type ArchiveFactory func(context.Context, string) (session.ArchiveResult, error)
 
 type RuntimeInfo struct {
@@ -100,6 +102,12 @@ func WithProfileSwitcher(profiles []string, switchProfile ProfileSwitchFactory) 
 	}
 }
 
+func WithDefaultProfileSetter(setDefaultProfile DefaultProfileSetter) Option {
+	return func(controller *Controller) {
+		controller.setDefaultProfile = setDefaultProfile
+	}
+}
+
 func WithMemory(manager memory.Manager, userScope, workspaceScope memory.Scope) Option {
 	return func(controller *Controller) {
 		controller.memoryManager = manager
@@ -148,6 +156,7 @@ type SessionArchiver interface {
 type ProfileSwitcher interface {
 	Profiles() []string
 	SwitchProfile(context.Context, string) (ResumeResult, error)
+	SetDefaultProfile(context.Context, string) error
 }
 
 type replacementPhase uint8
@@ -216,6 +225,7 @@ type Controller struct {
 	newSession           NewSessionBuilder
 	archiveSession       ArchiveFactory
 	switchProfile        ProfileSwitchFactory
+	setDefaultProfile    DefaultProfileSetter
 	profiles             []string
 	memoryManager        memory.Manager
 	memoryUserScope      memory.Scope
@@ -472,6 +482,20 @@ func (c *Controller) Profiles() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.profiles...)
+}
+
+func (c *Controller) SetDefaultProfile(ctx context.Context, profile string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClosed
+	}
+	setter := c.setDefaultProfile
+	c.mu.Unlock()
+	if setter == nil {
+		return ErrProfileSwitchUnavailable
+	}
+	return setter(ctx, profile)
 }
 
 // SwitchProfile starts a fresh session on the named profile, swapping the

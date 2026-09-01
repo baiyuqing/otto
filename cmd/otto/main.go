@@ -178,7 +178,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		listedSessionPath = true
 	}
 
-	configFile, err := loadConfig(options, home)
+	configPath, configFile, err := loadConfig(options, home)
 	if err != nil {
 		return fail(stderr, "load config: %v", err)
 	}
@@ -199,7 +199,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
+	builder := newRuntimeBuilder(configPath, configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
 
 	memoryCfg, err := config.ResolveMemory(configFile, environment, config.Overrides{})
 	if err != nil {
@@ -300,6 +300,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		}),
 		app.WithMemory(memoryService, memoryUserScope, memoryWorkspaceScope),
 		app.WithProfileSwitcher(builder.profileNames(), builder.buildProfileReplacement),
+		app.WithDefaultProfileSetter(builder.persistDefaultProfile),
 	}
 	if !options.noSession {
 		controllerOptions = append(controllerOptions,
@@ -575,22 +576,23 @@ func resolveHome(getenv func(string) string) (string, error) {
 	return filepath.Abs(home)
 }
 
-func loadConfig(options cliOptions, home string) (config.File, error) {
+func loadConfig(options cliOptions, home string) (string, config.File, error) {
 	path := options.configPath
 	if path == "" {
 		path = filepath.Join(home, ".config", "otto", "config.toml")
 	}
 	file, err := config.Load(path)
 	if err != nil && !options.explicitConfig && os.IsNotExist(err) {
-		return config.File{}, nil
+		return path, config.File{}, nil
 	}
-	return file, err
+	return path, file, err
 }
 
 func configEnvironment(file config.File, getenv func(string) string) map[string]string {
 	keys := map[string]struct{}{
 		"HOME":          {},
 		"OTTO_PROVIDER": {},
+		"OTTO_PROFILE":  {},
 		"OTTO_MODEL":    {},
 		"OTTO_API_KEY":  {},
 		"OTTO_UI":       {},

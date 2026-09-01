@@ -13,9 +13,10 @@ import (
 // switchBackend adds the app.ProfileSwitcher capability to fakeBackend.
 type switchBackend struct {
 	fakeBackend
-	profiles      []string
-	switchProfile func(context.Context, string) (app.ResumeResult, error)
-	switchCalls   []string
+	profiles        []string
+	switchProfile   func(context.Context, string) (app.ResumeResult, error)
+	switchCalls     []string
+	setDefaultCalls []string
 }
 
 func (f *switchBackend) Profiles() []string { return f.profiles }
@@ -26,6 +27,11 @@ func (f *switchBackend) SwitchProfile(ctx context.Context, name string) (app.Res
 		return app.ResumeResult{}, nil
 	}
 	return f.switchProfile(ctx, name)
+}
+
+func (f *switchBackend) SetDefaultProfile(_ context.Context, name string) error {
+	f.setDefaultCalls = append(f.setDefaultCalls, name)
+	return nil
 }
 
 func TestModelCommandShowsCurrentAndProfiles(t *testing.T) {
@@ -75,7 +81,10 @@ func TestModelCommandSwitchesProfile(t *testing.T) {
 	if len(backend.switchCalls) != 1 || backend.switchCalls[0] != "chatgpt" {
 		t.Fatalf("switch calls = %v", backend.switchCalls)
 	}
-	if !strings.Contains(got.statusText, "chatgpt") || !strings.Contains(got.statusText, "gpt-5") {
+	if len(backend.setDefaultCalls) != 1 || backend.setDefaultCalls[0] != "chatgpt" {
+		t.Fatalf("set default calls = %v", backend.setDefaultCalls)
+	}
+	if !strings.Contains(got.statusText, "chatgpt") || !strings.Contains(got.statusText, "gpt-5") || !strings.Contains(got.statusText, "default") {
 		t.Fatalf("statusText = %q, want new profile fields", got.statusText)
 	}
 }

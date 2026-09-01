@@ -177,6 +177,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | Variable | Meaning |
 | --- | --- |
 | `OTTO_PROVIDER` | Provider override (overrides the profile; overridden by `--provider`). |
+| `OTTO_PROFILE` | Profile override (overrides `default_profile`; overridden by `--profile`). |
 | `OTTO_MODEL` | Model override (overridden by `--model`). |
 | `OTTO_API_KEY` | Fallback API key, used when the selected profile's `api_key_env` variable is empty. |
 | `OTTO_UI` | Frontend mode (`auto`, `tui`, `repl`); overridden by `--ui`. |
@@ -236,8 +237,8 @@ Key points:
 Startup resolution is field-specific:
 
 - **Profile:** explicit `--profile` wins; otherwise a startup `--continue` or
-  `--resume` uses the session's stored profile, and a new session uses
-  `default_profile`.
+  `--resume` uses the session's stored profile when present, then `OTTO_PROFILE`,
+  and a new session uses `OTTO_PROFILE` or `default_profile`.
 - **Provider / model:** `--provider` / `--model` override `OTTO_PROVIDER` /
   `OTTO_MODEL`, which override the selected profile and any provider/model
   stored in a resumed session. Explicit `--profile` makes that profile the

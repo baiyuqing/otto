@@ -112,6 +112,7 @@ type Model struct {
 	profileSwitchGeneration uint64
 	resume                  resumePickerState
 	archive                 archivePickerState
+	profilePicker           profilePickerState
 	memoryGeneration        uint64
 	loginPending            bool
 	loginGeneration         uint64
@@ -220,6 +221,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.archive.selected = 0
 		} else {
 			m.archive.selected = clamp(m.archive.selected, 0, len(m.archive.sessions)-1)
+		}
+		if len(m.profilePicker.profiles) == 0 {
+			m.profilePicker.selected = 0
+		} else {
+			m.profilePicker.selected = clamp(m.profilePicker.selected, 0, len(m.profilePicker.profiles)-1)
 		}
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
@@ -333,6 +339,9 @@ func (m Model) View() tea.View {
 	if m.archive.active() {
 		return newRootView(m, renderArchivePicker(m.width, m.height, m.archive, m.spinner.View(), m.now()))
 	}
+	if m.profilePicker.active() {
+		return newRootView(m, renderProfilePicker(m.width, m.height, m.profilePicker, infoFromBackend(m.backend)))
+	}
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
 	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.footerStatus()))
@@ -414,6 +423,9 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 		return updated, cmd
 	}
 	if updated, cmd, handled := m.handleArchiveKeyPress(msg); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := m.handleProfilePickerKeyPress(msg); handled {
 		return updated, cmd
 	}
 	if m.overlay != overlayNone {
@@ -629,7 +641,7 @@ func newRootView(m Model, content string) tea.View {
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
 	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()))
-	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && m.overlay == overlayNone {
+	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && !m.profilePicker.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
 			cursor.Y += layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
 			if layout.inputBoxed {

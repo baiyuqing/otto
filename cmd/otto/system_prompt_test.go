@@ -123,7 +123,7 @@ func TestSystemPromptUnavailableAndInvalidStatesNeverExposeReasonOrBashTool(t *t
 func TestSystemPromptLegacyOffExactText(t *testing.T) {
 	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "grep"}, {Name: "find"}, {Name: "ls"}, {Name: "write"}, {Name: "edit"}, {Name: "bash"}}
 	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
-	const want = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Bash is unsandboxed and has the current macOS user's access."
+	const want = "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Bash is unsandboxed and has the current macOS user's access."
 	if got := systemPromptFor(definitions, info); got != want {
 		t.Fatalf("systemPromptFor() = %q, want %q", got, want)
 	}

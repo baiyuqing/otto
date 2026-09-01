@@ -125,10 +125,13 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 	explicitProfile := overrides.Profile != ""
 	selectedProfile := overrides.Profile
 	if selectedProfile == "" {
+		selectedProfile = envValue(env, "OTTO_PROFILE")
+	}
+	if selectedProfile == "" {
 		selectedProfile = file.DefaultProfile
-		if selectedProfile != "" {
-			runtime.Profile = selectedProfile
-		}
+	}
+	if selectedProfile != "" {
+		runtime.Profile = selectedProfile
 	}
 
 	var (
@@ -179,20 +182,28 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 	if provider == "" {
 		return Runtime{}, fmt.Errorf("missing provider")
 	}
-	if provider != "openai-compatible" {
+	switch provider {
+	case ProviderOpenAICompatible, ProviderChatGPT:
+	default:
 		return Runtime{}, fmt.Errorf("unsupported provider %q", provider)
 	}
 	if model == "" {
 		return Runtime{}, fmt.Errorf("missing model")
 	}
-	if baseURL == "" {
-		return Runtime{}, fmt.Errorf("missing base_url")
+	if provider == ProviderOpenAICompatible {
+		if baseURL == "" {
+			return Runtime{}, fmt.Errorf("missing base_url")
+		}
+		normalizedBaseURL, err := openaicompat.NormalizeBaseURL(baseURL)
+		if err != nil {
+			return Runtime{}, fmt.Errorf("invalid base_url: %w", err)
+		}
+		baseURL = normalizedBaseURL
+	} else {
+		// The chatgpt provider uses a fixed backend URL and OAuth credentials
+		// from the credential file, not a configured base_url or API key.
+		baseURL = ""
 	}
-	normalizedBaseURL, err := openaicompat.NormalizeBaseURL(baseURL)
-	if err != nil {
-		return Runtime{}, fmt.Errorf("invalid base_url: %w", err)
-	}
-	baseURL = normalizedBaseURL
 
 	shellTimeout := defaultShellTimeout
 	if file.Agent.ShellTimeout != "" {
@@ -222,9 +233,12 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 		return Runtime{}, err
 	}
 
-	apiKey, err := resolveAPIKey(env, apiKeyEnv)
-	if err != nil {
-		return Runtime{}, err
+	var apiKey string
+	if provider == ProviderOpenAICompatible {
+		apiKey, err = resolveAPIKey(env, apiKeyEnv)
+		if err != nil {
+			return Runtime{}, err
+		}
 	}
 
 	return Runtime{

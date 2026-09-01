@@ -10,7 +10,11 @@ import (
 
 type Result struct {
 	Content string
-	IsError bool
+	// PersistedContent, when non-empty, replaces Content in the session
+	// transcript and provider history; Content still reaches the live
+	// EventToolCallFinished event unchanged.
+	PersistedContent string
+	IsError          bool
 }
 
 type cappedByteCollector struct {

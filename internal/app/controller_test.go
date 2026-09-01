@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 )
@@ -795,6 +796,66 @@ func TestControllerCloseWaitsForActivePrompt(t *testing.T) {
 	}
 }
 
+func TestControllerCloseClosesRunnerDirectly(t *testing.T) {
+	current := &fakeSession{header: testHeader("close")}
+	runner := &recordingRunner{}
+	controller, err := New(current, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return runner })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if runner.CloseCalls() != 1 {
+		t.Fatalf("runner close calls = %d, want 1", runner.CloseCalls())
+	}
+}
+
+func TestControllerCloseWaitsForActivePromptThenClosesRunner(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runner := &lifecycleRunner{run: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-release
+		return nil
+	}}
+	current := &fakeSession{header: testHeader("close-wait")}
+	controller, err := New(current, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return runner })
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptDone := make(chan error, 1)
+	go func() { promptDone <- controller.Prompt(context.Background(), "one", func(agent.Event) {}) }()
+	<-started
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- controller.Close() }()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close() returned early: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if runner.CloseCalls() != 0 {
+		t.Fatalf("runner close calls before release = %d, want 0", runner.CloseCalls())
+	}
+
+	close(release)
+	if err := <-promptDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	if runner.CloseCalls() != 1 {
+		t.Fatalf("runner close calls after release = %d, want 1", runner.CloseCalls())
+	}
+}
+
 func TestControllerPreservesFatalPersistenceIdentity(t *testing.T) {
 	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("disk full"))
 	controller := newTestController(t, runnerFunc(func(ctx context.Context, text string, emit func(agent.Event)) error {
@@ -904,6 +965,12 @@ func TestControllerResumeSwapsSessionRunnerAndRuntimeAtomically(t *testing.T) {
 	if old.CloseCalls() != 1 {
 		t.Fatalf("old close calls = %d, want 1", old.CloseCalls())
 	}
+	if oldRunner.CloseCalls() != 1 {
+		t.Fatalf("old runner close calls = %d, want 1", oldRunner.CloseCalls())
+	}
+	if nextRunner.CloseCalls() != 0 {
+		t.Fatalf("next runner close calls = %d, want 0", nextRunner.CloseCalls())
+	}
 	if err := controller.Prompt(context.Background(), "new runner", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -932,6 +999,136 @@ func TestControllerResumeBuildFailureKeepsCurrentUsable(t *testing.T) {
 	}
 	if old.CloseCalls() != 0 {
 		t.Fatalf("old close calls = %d, want 0", old.CloseCalls())
+	}
+	if oldRunner.CloseCalls() != 0 {
+		t.Fatalf("old runner close calls = %d, want 0", oldRunner.CloseCalls())
+	}
+}
+
+func newControllerWithProfileSwitcher(t *testing.T, initial session.Session, runner Runner, profiles []string, switchProfile ProfileSwitchFactory) *Controller {
+	t.Helper()
+	controller, err := New(initial, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("new")}, nil
+	}, func(session.Session) Runner { return runner },
+		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "old", Model: "old-model"}),
+		WithProfileSwitcher(profiles, switchProfile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return controller
+}
+
+func TestControllerSwitchProfileSwapsSessionRunnerAndRuntimeAtomically(t *testing.T) {
+	old := &fakeSession{header: testHeader("old")}
+	next := &fakeSession{header: testHeader("next")}
+	oldRunner := &recordingRunner{}
+	nextRunner := &recordingRunner{}
+	var gotProfile string
+	controller := newControllerWithProfileSwitcher(t, old, oldRunner, []string{"alpha", "chatgpt"},
+		func(_ context.Context, name string) (SessionReplacement, error) {
+			gotProfile = name
+			return SessionReplacement{
+				Session: next,
+				Runner:  nextRunner,
+				RuntimeInfo: RuntimeInfo{
+					Provider: "chatgpt",
+					Profile:  "chatgpt",
+					Model:    "gpt-5",
+				},
+			}, nil
+		})
+
+	result, err := controller.SwitchProfile(context.Background(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotProfile != "chatgpt" {
+		t.Fatalf("factory profile = %q, want chatgpt", gotProfile)
+	}
+	if result.SessionPath != canonicalSessionPath(next.Path()) {
+		t.Fatalf("session path = %q, want %q", result.SessionPath, canonicalSessionPath(next.Path()))
+	}
+	if got := controller.Info(); got.Provider != "chatgpt" || got.Profile != "chatgpt" || got.Model != "gpt-5" {
+		t.Fatalf("info = %#v", got)
+	}
+	if old.CloseCalls() != 1 || oldRunner.CloseCalls() != 1 {
+		t.Fatalf("old close calls = session %d runner %d, want 1/1", old.CloseCalls(), oldRunner.CloseCalls())
+	}
+	if nextRunner.CloseCalls() != 0 {
+		t.Fatalf("next runner close calls = %d, want 0", nextRunner.CloseCalls())
+	}
+	if err := controller.Prompt(context.Background(), "on new profile", nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldRunner.Calls() != 0 || nextRunner.Calls() != 1 {
+		t.Fatalf("runner calls = old %d, next %d", oldRunner.Calls(), nextRunner.Calls())
+	}
+}
+
+func TestControllerSwitchProfileBuildFailureKeepsCurrentUsable(t *testing.T) {
+	buildErr := errors.New("profile \"chatgpt\" not found")
+	old := &fakeSession{header: testHeader("old")}
+	oldRunner := &recordingRunner{}
+	controller := newControllerWithProfileSwitcher(t, old, oldRunner, []string{"alpha"},
+		func(context.Context, string) (SessionReplacement, error) {
+			return SessionReplacement{}, buildErr
+		})
+
+	if _, err := controller.SwitchProfile(context.Background(), "chatgpt"); err != buildErr {
+		t.Fatalf("SwitchProfile() error = %v, want exact build error", err)
+	}
+	if err := controller.Prompt(context.Background(), "still works", nil); err != nil {
+		t.Fatal(err)
+	}
+	if oldRunner.Calls() != 1 {
+		t.Fatalf("old runner calls = %d, want 1", oldRunner.Calls())
+	}
+	if old.CloseCalls() != 0 || oldRunner.CloseCalls() != 0 {
+		t.Fatalf("old close calls = session %d runner %d, want 0/0", old.CloseCalls(), oldRunner.CloseCalls())
+	}
+}
+
+func TestControllerSwitchProfileRejectedWhilePrompting(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runner := runnerFunc(func(ctx context.Context, text string, emit func(agent.Event)) error {
+		close(started)
+		<-release
+		return nil
+	})
+	controller := newControllerWithProfileSwitcher(t, &fakeSession{header: testHeader("old")}, runner, []string{"alpha"},
+		func(context.Context, string) (SessionReplacement, error) {
+			t.Error("factory must not run while prompting")
+			return SessionReplacement{}, nil
+		})
+	done := make(chan error, 1)
+	go func() { done <- controller.Prompt(context.Background(), "one", func(agent.Event) {}) }()
+	<-started
+	if _, err := controller.SwitchProfile(context.Background(), "alpha"); !errors.Is(err, ErrPromptActive) {
+		t.Fatalf("error = %v, want ErrPromptActive", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestControllerProfilesReturnsDefensiveCopy(t *testing.T) {
+	controller := newControllerWithProfileSwitcher(t, &fakeSession{header: testHeader("old")}, &recordingRunner{}, []string{"alpha", "chatgpt"}, nil)
+	profiles := controller.Profiles()
+	if len(profiles) != 2 || profiles[0] != "alpha" || profiles[1] != "chatgpt" {
+		t.Fatalf("profiles = %#v", profiles)
+	}
+	profiles[0] = "mutated"
+	if again := controller.Profiles(); again[0] != "alpha" {
+		t.Fatalf("Profiles() mutated by caller: %#v", again)
+	}
+}
+
+func TestControllerSwitchProfileWithoutFactoryReportsUnavailable(t *testing.T) {
+	controller := newTestController(t, runnerFunc(noopRun))
+	if _, err := controller.SwitchProfile(context.Background(), "alpha"); !errors.Is(err, ErrProfileSwitchUnavailable) {
+		t.Fatalf("SwitchProfile() error = %v, want ErrProfileSwitchUnavailable", err)
 	}
 }
 
@@ -1002,6 +1199,108 @@ func TestControllerListSessionsAndResumeReportPersistenceDisabled(t *testing.T) 
 	}
 	if _, err := browser.ResumeSession(context.Background(), "/sessions/next.jsonl"); !errors.Is(err, ErrPersistenceDisabled) {
 		t.Fatalf("ResumeSession() error = %v, want ErrPersistenceDisabled", err)
+	}
+}
+
+func TestControllerMemoryFacadeReportsUnavailableWithoutManager(t *testing.T) {
+	controller := newTestController(t, &recordingRunner{})
+
+	if _, err := controller.SearchMemory(context.Background(), memory.SearchRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("SearchMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.RememberMemory(context.Background(), memory.RememberRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("RememberMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.ForgetMemory(context.Background(), memory.ForgetRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("ForgetMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.ReviewMemoryCandidate(context.Background(), memory.ReviewRequest{}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("ReviewMemoryCandidate() error = %v, want ErrMemoryUnavailable", err)
+	}
+}
+
+func TestControllerMemoryFacadeDelegatesToManager(t *testing.T) {
+	manager := &fakeMemoryManager{
+		searchResult:   memory.SearchResult{Records: []memory.Record{{ID: "rec-1"}}},
+		rememberResult: memory.Record{ID: "rec-2"},
+		forgetResult:   memory.ForgetResult{Tombstone: memory.Tombstone{ID: "rec-3"}},
+		reviewResult:   memory.ReviewResult{Record: &memory.Record{ID: "rec-4"}},
+	}
+	userScope := memory.Scope{Namespace: "user", ID: "u1"}
+	workspaceScope := memory.Scope{Namespace: "workspace", ID: "w1"}
+	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager, userScope, workspaceScope))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	searchResult, err := controller.SearchMemory(context.Background(), memory.SearchRequest{Query: "vim"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.searchRequest.Query != "vim" || len(searchResult.Records) != 1 || searchResult.Records[0].ID != "rec-1" {
+		t.Fatalf("SearchMemory() = %#v, request = %#v", searchResult, manager.searchRequest)
+	}
+
+	rememberResult, err := controller.RememberMemory(context.Background(), memory.RememberRequest{Key: "editor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.rememberRequest.Key != "editor" || rememberResult.ID != "rec-2" {
+		t.Fatalf("RememberMemory() = %#v, request = %#v", rememberResult, manager.rememberRequest)
+	}
+
+	forgetResult, err := controller.ForgetMemory(context.Background(), memory.ForgetRequest{Ref: memory.RecordRef{ID: "rec-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.forgetRequest.Ref.ID != "rec-1" || forgetResult.Tombstone.ID != "rec-3" {
+		t.Fatalf("ForgetMemory() = %#v, request = %#v", forgetResult, manager.forgetRequest)
+	}
+
+	reviewResult, err := controller.ReviewMemoryCandidate(context.Background(), memory.ReviewRequest{Ref: memory.CandidateRef{ID: "cand-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.reviewRequest.Ref.ID != "cand-1" || reviewResult.Record == nil || reviewResult.Record.ID != "rec-4" {
+		t.Fatalf("ReviewMemoryCandidate() = %#v, request = %#v", reviewResult, manager.reviewRequest)
+	}
+}
+
+func TestControllerMemoryScopesReportsUnavailableWithoutManager(t *testing.T) {
+	controller := newTestController(t, &recordingRunner{})
+
+	if _, _, ok := controller.MemoryScopes(); ok {
+		t.Fatal("MemoryScopes() ok = true, want false without a bound manager")
+	}
+	if _, err := controller.GetMemory(context.Background(), memory.RecordRef{ID: "rec-1"}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("GetMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+}
+
+func TestControllerMemoryScopesAndGetDelegateToManager(t *testing.T) {
+	manager := &fakeMemoryManager{getResult: memory.Record{ID: "rec-1", Revision: 3}}
+	userScope := memory.Scope{Namespace: "user", ID: "u1"}
+	workspaceScope := memory.Scope{Namespace: "workspace", ID: "w1"}
+	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager, userScope, workspaceScope))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gotUser, gotWorkspace, ok := controller.MemoryScopes()
+	if !ok || gotUser != userScope || gotWorkspace != workspaceScope {
+		t.Fatalf("MemoryScopes() = %#v, %#v, %v, want %#v, %#v, true", gotUser, gotWorkspace, ok, userScope, workspaceScope)
+	}
+
+	record, err := controller.GetMemory(context.Background(), memory.RecordRef{Scope: userScope, ID: "rec-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.getRequest.ID != "rec-1" || record.Revision != 3 {
+		t.Fatalf("GetMemory() = %#v, request = %#v", record, manager.getRequest)
 	}
 }
 
@@ -1121,8 +1420,14 @@ func TestControllerResumeRejectsInvalidCandidateAndKeepsCurrent(t *testing.T) {
 			if old.CloseCalls() != 0 {
 				t.Fatalf("old close calls = %d, want 0", old.CloseCalls())
 			}
+			if oldRunner.CloseCalls() != 0 {
+				t.Fatalf("old runner close calls = %d, want 0", oldRunner.CloseCalls())
+			}
 			if tt.candidate != nil && tt.candidate.CloseCalls() != 1 {
 				t.Fatalf("candidate close calls = %d, want 1", tt.candidate.CloseCalls())
+			}
+			if r, ok := tt.runner.(*recordingRunner); ok && tt.candidate != nil && r.CloseCalls() != 1 {
+				t.Fatalf("candidate runner close calls = %d, want 1", r.CloseCalls())
 			}
 			if err := controller.Prompt(context.Background(), "still works", nil); err != nil {
 				t.Fatal(err)
@@ -1233,17 +1538,21 @@ func TestControllerResumeCancellationCleansCandidateAndPreservesCurrent(t *testi
 	t.Run("canceled after complete candidate before old close", func(t *testing.T) {
 		old := &fakeSession{header: testHeader("old")}
 		candidate := &fakeSession{header: testHeader("next")}
+		candidateRunner := &recordingRunner{}
 		ctx, cancel := context.WithCancel(context.Background())
 		controller := newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
 			func(context.Context, string) (SessionReplacement, error) {
 				cancel()
-				return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+				return SessionReplacement{Session: candidate, Runner: candidateRunner}, nil
 			})
 		if _, err := controller.ResumeSession(ctx, candidate.Path()); !errors.Is(err, context.Canceled) {
 			t.Fatalf("ResumeSession() error = %v, want context.Canceled", err)
 		}
 		if candidate.CloseCalls() != 1 || old.CloseCalls() != 0 {
 			t.Fatalf("close calls = candidate %d, old %d", candidate.CloseCalls(), old.CloseCalls())
+		}
+		if candidateRunner.CloseCalls() != 1 {
+			t.Fatalf("candidate runner close calls = %d, want 1", candidateRunner.CloseCalls())
 		}
 	})
 }
@@ -2711,6 +3020,9 @@ func noopRun(context.Context, string, func(agent.Event)) error { return nil }
 type lifecycleRunner struct {
 	run     func(context.Context, string, func(agent.Event)) error
 	compact func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
+
+	mu         sync.Mutex
+	closeCalls int
 }
 
 func (r *lifecycleRunner) Run(ctx context.Context, text string, emit func(agent.Event)) error {
@@ -2727,13 +3039,89 @@ func (r *lifecycleRunner) Compact(ctx context.Context, focus string, emit func(a
 	return r.compact(ctx, focus, emit)
 }
 
+func (r *lifecycleRunner) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeCalls++
+	return nil
+}
+
+func (r *lifecycleRunner) CloseCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeCalls
+}
+
 func testHeader(id string) session.Header {
 	return session.Header{Version: 1, ID: id, Workspace: "/workspace", Provider: "openai-compatible", Profile: "test", Model: "model", CreatedAt: time.Unix(1, 0).UTC()}
 }
 
+// fakeMemoryManager is a minimal memory.Manager test double: it records the
+// last request passed to each of the methods Controller exposes and returns
+// canned results/errors.
+type fakeMemoryManager struct {
+	getRequest memory.RecordRef
+	getResult  memory.Record
+	getErr     error
+
+	searchRequest memory.SearchRequest
+	searchResult  memory.SearchResult
+	searchErr     error
+
+	rememberRequest memory.RememberRequest
+	rememberResult  memory.Record
+	rememberErr     error
+
+	forgetRequest memory.ForgetRequest
+	forgetResult  memory.ForgetResult
+	forgetErr     error
+
+	reviewRequest memory.ReviewRequest
+	reviewResult  memory.ReviewResult
+	reviewErr     error
+}
+
+func (m *fakeMemoryManager) Get(_ context.Context, ref memory.RecordRef) (memory.Record, error) {
+	m.getRequest = ref
+	return m.getResult, m.getErr
+}
+
+func (m *fakeMemoryManager) GetByKey(context.Context, memory.RecordKey) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (m *fakeMemoryManager) GetTombstone(context.Context, memory.RecordRef) (memory.Tombstone, error) {
+	return memory.Tombstone{}, nil
+}
+
+func (m *fakeMemoryManager) GetCandidate(context.Context, memory.CandidateRef) (memory.Candidate, error) {
+	return memory.Candidate{}, nil
+}
+
+func (m *fakeMemoryManager) Search(_ context.Context, request memory.SearchRequest) (memory.SearchResult, error) {
+	m.searchRequest = request
+	return m.searchResult, m.searchErr
+}
+
+func (m *fakeMemoryManager) Remember(_ context.Context, request memory.RememberRequest) (memory.Record, error) {
+	m.rememberRequest = request
+	return m.rememberResult, m.rememberErr
+}
+
+func (m *fakeMemoryManager) Forget(_ context.Context, request memory.ForgetRequest) (memory.ForgetResult, error) {
+	m.forgetRequest = request
+	return m.forgetResult, m.forgetErr
+}
+
+func (m *fakeMemoryManager) Review(_ context.Context, request memory.ReviewRequest) (memory.ReviewResult, error) {
+	m.reviewRequest = request
+	return m.reviewResult, m.reviewErr
+}
+
 type recordingRunner struct {
-	mu    sync.Mutex
-	calls int
+	mu         sync.Mutex
+	calls      int
+	closeCalls int
 }
 
 func (r *recordingRunner) Run(context.Context, string, func(agent.Event)) error {
@@ -2754,6 +3142,19 @@ func (r *recordingRunner) Calls() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
+}
+
+func (r *recordingRunner) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeCalls++
+	return nil
+}
+
+func (r *recordingRunner) CloseCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeCalls
 }
 
 type aggregateUsageSession struct {

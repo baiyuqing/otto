@@ -4,20 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
 var (
-	ErrPromptActive        = errors.New("prompt already active")
-	ErrClosed              = errors.New("controller is closed")
-	ErrPersistenceDisabled = errors.New("session persistence is disabled")
+	ErrPromptActive             = errors.New("prompt already active")
+	ErrClosed                   = errors.New("controller is closed")
+	ErrPersistenceDisabled      = errors.New("session persistence is disabled")
+	ErrMemoryUnavailable        = errors.New("memory is not available")
+	ErrProfileSwitchUnavailable = errors.New("profile switching is not available")
 )
 
 type Runner interface {
@@ -34,6 +38,15 @@ type SessionLister func(context.Context, int) (session.ListResult, error)
 type ResumeFactory func(context.Context, string) (SessionReplacement, error)
 
 type NewSessionBuilder func(context.Context, RuntimeInfo) (SessionReplacement, error)
+
+// ProfileSwitchFactory builds a fresh session on the named configuration
+// profile. It resolves that profile's provider/model independently of the
+// current session, so switching profile also switches provider.
+type ProfileSwitchFactory func(context.Context, string) (SessionReplacement, error)
+
+type DefaultProfileSetter func(context.Context, string) error
+
+type ArchiveFactory func(context.Context, string) (session.ArchiveResult, error)
 
 type SandboxMode string
 
@@ -164,6 +177,33 @@ func WithNewSessionBuilder(build NewSessionBuilder) Option {
 	}
 }
 
+func WithSessionArchiver(archive ArchiveFactory) Option {
+	return func(controller *Controller) {
+		controller.archiveSession = archive
+	}
+}
+
+func WithProfileSwitcher(profiles []string, switchProfile ProfileSwitchFactory) Option {
+	return func(controller *Controller) {
+		controller.profiles = append([]string(nil), profiles...)
+		controller.switchProfile = switchProfile
+	}
+}
+
+func WithDefaultProfileSetter(setDefaultProfile DefaultProfileSetter) Option {
+	return func(controller *Controller) {
+		controller.setDefaultProfile = setDefaultProfile
+	}
+}
+
+func WithMemory(manager memory.Manager, userScope, workspaceScope memory.Scope) Option {
+	return func(controller *Controller) {
+		controller.memoryManager = manager
+		controller.memoryUserScope = userScope
+		controller.memoryWorkspaceScope = workspaceScope
+	}
+}
+
 // WithDynamicContent controls whether session-derived metadata, history,
 // browsing, and replacement operations may cross the frontend boundary.
 func WithDynamicContent(enabled bool) Option {
@@ -201,6 +241,21 @@ type SessionBrowser interface {
 	ResumeSession(context.Context, string) (ResumeResult, error)
 }
 
+type SessionArchiver interface {
+	SessionBrowser
+	ArchiveSession(context.Context, string) (session.ArchiveResult, error)
+	ArchiveCurrentSession(context.Context) (session.ArchiveResult, error)
+}
+
+// ProfileSwitcher exposes the configured profile names and a switch that
+// starts a fresh session on the chosen profile. Frontends type-assert it on
+// the Backend, matching how SessionBrowser and SessionArchiver are consumed.
+type ProfileSwitcher interface {
+	Profiles() []string
+	SwitchProfile(context.Context, string) (ResumeResult, error)
+	SetDefaultProfile(context.Context, string) error
+}
+
 type replacementPhase uint8
 
 const (
@@ -216,9 +271,33 @@ type replacementState struct {
 	buildActive       bool
 	current           session.Session
 	currentWorkspace  string
+	runner            Runner
 	replacement       session.Session
 	replacementClosed bool
 	closeRequested    bool
+}
+
+// closeRunner closes runner if it implements io.Closer. The Runner interface
+// stays narrow (Run, Compact) because most implementations own no closable
+// resources; a memory-bound agent.Agent is the one that does.
+func closeRunner(runner Runner) error {
+	if closer, ok := runner.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+// joinCloseErrors combines two close errors without disturbing callers that
+// compare a lone error by identity (errors.Join always allocates, even for
+// one non-nil argument).
+func joinCloseErrors(a, b error) error {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return errors.Join(a, b)
 }
 
 type activeOperation struct {
@@ -231,27 +310,34 @@ type activeOperation struct {
 }
 
 type Controller struct {
-	mu                  sync.Mutex
-	current             session.Session
-	currentPath         string
-	currentWorkspace    string
-	runner              Runner
-	create              SessionFactory
-	build               RunnerFactory
-	listSessions        SessionLister
-	resumeSession       ResumeFactory
-	newSession          NewSessionBuilder
-	active              *activeOperation
-	replace             *replacementState
-	closed              bool
-	closeDone           chan struct{}
-	closeComplete       bool
-	closeErr            error
-	reentrantCloseOwner uint64
-	ownerIDSource       func() uint64
-	runtimeInfo         *RuntimeInfo
-	sandboxInfo         SandboxInfo
-	dynamicContent      bool
+	mu                   sync.Mutex
+	current              session.Session
+	currentPath          string
+	currentWorkspace     string
+	runner               Runner
+	create               SessionFactory
+	build                RunnerFactory
+	listSessions         SessionLister
+	resumeSession        ResumeFactory
+	newSession           NewSessionBuilder
+	archiveSession       ArchiveFactory
+	switchProfile        ProfileSwitchFactory
+	setDefaultProfile    DefaultProfileSetter
+	profiles             []string
+	memoryManager        memory.Manager
+	memoryUserScope      memory.Scope
+	memoryWorkspaceScope memory.Scope
+	active               *activeOperation
+	replace              *replacementState
+	closed               bool
+	closeDone            chan struct{}
+	closeComplete        bool
+	closeErr             error
+	reentrantCloseOwner  uint64
+	ownerIDSource        func() uint64
+	runtimeInfo          *RuntimeInfo
+	sandboxInfo          SandboxInfo
+	dynamicContent       bool
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
@@ -369,6 +455,7 @@ func (c *Controller) endOperation(operation *activeOperation) {
 	if current != nil {
 		closeErr = current.Close()
 	}
+	closeErr = joinCloseErrors(closeErr, closeRunner(operation.runner))
 
 	c.mu.Lock()
 	if c.active == operation {
@@ -395,7 +482,6 @@ func (c *Controller) NewSession() error {
 		return ErrPromptActive
 	}
 	state := c.beginReplacementLocked(owner)
-	builder := c.newSession
 	current := c.current
 	sandboxInfo := c.sandboxInfo
 	var runtimeInfo *RuntimeInfo
@@ -412,34 +498,39 @@ func (c *Controller) NewSession() error {
 	}
 
 	_, err := c.runReplacement(context.Background(), state, func() (SessionReplacement, error) {
-		if builder != nil {
-			return builder(context.Background(), *runtimeInfo)
-		}
-		replacement, createErr := c.create()
-		if createErr != nil {
-			return SessionReplacement{Session: replacement}, createErr
-		}
-		if replacement == nil {
-			return SessionReplacement{}, errors.New("session factory returned nil session")
-		}
-		runner := c.build(replacement)
-		if runner == nil {
-			return SessionReplacement{Session: replacement}, errors.New("runner factory returned nil runner")
-		}
-		header := replacement.Header()
-		return SessionReplacement{
-			Session: replacement,
-			Runner:  runner,
-			RuntimeInfo: RuntimeInfo{
-				Provider:      header.Provider,
-				Profile:       header.Profile,
-				Model:         header.Model,
-				ContextWindow: runtimeInfo.ContextWindow,
-				Sandbox:       sandboxInfo,
-			},
-		}, nil
+		return c.buildReplacement(context.Background(), runtimeInfo)
 	}, true, false)
 	return err
+}
+
+func (c *Controller) buildReplacement(ctx context.Context, runtimeInfo *RuntimeInfo) (SessionReplacement, error) {
+	builder := c.newSession
+	if builder != nil {
+		return builder(ctx, *runtimeInfo)
+	}
+	replacement, createErr := c.create()
+	if createErr != nil {
+		return SessionReplacement{Session: replacement}, createErr
+	}
+	if replacement == nil {
+		return SessionReplacement{}, errors.New("session factory returned nil session")
+	}
+	runner := c.build(replacement)
+	if runner == nil {
+		return SessionReplacement{Session: replacement}, errors.New("runner factory returned nil runner")
+	}
+	header := replacement.Header()
+	return SessionReplacement{
+		Session: replacement,
+		Runner:  runner,
+		RuntimeInfo: RuntimeInfo{
+			Provider:      header.Provider,
+			Profile:       header.Profile,
+			Model:         header.Model,
+			ContextWindow: runtimeInfo.ContextWindow,
+			Sandbox:       runtimeInfo.Sandbox,
+		},
+	}, nil
 }
 
 func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListResult, error) {
@@ -498,6 +589,212 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 	}, true, true)
 }
 
+// Profiles returns a defensive copy of the configured profile names.
+func (c *Controller) Profiles() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.profiles...)
+}
+
+func (c *Controller) SetDefaultProfile(ctx context.Context, profile string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrClosed
+	}
+	setter := c.setDefaultProfile
+	c.mu.Unlock()
+	if setter == nil {
+		return ErrProfileSwitchUnavailable
+	}
+	return setter(ctx, profile)
+}
+
+// SwitchProfile starts a fresh session on the named profile, swapping the
+// session, runner, and runtime atomically through the same replacement path as
+// /new. Unlike /resume it does not validate the workspace, because the
+// replacement is a new session created in the current workspace.
+func (c *Controller) SwitchProfile(ctx context.Context, profile string) (ResumeResult, error) {
+	owner := c.ownerID()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrClosed
+	}
+	if c.active != nil || c.replace != nil {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrPromptActive
+	}
+	factory := c.switchProfile
+	if factory == nil {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrProfileSwitchUnavailable
+	}
+	state := c.beginReplacementLocked(owner)
+	c.mu.Unlock()
+
+	return c.runReplacement(ctx, state, func() (SessionReplacement, error) {
+		return factory(ctx, profile)
+	}, true, false)
+}
+
+// ArchiveSession archives an active session file without touching the current
+// session state. Selecting the current session delegates to ArchiveCurrentSession
+// so picker "current" rows behave identically to /archive on the current session.
+func (c *Controller) ArchiveSession(ctx context.Context, path string) (session.ArchiveResult, error) {
+	requestedPath := canonicalSessionPath(path)
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrClosed
+	}
+	if c.active != nil || c.replace != nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPromptActive
+	}
+	factory := c.archiveSession
+	if factory == nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
+	}
+	currentPath := c.currentPath
+	c.mu.Unlock()
+
+	if requestedPath != "" && requestedPath == currentPath {
+		return c.ArchiveCurrentSession(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return session.ArchiveResult{}, err
+	}
+	return factory(ctx, path)
+}
+
+// ArchiveCurrentSession archives the current session file and starts a fresh
+// session in its place. The fresh session is built before the archive move so
+// every failure path leaves the current session fully intact; the only committed
+// state change is the atomic file move, which happens last.
+func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.ArchiveResult, error) {
+	owner := c.ownerID()
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrClosed
+	}
+	if c.active != nil || c.replace != nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPromptActive
+	}
+	factory := c.archiveSession
+	if factory == nil {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
+	}
+	current := c.current
+	currentPath := c.currentPath
+	if currentPath == "" {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
+	}
+	state := c.beginReplacementLocked(owner)
+	var runtimeInfo *RuntimeInfo
+	if c.runtimeInfo != nil {
+		copy := *c.runtimeInfo
+		runtimeInfo = &copy
+	}
+	c.mu.Unlock()
+
+	if runtimeInfo == nil {
+		header := current.Header()
+		runtimeInfo = &RuntimeInfo{Provider: header.Provider, Profile: header.Profile, Model: header.Model}
+	}
+
+	var archiveResult session.ArchiveResult
+	_, err := c.runReplacement(ctx, state, func() (SessionReplacement, error) {
+		replacement, buildErr := c.buildReplacement(ctx, runtimeInfo)
+		if buildErr != nil {
+			return SessionReplacement{}, buildErr
+		}
+		archive, archiveErr := factory(ctx, currentPath)
+		if archiveErr != nil {
+			return SessionReplacement{Session: replacement.Session}, archiveErr
+		}
+		archiveResult = archive
+		return replacement, nil
+	}, true, false)
+	if err != nil {
+		return session.ArchiveResult{}, err
+	}
+	return archiveResult, nil
+}
+
+// SearchMemory, RememberMemory, ForgetMemory, and ReviewMemoryCandidate
+// delegate straight to the injected memory.Manager. The manager owns its own
+// concurrency (store-level locking), so these do not touch c.mu's
+// replacement state machine.
+func (c *Controller) SearchMemory(ctx context.Context, request memory.SearchRequest) (memory.SearchResult, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.SearchResult{}, ErrMemoryUnavailable
+	}
+	return manager.Search(ctx, request)
+}
+
+func (c *Controller) RememberMemory(ctx context.Context, request memory.RememberRequest) (memory.Record, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.Record{}, ErrMemoryUnavailable
+	}
+	return manager.Remember(ctx, request)
+}
+
+func (c *Controller) ForgetMemory(ctx context.Context, request memory.ForgetRequest) (memory.ForgetResult, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.ForgetResult{}, ErrMemoryUnavailable
+	}
+	return manager.Forget(ctx, request)
+}
+
+func (c *Controller) ReviewMemoryCandidate(ctx context.Context, request memory.ReviewRequest) (memory.ReviewResult, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.ReviewResult{}, ErrMemoryUnavailable
+	}
+	return manager.Review(ctx, request)
+}
+
+// MemoryScopes returns the user and workspace scopes the bound memory
+// manager was configured with, and whether a manager is bound at all.
+func (c *Controller) MemoryScopes() (memory.Scope, memory.Scope, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.memoryManager == nil {
+		return memory.Scope{}, memory.Scope{}, false
+	}
+	return c.memoryUserScope, c.memoryWorkspaceScope, true
+}
+
+func (c *Controller) GetMemory(ctx context.Context, ref memory.RecordRef) (memory.Record, error) {
+	c.mu.Lock()
+	manager := c.memoryManager
+	c.mu.Unlock()
+	if manager == nil {
+		return memory.Record{}, ErrMemoryUnavailable
+	}
+	return manager.Get(ctx, ref)
+}
+
 func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {
 	state := &replacementState{
 		done:             make(chan struct{}),
@@ -505,6 +802,7 @@ func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {
 		phase:            replacementPhaseBuilding,
 		current:          c.current,
 		currentWorkspace: c.currentWorkspace,
+		runner:           c.runner,
 	}
 	c.replace = state
 	return state
@@ -518,7 +816,7 @@ func (c *Controller) runReplacement(
 	validateWorkspace bool,
 ) (ResumeResult, error) {
 	if err := ctx.Err(); err != nil {
-		c.abortReplacement(state, nil)
+		c.abortReplacement(state, SessionReplacement{})
 		return ResumeResult{}, err
 	}
 
@@ -535,26 +833,26 @@ func (c *Controller) runReplacement(
 	c.mu.Unlock()
 	warnings := cloneWarnings(replacement.Warnings)
 	if err != nil {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, err
 	}
 	if replacement.Session == nil {
-		c.abortReplacement(state, nil)
+		c.abortReplacement(state, SessionReplacement{})
 		return ResumeResult{}, errors.New("resume factory returned nil session")
 	}
 	if replacement.Runner == nil {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, errors.New("resume factory returned nil runner")
 	}
 
 	if !c.registerReplacement(state, replacement.Session) {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, ErrClosed
 	}
 
 	replacementPath := replacement.Session.Path()
 	if validateWorkspace && replacementPath == "" {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, errors.New("replacement session path is required")
 	}
 	if replacementPath != "" {
@@ -562,7 +860,7 @@ func (c *Controller) runReplacement(
 	}
 	replacementWorkspace := canonicalSessionPath(replacement.Session.Header().Workspace)
 	if validateWorkspace && replacementWorkspace != state.currentWorkspace {
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, errors.New("replacement session workspace does not match current workspace")
 	}
 
@@ -572,11 +870,11 @@ func (c *Controller) runReplacement(
 	switch {
 	case c.replace != state || c.closed:
 		c.mu.Unlock()
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		return ResumeResult{}, ErrClosed
 	case cancelErr != nil || channelClosed(cancelDone):
 		c.mu.Unlock()
-		c.abortReplacement(state, replacement.Session)
+		c.abortReplacement(state, replacement)
 		if cancelErr == nil {
 			cancelErr = ctx.Err()
 			if cancelErr == nil {
@@ -589,7 +887,7 @@ func (c *Controller) runReplacement(
 		c.mu.Unlock()
 	}
 
-	if err := state.current.Close(); err != nil {
+	if err := joinCloseErrors(state.current.Close(), closeRunner(state.runner)); err != nil {
 		c.mu.Lock()
 		deferredClose := state.closeRequested
 		shouldClose := c.releaseReplacementLocked(state, replacement.Session)
@@ -661,9 +959,15 @@ func (c *Controller) registerReplacement(state *replacementState, replacement se
 	return true
 }
 
-func (c *Controller) abortReplacement(state *replacementState, replacement session.Session) {
+// abortReplacement discards a candidate SessionReplacement that will never
+// become the controller's current session or runner. It closes both the
+// candidate session and the candidate runner (which may hold its own
+// resources, such as a bound memory.Binding) — otherwise a runner built
+// during a rejected /new or /resume leaks whatever buildRunner allocated
+// for it.
+func (c *Controller) abortReplacement(state *replacementState, replacement SessionReplacement) {
 	c.mu.Lock()
-	shouldClose := replacement != nil && !state.replacementClosed
+	shouldClose := replacement.Session != nil && !state.replacementClosed
 	if shouldClose {
 		state.replacementClosed = true
 		if c.replace == state {
@@ -673,7 +977,8 @@ func (c *Controller) abortReplacement(state *replacementState, replacement sessi
 	c.mu.Unlock()
 
 	if shouldClose {
-		_ = replacement.Close()
+		_ = replacement.Session.Close()
+		_ = closeRunner(replacement.Runner)
 	}
 
 	c.mu.Lock()
@@ -695,6 +1000,7 @@ func (c *Controller) abortReplacement(state *replacementState, replacement sessi
 	if current != nil {
 		closeErr = current.Close()
 	}
+	closeErr = joinCloseErrors(closeErr, closeRunner(state.runner))
 	c.finishReplacing(state)
 	c.completeClose(closeDone, closeErr)
 }
@@ -834,12 +1140,14 @@ func (c *Controller) Close() error {
 		return err
 	}
 	current := c.current
+	runner := c.runner
 	c.mu.Unlock()
 
 	var err error
 	if current != nil {
 		err = current.Close()
 	}
+	err = joinCloseErrors(err, closeRunner(runner))
 	c.completeClose(done, err)
 	return err
 }

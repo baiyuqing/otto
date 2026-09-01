@@ -78,55 +78,63 @@ type turnHistoryBaseline struct {
 }
 
 type Model struct {
-	rootCtx                context.Context
-	backend                app.Backend
-	entries                []Entry
-	viewport               viewport.Model
-	editor                 textarea.Model
-	spinner                spinner.Model
-	keymap                 KeyMap
-	width                  int
-	height                 int
-	usage                  otmodel.Usage
-	running                bool
-	expandedDetails        bool
-	overlay                overlayKind
-	autoFollow             bool
-	renderer               MarkdownRenderer
-	rendererInjected       bool
-	darkBackground         bool
-	clock                  Clock
-	statusText             string
-	supportsModifiedEnter  bool
-	dirtyStreaming         bool
-	renderTickActive       bool
-	cancel                 context.CancelFunc
-	operationCleanup       *operationCleanup
-	activeOperation        *activeOperation
-	ctrlCArmed             bool
-	ctrlCArmedAt           time.Time
-	ctrlCArmGeneration     uint64
-	newSessionPending      bool
-	newSessionGeneration   uint64
-	resume                 resumePickerState
-	activeTurnStream       *turnStream
-	activeTurnChannel      <-chan turnEnvelope
-	activeAssistant        int
-	turnErrorSeen          bool
-	turnEventErr           error
-	fatalErr               error
-	turnGeneration         uint64
-	operationKind          operationKind
-	compactionCompleted    bool
-	turnHistoryBaseline    turnHistoryBaseline
-	turnEntryStart         int
-	liveEntrySequence      int
-	commandSuggestionIndex int
-	promptHistory          []string
-	promptHistoryIndex     int
-	promptDraft            string
-	turnStartedAt          time.Time
-	turnDuration           time.Duration
+	rootCtx                 context.Context
+	backend                 app.Backend
+	entries                 []Entry
+	viewport                viewport.Model
+	editor                  textarea.Model
+	spinner                 spinner.Model
+	keymap                  KeyMap
+	width                   int
+	height                  int
+	usage                   otmodel.Usage
+	running                 bool
+	expandedDetails         bool
+	overlay                 overlayKind
+	autoFollow              bool
+	renderer                MarkdownRenderer
+	rendererInjected        bool
+	darkBackground          bool
+	clock                   Clock
+	statusText              string
+	supportsModifiedEnter   bool
+	dirtyStreaming          bool
+	renderTickActive        bool
+	cancel                  context.CancelFunc
+	operationCleanup        *operationCleanup
+	activeOperation         *activeOperation
+	ctrlCArmed              bool
+	ctrlCArmedAt            time.Time
+	ctrlCArmGeneration      uint64
+	newSessionPending       bool
+	newSessionGeneration    uint64
+	profileSwitchPending    bool
+	profileSwitchGeneration uint64
+	resume                  resumePickerState
+	archive                 archivePickerState
+	profilePicker           profilePickerState
+	memoryGeneration        uint64
+	loginPending            bool
+	loginGeneration         uint64
+	loginChannel            chan loginResultMsg
+	activeTurnStream        *turnStream
+	activeTurnChannel       <-chan turnEnvelope
+	activeAssistant         int
+	turnErrorSeen           bool
+	turnEventErr            error
+	fatalErr                error
+	turnGeneration          uint64
+	operationKind           operationKind
+	compactionCompleted     bool
+	turnHistoryBaseline     turnHistoryBaseline
+	turnEntryStart          int
+	liveEntrySequence       int
+	commandSuggestionIndex  int
+	promptHistory           []string
+	promptHistoryIndex      int
+	promptDraft             string
+	turnStartedAt           time.Time
+	turnDuration            time.Duration
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
@@ -147,6 +155,12 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	vp := viewport.New()
 	vp.MouseWheelEnabled = true
 	vp.SoftWrap = true
+	// The transcript viewport must never consume typing keys. Its default
+	// keymap binds space (and f/j/k/u/d/b/h/l) to scrolling, which would fire
+	// while the composer is focused because unhandled key presses are forwarded
+	// to the viewport before the editor. Scrolling is handled explicitly by the
+	// TUI keymap (PgUp/PgDn/Home/End) and the mouse wheel.
+	vp.KeyMap = viewport.KeyMap{}
 
 	model := Model{
 		rootCtx:            ctx,
@@ -203,6 +217,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.resume.selected = clamp(m.resume.selected, 0, len(m.resume.sessions)-1)
 		}
+		if len(m.archive.sessions) == 0 {
+			m.archive.selected = 0
+		} else {
+			m.archive.selected = clamp(m.archive.selected, 0, len(m.archive.sessions)-1)
+		}
+		if len(m.profilePicker.profiles) == 0 {
+			m.profilePicker.selected = 0
+		} else {
+			m.profilePicker.selected = clamp(m.profilePicker.selected, 0, len(m.profilePicker.profiles)-1)
+		}
 		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
 	case tea.KeyboardEnhancementsMsg:
@@ -228,10 +252,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case newSessionResultMsg:
 		return m.applyNewSessionResult(msg)
+	case profileSwitchResultMsg:
+		return m.applyProfileSwitchResult(msg)
 	case sessionListResultMsg:
-		return m.applySessionListResult(msg)
+		if m.resume.listPending && msg.generation == m.resume.generation {
+			return m.applySessionListResult(msg)
+		}
+		if m.archive.listPending && msg.generation == m.archive.generation {
+			return m.applyArchiveListResult(msg)
+		}
+		return m, nil
 	case sessionResumeResultMsg:
 		return m.applySessionResumeResult(msg)
+	case archiveSessionResultMsg:
+		return m.applyArchiveSessionResult(msg)
+	case memoryCommandResultMsg:
+		return m.applyMemoryCommandResult(msg)
+	case loginResultMsg:
+		return m.applyLoginResult(msg)
 	case ctrlCArmExpiredMsg:
 		if m.ctrlCArmed && msg.generation == m.ctrlCArmGeneration {
 			m.clearCtrlCArm()
@@ -252,11 +290,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return m.handleKeyPress(msg, previousYOffset, previousEditorHeight, viewportBefore)
 	case tea.PasteMsg:
-		if m.resume.active() || m.overlay != overlayNone {
+		if m.resume.active() || m.archive.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	case tea.MouseMsg:
-		if m.resume.active() || m.overlay != overlayNone {
+		if m.resume.active() || m.archive.active() || m.overlay != overlayNone {
 			return m, nil
 		}
 	}
@@ -298,6 +336,12 @@ func (m Model) View() tea.View {
 	if m.resume.active() {
 		return newRootView(m, renderResumePicker(m.width, m.height, m.resume, m.spinner.View(), m.now()))
 	}
+	if m.archive.active() {
+		return newRootView(m, renderArchivePicker(m.width, m.height, m.archive, m.spinner.View(), m.now()))
+	}
+	if m.profilePicker.active() {
+		return newRootView(m, renderProfilePicker(m.width, m.height, m.profilePicker, infoFromBackend(m.backend)))
+	}
 
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
 	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.footerStatus()))
@@ -325,7 +369,11 @@ func (m Model) footerStatus() string {
 	if !m.running {
 		return m.statusText
 	}
-	running := m.spinner.View() + " working " + formatTurnSeconds(m.now().Sub(m.turnStartedAt))
+	elapsed := m.now().Sub(m.turnStartedAt)
+	running := m.spinner.View() + " working"
+	if elapsed >= 10*time.Second {
+		running += " " + formatTurnSeconds(elapsed)
+	}
 	if m.statusText == "" {
 		return running
 	}
@@ -372,6 +420,12 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEdit
 		return m.handleCtrlC(previousEditorHeight)
 	}
 	if updated, cmd, handled := m.handleResumeKeyPress(msg); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := m.handleArchiveKeyPress(msg); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := m.handleProfilePickerKeyPress(msg); handled {
 		return updated, cmd
 	}
 	if m.overlay != overlayNone {
@@ -587,7 +641,7 @@ func newRootView(m Model, content string) tea.View {
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
 	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()))
-	if !layout.tooSmall && !m.resume.active() && m.overlay == overlayNone {
+	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && !m.profilePicker.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
 			cursor.Y += layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
 			if layout.inputBoxed {
@@ -619,7 +673,8 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 	command, argument, ok := parseSlashCommand(value)
-	if !ok || (argument != "" && command.Kind != slashCommandCompact) {
+	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember || command.Kind == slashCommandLogin || command.Kind == slashCommandModel
+	if !ok || (argument != "" && !argumentAllowed) {
 		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
 	}
@@ -646,14 +701,26 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 		m.newSessionPending = true
 		m.statusText = ""
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
+	case slashCommandModel:
+		return m.handleModelCommand(argument)
 	case slashCommandResume:
 		return m.handleResumeCommand()
+	case slashCommandArchive:
+		return m.handleArchiveCommand()
 	case slashCommandCompact:
 		if m.running || m.newSessionPending {
 			m.statusText = app.ErrPromptActive.Error()
 			return m, nil
 		}
 		return m.startCompaction(argument)
+	case slashCommandMemory:
+		return m.handleMemoryCommand(argument)
+	case slashCommandRemember:
+		return m.handleRememberCommand(argument)
+	case slashCommandLogin:
+		return m.handleLoginCommand(argument)
+	case slashCommandLogout:
+		return m.handleLogoutCommand()
 	case slashCommandExit:
 		if m.running {
 			return m, nil
@@ -702,6 +769,9 @@ func (m *Model) resetSessionViewFromBackend(status string) {
 	m.renderTickActive = false
 	m.activeTurnStream = nil
 	m.activeTurnChannel = nil
+	m.loginPending = false
+	m.loginChannel = nil
+	m.profileSwitchPending = false
 	m.activeOperation = nil
 	m.activeAssistant = -1
 	m.turnErrorSeen = false
@@ -1029,6 +1099,13 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 	case agent.EventCompactionStarted, agent.EventCompactionPlanned, agent.EventCompactionCompleted, agent.EventCompactionWarning:
 		if m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent) {
 			m.refreshViewportContent(!m.autoFollow)
+		}
+		return m, waitTurn(stream)
+	case agent.EventMemoryWarning:
+		if event.Err != nil {
+			m.statusText = event.Err.Error()
+		} else {
+			m.statusText = "memory recall warning"
 		}
 		return m, waitTurn(stream)
 	case agent.EventAgentFinished:
@@ -1514,7 +1591,7 @@ func (m Model) transcriptContent(width int) string {
 				blocks = append(blocks, renderMessageBlock("Otto", ""))
 			}
 			if entry.Kind == EntryTool {
-				blocks = append(blocks, indentToolBlock(renderToolBlock(entry, width, m.expandedDetails), width))
+				blocks = append(blocks, indentToolBlock(renderToolBlock(entry, width, m.expandedDetails, m.darkBackground), width))
 			} else {
 				blocks = append(blocks, entry.Rendered)
 			}
@@ -1546,7 +1623,7 @@ func (m Model) renderEntry(entry Entry, width int) string {
 	case EntryAssistant:
 		return renderMessageBlock("Otto", entry.Rendered)
 	case EntryTool:
-		return renderToolBlock(entry, width, m.expandedDetails)
+		return renderToolBlock(entry, width, m.expandedDetails, m.darkBackground)
 	case EntryCompaction:
 		return renderCompactionBlock(entry, width, m.expandedDetails)
 	case EntryError:
@@ -1586,7 +1663,7 @@ func indentToolBlock(block string, width int) string {
 	for _, line := range strings.Split(block, "\n") {
 		wrapped := ansi.Wrap(line, max(1, width-2), "")
 		for _, part := range strings.Split(wrapped, "\n") {
-			lines = append(lines, ansi.Truncate("  "+part, max(0, width), ""))
+			lines = append(lines, ansi.Truncate("│ "+part, max(0, width), ""))
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -1600,7 +1677,7 @@ func renderCompactionBlock(entry Entry, width int, expanded bool) string {
 	return summary + "\n\n" + entry.Rendered
 }
 
-func renderToolBlock(entry Entry, width int, expanded bool) string {
+func renderToolBlock(entry Entry, width int, expanded bool, dark bool) string {
 	name := escapeSingleLineText(entry.ToolName)
 	if name == "" {
 		name = "tool"
@@ -1617,7 +1694,7 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 	if entry.ToolError && entry.ToolOutput != "" {
 		preview += " — " + strings.Join(strings.Fields(escapePlainText(entry.ToolOutput)), " ")
 	}
-	summary := renderToolSummary(name, preview, status, max(1, min(118, width-2)))
+	summary := renderToolSummary(name, preview, status, max(1, min(118, width-2)), dark)
 	if !expanded {
 		return summary
 	}
@@ -1632,44 +1709,119 @@ func renderToolBlock(entry Entry, width int, expanded bool) string {
 }
 
 func toolArgumentPreview(name, raw string) string {
-	if name == "bash" {
-		var args struct {
-			Command string `json:"command"`
+	var fields struct {
+		Command   string `json:"command"`
+		Path      string `json:"path"`
+		FilePath  string `json:"file_path"`
+		Pattern   string `json:"pattern"`
+		Glob      string `json:"glob"`
+		Query     string `json:"query"`
+		OldString string `json:"old_string"`
+		NewString string `json:"new_string"`
+	}
+	if json.Unmarshal([]byte(raw), &fields) != nil {
+		return escapePlainText(raw)
+	}
+	path := fields.Path
+	if path == "" {
+		path = fields.FilePath
+	}
+
+	switch name {
+	case "bash":
+		if fields.Command != "" {
+			return escapePlainText(fields.Command)
 		}
-		if json.Unmarshal([]byte(raw), &args) == nil && args.Command != "" {
-			return escapePlainText(args.Command)
+	case "read", "write", "ls":
+		if path != "" {
+			return escapePlainText(path)
+		}
+	case "grep":
+		parts := make([]string, 0, 3)
+		if fields.Pattern != "" {
+			parts = append(parts, fields.Pattern)
+		}
+		if path != "" && path != "." {
+			parts = append(parts, path)
+		}
+		if fields.Glob != "" {
+			parts = append(parts, fields.Glob)
+		}
+		if len(parts) > 0 {
+			return escapePlainText(strings.Join(parts, " "))
+		}
+	case "find":
+		parts := make([]string, 0, 2)
+		if fields.Pattern != "" {
+			parts = append(parts, fields.Pattern)
+		}
+		if path != "" && path != "." {
+			parts = append(parts, "in "+path)
+		}
+		if len(parts) > 0 {
+			return escapePlainText(strings.Join(parts, " "))
+		}
+	case "edit":
+		parts := make([]string, 0, 2)
+		if path != "" {
+			parts = append(parts, path)
+		}
+		if fields.OldString != "" {
+			preview := strings.Join(strings.Fields(fields.OldString), " ")
+			if len(preview) > 40 {
+				preview = preview[:40] + "…"
+			}
+			parts = append(parts, preview+" → …")
+		}
+		if len(parts) > 0 {
+			return escapePlainText(strings.Join(parts, " "))
+		}
+	case "memory_search":
+		if fields.Query != "" {
+			return escapePlainText(fields.Query)
 		}
 	}
 	return escapePlainText(raw)
 }
 
-func renderToolSummary(name, args, status string, width int) string {
+func renderToolSummary(name, args, status string, width int, dark bool) string {
 	if width <= 0 {
 		return ""
 	}
 	marker := "…"
-	if status == "complete" {
+	switch status {
+	case "complete":
 		marker = "✓"
-	} else if status == "error" {
+	case "error":
 		marker = "✗"
 	}
+
 	prefix := marker + " "
-	minimum := prefix + name
-	if ansi.StringWidth(minimum) > width {
-		nameWidth := max(1, width-ansi.StringWidth(prefix))
+	prefixWidth := 2 // marker + space
+	if prefixWidth+ansi.StringWidth(name) > width {
+		nameWidth := max(1, width-prefixWidth)
 		name = ansi.Truncate(name, nameWidth, "…")
 	}
 
-	base := prefix + name + " "
-	remaining := width - ansi.StringWidth(base)
+	base := prefix + name
+	baseWidth := prefixWidth + ansi.StringWidth(name)
 	preview := strings.Join(strings.Fields(args), " ")
-	if preview == "" {
-		return strings.TrimRight(base, " ")
+	if preview != "" {
+		remaining := width - baseWidth - 2 // "  " separator
+		if remaining > 1 {
+			base += "  " + ansi.Truncate(preview, remaining, "…")
+		}
 	}
-	if remaining > 1 {
-		base += " " + ansi.Truncate(preview, remaining-1, "…")
+
+	bg := "254"
+	if dark {
+		bg = "237"
 	}
-	return ansi.Truncate(base, width, "")
+	lineStyle := lipgloss.NewStyle().Background(lipgloss.Color(bg))
+	if status == "running" {
+		lineStyle = lineStyle.Faint(true)
+	}
+	return lineStyle.Width(width).MaxWidth(width).MaxHeight(1).Render(base)
 }
 
 func (m *Model) scrollViewport(delta int) {
@@ -1754,7 +1906,7 @@ func (m *Model) abandonActiveTurn() {
 }
 
 func (m Model) reservedStateActive() bool {
-	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.activeTurnStream != nil || m.ctrlCArmed || m.fatalErr != nil
+	return m.running || m.newSessionPending || m.resume.active() || m.resume.listPending || m.archive.active() || m.archive.listPending || m.dirtyStreaming || m.renderTickActive || m.cancel != nil || m.activeTurnStream != nil || m.ctrlCArmed || m.fatalErr != nil
 }
 
 // boxedInput renders the composer as a bordered panel that anchors the screen

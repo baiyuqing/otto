@@ -86,6 +86,18 @@ func (e *CommitUnknownError) EntityIDs() []string {
 	return cloneStrings(e.entityIDs)
 }
 
+// PolicyDecisionError reports that Propose did not queue a candidate because
+// Policy.Decide returned a decision other than PolicyPending. Propose only
+// ever creates pending candidates, so PolicyAccept and PolicyReject both
+// surface here rather than as a silent empty CandidateBatch.
+type PolicyDecisionError struct {
+	Decision PolicyDecision
+}
+
+func (e *PolicyDecisionError) Error() string {
+	return fmt.Sprintf("memory proposal was not queued for review: policy decision %q", e.Decision)
+}
+
 func validCommitOperation(operation CommitOperation) bool {
 	switch operation {
 	case CommitSchema, CommitUpsert, CommitForget, CommitPropose, CommitObserve, CommitReview:

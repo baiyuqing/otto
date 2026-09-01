@@ -11,8 +11,14 @@ const (
 	slashCommandHelp slashCommandKind = iota
 	slashCommandSession
 	slashCommandNew
+	slashCommandModel
 	slashCommandResume
+	slashCommandArchive
 	slashCommandCompact
+	slashCommandMemory
+	slashCommandRemember
+	slashCommandLogin
+	slashCommandLogout
 	slashCommandExit
 )
 
@@ -26,8 +32,14 @@ var slashCommands = []slashCommand{
 	{Name: "/help", Description: "show help", Kind: slashCommandHelp},
 	{Name: "/session", Description: "show session details", Kind: slashCommandSession},
 	{Name: "/new", Description: "start a new session", Kind: slashCommandNew},
+	{Name: "/model", Description: "show current model, or switch profiles (fresh session)", Kind: slashCommandModel},
 	{Name: "/resume", Description: "resume a session", Kind: slashCommandResume},
+	{Name: "/archive", Description: "archive a session", Kind: slashCommandArchive},
 	{Name: "/compact", Description: "compact context", Kind: slashCommandCompact},
+	{Name: "/memory", Description: "search, forget, or review remembered records", Kind: slashCommandMemory},
+	{Name: "/remember", Description: "remember a fact for later", Kind: slashCommandRemember},
+	{Name: "/login", Description: "sign in to ChatGPT (add status to check)", Kind: slashCommandLogin},
+	{Name: "/logout", Description: "sign out of ChatGPT", Kind: slashCommandLogout},
 	{Name: "/exit", Description: "quit", Kind: slashCommandExit},
 }
 

@@ -13,9 +13,13 @@ import (
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
+	"github.com/baiyuqing/otto/internal/provider/openairesponses"
 	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
@@ -52,28 +56,41 @@ func (p *preparedStore) Close() error {
 }
 
 type runtimeBuilder struct {
-	config                 config.File
-	environment            map[string]string
-	workspace              *tool.Workspace
-	workspacePath          string
-	sessionRoot            string
-	shell                  string
-	noSession              bool
-	stderr                 io.Writer
-	deps                   runDependencies
-	prepareSession         func(context.Context, string, string) (preparedSession, error)
-	prepareListedSession   func(context.Context, string, string, string) (preparedSession, error)
-	buildRunnerOverride    func(session.Session, config.Runtime) (app.Runner, error)
-	runtimeOverrides       config.Overrides
-	commandExecutor        sandbox.CommandExecutor
-	sandboxEnvironment     []string
-	sandboxInfo            app.SandboxInfo
-	sandboxSecrets         []string
-	sandboxSecretsComplete bool
+	configPath              string
+	config                  config.File
+	environment             map[string]string
+	workspace               *tool.Workspace
+	workspacePath           string
+	sessionRoot             string
+	shell                   string
+	noSession               bool
+	stderr                  io.Writer
+	deps                    runDependencies
+	prepareSession          func(context.Context, string, string) (preparedSession, error)
+	prepareListedSession    func(context.Context, string, string, string) (preparedSession, error)
+	buildRunnerOverride     func(session.Session, config.Runtime) (app.Runner, error)
+	setDefaultProfile       func(context.Context, string) error
+	runtimeOverrides        config.Overrides
+	commandExecutor         sandbox.CommandExecutor
+	sandboxEnvironment      []string
+	sandboxInfo             app.SandboxInfo
+	sandboxSecrets          []string
+	sandboxSecretsComplete  bool
+	memoryService           memory.Service
+	memoryUsable            bool
+	memoryUserScope         memory.Scope
+	memoryWorkspaceScope    memory.Scope
+	memoryRecallLimit       int
+	memoryRecallTokenBudget int
+	// extraTools is test-only: appended before registry construction so
+	// tests can force tool.NewRegistry to fail (e.g. a duplicate name) and
+	// exercise the memory-binding cleanup path deterministically.
+	extraTools []tool.Tool
 }
 
-func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
+func newRuntimeBuilder(configPath string, configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
 	builder := runtimeBuilder{
+		configPath:             configPath,
 		config:                 configFile,
 		environment:            environment,
 		workspace:              workspace,
@@ -84,8 +101,8 @@ func newRuntimeBuilder(configFile config.File, environment map[string]string, wo
 		stderr:                 stderr,
 		deps:                   deps,
 		prepareSession:         deps.prepareSession,
-		sandboxSecretsComplete: true,
 		prepareListedSession:   deps.prepareListedSession,
+		sandboxSecretsComplete: true,
 		runtimeOverrides: config.Overrides{
 			BaseURL:        options.baseURL,
 			Thinking:       options.thinking,
@@ -112,7 +129,7 @@ func (b runtimeBuilder) resolveSession(metadata session.RuntimeMetadata) (config
 	return runtime, nil
 }
 
-func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runtime) (app.Runner, error) {
+func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session, runtime config.Runtime) (app.Runner, error) {
 	if b.buildRunnerOverride != nil {
 		runner, err := b.buildRunnerOverride(current, runtime)
 		if err != nil {
@@ -147,11 +164,38 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 		}
 		tools = append(tools, bash)
 	}
+	var binding memory.Binding
+	if b.memoryUsable && b.boundaryAllowsDynamic(&runtime) {
+		memoryScopes := []memory.Scope{b.memoryUserScope, b.memoryWorkspaceScope}
+		tools = append(tools,
+			tool.NewMemorySearchTool(b.memoryService, memoryScopes, runtime.MaxOutputBytes),
+			tool.NewRememberTool(b.memoryService, b.memoryWorkspaceScope),
+			tool.NewForgetTool(b.memoryService, memoryScopes),
+		)
+		bound, err := b.memoryService.Bind(ctx, memory.BindOptions{
+			Scopes:            memoryScopes,
+			DefaultWriteScope: b.memoryWorkspaceScope,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("bind memory: %w", err)
+		}
+		binding = bound
+	}
+	tools = append(tools, b.extraTools...)
 	registry, err := tool.NewRegistry(tools...)
 	if err != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
-	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
+	client, err := b.buildProvider(ctx, runtime)
+	if err != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
+		return nil, b.redactError(err, &runtime)
+	}
 	redactor := b.boundaryRedactor(&runtime)
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()), Thinking: runtime.Thinking,
@@ -162,6 +206,9 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 			ReserveTokens:    runtime.Compaction.ReserveTokens,
 			KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
 		},
+		Memory:                  binding,
+		MemoryRecallLimit:       b.memoryRecallLimit,
+		MemoryRecallTokenBudget: b.memoryRecallTokenBudget,
 	}, redactor), nil
 }
 
@@ -201,6 +248,29 @@ func (b runtimeBuilder) runtimeInfo(runtime config.Runtime) app.RuntimeInfo {
 	return info
 }
 
+func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtime) (provider.Provider, error) {
+	if runtime.Provider != config.ProviderChatGPT {
+		return openaicompat.New(runtime.BaseURL, runtime.APIKey, nil), nil
+	}
+	path, err := authPathForEnvironment(b.environment)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := auth.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, nil), nil
+}
+
+func authPathForEnvironment(environment map[string]string) (string, error) {
+	home := strings.TrimSpace(environment["HOME"])
+	if home != "" {
+		return auth.PathForHome(home), nil
+	}
+	return auth.DefaultPath()
+}
+
 func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {
 	if err := ctx.Err(); err != nil {
 		return app.SessionReplacement{}, err
@@ -217,7 +287,53 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 	if !b.boundaryAllowsDynamic(&runtime) {
 		return app.SessionReplacement{}, errSessionOperationUnavailable
 	}
+	return b.freshReplacement(ctx, runtime)
+}
 
+// buildProfileReplacement resolves the named profile as an explicit override so
+// its own provider/model/base_url win (matching startup --profile), then builds
+// a fresh session on it. Switching profile therefore also switches provider.
+// An unknown profile is rejected by config.Resolve before any session is created.
+func (b runtimeBuilder) buildProfileReplacement(ctx context.Context, profile string) (app.SessionReplacement, error) {
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, err
+	}
+	overrides := b.runtimeOverrides
+	overrides.Profile = profile
+	runtime, err := config.Resolve(b.config, b.resumeEnvironment(), config.SessionDefaults{}, overrides)
+	if err != nil {
+		return app.SessionReplacement{}, b.redactError(err, nil)
+	}
+	if !b.boundaryAllowsDynamic(&runtime) {
+		return app.SessionReplacement{}, errSessionOperationUnavailable
+	}
+	return b.freshReplacement(ctx, runtime)
+}
+
+func (b runtimeBuilder) persistDefaultProfile(ctx context.Context, profile string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b.setDefaultProfile != nil {
+		return b.setDefaultProfile(ctx, profile)
+	}
+	return config.SetDefaultProfile(b.configPath, profile)
+}
+
+// profileNames returns the configured profile names in sorted order for
+// display by the /model command.
+func (b runtimeBuilder) profileNames() []string {
+	names := make([]string, 0, len(b.config.Profiles))
+	for name := range b.config.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// freshReplacement creates a new session and runner for an already-resolved
+// runtime, shared by the /new and /model replacement paths.
+func (b runtimeBuilder) freshReplacement(ctx context.Context, runtime config.Runtime) (app.SessionReplacement, error) {
 	create := b.deps.newSession
 	if create == nil {
 		create = newSession
@@ -233,7 +349,7 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
 
-	runner, err := b.buildRunner(candidate, runtime)
+	runner, err := b.buildRunner(ctx, candidate, runtime)
 	if err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
@@ -280,7 +396,7 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 	if err != nil {
 		return app.SessionReplacement{}, err
 	}
-	runner, err := b.buildRunner(candidate, runtime)
+	runner, err := b.buildRunner(ctx, candidate, runtime)
 	if err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
@@ -412,7 +528,7 @@ func (b runtimeBuilder) resumeEnvironment() map[string]string {
 	environment := make(map[string]string, len(b.environment))
 	for key, value := range b.environment {
 		switch key {
-		case "OTTO_PROVIDER", "OTTO_MODEL", "OTTO_UI":
+		case "OTTO_PROVIDER", "OTTO_PROFILE", "OTTO_MODEL", "OTTO_UI":
 			continue
 		default:
 			environment[key] = value
@@ -508,6 +624,46 @@ func (b runtimeBuilder) boundaryRedactor(runtime *config.Runtime) *agent.Redacto
 
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 	values, _ := b.boundarySecretValues(runtime)
+	return values
+}
+
+// collectSecretValues gathers the API keys, URL-embedded secrets, and
+// ChatGPT OAuth credentials known from static config and the captured
+// environment. It has no receiver so callers without a full runtimeBuilder
+// (for example the standalone "otto memory" CLI) can build the same list.
+func collectSecretValues(cfg config.File, environment map[string]string, runtime *config.Runtime) []string {
+	seen := make(map[string]struct{})
+	values := make([]string, 0, len(cfg.Profiles)+8)
+	add := func(value string) bool {
+		if value == "" {
+			return true
+		}
+		if _, ok := seen[value]; ok {
+			return true
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+		return true
+	}
+	add(environment["OTTO_API_KEY"])
+	for _, name := range sortedProfileNames(cfg.Profiles) {
+		profile := cfg.Profiles[name]
+		if profile.APIKeyEnv != "" {
+			add(environment[profile.APIKeyEnv])
+		}
+		collectURLSecretValues(profile.BaseURL, add)
+	}
+	if runtime != nil {
+		add(runtime.APIKey)
+		collectURLSecretValues(runtime.BaseURL, add)
+	}
+	if path, err := authPathForEnvironment(environment); err == nil {
+		if creds, err := auth.Load(path); err == nil {
+			add(creds.AccessToken)
+			add(creds.RefreshToken)
+			add(creds.IDToken)
+		}
+	}
 	return values
 }
 

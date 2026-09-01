@@ -928,6 +928,78 @@ func TestRunIncompleteRedactionDoesNotObserveProviderError(t *testing.T) {
 	}
 }
 
+func TestRunPersistsPlaceholderButShowsFullContentToProviderWithinTheSameTurn(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}, FinishReason: model.FinishToolCalls}},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	recorder := &recordingTool{name: "recorder", execute: func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "3 records: id1, id2, id3", PersistedContent: "3 records (ids omitted)"}
+	}}
+	registry, err := tool.NewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
+
+	var finished Event
+	if err := runner.Run(context.Background(), "inspect", func(event Event) {
+		if event.Type == EventToolCallFinished {
+			finished = event
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if finished.ToolResult.Content != "3 records: id1, id2, id3" {
+		t.Fatalf("live event content = %q, want full content", finished.ToolResult.Content)
+	}
+	messages := memory.Messages()
+	if got := messages[2].Blocks[0].Text; got != "3 records (ids omitted)" {
+		t.Fatalf("persisted tool result = %q, want placeholder", got)
+	}
+	// The provider request built after the tool ran, within this same turn,
+	// must see the full content the model needs to act on (e.g. to build a
+	// valid forget/remember follow-up call) — only the durable session and
+	// resumed history get the placeholder.
+	if got := fakeProvider.requests[1].Messages[2].Blocks[0].Text; got != "3 records: id1, id2, id3" {
+		t.Fatalf("provider history tool result = %q, want full content", got)
+	}
+}
+
+func TestRunToolResultOverlayDoesNotPersistAcrossTurns(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}, FinishReason: model.FinishToolCalls}},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}}, FinishReason: model.FinishStop}},
+	}}
+	recorder := &recordingTool{name: "recorder", execute: func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "3 records: id1, id2, id3", PersistedContent: "3 records (ids omitted)"}
+	}}
+	registry, err := tool.NewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
+
+	if err := runner.Run(context.Background(), "inspect", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Run(context.Background(), "follow up", func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The second turn's request replays the first turn's tool result out of
+	// session history; runDispatchState is fresh per Run() call, so the
+	// overlay from turn one must not leak in and the model sees the
+	// placeholder, same as what was actually persisted.
+	if got := fakeProvider.requests[2].Messages[2].Blocks[0].Text; got != "3 records (ids omitted)" {
+		t.Fatalf("second-turn provider history tool result = %q, want placeholder (overlay must not survive across turns)", got)
+	}
+}
+
 func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testing.T) {
 	credential := fmt.Sprintf("credential-%d", time.Now().UnixNano())
 	workspaceRoot := t.TempDir()

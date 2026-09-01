@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
 	"github.com/baiyuqing/otto/internal/tool"
@@ -22,6 +23,7 @@ const (
 	EventCompactionPlanned   EventType = "compaction_planned"
 	EventCompactionCompleted EventType = "compaction_completed"
 	EventCompactionWarning   EventType = "compaction_warning"
+	EventMemoryWarning       EventType = "memory_warning"
 	EventAgentError          EventType = "agent_error"
 )
 
@@ -103,13 +105,16 @@ type CompactionSettings struct {
 }
 
 type Options struct {
-	Model        string
-	SystemPrompt string
-	Thinking     string
-	RequestSizer provider.RequestSizer
-	Compaction   CompactionSettings
-	Now          func() time.Time
-	NewID        func() string
+	Model                   string
+	SystemPrompt            string
+	Thinking                string
+	RequestSizer            provider.RequestSizer
+	Compaction              CompactionSettings
+	Now                     func() time.Time
+	NewID                   func() string
+	Memory                  memory.Binding
+	MemoryRecallLimit       int
+	MemoryRecallTokenBudget int
 }
 
 var (

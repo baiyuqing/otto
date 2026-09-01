@@ -2,10 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"math/big"
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/app"
@@ -194,17 +196,42 @@ func renderFooterCore(width int, status, profileModel, badge string) string {
 	return left + separator + badge
 }
 
+const contextBarWidth = 10
+
 func footerContextField(info app.Info) string {
 	if info.ContextWindow <= 0 {
 		return ""
 	}
 	if info.ContextInputTokensPresent {
-		return "ctx " + formatFooterContextPercentage(info.ContextInputTokens, info.ContextWindow)
+		pct := float64(info.ContextInputTokens) / float64(info.ContextWindow)
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 1 {
+			pct = 1
+		}
+		bar := progress.New(
+			progress.WithWidth(contextBarWidth),
+			progress.WithoutPercentage(),
+			progress.WithColorFunc(contextBarColor),
+		).ViewAs(pct)
+		return "ctx " + bar + " " + formatFooterContextPercentage(info.ContextInputTokens, info.ContextWindow)
 	}
 	if info.ContextInputTokensPending {
 		return "ctx ?%"
 	}
 	return ""
+}
+
+func contextBarColor(total, _ float64) color.Color {
+	switch {
+	case total >= 0.8:
+		return lipgloss.Color("#EF4444")
+	case total >= 0.6:
+		return lipgloss.Color("#EAB308")
+	default:
+		return lipgloss.Color("#22C55E")
+	}
 }
 
 func formatFooterContextPercentage(inputTokens, contextWindow int) string {
@@ -358,16 +385,43 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 	if len(full) <= innerHeight {
 		return truncateAndClipLines(strings.Join(full, "\n"), innerWidth, innerHeight)
 	}
-
-	compactDetails := []string{
-		"Help ? /help Enter Shift+Enter",
-		"Alt+Enter Ctrl+O PgUp/PgDn Home/End",
-		"Esc Ctrl+C /session /new /exit",
-		"/resume /compact",
+	if innerHeight <= 6 {
+		compact := []string{
+			"Help ? /help Enter Esc",
+			"Shift+Enter Alt+Enter",
+			"Ctrl+O PgUp/PgDn Home/End Ctrl+C",
+			"/session /new /exit",
+		}
+		compact = append(compact, sandboxLines...)
+		return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, innerHeight)
 	}
-	detailLimit := max(0, innerHeight-len(sandboxLines))
-	compactDetails = compactDetails[:min(len(compactDetails), detailLimit)]
-	compact := append(compactDetails, sandboxLines...)
+
+	compact := []string{
+		"Help (?/help) · Enter · Esc",
+		"Shift+Enter/Alt+Enter newline",
+		"Ctrl+O toggle details",
+		"PgUp/PgDn · Home/End · Ctrl+C",
+	}
+	if remaining := innerHeight - len(compact); remaining > len(sandboxLines) {
+		compact = append(compact, sandboxLines...)
+	}
+	commandLines := make([]string, 0, len(slashCommands))
+	line := ""
+	for _, command := range slashCommands {
+		switch {
+		case line == "":
+			line = command.Name
+		case ansi.StringWidth(line+" "+command.Name) <= innerWidth:
+			line += " " + command.Name
+		default:
+			commandLines = append(commandLines, line)
+			line = command.Name
+		}
+	}
+	if line != "" {
+		commandLines = append(commandLines, line)
+	}
+	compact = append(compact, commandLines...)
 	return truncateAndClipLines(strings.Join(compact, "\n"), innerWidth, innerHeight)
 }
 

@@ -7,6 +7,57 @@ import (
 	"testing"
 )
 
+func TestSetDefaultProfileUpdatesExistingLine(t *testing.T) {
+	path := writeConfig(t, `default_profile = "old"
+[profiles.old]
+provider = "openai-compatible"
+model = "old-model"
+base_url = "https://old.example/v1"
+api_key_env = "OLD_KEY"
+[profiles.new]
+provider = "chatgpt"
+model = "gpt-5-codex"
+`)
+	if err := SetDefaultProfile(path, "new"); err != nil {
+		t.Fatal(err)
+	}
+	content := string(mustReadFile(t, path))
+	if !strings.Contains(content, `default_profile = "new"`) || strings.Contains(content, `default_profile = "old"`) {
+		t.Fatalf("content = %q", content)
+	}
+	file, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.DefaultProfile != "new" || file.Profiles["old"].Model != "old-model" || file.Profiles["new"].Provider != "chatgpt" {
+		t.Fatalf("file = %#v", file)
+	}
+}
+
+func TestSetDefaultProfileInsertsMissingLine(t *testing.T) {
+	path := writeConfig(t, `[profiles.new]
+provider = "chatgpt"
+model = "gpt-5-codex"
+`)
+	if err := SetDefaultProfile(path, "new"); err != nil {
+		t.Fatal(err)
+	}
+	content := string(mustReadFile(t, path))
+	if !strings.HasPrefix(content, "default_profile = \"new\"\n") {
+		t.Fatalf("content = %q", content)
+	}
+}
+
+func TestSetDefaultProfileRejectsUnknownProfile(t *testing.T) {
+	path := writeConfig(t, `[profiles.known]
+provider = "chatgpt"
+model = "gpt-5-codex"
+`)
+	if err := SetDefaultProfile(path, "missing"); err == nil || !strings.Contains(err.Error(), `profile "missing" not found`) {
+		t.Fatalf("error = %v, want missing profile", err)
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	path := writeConfig(t, `default_profile = "local"
 unknown = true
@@ -220,6 +271,15 @@ func TestDefaultPathUsesHomeDir(t *testing.T) {
 	if got := DefaultPath(); got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
 }
 
 func writeConfig(t *testing.T, content string) string {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -35,7 +36,7 @@ func TestToolRenderingEscapesNameArgumentsAndOutput(t *testing.T) {
 		ToolOutput: "output-" + terminalInjectionPayload + "\n\tkept",
 		ToolDone:   true,
 	}
-	rendered := renderToolBlock(entry, 80, true)
+	rendered := renderToolBlock(entry, 80, true, false)
 	assertNoRawTerminalControls(t, rendered)
 	if got := strings.Count(rendered, `\x1b]52;c;owned`); got != 3 {
 		t.Fatalf("escaped OSC count = %d, want 3 in %q", got, rendered)
@@ -200,10 +201,16 @@ func TestSingleLineSanitizerEscapesAllLineBreakingControls(t *testing.T) {
 	}
 }
 
+// sgrRe matches ANSI SGR sequences (\x1b[...m) that lipgloss produces for
+// color/style. Only these are stripped before checking for injected terminal
+// controls \u2014 other escapes (OSC, CSI non-SGR) remain so the check catches them.
+var sgrRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
 func assertNoRawTerminalControls(t *testing.T, rendered string) {
 	t.Helper()
+	stripped := sgrRe.ReplaceAllString(rendered, "")
 	for _, forbidden := range []string{"\x1b", "\a", "\u009b", "\x7f"} {
-		if strings.Contains(rendered, forbidden) {
+		if strings.Contains(stripped, forbidden) {
 			t.Fatalf("rendered text contains raw terminal control %q: %q", forbidden, rendered)
 		}
 	}

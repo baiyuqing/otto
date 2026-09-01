@@ -65,6 +65,40 @@ func TestResolveCopiesThinkingOverride(t *testing.T) {
 	}
 }
 
+func TestResolveUsesEnvironmentProfileBeforeDefaultProfile(t *testing.T) {
+	file := File{
+		DefaultProfile: "configured",
+		Profiles: map[string]Profile{
+			"configured": {Provider: "openai-compatible", Model: "config-model", BaseURL: "https://config.example/v1", APIKeyEnv: "CONFIG_KEY"},
+			"current":    {Provider: "openai-compatible", Model: "current-model", BaseURL: "https://current.example/v1", APIKeyEnv: "CURRENT_KEY"},
+		},
+	}
+	runtime, err := Resolve(file, map[string]string{"OTTO_PROFILE": "current", "CURRENT_KEY": "secret"}, SessionDefaults{}, Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Profile != "current" || runtime.Model != "current-model" || runtime.APIKey != "secret" || runtime.BaseURL != "https://current.example/v1" {
+		t.Fatalf("unexpected runtime: %#v", runtime)
+	}
+}
+
+func TestResolveExplicitProfileOverridesEnvironmentProfile(t *testing.T) {
+	file := File{
+		DefaultProfile: "configured",
+		Profiles: map[string]Profile{
+			"env":      {Provider: "openai-compatible", Model: "env-model", BaseURL: "https://env.example/v1", APIKeyEnv: "ENV_KEY"},
+			"explicit": {Provider: "openai-compatible", Model: "explicit-model", BaseURL: "https://explicit.example/v1", APIKeyEnv: "EXPLICIT_KEY"},
+		},
+	}
+	runtime, err := Resolve(file, map[string]string{"OTTO_PROFILE": "env", "EXPLICIT_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "explicit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Profile != "explicit" || runtime.Model != "explicit-model" || runtime.APIKey != "secret" || runtime.BaseURL != "https://explicit.example/v1" {
+		t.Fatalf("unexpected runtime: %#v", runtime)
+	}
+}
+
 func TestResolveRejectsUnknownProfile(t *testing.T) {
 	if _, err := Resolve(File{}, nil, SessionDefaults{}, Overrides{Profile: "missing"}); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("expected missing profile error, got %v", err)
@@ -86,6 +120,31 @@ func TestResolveRejectsUnsupportedProvider(t *testing.T) {
 	}}
 	if _, err := Resolve(file, map[string]string{"PROFILE_KEY": "secret"}, SessionDefaults{}, Overrides{Profile: "local"}); err == nil || !strings.Contains(err.Error(), "provider") {
 		t.Fatalf("expected unsupported provider error, got %v", err)
+	}
+}
+
+func TestResolveChatGPTProviderNeedsNoBaseURLOrKey(t *testing.T) {
+	file := File{Profiles: map[string]Profile{
+		"sub": {Provider: "chatgpt", Model: "gpt-5-codex"},
+	}}
+	runtime, err := Resolve(file, map[string]string{}, SessionDefaults{}, Overrides{Profile: "sub"})
+	if err != nil {
+		t.Fatalf("Resolve chatgpt: %v", err)
+	}
+	if runtime.Provider != "chatgpt" || runtime.Model != "gpt-5-codex" {
+		t.Fatalf("unexpected runtime: %+v", runtime)
+	}
+	if runtime.BaseURL != "" || runtime.APIKey != "" {
+		t.Fatalf("chatgpt runtime should carry no base_url/api key: %+v", runtime)
+	}
+}
+
+func TestResolveChatGPTStillRequiresModel(t *testing.T) {
+	file := File{Profiles: map[string]Profile{
+		"sub": {Provider: "chatgpt"},
+	}}
+	if _, err := Resolve(file, nil, SessionDefaults{}, Overrides{Profile: "sub"}); err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("expected missing model error, got %v", err)
 	}
 }
 

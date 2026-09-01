@@ -62,8 +62,6 @@ func NewWithInput(input *Input, stdout, stderr io.Writer, backend app.Backend) *
 	return &REPL{input: input, stdout: stdout, stderr: stderr, backend: backend}
 }
 
-const ottoMark = "(●ᴥ●)  otto"
-
 const logo = `     ____  __  __
     / __ \/ /_/ /____
    / /_/ / __/ __/ __ \
@@ -233,7 +231,7 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if args != "" {
 			break
 		}
-		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/compact [focus] compact context\n")
+		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n")
 		return false, nil
 	case "exit":
 		if args != "" {
@@ -247,6 +245,23 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if err := r.backend.NewSession(); err != nil {
 			return false, &commandError{command: command, err: err}
 		}
+		if info := r.backend.Info(); info.SessionID != "" {
+			_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
+		}
+		return false, nil
+	case "archive":
+		if args != "" {
+			break
+		}
+		archiver, ok := r.backend.(app.SessionArchiver)
+		if !ok {
+			return false, &commandError{command: command, err: app.ErrPersistenceDisabled}
+		}
+		result, err := archiver.ArchiveCurrentSession(ctx)
+		if err != nil {
+			return false, &commandError{command: command, err: err}
+		}
+		_, _ = fmt.Fprintf(r.stdout, "Archived: %s\n", result.Path)
 		if info := r.backend.Info(); info.SessionID != "" {
 			_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 		}
@@ -267,6 +282,19 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 			return false, err
 		}
 		return false, nil
+	case "model":
+		return r.modelCommand(ctx, args)
+	case "memory":
+		return r.memoryCommand(ctx, args)
+	case "remember":
+		return r.rememberCommand(ctx, args)
+	case "login":
+		return r.loginCommand(ctx, args)
+	case "logout":
+		if args != "" {
+			break
+		}
+		return r.logoutCommand()
 	}
 	_, _ = fmt.Fprintf(r.stderr, "unknown command: %s\n", command)
 	return false, nil
@@ -331,6 +359,10 @@ func (r *REPL) renderEvent(event agent.Event) bool {
 			r.renderCompaction(*event.Compaction)
 		}
 	case agent.EventCompactionWarning:
+		if event.Err != nil {
+			_, _ = fmt.Fprintln(r.stderr, event.Err)
+		}
+	case agent.EventMemoryWarning:
 		if event.Err != nil {
 			_, _ = fmt.Fprintln(r.stderr, event.Err)
 		}

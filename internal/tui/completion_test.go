@@ -98,9 +98,9 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 		}
 	}
 
-	m = resizeModel(t, m, 60, 16)
+	m = resizeModel(t, m, 60, 18)
 	content = m.View().Content
-	assertRenderedBounds(t, content, 60, 16)
+	assertRenderedBounds(t, content, 60, 18)
 	for _, text := range []string{"/resume", "resume a session", "/compact", "compact context", "/exit", "quit"} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("suggestion panel = %q, want %q", content, text)
@@ -109,7 +109,7 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 
 	m.overlay = overlayHelp
 	help := m.View().Content
-	assertRenderedBounds(t, help, 60, 16)
+	assertRenderedBounds(t, help, 60, 18)
 	for _, command := range []string{"/help", "/session", "/new", "/resume", "/compact", "/exit"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("help = %q, want registry command %q", help, command)
@@ -167,7 +167,7 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 6 || m.viewport.Height() != 1 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 12 || m.viewport.Height() != 1 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))
@@ -261,8 +261,8 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
 	m = resizeModel(t, m, 100, 20)
-	if m.viewport.Height() != 8 {
-		t.Fatalf("expanded viewport height = %d, want 8", m.viewport.Height())
+	if m.viewport.Height() != 2 {
+		t.Fatalf("expanded viewport height = %d, want 2", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 100, 20)
 

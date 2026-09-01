@@ -17,11 +17,12 @@ For the full usage reference, see the [Otto user manual](docs/user-manual.md).
 - `otto` CLI for macOS
 - OpenAI-compatible provider support only
 - Adaptive UI selection: full-screen TUI on terminal stdin/stdout, REPL otherwise
-- Streaming TUI and REPL with `/help`, `/exit`, `/new`, `/session`, and `/compact`; the TUI also provides `/resume`
+- Streaming TUI and REPL with `/help`, `/exit`, `/new`, `/session`, and `/compact`; the TUI also provides `/resume` and `/archive`
 - Manual `/compact [focus]` plus automatic proactive and typed-overflow context compaction
 - Folded compaction checkpoints and collapsible tool output in the TUI (`Ctrl+O`)
 - Built-in `read`, `grep`, `find`, `ls`, `write`, `edit`, and `bash` tools
 - Persistent append-only Pi v3 JSONL sessions with `--continue` and `--resume`
+- Non-destructive session archiving with `/archive`, `--archive PATH`, and the `archive/` storage directory
 - Global TOML configuration at `~/.config/otto/config.toml`
 - `--thinking` pass-through for model reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
 - `--approve` headless mode for non-interactive single-prompt runs
@@ -35,9 +36,15 @@ For the full usage reference, see the [Otto user manual](docs/user-manual.md).
 - Windows or Linux support commitments
 - Session trees/forks, session naming, deletion, or search
 
+Archiving (moving a finished session into `archive/`) is distinct from deletion:
+archived files are preserved byte-for-byte, excluded from `/resume`, `--continue`,
+and `/archive`, and remain resumable by explicit `--resume PATH`.
+
 ### Planned providers
 
-- Stage 2: Codex subscription support
+- Stage 2: ChatGPT (Codex) subscription support — **implemented**, see
+  [ChatGPT subscription](#chatgpt-subscription-stage-2) below and the design
+  spec [`docs/superpowers/specs/2026-09-01-chatgpt-subscription-auth-design.md`](docs/superpowers/specs/2026-09-01-chatgpt-subscription-auth-design.md)
 - Stage 3: Claude subscription support
 
 See the approved design: [`docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md`](docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md).
@@ -46,8 +53,9 @@ See the approved design: [`docs/superpowers/specs/2026-08-26-otto-coding-agent-d
 
 - macOS
 - Go 1.26+
-- A reachable OpenAI-compatible endpoint with SSE chat-completions streaming
-- An API key exposed through an environment variable
+- One of:
+  - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming plus an API key exposed through an environment variable, or
+  - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription-stage-2))
 
 ## Build
 
@@ -120,6 +128,58 @@ Run a single prompt headless with `--approve` and exit:
 ./otto --approve "explain main.go" --thinking max --continue
 ```
 
+Manage sessions without touching the workspace:
+
+```bash
+./otto --cwd /path/to/project --continue
+./otto --cwd /path/to/project --resume /path/to/session.jsonl
+./otto --cwd /path/to/project --archive /path/to/active-session.jsonl
+```
+
+## ChatGPT subscription (Stage 2)
+
+Otto can authorize requests with a ChatGPT Plus/Pro/Team/Enterprise subscription instead of a pay-per-token API key, using OpenAI's "Sign in with ChatGPT" OAuth flow (the same mechanism the Codex CLI uses).
+
+Sign in once:
+
+```bash
+./otto login
+```
+
+`otto login` opens your browser to the OpenAI authorization page and also prints the URL as a fallback. After you approve, credentials are stored at `~/.otto/auth/chatgpt.json` (file mode `0600`). Manage the session with:
+
+```bash
+./otto login --status   # show the signed-in account and token expiry
+./otto logout           # remove stored credentials
+```
+
+Then select the `chatgpt` provider. It needs a `model` but no `base_url` or API key:
+
+```toml
+default_profile = "chatgpt"
+
+[profiles.chatgpt]
+provider = "chatgpt"
+model = "gpt-5-codex"
+```
+
+```bash
+./otto --profile chatgpt
+```
+
+Or ad hoc, without a profile:
+
+```bash
+./otto --provider chatgpt --model gpt-5-codex
+```
+
+Notes:
+
+- Subscription traffic goes to OpenAI's Responses backend (`https://chatgpt.com/backend-api/codex/responses`), not the Chat Completions endpoint. The wire format differs from the OpenAI-compatible provider, but the CLI, tools, sessions, and compaction behave the same.
+- The access token is refreshed automatically from the stored refresh token; rotated tokens are written back to the credential file.
+- Tokens are never written to TOML, sessions, or logs, and are stripped from provider error messages.
+- This is distinct from exchanging the login for an API key, which bills as API credits rather than subscription quota. Otto does not do that.
+
 ## Configuration and precedence
 
 Otto auto-discovers only the global config file at `~/.config/otto/config.toml`. It does not auto-discover project-local configuration, but you can explicitly select any path with `--config`.
@@ -150,13 +210,14 @@ Startup resolution is field-specific:
 - **Provider and model:** explicit `--provider` / `--model` override `OTTO_PROVIDER` / `OTTO_MODEL`. Those environment variables override the selected profile and any provider/model stored in a startup-resumed session. Without direct or environment overrides, startup resume uses the stored provider/model; however, explicit `--profile` makes that profile's provider/model the baseline instead. An explicit profile does **not** outrank `OTTO_PROVIDER` or `OTTO_MODEL`.
 - **Endpoint:** `--base-url` overrides the selected profile's `base_url`. There is no base-URL environment override, and session files do not supply an endpoint.
 - **API key:** the selected profile determines `api_key_env`. A nonempty value from that environment variable wins; `OTTO_API_KEY` is its fallback. API keys have no CLI flag and must not be stored in TOML.
+- **ChatGPT subscription:** the `chatgpt` provider uses OAuth credentials from `otto login` (`~/.otto/auth/chatgpt.json`) and ignores `base_url` and API-key settings; it still requires `model`. See [ChatGPT subscription](#chatgpt-subscription-stage-2).
 - **Agent limits:** direct `--shell-timeout` and `--max-output-bytes` values override `[agent]` values, which override built-in defaults. Profiles and resumed sessions do not contain these limits.
 - **Sandbox:** `--sandbox auto|seatbelt|off` overrides `[sandbox].driver`; otherwise `[sandbox].driver` overrides the built-in `auto`. `network`, `read_paths`, and `allow_env` come from `[sandbox]` only. Sandbox policy is process-wide and does not change on `/new`, `--continue`, or `/resume`.
 - **Thinking effort:** `--thinking` (`low`, `medium`, `high`, `xhigh`, or `max`) is sent as `reasoning_effort` on OpenAI-compatible requests. It has no environment variable or TOML key and is omitted from requests when unset. Like agent limits, it stays in effect across in-process `/resume` and `/new`.
 
 Startup `--continue` / `--resume` therefore restores session provider/model only as defaults: direct flags and `OTTO_PROVIDER` / `OTTO_MODEL` can override them as described above. In contrast, an in-process TUI `/resume` restores the selected session's stored provider/model and ignores the process's provider/model/profile/base-URL overrides and `OTTO_PROVIDER` / `OTTO_MODEL`; its stored profile selects the endpoint and key environment. Agent-limit overrides remain in effect. `/new` returns to the runtime resolved at process startup.
 
-`--no-session` cannot be combined with `--continue` or `--resume`.
+`--no-session` cannot be combined with `--continue`, `--resume`, or `--archive`.
 
 UI mode precedence:
 
@@ -228,28 +289,45 @@ The 272K GPT working boundary is intentional. Otto compacts well before the hard
 
 If a model ID is unknown to Otto, proactive safe-limit automation is disabled because no trustworthy local window is available. Reactive one-shot recovery can still happen after a typed provider overflow. For private deployments, set `context_window` and optionally `compaction_window` on the selected profile to restore deterministic proactive behavior.
 
-## Memory (extensible core)
+## Memory
 
-Otto ships the foundation of an extensible memory subsystem as **internal infrastructure only**; it is not yet wired into the CLI.
+Otto has a local, per-workspace/per-user memory store backed by SQLite/FTS5 (`internal/memory`, `internal/memory/sqlite`). It is enabled by default.
 
-Implemented in this phase:
+Config (`[memory]` in TOML; all keys optional):
 
-- `internal/memory` — neutral contracts (`Scope`, `Record`, `Candidate`, and the `TurnMemory`/`Store`/`Retriever`/`Policy` interfaces), hard limits, validation, content/secret guards, a conservative policy, and a `NullService` for disabled/unavailable degradation.
-- `internal/memory/sqlite` — a secure local SQLite/FTS5 store and bounded retriever behind those contracts, with conditional revisions, opaque pagination, observation idempotency, and strict file-permission/symlink enforcement.
+```toml
+[memory]
+enabled = true          # default true
+backend = "sqlite"      # only supported value
+required = false        # true: fail startup if the store can't open; false: degrade to disabled with a warning
+recall_tokens = 2000
+max_results = 12
+require_encryption = false
 
-Not yet implemented in this phase:
+[memory.sqlite]
+path = "~/.otto/memory/memory.db"   # default when unset
+busy_timeout = "5s"
 
-- No `--memory-*` flags, `[memory]` TOML keys, or standalone `otto memory` commands.
-- No `/memory`-style slash commands in the TUI or REPL.
-- No `memory_search`/`remember`/`forget` agent tools, and no automatic extraction or recall in the agent loop.
-- Nothing in `cmd/otto`, `internal/config`, `internal/tool`, `internal/agent`, or either frontend references the memory core yet.
+[memory.workspace_ids]
+"/canonical/path/to/workspace" = "stable-id"   # keeps records when a workspace moves
+```
 
-The approved design and implementation plan are:
+There are no `--memory-*` CLI flags.
 
-- [`docs/superpowers/specs/2026-08-29-extensible-memory-design.md`](docs/superpowers/specs/2026-08-29-extensible-memory-design.md)
-- [`docs/superpowers/plans/2026-08-29-extensible-memory-core.md`](docs/superpowers/plans/2026-08-29-extensible-memory-core.md)
+What's wired:
 
-Per that design, future wiring will keep recalled memory request-local: it will never be written into Pi session files, compaction summaries, logs, or session metadata.
+- **Recall:** before every turn, Otto searches the store (user and workspace scopes) with the user's message and injects matching records as a request-local, untrusted context block. It is never written to the Pi session JSONL, compaction summaries, or logs. A recall failure emits a warning and the turn continues without memory context.
+- **Agent-facing tools:** `memory_search`, `remember`, `forget` are registered for the model. Writes from these tools always land as **pending candidates** — the record has no effect until a human reviews it with `/memory review <id> accept|reject` (or its rejection).
+- **Human-facing commands** (TUI and REPL): `/memory search <query>`, `/memory forget <id>`, `/memory review <id> accept|reject`, and `/remember [--scope user|workspace] [--kind K] [--key K] <text>`. Unlike the model's tools, `/remember` and `/memory forget` take effect immediately — no review step, since a human typing the command is the review.
+- **Standalone CLI:** `otto memory status` prints whether memory is enabled/usable and its store path; `otto memory forget <id>` deletes a record (tries the user scope, then the workspace scope).
+
+Not yet implemented:
+
+- No automatic extraction — nothing calls `Binding.Observe`; only explicit `remember`/`/remember` writes exist today.
+- No backup/restore/verify (`Maintenance` is a permanent stub) and no multi-process locking beyond SQLite's own.
+- No `otto memory backup|backups|verify|restore` subcommands.
+
+Design reference: [`docs/superpowers/specs/2026-08-29-extensible-memory-design.md`](docs/superpowers/specs/2026-08-29-extensible-memory-design.md).
 
 ## Frontends
 
@@ -317,9 +395,10 @@ Shared commands:
 - `/compact [focus]` creates a manual context checkpoint or reports `[context] no-op` when nothing can be compacted.
 - `/exit` exits when idle. In the REPL, EOF also exits.
 
-TUI-only command:
+TUI-only commands:
 
 - `/resume` opens a modal containing up to the 20 most recently modified valid sessions for the current canonical workspace. Use `↑`/`↓` or `PgUp`/`PgDn` to navigate, `Enter` to resume, and `Esc` to close it. It does not search other workspaces or session contents.
+- `/archive` opens the same picker to archive a session. `Enter` on a non-current session moves it into `archive/` and shows `archived session <id>`; `Enter` on the current session archives it and starts a fresh session. `Esc` closes without archiving.
 
 ## REPL behavior
 
@@ -327,6 +406,7 @@ TUI-only command:
 - `/help` shows commands.
 - `/session` prints the current session ID, path, provider, and model.
 - `/new` closes the current session and starts a fresh one in the same process.
+- `/archive` archives the current session and starts a fresh one, printing the archived path and the new session ID.
 - `/compact [focus]` creates a manual context checkpoint or reports `[context] no-op`.
 - `/exit` or EOF exits.
 - `Ctrl+C` during an active provider call, tool run, or manual compaction cancels only that turn and returns you to the prompt.
@@ -360,6 +440,11 @@ Notes:
 - `/resume` is TUI-only and shows at most the recent 20 sessions in the current workspace; controls are documented above.
 - `/session` shows the exact session path.
 - `--no-session` keeps history in memory only.
+- **Archiving** moves an active session into a sibling `archive/` directory: `~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. The move is atomic and preserves the file byte-for-byte with its `0600` mode; nothing is deleted and no disk space is reclaimed. The `archive/` directory is created `0700` on the first archive and is scoped to that workspace. Archived sessions disappear from `/resume`, `--continue`, and `/archive`, but remain resumable by explicit path:
+  ```bash
+  ./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
+  ```
+  `--archive PATH` archives one active session for the current `--cwd` and exits. It cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`. In `--no-session` mode `/archive` reports that session persistence is disabled.
 - Manual and automatic compaction append Pi v3 `type: "compaction"` checkpoints. Checkpoints carry `firstKeptEntryId`, `tokensBefore`, optional usage, and bounded file metadata; writes remain append-only.
 - Session files contain sensitive prompt text, assistant responses, compaction summaries, tool calls, tool arguments, tool results, and file metadata. Protect them like source data. Session records do not contain provider API keys, OAuth tokens, authorization-header fields, cookie values, or private sandbox profile paths as runtime metadata.
 - Stage 1 has no session tree/fork UI, naming, deletion, or search.
@@ -451,6 +536,10 @@ On macOS, `auto` means Seatbelt. Otto does not fall back to Docker or direct exe
 - prefer narrow absolute `read_paths` plus tool-specific config environment variables over granting broad home or cache access;
 - use `--sandbox off` only if you accept unsandboxed current-user execution.
 
+### `no chatgpt credentials; run 'otto login'`
+
+The `chatgpt` provider has no stored OAuth credentials. Run `otto login` to sign in with your ChatGPT subscription, or check state with `otto login --status`. See [ChatGPT subscription](#chatgpt-subscription-stage-2).
+
 ### Context-length or prompt-size failures
 
 Otto can now try one automatic checkpoint before the hard limit (when it knows the model window) and one typed-overflow recovery checkpoint after a provider context error. If you still hit a hard input limit:
@@ -470,7 +559,7 @@ See [`AGENTS.md`](AGENTS.md) for Go-specific contributor instructions.
 ## Roadmap
 
 - Stage 1: current OpenAI-compatible MVP
-- Stage 2: Codex subscription auth and provider adapter
+- Stage 2: ChatGPT (Codex) subscription auth and provider adapter — **implemented** ([ChatGPT subscription](#chatgpt-subscription-stage-2))
 - Stage 3: Claude subscription auth and provider adapter
 
 The full staged design lives in [`docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md`](docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md).

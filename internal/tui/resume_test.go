@@ -763,7 +763,7 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	if got.usage.InputTokens != 20 || got.usage.OutputTokens != 6 {
 		t.Fatalf("usage = %#v", got.usage)
 	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") || !strings.Contains(content, "ctx 12.5%") || strings.Contains(content, "ctx 50.0%") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") || !strings.Contains(content, "12.5%") || strings.Contains(content, "50.0%") {
 		t.Fatalf("view = %q", content)
 	}
 	if !strings.Contains(got.statusText, "warning: repaired trailing newline") {

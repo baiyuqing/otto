@@ -299,6 +299,23 @@ func TestREPLAutomaticCompactionSuccessAndWarningDuringPrompt(t *testing.T) {
 	}
 }
 
+func TestREPLMemoryWarningDuringPrompt(t *testing.T) {
+	warningErr := errors.New("memory recall failed: query too long")
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{prompt: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventMemoryWarning, Err: warningErr})
+		emit(agent.Event{Type: agent.EventTextDelta, Text: "done"})
+		return nil
+	}}
+	r := New(strings.NewReader("inspect\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), warningErr.Error()) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestREPLCompactCommandInterruptReturnsToPrompt(t *testing.T) {
 	started := make(chan struct{})
 	finished := make(chan struct{})

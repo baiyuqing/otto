@@ -24,6 +24,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
@@ -31,6 +32,34 @@ import (
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
+
+// bindSpyService wraps a real memory.Service and records the last Binding
+// returned by Bind, wrapped in a spyBinding, so tests can assert it was
+// closed on an error path that must not leak it.
+type bindSpyService struct {
+	memory.Service
+	lastBinding *spyBinding
+}
+
+func (s *bindSpyService) Bind(ctx context.Context, options memory.BindOptions) (memory.Binding, error) {
+	bound, err := s.Service.Bind(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	spy := &spyBinding{Binding: bound}
+	s.lastBinding = spy
+	return spy, nil
+}
+
+type spyBinding struct {
+	memory.Binding
+	closed bool
+}
+
+func (b *spyBinding) Close() error {
+	b.closed = true
+	return b.Binding.Close()
+}
 
 func TestRuntimeBuilderUsesStoredProfileProviderAndModel(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default", "resumed"))
@@ -66,6 +95,19 @@ func TestRuntimeBuilderResolveSessionIgnoresProcessModelOverrides(t *testing.T) 
 		t.Fatal(err)
 	}
 	if runtime.Provider != "openai-compatible" || runtime.Model != "stored-model" {
+		t.Fatalf("runtime = %#v", redactedRuntime(runtime))
+	}
+}
+
+func TestRuntimeBuilderResolveSessionIgnoresProcessProfileOverrides(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default", "stored", "env"))
+	builder.environment["OTTO_PROFILE"] = "env"
+
+	runtime, err := builder.resolveSession(session.RuntimeMetadata{Profile: "stored", Provider: "openai-compatible", Model: "stored-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Profile != "stored" || runtime.APIKey != "stored-secret" || runtime.BaseURL != "https://stored.example/v1" {
 		t.Fatalf("runtime = %#v", redactedRuntime(runtime))
 	}
 }
@@ -107,7 +149,7 @@ func TestRuntimeBuilderBuildNewReplacementPreservesExplicitBaseURL(t *testing.T)
 					Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 				}), nil
 			}}
-			builder := newRuntimeBuilder(tt.file, tt.environment, workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{
+			builder := newRuntimeBuilder(filepath.Join(t.TempDir(), "config.toml"), tt.file, tt.environment, workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{
 				baseURL: overrideBaseURL,
 			}, nil, deps)
 			builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
@@ -294,7 +336,7 @@ func TestRuntimeBuilderRedactsJSONStringEscapeFormsFromRawProviderBody(t *testin
 		Version: session.CurrentVersion, ID: "raw-provider-body", Workspace: builder.workspacePath,
 		Provider: "openai-compatible", Profile: "active", Model: "active-model", CreatedAt: time.Now().UTC(),
 	})
-	runner, err := builder.buildRunner(memory, config.Runtime{
+	runner, err := builder.buildRunner(context.Background(), memory, config.Runtime{
 		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model",
 		APIKeyEnv: "ESCAPED_KEY_0", APIKey: tests[0].raw, ShellTimeout: time.Second, MaxOutputBytes: 4096,
 	})
@@ -838,7 +880,7 @@ func TestRuntimeBuilderBuildRunnerMapsResolvedCompactionAndKeepsClientRequestSiz
 		},
 	}
 
-	runner, err := builder.buildRunner(current, runtime)
+	runner, err := builder.buildRunner(context.Background(), current, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -867,6 +909,180 @@ func TestRuntimeBuilderBuildRunnerMapsResolvedCompactionAndKeepsClientRequestSiz
 	}
 	if requestSizer := options.FieldByName("RequestSizer"); !requestSizer.IsValid() || requestSizer.IsNil() {
 		t.Fatal("OpenAI-compatible client was not retained as automatic RequestSizer")
+	}
+}
+
+func TestRuntimeBuilderBuildRunnerMapsConfiguredMemoryRecallLimits(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.memoryRecallLimit = 7
+	builder.memoryRecallTokenBudget = 999
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "recall-limits", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "m", CreatedAt: time.Now().UTC(),
+	})
+	runtime := config.Runtime{
+		Profile: "default", Provider: "openai-compatible", BaseURL: "https://default.example/v1",
+		Model: "m", ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	}
+
+	runner, err := builder.buildRunner(context.Background(), current, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := reflect.ValueOf(runner).Elem().FieldByName("options")
+	if got := options.FieldByName("MemoryRecallLimit").Int(); got != 7 {
+		t.Fatalf("MemoryRecallLimit = %d, want 7 (from configured memory.max_results)", got)
+	}
+	if got := options.FieldByName("MemoryRecallTokenBudget").Int(); got != 999 {
+		t.Fatalf("MemoryRecallTokenBudget = %d, want 999 (from configured memory.recall_tokens)", got)
+	}
+}
+
+func TestRuntimeBuilderBuildRunnerSkipsMemoryToolsWhenNotUsable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if len(payload.Messages) > 2 {
+			writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"memory_search","arguments":"{\"query\":\"test\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	defer server.Close()
+
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "no-memory", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "m", CreatedAt: time.Now().UTC(),
+	})
+	runtime := config.Runtime{
+		Profile: "default", Provider: "openai-compatible", BaseURL: server.URL, Model: "m",
+		ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	}
+
+	runner, err := builder.buildRunner(context.Background(), current, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var toolContent string
+	_ = runner.Run(context.Background(), "search memory", func(event agent.Event) {
+		toolContent += event.ToolResult.Content
+	})
+	if !strings.Contains(toolContent, "unknown tool: memory_search") {
+		t.Fatalf("tool result = %q, want unknown-tool error (memory tools must not be registered when memory is unusable)", toolContent)
+	}
+}
+
+func TestRuntimeBuilderBuildRunnerRegistersAndBindsMemoryWhenUsable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if len(payload.Messages) > 2 {
+			writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"memory_search","arguments":"{\"query\":\"test\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	}))
+	defer server.Close()
+
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	dbPath := filepath.Join(t.TempDir(), "memory", "memory.db")
+	memoryCfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: dbPath}
+	service, userScope, usable, err := openMemoryService(context.Background(), memoryCfg, nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("openMemoryService() error = %v", err)
+	}
+	if !usable {
+		t.Fatal("openMemoryService() usable = false, want true")
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	workspaceScope, err := workspaceMemoryScope(memoryCfg, builder.workspacePath)
+	if err != nil {
+		t.Fatalf("workspaceMemoryScope() error = %v", err)
+	}
+	builder.memoryService = service
+	builder.memoryUsable = true
+	builder.memoryUserScope = userScope
+	builder.memoryWorkspaceScope = workspaceScope
+
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "with-memory", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "m", CreatedAt: time.Now().UTC(),
+	})
+	runtime := config.Runtime{
+		Profile: "default", Provider: "openai-compatible", BaseURL: server.URL, Model: "m",
+		ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	}
+
+	runner, err := builder.buildRunner(context.Background(), current, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := reflect.ValueOf(runner)
+	memoryField := value.Elem().FieldByName("options").FieldByName("Memory")
+	if !memoryField.IsValid() || memoryField.IsNil() {
+		t.Fatal("agent.Options.Memory is nil, want a bound memory.Binding")
+	}
+
+	var toolContent string
+	runErr := runner.Run(context.Background(), "search memory", func(event agent.Event) {
+		toolContent += event.ToolResult.Content
+	})
+	if runErr != nil {
+		t.Fatalf("Run() error = %v", runErr)
+	}
+	if !strings.Contains(toolContent, "no matching records") {
+		t.Fatalf("tool result = %q, want a real (empty) memory search result", toolContent)
+	}
+}
+
+func TestRuntimeBuilderBuildRunnerClosesMemoryBindingWhenToolRegistryFails(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	dbPath := filepath.Join(t.TempDir(), "memory", "memory.db")
+	memoryCfg := config.MemoryRuntime{Enabled: true, Backend: "sqlite", SQLitePath: dbPath}
+	realService, userScope, usable, err := openMemoryService(context.Background(), memoryCfg, nil, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("openMemoryService() error = %v", err)
+	}
+	if !usable {
+		t.Fatal("openMemoryService() usable = false, want true")
+	}
+	t.Cleanup(func() { _ = realService.Close() })
+	workspaceScope, err := workspaceMemoryScope(memoryCfg, builder.workspacePath)
+	if err != nil {
+		t.Fatalf("workspaceMemoryScope() error = %v", err)
+	}
+	spy := &bindSpyService{Service: realService}
+	builder.memoryService = spy
+	builder.memoryUsable = true
+	builder.memoryUserScope = userScope
+	builder.memoryWorkspaceScope = workspaceScope
+	// A duplicate "read" tool forces tool.NewRegistry to fail after the
+	// memory binding has already succeeded, exercising the cleanup path.
+	builder.extraTools = []tool.Tool{tool.NewReadTool(builder.workspace, 64<<10)}
+
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "leak-check", Workspace: builder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "m", CreatedAt: time.Now().UTC(),
+	})
+	runtime := config.Runtime{
+		Profile: "default", Provider: "openai-compatible", BaseURL: "https://default.example/v1",
+		Model: "m", ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
+	}
+
+	_, err = builder.buildRunner(context.Background(), current, runtime)
+	if err == nil {
+		t.Fatal("buildRunner() error = nil, want a tool-registry error from the duplicate \"read\" tool")
+	}
+	if spy.lastBinding == nil {
+		t.Fatal("memory.Service.Bind was never called")
+	}
+	if !spy.lastBinding.closed {
+		t.Fatal("bound memory.Binding leaked: not closed after tool registry construction failed")
 	}
 }
 
@@ -926,6 +1142,61 @@ func TestRuntimeBuilderBuildNewReplacementResolvesCurrentSessionRuntimeTransacti
 	}
 	if header := replacement.Session.Header(); header.Profile != "resumed" || header.Model != "gpt-5.3-codex-spark" {
 		t.Fatalf("new session header = %#v", header)
+	}
+}
+
+func TestRuntimeBuilderBuildProfileReplacementSwitchesToNamedProfile(t *testing.T) {
+	file := configWithProfiles("startup")
+	file.Profiles["chatgpt"] = config.Profile{Provider: "chatgpt", Model: "gpt-5"}
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.noSession = false
+
+	var createdRuntime config.Runtime
+	builder.deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		createdRuntime = runtime
+		return session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "fresh", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), nil
+	}
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	replacement, err := builder.buildProfileReplacement(context.Background(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Session.Close()
+	if replacement.RuntimeInfo.Provider != "chatgpt" || replacement.RuntimeInfo.Profile != "chatgpt" || replacement.RuntimeInfo.Model != "gpt-5" {
+		t.Fatalf("runtime info = %#v", replacement.RuntimeInfo)
+	}
+	if createdRuntime.Provider != "chatgpt" || createdRuntime.Model != "gpt-5" {
+		t.Fatalf("resolved runtime = %#v", redactedRuntime(createdRuntime))
+	}
+	if header := replacement.Session.Header(); header.Provider != "chatgpt" || header.Profile != "chatgpt" || header.Model != "gpt-5" {
+		t.Fatalf("session header = %#v", header)
+	}
+}
+
+func TestRuntimeBuilderBuildProfileReplacementUnknownProfileErrors(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("startup"))
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		t.Fatal("runner must not build for an unknown profile")
+		return nil, nil
+	}
+	_, err := builder.buildProfileReplacement(context.Background(), "missing")
+	if err == nil || !strings.Contains(err.Error(), `profile "missing" not found`) {
+		t.Fatalf("error = %v, want profile not found", err)
+	}
+}
+
+func TestRuntimeBuilderProfileNamesSorted(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("beta", "alpha", "chatgpt"))
+	names := builder.profileNames()
+	want := []string{"alpha", "beta", "chatgpt"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("profileNames() = %#v, want %#v", names, want)
 	}
 }
 
@@ -1212,7 +1483,7 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 	}
 	path := store.Path()
 
-	runner, err := builder.buildRunner(store, config.Runtime{
+	runner, err := builder.buildRunner(context.Background(), store, config.Runtime{
 		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model",
 		APIKey: activeKey, APIKeyEnv: activeEnv, ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
 	})
@@ -1349,7 +1620,7 @@ func TestRuntimeBuilderFailsClosedForInactiveMalformedEndpointAcrossBoundaries(t
 		t.Fatal(err)
 	}
 	path := store.Path()
-	runner, err := builder.buildRunner(store, config.Runtime{
+	runner, err := builder.buildRunner(context.Background(), store, config.Runtime{
 		Profile: "active", Provider: "openai-compatible", BaseURL: server.URL, Model: "active-model",
 		APIKey: "active-key", APIKeyEnv: "ACTIVE_KEY", ShellTimeout: time.Second, MaxOutputBytes: 64 << 10,
 	})
@@ -1447,7 +1718,7 @@ func TestRuntimeBuilderMarkerExhaustionDisablesDynamicRuntimeAndBash(t *testing.
 		t.Fatal(err)
 	}
 	path := store.Path()
-	runner, err := builder.buildRunner(store, runtime)
+	runner, err := builder.buildRunner(context.Background(), store, runtime)
 	if err != nil {
 		_ = store.Close()
 		t.Fatalf("buildRunner() rejected marker adversary: %v", err)
@@ -1510,7 +1781,7 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 	}}
 	builder.sandboxEnvironment = []string{"PATH=/usr/bin:/bin", unrelatedEnvKey + "=keep-me"}
 	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "runtime-builder", Workspace: builder.workspacePath, Provider: "openai-compatible", Model: "runtime-model", CreatedAt: time.Now().UTC()})
-	runner, err := builder.buildRunner(memory, config.Runtime{
+	runner, err := builder.buildRunner(context.Background(), memory, config.Runtime{
 		Profile:        "default",
 		Provider:       "openai-compatible",
 		BaseURL:        server.URL,
@@ -1590,7 +1861,7 @@ func TestRuntimeBuilderUnavailableSandboxRegistersExactlySixFileTools(t *testing
 	builder.sandboxEnvironment = nil
 	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonSelfTestFailed}
 	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "no-bash", Workspace: builder.workspacePath, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC()})
-	runner, err := builder.buildRunner(memory, config.Runtime{
+	runner, err := builder.buildRunner(context.Background(), memory, config.Runtime{
 		Provider: "openai-compatible", BaseURL: server.URL, Model: "test-model", APIKey: "provider-value",
 		ShellTimeout: time.Second, MaxOutputBytes: 4096,
 	})
@@ -1643,7 +1914,7 @@ func TestRuntimeBuilderTypedNilExecutorKeepsFileToolsAndTruthfulStatus(t *testin
 	builder.sandboxEnvironment = []string{}
 	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}
 	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "typed-nil", Workspace: builder.workspacePath, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC()})
-	runner, err := builder.buildRunner(memory, config.Runtime{
+	runner, err := builder.buildRunner(context.Background(), memory, config.Runtime{
 		Provider: "openai-compatible", BaseURL: server.URL, Model: "test-model", APIKey: "provider-value",
 		ShellTimeout: time.Second, MaxOutputBytes: 4096,
 	})
@@ -1691,7 +1962,7 @@ func TestRuntimeBuilderReusesOneSandboxExecutorForInitialNewAndResume(t *testing
 		t.Fatal(err)
 	}
 	initial := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "initial", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()})
-	initialRunner, err := builder.buildRunner(initial, runtime)
+	initialRunner, err := builder.buildRunner(context.Background(), initial, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1750,7 +2021,7 @@ func TestRuntimeBuilderCapsCombinedRuntimeSecretsAndSuppressesDynamicRuntime(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	builder := newRuntimeBuilder(file, environmentForProfiles(file), workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{}, nil, runDependencies{})
+	builder := newRuntimeBuilder("", file, environmentForProfiles(file), workspace, workspacePath, filepath.Join(t.TempDir(), "sessions"), "/bin/sh", cliOptions{}, nil, runDependencies{})
 	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true}
 	values, complete := builder.boundarySecretValues(nil)
 	if complete {
@@ -1773,7 +2044,7 @@ func TestRuntimeBuilderCapsCombinedRuntimeSecretsAndSuppressesDynamicRuntime(t *
 		APIKey: "p000-secret", APIKeyEnv: "KEY_000", ShellTimeout: time.Second, MaxOutputBytes: 4096,
 	}
 	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "capped-secrets", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()})
-	runner, err := builder.buildRunner(memory, runtime)
+	runner, err := builder.buildRunner(context.Background(), memory, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1870,7 +2141,7 @@ func TestRuntimeBuilderMandatoryFieldCollisionsSuppressBeforeProviderAndSessionM
 				t.Fatalf("openReplacement() activated %d sessions", activated.Load())
 			}
 			memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "collision", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()})
-			runner, err := builder.buildRunner(memory, runtime)
+			runner, err := builder.buildRunner(context.Background(), memory, runtime)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1924,7 +2195,7 @@ func TestRuntimeBuilderIncompleteRedactionRunsInitialLifecycleButRejectsNewAndRe
 	}
 	initialPath := initial.Path()
 	initialBefore := mustReadFile(t, initialPath)
-	initialRunner, err := builder.buildRunner(initial, runtime)
+	initialRunner, err := builder.buildRunner(context.Background(), initial, runtime)
 	if err != nil {
 		t.Fatal(err)
 	}

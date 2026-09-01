@@ -232,6 +232,105 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	t.Logf("PTY escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
 }
 
+func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"unused"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "pty-archive-workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".otto", "sessions")
+	archiveTargetPath := createPTYSession(t, root, workspace, "pty-archive-target", "archive target label", "")
+	currentPath := createPTYSession(t, root, workspace, "pty-archive-current", "current archive transcript", "current archive assistant")
+	now := time.Now()
+	setCLISessionMTime(t, archiveTargetPath, now)
+	setCLISessionMTime(t, currentPath, now.Add(-time.Hour))
+	configPath := writeCLIConfig(t, "openai-compatible", "PTY_TEST_KEY", server.URL)
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open() error = %v", err)
+	}
+	initialMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read initial terminal mode: %v", err)
+	}
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 120, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize(120x30) error = %v", err)
+	}
+
+	collector := newPTYOutputCollector(master)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	var stderr bytes.Buffer
+	runResult := startRunResult(func() error {
+		code := run(runCtx, []string{"--config", configPath, "--cwd", workspace, "--resume", currentPath, "--ui", "tui"}, slave, slave, &stderr, testGetenv(map[string]string{
+			"HOME": home, "SHELL": "/bin/sh", "PTY_TEST_KEY": "offline-test-key",
+		}))
+		if code != 0 {
+			return fmt.Errorf("run exit code %d: %s", code, stderr.String())
+		}
+		return nil
+	})
+
+	t.Cleanup(func() {
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("forced TUI cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("forced TUI cleanup error: %v", err)
+		}
+	})
+
+	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
+	waitForSubsequence(t, collector, 0, "current archive transcript")
+	writePTY(t, master, "/archive\r")
+	waitForSubsequence(t, collector, 0, "Archive Session")
+	waitForSubsequence(t, collector, 0, "archive target label")
+	// The archive target is the newest session and therefore the first row;
+	// Enter archives it without touching the current session.
+	writePTY(t, master, "\r")
+	waitForSubsequence(t, collector, 0, "archived session pty-archive-target")
+
+	archivedPath := filepath.Join(filepath.Dir(archiveTargetPath), "archive", "pty-archive-target.jsonl")
+	if _, err := os.Stat(archivedPath); err != nil {
+		t.Fatalf("archived session missing on disk: %v", err)
+	}
+	if _, err := os.Stat(archiveTargetPath); !os.IsNotExist(err) {
+		t.Fatalf("archived source still exists on disk")
+	}
+
+	writePTY(t, master, "/exit\r")
+	waitForRunReturn(t, runResult)
+	waitForSubsequence(t, collector, 0, altScreenExitSeq)
+
+	if !runResult.Finished() {
+		t.Fatal("run process was still active before terminal restoration check")
+	}
+	output := collector.Snapshot()
+	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
+	if enters != 1 || exits != 1 {
+		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
+	}
+	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
+	if err != nil {
+		t.Fatalf("read restored terminal mode: %v", err)
+	}
+	if *restoredMode != *initialMode {
+		t.Fatalf("terminal mode leaked after process exit: %s", diffTermios(*initialMode, *restoredMode))
+	}
+	t.Logf("PTY archive evidence: picker opened, target archived to %s, alt-screen enter=%d exit=%d, termios restored", archivedPath, enters, exits)
+}
+
 func diffTermios(initial, restored unix.Termios) string {
 	var diffs []string
 	if initial.Iflag != restored.Iflag {

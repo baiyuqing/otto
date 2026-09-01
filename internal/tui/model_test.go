@@ -593,7 +593,7 @@ func TestCollapsedToolSummaryIsSingleLineBoundedAndExpandable(t *testing.T) {
 	}
 
 	const width = 40
-	collapsed := renderToolBlock(entry, width, false)
+	collapsed := renderToolBlock(entry, width, false, false)
 	if strings.Contains(collapsed, "\n") || ansi.StringWidth(collapsed) > width {
 		t.Fatalf("collapsed summary = %q width=%d, want one bounded line", collapsed, ansi.StringWidth(collapsed))
 	}
@@ -601,7 +601,7 @@ func TestCollapsedToolSummaryIsSingleLineBoundedAndExpandable(t *testing.T) {
 		t.Fatalf("collapsed summary = %q, want concise name/argument preview without full details", collapsed)
 	}
 
-	expanded := renderToolBlock(entry, width, true)
+	expanded := renderToolBlock(entry, width, true, false)
 	for _, want := range []string{`{"path":"README.md",`, `"content":"long argument SECOND-TAIL"}`, "complete output THIRD-TAIL"} {
 		if !strings.Contains(expanded, want) {
 			t.Fatalf("expanded tool = %q, want %q", expanded, want)
@@ -618,12 +618,47 @@ func TestExpandedToolPreservesArgumentAndOutputWhitespace(t *testing.T) {
 		ToolDone:   true,
 	}
 
-	expanded := renderToolBlock(entry, 80, true)
+	expanded := renderToolBlock(entry, 80, true, false)
 	if !strings.Contains(expanded, "Arguments:\n\n  {\"command\":\"printf hi\"}\t\n") {
 		t.Fatalf("expanded tool = %q, want exact argument boundary whitespace", expanded)
 	}
 	if !strings.Contains(expanded, "Output:\n \n output with boundaries \t\n") {
 		t.Fatalf("expanded tool = %q, want exact output boundary whitespace", expanded)
+	}
+}
+
+func TestTypingKeysDoNotScrollViewport(t *testing.T) {
+	history := make([]model.Message, 0, 24)
+	for i := range 24 {
+		history = append(history, model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: fmt.Sprintf("entry %02d", i)}}})
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{
+		info:    app.Info{Profile: "profile", Model: "model", SessionID: "session"},
+		history: history,
+	}), 80, 10)
+	m.viewport.SetYOffset(6)
+	m.autoFollow = false
+	before := m.viewport.YOffset()
+
+	// Space, letters, and digits are ordinary composer input and must not
+	// trigger the viewport's default pager bindings (space/f/b/u/d/j/k/h/l).
+	spacePress := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Text: " "})
+	updated, _ := m.Update(spacePress)
+	got := updated.(Model)
+	if got.viewport.YOffset() != before {
+		t.Fatalf("typing space scrolled viewport: offset %d -> %d", before, got.viewport.YOffset())
+	}
+	m = got
+	for _, code := range []rune{'f', 'b', 'u', 'd', 'j', 'k', 'h', 'l', 'a', '1'} {
+		updated, _ := m.Update(keyPress(code))
+		got := updated.(Model)
+		if got.viewport.YOffset() != before {
+			t.Fatalf("typing %q scrolled viewport: offset %d -> %d", string(code), before, got.viewport.YOffset())
+		}
+		m = got
+	}
+	if got := m.editor.Value(); got != " fbudjkhla1" {
+		t.Fatalf("composer value = %q, want all typed keys inserted", got)
 	}
 }
 
@@ -1127,7 +1162,7 @@ func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 	if got.editor.Value() != "" || got.usage.InputTokens != 7 || got.usage.OutputTokens != 9 {
 		t.Fatalf("editor=%q usage=%#v", got.editor.Value(), got.usage)
 	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") || !strings.Contains(content, "ctx ?%") || strings.Contains(content, "ctx 23.4%") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") || !strings.Contains(content, "ctx ?%") || strings.Contains(content, "23.4%") {
 		t.Fatalf("view = %q", content)
 	}
 }
@@ -2477,6 +2512,23 @@ func TestFooterStatusShowsHumanReadableElapsedWhileRunning(t *testing.T) {
 	status := m.footerStatus()
 	if !strings.Contains(status, "working") || !strings.Contains(status, "1m 1s") {
 		t.Fatalf("footer status = %q, want working with 1m 1s elapsed", status)
+	}
+}
+
+func TestFooterStatusHidesElapsedUnderTenSeconds(t *testing.T) {
+	clock := newFakeClock(time.Unix(100, 0))
+	m := resizeModel(t, NewModel(context.Background(), &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}, WithClock(clock), WithRenderer(rendererFunc(func(text string, _ int) (string, error) {
+		return text, nil
+	}))), 80, 12)
+	m.running = true
+	m.turnStartedAt = clock.Now().Add(-5 * time.Second)
+
+	status := m.footerStatus()
+	if !strings.Contains(status, "working") {
+		t.Fatalf("footer status = %q, want 'working'", status)
+	}
+	if strings.Contains(status, "5s") {
+		t.Fatalf("footer status = %q, should not show elapsed time under 10s", status)
 	}
 }
 

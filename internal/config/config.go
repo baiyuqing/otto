@@ -4,16 +4,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
 
+// Provider identifiers accepted in config, env, and flags.
+const (
+	// ProviderOpenAICompatible uses a base_url + API key (Stage 1).
+	ProviderOpenAICompatible = "openai-compatible"
+	// ProviderChatGPT uses a ChatGPT subscription via OAuth credentials.
+	ProviderChatGPT = "chatgpt"
+)
+
 type File struct {
 	DefaultProfile string             `toml:"default_profile"`
 	UI             UI                 `toml:"ui"`
 	Agent          Agent              `toml:"agent"`
+	Memory         Memory             `toml:"memory"`
 	Sandbox        SandboxConfig      `toml:"sandbox"`
 	Profiles       map[string]Profile `toml:"profiles"`
 }
@@ -83,6 +94,59 @@ type Runtime struct {
 	ShellTimeout   time.Duration
 	MaxOutputBytes int
 	Compaction     CompactionRuntime
+}
+
+func Save(path string, file File) error {
+	data, err := toml.Marshal(file)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func SetDefaultProfile(path, profile string) error {
+	if profile == "" {
+		return fmt.Errorf("missing profile")
+	}
+	file, err := Load(path)
+	if err != nil {
+		return err
+	}
+	if _, ok := file.Profiles[profile]; !ok {
+		return fmt.Errorf("profile %q not found", profile)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && path == DefaultPath() {
+			file.DefaultProfile = profile
+			return Save(path, file)
+		}
+		return err
+	}
+	updated := replaceDefaultProfile(string(content), profile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(updated), 0o600)
+}
+
+var defaultProfileLineRE = regexp.MustCompile(`(?m)^\s*default_profile\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(#.*)?$`)
+
+func replaceDefaultProfile(content, profile string) string {
+	line := "default_profile = " + strconv.Quote(profile)
+	if defaultProfileLineRE.MatchString(content) {
+		return defaultProfileLineRE.ReplaceAllString(content, line)
+	}
+	if strings.TrimSpace(content) == "" {
+		return line + "\n"
+	}
+	if strings.HasSuffix(content, "\n") {
+		return line + "\n" + content
+	}
+	return line + "\n" + content + "\n"
 }
 
 func DefaultPath() string {

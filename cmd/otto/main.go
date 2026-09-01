@@ -62,7 +62,7 @@ func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) s
 	if len(toolNames) > 0 {
 		tools = strings.Join(toolNames, ", ")
 	}
-	return "You are Otto, a concise coding agent. Inspect the workspace before changing it. Usable tools: " + tools + ". File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. " + policy
+	return "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Usable tools: " + tools + ". File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. " + policy
 }
 
 func safePromptToolName(name string) bool {
@@ -148,6 +148,7 @@ type cliOptions struct {
 	noSession      bool
 	continueLast   bool
 	resumePath     string
+	archivePath    string
 	shellTimeSet   bool
 	maxOutputSet   bool
 	approveSet     bool
@@ -182,6 +183,21 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	if deps.newSession == nil {
 		deps.newSession = newSession
+	}
+
+	if len(args) > 0 && (args[0] == "memory" || args[0] == "login" || args[0] == "logout") {
+		hostEntries, err := captureEnvironment(enumerate)
+		if err != nil {
+			return fail(stderr, "%v", err)
+		}
+		environmentLookup, err := newEnvironmentLookup(hostEntries)
+		if err != nil {
+			return fail(stderr, "%v", err)
+		}
+		if args[0] == "memory" {
+			return runMemoryCommand(ctx, args[1:], stdout, stderr, environmentLookup)
+		}
+		return runAuthCommand(ctx, args, stdout, stderr, environmentLookup)
 	}
 
 	var parseErrors bytes.Buffer
@@ -223,11 +239,12 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
-	configFile, err := loadConfig(options, home)
+	configPath, configFile, err := loadConfig(options, home)
 	if err != nil {
 		return fail(stderr, "load config: configuration is invalid or unavailable")
 	}
 	environment := configEnvironment(configFile, environmentLookup)
+	environment["HOME"] = home
 	configuredSnapshot, _ := sandbox.ResolveEnvironment(sandbox.EnvironmentOptions{
 		HostEntries:   cloneSandboxRuntimeStrings(hostEntries),
 		ProviderNames: sandboxProviderEnvironmentNames(configFile, ""),
@@ -262,6 +279,15 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
+	if options.archivePath != "" {
+		result, err := session.Archive(ctx, sessionRoot, workspacePath, options.archivePath)
+		if err != nil {
+			return fail(stderr, "archive session: %v", err)
+		}
+		_, _ = fmt.Fprintf(stdout, "Archived: %s\n", result.Path)
+		return 0
+	}
+
 	sessionPath := options.resumePath
 	listedSessionPath := false
 	if options.continueLast {
@@ -295,7 +321,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if canonicalShell, shellErr := canonicalExecutableFile(shell); shellErr == nil {
 		shell = canonicalShell
 	}
-	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
+	builder := newRuntimeBuilder(configPath, configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
 	builder.sandboxSecrets = cloneSandboxRuntimeStrings(startupBoundary.sandboxSecrets)
 	builder.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete
 	var sandboxDriverOverride *string
@@ -306,6 +332,11 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	sandboxSettings, err := config.ResolveSandbox(configFile.Sandbox, sandboxDriverOverride)
 	if err != nil {
 		return fail(stderr, "%v", builder.redactError(err, nil))
+	}
+
+	memoryCfg, err := config.ResolveMemory(configFile, environment, config.Overrides{})
+	if err != nil {
+		return fail(stderr, "%v", err)
 	}
 
 	var (
@@ -371,7 +402,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		close(signalDone)
 		<-signalStopped
 	}()
-
 	processSandbox := deps.openSandbox(processCtx, sandboxOpenOptions{
 		Settings:      sandboxSettings,
 		Workspace:     workspacePath,
@@ -432,6 +462,25 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if preparedInitial != nil && !dynamicContent {
 		return fail(stderr, "%v", errSessionOperationUnavailable)
 	}
+	if processCtx.Err() != nil {
+		return 130
+	}
+
+	memoryService, memoryUserScope, memoryUsable, err := openMemoryService(processCtx, memoryCfg, collectSecretValues(configFile, environment, &resolvedRuntime), stderr)
+	if err != nil {
+		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
+	}
+	defer func() { _ = memoryService.Close() }()
+	memoryWorkspaceScope, err := workspaceMemoryScope(memoryCfg, workspacePath)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	builder.memoryService = memoryService
+	builder.memoryUsable = memoryUsable
+	builder.memoryUserScope = memoryUserScope
+	builder.memoryWorkspaceScope = memoryWorkspaceScope
+	builder.memoryRecallLimit = memoryCfg.MaxResults
+	builder.memoryRecallTokenBudget = memoryCfg.RecallTokens
 
 	var (
 		initialSession  session.Session
@@ -459,7 +508,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return 130
 	}
 
-	initialRunner, err := builder.buildRunner(initialSession, resolvedRuntime)
+	initialRunner, err := builder.buildRunner(processCtx, initialSession, resolvedRuntime)
 	if processCtx.Err() != nil {
 		_ = initialSession.Close()
 		return 130
@@ -485,7 +534,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 			initialRunnerPending = false
 			return initialRunner
 		}
-		runner, buildErr := builder.buildRunner(current, resolvedRuntime)
+		runner, buildErr := builder.buildRunner(context.Background(), current, resolvedRuntime)
 		if buildErr != nil {
 			return nil
 		}
@@ -494,14 +543,20 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	controllerOptions := []app.Option{
 		app.WithRuntimeInfo(builder.runtimeInfo(resolvedRuntime)),
 		app.WithDynamicContent(dynamicContent),
+		app.WithMemory(memoryService, memoryUserScope, memoryWorkspaceScope),
+		app.WithProfileSwitcher(builder.profileNames(), builder.buildProfileReplacement),
+		app.WithDefaultProfileSetter(builder.persistDefaultProfile),
+		app.WithNewSessionBuilder(builder.buildNewReplacement),
 	}
-	if dynamicContent {
-		controllerOptions = append(controllerOptions, app.WithNewSessionBuilder(builder.buildNewReplacement))
-		if !options.noSession {
-			controllerOptions = append(controllerOptions, app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
+	if !options.noSession {
+		controllerOptions = append(controllerOptions,
+			app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
 				return session.List(ctx, sessionRoot, workspacePath, "", limit)
-			}, builder.openReplacement))
-		}
+			}, builder.openReplacement),
+			app.WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
+				return session.Archive(ctx, sessionRoot, workspacePath, path)
+			}),
+		)
 	}
 	createSession := func() (session.Session, error) {
 		if !dynamicContent {
@@ -618,6 +673,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.BoolVar(&options.noSession, "no-session", false, "use an in-memory session")
 	flags.BoolVar(&options.continueLast, "continue", false, "continue the newest workspace session")
 	flags.StringVar(&options.resumePath, "resume", "", "resume a session file")
+	flags.StringVar(&options.archivePath, "archive", "", "archive an active session file")
 	flags.Usage = func() {}
 	if err := flags.Parse(args); err != nil {
 		return options, false, errUnsafeFlagParse
@@ -653,6 +709,23 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 		_, _ = fmt.Fprintln(stderr, "otto: --no-session cannot be used with --continue or --resume")
 		return options, false, errors.New("conflicting session flags")
 	}
+	if options.archivePath != "" {
+		conflict := ""
+		switch {
+		case options.continueLast:
+			conflict = "--continue"
+		case options.resumePath != "":
+			conflict = "--resume"
+		case options.noSession:
+			conflict = "--no-session"
+		case options.approveSet:
+			conflict = "--approve"
+		}
+		if conflict != "" {
+			_, _ = fmt.Fprintf(stderr, "otto: --archive cannot be used with %s\n", conflict)
+			return options, false, errors.New("conflicting archive flag")
+		}
+	}
 	if options.shellTimeSet && options.shellTimeout <= 0 {
 		_, _ = fmt.Fprintln(stderr, "otto: --shell-timeout must be greater than zero")
 		return options, false, errors.New("invalid shell timeout")
@@ -680,6 +753,9 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 
 func printUsage(output io.Writer) {
 	_, _ = io.WriteString(output, `Usage: otto [options]
+       otto login [--status]   sign in with a ChatGPT subscription
+       otto logout             remove stored ChatGPT credentials
+       otto memory status|forget <id>
 
 Sandbox: on macOS, auto -> Seatbelt; if it cannot be established, bash is disabled.
 WARNING: off is explicitly unsafe; bash runs unsandboxed with anything accessible to your macOS user.
@@ -702,6 +778,7 @@ Options:
   --no-session           use an in-memory session
   --continue             continue newest workspace session
   --resume PATH          resume a session file
+  --archive PATH         archive an active session file
 `)
 }
 
@@ -845,21 +922,23 @@ func resolveHome(lookup environmentLookup, fallback func() (string, error)) (str
 	return absolute, nil
 }
 
-func loadConfig(options cliOptions, home string) (config.File, error) {
+func loadConfig(options cliOptions, home string) (string, config.File, error) {
 	path := options.configPath
 	if path == "" {
 		path = filepath.Join(home, ".config", "otto", "config.toml")
 	}
 	file, err := config.LoadRequired(path)
 	if err != nil && !options.explicitConfig && os.IsNotExist(err) {
-		return config.File{}, nil
+		return path, config.File{}, nil
 	}
-	return file, err
+	return path, file, err
 }
 
 func configEnvironment(file config.File, lookup environmentLookup) map[string]string {
 	keys := map[string]struct{}{
+		"HOME":          {},
 		"OTTO_PROVIDER": {},
+		"OTTO_PROFILE":  {},
 		"OTTO_MODEL":    {},
 		"OTTO_API_KEY":  {},
 		"OTTO_UI":       {},

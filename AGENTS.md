@@ -19,7 +19,7 @@ Keep responsibilities split along the current Go package layout:
 - `internal/app`: shared frontend/backend lifecycle, prompt serialization, session replacement, and exported session info/history access
 - `internal/config`: TOML loading and runtime resolution
 - `internal/model`: provider-neutral message/tool types
-- `internal/memory`: neutral memory contracts, validation/secret guards, conservative policy, null service, and the shared Store conformance harness
+- `internal/memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation composing them with a `Store`/`Retriever`, a null service fallback, and the shared Store conformance harness
 - `internal/memory/sqlite`: secure local SQLite/FTS5 store and retriever implementing the memory contracts
 - `internal/provider`: neutral provider contract
 - `internal/provider/openaicompat`: all Stage 1 provider-specific HTTP/JSON/SSE code
@@ -35,7 +35,11 @@ Rules:
 - Keep file-tool workspace enforcement inside `internal/tool`.
 - Keep session persistence append-only.
 - Keep `bash` delegated through `internal/sandbox`; only explicit sandbox `off` may use direct execution, and it still starts in the selected workspace.
-- Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store. The memory core is currently unwired — do not document it as a user-facing Stage 1 feature until config/tool/frontend wiring lands.
+- Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store directly — only through `memory.Binding`/`memory.Reader`/`memory.Proposer` or the `app.Controller` memory facade. Per-turn recall and explicit management (`memory_search`/`remember`/`forget` tools, `/memory`/`/remember` in both frontends, `otto memory status|forget`) are wired end to end via `[memory]` TOML config; model- and human-originated writes always land as pending candidates requiring review. Automatic extraction (`Binding.Observe`) and durability (backup/restore/verify) remain unwired — do not document those as working Stage 1 features.
+
+## Working preferences
+
+- Consider cost and efficiency when choosing models: default to the cheapest adequate model for routine work and escalate to a more capable model only when the task requires it.
 
 ## Development isolation
 

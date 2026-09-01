@@ -1416,7 +1416,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 }
 
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
-	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
+	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Usable tools: read, grep, find, ls, write, edit, bash, memory_search, remember, forget. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
@@ -1446,7 +1446,7 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 			for _, item := range payload.Tools {
 				names = append(names, item.Function.Name)
 			}
-			if !reflect.DeepEqual(names, []string{"read", "grep", "find", "ls", "write", "edit", "bash"}) {
+			if !reflect.DeepEqual(names, []string{"read", "grep", "find", "ls", "write", "edit", "bash", "memory_search", "remember", "forget"}) {
 				t.Errorf("tool names = %v", names)
 			}
 			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write","arguments":"{\"path\":\"created.txt\",\"content\":\"hello\"}"}}]},"finish_reason":"tool_calls"}]}`)
@@ -2060,6 +2060,10 @@ func testEnviron(values map[string]string) environmentEnumerator {
 		}
 		return entries
 	}
+}
+
+func testGetenv(values map[string]string) environmentEnumerator {
+	return testEnviron(values)
 }
 
 func createCLISession(t *testing.T, root, workspace, id string) string {

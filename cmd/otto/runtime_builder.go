@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/baiyuqing/otto/internal/agent"
@@ -210,7 +211,40 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 	if err != nil {
 		return app.SessionReplacement{}, err
 	}
+	return b.freshReplacement(ctx, runtime)
+}
 
+// buildProfileReplacement resolves the named profile as an explicit override so
+// its own provider/model/base_url win (matching startup --profile), then builds
+// a fresh session on it. Switching profile therefore also switches provider.
+// An unknown profile is rejected by config.Resolve before any session is created.
+func (b runtimeBuilder) buildProfileReplacement(ctx context.Context, profile string) (app.SessionReplacement, error) {
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, err
+	}
+	overrides := b.runtimeOverrides
+	overrides.Profile = profile
+	runtime, err := config.Resolve(b.config, b.resumeEnvironment(), config.SessionDefaults{}, overrides)
+	if err != nil {
+		return app.SessionReplacement{}, b.redactError(err, nil)
+	}
+	return b.freshReplacement(ctx, runtime)
+}
+
+// profileNames returns the configured profile names in sorted order for
+// display by the /model command.
+func (b runtimeBuilder) profileNames() []string {
+	names := make([]string, 0, len(b.config.Profiles))
+	for name := range b.config.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// freshReplacement creates a new session and runner for an already-resolved
+// runtime, shared by the /new and /model replacement paths.
+func (b runtimeBuilder) freshReplacement(ctx context.Context, runtime config.Runtime) (app.SessionReplacement, error) {
 	create := b.deps.newSession
 	if create == nil {
 		create = newSession

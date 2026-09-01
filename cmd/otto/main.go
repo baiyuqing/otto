@@ -299,6 +299,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 			ContextWindow: runtime.Compaction.ContextWindow,
 		}),
 		app.WithMemory(memoryService, memoryUserScope, memoryWorkspaceScope),
+		app.WithProfileSwitcher(builder.profileNames(), builder.buildProfileReplacement),
 	}
 	if !options.noSession {
 		controllerOptions = append(controllerOptions,

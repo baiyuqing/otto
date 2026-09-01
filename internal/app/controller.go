@@ -742,7 +742,7 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 		}
 		archive, archiveErr := factory(ctx, currentPath)
 		if archiveErr != nil {
-			return SessionReplacement{Session: replacement.Session}, archiveErr
+			return replacement, archiveErr
 		}
 		archiveResult = archive
 		return replacement, nil
@@ -1126,6 +1126,12 @@ func (c *Controller) Info() Info {
 		info.Usage, info.UsagePresent = usageSource.AggregateUsage()
 	}
 	return info
+}
+
+func (c *Controller) DynamicContentAvailable() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && c.dynamicContent
 }
 
 func (c *Controller) History() []model.Message {

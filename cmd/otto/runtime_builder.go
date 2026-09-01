@@ -305,31 +305,12 @@ func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtim
 	if !b.authCredentialsLoaded {
 		return nil, auth.ErrNoCredentials
 	}
-	path := b.authPath
-	if path == "" {
-		path = authPathForCapturedEnvironment(b.environment)
-	}
+	path := strings.TrimSpace(b.authPath)
 	if path == "" {
 		return nil, auth.ErrCredentialsUnavailable
 	}
 	creds := b.authCredentials
 	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, nil), nil
-}
-
-func authPathForCapturedEnvironment(environment map[string]string) string {
-	home := strings.TrimSpace(environment["HOME"])
-	if home == "" {
-		return ""
-	}
-	return auth.PathForHome(home)
-}
-
-func authPathForEnvironment(environment map[string]string) (string, error) {
-	home := strings.TrimSpace(environment["HOME"])
-	if home != "" {
-		return auth.PathForHome(home), nil
-	}
-	return auth.DefaultPath()
 }
 
 func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {
@@ -708,20 +689,6 @@ func (b runtimeBuilder) boundaryRedactor(runtime *config.Runtime) *agent.Redacto
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 	values, _ := b.boundarySecretValues(runtime)
 	return values
-}
-
-// collectSecretValues gathers the API keys, URL-embedded secrets, and
-// ChatGPT OAuth credentials known from static config and the captured
-// environment. It has no receiver so callers without a full runtimeBuilder
-// (for example the standalone "otto memory" CLI) can build the same list.
-func collectSecretValues(cfg config.File, environment map[string]string, runtime *config.Runtime) []string {
-	var captured *auth.Credentials
-	if path, err := authPathForEnvironment(environment); err == nil {
-		if creds, err := auth.Load(path); err == nil {
-			captured = &creds
-		}
-	}
-	return collectSecretValuesWithAuth(cfg, environment, runtime, captured)
 }
 
 func collectSecretValuesWithAuth(cfg config.File, environment map[string]string, runtime *config.Runtime, captured *auth.Credentials) []string {

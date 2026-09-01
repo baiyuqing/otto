@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"golang.org/x/oauth2"
 )
 
@@ -114,6 +116,73 @@ func TestCompleteParsesTextAndToolCall(t *testing.T) {
 	}
 }
 
+func TestCompleteSuccessfulStreamAndResponseRedactRotatedCredentials(t *testing.T) {
+	const (
+		accessToken = "rotated-token-123"
+		accountID   = "acct-rotated-456"
+	)
+	marker := requestRedactionMarker(t, accessToken, accountID)
+	stream := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"before ` + accessToken[:8] + `"}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"` + accessToken[8:] + ` after ` + accountID[:7] + `"}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"` + accountID[7:] + ` done"}`,
+		``,
+		`event: response.output_item.added`,
+		`data: {"type":"response.output_item.added","item":{"type":"function_call","id":"item_1","call_id":"call-` + accessToken + `","name":"tool-` + accountID + `"}}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"{\"token\":\"` + accessToken[:8] + `"}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"` + accessToken[8:] + `\",\"account\":\"` + accountID[:7] + `"}`,
+		``,
+		`event: response.function_call_arguments.delta`,
+		`data: {"type":"response.function_call_arguments.delta","item_id":"item_1","delta":"` + accountID[7:] + `\"}"}`,
+		``,
+		`event: response.completed`,
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`,
+		``,
+	}, "\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer server.Close()
+
+	client := newWithBaseURL(server.URL,
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}),
+		accountID, server.Client())
+
+	var events []provider.StreamEvent
+	response, err := client.Complete(context.Background(), provider.Request{Model: "m"}, func(event provider.StreamEvent) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("Complete() emitted no events")
+	}
+	for _, secret := range []string{accessToken, accountID} {
+		for _, event := range events {
+			if strings.Contains(event.Text, secret) || strings.Contains(event.ToolCallID, secret) || strings.Contains(event.ToolName, secret) || strings.Contains(event.Arguments, secret) {
+				t.Fatalf("event leaked %q: %#v", secret, event)
+			}
+		}
+		if strings.Contains(response.Message.Text(), secret) || strings.Contains(response.Message.ID, secret) || strings.Contains(string(response.Message.Blocks[1].Arguments), secret) {
+			t.Fatalf("response leaked %q: %#v", secret, response)
+		}
+	}
+	if !strings.Contains(strings.Join([]string{events[0].Text, events[len(events)-1].Arguments, response.Message.Text(), response.Message.Blocks[1].ToolCallID, response.Message.Blocks[1].ToolName, string(response.Message.Blocks[1].Arguments)}, "\n"), marker) {
+		t.Fatalf("redacted output did not contain marker %q: events=%#v response=%#v", marker, events, response)
+	}
+}
+
 func TestCompleteHTTPErrorRedactsTokenAndAccountID(t *testing.T) {
 	const (
 		accessToken = "secret-abc"
@@ -194,6 +263,64 @@ func TestCompleteStreamReadErrorRedactsTokenAndAccountID(t *testing.T) {
 	}
 }
 
+func TestCompleteRejectsUnrepresentableRequestBoundaryBeforeHTTP(t *testing.T) {
+	var calls atomic.Int32
+	client := newWithBaseURL("https://example.test",
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: strings.Repeat("x", safetext.MaxDynamicValueBytes+1)}),
+		"acct-1",
+		&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return nil, nil
+		})},
+	)
+	var emitted atomic.Int32
+	_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, func(provider.StreamEvent) {
+		emitted.Add(1)
+	})
+	if err != errChatGPTRequestFailed {
+		t.Fatalf("Complete() error = %v, want fixed request failure", err)
+	}
+	if calls.Load() != 0 || emitted.Load() != 0 {
+		t.Fatalf("transport/emits = %d/%d, want 0/0", calls.Load(), emitted.Load())
+	}
+}
+
+func TestCompleteTransportFailureDoesNotInspectArbitraryError(t *testing.T) {
+	hostile := &hostileBoundaryError{}
+	client := newWithBaseURL("https://example.test",
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "access-token"}),
+		"acct-1",
+		&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, hostile
+		})},
+	)
+	_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, nil)
+	if err != errChatGPTRequestFailed {
+		t.Fatalf("Complete() error = %v, want fixed request failure", err)
+	}
+	if hostile.calls() != 0 {
+		t.Fatalf("transport error methods called %d times", hostile.calls())
+	}
+}
+
+func TestCompleteBodyReadFailureDoesNotInspectArbitraryError(t *testing.T) {
+	hostile := &hostileBoundaryError{}
+	client := newWithBaseURL("https://example.test",
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "access-token"}),
+		"acct-1",
+		&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: failingReadCloser{err: hostile}}, nil
+		})},
+	)
+	_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, nil)
+	if err != errChatGPTRequestFailed {
+		t.Fatalf("Complete() error = %v, want fixed request failure", err)
+	}
+	if hostile.calls() != 0 {
+		t.Fatalf("body read error methods called %d times", hostile.calls())
+	}
+}
+
 type failingTokenSource struct {
 	token *oauth2.Token
 	err   error
@@ -213,3 +340,37 @@ type failingReadCloser struct{ err error }
 
 func (f failingReadCloser) Read([]byte) (int, error) { return 0, f.err }
 func (f failingReadCloser) Close() error             { return nil }
+
+func requestRedactionMarker(t *testing.T, values ...string) string {
+	t.Helper()
+	collector := safetext.NewSecretCollector()
+	for _, value := range values {
+		if !collector.Add(value) {
+			t.Fatalf("collector rejected %q", value)
+		}
+	}
+	marker, ok := safetext.DynamicRedactionMarker(collector.Values())
+	if !ok {
+		t.Fatal("DynamicRedactionMarker() rejected bounded test values")
+	}
+	return marker
+}
+
+type hostileBoundaryError struct{ callsCount atomic.Int32 }
+
+func (e *hostileBoundaryError) Error() string {
+	e.callsCount.Add(1)
+	return "hostile error"
+}
+
+func (e *hostileBoundaryError) Is(error) bool {
+	e.callsCount.Add(1)
+	return false
+}
+
+func (e *hostileBoundaryError) Unwrap() error {
+	e.callsCount.Add(1)
+	return nil
+}
+
+func (e *hostileBoundaryError) calls() int { return int(e.callsCount.Load()) }

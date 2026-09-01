@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -17,19 +18,19 @@ var (
 	ErrCredentialsUnavailable   = errors.New("chatgpt credentials are unavailable; run 'otto login'")
 	ErrCredentialsPersistence   = errors.New("chatgpt credentials could not be saved")
 	ErrAccessTokenRefreshFailed = errors.New("chatgpt access token refresh failed; run 'otto login'")
+	ErrInteractiveUnavailable   = errors.New("chatgpt sign-in is unavailable in this session")
 )
+
+const maxCredentialFileBytes = 1 << 20
 
 func boundedAuthError(kind, cause error) error {
 	if cause == nil {
 		return nil
 	}
-	return authError{kind: kind, cause: cause}
+	return authError{kind: kind}
 }
 
-type authError struct {
-	kind  error
-	cause error
-}
+type authError struct{ kind error }
 
 func (e authError) Error() string {
 	if e.kind == nil {
@@ -38,12 +39,8 @@ func (e authError) Error() string {
 	return e.kind.Error()
 }
 
-func (e authError) Unwrap() error {
-	return e.cause
-}
-
 func (e authError) Is(target error) bool {
-	return target == e.kind || errors.Is(e.cause, target)
+	return target == e.kind
 }
 
 // Credentials holds the tokens obtained from the ChatGPT OAuth flow. It is
@@ -73,16 +70,28 @@ func PathForHome(home string) string {
 // Load reads credentials from path, returning ErrNoCredentials if the file is
 // absent.
 func Load(path string) (Credentials, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if os.IsNotExist(err) {
 			return Credentials{}, ErrNoCredentials
 		}
 		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
 	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxCredentialFileBytes+1))
+	if err != nil {
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
+	}
+	if len(data) > maxCredentialFileBytes {
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, errors.New("credentials exceed maximum size"))
+	}
 	var creds Credentials
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
+	}
+	if !credentialsWithinBounds(creds) {
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, errors.New("credentials exceed maximum size"))
 	}
 	return creds, nil
 }
@@ -90,13 +99,16 @@ func Load(path string) (Credentials, error) {
 // Save writes credentials to path atomically with 0600 permissions, creating
 // parent directories (0700) as needed.
 func (c Credentials) Save(path string) error {
+	if !credentialsWithinBounds(c) {
+		return boundedAuthError(ErrCredentialsPersistence, errors.New("credentials exceed maximum size"))
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return boundedAuthError(ErrCredentialsPersistence, err)
+	if err != nil || len(data) > maxCredentialFileBytes {
+		return boundedAuthError(ErrCredentialsPersistence, errors.New("credentials exceed maximum size"))
 	}
 	tmp, err := os.CreateTemp(dir, ".chatgpt-*.tmp")
 	if err != nil {
@@ -119,4 +131,15 @@ func (c Credentials) Save(path string) error {
 		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	return nil
+}
+
+func credentialsWithinBounds(creds Credentials) bool {
+	total := 0
+	for _, value := range []string{creds.AccessToken, creds.RefreshToken, creds.IDToken, creds.AccountID} {
+		if len(value) > maxCredentialFileBytes-total {
+			return false
+		}
+		total += len(value)
+	}
+	return true
 }

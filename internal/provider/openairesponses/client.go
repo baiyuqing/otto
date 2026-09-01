@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/provider"
-	"github.com/baiyuqing/otto/internal/safetext"
 	"golang.org/x/oauth2"
 )
 
@@ -92,11 +91,15 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 		}
 		return provider.Response{}, errChatGPTAuthorizationFailed
 	}
-	if token == nil || strings.TrimSpace(token.AccessToken) == "" {
+	if token == nil || strings.TrimSpace(token.AccessToken) == "" || strings.TrimSpace(c.accountID) == "" {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return provider.Response{}, ctxErr
 		}
 		return provider.Response{}, errChatGPTAuthorizationFailed
+	}
+	requestRedactor, ok := newRequestRedactor(token.AccessToken, c.accountID)
+	if !ok {
+		return provider.Response{}, errChatGPTRequestFailed
 	}
 	payload, err := json.Marshal(translateRequest(request))
 	if err != nil {
@@ -116,60 +119,38 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		return provider.Response{}, c.redactErr(token.AccessToken, c.accountID, fmt.Errorf("send responses request: %w", err), errChatGPTRequestFailed)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
+		}
+		return provider.Response{}, errChatGPTRequestFailed
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBody))
-		return provider.Response{}, c.redactErr(token.AccessToken, c.accountID,
-			fmt.Errorf("chatgpt responses HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body))), errChatGPTRequestFailed)
+		body, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBody+1))
+		body = body[:min(len(body), maxErrorBody)]
+		message := strings.TrimSpace(requestRedactor.redactString(string(body)))
+		if message == "" {
+			message = fmt.Sprintf("chatgpt responses HTTP %d", response.StatusCode)
+		} else {
+			message = fmt.Sprintf("chatgpt responses HTTP %d: %s", response.StatusCode, message)
+		}
+		return provider.Response{}, errors.New(message)
 	}
 
-	result, _, err := readStream(response.Body, emit)
+	emitter := requestRedactor.wrapEmit(emit)
+	result, _, failureKind, err := readStream(response.Body, emitter.Emit)
 	if err != nil {
-		return provider.Response{}, c.redactErr(token.AccessToken, c.accountID, err, errChatGPTRequestFailed)
-	}
-	return result, nil
-}
-
-// redactErr removes the rotated access token and account ID from error text so
-// neither reaches logs, sessions, or the user. If exact shared redaction is
-// impossible, it fails closed to a fixed fallback error.
-func (c *Client) redactErr(token, accountID string, err, fallback error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	collector := safetext.NewSecretCollector()
-	for _, value := range []string{token, accountID} {
-		if value != "" && !collector.Add(value) {
-			return fallback
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
 		}
-	}
-	secrets := collector.Values()
-	marker, ok := safetext.DynamicRedactionMarker(secrets)
-	if !ok {
-		if len(secrets) == 0 {
-			return err
+		if failureKind == streamFailureRead {
+			return provider.Response{}, errChatGPTRequestFailed
 		}
-		return fallback
+		return provider.Response{}, errors.New(requestRedactor.redactString(err.Error()))
 	}
-	message := err.Error()
-	redacted := false
-	for _, secret := range secrets {
-		next := strings.ReplaceAll(message, secret, marker)
-		if next != message {
-			message = next
-			redacted = true
-		}
-	}
-	if !redacted {
-		return err
-	}
-	return errors.New(message)
+	emitter.Flush()
+	return requestRedactor.redactResponse(result), nil
 }
 
 func defaultHTTPClient() *http.Client {

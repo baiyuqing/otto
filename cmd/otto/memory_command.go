@@ -3,13 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 
+	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/memory"
+)
+
+var (
+	memoryOpenService           = openMemoryService
+	memoryWorkspaceScopeFunc    = workspaceMemoryScope
+	errMemoryCommandUnavailable = errors.New("memory command is unavailable")
 )
 
 // runMemoryCommand handles the standalone "otto memory status|forget <id>"
@@ -48,11 +56,22 @@ func runMemoryCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 		return fail(stderr, "load config: %v", err)
 	}
 	environment := configEnvironment(configFile, lookup)
+	environment["HOME"] = home
 	memoryCfg, err := config.ResolveMemory(configFile, environment, config.Overrides{})
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
-	secretValues := collectSecretValues(configFile, environment, nil)
+	capturedAuth := captureAuthCredentials(auth.PathForHome(home))
+	collector := runtimeBuilder{
+		config:                 configFile,
+		environment:            environment,
+		sandboxSecretsComplete: capturedAuth.complete,
+		authCredentials:        capturedAuth.credentials,
+	}
+	secretValues, complete := collector.boundarySecretValues(nil)
+	if !complete {
+		return fail(stderr, "%v", errMemoryCommandUnavailable)
+	}
 
 	switch subcommand {
 	case "status":
@@ -70,7 +89,7 @@ func runMemoryCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 
 func runMemoryStatus(ctx context.Context, cfg config.MemoryRuntime, secretValues []string, stdout, stderr io.Writer) int {
 	var warning bytes.Buffer
-	service, _, usable, err := openMemoryService(ctx, cfg, secretValues, &warning)
+	service, _, usable, err := memoryOpenService(ctx, cfg, secretValues, &warning)
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
@@ -87,7 +106,7 @@ func runMemoryStatus(ctx context.Context, cfg config.MemoryRuntime, secretValues
 
 func runMemoryForget(ctx context.Context, cfg config.MemoryRuntime, secretValues []string, workspacePath, id string, stdout, stderr io.Writer) int {
 	var warning bytes.Buffer
-	service, userScope, usable, err := openMemoryService(ctx, cfg, secretValues, &warning)
+	service, userScope, usable, err := memoryOpenService(ctx, cfg, secretValues, &warning)
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}
@@ -95,7 +114,7 @@ func runMemoryForget(ctx context.Context, cfg config.MemoryRuntime, secretValues
 	if !usable {
 		return fail(stderr, "memory is not usable: %s", strings.TrimSpace(warning.String()))
 	}
-	workspaceScope, err := workspaceMemoryScope(cfg, workspacePath)
+	workspaceScope, err := memoryWorkspaceScopeFunc(cfg, workspacePath)
 	if err != nil {
 		return fail(stderr, "%v", err)
 	}

@@ -1301,6 +1301,19 @@ func TestRuntimeBuilderBuildProviderUsesCapturedCredentialSnapshot(t *testing.T)
 	}
 }
 
+func TestRuntimeBuilderBuildProviderRequiresInjectedAuthPath(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, config.File{})
+	builder.environment = map[string]string{"HOME": t.TempDir()}
+	builder.authCredentials = auth.Credentials{
+		AccessToken: "captured-token", RefreshToken: "captured-refresh", AccountID: "captured-account", Expiry: time.Now().Add(time.Hour),
+	}
+	builder.authCredentialsLoaded = true
+	_, err := builder.buildProvider(context.Background(), config.Runtime{Provider: "chatgpt"})
+	if !errors.Is(err, auth.ErrCredentialsUnavailable) {
+		t.Fatalf("buildProvider() error = %v, want ErrCredentialsUnavailable", err)
+	}
+}
+
 func TestRuntimeBuilderOpenReplacementProvenanceFailureClosesCandidateAndRunner(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 	base := &trackedReplacementSession{

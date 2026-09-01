@@ -78,8 +78,8 @@ func runLogout(path string, stdout, stderr io.Writer) int {
 func runLogin(ctx context.Context, path string, stdout, stderr io.Writer) int {
 	creds, err := authLogin(ctx, browserOpener(stdout))
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return fail(stderr, "%v", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fail(stderr, "%v", ctxErr)
 		}
 		return fail(stderr, "login: %v", errChatGPTLoginFailed)
 	}

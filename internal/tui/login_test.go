@@ -14,23 +14,15 @@ import (
 	"github.com/baiyuqing/otto/internal/config"
 )
 
-// chatgptModel builds a test Model whose provider is chatgpt, the provider the
-// OAuth login flow targets.
-func chatgptModel(t *testing.T) Model {
-	t.Helper()
-	return newTestModelWithBackend(t, &fakeBackend{info: app.Info{Provider: config.ProviderChatGPT}})
-}
-
-func withTUIAuthSeams(t *testing.T, login func(context.Context, func(string) error) (auth.Credentials, error)) string {
+func withTUIAuthSeams(t *testing.T, login func(context.Context, func(string) error) (auth.Credentials, error)) (context.Context, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "chatgpt.json")
-	prevPath, prevLogin := authPathFn, authLoginFn
-	authPathFn = func() (string, error) { return path, nil }
+	prevLogin := authLoginFn
 	if login != nil {
 		authLoginFn = login
 	}
-	t.Cleanup(func() { authPathFn, authLoginFn = prevPath, prevLogin })
-	return path
+	t.Cleanup(func() { authLoginFn = prevLogin })
+	return auth.ContextWithPath(context.Background(), path), path
 }
 
 func submitCommand(t *testing.T, m Model, value string) (Model, tea.Cmd) {
@@ -60,11 +52,11 @@ func TestLoginCommandRegistryCompletionAndHelp(t *testing.T) {
 }
 
 func TestLoginStatusCommandRendersStatus(t *testing.T) {
-	path := withTUIAuthSeams(t, nil)
+	ctx, path := withTUIAuthSeams(t, nil)
 	if err := (auth.Credentials{AccountID: "acct-42", Expiry: time.Date(2030, 5, 6, 7, 8, 9, 0, time.UTC)}).Save(path); err != nil {
 		t.Fatal(err)
 	}
-	m := resizeModel(t, newTestModel(t), 80, 20)
+	m := resizeModel(t, NewModel(ctx, &fakeBackend{}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 20)
 	got, cmd := submitCommand(t, m, "/login status")
 	if cmd != nil {
 		t.Fatalf("cmd = %v, want nil", cmd)
@@ -75,8 +67,8 @@ func TestLoginStatusCommandRendersStatus(t *testing.T) {
 }
 
 func TestLoginStatusReportsNotSignedIn(t *testing.T) {
-	withTUIAuthSeams(t, nil)
-	m := resizeModel(t, newTestModel(t), 80, 20)
+	ctx, _ := withTUIAuthSeams(t, nil)
+	m := resizeModel(t, NewModel(ctx, &fakeBackend{}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 20)
 	got, _ := submitCommand(t, m, "/login status")
 	if !strings.Contains(got.View().Content, "Not signed in") {
 		t.Fatalf("view = %q", got.View().Content)
@@ -84,11 +76,11 @@ func TestLoginStatusReportsNotSignedIn(t *testing.T) {
 }
 
 func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
-	path := withTUIAuthSeams(t, func(_ context.Context, open func(string) error) (auth.Credentials, error) {
+	ctx, path := withTUIAuthSeams(t, func(_ context.Context, open func(string) error) (auth.Credentials, error) {
 		_ = open("https://auth.example/authorize?x=1")
 		return auth.Credentials{AccessToken: "secret-token", AccountID: "acct-7"}, nil
 	})
-	m := resizeModel(t, chatgptModel(t), 80, 24)
+	m := resizeModel(t, NewModel(ctx, &fakeBackend{info: app.Info{Provider: config.ProviderChatGPT}}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 24)
 	pending, cmd := submitCommand(t, m, "/login")
 	if cmd == nil {
 		t.Fatal("/login cmd = nil")
@@ -97,7 +89,6 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 		t.Fatal("loginPending = false, want true")
 	}
 
-	// First message: the authorization URL notice.
 	urlMsg := runCommandWithin(t, cmd, time.Second)
 	updated, cmd := pending.Update(urlMsg)
 	pending = updated.(Model)
@@ -108,7 +99,6 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 		t.Fatalf("view missing URL: %q", pending.View().Content)
 	}
 
-	// Second message: the final result.
 	doneMsg := runCommandWithin(t, cmd, time.Second)
 	updated, _ = pending.Update(doneMsg)
 	got := updated.(Model)
@@ -116,7 +106,7 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 		t.Fatal("loginPending = true after completion")
 	}
 	content := got.View().Content
-	if strings.Contains(content, "acct-7") || !strings.Contains(content, "Signed in to ChatGPT") || !strings.Contains(content, "Start a new session") {
+	if strings.Contains(content, "acct-7") || !strings.Contains(content, "Signed in to ChatGPT") || !strings.Contains(content, "Restart Otto") {
 		t.Fatalf("view = %q", content)
 	}
 	if strings.Contains(content, "secret-token") {
@@ -133,12 +123,12 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 
 func TestLoginNonChatGPTProviderExplainsAPIKey(t *testing.T) {
 	called := false
-	withTUIAuthSeams(t, func(context.Context, func(string) error) (auth.Credentials, error) {
+	ctx, _ := withTUIAuthSeams(t, func(context.Context, func(string) error) (auth.Credentials, error) {
 		called = true
 		return auth.Credentials{}, nil
 	})
 	backend := &fakeBackend{info: app.Info{Provider: config.ProviderOpenAICompatible}}
-	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 24)
+	m := resizeModel(t, NewModel(ctx, backend, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 24)
 	got, cmd := submitCommand(t, m, "/login")
 	if cmd != nil {
 		t.Fatalf("cmd = %v, want nil (no OAuth for non-chatgpt provider)", cmd)
@@ -155,11 +145,11 @@ func TestLoginNonChatGPTProviderExplainsAPIKey(t *testing.T) {
 }
 
 func TestLogoutCommandRemovesCredentials(t *testing.T) {
-	path := withTUIAuthSeams(t, nil)
+	ctx, path := withTUIAuthSeams(t, nil)
 	if err := (auth.Credentials{AccountID: "acct-1"}).Save(path); err != nil {
 		t.Fatal(err)
 	}
-	m := resizeModel(t, newTestModel(t), 80, 20)
+	m := resizeModel(t, NewModel(ctx, &fakeBackend{}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 20)
 	got, _ := submitCommand(t, m, "/logout")
 	if !strings.Contains(got.View().Content, "Signed out") {
 		t.Fatalf("view = %q", got.View().Content)
@@ -170,10 +160,10 @@ func TestLogoutCommandRemovesCredentials(t *testing.T) {
 }
 
 func TestLoginCommandFailureIsBounded(t *testing.T) {
-	withTUIAuthSeams(t, func(context.Context, func(string) error) (auth.Credentials, error) {
+	ctx, _ := withTUIAuthSeams(t, func(context.Context, func(string) error) (auth.Credentials, error) {
 		return auth.Credentials{}, errors.New("tui-login-secret")
 	})
-	m := resizeModel(t, chatgptModel(t), 80, 24)
+	m := resizeModel(t, NewModel(ctx, &fakeBackend{info: app.Info{Provider: config.ProviderChatGPT}}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 24)
 	pending, cmd := submitCommand(t, m, "/login")
 	if cmd == nil {
 		t.Fatal("/login cmd = nil")
@@ -186,10 +176,46 @@ func TestLoginCommandFailureIsBounded(t *testing.T) {
 }
 
 func TestLogoutCommandWhenNotSignedIn(t *testing.T) {
-	withTUIAuthSeams(t, nil)
-	m := resizeModel(t, newTestModel(t), 80, 20)
+	ctx, _ := withTUIAuthSeams(t, nil)
+	m := resizeModel(t, NewModel(ctx, &fakeBackend{}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 20)
 	got, _ := submitCommand(t, m, "/logout")
 	if !strings.Contains(got.View().Content, "Not signed in") {
 		t.Fatalf("view = %q", got.View().Content)
 	}
 }
+
+func TestLoginCommandsUnavailableWhenDynamicContentIsSuppressed(t *testing.T) {
+	loginCalls := 0
+	ctx, path := withTUIAuthSeams(t, func(context.Context, func(string) error) (auth.Credentials, error) {
+		loginCalls++
+		return auth.Credentials{}, nil
+	})
+	if err := (auth.Credentials{AccountID: "acct-1"}).Save(path); err != nil {
+		t.Fatal(err)
+	}
+	backend := &dynamicTUIBackend{fakeBackend: fakeBackend{info: app.Info{Provider: config.ProviderChatGPT}}, dynamic: false}
+	m := resizeModel(t, NewModel(ctx, backend, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 24)
+	for _, command := range []string{"/login status", "/logout", "/login"} {
+		updated, cmd := submitCommand(t, m, command)
+		if cmd != nil {
+			t.Fatalf("%s scheduled cmd %v, want nil", command, cmd)
+		}
+		m = updated
+		if !strings.Contains(m.View().Content, auth.ErrInteractiveUnavailable.Error()) {
+			t.Fatalf("%s view = %q", command, m.View().Content)
+		}
+	}
+	if loginCalls != 0 {
+		t.Fatalf("login callback calls = %d, want 0", loginCalls)
+	}
+	if _, err := auth.Load(path); err != nil {
+		t.Fatalf("suppressed commands mutated credentials: %v", err)
+	}
+}
+
+type dynamicTUIBackend struct {
+	fakeBackend
+	dynamic bool
+}
+
+func (b *dynamicTUIBackend) DynamicContentAvailable() bool { return b.dynamic }

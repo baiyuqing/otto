@@ -34,7 +34,10 @@ import (
 
 const maxApprovePromptBytes = 1 << 20
 
-var errUnsafeFlagParse = errors.New("unsafe flag parser diagnostic")
+var (
+	errUnsafeFlagParse      = errors.New("unsafe flag parser diagnostic")
+	errArchiveSessionFailed = errors.New("archive session failed")
+)
 
 func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) string {
 	policy := "Sandbox policy: Bash is unavailable."
@@ -268,11 +271,12 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	})
 	startupBoundary.config = configFile
 	startupBoundary.environment = environment
-	startupBoundary.sandboxSecrets = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, configuredSnapshot.RedactionValues())
-	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && configuredSnapshot.RedactionsComplete()
+	var mergedComplete bool
+	startupBoundary.sandboxSecrets, mergedComplete = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, configuredSnapshot.RedactionValues())
+	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && configuredSnapshot.RedactionsComplete() && mergedComplete
 	capturedAuth := captureAuthCredentials(auth.PathForHome(home))
-	startupBoundary.sandboxSecrets = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, capturedAuth.redactionValues)
-	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && capturedAuth.complete
+	startupBoundary.sandboxSecrets, mergedComplete = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, capturedAuth.redactionValues)
+	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && capturedAuth.complete && mergedComplete
 	if (options.archivePath != "" || options.resumePath != "" || options.continueLast) && !startupBoundary.boundaryAllowsDynamic(nil) {
 		return fail(stderr, "%v", errSessionOperationUnavailable)
 	}
@@ -302,9 +306,12 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if options.archivePath != "" {
 		result, err := session.Archive(ctx, sessionRoot, workspacePath, options.archivePath)
 		if err != nil {
-			return fail(stderr, "archive session: %v", err)
+			if ctx.Err() != nil {
+				return fail(stderr, "archive session: %v", ctx.Err())
+			}
+			return fail(stderr, "archive session: %v", errArchiveSessionFailed)
 		}
-		_, _ = fmt.Fprintf(stdout, "Archived: %s\n", result.Path)
+		_, _ = fmt.Fprintf(stdout, "Archived: %s\n", startupBoundary.secretRedactor(nil).RedactString(result.Path))
 		return 0
 	}
 
@@ -489,8 +496,8 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	builder.commandExecutor = processSandbox.Executor
 	builder.sandboxEnvironment = cloneSandboxRuntimeStrings(processSandbox.Environment)
 	builder.sandboxInfo = processSandbox.Info
-	builder.sandboxSecrets = mergeSandboxRuntimeRedactions(builder.sandboxSecrets, processSandbox.RedactionValues)
-	builder.sandboxSecretsComplete = builder.sandboxSecretsComplete && processSandbox.RedactionsComplete
+	builder.sandboxSecrets, mergedComplete = mergeSandboxRuntimeRedactions(builder.sandboxSecrets, processSandbox.RedactionValues)
+	builder.sandboxSecretsComplete = builder.sandboxSecretsComplete && processSandbox.RedactionsComplete && mergedComplete
 	printSandboxRuntimeWarning(stderr, builder.effectiveSandboxInfo())
 	if processCtx.Err() != nil {
 		return 130
@@ -509,13 +516,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		memoryUsable         bool
 	)
 	if dynamicContent {
-		memoryService, memoryUserScope, memoryUsable, err = deps.openMemoryService(processCtx, memoryCfg, collectSecretValuesWithAuth(configFile, environment, &resolvedRuntime, func() *auth.Credentials {
-			if !capturedAuth.loaded {
-				return nil
-			}
-			copy := capturedAuth.credentials
-			return &copy
-		}()), stderr)
+		memoryService, memoryUserScope, memoryUsable, err = deps.openMemoryService(processCtx, memoryCfg, builder.secretValues(&resolvedRuntime), stderr)
 		if err != nil {
 			return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
 		}
@@ -644,16 +645,17 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return controller.Close()
 	}
 
+	frontendCtx := auth.ContextWithPath(processCtx, capturedAuth.path)
 	var runErr error
 	switch frontend {
 	case frontendTUI:
-		runErr = deps.runTUI(processCtx, stdin, stdout, controller)
+		runErr = deps.runTUI(frontendCtx, stdin, stdout, controller)
 	case frontendOnce:
 		console := repl.New(strings.NewReader(""), stdout, stderr, controller)
 		replMu.Lock()
 		currentREPL = console
 		replMu.Unlock()
-		runErr = console.RunOnce(processCtx, approvePrompt)
+		runErr = console.RunOnce(frontendCtx, approvePrompt)
 		replMu.Lock()
 		if currentREPL == console {
 			currentREPL = nil
@@ -666,7 +668,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		replMu.Lock()
 		currentREPL = console
 		replMu.Unlock()
-		runErr = console.Run(processCtx)
+		runErr = console.Run(frontendCtx)
 		replMu.Lock()
 		if currentREPL == console {
 			currentREPL = nil

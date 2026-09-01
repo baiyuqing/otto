@@ -89,6 +89,52 @@ func TestSaveFailureReturnsFixedPersistenceError(t *testing.T) {
 	}
 }
 
+func TestLoadOversizedCredentialFileReturnsFixedUnavailableError(t *testing.T) {
+	const secret = "oversized-credential-secret"
+	path := filepath.Join(t.TempDir(), secret, "chatgpt.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxCredentialFileBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if !errors.Is(err, ErrCredentialsUnavailable) {
+		t.Fatalf("err = %v, want ErrCredentialsUnavailable", err)
+	}
+	if got := err.Error(); strings.Contains(got, secret) || strings.Contains(got, path) {
+		t.Fatalf("Load() leaked oversized credential detail: %q", got)
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("Load() error exposed wrapped cause: %#v", errors.Unwrap(err))
+	}
+}
+
+func TestSaveOversizedCredentialsReturnsFixedPersistenceError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chatgpt.json")
+	err := (Credentials{AccessToken: strings.Repeat("a", maxCredentialFileBytes+1)}).Save(path)
+	if !errors.Is(err, ErrCredentialsPersistence) {
+		t.Fatalf("err = %v, want ErrCredentialsPersistence", err)
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("Save() error exposed wrapped cause: %#v", errors.Unwrap(err))
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("Save() created oversized credential file: %v", statErr)
+	}
+}
+
+func TestBoundedAuthErrorsDoNotExposeWrappedCause(t *testing.T) {
+	cause := errors.New("secret cause")
+	err := boundedAuthError(ErrCredentialsUnavailable, cause)
+	if !errors.Is(err, ErrCredentialsUnavailable) {
+		t.Fatalf("errors.Is(err, ErrCredentialsUnavailable) = false for %v", err)
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("errors.Unwrap(err) = %#v, want nil", errors.Unwrap(err))
+	}
+}
+
 func TestDefaultPathEndsWithExpectedSuffix(t *testing.T) {
 	path, err := DefaultPath()
 	if err != nil {

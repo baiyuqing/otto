@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/sandbox/seatbelt"
 )
@@ -425,6 +426,38 @@ func TestOpenSandboxInvalidShellFailsClosedBeforeConstructingDriver(t *testing.T
 	want := app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonInvalidShell}
 	if runtime.Executor != nil || runtime.Environment != nil || runtime.Info != want {
 		t.Fatalf("runtime = %#v, want invalid-shell unavailable", runtime)
+	}
+}
+
+func TestMergeSandboxRuntimeRedactionsBoundsGlobalRetentionByValueCount(t *testing.T) {
+	groupA := sensitiveSandboxRuntimeEntries(300)
+	groupB := sensitiveSandboxRuntimeEntries(300)
+	for index := range groupB {
+		groupB[index] = fmt.Sprintf("EXTRA_%03d_TOKEN=disjoint-runtime-sensitive-value-%03d", index, index)
+	}
+	merged, complete := mergeSandboxRuntimeRedactions(groupA, groupB)
+	if complete {
+		t.Fatal("mergeSandboxRuntimeRedactions() completeness = true, want false after global overflow")
+	}
+	if len(merged) != safetext.MaxSecretValues {
+		t.Fatalf("merged values = %d, want %d", len(merged), safetext.MaxSecretValues)
+	}
+}
+
+func TestMergeSandboxRuntimeRedactionsBoundsGlobalRetentionByByteBudget(t *testing.T) {
+	chunk := strings.Repeat("z", safetext.MaxSecretBytes/2)
+	groupA := []string{"a-" + chunk}
+	groupB := []string{"b-" + chunk}
+	merged, complete := mergeSandboxRuntimeRedactions(groupA, groupB)
+	if complete {
+		t.Fatal("mergeSandboxRuntimeRedactions() completeness = true, want false after byte overflow")
+	}
+	total := 0
+	for _, value := range merged {
+		total += len(value)
+	}
+	if total > safetext.MaxSecretBytes {
+		t.Fatalf("merged bytes = %d, want <= %d", total, safetext.MaxSecretBytes)
 	}
 }
 

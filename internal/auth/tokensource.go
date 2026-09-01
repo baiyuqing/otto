@@ -51,19 +51,27 @@ func (s *persistingSource) Token() (*oauth2.Token, error) {
 	if ctxErr := s.ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
+	if tok == nil {
+		return nil, ErrAccessTokenRefreshFailed
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	changed := tok.AccessToken != s.creds.AccessToken || !tok.Expiry.Equal(s.creds.Expiry)
-	if tok.RefreshToken != "" && tok.RefreshToken != s.creds.RefreshToken {
-		s.creds.RefreshToken = tok.RefreshToken
-		changed = true
+	candidate := s.creds
+	candidate.AccessToken = tok.AccessToken
+	candidate.Expiry = tok.Expiry
+	if tok.RefreshToken != "" {
+		candidate.RefreshToken = tok.RefreshToken
 	}
+	if !credentialsWithinBounds(candidate) {
+		return nil, ErrAccessTokenRefreshFailed
+	}
+	changed := candidate.AccessToken != s.creds.AccessToken || candidate.RefreshToken != s.creds.RefreshToken || !candidate.Expiry.Equal(s.creds.Expiry)
 	if changed {
-		s.creds.AccessToken = tok.AccessToken
-		s.creds.Expiry = tok.Expiry
-		if err := s.creds.Save(s.path); err != nil {
+		if err := candidate.Save(s.path); err != nil {
 			return nil, err
 		}
+		s.creds = candidate
 	}
 	return tok, nil
 }

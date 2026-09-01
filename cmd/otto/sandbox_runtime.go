@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/sandbox/direct"
 	"github.com/baiyuqing/otto/internal/sandbox/seatbelt"
@@ -164,8 +165,8 @@ func openSeatbeltSandboxRuntime(ctx context.Context, options sandboxOpenOptions,
 		PrivateDirectories: &privateDirectories,
 	})
 	environmentEntries := environment.Entries()
-	redactions := mergeSandboxRuntimeRedactions(hostRedactions, environment.RedactionValues())
-	redactionsComplete := hostComplete && environment.RedactionsComplete()
+	redactions, mergedComplete := mergeSandboxRuntimeRedactions(hostRedactions, environment.RedactionValues())
+	redactionsComplete := hostComplete && environment.RedactionsComplete() && mergedComplete
 	if environmentErr != nil || environmentEntries == nil || ctx.Err() != nil {
 		cleanupErr := driver.Close()
 		reason := app.SandboxReasonEnvironmentRejected
@@ -219,8 +220,8 @@ func openDirectSandboxRuntime(ctx context.Context, options sandboxOpenOptions, h
 		AllowNames:    cloneSandboxRuntimeStrings(options.Settings.AllowEnv),
 	})
 	environmentEntries := environment.Entries()
-	redactions := mergeSandboxRuntimeRedactions(hostRedactions, environment.RedactionValues())
-	redactionsComplete := hostComplete && environment.RedactionsComplete()
+	redactions, mergedComplete := mergeSandboxRuntimeRedactions(hostRedactions, environment.RedactionValues())
+	redactionsComplete := hostComplete && environment.RedactionsComplete() && mergedComplete
 	if environmentErr != nil || environmentEntries == nil {
 		return unavailableSandboxRuntime(app.SandboxReasonEnvironmentRejected, redactions, redactionsComplete)
 	}
@@ -387,22 +388,16 @@ func cloneSandboxOpenOptions(options sandboxOpenOptions) sandboxOpenOptions {
 	return options
 }
 
-func mergeSandboxRuntimeRedactions(groups ...[]string) []string {
-	seen := make(map[string]struct{})
-	var merged []string
+func mergeSandboxRuntimeRedactions(groups ...[]string) ([]string, bool) {
+	collector := safetext.NewSecretCollector()
 	for _, values := range groups {
 		for _, value := range values {
-			if value == "" {
-				continue
+			if !collector.AddForm(value) {
+				return collector.Values(), false
 			}
-			if _, duplicate := seen[value]; duplicate {
-				continue
-			}
-			seen[value] = struct{}{}
-			merged = append(merged, strings.Clone(value))
 		}
 	}
-	return merged
+	return collector.Values(), true
 }
 
 func cloneSandboxRuntimeStrings(values []string) []string {

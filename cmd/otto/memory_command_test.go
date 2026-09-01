@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/memory"
 )
@@ -110,6 +113,81 @@ func TestRunMemoryCommandForgetMissingIDReturnsUsageError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "usage") {
 		t.Fatalf("stderr = %q, want a usage message", stderr.String())
+	}
+}
+
+func TestRunMemoryCommandUsesCapturedAuthPathAndDecodedAlias(t *testing.T) {
+	capturedHome := t.TempDir()
+	liveHome := t.TempDir()
+	t.Setenv("HOME", liveHome)
+	workspace := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "memory", "memory.db")
+	configPath := writeMemoryConfig(t, dbPath)
+	if err := (auth.Credentials{AccessToken: `\u0061\u0062\u0063`, AccountID: "acct-captured"}).Save(auth.PathForHome(capturedHome)); err != nil {
+		t.Fatal(err)
+	}
+	if err := (auth.Credentials{AccessToken: "live-home-token", AccountID: "acct-live"}).Save(auth.PathForHome(liveHome)); err != nil {
+		t.Fatal(err)
+	}
+	original := memoryOpenService
+	var captured []string
+	memoryOpenService = func(_ context.Context, _ config.MemoryRuntime, secretValues []string, _ io.Writer) (memory.Service, memory.Scope, bool, error) {
+		captured = append([]string(nil), secretValues...)
+		return memory.NewNullService(memory.ErrDisabled), memory.Scope{}, false, nil
+	}
+	defer func() { memoryOpenService = original }()
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"memory", "status", "--config", configPath, "--cwd", workspace},
+		strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{"HOME": capturedHome}), defaultRunDependencies())
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{`\u0061\u0062\u0063`, "abc", "acct-captured"} {
+		if !slices.Contains(captured, want) {
+			t.Fatalf("captured secret values = %#v, want %q", captured, want)
+		}
+	}
+	for _, forbidden := range []string{"live-home-token", "acct-live"} {
+		if slices.Contains(captured, forbidden) {
+			t.Fatalf("captured secret values = %#v, must not contain live-home value %q", captured, forbidden)
+		}
+	}
+}
+
+func TestRunMemoryCommandRejectsMalformedCapturedAuthBeforeOpeningMemory(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	dbPath := filepath.Join(t.TempDir(), "memory", "memory.db")
+	configPath := writeMemoryConfig(t, dbPath)
+	path := auth.PathForHome(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"access_token":"unterminated}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := memoryOpenService
+	opened := 0
+	memoryOpenService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		opened++
+		return nil, memory.Scope{}, false, nil
+	}
+	defer func() { memoryOpenService = original }()
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"memory", "status", "--config", configPath, "--cwd", workspace},
+		strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{"HOME": home}), defaultRunDependencies())
+	if code == 0 {
+		t.Fatalf("code = 0, want failure; stdout = %q", stdout.String())
+	}
+	if opened != 0 {
+		t.Fatalf("memory open calls = %d, want 0", opened)
+	}
+	if got := stderr.String(); strings.Contains(got, path) || strings.Contains(got, "unterminated") {
+		t.Fatalf("stderr leaked malformed auth detail: %q", got)
 	}
 }
 

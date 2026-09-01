@@ -145,6 +145,50 @@ func TestTokenSourceSaveFailureReturnsFixedError(t *testing.T) {
 	}
 }
 
+func TestTokenSourceRefreshFailureDoesNotInspectArbitraryError(t *testing.T) {
+	hostile := &hostileAuthError{}
+	source := &persistingSource{
+		base:  tokenSourceFunc(func() (*oauth2.Token, error) { return nil, hostile }),
+		ctx:   context.Background(),
+		path:  filepath.Join(t.TempDir(), "chatgpt.json"),
+		creds: Credentials{AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute)},
+	}
+	_, err := source.Token()
+	if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+		t.Fatalf("err = %v, want ErrAccessTokenRefreshFailed", err)
+	}
+	if hostile.calls() != 0 {
+		t.Fatalf("hostile auth error methods called %d times", hostile.calls())
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("errors.Unwrap(err) = %#v, want nil", errors.Unwrap(err))
+	}
+}
+
+func TestTokenSourceRejectsOversizedRotatedCredentialsWithoutPersisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chatgpt.json")
+	source := &persistingSource{
+		base: tokenSourceFunc(func() (*oauth2.Token, error) {
+			return &oauth2.Token{AccessToken: strings.Repeat("x", maxCredentialFileBytes+1), RefreshToken: "refresh-new", Expiry: time.Now().Add(time.Hour)}, nil
+		}),
+		ctx:  context.Background(),
+		path: path,
+		creds: Credentials{
+			AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+		},
+	}
+	_, err := source.Token()
+	if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+		t.Fatalf("err = %v, want ErrAccessTokenRefreshFailed", err)
+	}
+	if source.creds.AccessToken != "access-old" || source.creds.RefreshToken != "refresh-old" {
+		t.Fatalf("oversized refresh mutated retained credentials: %+v", source.creds)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("oversized refresh persisted credential file: %v", statErr)
+	}
+}
+
 func TestTokenSourcePreservesContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -156,3 +200,26 @@ func TestTokenSourcePreservesContextCancellation(t *testing.T) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
+
+type tokenSourceFunc func() (*oauth2.Token, error)
+
+func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
+
+type hostileAuthError struct{ callsCount atomic.Int32 }
+
+func (e *hostileAuthError) Error() string {
+	e.callsCount.Add(1)
+	return "hostile auth error"
+}
+
+func (e *hostileAuthError) Is(error) bool {
+	e.callsCount.Add(1)
+	return false
+}
+
+func (e *hostileAuthError) Unwrap() error {
+	e.callsCount.Add(1)
+	return nil
+}
+
+func (e *hostileAuthError) calls() int { return int(e.callsCount.Load()) }

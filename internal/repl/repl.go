@@ -294,7 +294,7 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if args != "" {
 			break
 		}
-		return r.logoutCommand()
+		return r.logoutCommand(ctx)
 	}
 	_, _ = fmt.Fprintf(r.stderr, "unknown command: %s\n", command)
 	return false, nil

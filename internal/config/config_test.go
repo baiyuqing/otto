@@ -181,6 +181,32 @@ func TestLoadReturnsEmptyFileForMissingDefaultPath(t *testing.T) {
 	}
 }
 
+func TestLoadRequiredNeverTreatsMissingPathAsImplicitDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".config", "otto", "config.toml")
+
+	if _, err := LoadRequired(path); !os.IsNotExist(err) {
+		t.Fatalf("LoadRequired() error = %v, want missing-path error", err)
+	}
+}
+
+func TestLoadRequiredDecodesWithoutConsultingDefaultPath(t *testing.T) {
+	path := writeConfig(t, `default_profile = "local"
+[profiles.local]
+provider = "openai-compatible"
+`)
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "unrelated-home"))
+
+	file, err := LoadRequired(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.DefaultProfile != "local" || file.Profiles["local"].Provider != "openai-compatible" {
+		t.Fatalf("LoadRequired() = %#v", file)
+	}
+}
+
 func TestLoadRejectsMissingExplicitPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.toml")
 	if _, err := Load(path); err == nil {

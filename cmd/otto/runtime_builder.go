@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"strings"
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
+	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -56,7 +56,10 @@ type runtimeBuilder struct {
 	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
 	buildRunnerOverride  func(session.Session, config.Runtime) (app.Runner, error)
 	runtimeOverrides     config.Overrides
+	commandExecutor      sandbox.CommandExecutor
+	sandboxEnvironment   []string
 	sandboxInfo          app.SandboxInfo
+	sandboxSecrets       []string
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
@@ -109,23 +112,36 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 	if b.workspace == nil {
 		return nil, errors.New("workspace is required")
 	}
-	registry, err := tool.NewRegistry(
+	redactionValues := b.secretValues(&runtime)
+	tools := []tool.Tool{
 		tool.NewReadTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewGrepTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewFindTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewLSTool(b.workspace, runtime.MaxOutputBytes),
 		tool.NewWriteTool(b.workspace),
 		tool.NewEditTool(b.workspace),
-		tool.NewBashTool(b.workspace, b.shell, runtime.ShellTimeout, runtime.MaxOutputBytes, tool.BashSecurity{
-			RemoveEnv:    b.credentialEnvironmentNames(runtime.APIKeyEnv),
-			RedactValues: b.secretValues(&runtime),
-		}),
-	)
+	}
+	if b.commandExecutor != nil {
+		bash, err := tool.NewBashTool(
+			b.workspace,
+			b.commandExecutor,
+			b.shell,
+			cloneSandboxRuntimeStrings(b.sandboxEnvironment),
+			runtime.ShellTimeout,
+			runtime.MaxOutputBytes,
+			cloneSandboxRuntimeStrings(redactionValues),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("create bash tool: %w", err)
+		}
+		tools = append(tools, bash)
+	}
+	registry, err := tool.NewRegistry(tools...)
 	if err != nil {
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
 	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
-	redactor := agent.NewRedactor(b.secretValues(&runtime))
+	redactor := agent.NewRedactor(cloneSandboxRuntimeStrings(redactionValues))
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPromptFor(registry.Definitions(), b.sandboxInfo), Thinking: runtime.Thinking,
 		Compaction: agent.CompactionSettings{
@@ -335,10 +351,7 @@ func (b runtimeBuilder) redactError(err error, runtime *config.Runtime) error {
 	if err == nil {
 		return nil
 	}
-	message := err.Error()
-	for _, value := range b.secretValues(runtime) {
-		message = strings.ReplaceAll(message, value, "[REDACTED]")
-	}
+	message := agent.NewRedactor(b.secretValues(runtime)).RedactString(err.Error())
 	if message == err.Error() {
 		return err
 	}
@@ -361,30 +374,9 @@ func (e redactedIdentityError) Is(target error) bool {
 	return errors.Is(e.cause, target)
 }
 
-func (b runtimeBuilder) credentialEnvironmentNames(runtimeAPIKeyEnv string) []string {
-	seen := make(map[string]struct{}, len(b.config.Profiles)+2)
-	names := make([]string, 0, len(b.config.Profiles)+2)
-	add := func(name string) {
-		if name == "" {
-			return
-		}
-		if _, ok := seen[name]; ok {
-			return
-		}
-		seen[name] = struct{}{}
-		names = append(names, name)
-	}
-	add("OTTO_API_KEY")
-	add(runtimeAPIKeyEnv)
-	for _, profile := range b.config.Profiles {
-		add(profile.APIKeyEnv)
-	}
-	return names
-}
-
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 	seen := make(map[string]struct{})
-	values := make([]string, 0, len(b.config.Profiles)+2)
+	values := make([]string, 0, len(b.sandboxSecrets)+len(b.config.Profiles)+2)
 	add := func(value string) {
 		if value == "" {
 			return
@@ -395,6 +387,9 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 		seen[value] = struct{}{}
 		values = append(values, value)
 	}
+	for _, value := range b.sandboxSecrets {
+		add(value)
+	}
 	add(b.environment["OTTO_API_KEY"])
 	for _, profile := range b.config.Profiles {
 		if profile.APIKeyEnv != "" {
@@ -402,6 +397,7 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 		}
 		collectURLSecretValues(profile.BaseURL, add)
 	}
+	collectURLSecretValues(b.runtimeOverrides.BaseURL, add)
 	if runtime != nil {
 		add(runtime.APIKey)
 		collectURLSecretValues(runtime.BaseURL, add)

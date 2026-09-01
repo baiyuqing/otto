@@ -108,12 +108,12 @@ func TestBashSandboxedConstructorRejectsEveryInvalidBoundaryWithOneSafeError(t *
 		{name: "negative output cap", workspace: workspace, executor: validExecutor, shell: "/bin/sh", environment: []string{}, timeout: time.Second, maxOutputBytes: -1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			constructed, err := NewSandboxedBashTool(test.workspace, test.executor, test.shell, test.environment, test.timeout, test.maxOutputBytes, []string{"must-not-appear"})
+			constructed, err := NewBashTool(test.workspace, test.executor, test.shell, test.environment, test.timeout, test.maxOutputBytes, []string{"must-not-appear"})
 			if constructed != nil {
-				t.Fatalf("NewSandboxedBashTool() tool = %T, want nil", constructed)
+				t.Fatalf("NewBashTool() tool = %T, want nil", constructed)
 			}
 			if err == nil || err.Error() != "invalid sandboxed bash configuration" {
-				t.Fatalf("NewSandboxedBashTool() error = %v, want fixed safe error", err)
+				t.Fatalf("NewBashTool() error = %v, want fixed safe error", err)
 			}
 		})
 	}
@@ -126,7 +126,7 @@ func TestBashSandboxedConstructorRejectsWhenNoCollisionSafeMarkerExists(t *testi
 		allBytes[i] = byte(i)
 	}
 
-	constructed, err := NewSandboxedBashTool(
+	constructed, err := NewBashTool(
 		workspace,
 		&fakeBashExecutor{},
 		"/bin/sh",
@@ -136,19 +136,19 @@ func TestBashSandboxedConstructorRejectsWhenNoCollisionSafeMarkerExists(t *testi
 		[]string{string(allBytes)},
 	)
 	if constructed != nil {
-		t.Fatalf("NewSandboxedBashTool() tool = %T, want nil", constructed)
+		t.Fatalf("NewBashTool() tool = %T, want nil", constructed)
 	}
 	if err != errInvalidSandboxedBashConfiguration {
-		t.Fatalf("NewSandboxedBashTool() error = %v, want fixed configuration error", err)
+		t.Fatalf("NewBashTool() error = %v, want fixed configuration error", err)
 	}
 }
 
 func TestBashSandboxedConstructorRegistersWithExplicitEmptyEnvironment(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	fake := &fakeBashExecutor{status: sandbox.ExitStatus{Code: 0}}
-	constructed, err := NewSandboxedBashTool(workspace, fake, "/bin/sh", []string{}, time.Second, 1024, nil)
+	constructed, err := NewBashTool(workspace, fake, "/bin/sh", []string{}, time.Second, 1024, nil)
 	if err != nil {
-		t.Fatalf("NewSandboxedBashTool() error = %v", err)
+		t.Fatalf("NewBashTool() error = %v", err)
 	}
 	registry, err := NewRegistry(constructed)
 	if err != nil {

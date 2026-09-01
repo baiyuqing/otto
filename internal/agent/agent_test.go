@@ -13,6 +13,8 @@ import (
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/direct"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -507,7 +509,32 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := tool.NewRegistry(tool.NewBashTool(workspace, "/bin/sh", time.Second, 51200, tool.BashSecurity{RedactValues: []string{credential}}))
+	driver := direct.New()
+	executor, err := sandbox.NewExecutor(driver, sandbox.Policy{
+		Filesystem: sandbox.FilesystemUnconfined,
+		Network:    sandbox.NetworkAllow,
+	}, workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := executor.Close(); err != nil {
+			t.Errorf("Executor.Close() error = %v", err)
+		}
+	})
+	bash, err := tool.NewBashTool(
+		workspace,
+		executor,
+		"/bin/sh",
+		[]string{"HOME=", "PATH=/usr/bin:/bin", "LC_ALL=C"},
+		time.Second,
+		51200,
+		[]string{credential},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := tool.NewRegistry(bash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +573,9 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 			return string(encoded)
 		}(),
 	} {
-		if strings.Contains(content, credential) || !strings.Contains(content, "[REDACTED]") {
+		hasMarker := strings.Contains(content, "[REDACTED]") || strings.Contains(content, "stdout:\n*\n") ||
+			strings.Contains(content, `stdout:\n*\n`)
+		if strings.Contains(content, credential) || !hasMarker {
 			t.Fatalf("%s did not safely redact credential: %q", location, content)
 		}
 	}

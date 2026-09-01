@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,7 @@ import (
 
 func TestRunHelpDoesNotRequireCredentials(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--help"}, strings.NewReader(""), &stdout, &stderr, func(string) string { return "" })
+	code := runForTest(t, context.Background(), []string{"--help"}, strings.NewReader(""), &stdout, &stderr, testEnviron(nil))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
@@ -62,7 +63,7 @@ func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
 			workspace := t.TempDir()
 			configPath := writeCLIConfigWithUI(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1", test.configUI)
 
-			deps := defaultRunDependencies()
+			deps := deterministicRunDependencies(t)
 			deps.subscribeInterrupts = func() interruptSubscription {
 				return interruptSubscription{stop: func() {}}
 			}
@@ -100,7 +101,7 @@ func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := runWithDependencies(context.Background(), args, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(env), deps)
+			code := runWithDependencies(context.Background(), args, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(env), deps)
 			if code != 0 {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
@@ -137,7 +138,7 @@ func TestRunTUIProgramErrorReturnsOne(t *testing.T) {
 			workspace := t.TempDir()
 			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-			deps := defaultRunDependencies()
+			deps := deterministicRunDependencies(t)
 			deps.subscribeInterrupts = func() interruptSubscription {
 				return interruptSubscription{stop: func() {}}
 			}
@@ -153,7 +154,7 @@ func TestRunTUIProgramErrorReturnsOne(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 			}), deps)
 			if code != 1 {
@@ -175,7 +176,7 @@ func TestRunTUIFatalPersistenceReturnsOneAndPrintsDiagnostic(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -193,7 +194,7 @@ func TestRunTUIFatalPersistenceReturnsOneAndPrintsDiagnostic(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 {
@@ -221,7 +222,7 @@ func TestRunTUIProgramErrorCancelsActivePromptBeforeClosing(t *testing.T) {
 	store := &trackingSession{Session: session.NewMemory(session.Header{
 		Version: 1, ID: "active-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
 	})}
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -255,7 +256,7 @@ func TestRunTUIProgramErrorCancelsActivePromptBeforeClosing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	codeDone := make(chan int, 1)
 	go func() {
-		codeDone <- runWithDependencies(processCtx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		codeDone <- runWithDependencies(processCtx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -299,7 +300,7 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -321,7 +322,7 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 {
@@ -341,7 +342,7 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 	valid := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	unsupported := writeCLIConfig(t, "other-provider", "TEST_KEY", "http://127.0.0.1:1")
 	missingKey := writeCLIConfig(t, "openai-compatible", "MISSING_KEY", "http://127.0.0.1:1")
-	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
 	tests := []struct {
 		name string
@@ -359,7 +360,7 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), test.args, strings.NewReader("/exit\n"), &stdout, &stderr, env)
+			code := runForTest(t, context.Background(), test.args, strings.NewReader("/exit\n"), &stdout, &stderr, env)
 			if code == 0 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
 			}
@@ -372,7 +373,7 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "https://example.test/v1?tenant=x")
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resume")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	var prepareCalls, activateCalls atomic.Int32
 	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
 		prepareCalls.Add(1)
@@ -391,7 +392,7 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code == 0 || !strings.Contains(stderr.String(), "base_url") {
@@ -407,7 +408,7 @@ func TestRunNoSessionAndExplicitConfig(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -425,7 +426,7 @@ func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -445,7 +446,7 @@ func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session", "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session", "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 0 {
@@ -458,7 +459,7 @@ func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
 	workspace := t.TempDir()
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "warning-session")
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -485,7 +486,7 @@ func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
 		return nil
 	}
 
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 0 {
@@ -506,7 +507,7 @@ func TestRunCanonicalizesCWDBeforeCreatingSession(t *testing.T) {
 	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", link}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", link}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -556,7 +557,7 @@ func TestRunContinueSkipsOldOttoSessions(t *testing.T) {
 
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--continue"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--continue"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "offline-test-key",
 	}))
 	if code != 0 || !strings.Contains(stdout.String(), "ID: newest-valid-v3") {
@@ -597,7 +598,7 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 	setCLISessionMTime(t, oldV1Path, now.Add(-30*time.Minute))
 	setCLISessionMTime(t, corruptPath, now)
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
 	for _, test := range []struct {
 		name string
@@ -610,7 +611,7 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			args := append([]string{"--config", configPath, "--cwd", workspace}, test.args...)
-			code := run(context.Background(), args, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, env)
+			code := runForTest(t, context.Background(), args, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, env)
 			if code != 0 || !strings.Contains(stdout.String(), test.want) {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
@@ -623,7 +624,7 @@ func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".otto", "sessions")
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
 	for _, test := range []struct {
 		name string
@@ -635,7 +636,7 @@ func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", test.path}, strings.NewReader("/exit\n"), &stdout, &stderr, env)
+			code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", test.path}, strings.NewReader("/exit\n"), &stdout, &stderr, env)
 			if code == 0 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
@@ -655,7 +656,7 @@ func TestRunResumeRejectsAtomicReplacementOfPreparedSessionWithoutMutation(t *te
 	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -685,7 +686,7 @@ func TestRunResumeRejectsAtomicReplacementOfPreparedSessionWithoutMutation(t *te
 	var stdout, stderr bytes.Buffer
 	code := runWithDependencies(context.Background(), []string{
 		"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui",
-	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 || !strings.Contains(stderr.String(), "identity changed") {
@@ -725,7 +726,7 @@ api_key_env = "TEST_KEY"
 		t.Fatal(err)
 	}
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -744,7 +745,7 @@ api_key_env = "TEST_KEY"
 		"--profile", "active",
 		"--model", "override-model",
 		"--ui", "tui",
-	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "ACTIVE_KEY": "active-secret", "TEST_KEY": "persisted-secret",
 	}), deps)
 	if code != 0 {
@@ -820,7 +821,7 @@ api_key_env = "OVERRIDE_KEY"
 				args = append(args, "--continue")
 			}
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), args, strings.NewReader("use effective runtime\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+			code := runForTest(t, context.Background(), args, strings.NewReader("use effective runtime\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 				"HOME": home, "SHELL": "/bin/sh", "STORED_KEY": "stored-secret", "OVERRIDE_KEY": "override-secret",
 			}))
 			if code != 0 {
@@ -908,7 +909,7 @@ api_key_env = "RESUMED_KEY"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "DEFAULT_KEY": "default-secret", "RESUMED_KEY": "resumed-secret",
 	}))
 	if code != 0 {
@@ -971,7 +972,7 @@ api_key_env = "RESUMED_KEY"
 		t.Fatal(err)
 	}
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -1000,7 +1001,7 @@ api_key_env = "RESUMED_KEY"
 	var stdout, stderr bytes.Buffer
 	code := runWithDependencies(context.Background(), []string{
 		"--config", configPath, "--cwd", workspace, "--ui", "tui",
-	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "STARTUP_KEY": "startup-secret", "RESUMED_KEY": "resumed-secret",
 	}), deps)
 	if code != 0 {
@@ -1018,7 +1019,7 @@ func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// The startup session is lazy (no file until a user prompt). /new swaps it
 	// for another lazy session; the prompt "hello" is what materializes a file.
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\nhello\n/exit\nmust not run\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\nhello\n/exit\nmust not run\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1050,7 +1051,7 @@ func TestRunIdleWithoutPromptLeavesNoSessionFile(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/help\n/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/help\n/session\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1069,7 +1070,7 @@ func TestRunNewSessionCreationFailureReturnsDirectError(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -1086,7 +1087,7 @@ func TestRunNewSessionCreationFailureReturnsDirectError(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 {
@@ -1105,7 +1106,7 @@ func TestRunRejectsUnknownMaxTurnsFlag(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1"}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1"}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -max-turns") {
@@ -1143,7 +1144,7 @@ func TestRunApproveRunsPromptHeadlessAndExits(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "do the thing"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "do the thing"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1170,7 +1171,7 @@ func TestRunApproveReadsMultilinePromptFromFile(t *testing.T) {
 	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "@" + promptPath}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "@" + promptPath}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1207,7 +1208,7 @@ func TestRunApproveFlagValidation(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), append([]string{"--config", configPath, "--cwd", workspace}, testCase.args...), strings.NewReader(""), &stdout, &stderr, testGetenv(environment))
+			code := runForTest(t, context.Background(), append([]string{"--config", configPath, "--cwd", workspace}, testCase.args...), strings.NewReader(""), &stdout, &stderr, testEnviron(environment))
 			if code != testCase.code || !strings.Contains(stderr.String(), testCase.stderr) {
 				t.Fatalf("code = %d, stderr = %q, want %d containing %q", code, stderr.String(), testCase.code, testCase.stderr)
 			}
@@ -1220,7 +1221,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "banana"}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "banana"}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 2 || !strings.Contains(stderr.String(), "--thinking must be one of low, medium, high, xhigh, max") {
@@ -1229,7 +1230,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 }
 
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
-	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Bash is unsandboxed."
+	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it. Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
@@ -1273,7 +1274,7 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "xhigh"}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "xhigh"}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "smoke-secret",
 	}))
 	if code != 0 {
@@ -1357,7 +1358,7 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check provider output\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check provider output\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": credential,
 	}))
 	if code != 0 {
@@ -1400,11 +1401,6 @@ func TestRunKeepsEveryProfileCredentialOutOfBashEventsSessionAndProviderHistory(
 		profileKeyEnv  = "OTTO_E2E_PROFILE_KEY"
 		inactiveKeyEnv = "OTTO_E2E_INACTIVE_KEY"
 	)
-	t.Setenv(profileKeyEnv, resolvedCredential)
-	t.Setenv(inactiveKeyEnv, inactiveCredential)
-	t.Setenv("OTTO_API_KEY", fallbackCredential)
-	t.Setenv("OTTO_E2E_UNRELATED", "preserved-environment")
-
 	home := t.TempDir()
 	workspace := t.TempDir()
 	midpoint := len(resolvedCredential) / 2
@@ -1457,11 +1453,15 @@ api_key_env = %q
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check credentials\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
-		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, inactiveKeyEnv: inactiveCredential, "OTTO_API_KEY": fallbackCredential,
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off"}, strings.NewReader("check credentials\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, inactiveKeyEnv: inactiveCredential,
+		"OTTO_API_KEY": fallbackCredential, "OTTO_E2E_UNRELATED": "preserved-environment",
 	}))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := "warning: sandbox is off; bash runs unsandboxed as your macOS user\n"; stderr.String() != want {
+		t.Fatalf("stderr = %q, want explicit off warning %q", stderr.String(), want)
 	}
 
 	persisted, err := os.ReadFile(onlySessionPath(t, home))
@@ -1483,7 +1483,8 @@ api_key_env = %q
 			}
 		}
 	}
-	redactedReconstruction := strings.Contains(string(persisted), "reconstructed=[REDACTED]") || strings.Contains(string(persisted), "reconstructed=█")
+	redactedReconstruction := strings.Contains(string(persisted), "reconstructed=[REDACTED]") ||
+		strings.Contains(string(persisted), "reconstructed=█") || strings.Contains(string(persisted), "reconstructed=*")
 	if !redactedReconstruction || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
 		t.Fatalf("persisted bash event/result did not redact credential while preserving unrelated environment: %s", persisted)
 	}
@@ -1505,7 +1506,7 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 	interrupts := make(chan os.Signal, 1)
 	subscribed := make(chan struct{})
 	var stopCalls atomic.Int32
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -1529,7 +1530,7 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	codeCh := make(chan int, 1)
 	go func() {
-		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("wait\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("wait\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -1568,7 +1569,7 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	interrupts := make(chan os.Signal, 1)
 	subscribed := make(chan struct{})
 	var stopCalls atomic.Int32
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -1595,7 +1596,7 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	codeCh := make(chan int, 1)
 	go func() {
-		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, reader, &stdout, &stderr, testGetenv(map[string]string{
+		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, reader, &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -1638,7 +1639,7 @@ func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T
 	store := &trackingSession{Session: session.NewMemory(session.Header{
 		Version: 1, ID: "signal-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
 	})}
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -1672,7 +1673,7 @@ func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T
 	var stdout, stderr bytes.Buffer
 	codeDone := make(chan int, 1)
 	go func() {
-		codeDone <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		codeDone <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -1727,7 +1728,7 @@ func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 			home := t.TempDir()
 			workspace := t.TempDir()
 			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-			deps := defaultRunDependencies()
+			deps := deterministicRunDependencies(t)
 			deps.subscribeInterrupts = func() interruptSubscription {
 				return interruptSubscription{stop: func() {}}
 			}
@@ -1742,7 +1743,7 @@ func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(test.input), &stdout, &stderr, testGetenv(map[string]string{
+			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(test.input), &stdout, &stderr, testEnviron(map[string]string{
 				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 			}), deps)
 			if code != test.wantCode {
@@ -1763,7 +1764,7 @@ func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
 	const secret = "argument-secret"
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--api-key", secret}, strings.NewReader(""), &stdout, &stderr, func(string) string { return "" })
+	code := runForTest(t, context.Background(), []string{"--api-key", secret}, strings.NewReader(""), &stdout, &stderr, testEnviron(nil))
 	if code == 0 {
 		t.Fatal("--api-key unexpectedly accepted")
 	}
@@ -1837,8 +1838,19 @@ api_key_env = %q
 	return path
 }
 
-func testGetenv(values map[string]string) func(string) string {
-	return func(key string) string { return values[key] }
+func testEnviron(values map[string]string) environmentEnumerator {
+	return func() []string {
+		names := make([]string, 0, len(values))
+		for name := range values {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		entries := make([]string, 0, len(names))
+		for _, name := range names {
+			entries = append(entries, name+"="+values[name])
+		}
+		return entries
+	}
 }
 
 func createCLISession(t *testing.T, root, workspace, id string) string {

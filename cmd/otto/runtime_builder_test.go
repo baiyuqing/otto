@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,6 +22,8 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/direct"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -115,6 +119,36 @@ func TestRuntimeBuilderBuildNewReplacementPreservesExplicitBaseURL(t *testing.T)
 				t.Fatalf("new replacement base URL = %q, want explicit override %q", createdRuntime.BaseURL, overrideBaseURL)
 			}
 		})
+	}
+}
+
+func TestRuntimeBuilderRejectsCLIBaseURLSecretsWithBoundedRedactedError(t *testing.T) {
+	const (
+		username = "cli-userinfo-name"
+		password = "cli-userinfo-password"
+		query    = "cli-query-value"
+		fragment = "cli-fragment-value"
+	)
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.runtimeOverrides.BaseURL = "https://" + username + ":" + password + "@example.test/v1?tenant=" + query + "#" + fragment
+
+	_, err := builder.resolveSession(session.RuntimeMetadata{Profile: "default", Provider: "openai-compatible", Model: "stored-model"})
+	if err == nil || !strings.Contains(err.Error(), "invalid base_url") {
+		t.Fatalf("resolveSession() error = %v, want invalid base_url", err)
+	}
+	for _, secret := range []string{username, password, query, fragment} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("resolveSession() leaked CLI endpoint value %q: %v", secret, err)
+		}
+	}
+	if len(err.Error()) > 512 {
+		t.Fatalf("resolveSession() error length = %d, want <= 512", len(err.Error()))
+	}
+	boundary := builder.redactError(fmt.Errorf("boundary exposed %s %s %s %s", username, password, query, fragment), nil)
+	for _, secret := range []string{username, password, query, fragment} {
+		if strings.Contains(boundary.Error(), secret) {
+			t.Fatalf("redactError() leaked CLI endpoint value %q: %v", secret, boundary)
+		}
 	}
 }
 
@@ -760,6 +794,18 @@ func TestRuntimeBuilderBuildNewReplacementProvenanceFailureClosesCandidate(t *te
 	}
 }
 
+func TestRuntimeBuilderBoundaryRedactionCannotSynthesizeConfiguredSecret(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.sandboxSecrets = []string{"TOKEN", "[REDACTED]"}
+
+	err := builder.redactError(errors.New("boundary TOKEN"), nil)
+	for _, forbidden := range builder.sandboxSecrets {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("redactError() synthesized or exposed %q: %v", forbidden, err)
+		}
+	}
+}
+
 func TestRuntimeBuilderCleanupCandidateRedactsJoinedCancellationErrors(t *testing.T) {
 	const (
 		apiKey      = "joined-cancel-api-key-secret"
@@ -845,10 +891,6 @@ func TestRuntimeBuilderBuildRunnerRemovesAndRedactsEveryProfileCredential(t *tes
 		inactiveKey = "credential-bravo-761205"
 		fallbackKey = "credential-charlie-458913"
 	)
-	t.Setenv(activeEnv, activeKey)
-	t.Setenv(inactiveEnv, inactiveKey)
-	t.Setenv("OTTO_API_KEY", fallbackKey)
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer "+activeKey {
 			t.Errorf("Authorization = %q, want active profile credential", got)
@@ -954,10 +996,6 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 		apiKeyEnv       = "RUNTIME_KEY"
 		unrelatedEnvKey = "OTTO_RUNTIME_BUILDER_UNRELATED"
 	)
-	t.Setenv(apiKeyEnv, apiKey)
-	t.Setenv("OTTO_API_KEY", fallbackAPIKey)
-	t.Setenv(unrelatedEnvKey, "keep-me")
-
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if requests.Add(1) != 1 {
@@ -1005,6 +1043,131 @@ func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t 
 	for _, forbidden := range []string{apiKey, fallbackAPIKey} {
 		if strings.Contains(toolResult, forbidden) {
 			t.Fatalf("tool result leaked %q: %q", forbidden, toolResult)
+		}
+	}
+}
+
+func TestRuntimeBuilderUnavailableSandboxRegistersExactlySixFileTools(t *testing.T) {
+	var toolNames []string
+	var systemPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if len(payload.Messages) > 0 {
+			systemPrompt = payload.Messages[0].Content
+		}
+		for _, item := range payload.Tools {
+			toolNames = append(toolNames, item.Function.Name)
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.commandExecutor = nil
+	builder.sandboxEnvironment = nil
+	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonSelfTestFailed}
+	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "no-bash", Workspace: builder.workspacePath, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC()})
+	runner, err := builder.buildRunner(memory, config.Runtime{
+		Provider: "openai-compatible", BaseURL: server.URL, Model: "test-model", APIKey: "provider-value",
+		ShellTimeout: time.Second, MaxOutputBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"read", "grep", "find", "ls", "write", "edit"}
+	if !reflect.DeepEqual(toolNames, want) {
+		t.Fatalf("tool names = %#v, want %#v", toolNames, want)
+	}
+	if strings.Contains(systemPrompt, "bash,") || strings.Contains(systemPrompt, ", bash") || !strings.Contains(systemPrompt, "Bash is unavailable") {
+		t.Fatalf("system prompt = %q, want unavailable Bash and six file tools", systemPrompt)
+	}
+}
+
+func TestRuntimeBuilderReusesOneSandboxExecutorForInitialNewAndResume(t *testing.T) {
+	var providerCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := providerCalls.Add(1)
+		if call%2 == 1 {
+			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":"{\"command\":\"printf reused\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	file := configWithProfiles("default")
+	profile := file.Profiles["default"]
+	profile.BaseURL = server.URL
+	file.Profiles["default"] = profile
+	builder := newRuntimeBuilderForTest(t, file)
+	executor := &recordingSandboxExecutor{execute: func(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+		_, _ = io.WriteString(streams.Stdout, "reused")
+		return sandbox.ExitStatus{Code: 0}, nil
+	}}
+	builder.commandExecutor = executor
+	builder.sandboxEnvironment = []string{"PATH=/usr/bin:/bin", "UNRELATED=preserved"}
+	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}
+
+	runtime, err := config.Resolve(file, builder.environment, config.SessionDefaults{}, config.Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "initial", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()})
+	initialRunner, err := builder.buildRunner(initial, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initialRunner.Run(context.Background(), "initial", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	newReplacement, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newReplacement.Session.Close()
+	if err := newReplacement.Runner.Run(context.Background(), "new", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	resumePath := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{
+		Version: session.CurrentVersion, ID: "resume-executor", Workspace: builder.workspacePath,
+		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+	})
+	resumeReplacement, err := builder.openReplacement(context.Background(), resumePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumeReplacement.Session.Close()
+	if err := resumeReplacement.Runner.Run(context.Background(), "resume", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if executor.calls.Load() != 3 || providerCalls.Load() != 6 {
+		t.Fatalf("executor/provider calls = %d/%d, want 3/6", executor.calls.Load(), providerCalls.Load())
+	}
+	executor.mu.Lock()
+	requests := append([]sandbox.Request(nil), executor.requests...)
+	executor.mu.Unlock()
+	for index, request := range requests {
+		if !reflect.DeepEqual(request.Env, []string{"PATH=/usr/bin:/bin", "UNRELATED=preserved"}) {
+			t.Fatalf("request %d environment = %#v", index, request.Env)
 		}
 	}
 }
@@ -1108,13 +1271,44 @@ func newRuntimeBuilderForTest(t *testing.T, file config.File) runtimeBuilder {
 	if err != nil {
 		t.Fatal(err)
 	}
+	environment := environmentForProfiles(file)
+	hostEntries := []string{"HOME=", "PATH=/usr/bin:/bin", "OTTO_RUNTIME_BUILDER_UNRELATED=keep-me"}
+	names := make([]string, 0, len(environment))
+	for name := range environment {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		hostEntries = append(hostEntries, name+"="+environment[name])
+	}
+	providerNames := sandboxProviderEnvironmentNames(file, "")
+	snapshot, err := sandbox.ResolveEnvironment(sandbox.EnvironmentOptions{HostEntries: hostEntries, ProviderNames: providerNames})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := direct.New()
+	executor, err := sandbox.NewExecutor(driver, sandbox.Policy{Filesystem: sandbox.FilesystemUnconfined, Network: sandbox.NetworkAllow}, workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := executor.Close(); err != nil {
+			t.Errorf("Executor.Close() error = %v", err)
+		}
+	})
 	return runtimeBuilder{
-		config:        file,
-		environment:   environmentForProfiles(file),
-		workspace:     workspace,
-		workspacePath: workspacePath,
-		sessionRoot:   filepath.Join(t.TempDir(), "sessions"),
-		shell:         "/bin/sh",
+		config:             file,
+		environment:        environment,
+		workspace:          workspace,
+		workspacePath:      workspacePath,
+		sessionRoot:        filepath.Join(t.TempDir(), "sessions"),
+		shell:              canonicalSandboxRuntimeShell(t),
+		commandExecutor:    executor,
+		sandboxEnvironment: snapshot.Entries(),
+		sandboxSecrets:     snapshot.RedactionValues(),
+		sandboxInfo: app.SandboxInfo{
+			Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
+		},
 	}
 }
 

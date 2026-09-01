@@ -94,11 +94,16 @@ func DefaultPath() string {
 }
 
 func Load(path string) (File, error) {
+	cfg, err := LoadRequired(path)
+	if err != nil && os.IsNotExist(err) && path == DefaultPath() {
+		return File{}, nil
+	}
+	return cfg, err
+}
+
+func LoadRequired(path string) (File, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) && path == DefaultPath() {
-			return File{}, nil
-		}
 		return File{}, err
 	}
 	defer file.Close()

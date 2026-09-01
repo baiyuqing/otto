@@ -5,54 +5,84 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/safetext"
+	"github.com/baiyuqing/otto/internal/sandbox"
 )
-
-type BashSecurity struct {
-	RemoveEnv    []string
-	RedactValues []string
-}
-
-type bashTool struct {
-	workspace      *Workspace
-	shell          string
-	timeout        time.Duration
-	maxOutputBytes int
-	removeEnv      map[string]struct{}
-	redactValues   []string
-}
 
 type bashArgs struct {
 	Command string `json:"command"`
 }
 
-func NewBashTool(workspace *Workspace, shell string, timeout time.Duration, maxOutputBytes int, securityOptions ...BashSecurity) Tool {
-	tool := &bashTool{
-		workspace:      workspace,
-		shell:          shell,
-		timeout:        timeout,
-		maxOutputBytes: maxOutputBytes,
-		removeEnv:      make(map[string]struct{}),
+var (
+	errInvalidSandboxedBashConfiguration = errors.New("invalid sandboxed bash configuration")
+	errSandboxedBashTimeout              = errors.New("sandboxed bash timeout")
+)
+
+const sandboxExecutionUnavailable = "sandbox execution unavailable"
+
+type bashTool struct {
+	workspace       *Workspace
+	executor        sandbox.CommandExecutor
+	shell           string
+	environment     []string
+	timeout         time.Duration
+	maxOutputBytes  int
+	redactValues    []string
+	redactionMarker string
+	dynamicContent  bool
+
+	deadlineContext func(context.Context, time.Duration, error) (context.Context, context.CancelFunc)
+}
+
+func NewBashTool(
+	workspace *Workspace,
+	executor sandbox.CommandExecutor,
+	shell string,
+	environment []string,
+	timeout time.Duration,
+	maxOutputBytes int,
+	redactionValues []string,
+) (Tool, error) {
+	if !validSandboxedBashWorkspace(workspace) ||
+		isNilSandboxedBashBoundary(executor) ||
+		strings.TrimSpace(shell) == "" ||
+		strings.IndexByte(shell, 0) >= 0 ||
+		environment == nil ||
+		timeout <= 0 ||
+		maxOutputBytes <= 0 {
+		return nil, errInvalidSandboxedBashConfiguration
 	}
-	for _, security := range securityOptions {
-		for _, name := range security.RemoveEnv {
-			if name != "" {
-				tool.removeEnv[name] = struct{}{}
-			}
-		}
-		for _, value := range security.RedactValues {
-			if value != "" {
-				tool.redactValues = append(tool.redactValues, value)
-			}
-		}
+
+	redactValues := canonicalizeSandboxedBashRedactions(redactionValues)
+	redactionMarker, dynamicContent := safetext.DynamicRedactionMarker(redactValues)
+	if !dynamicContent {
+		redactValues = nil
+		redactionMarker = ""
 	}
-	return tool
+
+	return &bashTool{
+		workspace: &Workspace{
+			root:        strings.Clone(workspace.root),
+			lexicalRoot: strings.Clone(workspace.lexicalRoot),
+		},
+		executor:        executor,
+		shell:           strings.Clone(shell),
+		environment:     cloneSandboxedBashStrings(environment),
+		timeout:         timeout,
+		maxOutputBytes:  maxOutputBytes,
+		redactValues:    redactValues,
+		redactionMarker: redactionMarker,
+		dynamicContent:  dynamicContent,
+		deadlineContext: context.WithTimeoutCause,
+	}, nil
 }
 
 func (t *bashTool) Definition() model.ToolDefinition {
@@ -73,148 +103,198 @@ func (t *bashTool) Definition() model.ToolDefinition {
 	}
 }
 
-func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) (result Result) {
-	defer func() {
-		for _, value := range t.redactValues {
-			result.Content = strings.ReplaceAll(result.Content, value, "[REDACTED]")
-		}
-	}()
+func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args bashArgs
 	if err := decodeStrictJSON(arguments, &args, "command"); err != nil {
-		return Result{Content: err.Error(), IsError: true}
+		return t.sandboxedArgumentError(err.Error())
 	}
 	if strings.TrimSpace(args.Command) == "" {
-		return Result{Content: "missing required argument: command", IsError: true}
+		return t.sandboxedArgumentError("missing required argument: command")
 	}
-	if strings.TrimSpace(t.shell) == "" {
-		return Result{Content: "invalid shell configuration", IsError: true}
+	if !t.dynamicContent {
+		return t.executeWithoutDynamicContent(ctx, args.Command)
 	}
-	if err := ctx.Err(); err != nil {
-		return Result{Content: formatBashResult(newCappedByteCollector(t.maxOutputBytes), newCappedByteCollector(t.maxOutputBytes), "status: cancelled"), IsError: false}
+	if isNilSandboxedBashBoundary(ctx) {
+		return sandboxedBashInfrastructureResult()
+	}
+	if ctx.Err() != nil {
+		return t.sandboxedResult(
+			newCappedByteCollector(t.maxOutputBytes),
+			newCappedByteCollector(t.maxOutputBytes),
+			sandbox.ExitStatus{},
+			"status: cancelled",
+		)
 	}
 
 	stdout := newCappedByteCollector(t.maxOutputBytes)
 	stderr := newCappedByteCollector(t.maxOutputBytes)
-	redactedStdout := newExactRedactingWriter(stdout, t.redactValues)
-	redactedStderr := newExactRedactingWriter(stderr, t.redactValues)
-	flushOutput := func() error {
-		if err := redactedStdout.Flush(); err != nil {
-			return err
+	redactedStdout := newExactRedactingWriterWithMarker(stdout, t.redactValues, t.redactionMarker)
+	redactedStderr := newExactRedactingWriterWithMarker(stderr, t.redactValues, t.redactionMarker)
+	normalizedStdout := newUTF8NormalizingWriter(redactedStdout)
+	normalizedStderr := newUTF8NormalizingWriter(redactedStderr)
+
+	commandCtx, cancel := t.deadlineContext(ctx, t.timeout, errSandboxedBashTimeout)
+	if isNilSandboxedBashBoundary(commandCtx) || cancel == nil {
+		if cancel != nil {
+			cancel()
 		}
-		return redactedStderr.Flush()
+		return sandboxedBashInfrastructureResult()
 	}
-	cmd := exec.Command(t.shell, "-lc", args.Command)
-	cmd.Dir = t.workspace.root
-	cmd.Env = filterEnvironment(os.Environ(), t.removeEnv)
-	cmd.Stdout = redactedStdout
-	cmd.Stderr = redactedStderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	status, executionErr := t.executor.Execute(commandCtx, sandbox.Request{
+		Argv: cloneSandboxedBashStrings([]string{t.shell, "-lc", args.Command}),
+		Dir:  t.workspace.root,
+		Env:  cloneSandboxedBashStrings(t.environment),
+	}, sandbox.Streams{Stdout: normalizedStdout, Stderr: normalizedStderr})
 
-	if err := cmd.Start(); err != nil {
-		return Result{Content: fmt.Sprintf("start shell command: %v", err), IsError: true}
+	cancel()
+	commandCause := context.Cause(commandCtx)
+	parentErr := ctx.Err()
+
+	exactContextException := executionErr == context.Canceled || executionErr == context.DeadlineExceeded
+	if executionErr != nil && !exactContextException {
+		return sandboxedBashInfrastructureResult()
+	}
+	if err := normalizedStdout.Flush(); err != nil {
+		return sandboxedBashInfrastructureResult()
+	}
+	if err := normalizedStderr.Flush(); err != nil {
+		return sandboxedBashInfrastructureResult()
+	}
+	if err := redactedStdout.Flush(); err != nil {
+		return sandboxedBashInfrastructureResult()
+	}
+	if err := redactedStderr.Flush(); err != nil {
+		return sandboxedBashInfrastructureResult()
 	}
 
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-
-	var timeoutCh <-chan time.Time
-	var timer *time.Timer
-	if t.timeout > 0 {
-		timer = time.NewTimer(t.timeout)
-		timeoutCh = timer.C
-		defer timer.Stop()
-	}
-
-	select {
-	case err := <-waitCh:
-		if flushErr := flushOutput(); flushErr != nil {
-			return Result{Content: fmt.Sprintf("capture shell output: %v", flushErr), IsError: true}
-		}
-		return t.resultForExit(err, stdout, stderr)
-	case <-ctx.Done():
-		waitErr := t.killAndWait(cmd, waitCh)
-		if waitErr != nil && !isProcessTermination(waitErr) {
-			return Result{Content: fmt.Sprintf("cancel shell command: %v", waitErr), IsError: true}
-		}
-		if flushErr := flushOutput(); flushErr != nil {
-			return Result{Content: fmt.Sprintf("capture shell output: %v", flushErr), IsError: true}
-		}
-		return Result{Content: formatBashResult(stdout, stderr, formatTerminationStatus("status: cancelled", waitErr)), IsError: false}
-	case <-timeoutCh:
-		waitErr := t.killAndWait(cmd, waitCh)
-		if waitErr != nil && !isProcessTermination(waitErr) {
-			return Result{Content: fmt.Sprintf("timeout shell command: %v", waitErr), IsError: true}
-		}
-		if flushErr := flushOutput(); flushErr != nil {
-			return Result{Content: fmt.Sprintf("capture shell output: %v", flushErr), IsError: true}
-		}
-		return Result{Content: formatBashResult(stdout, stderr, formatTerminationStatus(fmt.Sprintf("status: timed out after %s", t.timeout), waitErr)), IsError: false}
+	switch {
+	case parentErr != nil:
+		return t.sandboxedResult(stdout, stderr, status, "status: cancelled")
+	case commandCause == errSandboxedBashTimeout:
+		return t.sandboxedResult(stdout, stderr, status, fmt.Sprintf("status: timed out after %s", t.timeout))
+	case executionErr == context.DeadlineExceeded:
+		return t.sandboxedResult(stdout, stderr, status, fmt.Sprintf("status: timed out after %s", t.timeout))
+	case executionErr == context.Canceled || commandCause != nil && commandCause != context.Canceled:
+		return t.sandboxedResult(stdout, stderr, status, "status: cancelled")
+	default:
+		return t.sandboxedResult(stdout, stderr, status, fmt.Sprintf("exit_code: %d", status.Code))
 	}
 }
 
-func (t *bashTool) killAndWait(cmd *exec.Cmd, waitCh <-chan error) error {
-	killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	waitErr := <-waitCh
-	if killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-		return fmt.Errorf("kill process group: %w", killErr)
+func (t *bashTool) executeWithoutDynamicContent(ctx context.Context, command string) Result {
+	if isNilSandboxedBashBoundary(ctx) || ctx.Err() != nil {
+		return Result{}
 	}
-	return waitErr
+	commandCtx, cancel := t.deadlineContext(ctx, t.timeout, errSandboxedBashTimeout)
+	if isNilSandboxedBashBoundary(commandCtx) || cancel == nil {
+		if cancel != nil {
+			cancel()
+		}
+		return Result{IsError: true}
+	}
+	_, executionErr := t.executor.Execute(commandCtx, sandbox.Request{
+		Argv: cloneSandboxedBashStrings([]string{t.shell, "-lc", command}),
+		Dir:  t.workspace.root,
+		Env:  cloneSandboxedBashStrings(t.environment),
+	}, sandbox.Streams{Stdout: io.Discard, Stderr: io.Discard})
+	cancel()
+	if executionErr != nil && executionErr != context.Canceled && executionErr != context.DeadlineExceeded {
+		return Result{IsError: true}
+	}
+	return Result{}
 }
 
-func (t *bashTool) resultForExit(err error, stdout, stderr *cappedByteCollector) Result {
-	if err == nil {
-		return Result{Content: formatBashResult(stdout, stderr, "exit_code: 0")}
+func (t *bashTool) sandboxedArgumentError(message string) Result {
+	if !t.dynamicContent {
+		return Result{IsError: true}
 	}
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return Result{Content: formatBashResult(stdout, stderr, fmt.Sprintf("exit_code: %d", exitErr.ExitCode()))}
+	redacted, err := redactExactText(message, t.redactValues, t.redactionMarker)
+	if err != nil {
+		return sandboxedBashInfrastructureResult()
 	}
-
-	return Result{Content: fmt.Sprintf("wait for shell command: %v", err), IsError: true}
+	return Result{Content: redacted, IsError: true}
 }
 
-func isProcessTermination(err error) bool {
-	if err == nil {
+func (t *bashTool) sandboxedResult(stdout, stderr *cappedByteCollector, status sandbox.ExitStatus, summary string) Result {
+	if status.Signaled && status.Signal != "" {
+		summary += "; signal: " + status.Signal
+	}
+	formatted := formatBashResult(stdout, stderr, summary)
+	redacted, err := redactExactText(formatted, t.redactValues, t.redactionMarker)
+	if err != nil {
+		return sandboxedBashInfrastructureResult()
+	}
+	return Result{Content: redacted}
+}
+
+func sandboxedBashInfrastructureResult() Result {
+	return Result{Content: sandboxExecutionUnavailable, IsError: true}
+}
+
+func validSandboxedBashWorkspace(workspace *Workspace) bool {
+	if workspace == nil ||
+		workspace.root == "" ||
+		workspace.lexicalRoot == "" ||
+		strings.IndexByte(workspace.root, 0) >= 0 ||
+		strings.IndexByte(workspace.lexicalRoot, 0) >= 0 ||
+		!filepath.IsAbs(workspace.root) ||
+		!filepath.IsAbs(workspace.lexicalRoot) ||
+		filepath.Clean(workspace.root) != workspace.root ||
+		filepath.Clean(workspace.lexicalRoot) != workspace.lexicalRoot {
 		return false
 	}
-	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr)
+	resolvedRoot, err := filepath.EvalSymlinks(workspace.root)
+	if err != nil || resolvedRoot != workspace.root {
+		return false
+	}
+	info, err := os.Stat(resolvedRoot)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	resolvedLexicalRoot, err := filepath.EvalSymlinks(workspace.lexicalRoot)
+	return err == nil && resolvedLexicalRoot == workspace.root
 }
 
-func formatTerminationStatus(status string, err error) string {
-	if signal := terminationSignal(err); signal != "" {
-		return status + "; signal: " + signal
+func isNilSandboxedBashBoundary(value any) bool {
+	if value == nil {
+		return true
 	}
-	return status
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
-func terminationSignal(err error) string {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
-		return ""
+func cloneSandboxedBashStrings(values []string) []string {
+	if values == nil {
+		return nil
 	}
-	ws, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
-	if !ok || !ws.Signaled() {
-		return ""
+	cloned := make([]string, len(values))
+	for i, value := range values {
+		cloned[i] = strings.Clone(value)
 	}
-	return ws.Signal().String()
+	return cloned
 }
 
-func filterEnvironment(environment []string, removed map[string]struct{}) []string {
-	if len(removed) == 0 {
-		return environment
+func canonicalizeSandboxedBashRedactions(values []string) []string {
+	if values == nil {
+		return nil
 	}
-	filtered := make([]string, 0, len(environment))
-	for _, entry := range environment {
-		name, _, _ := strings.Cut(entry, "=")
-		if _, remove := removed[name]; !remove {
-			filtered = append(filtered, entry)
+	canonical := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		for _, form := range safetext.SecretForms(value) {
+			if _, duplicate := seen[form]; duplicate {
+				continue
+			}
+			seen[form] = struct{}{}
+			canonical = append(canonical, strings.Clone(form))
 		}
 	}
-	return filtered
+	return canonical
 }
 
 func formatBashResult(stdout, stderr *cappedByteCollector, status string) string {

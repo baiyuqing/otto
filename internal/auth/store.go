@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,6 +13,22 @@ import (
 // ErrNoCredentials is returned by Load when no credential file exists. Callers
 // use it to prompt the user to run "otto login".
 var ErrNoCredentials = errors.New("no chatgpt credentials; run 'otto login'")
+
+var (
+	ErrCredentialsUnavailable   = errors.New("chatgpt credentials are unavailable; run 'otto login'")
+	ErrCredentialsPersistence   = errors.New("chatgpt credentials could not be saved")
+	ErrAccessTokenRefreshFailed = errors.New("chatgpt access token refresh failed; run 'otto login'")
+	ErrInteractiveUnavailable   = errors.New("chatgpt sign-in is unavailable in this session")
+)
+
+const maxCredentialFileBytes = 1 << 20
+
+func boundedAuthError(kind, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return kind
+}
 
 // Credentials holds the tokens obtained from the ChatGPT OAuth flow. It is
 // persisted as JSON with 0600 permissions and never logged.
@@ -40,16 +57,28 @@ func PathForHome(home string) string {
 // Load reads credentials from path, returning ErrNoCredentials if the file is
 // absent.
 func Load(path string) (Credentials, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if os.IsNotExist(err) {
 			return Credentials{}, ErrNoCredentials
 		}
-		return Credentials{}, fmt.Errorf("read credentials: %w", err)
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxCredentialFileBytes+1))
+	if err != nil {
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
+	}
+	if len(data) > maxCredentialFileBytes {
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, errors.New("credentials exceed maximum size"))
 	}
 	var creds Credentials
 	if err := json.Unmarshal(data, &creds); err != nil {
-		return Credentials{}, fmt.Errorf("parse credentials: %w", err)
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
+	}
+	if !credentialsWithinBounds(creds) {
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, errors.New("credentials exceed maximum size"))
 	}
 	return creds, nil
 }
@@ -57,33 +86,47 @@ func Load(path string) (Credentials, error) {
 // Save writes credentials to path atomically with 0600 permissions, creating
 // parent directories (0700) as needed.
 func (c Credentials) Save(path string) error {
+	if !credentialsWithinBounds(c) {
+		return boundedAuthError(ErrCredentialsPersistence, errors.New("credentials exceed maximum size"))
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create credentials directory: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode credentials: %w", err)
+	if err != nil || len(data) > maxCredentialFileBytes {
+		return boundedAuthError(ErrCredentialsPersistence, errors.New("credentials exceed maximum size"))
 	}
 	tmp, err := os.CreateTemp(dir, ".chatgpt-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp credentials file: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp credentials file: %w", err)
+		_ = tmp.Close()
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp credentials file: %w", err)
+		_ = tmp.Close()
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp credentials file: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("replace credentials file: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	return nil
+}
+
+func credentialsWithinBounds(creds Credentials) bool {
+	total := 0
+	for _, value := range []string{creds.AccessToken, creds.RefreshToken, creds.IDToken, creds.AccountID} {
+		if len(value) > maxCredentialFileBytes-total {
+			return false
+		}
+		total += len(value)
+	}
+	return true
 }

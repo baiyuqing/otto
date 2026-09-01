@@ -2,9 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,3 +86,261 @@ func TestTokenSourceValidTokenSkipsRefresh(t *testing.T) {
 		t.Fatalf("access token = %q, want access-valid", tok.AccessToken)
 	}
 }
+
+func TestTokenSourceRefreshFailureReturnsFixedError(t *testing.T) {
+	const (
+		accessToken  = "access-secret"
+		refreshToken = "refresh-secret"
+		accountID    = "acct-secret"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"` + accessToken + ` ` + refreshToken + ` ` + accountID + `"}`))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), accountID, "chatgpt.json")
+	src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: server.URL}, Credentials{
+		AccessToken: accessToken, RefreshToken: refreshToken, AccountID: accountID, Expiry: time.Now().Add(-time.Minute),
+	}, path)
+	_, err := src.Token()
+	if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+		t.Fatalf("err = %v, want ErrAccessTokenRefreshFailed", err)
+	}
+	for _, secret := range []string{accessToken, refreshToken, accountID, path} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Token() leaked %q: %v", secret, err)
+		}
+	}
+}
+
+func TestTokenSourceSaveFailureReturnsFixedError(t *testing.T) {
+	const (
+		accessToken  = "access-secret"
+		refreshToken = "refresh-secret"
+		accountID    = "acct-secret"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"access-rotated","refresh_token":"refresh-rotated","token_type":"bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	parent := filepath.Join(t.TempDir(), accountID)
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "chatgpt.json")
+	src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: server.URL}, Credentials{
+		AccessToken: accessToken, RefreshToken: refreshToken, AccountID: accountID, Expiry: time.Now().Add(-time.Minute),
+	}, path)
+	_, err := src.Token()
+	if !errors.Is(err, ErrCredentialsPersistence) {
+		t.Fatalf("err = %v, want ErrCredentialsPersistence", err)
+	}
+	for _, secret := range []string{accessToken, refreshToken, accountID, path} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Token() leaked %q: %v", secret, err)
+		}
+	}
+}
+
+func TestTokenSourceRefreshFailureDoesNotInspectArbitraryError(t *testing.T) {
+	hostile := &hostileAuthError{}
+	source := &persistingSource{
+		base:  tokenSourceFunc(func() (*oauth2.Token, error) { return nil, hostile }),
+		ctx:   context.Background(),
+		path:  filepath.Join(t.TempDir(), "chatgpt.json"),
+		creds: Credentials{AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute)},
+	}
+	_, err := source.Token()
+	if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+		t.Fatalf("err = %v, want ErrAccessTokenRefreshFailed", err)
+	}
+	if hostile.calls() != 0 {
+		t.Fatalf("hostile auth error methods called %d times", hostile.calls())
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("errors.Unwrap(err) = %#v, want nil", errors.Unwrap(err))
+	}
+}
+
+func TestTokenSourceRejectsOversizedRotatedCredentialsWithoutPersisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chatgpt.json")
+	source := &persistingSource{
+		base: tokenSourceFunc(func() (*oauth2.Token, error) {
+			return &oauth2.Token{AccessToken: strings.Repeat("x", maxCredentialFileBytes+1), RefreshToken: "refresh-new", Expiry: time.Now().Add(time.Hour)}, nil
+		}),
+		ctx:  context.Background(),
+		path: path,
+		creds: Credentials{
+			AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+		},
+	}
+	_, err := source.Token()
+	if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+		t.Fatalf("err = %v, want ErrAccessTokenRefreshFailed", err)
+	}
+	if source.creds.AccessToken != "access-old" || source.creds.RefreshToken != "refresh-old" {
+		t.Fatalf("oversized refresh mutated retained credentials: %+v", source.creds)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("oversized refresh persisted credential file: %v", statErr)
+	}
+}
+
+func TestTokenSourcePreservesContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	src := newTokenSource(ctx, oauth2.Endpoint{TokenURL: "http://127.0.0.1:1"}, Credentials{
+		AccessToken: "access", RefreshToken: "refresh", Expiry: time.Now().Add(-time.Minute),
+	}, filepath.Join(t.TempDir(), "chatgpt.json"))
+	_, err := src.Token()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestTokenSourceRefreshBlocksAllRedirects(t *testing.T) {
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var sourceCalls atomic.Int32
+			var targetCalls atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetCalls.Add(1)
+				http.Error(w, "redirect target must not be reached", http.StatusInternalServerError)
+			}))
+			defer target.Close()
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sourceCalls.Add(1)
+				http.Redirect(w, r, target.URL, status)
+			}))
+			defer source.Close()
+
+			src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: source.URL}, Credentials{
+				AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+			}, filepath.Join(t.TempDir(), "chatgpt.json"))
+			_, err := src.Token()
+			if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+				t.Fatalf("Token() error = %v, want ErrAccessTokenRefreshFailed", err)
+			}
+			if sourceCalls.Load() == 0 || targetCalls.Load() != 0 {
+				t.Fatalf("source/target calls = %d/%d, want >0/0", sourceCalls.Load(), targetCalls.Load())
+			}
+		})
+	}
+}
+
+func TestTokenSourceTokenContextUsesTurnCancellation(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce atomic.Int32
+	original := oauthHTTPClientFactory
+	oauthHTTPClientFactory = func() *http.Client {
+		return &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if startedOnce.CompareAndSwap(0, 1) {
+				close(started)
+			}
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})}
+	}
+	defer func() { oauthHTTPClientFactory = original }()
+
+	src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: "https://auth.example/token"}, Credentials{
+		AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+	}, filepath.Join(t.TempDir(), "chatgpt.json"))
+	contextual, ok := src.(interface {
+		TokenContext(context.Context) (*oauth2.Token, error)
+	})
+	if !ok {
+		t.Fatal("token source does not implement TokenContext")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := contextual.TokenContext(ctx)
+		done <- err
+	}()
+
+	<-started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("TokenContext() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestTokenSourceTokenContextUsesBaseCancellation(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce atomic.Int32
+	original := oauthHTTPClientFactory
+	oauthHTTPClientFactory = func() *http.Client {
+		return &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if startedOnce.CompareAndSwap(0, 1) {
+				close(started)
+			}
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})}
+	}
+	defer func() { oauthHTTPClientFactory = original }()
+
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	src := newTokenSource(baseCtx, oauth2.Endpoint{TokenURL: "https://auth.example/token"}, Credentials{
+		AccessToken: "access-old", RefreshToken: "refresh-old", AccountID: "acct-1", Expiry: time.Now().Add(-time.Minute),
+	}, filepath.Join(t.TempDir(), "chatgpt.json"))
+	contextual, ok := src.(interface {
+		TokenContext(context.Context) (*oauth2.Token, error)
+	})
+	if !ok {
+		t.Fatal("token source does not implement TokenContext")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := contextual.TokenContext(context.Background())
+		done <- err
+	}()
+
+	<-started
+	cancelBase()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("TokenContext() error = %v, want context.Canceled", err)
+	}
+}
+
+type tokenSourceFunc func() (*oauth2.Token, error)
+
+func (f tokenSourceFunc) Token() (*oauth2.Token, error) { return f() }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type hostileAuthError struct{ callsCount atomic.Int32 }
+
+func (e *hostileAuthError) Error() string {
+	e.callsCount.Add(1)
+	return "hostile auth error"
+}
+
+func (e *hostileAuthError) Is(error) bool {
+	e.callsCount.Add(1)
+	return false
+}
+
+func (e *hostileAuthError) Unwrap() error {
+	e.callsCount.Add(1)
+	return nil
+}
+
+func (e *hostileAuthError) calls() int { return int(e.callsCount.Load()) }

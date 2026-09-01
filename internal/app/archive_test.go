@@ -169,9 +169,10 @@ func TestArchiveCurrentSessionArchiveFailureRetainsCurrentAndClosesCandidate(t *
 	current := &fakeSession{header: testHeader("initial"), path: "/sessions/initial.jsonl"}
 	candidate := &fakeSession{header: testHeader("next")}
 	candidate.onClose = func() { closeCalls++ }
+	runner := &archiveClosableRunner{}
 	controller, err := New(current, func() (session.Session, error) {
 		return candidate, nil
-	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
+	}, func(session.Session) Runner { return runner }, WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
 		return session.ArchiveResult{}, errors.New("archive failed")
 	}))
 	if err != nil {
@@ -185,6 +186,9 @@ func TestArchiveCurrentSessionArchiveFailureRetainsCurrentAndClosesCandidate(t *
 	}
 	if closeCalls != 1 {
 		t.Fatalf("candidate close calls = %d, want 1", closeCalls)
+	}
+	if runner.closeCalls != 1 {
+		t.Fatalf("candidate runner close calls = %d, want 1", runner.closeCalls)
 	}
 	if current.closed {
 		t.Fatal("current session was closed despite archive failure")
@@ -209,4 +213,17 @@ func TestArchiveCurrentSessionRequiresArchiver(t *testing.T) {
 	if _, err := controller.ArchiveCurrentSession(context.Background()); !errors.Is(err, ErrPersistenceDisabled) {
 		t.Fatalf("error = %v, want ErrPersistenceDisabled", err)
 	}
+}
+
+type archiveClosableRunner struct{ closeCalls int }
+
+func (*archiveClosableRunner) Run(context.Context, string, func(agent.Event)) error { return nil }
+
+func (*archiveClosableRunner) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{}, nil
+}
+
+func (r *archiveClosableRunner) Close() error {
+	r.closeCalls++
+	return nil
 }

@@ -23,6 +23,8 @@ type callbackResult struct {
 	err  error
 }
 
+var errAuthorizationCodeExchangeFailed = errors.New("chatgpt authorization code exchange failed")
+
 func login(ctx context.Context, endpoint oauth2.Endpoint, open func(url string) error) (Credentials, error) {
 	listener, port, err := listenLoopback(loopbackPorts)
 	if err != nil {
@@ -71,9 +73,16 @@ func login(ctx context.Context, endpoint oauth2.Endpoint, open func(url string) 
 		code = res.code
 	}
 
-	token, err := config.Exchange(ctx, code, oauth2.VerifierOption(verifier))
+	exchangeCtx := oauthHTTPContext(ctx)
+	token, err := config.Exchange(exchangeCtx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
-		return Credentials{}, fmt.Errorf("exchange authorization code: %w", err)
+		if ctxErr := exchangeCtx.Err(); ctxErr != nil {
+			return Credentials{}, ctxErr
+		}
+		return Credentials{}, errAuthorizationCodeExchangeFailed
+	}
+	if ctxErr := exchangeCtx.Err(); ctxErr != nil {
+		return Credentials{}, ctxErr
 	}
 	idToken, _ := token.Extra("id_token").(string)
 	if idToken == "" {

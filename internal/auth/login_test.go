@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -105,5 +107,60 @@ func TestLoginRejectsStateMismatch(t *testing.T) {
 
 	if _, err := login(context.Background(), endpoint, open); err == nil {
 		t.Fatal("expected error on state mismatch")
+	}
+}
+
+func TestLoginExchangeBlocksAllRedirects(t *testing.T) {
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			restore := loopbackPorts
+			loopbackPorts = []int{0}
+			defer func() { loopbackPorts = restore }()
+
+			var sourceCalls atomic.Int32
+			var targetCalls atomic.Int32
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetCalls.Add(1)
+				http.Error(w, "redirect target must not be reached", http.StatusInternalServerError)
+			}))
+			defer target.Close()
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sourceCalls.Add(1)
+				http.Redirect(w, r, target.URL, status)
+			}))
+			defer source.Close()
+
+			endpoint := oauth2.Endpoint{AuthURL: "https://auth.example/authorize", TokenURL: source.URL}
+			open := func(rawAuthURL string) error {
+				parsed, err := url.Parse(rawAuthURL)
+				if err != nil {
+					return err
+				}
+				redirect := parsed.Query().Get("redirect_uri")
+				state := parsed.Query().Get("state")
+				go func() {
+					resp, err := http.Get(fmt.Sprintf("%s?code=the-code&state=%s", redirect, url.QueryEscape(state)))
+					if err == nil {
+						resp.Body.Close()
+					}
+				}()
+				return nil
+			}
+
+			_, err := login(context.Background(), endpoint, open)
+			if !errors.Is(err, errAuthorizationCodeExchangeFailed) {
+				t.Fatalf("login() error = %v, want errAuthorizationCodeExchangeFailed", err)
+			}
+			if sourceCalls.Load() == 0 || targetCalls.Load() != 0 {
+				t.Fatalf("source/target calls = %d/%d, want >0/0", sourceCalls.Load(), targetCalls.Load())
+			}
+		})
 	}
 }

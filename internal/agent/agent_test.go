@@ -10,9 +10,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/direct"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
 )
@@ -493,6 +496,438 @@ func TestRunPreservesProviderCancellation(t *testing.T) {
 	}
 }
 
+func TestRunBashCapCannotSynthesizeSecretAcrossAgentProviderAndPiSession(t *testing.T) {
+	workspaceRoot := t.TempDir()
+	workspace, err := tool.NewWorkspace(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var printableASCII strings.Builder
+	for value := byte(0x20); value <= 0x7e; value++ {
+		printableASCII.WriteByte(value)
+	}
+	secrets := []string{"TOKEN", "prefix�", printableASCII.String()}
+	executor := &fixedOutputExecutor{stdout: []byte("prefixTOKEN")}
+	bash, err := tool.NewBashTool(
+		workspace,
+		executor,
+		"/bin/sh",
+		[]string{},
+		time.Second,
+		len("prefix")+1,
+		secrets,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := tool.NewRegistry(bash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "utf8-session", Workspace: workspaceRoot, Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"ignored"}`)}}}, FinishReason: model.FinishToolCalls}},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactor(secrets))
+	var events []Event
+	if err := runner.Run(context.Background(), "check", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundaries := map[string]any{
+		"events":             events,
+		"provider follow-up": fakeProvider.requests[1],
+		"session messages":   store.Messages(),
+	}
+	for name, value := range boundaries {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if !utf8.Valid(encoded) || strings.Contains(string(encoded), "prefix�") {
+			t.Fatalf("%s synthesized a configured secret: %s", name, encoded)
+		}
+	}
+	if !utf8.Valid(persisted) || strings.Contains(string(persisted), "prefix�") || strings.Contains(string(persisted), `prefix\ufffd`) {
+		t.Fatalf("Pi JSONL synthesized a configured secret: %q", persisted)
+	}
+}
+
+func TestRunCanonicalizesInvalidConfiguredSecretsAcrossEventsFollowUpErrorsAndPi(t *testing.T) {
+	invalidFF := string(append([]byte("decoded-prefix"), 0xff))
+	invalidOverlong := string(append([]byte("overlong-prefix"), 0xc0, 0xaf))
+	canonical := []string{"decoded-prefix�", "overlong-prefix��"}
+
+	streamBytes := append([]byte("stream "), []byte(invalidFF)...)
+	streamBytes = append(streamBytes, []byte(" | ")...)
+	streamBytes = append(streamBytes, []byte(invalidOverlong)...)
+	stream := make([]provider.StreamEvent, 0, len(streamBytes))
+	for _, value := range streamBytes {
+		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string([]byte{value})})
+	}
+
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "tool " + strings.Join(canonical, " | ")}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: stream,
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "assistant " + strings.Join(canonical, " | ")},
+					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{err: errors.New("provider " + strings.Join(canonical, " | "))},
+	}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "invalid-configured-secret", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactor([]string{invalidFF, invalidOverlong}))
+	var events []Event
+	runErr := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) })
+	if runErr == nil {
+		_ = store.Close()
+		t.Fatal("Run() unexpectedly succeeded")
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want follow-up request", len(fakeProvider.requests))
+	}
+
+	boundaries := map[string]any{
+		"events":             events,
+		"provider follow-up": fakeProvider.requests[1],
+		"messages":           messages,
+		"error":              runErr.Error(),
+	}
+	for name, value := range boundaries {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if !utf8.Valid(encoded) {
+			t.Fatalf("%s returned invalid UTF-8: %q", name, encoded)
+		}
+		for _, secret := range canonical {
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("%s retained canonical configured value %q: %s", name, secret, encoded)
+			}
+		}
+	}
+	for _, secret := range canonical {
+		if strings.Contains(string(persisted), secret) || strings.Contains(string(persisted), strings.ReplaceAll(secret, "�", `\ufffd`)) {
+			t.Fatalf("Pi JSONL retained canonical configured value %q: %q", secret, persisted)
+		}
+	}
+}
+
+func TestRunExpandsJSONStringEscapeSecretsAcrossEventsFollowUpAndRawPi(t *testing.T) {
+	tests := []struct {
+		raw     string
+		decoded string
+	}{
+		{raw: `less\u003cthan`, decoded: "less<than"},
+		{raw: `\\u003c`, decoded: `\u003c`},
+		{raw: `greater\u003Ethan`, decoded: "greater>than"},
+		{raw: `amp\u0026ersand`, decoded: "amp&ersand"},
+		{raw: `quote\"value`, decoded: `quote"value`},
+		{raw: `back\\slash`, decoded: `back\slash`},
+		{raw: `slash\/value`, decoded: "slash/value"},
+		{raw: `line\nbreak`, decoded: "line\nbreak"},
+		{raw: `separator\u2028value`, decoded: "separator\u2028value"},
+		{raw: `paragraph\u2029value`, decoded: "paragraph\u2029value"},
+	}
+	rawSecrets := make([]string, len(tests))
+	decodedSecrets := make([]string, len(tests))
+	for index, test := range tests {
+		rawSecrets[index] = test.raw
+		decodedSecrets[index] = test.decoded
+	}
+	dynamic := strings.Join(decodedSecrets, " | ")
+
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "tool " + dynamic}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "event " + dynamic}},
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "assistant " + dynamic},
+					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "json-escape-session", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactor(rawSecrets))
+	var events []Event
+	if err := runner.Run(context.Background(), "user "+dynamic, func(event Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want follow-up", len(fakeProvider.requests))
+	}
+
+	for name, value := range map[string]any{
+		"events":             events,
+		"provider first":     fakeProvider.requests[0],
+		"provider follow-up": fakeProvider.requests[1],
+		"messages":           messages,
+	} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		assertNoJSONStringEscapeSecrets(t, name, string(encoded), tests)
+	}
+	assertNoJSONStringEscapeSecrets(t, "raw Pi JSONL", string(persisted), tests)
+}
+
+func assertNoJSONStringEscapeSecrets(t *testing.T, boundary, content string, secrets []struct {
+	raw     string
+	decoded string
+}) {
+	t.Helper()
+	for _, secret := range secrets {
+		if strings.Contains(content, secret.raw) || strings.Contains(content, secret.decoded) {
+			t.Fatalf("%s retained raw/decoded JSON escape secret (%q, %q): %q", boundary, secret.raw, secret.decoded, content)
+		}
+	}
+}
+
+func TestRunUnrepresentableRedactorCallsNoProviderToolOrSessionBoundary(t *testing.T) {
+	const (
+		deleted     = "<DELETE-ME>"
+		synthesized = "leftright"
+	)
+	allRunes := allNonControlUnicodeRunes(t)
+	longPreferred := strings.Repeat(redactionMarker, 1<<20)
+	redactor := NewRedactor([]string{allRunes, longPreferred, deleted, synthesized})
+	if redactor.marker != "" || redactor.AllowsDynamicContent() {
+		t.Fatalf("exhaustive marker fallback = marker %q allows-dynamic %t, want suppression", redactor.marker, redactor.AllowsDynamicContent())
+	}
+
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "left" + deleted + "right"}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: []provider.StreamEvent{
+				{Type: provider.StreamTextDelta, Text: "left"},
+				{Type: provider.StreamTextDelta, Text: deleted},
+				{Type: provider.StreamTextDelta, Text: "right"},
+			},
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "left" + deleted + "right"},
+					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "deletion-session", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, redactor)
+	var events []Event
+	if err := runner.Run(context.Background(), "inspect deletion", func(event Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 0 || len(recorder.calls) != 0 || len(messages) != 0 {
+		t.Fatalf("suppressed run crossed a dynamic boundary: requests=%d tools=%d messages=%#v", len(fakeProvider.requests), len(recorder.calls), messages)
+	}
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentFinished {
+		t.Fatalf("suppressed lifecycle events = %#v", events)
+	}
+	encodedEvents, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"events": string(encodedEvents), "Pi JSONL": string(persisted)} {
+		if len(content) > 64<<10 {
+			t.Fatalf("%s expanded to %d bytes in suppression mode", name, len(content))
+		}
+		for _, credential := range []string{deleted, synthesized, longPreferred} {
+			if strings.Contains(content, credential) {
+				t.Fatalf("%s retained configured credential %q", name, credential)
+			}
+		}
+	}
+}
+
+func TestRunIncompleteRedactionSnapshotSuppressesRequestsEventsAndPi(t *testing.T) {
+	const omitted = "omitted-513th-environment-value"
+	recorder := &recordingTool{name: "echo"}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{
+		stream: []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "provider " + omitted}},
+		response: provider.Response{
+			Message: model.Message{ID: "response-" + omitted, Role: model.RoleAssistant, Blocks: []model.Block{
+				{Type: model.BlockText, Text: "provider " + omitted},
+				{Type: model.BlockToolCall, ToolName: "echo", ToolCallID: "call-" + omitted, Arguments: json.RawMessage(`{"value":"` + omitted + `"}`)},
+			}},
+			FinishReason: model.FinishToolCalls,
+			Usage:        model.Usage{InputTokens: 424_242, OutputTokens: 313_131, CachedInputTokens: 212_121},
+		},
+	}}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "incomplete-redaction", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "safe", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{
+		Model: omitted, SystemPrompt: "safe fixed system prompt", Thinking: omitted,
+		Now: fixedClock, NewID: fixedIDs(),
+	}, NewRedactorWithCompleteness(nil, false))
+	var events []Event
+	if err := runner.Run(context.Background(), "user "+omitted, func(event Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 0 {
+		t.Fatalf("provider requests = %d, want 0", len(fakeProvider.requests))
+	}
+	if len(messages) != 0 || len(recorder.calls) != 0 {
+		t.Fatalf("incomplete redaction mutated session or executed tool: messages=%#v calls=%#v", messages, recorder.calls)
+	}
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentFinished {
+		t.Fatalf("events = %#v, want fixed lifecycle only", events)
+	}
+	for name, value := range map[string]any{
+		"events":   events,
+		"messages": messages,
+	} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if strings.Contains(string(encoded), omitted) {
+			t.Fatalf("%s retained omitted environment value: %s", name, encoded)
+		}
+	}
+	if strings.Contains(string(persisted), omitted) {
+		t.Fatalf("Pi JSONL retained omitted environment value: %q", persisted)
+	}
+}
+
+func TestRunIncompleteRedactionPreservesCancellationWithoutProviderOrSessionMutation(t *testing.T) {
+	memory := session.NewMemory(testHeader(t))
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{response: provider.Response{
+		Message: model.Message{Role: model.RoleAssistant}, FinishReason: model.FinishStop,
+	}}}}
+	runner := New(fakeProvider, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactorWithCompleteness(nil, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var events []Event
+	err := runner.Run(ctx, "safe prompt", func(event Event) { events = append(events, event) })
+	if !errors.Is(err, context.Canceled) || len(fakeProvider.requests) != 0 || len(memory.Messages()) != 0 {
+		t.Fatalf("Run() error=%v provider calls=%d messages=%#v", err, len(fakeProvider.requests), memory.Messages())
+	}
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentError {
+		t.Fatalf("events=%#v", events)
+	}
+}
+
+func TestRunIncompleteRedactionDoesNotObserveProviderError(t *testing.T) {
+	const omitted = "omitted-provider-error-value"
+	memory := session.NewMemory(testHeader(t))
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{err: errors.New("provider exposed " + omitted)}}}
+	runner := New(fakeProvider, nil, memory, Options{Model: omitted, Now: fixedClock, NewID: fixedIDs()}, NewRedactorWithCompleteness(nil, false))
+
+	var events []Event
+	err := runner.Run(context.Background(), "user "+omitted, func(event Event) { events = append(events, event) })
+	if err != nil || len(fakeProvider.requests) != 0 || len(memory.Messages()) != 0 {
+		t.Fatalf("Run() error=%v provider calls=%d messages=%#v", err, len(fakeProvider.requests), memory.Messages())
+	}
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentFinished {
+		t.Fatalf("events=%#v", events)
+	}
+	encoded, marshalErr := json.Marshal(events)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if strings.Contains(string(encoded), omitted) {
+		t.Fatalf("events retained omitted value: %s", encoded)
+	}
+}
+
 func TestRunPersistsPlaceholderButShowsFullContentToProviderWithinTheSameTurn(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}, FinishReason: model.FinishToolCalls}},
@@ -579,7 +1014,32 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := tool.NewRegistry(tool.NewBashTool(workspace, "/bin/sh", time.Second, 51200, tool.BashSecurity{RedactValues: []string{credential}}))
+	driver := direct.New()
+	executor, err := sandbox.NewExecutor(driver, sandbox.Policy{
+		Filesystem: sandbox.FilesystemUnconfined,
+		Network:    sandbox.NetworkAllow,
+	}, workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := executor.Close(); err != nil {
+			t.Errorf("Executor.Close() error = %v", err)
+		}
+	})
+	bash, err := tool.NewBashTool(
+		workspace,
+		executor,
+		"/bin/sh",
+		[]string{"HOME=", "PATH=/usr/bin:/bin", "LC_ALL=C"},
+		time.Second,
+		51200,
+		[]string{credential},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := tool.NewRegistry(bash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +1078,9 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 			return string(encoded)
 		}(),
 	} {
-		if strings.Contains(content, credential) || !strings.Contains(content, "[REDACTED]") {
+		hasMarker := strings.Contains(content, "[REDACTED]") || strings.Contains(content, "stdout:\n"+redactionMarker+"\n") ||
+			strings.Contains(content, `stdout:\n`+redactionMarker+`\n`)
+		if strings.Contains(content, credential) || !hasMarker {
 			t.Fatalf("%s did not safely redact credential: %q", location, content)
 		}
 	}
@@ -635,7 +1097,7 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, credential, "prefix-"+credential, "Bearer "+credential, credential))
+	arguments := json.RawMessage(fmt.Sprintf(`{%q:"echo","value":%q,"nested":{%q:%q},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first",%q:"attacker-redacted"}}`, credential, credential, "prefix-"+credential, "Bearer "+credential, credential, redactionMarker))
 	stream := []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "text "}}
 	for _, character := range credential {
 		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string(character)})
@@ -897,6 +1359,21 @@ func TestRunEmitsErrorForEmptyUserText(t *testing.T) {
 	if got := eventTypes(events); len(got) != 1 || got[0] != EventAgentError {
 		t.Fatalf("events = %v, want only error", got)
 	}
+}
+
+type fixedOutputExecutor struct {
+	stdout []byte
+	stderr []byte
+}
+
+func (e *fixedOutputExecutor) Execute(_ context.Context, _ sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+	if _, err := streams.Stdout.Write(e.stdout); err != nil {
+		return sandbox.ExitStatus{}, err
+	}
+	if _, err := streams.Stderr.Write(e.stderr); err != nil {
+		return sandbox.ExitStatus{}, err
+	}
+	return sandbox.ExitStatus{Code: 0}, nil
 }
 
 type providerScript struct {

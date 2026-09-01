@@ -48,11 +48,98 @@ type DefaultProfileSetter func(context.Context, string) error
 
 type ArchiveFactory func(context.Context, string) (session.ArchiveResult, error)
 
+type SandboxMode string
+
+type SandboxNetwork string
+
+type SandboxReason string
+
+const (
+	SandboxSeatbelt    SandboxMode = "seatbelt"
+	SandboxOff         SandboxMode = "off"
+	SandboxUnavailable SandboxMode = "unavailable"
+
+	SandboxNetworkAllowed    SandboxNetwork = "allowed"
+	SandboxNetworkDenied     SandboxNetwork = "denied"
+	SandboxNetworkUnconfined SandboxNetwork = "unconfined"
+
+	SandboxReasonNone                SandboxReason = ""
+	SandboxReasonUnsupportedPlatform SandboxReason = "unsupported-platform"
+	SandboxReasonSeatbeltMissing     SandboxReason = "seatbelt-missing"
+	SandboxReasonSelfTestFailed      SandboxReason = "self-test-failed"
+	SandboxReasonRuntimeFailure      SandboxReason = "runtime-failure"
+	SandboxReasonInvalidShell        SandboxReason = "invalid-shell"
+	SandboxReasonEnvironmentRejected SandboxReason = "environment-rejected"
+	SandboxReasonPolicyUnsupported   SandboxReason = "policy-unsupported"
+)
+
+type SandboxInfo struct {
+	Mode          SandboxMode
+	Network       SandboxNetwork
+	BashAvailable bool
+	Reason        SandboxReason
+}
+
+func (s SandboxInfo) Summary() string {
+	switch {
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkAllowed && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "seatbelt · workspace-write · network allowed"
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkDenied && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "seatbelt · workspace-write · network denied"
+	case s.Mode == SandboxOff && s.Network == SandboxNetworkUnconfined && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "sandbox off · WARNING: bash is unsandboxed"
+	default:
+		return "bash disabled · sandbox unavailable"
+	}
+}
+
+func (s SandboxInfo) Badge() string {
+	switch {
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkAllowed && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "sb"
+	case s.Mode == SandboxSeatbelt && s.Network == SandboxNetworkDenied && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "sb"
+	case s.Mode == SandboxOff && s.Network == SandboxNetworkUnconfined && s.BashAvailable && s.Reason == SandboxReasonNone:
+		return "unsafe"
+	default:
+		return "no-bash"
+	}
+}
+
+func (s SandboxInfo) ReasonCode() string {
+	if s.Mode != SandboxUnavailable {
+		return ""
+	}
+	if s.BashAvailable {
+		return "runtime-failure"
+	}
+
+	switch s.Reason {
+	case SandboxReasonUnsupportedPlatform:
+		return "unsupported-platform"
+	case SandboxReasonSeatbeltMissing:
+		return "seatbelt-missing"
+	case SandboxReasonSelfTestFailed:
+		return "self-test-failed"
+	case SandboxReasonRuntimeFailure:
+		return "runtime-failure"
+	case SandboxReasonInvalidShell:
+		return "invalid-shell"
+	case SandboxReasonEnvironmentRejected:
+		return "environment-rejected"
+	case SandboxReasonPolicyUnsupported:
+		return "policy-unsupported"
+	default:
+		return "runtime-failure"
+	}
+}
+
 type RuntimeInfo struct {
 	Provider      string
 	Profile       string
 	Model         string
 	ContextWindow int
+	Sandbox       SandboxInfo
 }
 
 type SessionReplacement struct {
@@ -73,6 +160,7 @@ func WithRuntimeInfo(info RuntimeInfo) Option {
 	return func(controller *Controller) {
 		copy := info
 		controller.runtimeInfo = &copy
+		controller.sandboxInfo = info.Sandbox
 	}
 }
 
@@ -116,6 +204,14 @@ func WithMemory(manager memory.Manager, userScope, workspaceScope memory.Scope) 
 	}
 }
 
+// WithDynamicContent controls whether session-derived metadata, history,
+// browsing, and replacement operations may cross the frontend boundary.
+func WithDynamicContent(enabled bool) Option {
+	return func(controller *Controller) {
+		controller.dynamicContent = enabled
+	}
+}
+
 type Info struct {
 	SessionID                 string
 	SessionPath               string
@@ -129,6 +225,7 @@ type Info struct {
 	ContextInputTokens        int
 	ContextInputTokensPresent bool
 	ContextInputTokensPending bool
+	Sandbox                   SandboxInfo
 }
 
 type Backend interface {
@@ -239,6 +336,8 @@ type Controller struct {
 	reentrantCloseOwner  uint64
 	ownerIDSource        func() uint64
 	runtimeInfo          *RuntimeInfo
+	sandboxInfo          SandboxInfo
+	dynamicContent       bool
 }
 
 func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
@@ -266,6 +365,7 @@ func New(initial session.Session, create SessionFactory, build RunnerFactory, op
 		create:           create,
 		build:            build,
 		ownerIDSource:    currentGoroutineID,
+		dynamicContent:   true,
 	}
 	for _, option := range options {
 		if option != nil {
@@ -373,22 +473,28 @@ func (c *Controller) NewSession() error {
 		c.mu.Unlock()
 		return ErrClosed
 	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ErrPersistenceDisabled
+	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
 		return ErrPromptActive
 	}
 	state := c.beginReplacementLocked(owner)
 	current := c.current
+	sandboxInfo := c.sandboxInfo
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
+		copy.Sandbox = sandboxInfo
 		runtimeInfo = &copy
 	}
 	c.mu.Unlock()
 
 	if runtimeInfo == nil {
 		header := current.Header()
-		runtimeInfo = &RuntimeInfo{Provider: header.Provider, Profile: header.Profile, Model: header.Model}
+		runtimeInfo = &RuntimeInfo{Provider: header.Provider, Profile: header.Profile, Model: header.Model, Sandbox: sandboxInfo}
 	}
 
 	_, err := c.runReplacement(context.Background(), state, func() (SessionReplacement, error) {
@@ -422,16 +528,22 @@ func (c *Controller) buildReplacement(ctx context.Context, runtimeInfo *RuntimeI
 			Profile:       header.Profile,
 			Model:         header.Model,
 			ContextWindow: runtimeInfo.ContextWindow,
+			Sandbox:       runtimeInfo.Sandbox,
 		},
 	}, nil
 }
 
 func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return session.ListResult{}, ErrClosed
+	}
 	list := c.listSessions
 	currentPath := c.currentPath
+	dynamicContent := c.dynamicContent
 	c.mu.Unlock()
-	if list == nil {
+	if !dynamicContent || list == nil {
 		return session.ListResult{}, ErrPersistenceDisabled
 	}
 
@@ -447,7 +559,6 @@ func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListR
 }
 
 func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResult, error) {
-	requestedPath := canonicalSessionPath(path)
 	owner := c.ownerID()
 
 	c.mu.Lock()
@@ -455,10 +566,15 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 		c.mu.Unlock()
 		return ResumeResult{}, ErrClosed
 	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrPersistenceDisabled
+	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
 		return ResumeResult{}, ErrPromptActive
 	}
+	requestedPath := canonicalSessionPath(path)
 	factory := c.resumeSession
 	if factory == nil {
 		c.mu.Unlock()
@@ -481,6 +597,9 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 func (c *Controller) Profiles() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed || !c.dynamicContent {
+		return nil
+	}
 	return append([]string(nil), c.profiles...)
 }
 
@@ -489,6 +608,10 @@ func (c *Controller) SetDefaultProfile(ctx context.Context, profile string) erro
 	if c.closed {
 		c.mu.Unlock()
 		return ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ErrProfileSwitchUnavailable
 	}
 	setter := c.setDefaultProfile
 	c.mu.Unlock()
@@ -509,6 +632,10 @@ func (c *Controller) SwitchProfile(ctx context.Context, profile string) (ResumeR
 	if c.closed {
 		c.mu.Unlock()
 		return ResumeResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrProfileSwitchUnavailable
 	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
@@ -537,6 +664,10 @@ func (c *Controller) ArchiveSession(ctx context.Context, path string) (session.A
 	if c.closed {
 		c.mu.Unlock()
 		return session.ArchiveResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
 	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
@@ -570,6 +701,10 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 	if c.closed {
 		c.mu.Unlock()
 		return session.ArchiveResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
 	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
@@ -607,7 +742,7 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 		}
 		archive, archiveErr := factory(ctx, currentPath)
 		if archiveErr != nil {
-			return SessionReplacement{Session: replacement.Session}, archiveErr
+			return replacement, archiveErr
 		}
 		archiveResult = archive
 		return replacement, nil
@@ -624,6 +759,14 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 // replacement state machine.
 func (c *Controller) SearchMemory(ctx context.Context, request memory.SearchRequest) (memory.SearchResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.SearchResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.SearchResult{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -634,6 +777,14 @@ func (c *Controller) SearchMemory(ctx context.Context, request memory.SearchRequ
 
 func (c *Controller) RememberMemory(ctx context.Context, request memory.RememberRequest) (memory.Record, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.Record{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.Record{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -644,6 +795,14 @@ func (c *Controller) RememberMemory(ctx context.Context, request memory.Remember
 
 func (c *Controller) ForgetMemory(ctx context.Context, request memory.ForgetRequest) (memory.ForgetResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.ForgetResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.ForgetResult{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -654,6 +813,14 @@ func (c *Controller) ForgetMemory(ctx context.Context, request memory.ForgetRequ
 
 func (c *Controller) ReviewMemoryCandidate(ctx context.Context, request memory.ReviewRequest) (memory.ReviewResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.ReviewResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.ReviewResult{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -667,7 +834,7 @@ func (c *Controller) ReviewMemoryCandidate(ctx context.Context, request memory.R
 func (c *Controller) MemoryScopes() (memory.Scope, memory.Scope, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.memoryManager == nil {
+	if c.closed || !c.dynamicContent || c.memoryManager == nil {
 		return memory.Scope{}, memory.Scope{}, false
 	}
 	return c.memoryUserScope, c.memoryWorkspaceScope, true
@@ -675,6 +842,14 @@ func (c *Controller) MemoryScopes() (memory.Scope, memory.Scope, bool) {
 
 func (c *Controller) GetMemory(ctx context.Context, ref memory.RecordRef) (memory.Record, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.Record{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.Record{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -782,7 +957,7 @@ func (c *Controller) runReplacement(
 		closeDone, completeClose := c.finishClosedLocked(err, deferredClose)
 		c.mu.Unlock()
 		if shouldClose {
-			_ = replacement.Session.Close()
+			_ = joinCloseErrors(replacement.Session.Close(), closeRunner(replacement.Runner))
 			c.finishReplacing(state)
 		}
 		if completeClose {
@@ -798,7 +973,7 @@ func (c *Controller) runReplacement(
 		closed := c.closed
 		c.mu.Unlock()
 		if shouldClose {
-			_ = replacement.Session.Close()
+			_ = joinCloseErrors(replacement.Session.Close(), closeRunner(replacement.Runner))
 		}
 		if closed {
 			return ResumeResult{}, ErrClosed
@@ -812,6 +987,7 @@ func (c *Controller) runReplacement(
 	c.runner = replacement.Runner
 	if replaceRuntime {
 		runtimeInfo := replacement.RuntimeInfo
+		runtimeInfo.Sandbox = c.sandboxInfo
 		c.runtimeInfo = &runtimeInfo
 	}
 	closed := c.closed
@@ -826,7 +1002,7 @@ func (c *Controller) runReplacement(
 	c.mu.Unlock()
 
 	if deferredClose {
-		closeErr := replacement.Session.Close()
+		closeErr := joinCloseErrors(replacement.Session.Close(), closeRunner(replacement.Runner))
 		c.finishReplacing(state)
 		c.completeClose(closeDone, closeErr)
 	}
@@ -909,14 +1085,17 @@ func (c *Controller) Info() Info {
 	c.mu.Lock()
 	current := c.current
 	currentPath := strings.Clone(c.currentPath)
+	sandboxInfo := c.sandboxInfo
+	dynamicContent := c.dynamicContent
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
+		copy.Sandbox = sandboxInfo
 		runtimeInfo = &copy
 	}
 	c.mu.Unlock()
-	if current == nil {
-		return Info{}
+	if !dynamicContent || current == nil {
+		return Info{Sandbox: sandboxInfo}
 	}
 	header := current.Header()
 	info := Info{
@@ -926,6 +1105,7 @@ func (c *Controller) Info() Info {
 		Provider:    header.Provider,
 		Profile:     header.Profile,
 		Model:       header.Model,
+		Sandbox:     sandboxInfo,
 	}
 	if runtimeInfo != nil {
 		info.Provider = runtimeInfo.Provider
@@ -948,11 +1128,18 @@ func (c *Controller) Info() Info {
 	return info
 }
 
+func (c *Controller) DynamicContentAvailable() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.closed && c.dynamicContent
+}
+
 func (c *Controller) History() []model.Message {
 	c.mu.Lock()
 	current := c.current
+	dynamicContent := c.dynamicContent
 	c.mu.Unlock()
-	if current == nil {
+	if !dynamicContent || current == nil {
 		return nil
 	}
 	return cloneMessages(current.Messages())

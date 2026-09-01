@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,13 +22,194 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/safetext"
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/sandbox/sandboxtest"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
+func TestRunSandboxAcceptanceChecklist(t *testing.T) {
+	sandboxtest.RunChecklist(t, []sandboxtest.ChecklistItem{
+		{
+			Name: "default Darwin auto uses Seatbelt and never falls back to Direct",
+			Run: func(t *testing.T) {
+				fixture := newSandboxRuntimeFixture(t)
+				runtime := openSandboxRuntimeWithDependencies(context.Background(), fixture.options(), fixture.dependencies())
+				t.Cleanup(func() { _ = runtime.Close() })
+				if runtime.Info != (app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true, Reason: app.SandboxReasonNone}) {
+					t.Fatalf("default auto sandbox info = %#v", runtime.Info)
+				}
+				if fixture.seatbeltCalls.Load() != 1 || fixture.directCalls.Load() != 0 {
+					t.Fatalf("default auto driver calls = seatbelt %d direct %d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load())
+				}
+
+				failure := newSandboxRuntimeFixture(t)
+				failure.openErr = &sandbox.UnavailableError{Reason: sandbox.ReasonSelfTestFailed}
+				unavailable := openSandboxRuntimeWithDependencies(context.Background(), failure.options(), failure.dependencies())
+				if unavailable.Executor != nil || unavailable.Environment != nil || unavailable.Info.Mode != app.SandboxUnavailable || unavailable.Info.Reason != app.SandboxReasonSelfTestFailed {
+					t.Fatalf("forced Seatbelt failure runtime = %#v", unavailable)
+				}
+				if failure.seatbeltCalls.Load() != 1 || failure.directCalls.Load() != 0 {
+					t.Fatalf("forced Seatbelt failure driver calls = seatbelt %d direct %d", failure.seatbeltCalls.Load(), failure.directCalls.Load())
+				}
+			},
+		},
+		{
+			Name: "explicit off warns headless and renders REPL status",
+			Run: func(t *testing.T) {
+				home := t.TempDir()
+				workspace := t.TempDir()
+				configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+				deps := deterministicRunDependencies(t)
+				deps.newRunner = func(session.Session) app.Runner {
+					return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil })
+				}
+				deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+					return fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}, &recordingSandboxExecutor{}, []string{})
+				}
+
+				var headlessStdout, headlessStderr bytes.Buffer
+				if code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off", "--approve", "prompt"}, strings.NewReader(""), &headlessStdout, &headlessStderr, testEnviron(map[string]string{
+					"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+				}), deps); code != 0 {
+					t.Fatalf("headless off code = %d stderr = %q", code, headlessStderr.String())
+				}
+				if want := "warning: sandbox is off; bash runs unsandboxed as your macOS user\n"; headlessStderr.String() != want {
+					t.Fatalf("headless off stderr = %q, want %q", headlessStderr.String(), want)
+				}
+
+				var replStdout, replStderr bytes.Buffer
+				if code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off"}, strings.NewReader("/session\n/exit\n"), &replStdout, &replStderr, testEnviron(map[string]string{
+					"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+				}), deps); code != 0 {
+					t.Fatalf("REPL off code = %d stderr = %q", code, replStderr.String())
+				}
+				if !strings.Contains(replStdout.String(), "Sandbox: sandbox off · WARNING: bash is unsandboxed") {
+					t.Fatalf("REPL off status = %q", replStdout.String())
+				}
+			},
+		},
+		{
+			Name: "environment overflow disables Bash fail closed",
+			Run: func(t *testing.T) {
+				home := t.TempDir()
+				workspace := t.TempDir()
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+				}))
+				defer server.Close()
+				configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+				fixture := newSandboxRuntimeFixture(t)
+				deps := deterministicRunDependencies(t)
+				deps.openSandbox = func(ctx context.Context, options sandboxOpenOptions) sandboxRuntime {
+					return openSandboxRuntimeWithDependencies(ctx, options, fixture.dependencies())
+				}
+				entries := []string{"HOME=" + home, "SHELL=/bin/sh", "TEST_KEY=provider-value"}
+				for index := range 513 {
+					entries = append(entries, fmt.Sprintf("VALUE_%03d_TOKEN=environment-sensitive-value-%03d", index, index))
+				}
+				var stdout, stderr bytes.Buffer
+				if code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "safe"}, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps); code != 0 {
+					t.Fatalf("overflow code = %d stderr = %q", code, stderr.String())
+				}
+				if want := "warning: bash is unavailable because the configured sandbox could not be established (reason: environment-rejected); file tools remain available\n"; stderr.String() != want {
+					t.Fatalf("overflow stderr = %q, want %q", stderr.String(), want)
+				}
+				if fixture.seatbeltCalls.Load() != 0 || fixture.directCalls.Load() != 0 || fixture.executorCalls.Load() != 0 {
+					t.Fatalf("overflow constructed host child path: seatbelt/direct/executor = %d/%d/%d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load(), fixture.executorCalls.Load())
+				}
+				if paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl")); err != nil {
+					t.Fatal(err)
+				} else if len(paths) != 0 {
+					t.Fatalf("overflow persisted sessions: %v", paths)
+				}
+			},
+		},
+		{
+			Name: "provider follow-up and session never retain private auth cookie or profile path text",
+			Run: func(t *testing.T) {
+				secret := "/private/otto-sandbox-acceptance/profiles/profile.sb"
+				home := t.TempDir()
+				workspace := t.TempDir()
+				midpoint := len(secret) / 2
+				if err := os.WriteFile(filepath.Join(workspace, ".part1"), []byte(secret[:midpoint]), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(workspace, ".part2"), []byte(secret[midpoint:]), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var requestBodies []string
+				var mu sync.Mutex
+				var requests atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read request: %v", err)
+					}
+					mu.Lock()
+					requestBodies = append(requestBodies, string(body))
+					mu.Unlock()
+					if requests.Add(1) == 1 {
+						authorizationLabel := "Authoriza" + "tion: " + "Bearer "
+						cookieLabel := "Coo" + "kie: session="
+						command := "printf " + shellQuoteForMainTest(authorizationLabel) + "; cat .part1 .part2; printf '\\n'; printf " + shellQuoteForMainTest(cookieLabel) + "; cat .part1 .part2; printf '\\nsandbox-exec: refusal at '; cat .part1 .part2"
+						writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-bash","type":"function","function":{"name":"bash","arguments":%q}}]},"finish_reason":"tool_calls"}]}`,
+							fmt.Sprintf(`{"command":%q}`, command)))
+						return
+					}
+					writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+				}))
+				defer server.Close()
+				configPath := filepath.Join(t.TempDir(), "otto.toml")
+				if err := os.WriteFile(configPath, []byte(fmt.Sprintf(`default_profile = "active"
+[profiles.active]
+provider = "openai-compatible"
+base_url = %q
+model = "test-model"
+api_key_env = "TEST_KEY"
+`, server.URL)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				if code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off"}, strings.NewReader("check acceptance\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+					"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": secret,
+				})); code != 0 {
+					t.Fatalf("acceptance off code = %d stderr = %q", code, stderr.String())
+				}
+				persisted, err := os.ReadFile(onlySessionPath(t, home))
+				if err != nil {
+					t.Fatal(err)
+				}
+				mu.Lock()
+				bodies := append([]string(nil), requestBodies...)
+				mu.Unlock()
+				if len(bodies) != 2 {
+					t.Fatalf("provider requests = %d, want 2", len(bodies))
+				}
+				for location, content := range map[string]string{
+					"stdout":             stdout.String(),
+					"stderr":             stderr.String(),
+					"provider follow-up": bodies[1],
+					"session JSONL":      string(persisted),
+				} {
+					authorizationText := "Authoriza" + "tion: " + "Bearer " + secret
+					cookieText := "Coo" + "kie: session=" + secret
+					for _, forbidden := range []string{secret, authorizationText, cookieText, "sandbox-exec: refusal at " + secret} {
+						if strings.Contains(content, forbidden) {
+							t.Fatalf("%s leaked private auth/cookie/profile text: %q", location, content)
+						}
+					}
+				}
+			},
+		},
+	})
+}
+
 func TestRunHelpDoesNotRequireCredentials(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--help"}, strings.NewReader(""), &stdout, &stderr, func(string) string { return "" })
+	code := runForTest(t, context.Background(), []string{"--help"}, strings.NewReader(""), &stdout, &stderr, testEnviron(nil))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
@@ -62,7 +244,7 @@ func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
 			workspace := t.TempDir()
 			configPath := writeCLIConfigWithUI(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1", test.configUI)
 
-			deps := defaultRunDependencies()
+			deps := deterministicRunDependencies(t)
 			deps.subscribeInterrupts = func() interruptSubscription {
 				return interruptSubscription{stop: func() {}}
 			}
@@ -100,7 +282,7 @@ func TestRunSelectsFrontendFromResolvedUIMode(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := runWithDependencies(context.Background(), args, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(env), deps)
+			code := runWithDependencies(context.Background(), args, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(env), deps)
 			if code != 0 {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
@@ -137,7 +319,7 @@ func TestRunTUIProgramErrorReturnsOne(t *testing.T) {
 			workspace := t.TempDir()
 			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-			deps := defaultRunDependencies()
+			deps := deterministicRunDependencies(t)
 			deps.subscribeInterrupts = func() interruptSubscription {
 				return interruptSubscription{stop: func() {}}
 			}
@@ -153,7 +335,7 @@ func TestRunTUIProgramErrorReturnsOne(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 			}), deps)
 			if code != 1 {
@@ -175,7 +357,7 @@ func TestRunTUIFatalPersistenceReturnsOneAndPrintsDiagnostic(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -193,7 +375,7 @@ func TestRunTUIFatalPersistenceReturnsOneAndPrintsDiagnostic(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 {
@@ -221,7 +403,7 @@ func TestRunTUIProgramErrorCancelsActivePromptBeforeClosing(t *testing.T) {
 	store := &trackingSession{Session: session.NewMemory(session.Header{
 		Version: 1, ID: "active-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
 	})}
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -255,7 +437,7 @@ func TestRunTUIProgramErrorCancelsActivePromptBeforeClosing(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	codeDone := make(chan int, 1)
 	go func() {
-		codeDone <- runWithDependencies(processCtx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		codeDone <- runWithDependencies(processCtx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -299,7 +481,7 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -321,7 +503,7 @@ func TestRunForcedTUINeedsTerminalBeforeOpeningSession(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 {
@@ -341,7 +523,7 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 	valid := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	unsupported := writeCLIConfig(t, "other-provider", "TEST_KEY", "http://127.0.0.1:1")
 	missingKey := writeCLIConfig(t, "openai-compatible", "MISSING_KEY", "http://127.0.0.1:1")
-	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
 	tests := []struct {
 		name string
@@ -353,13 +535,13 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 		{name: "unsupported provider", args: []string{"--config", unsupported, "--cwd", workspace}, want: "unsupported provider"},
 		{name: "missing resume", args: []string{"--config", valid, "--cwd", workspace, "--resume", filepath.Join(t.TempDir(), "missing.jsonl")}, want: "open session file"},
 		{name: "conflicting continue and resume", args: []string{"--continue", "--resume", "anything"}, want: "cannot be used together"},
-		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid value"},
+		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid command-line arguments"},
 		{name: "invalid ui mode", args: []string{"--ui", "popup"}, want: "must be one of auto, tui, repl"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), test.args, strings.NewReader("/exit\n"), &stdout, &stderr, env)
+			code := runForTest(t, context.Background(), test.args, strings.NewReader("/exit\n"), &stdout, &stderr, env)
 			if code == 0 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
 			}
@@ -372,7 +554,7 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "https://example.test/v1?tenant=x")
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "resume")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	var prepareCalls, activateCalls atomic.Int32
 	deps.prepareSession = func(ctx context.Context, path, workspace string) (preparedSession, error) {
 		prepareCalls.Add(1)
@@ -391,7 +573,7 @@ func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code == 0 || !strings.Contains(stderr.String(), "base_url") {
@@ -407,7 +589,7 @@ func TestRunNoSessionAndExplicitConfig(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -425,7 +607,7 @@ func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -445,7 +627,7 @@ func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session", "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--no-session", "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 0 {
@@ -454,11 +636,17 @@ func TestRunNoSessionDoesNotWireSessionBrowser(t *testing.T) {
 }
 
 func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
+	const maliciousToolCallID = "startup-warning-tool-call-secret"
 	home := t.TempDir()
 	workspace := t.TempDir()
 	resumePath := createCLISession(t, filepath.Join(home, ".otto", "sessions"), workspace, "warning-session")
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.RedactionValues = []string{maliciousToolCallID}
+		return runtime
+	}
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -473,19 +661,19 @@ func TestRunPrintsStartupWarningsBeforeTUI(t *testing.T) {
 			info: prepared.Info(),
 			activate: func(ctx context.Context) (session.Session, []session.Warning, error) {
 				store, warnings, err := prepared.Activate(ctx)
-				return store, append(warnings, session.Warning{Message: "startup warning"}), err
+				return store, append(warnings, session.Warning{Message: "repaired dangling tool call " + maliciousToolCallID}), err
 			},
 			close: prepared.Close,
 		}, nil
 	}
 	deps.runTUI = func(_ context.Context, _ io.Reader, _ io.Writer, _ app.Backend) error {
-		if !strings.Contains(stderr.String(), "warning: startup warning\n") {
-			t.Fatalf("stderr before TUI = %q", stderr.String())
+		if strings.Contains(stderr.String(), maliciousToolCallID) || !strings.Contains(stderr.String(), "warning: repaired dangling tool call ") {
+			t.Fatalf("stderr before TUI was not safely redacted: %q", stderr.String())
 		}
 		return nil
 	}
 
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 0 {
@@ -506,7 +694,7 @@ func TestRunCanonicalizesCWDBeforeCreatingSession(t *testing.T) {
 	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", link}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", link}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -556,7 +744,7 @@ func TestRunContinueSkipsOldOttoSessions(t *testing.T) {
 
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--continue"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--continue"}, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "offline-test-key",
 	}))
 	if code != 0 || !strings.Contains(stdout.String(), "ID: newest-valid-v3") {
@@ -597,7 +785,7 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 	setCLISessionMTime(t, oldV1Path, now.Add(-30*time.Minute))
 	setCLISessionMTime(t, corruptPath, now)
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
 	for _, test := range []struct {
 		name string
@@ -610,7 +798,7 @@ func TestRunResumeAndContinueSelectSessions(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			args := append([]string{"--config", configPath, "--cwd", workspace}, test.args...)
-			code := run(context.Background(), args, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, env)
+			code := runForTest(t, context.Background(), args, strings.NewReader("/session\n/exit\n"), &stdout, &stderr, env)
 			if code != 0 || !strings.Contains(stdout.String(), test.want) {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
@@ -623,7 +811,7 @@ func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".otto", "sessions")
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	env := testGetenv(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
 
 	for _, test := range []struct {
 		name string
@@ -635,7 +823,7 @@ func TestRunResumeExplicitPathRejectsInvalidPiSessions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", test.path}, strings.NewReader("/exit\n"), &stdout, &stderr, env)
+			code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", test.path}, strings.NewReader("/exit\n"), &stdout, &stderr, env)
 			if code == 0 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 			}
@@ -655,7 +843,7 @@ func TestRunResumeRejectsAtomicReplacementOfPreparedSessionWithoutMutation(t *te
 	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -685,7 +873,7 @@ func TestRunResumeRejectsAtomicReplacementOfPreparedSessionWithoutMutation(t *te
 	var stdout, stderr bytes.Buffer
 	code := runWithDependencies(context.Background(), []string{
 		"--config", configPath, "--cwd", workspace, "--resume", resumePath, "--ui", "tui",
-	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 || !strings.Contains(stderr.String(), "identity changed") {
@@ -725,7 +913,7 @@ api_key_env = "TEST_KEY"
 		t.Fatal(err)
 	}
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -744,7 +932,7 @@ api_key_env = "TEST_KEY"
 		"--profile", "active",
 		"--model", "override-model",
 		"--ui", "tui",
-	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "ACTIVE_KEY": "active-secret", "TEST_KEY": "persisted-secret",
 	}), deps)
 	if code != 0 {
@@ -820,13 +1008,13 @@ api_key_env = "OVERRIDE_KEY"
 				args = append(args, "--continue")
 			}
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), args, strings.NewReader("use effective runtime\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+			code := runForTest(t, context.Background(), args, strings.NewReader("use effective runtime\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 				"HOME": home, "SHELL": "/bin/sh", "STORED_KEY": "stored-secret", "OVERRIDE_KEY": "override-secret",
 			}))
 			if code != 0 {
 				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 			}
-			if requestModel != "effective-model" || authorization != "Bearer override-secret" {
+			if requestModel != "effective-model" || authorization != "Bearer "+"override-secret" {
 				t.Fatalf("request model/auth = %q / %q", requestModel, authorization)
 			}
 
@@ -880,7 +1068,7 @@ func TestRunResumeUsesPersistedProfileForEndpointAndKey(t *testing.T) {
 	defer defaultServer.Close()
 	resumedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resumedRequests.Add(1)
-		if r.Header.Get("Authorization") != "Bearer resumed-secret" {
+		if r.Header.Get("Authorization") != "Bearer "+"resumed-secret" {
 			t.Errorf("authorization did not use resumed profile key")
 		}
 		writeSSE(w, `{"choices":[{"delta":{"content":"resumed profile"},"finish_reason":"stop"}]}`)
@@ -908,7 +1096,7 @@ api_key_env = "RESUMED_KEY"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--resume", resumePath}, strings.NewReader("hello\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "DEFAULT_KEY": "default-secret", "RESUMED_KEY": "resumed-secret",
 	}))
 	if code != 0 {
@@ -934,7 +1122,7 @@ func TestRunNewAfterResumeUsesCurrentRuntimeInfoRunnerAndHeader(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode resumed request: %v", err)
 		}
-		if request.Model != "resumed-model" || r.Header.Get("Authorization") != "Bearer resumed-secret" {
+		if request.Model != "resumed-model" || r.Header.Get("Authorization") != "Bearer "+"resumed-secret" {
 			t.Errorf("resumed request model/auth = %q / %q", request.Model, r.Header.Get("Authorization"))
 		}
 		writeSSE(w, `{"choices":[{"delta":{"content":"resumed runner"},"finish_reason":"stop"}]}`)
@@ -971,7 +1159,7 @@ api_key_env = "RESUMED_KEY"
 		t.Fatal(err)
 	}
 
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -1000,7 +1188,7 @@ api_key_env = "RESUMED_KEY"
 	var stdout, stderr bytes.Buffer
 	code := runWithDependencies(context.Background(), []string{
 		"--config", configPath, "--cwd", workspace, "--ui", "tui",
-	}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "STARTUP_KEY": "startup-secret", "RESUMED_KEY": "resumed-secret",
 	}), deps)
 	if code != 0 {
@@ -1018,7 +1206,7 @@ func TestRunNewReplacesSessionWithoutRestarting(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	// The startup session is lazy (no file until a user prompt). /new swaps it
 	// for another lazy session; the prompt "hello" is what materializes a file.
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\nhello\n/exit\nmust not run\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\nhello\n/exit\nmust not run\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1050,7 +1238,7 @@ func TestRunIdleWithoutPromptLeavesNoSessionFile(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/help\n/session\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/help\n/session\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1069,7 +1257,7 @@ func TestRunNewSessionCreationFailureReturnsDirectError(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		return interruptSubscription{stop: func() {}}
 	}
@@ -1086,7 +1274,7 @@ func TestRunNewSessionCreationFailureReturnsDirectError(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/new\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}), deps)
 	if code != 1 {
@@ -1105,11 +1293,11 @@ func TestRunRejectsUnknownMaxTurnsFlag(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1"}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1"}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
-	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -max-turns") {
-		t.Fatalf("code = %d, stderr = %q, want unknown flag rejection", code, stderr.String())
+	if code != 2 || stderr.String() != "otto: invalid command-line arguments\n" {
+		t.Fatalf("code = %d, stderr = %q, want fixed unknown flag rejection", code, stderr.String())
 	}
 }
 
@@ -1143,7 +1331,7 @@ func TestRunApproveRunsPromptHeadlessAndExits(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "do the thing"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "do the thing"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1170,7 +1358,7 @@ func TestRunApproveReadsMultilinePromptFromFile(t *testing.T) {
 	}
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "@" + promptPath}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--approve", "@" + promptPath}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 0 {
@@ -1207,7 +1395,7 @@ func TestRunApproveFlagValidation(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), append([]string{"--config", configPath, "--cwd", workspace}, testCase.args...), strings.NewReader(""), &stdout, &stderr, testGetenv(environment))
+			code := runForTest(t, context.Background(), append([]string{"--config", configPath, "--cwd", workspace}, testCase.args...), strings.NewReader(""), &stdout, &stderr, testEnviron(environment))
 			if code != testCase.code || !strings.Contains(stderr.String(), testCase.stderr) {
 				t.Fatalf("code = %d, stderr = %q, want %d containing %q", code, stderr.String(), testCase.code, testCase.stderr)
 			}
@@ -1220,7 +1408,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "banana"}, strings.NewReader("/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "banana"}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
 	if code != 2 || !strings.Contains(stderr.String(), "--thinking must be one of low, medium, high, xhigh, max") {
@@ -1229,7 +1417,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 }
 
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
-	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Use read, grep, find, ls, write, edit, and bash when needed. File tools are restricted to the workspace, but bash is unsandboxed. Prefer exact, minimal changes. Report what changed and what verification ran."
+	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Usable tools: read, grep, find, ls, write, edit, bash, memory_search, remember, forget. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
@@ -1273,7 +1461,7 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	workspace := t.TempDir()
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "xhigh"}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "xhigh"}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "smoke-secret",
 	}))
 	if code != 0 {
@@ -1337,7 +1525,11 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requestCount == 1 {
 			textSplit := len(authorization) - 3
-			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first","█":"attacker-redacted"}}`, credential, authorization, "prefix-"+credential, credential)
+			marker, ok := safetext.DynamicRedactionMarker(nil)
+			if !ok || marker == "" {
+				t.Fatal("DynamicRedactionMarker() did not return the shared marker")
+			}
+			arguments := fmt.Sprintf(`{%q:"provider-key","path":"credential.txt","content":%q,"nested":{%q:"nested-key"},"duplicates":{"safe":"first","safe":"attacker-exact","a":"first","\u0061":"attacker-alias","secret-\ud800":"first","secret-\ud801":"attacker-surrogate"},"collision":{%q:"first",%q:"attacker-redacted"}}`, credential, authorization, "prefix-"+credential, credential, marker)
 			argumentSplit := strings.Index(arguments, credential) + len(credential)/2
 			chunks := []string{
 				fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "authorization="+authorization[:textSplit]),
@@ -1357,7 +1549,7 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check provider output\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check provider output\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": credential,
 	}))
 	if code != 0 {
@@ -1385,8 +1577,12 @@ func TestRunRedactsSuccessfulProviderCredentialEchoAcrossSSEDeltasAndToolArgumen
 			t.Fatalf("%s leaked successful provider credential echo or colliding tool value: %q", location, content)
 		}
 	}
+	marker, ok := safetext.DynamicRedactionMarker(nil)
+	if !ok || marker == "" {
+		t.Fatal("DynamicRedactionMarker() did not return the shared marker")
+	}
 	for _, location := range []string{"stdout events", "provider follow-up", "session JSONL"} {
-		if !strings.Contains(locations[location], "█") {
+		if !strings.Contains(locations[location], marker) {
 			t.Fatalf("%s did not retain a redaction marker: %q", location, locations[location])
 		}
 	}
@@ -1400,11 +1596,6 @@ func TestRunKeepsEveryProfileCredentialOutOfBashEventsSessionAndProviderHistory(
 		profileKeyEnv  = "OTTO_E2E_PROFILE_KEY"
 		inactiveKeyEnv = "OTTO_E2E_INACTIVE_KEY"
 	)
-	t.Setenv(profileKeyEnv, resolvedCredential)
-	t.Setenv(inactiveKeyEnv, inactiveCredential)
-	t.Setenv("OTTO_API_KEY", fallbackCredential)
-	t.Setenv("OTTO_E2E_UNRELATED", "preserved-environment")
-
 	home := t.TempDir()
 	workspace := t.TempDir()
 	midpoint := len(resolvedCredential) / 2
@@ -1457,11 +1648,15 @@ api_key_env = %q
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("check credentials\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
-		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, inactiveKeyEnv: inactiveCredential, "OTTO_API_KEY": fallbackCredential,
+	code := run(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--sandbox", "off"}, strings.NewReader("check credentials\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", profileKeyEnv: resolvedCredential, inactiveKeyEnv: inactiveCredential,
+		"OTTO_API_KEY": fallbackCredential, "OTTO_E2E_UNRELATED": "preserved-environment",
 	}))
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := "warning: sandbox is off; bash runs unsandboxed as your macOS user\n"; stderr.String() != want {
+		t.Fatalf("stderr = %q, want explicit off warning %q", stderr.String(), want)
 	}
 
 	persisted, err := os.ReadFile(onlySessionPath(t, home))
@@ -1483,7 +1678,12 @@ api_key_env = %q
 			}
 		}
 	}
-	redactedReconstruction := strings.Contains(string(persisted), "reconstructed=[REDACTED]") || strings.Contains(string(persisted), "reconstructed=█")
+	marker, ok := safetext.DynamicRedactionMarker(nil)
+	if !ok || marker == "" {
+		t.Fatal("DynamicRedactionMarker() did not return the shared marker")
+	}
+	redactedReconstruction := strings.Contains(string(persisted), "reconstructed=[REDACTED]") ||
+		strings.Contains(string(persisted), "reconstructed="+marker)
 	if !redactedReconstruction || !strings.Contains(string(persisted), "OTTO_E2E_UNRELATED=preserved-environment") {
 		t.Fatalf("persisted bash event/result did not redact credential while preserving unrelated environment: %s", persisted)
 	}
@@ -1505,7 +1705,7 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 	interrupts := make(chan os.Signal, 1)
 	subscribed := make(chan struct{})
 	var stopCalls atomic.Int32
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -1529,7 +1729,7 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	codeCh := make(chan int, 1)
 	go func() {
-		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("wait\n/exit\n"), &stdout, &stderr, testGetenv(map[string]string{
+		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("wait\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -1568,7 +1768,7 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	interrupts := make(chan os.Signal, 1)
 	subscribed := make(chan struct{})
 	var stopCalls atomic.Int32
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -1577,12 +1777,14 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 		}
 	}
 	var stores []*trackingSession
+	sessionCreated := make(chan struct{})
 	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
 		store := &trackingSession{Session: session.NewMemory(session.Header{
 			Version: 1, ID: fmt.Sprintf("session-%d", len(stores)+1), Workspace: workspace,
 			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 		})}
 		stores = append(stores, store)
+		close(sessionCreated)
 		return store, nil
 	}
 
@@ -1595,7 +1797,7 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	codeCh := make(chan int, 1)
 	go func() {
-		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, reader, &stdout, &stderr, testGetenv(map[string]string{
+		codeCh <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, reader, &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -1604,6 +1806,11 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	case <-subscribed:
 	case <-time.After(time.Second):
 		t.Fatal("interrupt subscription did not start")
+	}
+	select {
+	case <-sessionCreated:
+	case <-time.After(time.Second):
+		t.Fatal("idle session was not created")
 	}
 	interrupts <- os.Interrupt
 	select {
@@ -1638,7 +1845,7 @@ func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T
 	store := &trackingSession{Session: session.NewMemory(session.Header{
 		Version: 1, ID: "signal-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
 	})}
-	deps := defaultRunDependencies()
+	deps := deterministicRunDependencies(t)
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -1672,7 +1879,7 @@ func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T
 	var stdout, stderr bytes.Buffer
 	codeDone := make(chan int, 1)
 	go func() {
-		codeDone <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testGetenv(map[string]string{
+		codeDone <- runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
 			"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 		}), deps)
 	}()
@@ -1709,6 +1916,226 @@ func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T
 	}
 }
 
+func TestRunClosesControllerBeforeSandboxAndMemoryService(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+		sandboxCtx context.Context
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	deps.openSandbox = func(ctx context.Context, _ sandboxOpenOptions) sandboxRuntime {
+		sandboxCtx = ctx
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "close-order", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), onClose: func() {
+			if sandboxCtx == nil || sandboxCtx.Err() == nil {
+				t.Error("session closed before process cancellation")
+			}
+			appendOrder("session")
+		}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
+func TestRunStartupCancellationAfterInitialRunnerBuildClosesRunnerAndBinding(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				cancel()
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "startup-cancel", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), onClose: func() { appendOrder("session") }}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(ctx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 130 {
+		t.Fatalf("code = %d, stderr = %q, want 130", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
+func TestRunUpdateRuntimeFailureClosesInitialRunnerAndBinding(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &runtimeUpdateFailSession{Session: &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "startup-update", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: "stale-model", CreatedAt: time.Now().UTC(),
+		}), onClose: func() { appendOrder("session") }}, err: errors.New("runtime update failed")}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code == 0 || !strings.Contains(stderr.String(), "runtime update failed") {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
+func TestRunControllerConstructionFailureClosesInitialRunnerAndBinding(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "controller-failure", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), onClose: func() { appendOrder("session") }}, nil
+	}
+	deps.newController = func(session.Session, app.SessionFactory, app.RunnerFactory, ...app.Option) (*app.Controller, error) {
+		return nil, errors.New("controller failed")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code == 0 || !strings.Contains(stderr.String(), "controller failed") {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
 func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected append failure"))
 	for _, test := range []struct {
@@ -1727,7 +2154,7 @@ func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 			home := t.TempDir()
 			workspace := t.TempDir()
 			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
-			deps := defaultRunDependencies()
+			deps := deterministicRunDependencies(t)
 			deps.subscribeInterrupts = func() interruptSubscription {
 				return interruptSubscription{stop: func() {}}
 			}
@@ -1742,7 +2169,7 @@ func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(test.input), &stdout, &stderr, testGetenv(map[string]string{
+			code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader(test.input), &stdout, &stderr, testEnviron(map[string]string{
 				"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 			}), deps)
 			if code != test.wantCode {
@@ -1763,7 +2190,7 @@ func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 func TestRunDoesNotAcceptOrEchoAPIKeyArguments(t *testing.T) {
 	const secret = "argument-secret"
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"--api-key", secret}, strings.NewReader(""), &stdout, &stderr, func(string) string { return "" })
+	code := runForTest(t, context.Background(), []string{"--api-key", secret}, strings.NewReader(""), &stdout, &stderr, testEnviron(nil))
 	if code == 0 {
 		t.Fatal("--api-key unexpectedly accepted")
 	}
@@ -1780,6 +2207,89 @@ func (f commandRunnerFunc) Run(ctx context.Context, text string, emit func(agent
 
 func (f commandRunnerFunc) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
 	return agent.CompactionResult{Noop: true}, nil
+}
+
+type runtimeUpdateFailSession struct {
+	session.Session
+	err error
+}
+
+func (s *runtimeUpdateFailSession) UpdateRuntime(context.Context, session.RuntimeMetadata) error {
+	return s.err
+}
+
+type recordingMemoryService struct {
+	bind  func(context.Context, memory.BindOptions) (memory.Binding, error)
+	close func()
+}
+
+func (s *recordingMemoryService) Bind(ctx context.Context, options memory.BindOptions) (memory.Binding, error) {
+	if s.bind == nil {
+		return &recordingMemoryBinding{}, nil
+	}
+	return s.bind(ctx, options)
+}
+
+func (s *recordingMemoryService) Close() error {
+	if s.close != nil {
+		s.close()
+	}
+	return nil
+}
+
+func (*recordingMemoryService) Get(context.Context, memory.RecordRef) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (*recordingMemoryService) GetByKey(context.Context, memory.RecordKey) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (*recordingMemoryService) GetTombstone(context.Context, memory.RecordRef) (memory.Tombstone, error) {
+	return memory.Tombstone{}, nil
+}
+
+func (*recordingMemoryService) GetCandidate(context.Context, memory.CandidateRef) (memory.Candidate, error) {
+	return memory.Candidate{}, nil
+}
+
+func (*recordingMemoryService) Search(context.Context, memory.SearchRequest) (memory.SearchResult, error) {
+	return memory.SearchResult{}, nil
+}
+
+func (*recordingMemoryService) Remember(context.Context, memory.RememberRequest) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (*recordingMemoryService) Forget(context.Context, memory.ForgetRequest) (memory.ForgetResult, error) {
+	return memory.ForgetResult{}, nil
+}
+
+func (*recordingMemoryService) Review(context.Context, memory.ReviewRequest) (memory.ReviewResult, error) {
+	return memory.ReviewResult{}, nil
+}
+
+func (*recordingMemoryService) Propose(context.Context, memory.ProposeRequest) (memory.CandidateBatch, error) {
+	return memory.CandidateBatch{}, nil
+}
+
+type recordingMemoryBinding struct {
+	close func()
+}
+
+func (b *recordingMemoryBinding) Recall(context.Context, memory.RecallRequest) (memory.RecallResult, error) {
+	return memory.RecallResult{}, nil
+}
+
+func (b *recordingMemoryBinding) Observe(context.Context, memory.Observation) (memory.ObserveResult, error) {
+	return memory.ObserveResult{}, nil
+}
+
+func (b *recordingMemoryBinding) Close() error {
+	if b.close != nil {
+		b.close()
+	}
+	return nil
 }
 
 type trackingSession struct {
@@ -1816,6 +2326,10 @@ func writeCLIConfig(t *testing.T, providerName, keyEnv, baseURL string) string {
 	return writeCLIConfigWithUI(t, providerName, keyEnv, baseURL, "")
 }
 
+func shellQuoteForMainTest(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
 func writeCLIConfigWithUI(t *testing.T, providerName, keyEnv, baseURL, uiMode string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "otto.toml")
@@ -1837,8 +2351,23 @@ api_key_env = %q
 	return path
 }
 
-func testGetenv(values map[string]string) func(string) string {
-	return func(key string) string { return values[key] }
+func testEnviron(values map[string]string) environmentEnumerator {
+	return func() []string {
+		names := make([]string, 0, len(values))
+		for name := range values {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		entries := make([]string, 0, len(names))
+		for _, name := range names {
+			entries = append(entries, name+"="+values[name])
+		}
+		return entries
+	}
+}
+
+func testGetenv(values map[string]string) environmentEnumerator {
+	return testEnviron(values)
 }
 
 func createCLISession(t *testing.T, root, workspace, id string) string {

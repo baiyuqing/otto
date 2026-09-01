@@ -59,9 +59,15 @@ func TestFooterAndSessionOverlayEscapeExternalMetadata(t *testing.T) {
 		Provider:    "provider-" + terminalInjectionPayload + spoof + entityPayload,
 		Profile:     "profile-" + terminalInjectionPayload + spoof + entityPayload,
 		Model:       "model-" + terminalInjectionPayload + spoof + entityPayload,
+		Sandbox: app.SandboxInfo{
+			Mode:          app.SandboxMode(terminalInjectionPayload + spoof),
+			Network:       app.SandboxNetwork(terminalInjectionPayload + spoof),
+			BashAvailable: true,
+			Reason:        app.SandboxReason(terminalInjectionPayload + spoof),
+		},
 	}
 	footer := renderFooter(1200, info, model.Usage{}, "status-"+terminalInjectionPayload+spoof+entityPayload)
-	overlay := sessionOverlayContent(info)
+	overlay := sessionOverlayContent(1200, 20, info)
 	for name, rendered := range map[string]string{"footer": footer, "session overlay": overlay} {
 		assertNoRawTerminalControls(t, rendered)
 		if name == "footer" && strings.ContainsAny(rendered, "\n\r\t") {
@@ -77,7 +83,10 @@ func TestFooterAndSessionOverlayEscapeExternalMetadata(t *testing.T) {
 			t.Fatalf("%s = %q, want inert entity text preserved", name, rendered)
 		}
 	}
-	if got, want := strings.Count(overlay, "\n"), 5; got != want {
+	if !strings.Contains(footer, "no-bash") || !strings.Contains(overlay, "Sandbox: bash disabled · sandbox unavailable") || strings.Contains(overlay, "Sandbox reason:") {
+		t.Fatalf("Sandbox presentation was not fixed and safe: footer=%q overlay=%q", footer, overlay)
+	}
+	if got, want := strings.Count(overlay, "\n"), 6; got != want {
 		t.Fatalf("session overlay line separators = %d, want %d structural lines only: %q", got, want, overlay)
 	}
 }

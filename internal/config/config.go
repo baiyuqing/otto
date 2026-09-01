@@ -25,7 +25,15 @@ type File struct {
 	UI             UI                 `toml:"ui"`
 	Agent          Agent              `toml:"agent"`
 	Memory         Memory             `toml:"memory"`
+	Sandbox        SandboxConfig      `toml:"sandbox"`
 	Profiles       map[string]Profile `toml:"profiles"`
+}
+
+type SandboxConfig struct {
+	Driver    *string  `toml:"driver"`
+	Network   *string  `toml:"network"`
+	ReadPaths []string `toml:"read_paths"`
+	AllowEnv  []string `toml:"allow_env"`
 }
 
 type Agent struct {
@@ -150,11 +158,16 @@ func DefaultPath() string {
 }
 
 func Load(path string) (File, error) {
+	cfg, err := LoadRequired(path)
+	if err != nil && os.IsNotExist(err) && path == DefaultPath() {
+		return File{}, nil
+	}
+	return cfg, err
+}
+
+func LoadRequired(path string) (File, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) && path == DefaultPath() {
-			return File{}, nil
-		}
 		return File{}, err
 	}
 	defer file.Close()

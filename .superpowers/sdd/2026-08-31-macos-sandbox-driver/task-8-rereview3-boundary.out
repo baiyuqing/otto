@@ -1,0 +1,190 @@
+# CHANGES_REQUIRED
+
+Audited clean `77bcef05e0b7` against `639b076`; no repository files were modified.
+
+## Findings
+
+### Major — JSON serialization can recreate a retained secret form
+
+**Locations**
+- `internal/agent/redactor.go:277-306`
+- `internal/tool/bash.go:301-336`
+- `internal/provider/openaicompat/client.go:79`
+- `internal/session/store.go:344-360`
+- `internal/session/pi_codec.go:759-884`
+
+**Trigger**
+
+Occupy the preferred marker, PUA range, and eligible runes before `<`, while retaining a nested JSON escape whose decoded form is `\u003c`. Both marker selectors choose `<`. `encoding/json` then serializes the replacement as `\u003c`, recreating the retained form.
+
+Read-only overlays reproduced this in:
+
+- Agent string redaction
+- Bash result serialization
+- The actual OpenAI-compatible HTTP request body
+- Raw Pi JSONL
+
+**Violated binding:** replacement markers must never synthesize a retained form at downstream serialization boundaries.
+
+**Fix**
+
+Only select marker runes emitted literally by every downstream encoder, and verify the encoded marker cannot contain/form a retained value. Fail closed if none exists. Prefer a shared selector for Agent and Bash.
+
+**Required tests**
+
+Exhaust candidate ranges, use nested escape forms, and inspect actual HTTP and Pi bytes without printing the protected value on failure.
+
+---
+
+### Major — Normal representable Agent and Bash streams are quadratic
+
+**Locations**
+- `internal/agent/redactor.go:347-365,411-437`
+- `internal/tool/result.go:123-135,162-203`
+- Bash pipeline: `internal/tool/bash.go:130-168`
+
+**Trigger**
+
+For secret `aⁿZ`, send `a` in one-byte chunks followed by a near miss. The entire growing proper prefix remains pending. Each append copies it, and matching rescans it.
+
+Measured `TotalAlloc`:
+
+| Input | Agent | Bash writer |
+|---:|---:|---:|
+| 2 KiB | 2.25 MiB | 2.23 MiB |
+| 4 KiB | 8.99 MiB | 8.95 MiB |
+| 8 KiB | 35.86 MiB | 35.78 MiB |
+| 16 KiB | 141.99 MiB | 141.86 MiB |
+
+Elapsed time also grew superlinearly. This is unusable near the required 1 MiB secret bound; Bash’s final output cap does not constrain its pre-cap redaction buffer.
+
+**Violated binding:** representable one-byte streams must use bounded memory and non-quadratic CPU.
+
+**Fix**
+
+Replace string concatenation and repeated suffix/full-secret scans with an incremental trie/automaton and a reusable buffer bounded by the maximum secret length. Preallocation alone is insufficient because matching remains quadratic.
+
+**Required tests**
+
+One-megabyte proper-prefix and near-miss streams, one-byte/random chunking, 512 shared-prefix forms, allocation ceilings, and end-to-end provider/Bash correctness.
+
+---
+
+### Major — Malformed multi-`@` URL extraction has quadratic output and no effective pre-cap
+
+**Locations**
+- `internal/urlprivacy/userinfo.go:108-183,200-213`
+- `internal/sandbox/environment.go:88-98,266-277`
+- `cmd/otto/runtime_builder.go:434-513`
+- `internal/config/config.go:68-86`
+
+**Trigger**
+
+A malformed endpoint shaped as an extra-slash authority followed by repeated credential-like `u:p@` segments creates local and every cumulative prefix. Those prefixes are decoded and cloned before the environment collector applies its cap.
+
+Measured:
+
+| Segments | Input size | Forms | Form bytes | Total allocation |
+|---:|---:|---:|---:|---:|
+| 250 | ~1 KiB | 502 | 250 KB | 0.96 MB |
+| 500 | ~2 KiB | 1,002 | 1 MB | 2.45 MB |
+| 1,000 | ~4 KiB | 2,002 | 4 MB | 7.31 MB |
+| 2,000 | ~8 KiB | 4,002 | 16 MB | 23.44 MB |
+
+Configured redactions also lack a global aggregate bound: 600 ordinary profiles produced 1,201 retained forms with `complete=true`, despite the 512-value design bound.
+
+**Violated binding:** malformed/huge configured or proxy input must have bounded work; excess or ambiguous input must cause global suppression.
+
+**Fix**
+
+Apply input, form-count, and aggregate-byte budgets before candidate materialization or decoding. Once completeness cannot be maintained, stop enumeration and return incomplete. Apply one shared 512-value/1 MiB collector to the final combined environment/provider set.
+
+**Required tests**
+
+Allocation/scaling tests through both `ResolveEnvironment` and `runtimeBuilder`, 513 profiles, oversized endpoints, and regression tests preserving valid path/query `@`, balanced IPv6, and `NO_PROXY`.
+
+---
+
+### Major — Secret collisions with mandatory runtime fields bypass redaction
+
+**Locations**
+- `cmd/otto/runtime_builder.go:430-469`
+- `cmd/otto/runtime_builder.go:150-189`
+- `internal/agent/agent.go:217-234`
+- `cmd/otto/main.go:948-966`
+- `cmd/otto/runtime_builder.go:353-364`
+
+**Trigger**
+
+Set an inactive profile credential equal to the active model. The credential is retained, but `boundaryAllowsDynamic` checks only marker representability. The raw model is then:
+
+- sent in the provider request,
+- persisted in Pi runtime/session metadata,
+- exposed through `RuntimeInfo`.
+
+An end-to-end overlay confirmed both provider-body and Pi leakage.
+
+**Violated binding:** every retained value must be protected across provider, persistence, and frontend surfaces, including collisions with control/metadata fields.
+
+**Fix**
+
+Before enabling dynamic mode or creating a session, verify every non-redactable outbound field is unchanged by the boundary: provider/profile/model/thinking, system prompt/tool definitions, and session/frontend metadata. If a mandatory field collides, suppress globally rather than sending a marker as an operational value.
+
+**Required tests**
+
+Table-test inactive credentials colliding with each runtime/control field; assert no provider call, session creation/update, Pi bytes, tool definitions, or frontend metadata.
+
+---
+
+### Moderate — Incomplete error handling invokes attacker-controlled methods
+
+**Locations**
+- `internal/agent/redactor.go:114-138`
+- `cmd/otto/runtime_builder.go:393-404`
+
+**Trigger/results**
+
+- Agent incomplete `RedactError` invoked a custom `Is` method five times.
+- RuntimeBuilder incomplete error handling invoked custom `Error`, `Is`, and `Unwrap` twice each.
+
+Such methods can block, recurse, or panic, so this is not constant-work suppression.
+
+**Fix**
+
+In incomplete mode return a fixed local error without calling `Error`, `Is`, or `Unwrap`. Preserve standard cancellation only through direct identity comparisons or a fixed internal classification.
+
+**Required test**
+
+Use errors whose methods panic and assert zero method calls for incomplete Agent and runtime paths.
+
+## Verification
+
+- Focused repeated and race tests for Agent, Tool, App, Sandbox, URL privacy, and runtime builder: **PASS**
+- `go test ./... -count=1`: **PASS**
+- `go test -race ./... -count=1`: **PASS**
+- PTY lifecycle/cancellation, repeated: **PASS**
+- `go vet ./...`: **PASS**
+- macOS build and Linux amd64/arm64 cross-builds: **PASS**
+- Scoped Staticcheck v0.8.1 command from Task 8 report: **PASS**
+- `gofmt`, `git diff --check`, source grep: **PASS**
+- Whole-repo Staticcheck reports pre-existing `internal/repl/repl.go:65: ottoMark is unused`; it is also present at the base commit.
+- Final `git status --porcelain`: empty.
+
+## Residuals
+
+Bounded `SecretForms`, normal URL/`NO_PROXY` behavior, invalid UTF-8 canonicalization, and most incomplete Agent/Controller suppression passed. The green suite does not cover the five defects above.
+
+## Task 8 branch note
+
+Implemented the five boundary fixes on this branch:
+- shared safe PUA marker selection for Agent/Bash/runtime error redaction,
+- bounded dynamic-capability gate plus one shared 512-value/1 MiB collector,
+- linear/bounded malformed-URL userinfo extraction,
+- mandatory runtime/control-field collision suppression before provider/session mutation,
+- incomplete-mode direct-identity error handling only.
+
+Focused verification run on this branch:
+- `go test ./internal/safetext ./internal/urlprivacy ./internal/agent ./internal/tool ./internal/sandbox ./internal/app ./cmd/otto -count=1`
+- `go test -race ./internal/safetext ./internal/urlprivacy ./internal/agent ./internal/tool ./internal/sandbox ./internal/app ./cmd/otto -count=1`
+- `test -z "$(gofmt -l cmd/otto/runtime_builder.go cmd/otto/runtime_builder_test.go cmd/otto/main_test.go internal/agent/agent_test.go internal/agent/redactor.go internal/agent/redactor_test.go internal/safetext/redaction.go internal/safetext/utf8_test.go internal/sandbox/environment.go internal/sandbox/environment_test.go internal/tool/bash.go internal/tool/bash_test.go internal/urlprivacy/userinfo.go internal/urlprivacy/userinfo_test.go)"`
+- `git diff --check`

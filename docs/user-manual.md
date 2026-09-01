@@ -4,24 +4,26 @@ Otto is a minimal macOS coding agent written in Go. It turns a natural-language
 prompt into a loop of model completions, optional tool calls, and — when needed —
 context compaction, all in a full-screen TUI or a line-oriented REPL.
 
-This manual describes the behavior implemented by the current Stage 1 build.
-It covers only what the CLI actually does today, not planned roadmap features.
+This manual describes the behavior implemented by the current build: the Stage 1
+OpenAI-compatible provider and the Stage 2 ChatGPT-subscription provider. It
+covers only what the CLI actually does today, not planned roadmap features.
 
 ## Contents
 
 1. [Prerequisites](#prerequisites)
 2. [Quick start](#quick-start)
-3. [Command-line reference](#command-line-reference)
-4. [Environment variables](#environment-variables)
-5. [Configuration](#configuration)
-6. [Frontends](#frontends)
-7. [Slash commands](#slash-commands)
-8. [Sessions](#sessions)
-9. [Context compaction](#context-compaction)
-10. [Tools and safety](#tools-and-safety)
-11. [Headless mode](#headless-mode)
-12. [Memory core (internal, unwired)](#memory-core)
-13. [Troubleshooting](#troubleshooting)
+3. [ChatGPT subscription](#chatgpt-subscription)
+4. [Command-line reference](#command-line-reference)
+5. [Environment variables](#environment-variables)
+6. [Configuration](#configuration)
+7. [Frontends](#frontends)
+8. [Slash commands](#slash-commands)
+9. [Sessions](#sessions)
+10. [Context compaction](#context-compaction)
+11. [Tools and safety](#tools-and-safety)
+12. [Headless mode](#headless-mode)
+13. [Memory core (internal, unwired)](#memory-core)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -29,8 +31,9 @@ It covers only what the CLI actually does today, not planned roadmap features.
 
 - macOS.
 - Go 1.26+ to build from source.
-- A reachable OpenAI-compatible endpoint with SSE chat-completions streaming.
-- An API key exposed through an environment variable.
+- One of:
+  - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming, plus an API key exposed through an environment variable, or
+  - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription)).
 
 ## Quick start
 
@@ -81,7 +84,74 @@ OTTO_API_KEY=your-key ./otto \
   --no-session
 ```
 
+## ChatGPT subscription
+
+Otto can authorize requests with a ChatGPT Plus/Pro/Team/Enterprise subscription
+instead of a pay-per-token API key, using OpenAI's "Sign in with ChatGPT" OAuth
+flow (the same mechanism the Codex CLI uses).
+
+### Signing in
+
+```bash
+./otto login
+```
+
+`otto login` starts a local callback server, opens your browser to the OpenAI
+authorization page, and also prints the URL so you can open it manually if the
+browser does not launch. After you approve, it exchanges the authorization code
+and writes credentials to `~/.otto/auth/chatgpt.json` with file mode `0600`.
+
+```bash
+./otto login --status   # report the signed-in account and access-token expiry; exits nonzero if not signed in
+./otto logout           # remove the stored credentials
+```
+
+### Using the subscription
+
+Select the `chatgpt` provider. It requires a `model` but no `base_url` and no
+API key:
+
+```toml
+default_profile = "chatgpt"
+
+[profiles.chatgpt]
+provider = "chatgpt"
+model = "gpt-5-codex"
+```
+
+```bash
+./otto --profile chatgpt
+```
+
+Or ad hoc, without a profile:
+
+```bash
+./otto --provider chatgpt --model gpt-5-codex
+```
+
+### How it works
+
+- Subscription traffic goes to OpenAI's Responses backend
+  (`https://chatgpt.com/backend-api/codex/responses`), authorized by the OAuth
+  access token plus the `chatgpt-account-id` header. This is a different wire
+  format from the OpenAI-compatible Chat Completions provider, but the CLI,
+  tools, sessions, and compaction behave identically.
+- The access token is refreshed automatically from the stored refresh token
+  when it nears expiry; rotated tokens are written back to the credential file.
+- Tokens are never written to TOML, session files, or logs, and are stripped
+  from provider error messages.
+- Exchanging the login for an API key (which would bill as API credits rather
+  than subscription quota) is intentionally not supported.
+
 ## Command-line reference
+
+Otto also has two subcommands that run before the flags below are parsed:
+
+| Command | Description |
+| --- | --- |
+| `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
+| `otto logout` | Remove stored ChatGPT credentials. |
+| `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory core](#memory-core). |
 
 | Flag | Description |
 | --- | --- |
@@ -89,7 +159,7 @@ OTTO_API_KEY=your-key ./otto \
 | `--config PATH` | Configuration file. Defaults to `~/.config/otto/config.toml`. |
 | `--cwd PATH` | Workspace directory. Defaults to `.`. |
 | `--profile NAME` | Configuration profile. |
-| `--provider NAME` | Provider override (`openai-compatible` in Stage 1). |
+| `--provider NAME` | Provider override: `openai-compatible` or `chatgpt`. |
 | `--base-url URL` | Provider base URL override. |
 | `--model NAME` | Model override. |
 | `--thinking LEVEL` | Model reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. |
@@ -155,6 +225,9 @@ Key points:
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
   `api_key_env`. Optional `context_window` and `compaction_window` size
   proactive compaction for private or unknown model IDs.
+- A `provider = "chatgpt"` profile needs only `model`; it ignores `base_url`
+  and `api_key_env` and authorizes with the credentials from `otto login`. See
+  [ChatGPT subscription](#chatgpt-subscription).
 - `[profiles.NAME].max_turns` is accepted by the schema but no longer limits the
   agent loop.
 
@@ -455,6 +528,12 @@ Check the selected profile, `--base-url`, and endpoint path. Otto posts to
 
 The provider or proxy is not delivering valid SSE chat-completions output.
 Confirm streaming is enabled and SSE is not buffered or rewritten.
+
+### `no chatgpt credentials; run 'otto login'`
+
+The `chatgpt` provider has no stored OAuth credentials. Run `otto login` to sign
+in with your ChatGPT subscription, or check state with `otto login --status`.
+See [ChatGPT subscription](#chatgpt-subscription).
 
 ### Context-length or prompt-size failures
 

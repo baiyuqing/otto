@@ -86,6 +86,31 @@ func TestResolveRejectsUnsupportedProvider(t *testing.T) {
 	}
 }
 
+func TestResolveChatGPTProviderNeedsNoBaseURLOrKey(t *testing.T) {
+	file := File{Profiles: map[string]Profile{
+		"sub": {Provider: "chatgpt", Model: "gpt-5-codex"},
+	}}
+	runtime, err := Resolve(file, map[string]string{}, SessionDefaults{}, Overrides{Profile: "sub"})
+	if err != nil {
+		t.Fatalf("Resolve chatgpt: %v", err)
+	}
+	if runtime.Provider != "chatgpt" || runtime.Model != "gpt-5-codex" {
+		t.Fatalf("unexpected runtime: %+v", runtime)
+	}
+	if runtime.BaseURL != "" || runtime.APIKey != "" {
+		t.Fatalf("chatgpt runtime should carry no base_url/api key: %+v", runtime)
+	}
+}
+
+func TestResolveChatGPTStillRequiresModel(t *testing.T) {
+	file := File{Profiles: map[string]Profile{
+		"sub": {Provider: "chatgpt"},
+	}}
+	if _, err := Resolve(file, nil, SessionDefaults{}, Overrides{Profile: "sub"}); err == nil || !strings.Contains(err.Error(), "model") {
+		t.Fatalf("expected missing model error, got %v", err)
+	}
+}
+
 func TestResolveRejectsMissingNamedAPIKeyEnvironmentVariable(t *testing.T) {
 	file := File{Profiles: map[string]Profile{
 		"local": {Provider: "openai-compatible", Model: "test-model", BaseURL: "https://example.com/v1", APIKeyEnv: "PROFILE_KEY"},

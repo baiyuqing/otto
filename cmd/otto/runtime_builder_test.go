@@ -816,6 +816,61 @@ func TestRuntimeBuilderBuildNewReplacementResolvesCurrentSessionRuntimeTransacti
 	}
 }
 
+func TestRuntimeBuilderBuildProfileReplacementSwitchesToNamedProfile(t *testing.T) {
+	file := configWithProfiles("startup")
+	file.Profiles["chatgpt"] = config.Profile{Provider: "chatgpt", Model: "gpt-5"}
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.noSession = false
+
+	var createdRuntime config.Runtime
+	builder.deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		createdRuntime = runtime
+		return session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "fresh", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), nil
+	}
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	replacement, err := builder.buildProfileReplacement(context.Background(), "chatgpt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Session.Close()
+	if replacement.RuntimeInfo.Provider != "chatgpt" || replacement.RuntimeInfo.Profile != "chatgpt" || replacement.RuntimeInfo.Model != "gpt-5" {
+		t.Fatalf("runtime info = %#v", replacement.RuntimeInfo)
+	}
+	if createdRuntime.Provider != "chatgpt" || createdRuntime.Model != "gpt-5" {
+		t.Fatalf("resolved runtime = %#v", redactedRuntime(createdRuntime))
+	}
+	if header := replacement.Session.Header(); header.Provider != "chatgpt" || header.Profile != "chatgpt" || header.Model != "gpt-5" {
+		t.Fatalf("session header = %#v", header)
+	}
+}
+
+func TestRuntimeBuilderBuildProfileReplacementUnknownProfileErrors(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("startup"))
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		t.Fatal("runner must not build for an unknown profile")
+		return nil, nil
+	}
+	_, err := builder.buildProfileReplacement(context.Background(), "missing")
+	if err == nil || !strings.Contains(err.Error(), `profile "missing" not found`) {
+		t.Fatalf("error = %v, want profile not found", err)
+	}
+}
+
+func TestRuntimeBuilderProfileNamesSorted(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("beta", "alpha", "chatgpt"))
+	names := builder.profileNames()
+	want := []string{"alpha", "beta", "chatgpt"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("profileNames() = %#v, want %#v", names, want)
+	}
+}
+
 func TestRuntimeBuilderBuildNewReplacementLeavesUnknownPrivateModelWindowUnset(t *testing.T) {
 	file := configWithProfiles("private")
 	file.Profiles["private"] = config.Profile{

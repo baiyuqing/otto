@@ -16,6 +16,11 @@ import (
 // credentials without a browser or network.
 var authLogin = auth.Login
 
+var (
+	errChatGPTLoginFailed  = errors.New("chatgpt sign-in failed")
+	errChatGPTLogoutFailed = errors.New("stored chatgpt credentials could not be removed")
+)
+
 // runAuthCommand handles "otto login [--status]" and "otto logout", dispatched
 // before the main flag set is parsed. It reads and writes only the credential
 // file; it builds no provider, session, or controller.
@@ -50,16 +55,12 @@ func runAuthCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 }
 
 func runLoginStatus(path string, stdout io.Writer) int {
-	creds, err := auth.Load(path)
-	if err != nil {
-		_, _ = fmt.Fprintln(stdout, "Not signed in to ChatGPT. Run 'otto login'.")
-		return 1
+	line, signedIn := auth.StatusLine(path)
+	_, _ = fmt.Fprintln(stdout, line)
+	if signedIn {
+		return 0
 	}
-	_, _ = fmt.Fprintf(stdout, "Signed in to ChatGPT (account %s).\n", creds.AccountID)
-	if !creds.Expiry.IsZero() {
-		_, _ = fmt.Fprintf(stdout, "Access token expires: %s\n", creds.Expiry.Format("2006-01-02 15:04:05 MST"))
-	}
-	return 0
+	return 1
 }
 
 func runLogout(path string, stdout, stderr io.Writer) int {
@@ -68,7 +69,7 @@ func runLogout(path string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stdout, "Not signed in to ChatGPT.")
 			return 0
 		}
-		return fail(stderr, "remove credentials: %v", err)
+		return fail(stderr, "%v", errChatGPTLogoutFailed)
 	}
 	_, _ = fmt.Fprintln(stdout, "Signed out of ChatGPT.")
 	return 0
@@ -77,12 +78,15 @@ func runLogout(path string, stdout, stderr io.Writer) int {
 func runLogin(ctx context.Context, path string, stdout, stderr io.Writer) int {
 	creds, err := authLogin(ctx, browserOpener(stdout))
 	if err != nil {
-		return fail(stderr, "login: %v", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fail(stderr, "%v", err)
+		}
+		return fail(stderr, "login: %v", errChatGPTLoginFailed)
 	}
 	if err := creds.Save(path); err != nil {
-		return fail(stderr, "save credentials: %v", err)
+		return fail(stderr, "%v", auth.ErrCredentialsPersistence)
 	}
-	_, _ = fmt.Fprintf(stdout, "Signed in to ChatGPT (account %s).\n", creds.AccountID)
+	_, _ = fmt.Fprintln(stdout, "Signed in to ChatGPT.")
 	return 0
 }
 

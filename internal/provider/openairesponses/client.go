@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/provider"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"golang.org/x/oauth2"
 )
 
@@ -45,6 +46,9 @@ type Client struct {
 var (
 	_ provider.Provider     = (*Client)(nil)
 	_ provider.RequestSizer = (*Client)(nil)
+
+	errChatGPTAuthorizationFailed = errors.New("chatgpt authorization failed; run 'otto login'")
+	errChatGPTRequestFailed       = errors.New("chatgpt request failed")
 )
 
 // New builds a subscription provider authorized by tokenSource. accountID is
@@ -79,11 +83,20 @@ func (c *Client) SerializedRequestSize(request provider.Request) (int, error) {
 // subscription rate limits make transient failures common.
 func (c *Client) Complete(ctx context.Context, request provider.Request, emit func(provider.StreamEvent)) (provider.Response, error) {
 	if c.tokenSource == nil {
-		return provider.Response{}, errors.New("no chatgpt credentials; run 'otto login'")
+		return provider.Response{}, errChatGPTAuthorizationFailed
 	}
 	token, err := c.tokenSource.Token()
 	if err != nil {
-		return provider.Response{}, fmt.Errorf("authorize chatgpt request: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
+		}
+		return provider.Response{}, errChatGPTAuthorizationFailed
+	}
+	if token == nil || strings.TrimSpace(token.AccessToken) == "" {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return provider.Response{}, ctxErr
+		}
+		return provider.Response{}, errChatGPTAuthorizationFailed
 	}
 	payload, err := json.Marshal(translateRequest(request))
 	if err != nil {
@@ -103,38 +116,60 @@ func (c *Client) Complete(ctx context.Context, request provider.Request, emit fu
 
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {
-		return provider.Response{}, c.redactErr(token.AccessToken, fmt.Errorf("send responses request: %w", err))
+		return provider.Response{}, c.redactErr(token.AccessToken, c.accountID, fmt.Errorf("send responses request: %w", err), errChatGPTRequestFailed)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, maxErrorBody))
-		return provider.Response{}, c.redactErr(token.AccessToken,
-			fmt.Errorf("chatgpt responses HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body))))
+		return provider.Response{}, c.redactErr(token.AccessToken, c.accountID,
+			fmt.Errorf("chatgpt responses HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body))), errChatGPTRequestFailed)
 	}
 
 	result, _, err := readStream(response.Body, emit)
 	if err != nil {
-		return provider.Response{}, c.redactErr(token.AccessToken, err)
+		return provider.Response{}, c.redactErr(token.AccessToken, c.accountID, err, errChatGPTRequestFailed)
 	}
 	return result, nil
 }
 
-// redactErr removes the access token from error text so it never reaches logs,
-// sessions, or the user. Tokens rotate, so the runtime redactor (built from
-// static secrets) cannot cover them; the provider redacts the value it used.
-func (c *Client) redactErr(token string, err error) error {
-	if err == nil || token == "" {
-		return err
-	}
-	msg := strings.ReplaceAll(err.Error(), token, "[REDACTED]")
-	if msg == err.Error() {
-		return err
+// redactErr removes the rotated access token and account ID from error text so
+// neither reaches logs, sessions, or the user. If exact shared redaction is
+// impossible, it fails closed to a fixed fallback error.
+func (c *Client) redactErr(token, accountID string, err, fallback error) error {
+	if err == nil {
+		return nil
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
-	return errors.New(msg)
+	collector := safetext.NewSecretCollector()
+	for _, value := range []string{token, accountID} {
+		if value != "" && !collector.Add(value) {
+			return fallback
+		}
+	}
+	secrets := collector.Values()
+	marker, ok := safetext.DynamicRedactionMarker(secrets)
+	if !ok {
+		if len(secrets) == 0 {
+			return err
+		}
+		return fallback
+	}
+	message := err.Error()
+	redacted := false
+	for _, secret := range secrets {
+		next := strings.ReplaceAll(message, secret, marker)
+		if next != message {
+			message = next
+			redacted = true
+		}
+	}
+	if !redacted {
+		return err
+	}
+	return errors.New(message)
 }
 
 func defaultHTTPClient() *http.Client {

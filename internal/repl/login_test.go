@@ -3,6 +3,7 @@ package repl
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,8 +55,8 @@ func TestREPLLoginStatusReportsSignedIn(t *testing.T) {
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "acct-9") {
-		t.Fatalf("stdout = %q", stdout.String())
+	if got := stdout.String(); strings.Contains(got, "acct-9") || !strings.Contains(got, "Signed in to ChatGPT") {
+		t.Fatalf("stdout = %q", got)
 	}
 }
 
@@ -71,7 +72,7 @@ func TestREPLLoginSavesCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "acct-7") || !strings.Contains(out, "Start a new session") {
+	if strings.Contains(out, "acct-7") || !strings.Contains(out, "Signed in to ChatGPT") || !strings.Contains(out, "Start a new session") {
 		t.Fatalf("stdout = %q", out)
 	}
 	if !strings.Contains(out, "auth.example") {
@@ -137,6 +138,20 @@ func TestREPLLogoutWhenNotSignedIn(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Not signed in") {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestREPLLoginFailureIsBounded(t *testing.T) {
+	withAuthSeams(t, func(context.Context, func(string) error) (auth.Credentials, error) {
+		return auth.Credentials{}, errors.New("repl-login-secret")
+	})
+	var stdout, stderr bytes.Buffer
+	r := New(strings.NewReader("/login\n/exit\n"), &stdout, &stderr, chatgptBackend())
+	if err := r.Run(context.Background()); err == nil {
+		t.Fatal("Run() unexpectedly succeeded")
+	}
+	if strings.Contains(stderr.String(), "repl-login-secret") {
+		t.Fatalf("stderr leaked login error: %q", stderr.String())
 	}
 }
 

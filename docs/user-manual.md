@@ -108,7 +108,7 @@ browser does not launch. After you approve, it exchanges the authorization code
 and writes credentials to `~/.otto/auth/chatgpt.json` with file mode `0600`.
 
 ```bash
-./otto login --status   # report the signed-in account and access-token expiry; exits nonzero if not signed in
+./otto login --status   # report the ChatGPT sign-in state and access-token expiry; exits nonzero if not signed in
 ./otto logout           # remove the stored credentials
 ```
 

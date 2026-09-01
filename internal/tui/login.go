@@ -16,8 +16,10 @@ import (
 // Seams so tests can supply credentials and a temp path without a browser,
 // network, or the real home directory.
 var (
-	authLoginFn = auth.Login
-	authPathFn  = auth.DefaultPath
+	authLoginFn        = auth.Login
+	authPathFn         = auth.DefaultPath
+	errTUILoginFailed  = errors.New("chatgpt sign-in failed")
+	errTUILogoutFailed = errors.New("stored chatgpt credentials could not be removed")
 )
 
 // loginResultMsg carries one step of the async login flow: an authorization URL
@@ -25,7 +27,6 @@ var (
 type loginResultMsg struct {
 	generation uint64
 	url        string
-	account    string
 	err        error
 	done       bool
 }
@@ -40,7 +41,7 @@ func (m Model) handleLoginCommand(argument string) (tea.Model, tea.Cmd) {
 	case "status":
 		path, err := authPathFn()
 		if err != nil {
-			m.statusText = err.Error()
+			m.statusText = auth.ErrCredentialsUnavailable.Error()
 			return m, nil
 		}
 		line, _ := auth.StatusLine(path)
@@ -75,7 +76,7 @@ func (m Model) handleLoginCommand(argument string) (tea.Model, tea.Cmd) {
 func (m Model) handleLogoutCommand() (tea.Model, tea.Cmd) {
 	path, err := authPathFn()
 	if err != nil {
-		m.statusText = err.Error()
+		m.statusText = auth.ErrCredentialsUnavailable.Error()
 		return m, nil
 	}
 	m.clearEditor()
@@ -85,8 +86,8 @@ func (m Model) handleLogoutCommand() (tea.Model, tea.Cmd) {
 			m.appendLoginEntry(EntrySystem, "Not signed in to ChatGPT.")
 			return m, nil
 		}
-		m.statusText = err.Error()
-		m.appendLoginEntry(EntryError, err.Error())
+		m.statusText = errTUILogoutFailed.Error()
+		m.appendLoginEntry(EntryError, errTUILogoutFailed.Error())
 		return m, nil
 	}
 	m.appendLoginEntry(EntrySystem, "Signed out of ChatGPT.")
@@ -109,19 +110,23 @@ func runLoginWorker(ctx context.Context, generation uint64, channel chan loginRe
 	}
 	creds, err := authLoginFn(rootContext(ctx), opener)
 	if err != nil {
-		channel <- loginResultMsg{generation: generation, err: err, done: true}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			channel <- loginResultMsg{generation: generation, err: err, done: true}
+			return
+		}
+		channel <- loginResultMsg{generation: generation, err: errTUILoginFailed, done: true}
 		return
 	}
 	path, err := authPathFn()
 	if err != nil {
-		channel <- loginResultMsg{generation: generation, err: err, done: true}
+		channel <- loginResultMsg{generation: generation, err: auth.ErrCredentialsUnavailable, done: true}
 		return
 	}
 	if err := creds.Save(path); err != nil {
-		channel <- loginResultMsg{generation: generation, err: err, done: true}
+		channel <- loginResultMsg{generation: generation, err: auth.ErrCredentialsPersistence, done: true}
 		return
 	}
-	channel <- loginResultMsg{generation: generation, account: creds.AccountID, done: true}
+	channel <- loginResultMsg{generation: generation, done: true}
 }
 
 func waitLogin(generation uint64, channel chan loginResultMsg) tea.Cmd {
@@ -150,7 +155,7 @@ func (m Model) applyLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.statusText = ""
-	m.appendLoginEntry(EntrySystem, fmt.Sprintf("Signed in to ChatGPT (account %s). Start a new session on the chatgpt provider to use it.", msg.account))
+	m.appendLoginEntry(EntrySystem, "Signed in to ChatGPT. Start a new session on the chatgpt provider to use it.")
 	return m, nil
 }
 

@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"golang.org/x/oauth2"
@@ -13,6 +12,7 @@ import (
 // refreshed access/refresh token survives across processes.
 type persistingSource struct {
 	base  oauth2.TokenSource
+	ctx   context.Context
 	path  string
 	mu    sync.Mutex
 	creds Credentials
@@ -34,6 +34,7 @@ func newTokenSource(ctx context.Context, endpoint oauth2.Endpoint, creds Credent
 	}
 	return &persistingSource{
 		base:  config.TokenSource(ctx, tok),
+		ctx:   ctx,
 		path:  path,
 		creds: creds,
 	}
@@ -42,7 +43,13 @@ func newTokenSource(ctx context.Context, endpoint oauth2.Endpoint, creds Credent
 func (s *persistingSource) Token() (*oauth2.Token, error) {
 	tok, err := s.base.Token()
 	if err != nil {
-		return nil, fmt.Errorf("obtain access token: %w", err)
+		if ctxErr := s.ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, boundedAuthError(ErrAccessTokenRefreshFailed, err)
+	}
+	if ctxErr := s.ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,7 +62,7 @@ func (s *persistingSource) Token() (*oauth2.Token, error) {
 		s.creds.AccessToken = tok.AccessToken
 		s.creds.Expiry = tok.Expiry
 		if err := s.creds.Save(s.path); err != nil {
-			return nil, fmt.Errorf("persist refreshed token: %w", err)
+			return nil, err
 		}
 	}
 	return tok, nil

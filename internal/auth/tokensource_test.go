@@ -2,9 +2,12 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,5 +84,75 @@ func TestTokenSourceValidTokenSkipsRefresh(t *testing.T) {
 	}
 	if tok.AccessToken != "access-valid" {
 		t.Fatalf("access token = %q, want access-valid", tok.AccessToken)
+	}
+}
+
+func TestTokenSourceRefreshFailureReturnsFixedError(t *testing.T) {
+	const (
+		accessToken  = "access-secret"
+		refreshToken = "refresh-secret"
+		accountID    = "acct-secret"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"` + accessToken + ` ` + refreshToken + ` ` + accountID + `"}`))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), accountID, "chatgpt.json")
+	src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: server.URL}, Credentials{
+		AccessToken: accessToken, RefreshToken: refreshToken, AccountID: accountID, Expiry: time.Now().Add(-time.Minute),
+	}, path)
+	_, err := src.Token()
+	if !errors.Is(err, ErrAccessTokenRefreshFailed) {
+		t.Fatalf("err = %v, want ErrAccessTokenRefreshFailed", err)
+	}
+	for _, secret := range []string{accessToken, refreshToken, accountID, path} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Token() leaked %q: %v", secret, err)
+		}
+	}
+}
+
+func TestTokenSourceSaveFailureReturnsFixedError(t *testing.T) {
+	const (
+		accessToken  = "access-secret"
+		refreshToken = "refresh-secret"
+		accountID    = "acct-secret"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"access-rotated","refresh_token":"refresh-rotated","token_type":"bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	parent := filepath.Join(t.TempDir(), accountID)
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "chatgpt.json")
+	src := newTokenSource(context.Background(), oauth2.Endpoint{TokenURL: server.URL}, Credentials{
+		AccessToken: accessToken, RefreshToken: refreshToken, AccountID: accountID, Expiry: time.Now().Add(-time.Minute),
+	}, path)
+	_, err := src.Token()
+	if !errors.Is(err, ErrCredentialsPersistence) {
+		t.Fatalf("err = %v, want ErrCredentialsPersistence", err)
+	}
+	for _, secret := range []string{accessToken, refreshToken, accountID, path} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Token() leaked %q: %v", secret, err)
+		}
+	}
+}
+
+func TestTokenSourcePreservesContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	src := newTokenSource(ctx, oauth2.Endpoint{TokenURL: "http://127.0.0.1:1"}, Credentials{
+		AccessToken: "access", RefreshToken: "refresh", Expiry: time.Now().Add(-time.Minute),
+	}, filepath.Join(t.TempDir(), "chatgpt.json"))
+	_, err := src.Token()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }

@@ -14,8 +14,10 @@ import (
 // Seams so tests can supply credentials and a temp path without a browser,
 // network, or the real home directory.
 var (
-	replAuthLogin = auth.Login
-	replAuthPath  = auth.DefaultPath
+	replAuthLogin       = auth.Login
+	replAuthPath        = auth.DefaultPath
+	errREPLLoginFailed  = errors.New("chatgpt sign-in failed")
+	errREPLLogoutFailed = errors.New("stored chatgpt credentials could not be removed")
 )
 
 // loginCommand handles "/login" and "/login status". The OAuth flow runs
@@ -25,7 +27,11 @@ var (
 func (r *REPL) loginCommand(ctx context.Context, args string) (bool, error) {
 	path, err := replAuthPath()
 	if err != nil {
-		return false, &commandError{command: "/login", err: err}
+		if args == "status" {
+			_, _ = fmt.Fprintln(r.stdout, auth.ErrCredentialsUnavailable.Error())
+			return false, nil
+		}
+		return false, &commandError{command: "/login", err: auth.ErrCredentialsUnavailable}
 	}
 	switch args {
 	case "status":
@@ -39,12 +45,15 @@ func (r *REPL) loginCommand(ctx context.Context, args string) (bool, error) {
 		}
 		creds, err := replAuthLogin(ctx, r.browserOpener())
 		if err != nil {
-			return false, &commandError{command: "/login", err: err}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false, &commandError{command: "/login", err: err}
+			}
+			return false, &commandError{command: "/login", err: errREPLLoginFailed}
 		}
 		if err := creds.Save(path); err != nil {
-			return false, &commandError{command: "/login", err: err}
+			return false, &commandError{command: "/login", err: auth.ErrCredentialsPersistence}
 		}
-		_, _ = fmt.Fprintf(r.stdout, "Signed in to ChatGPT (account %s). Start a new session on the chatgpt provider to use it.\n", creds.AccountID)
+		_, _ = fmt.Fprintln(r.stdout, "Signed in to ChatGPT. Start a new session on the chatgpt provider to use it.")
 		return false, nil
 	default:
 		_, _ = fmt.Fprintln(r.stderr, "usage: /login [status]")
@@ -55,14 +64,14 @@ func (r *REPL) loginCommand(ctx context.Context, args string) (bool, error) {
 func (r *REPL) logoutCommand() (bool, error) {
 	path, err := replAuthPath()
 	if err != nil {
-		return false, &commandError{command: "/logout", err: err}
+		return false, &commandError{command: "/logout", err: auth.ErrCredentialsUnavailable}
 	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			_, _ = fmt.Fprintln(r.stdout, "Not signed in to ChatGPT.")
 			return false, nil
 		}
-		return false, &commandError{command: "/logout", err: err}
+		return false, &commandError{command: "/logout", err: errREPLLogoutFailed}
 	}
 	_, _ = fmt.Fprintln(r.stdout, "Signed out of ChatGPT.")
 	return false, nil

@@ -149,7 +149,7 @@ Sign in once:
 `otto login` opens your browser to the OpenAI authorization page and also prints the URL as a fallback. After you approve, credentials are stored at `~/.otto/auth/chatgpt.json` (file mode `0600`). Manage the session with:
 
 ```bash
-./otto login --status   # show the signed-in account and token expiry
+./otto login --status   # show the ChatGPT sign-in state and token expiry
 ./otto logout           # remove stored credentials
 ```
 

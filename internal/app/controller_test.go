@@ -75,7 +75,16 @@ func TestControllerDynamicSuppressionHidesSessionStateAndRejectsBrowsingAndRepla
 		},
 		messages: []model.Message{{ID: secret, Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: secret}}}},
 	}
-	var createCalls, newCalls, listCalls, resumeCalls int
+	userScope, err := memory.NewUserScope("user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceScope, err := memory.NewWorkspaceScope(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryManager := &fakeMemoryManager{}
+	var createCalls, newCalls, listCalls, resumeCalls, setDefaultCalls, switchCalls, archiveCalls int
 	sandboxInfo := SandboxInfo{Mode: SandboxUnavailable, BashAvailable: false, Reason: SandboxReasonEnvironmentRejected}
 	controller, err := New(initial, func() (session.Session, error) {
 		createCalls++
@@ -93,6 +102,19 @@ func TestControllerDynamicSuppressionHidesSessionStateAndRejectsBrowsingAndRepla
 			resumeCalls++
 			return SessionReplacement{}, nil
 		}),
+		WithProfileSwitcher([]string{"alpha", "chatgpt"}, func(context.Context, string) (SessionReplacement, error) {
+			switchCalls++
+			return SessionReplacement{}, nil
+		}),
+		WithDefaultProfileSetter(func(context.Context, string) error {
+			setDefaultCalls++
+			return nil
+		}),
+		WithSessionArchiver(func(context.Context, string) (session.ArchiveResult, error) {
+			archiveCalls++
+			return session.ArchiveResult{}, nil
+		}),
+		WithMemory(memoryManager, userScope, workspaceScope),
 		WithDynamicContent(false),
 	)
 	if err != nil {
@@ -106,6 +128,9 @@ func TestControllerDynamicSuppressionHidesSessionStateAndRejectsBrowsingAndRepla
 	if history := controller.History(); len(history) != 0 {
 		t.Fatalf("History() exposed suppressed state: %#v", history)
 	}
+	if profiles := controller.Profiles(); len(profiles) != 0 {
+		t.Fatalf("Profiles() exposed suppressed metadata: %#v", profiles)
+	}
 	browser := SessionBrowser(controller)
 	if _, err := browser.ListSessions(context.Background(), 20); !errors.Is(err, ErrPersistenceDisabled) {
 		t.Fatalf("ListSessions() error = %v, want ErrPersistenceDisabled", err)
@@ -116,8 +141,41 @@ func TestControllerDynamicSuppressionHidesSessionStateAndRejectsBrowsingAndRepla
 	if err := controller.NewSession(); !errors.Is(err, ErrPersistenceDisabled) {
 		t.Fatalf("NewSession() error = %v, want ErrPersistenceDisabled", err)
 	}
-	if createCalls != 0 || newCalls != 0 || listCalls != 0 || resumeCalls != 0 {
-		t.Fatalf("suppressed callbacks = create %d new %d list %d resume %d", createCalls, newCalls, listCalls, resumeCalls)
+	if err := controller.SetDefaultProfile(context.Background(), "chatgpt"); !errors.Is(err, ErrProfileSwitchUnavailable) {
+		t.Fatalf("SetDefaultProfile() error = %v, want ErrProfileSwitchUnavailable", err)
+	}
+	if _, err := controller.SwitchProfile(context.Background(), "chatgpt"); !errors.Is(err, ErrProfileSwitchUnavailable) {
+		t.Fatalf("SwitchProfile() error = %v, want ErrProfileSwitchUnavailable", err)
+	}
+	if _, err := controller.ArchiveSession(context.Background(), "/sessions/other.jsonl"); !errors.Is(err, ErrPersistenceDisabled) {
+		t.Fatalf("ArchiveSession() error = %v, want ErrPersistenceDisabled", err)
+	}
+	if _, err := controller.ArchiveCurrentSession(context.Background()); !errors.Is(err, ErrPersistenceDisabled) {
+		t.Fatalf("ArchiveCurrentSession() error = %v, want ErrPersistenceDisabled", err)
+	}
+	if _, _, ok := controller.MemoryScopes(); ok {
+		t.Fatal("MemoryScopes() ok = true, want false when dynamic content is suppressed")
+	}
+	if _, err := controller.SearchMemory(context.Background(), memory.SearchRequest{Query: secret}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("SearchMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.RememberMemory(context.Background(), memory.RememberRequest{Text: secret}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("RememberMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.ForgetMemory(context.Background(), memory.ForgetRequest{Ref: memory.RecordRef{ID: secret}}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("ForgetMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.ReviewMemoryCandidate(context.Background(), memory.ReviewRequest{Ref: memory.CandidateRef{ID: secret}}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("ReviewMemoryCandidate() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if _, err := controller.GetMemory(context.Background(), memory.RecordRef{ID: secret}); !errors.Is(err, ErrMemoryUnavailable) {
+		t.Fatalf("GetMemory() error = %v, want ErrMemoryUnavailable", err)
+	}
+	if createCalls != 0 || newCalls != 0 || listCalls != 0 || resumeCalls != 0 || setDefaultCalls != 0 || switchCalls != 0 || archiveCalls != 0 {
+		t.Fatalf("suppressed callbacks = create %d new %d list %d resume %d set-default %d switch %d archive %d", createCalls, newCalls, listCalls, resumeCalls, setDefaultCalls, switchCalls, archiveCalls)
+	}
+	if !reflect.DeepEqual(memoryManager.searchRequest, memory.SearchRequest{}) || !reflect.DeepEqual(memoryManager.rememberRequest, memory.RememberRequest{}) || !reflect.DeepEqual(memoryManager.forgetRequest, memory.ForgetRequest{}) || !reflect.DeepEqual(memoryManager.reviewRequest, memory.ReviewRequest{}) || !reflect.DeepEqual(memoryManager.getRequest, memory.RecordRef{}) {
+		t.Fatalf("memory callbacks were invoked: manager = %#v", memoryManager)
 	}
 }
 
@@ -1578,16 +1636,17 @@ func TestControllerResumeOldCloseFailureIsFatalAndClosesCandidateOnce(t *testing
 	closeErr := errors.New("close old failed")
 	old := &fakeSession{header: testHeader("old"), closeErr: closeErr}
 	candidate := &fakeSession{header: testHeader("next"), closeErr: errors.New("close candidate failed")}
+	candidateRunner := &recordingRunner{}
 	controller := newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
 		func(context.Context, string) (SessionReplacement, error) {
-			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+			return SessionReplacement{Session: candidate, Runner: candidateRunner}, nil
 		})
 
 	if _, err := controller.ResumeSession(context.Background(), candidate.Path()); err != closeErr {
 		t.Fatalf("ResumeSession() error = %v, want exact old close error", err)
 	}
-	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
-		t.Fatalf("close calls = old %d, candidate %d", old.CloseCalls(), candidate.CloseCalls())
+	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 || candidateRunner.CloseCalls() != 1 {
+		t.Fatalf("close calls = old %d, candidate %d, runner %d", old.CloseCalls(), candidate.CloseCalls(), candidateRunner.CloseCalls())
 	}
 	if err := controller.Prompt(context.Background(), "prompt", nil); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Prompt() error = %v, want ErrClosed", err)
@@ -1595,8 +1654,8 @@ func TestControllerResumeOldCloseFailureIsFatalAndClosesCandidateOnce(t *testing
 	if err := controller.Close(); err != closeErr {
 		t.Fatalf("Close() error = %v, want exact old close error", err)
 	}
-	if candidate.CloseCalls() != 1 {
-		t.Fatalf("candidate close calls after Close = %d, want 1", candidate.CloseCalls())
+	if candidate.CloseCalls() != 1 || candidateRunner.CloseCalls() != 1 {
+		t.Fatalf("candidate cleanup after Close = session %d runner %d, want 1 each", candidate.CloseCalls(), candidateRunner.CloseCalls())
 	}
 }
 
@@ -1646,12 +1705,13 @@ func TestControllerExternalCloseWaitsForReentrantFactoryCloseAndCandidateCleanup
 		close(cleanupEntered)
 		<-releaseCleanup
 	}}
+	candidateRunner := &recordingRunner{}
 	var controller *Controller
 	controller = newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
 		func(context.Context, string) (SessionReplacement, error) {
 			factoryCloseDone <- controller.Close()
 			<-releaseFactory
-			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+			return SessionReplacement{Session: candidate, Runner: candidateRunner}, nil
 		})
 
 	resumeDone := make(chan error, 1)
@@ -1692,8 +1752,8 @@ func TestControllerExternalCloseWaitsForReentrantFactoryCloseAndCandidateCleanup
 	if returnedBeforeCleanup {
 		t.Fatal("external Close() returned before candidate cleanup finished")
 	}
-	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
-		t.Fatalf("close calls = old %d, candidate %d; want 1 each", old.CloseCalls(), candidate.CloseCalls())
+	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 || candidateRunner.CloseCalls() != 1 {
+		t.Fatalf("close calls = old %d, candidate %d, runner %d; want 1 each", old.CloseCalls(), candidate.CloseCalls(), candidateRunner.CloseCalls())
 	}
 }
 
@@ -1868,11 +1928,12 @@ func TestControllerCloseWaitsForResumeWithoutDeadlock(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	old := &fakeSession{header: testHeader("old")}
 	candidate := &fakeSession{header: testHeader("next")}
+	candidateRunner := &recordingRunner{}
 	controller := newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
 		func(context.Context, string) (SessionReplacement, error) {
 			close(entered)
 			<-release
-			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
+			return SessionReplacement{Session: candidate, Runner: candidateRunner}, nil
 		})
 	resumeDone := make(chan error, 1)
 	go func() {
@@ -1896,8 +1957,8 @@ func TestControllerCloseWaitsForResumeWithoutDeadlock(t *testing.T) {
 	if err := awaitError(t, closeDone, "close"); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
-	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
-		t.Fatalf("close calls = old %d, candidate %d", old.CloseCalls(), candidate.CloseCalls())
+	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 || candidateRunner.CloseCalls() != 1 {
+		t.Fatalf("close calls = old %d, candidate %d, runner %d", old.CloseCalls(), candidate.CloseCalls(), candidateRunner.CloseCalls())
 	}
 }
 

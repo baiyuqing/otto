@@ -39,6 +39,14 @@ type preparedStore struct {
 	prepared *session.Prepared
 }
 
+type capturedAuthCredentials struct {
+	path            string
+	credentials     auth.Credentials
+	loaded          bool
+	complete        bool
+	redactionValues []string
+}
+
 func (p *preparedStore) Info() session.SessionInfo {
 	return p.prepared.Info()
 }
@@ -76,6 +84,9 @@ type runtimeBuilder struct {
 	sandboxInfo             app.SandboxInfo
 	sandboxSecrets          []string
 	sandboxSecretsComplete  bool
+	authPath                string
+	authCredentials         auth.Credentials
+	authCredentialsLoaded   bool
 	memoryService           memory.Service
 	memoryUsable            bool
 	memoryUserScope         memory.Scope
@@ -119,6 +130,42 @@ func newRuntimeBuilder(configPath string, configFile config.File, environment ma
 		}
 	}
 	return builder
+}
+
+func captureAuthCredentials(path string) capturedAuthCredentials {
+	capture := capturedAuthCredentials{path: path, complete: true}
+	if path == "" {
+		capture.complete = false
+		return capture
+	}
+	creds, err := auth.Load(path)
+	if err != nil {
+		if errors.Is(err, auth.ErrNoCredentials) {
+			return capture
+		}
+		capture.complete = false
+		return capture
+	}
+	redactions := safetext.NewSecretCollector()
+	exact := safetext.NewSecretCollector()
+	for _, value := range []string{creds.AccessToken, creds.RefreshToken, creds.IDToken, creds.AccountID} {
+		if value == "" {
+			continue
+		}
+		if !redactions.Add(value) || !exact.AddForm(value) || len(value) > memory.MaxExactGuardValueBytes {
+			capture.complete = false
+			return capture
+		}
+	}
+	redactionValues := redactions.Values()
+	if _, ok := safetext.DynamicRedactionMarker(redactionValues); !ok {
+		capture.complete = false
+		return capture
+	}
+	capture.credentials = creds
+	capture.loaded = true
+	capture.redactionValues = redactionValues
+	return capture
 }
 
 func (b runtimeBuilder) resolveSession(metadata session.RuntimeMetadata) (config.Runtime, error) {
@@ -189,14 +236,17 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
-	client, err := b.buildProvider(ctx, runtime)
-	if err != nil {
-		if binding != nil {
-			_ = binding.Close()
-		}
-		return nil, b.redactError(err, &runtime)
-	}
 	redactor := b.boundaryRedactor(&runtime)
+	var client provider.Provider
+	if b.boundaryAllowsDynamic(&runtime) {
+		client, err = b.buildProvider(ctx, runtime)
+		if err != nil {
+			if binding != nil {
+				_ = binding.Close()
+			}
+			return nil, b.redactError(err, &runtime)
+		}
+	}
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()), Thinking: runtime.Thinking,
 		Compaction: agent.CompactionSettings{
@@ -252,15 +302,26 @@ func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtim
 	if runtime.Provider != config.ProviderChatGPT {
 		return openaicompat.New(runtime.BaseURL, runtime.APIKey, nil), nil
 	}
-	path, err := authPathForEnvironment(b.environment)
-	if err != nil {
-		return nil, err
+	if !b.authCredentialsLoaded {
+		return nil, auth.ErrNoCredentials
 	}
-	creds, err := auth.Load(path)
-	if err != nil {
-		return nil, err
+	path := b.authPath
+	if path == "" {
+		path = authPathForCapturedEnvironment(b.environment)
 	}
+	if path == "" {
+		return nil, auth.ErrCredentialsUnavailable
+	}
+	creds := b.authCredentials
 	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, nil), nil
+}
+
+func authPathForCapturedEnvironment(environment map[string]string) string {
+	home := strings.TrimSpace(environment["HOME"])
+	if home == "" {
+		return ""
+	}
+	return auth.PathForHome(home)
 }
 
 func authPathForEnvironment(environment map[string]string) (string, error) {
@@ -300,6 +361,9 @@ func (b runtimeBuilder) buildProfileReplacement(ctx context.Context, profile str
 	}
 	overrides := b.runtimeOverrides
 	overrides.Profile = profile
+	overrides.Provider = ""
+	overrides.BaseURL = ""
+	overrides.Model = ""
 	runtime, err := config.Resolve(b.config, b.resumeEnvironment(), config.SessionDefaults{}, overrides)
 	if err != nil {
 		return app.SessionReplacement{}, b.redactError(err, nil)
@@ -354,13 +418,13 @@ func (b runtimeBuilder) freshReplacement(ctx context.Context, runtime config.Run
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
 	if runner == nil {
-		return app.SessionReplacement{}, b.cleanupCandidate(candidate, errors.New("runner factory returned nil runner"), &runtime)
+		return app.SessionReplacement{}, b.cleanupReplacement(candidate, runner, errors.New("runner factory returned nil runner"), &runtime)
 	}
 	if err := ctx.Err(); err != nil {
-		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+		return app.SessionReplacement{}, b.cleanupReplacement(candidate, runner, err, &runtime)
 	}
 	if err := b.updateSessionRuntime(ctx, candidate, runtime); err != nil {
-		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+		return app.SessionReplacement{}, b.cleanupReplacement(candidate, runner, err, &runtime)
 	}
 	return app.SessionReplacement{
 		Session: candidate, Runner: runner, RuntimeInfo: b.runtimeInfo(runtime),
@@ -401,10 +465,13 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
 	if runner == nil {
-		return app.SessionReplacement{}, b.cleanupCandidate(candidate, errors.New("runner factory returned nil runner"), &runtime)
+		return app.SessionReplacement{}, b.cleanupReplacement(candidate, runner, errors.New("runner factory returned nil runner"), &runtime)
+	}
+	if err := ctx.Err(); err != nil {
+		return app.SessionReplacement{}, b.cleanupReplacement(candidate, runner, err, &runtime)
 	}
 	if err := b.updateSessionRuntime(ctx, candidate, runtime); err != nil {
-		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
+		return app.SessionReplacement{}, b.cleanupReplacement(candidate, runner, err, &runtime)
 	}
 	return app.SessionReplacement{
 		Session: candidate, Runner: runner, RuntimeInfo: b.runtimeInfo(runtime), Warnings: cloneWarnings(warnings),
@@ -498,12 +565,28 @@ func updateSessionRuntime(ctx context.Context, current session.Session, runtime 
 	})
 }
 
+func closeRuntimeRunner(runner app.Runner) error {
+	if closer, ok := runner.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 func (b runtimeBuilder) cleanupCandidate(candidate session.Session, err error, runtime *config.Runtime) error {
-	if candidate == nil {
+	return b.cleanupReplacement(candidate, nil, err, runtime)
+}
+
+func (b runtimeBuilder) cleanupReplacement(candidate session.Session, runner app.Runner, err error, runtime *config.Runtime) error {
+	if candidate == nil && runner == nil {
 		return b.redactError(err, runtime)
 	}
 	cause := err
-	if closeErr := candidate.Close(); closeErr != nil {
+	if candidate != nil {
+		if closeErr := candidate.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}
+	if closeErr := closeRuntimeRunner(runner); closeErr != nil {
 		err = errors.Join(err, closeErr)
 	}
 	switch cause {
@@ -632,8 +715,18 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 // environment. It has no receiver so callers without a full runtimeBuilder
 // (for example the standalone "otto memory" CLI) can build the same list.
 func collectSecretValues(cfg config.File, environment map[string]string, runtime *config.Runtime) []string {
+	var captured *auth.Credentials
+	if path, err := authPathForEnvironment(environment); err == nil {
+		if creds, err := auth.Load(path); err == nil {
+			captured = &creds
+		}
+	}
+	return collectSecretValuesWithAuth(cfg, environment, runtime, captured)
+}
+
+func collectSecretValuesWithAuth(cfg config.File, environment map[string]string, runtime *config.Runtime, captured *auth.Credentials) []string {
 	seen := make(map[string]struct{})
-	values := make([]string, 0, len(cfg.Profiles)+8)
+	values := make([]string, 0, len(cfg.Profiles)+12)
 	add := func(value string) bool {
 		if value == "" {
 			return true
@@ -657,12 +750,11 @@ func collectSecretValues(cfg config.File, environment map[string]string, runtime
 		add(runtime.APIKey)
 		collectURLSecretValues(runtime.BaseURL, add)
 	}
-	if path, err := authPathForEnvironment(environment); err == nil {
-		if creds, err := auth.Load(path); err == nil {
-			add(creds.AccessToken)
-			add(creds.RefreshToken)
-			add(creds.IDToken)
-		}
+	if captured != nil {
+		add(captured.AccessToken)
+		add(captured.RefreshToken)
+		add(captured.IDToken)
+		add(captured.AccountID)
 	}
 	return values
 }
@@ -712,6 +804,11 @@ func (b runtimeBuilder) boundarySecretValues(runtime *config.Runtime) ([]string,
 	addURL(b.runtimeOverrides.BaseURL)
 	if !collectorOpen {
 		return collector.Values(), false
+	}
+	for _, value := range []string{b.authCredentials.AccessToken, b.authCredentials.RefreshToken, b.authCredentials.IDToken, b.authCredentials.AccountID} {
+		if value != "" && !add(value) {
+			return collector.Values(), false
+		}
 	}
 	if runtime != nil {
 		if !add(runtime.APIKeyEnv) || !add(runtime.APIKey) {

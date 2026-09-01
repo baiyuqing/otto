@@ -13,6 +13,39 @@ import (
 // use it to prompt the user to run "otto login".
 var ErrNoCredentials = errors.New("no chatgpt credentials; run 'otto login'")
 
+var (
+	ErrCredentialsUnavailable   = errors.New("chatgpt credentials are unavailable; run 'otto login'")
+	ErrCredentialsPersistence   = errors.New("chatgpt credentials could not be saved")
+	ErrAccessTokenRefreshFailed = errors.New("chatgpt access token refresh failed; run 'otto login'")
+)
+
+func boundedAuthError(kind, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return authError{kind: kind, cause: cause}
+}
+
+type authError struct {
+	kind  error
+	cause error
+}
+
+func (e authError) Error() string {
+	if e.kind == nil {
+		return ""
+	}
+	return e.kind.Error()
+}
+
+func (e authError) Unwrap() error {
+	return e.cause
+}
+
+func (e authError) Is(target error) bool {
+	return target == e.kind || errors.Is(e.cause, target)
+}
+
 // Credentials holds the tokens obtained from the ChatGPT OAuth flow. It is
 // persisted as JSON with 0600 permissions and never logged.
 type Credentials struct {
@@ -45,11 +78,11 @@ func Load(path string) (Credentials, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return Credentials{}, ErrNoCredentials
 		}
-		return Credentials{}, fmt.Errorf("read credentials: %w", err)
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
 	}
 	var creds Credentials
 	if err := json.Unmarshal(data, &creds); err != nil {
-		return Credentials{}, fmt.Errorf("parse credentials: %w", err)
+		return Credentials{}, boundedAuthError(ErrCredentialsUnavailable, err)
 	}
 	return creds, nil
 }
@@ -59,31 +92,31 @@ func Load(path string) (Credentials, error) {
 func (c Credentials) Save(path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create credentials directory: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode credentials: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	tmp, err := os.CreateTemp(dir, ".chatgpt-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp credentials file: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temp credentials file: %w", err)
+		_ = tmp.Close()
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temp credentials file: %w", err)
+		_ = tmp.Close()
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp credentials file: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("replace credentials file: %w", err)
+		return boundedAuthError(ErrCredentialsPersistence, err)
 	}
 	return nil
 }

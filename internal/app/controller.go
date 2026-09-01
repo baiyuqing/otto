@@ -535,6 +535,10 @@ func (c *Controller) buildReplacement(ctx context.Context, runtimeInfo *RuntimeI
 
 func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return session.ListResult{}, ErrClosed
+	}
 	list := c.listSessions
 	currentPath := c.currentPath
 	dynamicContent := c.dynamicContent
@@ -593,6 +597,9 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 func (c *Controller) Profiles() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed || !c.dynamicContent {
+		return nil
+	}
 	return append([]string(nil), c.profiles...)
 }
 
@@ -601,6 +608,10 @@ func (c *Controller) SetDefaultProfile(ctx context.Context, profile string) erro
 	if c.closed {
 		c.mu.Unlock()
 		return ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ErrProfileSwitchUnavailable
 	}
 	setter := c.setDefaultProfile
 	c.mu.Unlock()
@@ -621,6 +632,10 @@ func (c *Controller) SwitchProfile(ctx context.Context, profile string) (ResumeR
 	if c.closed {
 		c.mu.Unlock()
 		return ResumeResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return ResumeResult{}, ErrProfileSwitchUnavailable
 	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
@@ -649,6 +664,10 @@ func (c *Controller) ArchiveSession(ctx context.Context, path string) (session.A
 	if c.closed {
 		c.mu.Unlock()
 		return session.ArchiveResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
 	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
@@ -682,6 +701,10 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 	if c.closed {
 		c.mu.Unlock()
 		return session.ArchiveResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return session.ArchiveResult{}, ErrPersistenceDisabled
 	}
 	if c.active != nil || c.replace != nil {
 		c.mu.Unlock()
@@ -736,6 +759,14 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 // replacement state machine.
 func (c *Controller) SearchMemory(ctx context.Context, request memory.SearchRequest) (memory.SearchResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.SearchResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.SearchResult{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -746,6 +777,14 @@ func (c *Controller) SearchMemory(ctx context.Context, request memory.SearchRequ
 
 func (c *Controller) RememberMemory(ctx context.Context, request memory.RememberRequest) (memory.Record, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.Record{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.Record{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -756,6 +795,14 @@ func (c *Controller) RememberMemory(ctx context.Context, request memory.Remember
 
 func (c *Controller) ForgetMemory(ctx context.Context, request memory.ForgetRequest) (memory.ForgetResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.ForgetResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.ForgetResult{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -766,6 +813,14 @@ func (c *Controller) ForgetMemory(ctx context.Context, request memory.ForgetRequ
 
 func (c *Controller) ReviewMemoryCandidate(ctx context.Context, request memory.ReviewRequest) (memory.ReviewResult, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.ReviewResult{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.ReviewResult{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -779,7 +834,7 @@ func (c *Controller) ReviewMemoryCandidate(ctx context.Context, request memory.R
 func (c *Controller) MemoryScopes() (memory.Scope, memory.Scope, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.memoryManager == nil {
+	if c.closed || !c.dynamicContent || c.memoryManager == nil {
 		return memory.Scope{}, memory.Scope{}, false
 	}
 	return c.memoryUserScope, c.memoryWorkspaceScope, true
@@ -787,6 +842,14 @@ func (c *Controller) MemoryScopes() (memory.Scope, memory.Scope, bool) {
 
 func (c *Controller) GetMemory(ctx context.Context, ref memory.RecordRef) (memory.Record, error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return memory.Record{}, ErrClosed
+	}
+	if !c.dynamicContent {
+		c.mu.Unlock()
+		return memory.Record{}, ErrMemoryUnavailable
+	}
 	manager := c.memoryManager
 	c.mu.Unlock()
 	if manager == nil {
@@ -894,7 +957,7 @@ func (c *Controller) runReplacement(
 		closeDone, completeClose := c.finishClosedLocked(err, deferredClose)
 		c.mu.Unlock()
 		if shouldClose {
-			_ = replacement.Session.Close()
+			_ = joinCloseErrors(replacement.Session.Close(), closeRunner(replacement.Runner))
 			c.finishReplacing(state)
 		}
 		if completeClose {
@@ -910,7 +973,7 @@ func (c *Controller) runReplacement(
 		closed := c.closed
 		c.mu.Unlock()
 		if shouldClose {
-			_ = replacement.Session.Close()
+			_ = joinCloseErrors(replacement.Session.Close(), closeRunner(replacement.Runner))
 		}
 		if closed {
 			return ResumeResult{}, ErrClosed
@@ -939,7 +1002,7 @@ func (c *Controller) runReplacement(
 	c.mu.Unlock()
 
 	if deferredClose {
-		closeErr := replacement.Session.Close()
+		closeErr := joinCloseErrors(replacement.Session.Close(), closeRunner(replacement.Runner))
 		c.finishReplacing(state)
 		c.completeClose(closeDone, closeErr)
 	}

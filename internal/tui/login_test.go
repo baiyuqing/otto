@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,8 +69,8 @@ func TestLoginStatusCommandRendersStatus(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("cmd = %v, want nil", cmd)
 	}
-	if !strings.Contains(got.View().Content, "acct-42") {
-		t.Fatalf("view = %q", got.View().Content)
+	if content := got.View().Content; strings.Contains(content, "acct-42") || !strings.Contains(content, "Signed in to ChatGPT") {
+		t.Fatalf("view = %q", content)
 	}
 }
 
@@ -115,7 +116,7 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 		t.Fatal("loginPending = true after completion")
 	}
 	content := got.View().Content
-	if !strings.Contains(content, "acct-7") || !strings.Contains(content, "Start a new session") {
+	if strings.Contains(content, "acct-7") || !strings.Contains(content, "Signed in to ChatGPT") || !strings.Contains(content, "Start a new session") {
 		t.Fatalf("view = %q", content)
 	}
 	if strings.Contains(content, "secret-token") {
@@ -165,6 +166,22 @@ func TestLogoutCommandRemovesCredentials(t *testing.T) {
 	}
 	if _, err := auth.Load(path); err != auth.ErrNoCredentials {
 		t.Fatalf("credentials still present: %v", err)
+	}
+}
+
+func TestLoginCommandFailureIsBounded(t *testing.T) {
+	withTUIAuthSeams(t, func(context.Context, func(string) error) (auth.Credentials, error) {
+		return auth.Credentials{}, errors.New("tui-login-secret")
+	})
+	m := resizeModel(t, chatgptModel(t), 80, 24)
+	pending, cmd := submitCommand(t, m, "/login")
+	if cmd == nil {
+		t.Fatal("/login cmd = nil")
+	}
+	updated, _ := pending.Update(runCommandWithin(t, cmd, time.Second))
+	got := updated.(Model)
+	if strings.Contains(got.View().Content, "tui-login-secret") {
+		t.Fatalf("view leaked login error: %q", got.View().Content)
 	}
 }
 

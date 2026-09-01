@@ -23,6 +23,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
@@ -492,6 +493,40 @@ func TestRunKnownIncompleteBoundaryRejectsResumeAndContinueBeforeSessionAccess(t
 	}
 }
 
+func TestRunKnownIncompleteBoundaryRejectsArchiveBeforeSessionAccess(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	root := filepath.Join(home, ".otto", "sessions")
+	path := createCLISession(t, root, workspace, "known-incomplete-archive")
+	before := mustReadFile(t, path)
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	entries := []string{"HOME=" + home, "SHELL=/bin/sh", "TEST_KEY=provider-value"}
+	for index := range 513 {
+		entries = append(entries, fmt.Sprintf("VALUE_%03d_TOKEN=environment-sensitive-value-%03d", index, index))
+	}
+
+	deps := deterministicRunDependencies(t)
+	var sandboxCalls atomic.Int32
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		sandboxCalls.Add(1)
+		return fakeSandboxRuntime(app.SandboxInfo{}, nil, []string{})
+	}
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--archive", path}, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps)
+	if code != 1 || stderr.String() != "otto: session operation is unavailable\n" {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if sandboxCalls.Load() != 0 {
+		t.Fatalf("sandbox opened %d times, want 0", sandboxCalls.Load())
+	}
+	if after := mustReadFile(t, path); !bytes.Equal(after, before) {
+		t.Fatal("known-incomplete archive mutated session bytes")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "archive", filepath.Base(path))); !os.IsNotExist(err) {
+		t.Fatalf("archive target exists after rejected archive: %v", err)
+	}
+}
+
 func TestRunLateIncompleteBoundaryClosesPreparedResumeWithoutRepair(t *testing.T) {
 	for _, fixture := range []string{"missing delimiter", "truncated tail", "dangling tool call"} {
 		t.Run(fixture, func(t *testing.T) {
@@ -585,10 +620,18 @@ func TestRunIncompleteInitialSessionIsLazyAndFrontendStateIsSuppressed(t *testin
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	deps := deterministicRunDependencies(t)
 	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
-	var newCalls atomic.Int32
+	var newCalls, memoryOpenCalls, memoryScopeCalls atomic.Int32
 	deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
 		newCalls.Add(1)
 		return nil, errors.New("unexpected persistent session creation")
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		memoryOpenCalls.Add(1)
+		return nil, memory.Scope{}, false, errors.New("unexpected memory open")
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		memoryScopeCalls.Add(1)
+		return memory.Scope{}, nil
 	}
 	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
 		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
@@ -635,8 +678,11 @@ func TestRunIncompleteInitialSessionIsLazyAndFrontendStateIsSuppressed(t *testin
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
-	if providerCalls.Load() != 0 || newCalls.Load() != 0 {
-		t.Fatalf("dynamic callbacks = provider %d new %d", providerCalls.Load(), newCalls.Load())
+	if providerCalls.Load() != 0 || newCalls.Load() != 0 || memoryOpenCalls.Load() != 0 || memoryScopeCalls.Load() != 0 {
+		t.Fatalf("dynamic callbacks = provider %d new %d memory-open %d memory-scope %d", providerCalls.Load(), newCalls.Load(), memoryOpenCalls.Load(), memoryScopeCalls.Load())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".otto", "memory", "memory.db")); !os.IsNotExist(err) {
+		t.Fatalf("late-incomplete startup created memory db: %v", err)
 	}
 	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
 	if err != nil {
@@ -644,6 +690,62 @@ func TestRunIncompleteInitialSessionIsLazyAndFrontendStateIsSuppressed(t *testin
 	}
 	if len(paths) != 0 {
 		t.Fatalf("lazy incomplete startup created sessions: %v", paths)
+	}
+}
+
+func TestRunMalformedChatGPTCredentialsFallBackToLifecycleOnlyStartup(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "otto.toml")
+	if err := os.WriteFile(configPath, []byte(`default_profile = "chatgpt"
+[profiles.chatgpt]
+provider = "chatgpt"
+model = "gpt-5"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(home, ".otto", "auth", "chatgpt.json")
+	if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const leaked = "broken-auth-secret"
+	if err := os.WriteFile(authPath, []byte(`{"access_token":"`+leaked), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deps := deterministicRunDependencies(t)
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	var memoryOpenCalls atomic.Int32
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		memoryOpenCalls.Add(1)
+		return nil, memory.Scope{}, false, errors.New("unexpected memory open")
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{}, nil
+	}
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		if info := backend.Info(); info.Provider != "" || info.Profile != "" || info.Model != "" || info.SessionID != "" || info.SessionPath != "" {
+			return fmt.Errorf("Info exposed malformed auth state: %#v", info)
+		}
+		var events []agent.Event
+		if err := backend.Prompt(ctx, "prompt", func(event agent.Event) { events = append(events, event) }); err != nil {
+			return err
+		}
+		if len(events) != 2 || events[0].Type != agent.EventAgentStarted || events[1].Type != agent.EventAgentFinished {
+			return fmt.Errorf("events = %#v", events)
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace, "--ui", "tui"}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh"}), deps)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if memoryOpenCalls.Load() != 0 {
+		t.Fatalf("memory opened %d times, want 0", memoryOpenCalls.Load())
+	}
+	if strings.Contains(stderr.String(), leaked) || strings.Contains(stderr.String(), authPath) {
+		t.Fatalf("stderr leaked malformed auth detail: %q", stderr.String())
 	}
 }
 

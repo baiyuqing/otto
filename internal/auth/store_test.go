@@ -55,6 +55,40 @@ func TestLoadMissingReturnsErrNoCredentials(t *testing.T) {
 	}
 }
 
+func TestLoadMalformedReturnsFixedUnavailableError(t *testing.T) {
+	const secret = "credential-parse-secret"
+	path := filepath.Join(t.TempDir(), secret, "chatgpt.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"access_token":"`+secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if !errors.Is(err, ErrCredentialsUnavailable) {
+		t.Fatalf("err = %v, want ErrCredentialsUnavailable", err)
+	}
+	if got := err.Error(); strings.Contains(got, secret) || strings.Contains(got, path) {
+		t.Fatalf("Load() leaked malformed credential detail: %q", got)
+	}
+}
+
+func TestSaveFailureReturnsFixedPersistenceError(t *testing.T) {
+	const secret = "credentials-path-secret"
+	parent := filepath.Join(t.TempDir(), secret)
+	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "chatgpt.json")
+	err := (Credentials{AccessToken: "access"}).Save(path)
+	if !errors.Is(err, ErrCredentialsPersistence) {
+		t.Fatalf("err = %v, want ErrCredentialsPersistence", err)
+	}
+	if got := err.Error(); strings.Contains(got, secret) || strings.Contains(got, path) {
+		t.Fatalf("Save() leaked path detail: %q", got)
+	}
+}
+
 func TestDefaultPathEndsWithExpectedSuffix(t *testing.T) {
 	path, err := DefaultPath()
 	if err != nil {

@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -41,8 +43,8 @@ func TestLoginStatusSignedIn(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr)
 	}
-	if !strings.Contains(stdout, "acct-xyz") {
-		t.Fatalf("stdout = %q, want it to contain account id", stdout)
+	if strings.Contains(stdout, "acct-xyz") || !strings.Contains(stdout, "Signed in to ChatGPT") {
+		t.Fatalf("stdout = %q, want sign-in state without account id", stdout)
 	}
 }
 
@@ -98,7 +100,42 @@ func TestLoginSavesCredentials(t *testing.T) {
 	if saved.AccountID != "acct-new" || saved.AccessToken != "tok" {
 		t.Fatalf("saved credentials = %+v", saved)
 	}
-	if !strings.Contains(stdout, "acct-new") {
-		t.Fatalf("stdout = %q, want it to confirm the signed-in account", stdout)
+	if strings.Contains(stdout, "acct-new") || !strings.Contains(stdout, "Signed in to ChatGPT") {
+		t.Fatalf("stdout = %q, want bounded sign-in confirmation", stdout)
+	}
+}
+
+func TestLoginFailureIsBounded(t *testing.T) {
+	home := t.TempDir()
+	original := authLogin
+	authLogin = func(_ context.Context, _ func(string) error) (auth.Credentials, error) {
+		return auth.Credentials{}, errors.New("login secret failure")
+	}
+	defer func() { authLogin = original }()
+
+	code, _, stderr := runAuth(t, home, "login")
+	if code == 0 {
+		t.Fatal("login unexpectedly succeeded")
+	}
+	if strings.Contains(stderr, "login secret failure") {
+		t.Fatalf("stderr leaked login error: %q", stderr)
+	}
+}
+
+func TestLogoutFailureIsBounded(t *testing.T) {
+	home := t.TempDir()
+	path := auth.PathForHome(home)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runAuth(t, home, "logout")
+	if code == 0 {
+		t.Fatal("logout unexpectedly succeeded")
+	}
+	if strings.Contains(stderr, path) || strings.Contains(stderr, "directory not empty") {
+		t.Fatalf("stderr leaked remove detail: %q", stderr)
 	}
 }

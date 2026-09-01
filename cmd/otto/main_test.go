@@ -22,6 +22,7 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
@@ -1915,6 +1916,226 @@ func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T
 	}
 }
 
+func TestRunClosesControllerBeforeSandboxAndMemoryService(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+		sandboxCtx context.Context
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	deps.openSandbox = func(ctx context.Context, _ sandboxOpenOptions) sandboxRuntime {
+		sandboxCtx = ctx
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "close-order", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), onClose: func() {
+			if sandboxCtx == nil || sandboxCtx.Err() == nil {
+				t.Error("session closed before process cancellation")
+			}
+			appendOrder("session")
+		}}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
+func TestRunStartupCancellationAfterInitialRunnerBuildClosesRunnerAndBinding(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				cancel()
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "startup-cancel", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), onClose: func() { appendOrder("session") }}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(ctx, []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code != 130 {
+		t.Fatalf("code = %d, stderr = %q, want 130", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
+func TestRunUpdateRuntimeFailureClosesInitialRunnerAndBinding(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &runtimeUpdateFailSession{Session: &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "startup-update", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: "stale-model", CreatedAt: time.Now().UTC(),
+		}), onClose: func() { appendOrder("session") }}, err: errors.New("runtime update failed")}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code == 0 || !strings.Contains(stderr.String(), "runtime update failed") {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
+func TestRunControllerConstructionFailureClosesInitialRunnerAndBinding(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	var (
+		orderMu    sync.Mutex
+		closeOrder []string
+	)
+	appendOrder := func(value string) {
+		orderMu.Lock()
+		defer orderMu.Unlock()
+		closeOrder = append(closeOrder, value)
+	}
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.close = newSandboxRuntimeCloser(func() error {
+			appendOrder("sandbox")
+			return nil
+		})
+		return runtime
+	}
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return &recordingMemoryService{
+			bind: func(context.Context, memory.BindOptions) (memory.Binding, error) {
+				return &recordingMemoryBinding{close: func() { appendOrder("binding") }}, nil
+			},
+			close: func() { appendOrder("memory") },
+		}, memory.Scope{Namespace: memory.NamespaceUser, ID: "user-1"}, true, nil
+	}
+	deps.workspaceMemoryScope = func(config.MemoryRuntime, string) (memory.Scope, error) {
+		return memory.Scope{Namespace: memory.NamespaceWorkspace, ID: "workspace-1"}, nil
+	}
+	deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		return &orderingSession{Session: session.NewMemory(session.Header{
+			Version: 1, ID: "controller-failure", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), onClose: func() { appendOrder("session") }}, nil
+	}
+	deps.newController = func(session.Session, app.SessionFactory, app.RunnerFactory, ...app.Option) (*app.Controller, error) {
+		return nil, errors.New("controller failed")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"--config", configPath, "--cwd", workspace}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if code == 0 || !strings.Contains(stderr.String(), "controller failed") {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if want := []string{"session", "binding", "sandbox", "memory"}; !reflect.DeepEqual(closeOrder, want) {
+		t.Fatalf("close order = %#v, want %#v", closeOrder, want)
+	}
+}
+
 func TestRunClosesSessionsOnceAcrossExitPaths(t *testing.T) {
 	fatalErr := errors.Join(session.ErrFatalPersistence, errors.New("injected append failure"))
 	for _, test := range []struct {
@@ -1986,6 +2207,89 @@ func (f commandRunnerFunc) Run(ctx context.Context, text string, emit func(agent
 
 func (f commandRunnerFunc) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
 	return agent.CompactionResult{Noop: true}, nil
+}
+
+type runtimeUpdateFailSession struct {
+	session.Session
+	err error
+}
+
+func (s *runtimeUpdateFailSession) UpdateRuntime(context.Context, session.RuntimeMetadata) error {
+	return s.err
+}
+
+type recordingMemoryService struct {
+	bind  func(context.Context, memory.BindOptions) (memory.Binding, error)
+	close func()
+}
+
+func (s *recordingMemoryService) Bind(ctx context.Context, options memory.BindOptions) (memory.Binding, error) {
+	if s.bind == nil {
+		return &recordingMemoryBinding{}, nil
+	}
+	return s.bind(ctx, options)
+}
+
+func (s *recordingMemoryService) Close() error {
+	if s.close != nil {
+		s.close()
+	}
+	return nil
+}
+
+func (*recordingMemoryService) Get(context.Context, memory.RecordRef) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (*recordingMemoryService) GetByKey(context.Context, memory.RecordKey) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (*recordingMemoryService) GetTombstone(context.Context, memory.RecordRef) (memory.Tombstone, error) {
+	return memory.Tombstone{}, nil
+}
+
+func (*recordingMemoryService) GetCandidate(context.Context, memory.CandidateRef) (memory.Candidate, error) {
+	return memory.Candidate{}, nil
+}
+
+func (*recordingMemoryService) Search(context.Context, memory.SearchRequest) (memory.SearchResult, error) {
+	return memory.SearchResult{}, nil
+}
+
+func (*recordingMemoryService) Remember(context.Context, memory.RememberRequest) (memory.Record, error) {
+	return memory.Record{}, nil
+}
+
+func (*recordingMemoryService) Forget(context.Context, memory.ForgetRequest) (memory.ForgetResult, error) {
+	return memory.ForgetResult{}, nil
+}
+
+func (*recordingMemoryService) Review(context.Context, memory.ReviewRequest) (memory.ReviewResult, error) {
+	return memory.ReviewResult{}, nil
+}
+
+func (*recordingMemoryService) Propose(context.Context, memory.ProposeRequest) (memory.CandidateBatch, error) {
+	return memory.CandidateBatch{}, nil
+}
+
+type recordingMemoryBinding struct {
+	close func()
+}
+
+func (b *recordingMemoryBinding) Recall(context.Context, memory.RecallRequest) (memory.RecallResult, error) {
+	return memory.RecallResult{}, nil
+}
+
+func (b *recordingMemoryBinding) Observe(context.Context, memory.Observation) (memory.ObserveResult, error) {
+	return memory.ObserveResult{}, nil
+}
+
+func (b *recordingMemoryBinding) Close() error {
+	if b.close != nil {
+		b.close()
+	}
+	return nil
 }
 
 type trackingSession struct {

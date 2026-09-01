@@ -3,6 +3,7 @@ package openairesponses
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -113,23 +114,102 @@ func TestCompleteParsesTextAndToolCall(t *testing.T) {
 	}
 }
 
-func TestCompleteHTTPErrorRedactsToken(t *testing.T) {
+func TestCompleteHTTPErrorRedactsTokenAndAccountID(t *testing.T) {
+	const (
+		accessToken = "secret-abc"
+		accountID   = "acct-secret"
+	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		// Echo the token back to prove the provider strips it from errors.
-		_, _ = io.WriteString(w, "invalid token secret-abc")
+		_, _ = io.WriteString(w, "invalid token "+accessToken+" account "+accountID)
 	}))
 	defer server.Close()
 
 	client := newWithBaseURL(server.URL,
-		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "secret-abc"}),
-		"acct-1", server.Client())
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}),
+		accountID, server.Client())
 
 	_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, nil)
 	if err == nil {
 		t.Fatal("expected error on HTTP 401")
 	}
-	if got := err.Error(); strings.Contains(got, "secret-abc") {
-		t.Fatalf("error leaked token: %q", got)
+	for _, secret := range []string{accessToken, accountID} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked %q: %q", secret, err.Error())
+		}
 	}
 }
+
+func TestCompleteTokenSourceFailuresReturnFixedAuthError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		src  oauth2.TokenSource
+	}{
+		{name: "error", src: failingTokenSource{err: errors.New("access-secret refresh-secret acct-secret")}},
+		{name: "nil token", src: failingTokenSource{}},
+		{name: "empty token", src: failingTokenSource{token: &oauth2.Token{AccessToken: ""}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newWithBaseURL("https://example.test", test.src, "acct-secret", &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("transport must not be called when authorization fails")
+				return nil, nil
+			})})
+			_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, nil)
+			if err == nil || err.Error() != errChatGPTAuthorizationFailed.Error() {
+				t.Fatalf("err = %v, want fixed auth failure", err)
+			}
+			for _, secret := range []string{"access-secret", "refresh-secret", "acct-secret"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("authorization error leaked %q: %v", secret, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCompleteStreamReadErrorRedactsTokenAndAccountID(t *testing.T) {
+	const (
+		accessToken = "stream-token-secret"
+		accountID   = "stream-account-secret"
+	)
+	client := newWithBaseURL("https://example.test",
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken}),
+		accountID,
+		&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       failingReadCloser{err: errors.New("stream read failed for " + accessToken + " " + accountID)},
+			}, nil
+		})},
+	)
+	_, err := client.Complete(context.Background(), provider.Request{Model: "m"}, nil)
+	if err == nil {
+		t.Fatal("Complete() succeeded")
+	}
+	for _, secret := range []string{accessToken, accountID} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("stream error leaked %q: %v", secret, err)
+		}
+	}
+}
+
+type failingTokenSource struct {
+	token *oauth2.Token
+	err   error
+}
+
+func (s failingTokenSource) Token() (*oauth2.Token, error) {
+	return s.token, s.err
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+type failingReadCloser struct{ err error }
+
+func (f failingReadCloser) Read([]byte) (int, error) { return 0, f.err }
+func (f failingReadCloser) Close() error             { return nil }

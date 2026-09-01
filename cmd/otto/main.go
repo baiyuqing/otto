@@ -20,7 +20,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/repl"
 	"github.com/baiyuqing/otto/internal/sandbox"
@@ -108,6 +110,9 @@ type runDependencies struct {
 	runTUI               func(context.Context, io.Reader, io.Writer, app.Backend) error
 	newRunner            app.RunnerFactory
 	openSandbox          func(context.Context, sandboxOpenOptions) sandboxRuntime
+	openMemoryService    func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error)
+	workspaceMemoryScope func(config.MemoryRuntime, string) (memory.Scope, error)
+	newController        func(session.Session, app.SessionFactory, app.RunnerFactory, ...app.Option) (*app.Controller, error)
 	resolveUserHome      func() (string, error)
 }
 
@@ -120,6 +125,9 @@ func defaultRunDependencies() runDependencies {
 		detectTerminal:       detectTerminalIO,
 		runTUI:               tui.Run,
 		openSandbox:          openSandboxRuntime,
+		openMemoryService:    openMemoryService,
+		workspaceMemoryScope: workspaceMemoryScope,
+		newController:        app.New,
 		resolveUserHome:      currentOSUserHome,
 	}
 }
@@ -177,6 +185,15 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	if deps.openSandbox == nil {
 		deps.openSandbox = openSandboxRuntime
+	}
+	if deps.openMemoryService == nil {
+		deps.openMemoryService = openMemoryService
+	}
+	if deps.workspaceMemoryScope == nil {
+		deps.workspaceMemoryScope = workspaceMemoryScope
+	}
+	if deps.newController == nil {
+		deps.newController = app.New
 	}
 	if deps.resolveUserHome == nil {
 		deps.resolveUserHome = currentOSUserHome
@@ -253,7 +270,10 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	startupBoundary.environment = environment
 	startupBoundary.sandboxSecrets = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, configuredSnapshot.RedactionValues())
 	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && configuredSnapshot.RedactionsComplete()
-	if (options.resumePath != "" || options.continueLast) && !startupBoundary.boundaryAllowsDynamic(nil) {
+	capturedAuth := captureAuthCredentials(auth.PathForHome(home))
+	startupBoundary.sandboxSecrets = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, capturedAuth.redactionValues)
+	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && capturedAuth.complete
+	if (options.archivePath != "" || options.resumePath != "" || options.continueLast) && !startupBoundary.boundaryAllowsDynamic(nil) {
 		return fail(stderr, "%v", errSessionOperationUnavailable)
 	}
 
@@ -324,6 +344,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	builder := newRuntimeBuilder(configPath, configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
 	builder.sandboxSecrets = cloneSandboxRuntimeStrings(startupBoundary.sandboxSecrets)
 	builder.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete
+	builder.authPath = capturedAuth.path
+	builder.authCredentials = capturedAuth.credentials
+	builder.authCredentialsLoaded = capturedAuth.loaded
 	var sandboxDriverOverride *string
 	if options.sandboxSet {
 		driver := strings.Clone(options.sandbox)
@@ -418,8 +441,19 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		sandboxClosed = true
 		return processSandbox.Close()
 	}
-	var controller *app.Controller
-	controllerClosed := false
+	var (
+		controller          *app.Controller
+		controllerClosed    bool
+		memoryService       memory.Service
+		memoryServiceClosed bool
+	)
+	closeMemoryService := func() error {
+		if memoryServiceClosed || memoryService == nil {
+			return nil
+		}
+		memoryServiceClosed = true
+		return memoryService.Close()
+	}
 	defer func() {
 		cancelProcess()
 		if controller != nil && !controllerClosed {
@@ -428,6 +462,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		}
 		if !sandboxClosed {
 			_ = closeSandbox()
+		}
+		if !memoryServiceClosed {
+			_ = closeMemoryService()
 		}
 	}()
 	if processCtx.Err() != nil {
@@ -466,14 +503,26 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return 130
 	}
 
-	memoryService, memoryUserScope, memoryUsable, err := openMemoryService(processCtx, memoryCfg, collectSecretValues(configFile, environment, &resolvedRuntime), stderr)
-	if err != nil {
-		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
-	}
-	defer func() { _ = memoryService.Close() }()
-	memoryWorkspaceScope, err := workspaceMemoryScope(memoryCfg, workspacePath)
-	if err != nil {
-		return fail(stderr, "%v", err)
+	var (
+		memoryUserScope      memory.Scope
+		memoryWorkspaceScope memory.Scope
+		memoryUsable         bool
+	)
+	if dynamicContent {
+		memoryService, memoryUserScope, memoryUsable, err = deps.openMemoryService(processCtx, memoryCfg, collectSecretValuesWithAuth(configFile, environment, &resolvedRuntime, func() *auth.Credentials {
+			if !capturedAuth.loaded {
+				return nil
+			}
+			copy := capturedAuth.credentials
+			return &copy
+		}()), stderr)
+		if err != nil {
+			return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
+		}
+		memoryWorkspaceScope, err = deps.workspaceMemoryScope(memoryCfg, workspacePath)
+		if err != nil {
+			return fail(stderr, "%v", err)
+		}
 	}
 	builder.memoryService = memoryService
 	builder.memoryUsable = memoryUsable
@@ -510,22 +559,29 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 
 	initialRunner, err := builder.buildRunner(processCtx, initialSession, resolvedRuntime)
 	if processCtx.Err() != nil {
-		_ = initialSession.Close()
+		_ = errors.Join(initialSession.Close(), closeRuntimeRunner(initialRunner))
 		return 130
 	}
 	if err != nil {
 		_ = initialSession.Close()
 		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
 	}
+	closeInitialResources := func() {
+		_ = errors.Join(initialSession.Close(), closeRuntimeRunner(initialRunner))
+	}
+	if processCtx.Err() != nil {
+		closeInitialResources()
+		return 130
+	}
 	if err := builder.updateSessionRuntime(processCtx, initialSession, resolvedRuntime); err != nil {
-		_ = initialSession.Close()
+		closeInitialResources()
 		if processCtx.Err() != nil {
 			return 130
 		}
 		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
 	}
 	if processCtx.Err() != nil {
-		_ = initialSession.Close()
+		closeInitialResources()
 		return 130
 	}
 	initialRunnerPending := true
@@ -543,10 +599,12 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	controllerOptions := []app.Option{
 		app.WithRuntimeInfo(builder.runtimeInfo(resolvedRuntime)),
 		app.WithDynamicContent(dynamicContent),
-		app.WithMemory(memoryService, memoryUserScope, memoryWorkspaceScope),
 		app.WithProfileSwitcher(builder.profileNames(), builder.buildProfileReplacement),
 		app.WithDefaultProfileSetter(builder.persistDefaultProfile),
 		app.WithNewSessionBuilder(builder.buildNewReplacement),
+	}
+	if memoryService != nil {
+		controllerOptions = append(controllerOptions, app.WithMemory(memoryService, memoryUserScope, memoryWorkspaceScope))
 	}
 	if !options.noSession {
 		controllerOptions = append(controllerOptions,
@@ -564,9 +622,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		}
 		return deps.newSession(options.noSession, sessionRoot, workspacePath, resolvedRuntime)
 	}
-	controller, err = app.New(initialSession, createSession, buildRunner, controllerOptions...)
+	controller, err = deps.newController(initialSession, createSession, buildRunner, controllerOptions...)
 	if err != nil {
-		_ = initialSession.Close()
+		closeInitialResources()
 		if processCtx.Err() != nil {
 			return 130
 		}

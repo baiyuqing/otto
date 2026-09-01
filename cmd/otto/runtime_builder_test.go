@@ -23,6 +23,7 @@ import (
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
+	"github.com/baiyuqing/otto/internal/auth"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/memory"
 	"github.com/baiyuqing/otto/internal/model"
@@ -59,6 +60,21 @@ type spyBinding struct {
 func (b *spyBinding) Close() error {
 	b.closed = true
 	return b.Binding.Close()
+}
+
+type closableRunner struct{ closeCalls atomic.Int32 }
+
+func (*closableRunner) Run(context.Context, string, func(agent.Event)) error {
+	return nil
+}
+
+func (*closableRunner) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
+func (r *closableRunner) Close() error {
+	r.closeCalls.Add(1)
+	return nil
 }
 
 func TestRuntimeBuilderUsesStoredProfileProviderAndModel(t *testing.T) {
@@ -1179,6 +1195,45 @@ func TestRuntimeBuilderBuildProfileReplacementSwitchesToNamedProfile(t *testing.
 	}
 }
 
+func TestRuntimeBuilderBuildProfileReplacementDoesNotCarryStartupEndpointOverride(t *testing.T) {
+	file := configWithProfiles("startup", "named")
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.runtimeOverrides = config.Overrides{
+		Provider:       "openai-compatible",
+		BaseURL:        "https://cli-override.example/v1",
+		Model:          "cli-model",
+		Thinking:       "high",
+		ShellTimeout:   45 * time.Second,
+		MaxOutputBytes: 1234,
+	}
+	var createdRuntime config.Runtime
+	builder.deps.newSession = func(_ bool, _ string, workspace string, runtime config.Runtime) (session.Session, error) {
+		createdRuntime = runtime
+		return session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "fresh", Workspace: workspace,
+			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+		}), nil
+	}
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+
+	replacement, err := builder.buildProfileReplacement(context.Background(), "named")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Session.Close()
+	if createdRuntime.Profile != "named" || createdRuntime.BaseURL != "https://named.example/v1" || createdRuntime.Model != "named-profile-model" {
+		t.Fatalf("resolved runtime = %#v", redactedRuntime(createdRuntime))
+	}
+	if createdRuntime.Thinking != "high" || createdRuntime.ShellTimeout != 45*time.Second || createdRuntime.MaxOutputBytes != 1234 {
+		t.Fatalf("neutral overrides were not preserved: %#v", redactedRuntime(createdRuntime))
+	}
+	if replacement.RuntimeInfo.Profile != "named" || replacement.RuntimeInfo.Model != "named-profile-model" {
+		t.Fatalf("runtime info = %#v", replacement.RuntimeInfo)
+	}
+}
+
 func TestRuntimeBuilderBuildProfileReplacementUnknownProfileErrors(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("startup"))
 	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
@@ -1197,6 +1252,91 @@ func TestRuntimeBuilderProfileNamesSorted(t *testing.T) {
 	want := []string{"alpha", "beta", "chatgpt"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("profileNames() = %#v, want %#v", names, want)
+	}
+}
+
+func TestRuntimeBuilderCollectSecretValuesIncludesCapturedOAuthCredentials(t *testing.T) {
+	file := configWithProfiles("default")
+	values := collectSecretValuesWithAuth(file, environmentForProfiles(file), nil, &auth.Credentials{
+		AccessToken:  "oauth-access",
+		RefreshToken: "oauth-refresh",
+		IDToken:      "oauth-id",
+		AccountID:    "oauth-account",
+	})
+	for _, want := range []string{"oauth-access", "oauth-refresh", "oauth-id", "oauth-account"} {
+		found := false
+		for _, got := range values {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("collectSecretValuesWithAuth() missing %q in %#v", want, values)
+		}
+	}
+}
+
+func TestRuntimeBuilderBuildProviderUsesCapturedCredentialSnapshot(t *testing.T) {
+	home := t.TempDir()
+	path := auth.PathForHome(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"access_token":"mutated-token"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	builder := newRuntimeBuilderForTest(t, config.File{})
+	builder.authPath = path
+	builder.authCredentials = auth.Credentials{
+		AccessToken: "captured-token", RefreshToken: "captured-refresh", AccountID: "captured-account", Expiry: time.Now().Add(time.Hour),
+	}
+	builder.authCredentialsLoaded = true
+	providerClient, err := builder.buildProvider(context.Background(), config.Runtime{Provider: "chatgpt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerClient == nil {
+		t.Fatal("buildProvider() returned nil provider")
+	}
+}
+
+func TestRuntimeBuilderOpenReplacementProvenanceFailureClosesCandidateAndRunner(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	base := &trackedReplacementSession{
+		Session: session.NewMemory(session.Header{
+			Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath,
+			Provider: "openai-compatible", Profile: "default", Model: "stale-model", CreatedAt: time.Now().UTC(),
+		}),
+		closed: make(chan struct{}),
+	}
+	candidate := &flippingHeaderSession{
+		trackedReplacementSession: base,
+		first:                     session.Header{Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath, Provider: "openai-compatible", Profile: "default", Model: "default-profile-model", CreatedAt: time.Now().UTC()},
+		second:                    session.Header{Version: session.CurrentVersion, ID: "candidate", Workspace: builder.workspacePath, Provider: "openai-compatible", Profile: "default", Model: "stale-model", CreatedAt: time.Now().UTC()},
+	}
+	builder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		return &fakePreparedSession{
+			info: session.SessionInfo{
+				Path: "/sessions/candidate.jsonl", ID: "candidate", CWD: builder.workspacePath,
+				Profile: "default", Provider: "openai-compatible", Model: "default-profile-model",
+			},
+			activate: func(context.Context) (session.Session, []session.Warning, error) {
+				return candidate, nil, nil
+			},
+		}, nil
+	}
+	runner := &closableRunner{}
+	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return runner, nil
+	}
+
+	_, err := builder.openReplacement(context.Background(), "/sessions/candidate.jsonl")
+	if err == nil || !strings.Contains(err.Error(), "runtime provenance updates") {
+		t.Fatalf("openReplacement() error = %v, want provenance update error", err)
+	}
+	if base.closeCalls.Load() != 1 || runner.closeCalls.Load() != 1 {
+		t.Fatalf("cleanup close calls = session %d runner %d, want 1 each", base.closeCalls.Load(), runner.closeCalls.Load())
 	}
 }
 
@@ -1331,9 +1471,10 @@ func TestRuntimeBuilderBuildNewReplacementProvenanceFailureClosesCandidate(t *te
 		}),
 		closed: make(chan struct{}),
 	}
+	runner := &closableRunner{}
 	builder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) { return candidate, nil }
 	builder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
-		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+		return runner, nil
 	}
 
 	_, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
@@ -1342,8 +1483,8 @@ func TestRuntimeBuilderBuildNewReplacementProvenanceFailureClosesCandidate(t *te
 	if err == nil || !strings.Contains(err.Error(), "runtime provenance updates") {
 		t.Fatalf("buildNewReplacement() error = %v, want provenance update error", err)
 	}
-	if candidate.closeCalls.Load() != 1 {
-		t.Fatalf("candidate close calls = %d, want 1", candidate.closeCalls.Load())
+	if candidate.closeCalls.Load() != 1 || runner.closeCalls.Load() != 1 {
+		t.Fatalf("cleanup close calls = session %d runner %d, want 1 each", candidate.closeCalls.Load(), runner.closeCalls.Load())
 	}
 }
 
@@ -2385,6 +2526,20 @@ type trackedReplacementSession struct {
 	closed     chan struct{}
 	closeCalls atomic.Int32
 	closeErr   error
+}
+
+type flippingHeaderSession struct {
+	*trackedReplacementSession
+	first       session.Header
+	second      session.Header
+	headerCalls atomic.Int32
+}
+
+func (s *flippingHeaderSession) Header() session.Header {
+	if s.headerCalls.Add(1) == 1 {
+		return s.first
+	}
+	return s.second
 }
 
 func TestRuntimeBuilderIncompleteRedactErrorDoesNotInvokeAttackerErrorMethods(t *testing.T) {

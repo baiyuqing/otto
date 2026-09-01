@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -154,6 +155,34 @@ func TestOpenSandboxUnavailableRetainsClassifiedHostRedactions(t *testing.T) {
 				if !containsString(runtime.RedactionValues, value) {
 					t.Fatalf("redactions omitted required host value: %#v", runtime.RedactionValues)
 				}
+			}
+		})
+	}
+}
+
+func TestOpenSandboxPropagatesImmutableRedactionCompleteness(t *testing.T) {
+	tests := []struct {
+		name         string
+		hostEntries  []string
+		wantComplete bool
+	}{
+		{name: "complete", hostEntries: []string{"ORDINARY=value"}, wantComplete: true},
+		{name: "malformed entry", hostEntries: []string{"BROKEN"}, wantComplete: false},
+		{name: "fully extracted malformed proxy", hostEntries: []string{"HTTPS_PROXY=http:///user:pass@example.test"}, wantComplete: true},
+		{name: "513 sensitive values", hostEntries: sensitiveSandboxRuntimeEntries(513), wantComplete: false},
+		{name: "over one MiB", hostEntries: []string{"LARGE_TOKEN=" + strings.Repeat("z", (1<<20)+1)}, wantComplete: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSandboxRuntimeFixture(t)
+			fixture.hostEntries = append([]string(nil), test.hostEntries...)
+			runtime := openSandboxRuntimeWithDependencies(context.Background(), fixture.options(), fixture.dependencies())
+			t.Cleanup(func() { _ = runtime.Close() })
+			if runtime.RedactionsComplete != test.wantComplete {
+				t.Fatalf("RedactionsComplete = %t, want %t", runtime.RedactionsComplete, test.wantComplete)
+			}
+			if !test.wantComplete && (runtime.Executor != nil || runtime.Info.Reason != app.SandboxReasonEnvironmentRejected) {
+				t.Fatalf("incomplete runtime = %#v, want environment-rejected without Executor", runtime)
 			}
 		})
 	}
@@ -557,6 +586,14 @@ func canonicalSandboxRuntimeShell(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func sensitiveSandboxRuntimeEntries(count int) []string {
+	entries := make([]string, 0, count)
+	for index := range count {
+		entries = append(entries, fmt.Sprintf("VALUE_%03d_TOKEN=runtime-sensitive-value-%03d", index, index))
+	}
+	return entries
 }
 
 func byteSlices(values []string) [][]byte {

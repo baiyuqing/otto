@@ -4,6 +4,8 @@ import (
 	"io"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/baiyuqing/otto/internal/safetext"
 )
 
 type Result struct {
@@ -104,6 +106,7 @@ func newExactRedactingWriterWithMarker(destination io.Writer, values []string, m
 	writer := &exactRedactingWriter{destination: destination, marker: strings.Clone(marker)}
 	seen := make(map[string]struct{})
 	for _, value := range values {
+		value = safetext.CanonicalizeUTF8(value)
 		if value == "" {
 			continue
 		}
@@ -150,7 +153,26 @@ func redactExactText(value string, redactionValues []string, marker string) (str
 	if err := writer.Flush(); err != nil {
 		return "", err
 	}
-	return redacted.String(), nil
+	result := redacted.String()
+	if marker != "" {
+		return result, nil
+	}
+	canonicalValues := make([]string, 0, len(redactionValues))
+	for _, configured := range redactionValues {
+		configured = safetext.CanonicalizeUTF8(configured)
+		if configured != "" {
+			canonicalValues = append(canonicalValues, configured)
+		}
+	}
+	for {
+		before := len(result)
+		for _, configured := range canonicalValues {
+			result = strings.ReplaceAll(result, configured, "")
+		}
+		if len(result) == before {
+			return result, nil
+		}
+	}
 }
 
 func (w *exactRedactingWriter) process(final bool) {

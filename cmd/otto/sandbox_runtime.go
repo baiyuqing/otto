@@ -28,11 +28,12 @@ type sandboxOpenOptions struct {
 }
 
 type sandboxRuntime struct {
-	Executor        sandbox.CommandExecutor
-	Environment     []string
-	Info            app.SandboxInfo
-	RedactionValues []string
-	close           func() error
+	Executor           sandbox.CommandExecutor
+	Environment        []string
+	Info               app.SandboxInfo
+	RedactionValues    []string
+	RedactionsComplete bool
+	close              func() error
 }
 
 type sandboxSeatbeltDriver interface {
@@ -76,13 +77,13 @@ func openSandboxRuntime(ctx context.Context, options sandboxOpenOptions) sandbox
 func openSandboxRuntimeWithDependencies(ctx context.Context, options sandboxOpenOptions, dependencies sandboxRuntimeDependencies) sandboxRuntime {
 	options = cloneSandboxOpenOptions(options)
 	if isNilSandboxRuntimeValue(ctx) || dependencies.classifyEnvironment == nil || dependencies.resolveEnvironment == nil || dependencies.newExecutor == nil {
-		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, nil)
+		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, nil, false)
 	}
 	if ctx.Err() != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, nil)
+		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, nil, false)
 	}
 	if options.Settings.Network != sandbox.NetworkAllow && options.Settings.Network != sandbox.NetworkDeny {
-		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, nil)
+		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, nil, false)
 	}
 
 	hostSnapshot, hostErr := dependencies.classifyEnvironment(sandbox.EnvironmentOptions{
@@ -91,46 +92,47 @@ func openSandboxRuntimeWithDependencies(ctx context.Context, options sandboxOpen
 		AllowNames:    cloneSandboxRuntimeStrings(options.Settings.AllowEnv),
 	})
 	hostRedactions := hostSnapshot.RedactionValues()
+	hostComplete := hostSnapshot.RedactionsComplete()
 	if hostErr != nil || hostSnapshot.Entries() == nil {
-		return unavailableSandboxRuntime(app.SandboxReasonEnvironmentRejected, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonEnvironmentRejected, hostRedactions, hostComplete)
 	}
 	if ctx.Err() != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions, hostComplete)
 	}
 
 	switch options.Settings.Driver {
 	case sandbox.DriverAuto, sandbox.DriverSeatbelt:
 		if dependencies.platform != "darwin" {
-			return unavailableSandboxRuntime(app.SandboxReasonUnsupportedPlatform, hostRedactions)
+			return unavailableSandboxRuntime(app.SandboxReasonUnsupportedPlatform, hostRedactions, hostComplete)
 		}
 		if dependencies.openSeatbelt == nil {
-			return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions)
+			return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions, hostComplete)
 		}
-		return openSeatbeltSandboxRuntime(ctx, options, hostRedactions, dependencies)
+		return openSeatbeltSandboxRuntime(ctx, options, hostRedactions, hostComplete, dependencies)
 	case sandbox.DriverOff:
 		if dependencies.newDirect == nil {
-			return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions)
+			return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions, hostComplete)
 		}
-		return openDirectSandboxRuntime(ctx, options, hostRedactions, dependencies)
+		return openDirectSandboxRuntime(ctx, options, hostRedactions, hostComplete, dependencies)
 	default:
-		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions, hostComplete)
 	}
 }
 
-func openSeatbeltSandboxRuntime(ctx context.Context, options sandboxOpenOptions, hostRedactions []string, dependencies sandboxRuntimeDependencies) sandboxRuntime {
+func openSeatbeltSandboxRuntime(ctx context.Context, options sandboxOpenOptions, hostRedactions []string, hostComplete bool, dependencies sandboxRuntimeDependencies) sandboxRuntime {
 	if options.Settings.Network != sandbox.NetworkAllow && options.Settings.Network != sandbox.NetworkDeny {
-		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions, hostComplete)
 	}
 	workspace, err := canonicalDirectory(options.Workspace)
 	if err != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions, hostComplete)
 	}
 	shell, err := canonicalExecutableFile(options.Shell)
 	if err != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonInvalidShell, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonInvalidShell, hostRedactions, hostComplete)
 	}
 	if ctx.Err() != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions, hostComplete)
 	}
 
 	driver, openErr := dependencies.openSeatbelt(ctx, seatbelt.Options{
@@ -151,7 +153,7 @@ func openSeatbeltSandboxRuntime(ctx context.Context, options sandboxOpenOptions,
 		if ctx.Err() != nil {
 			reason = app.SandboxReasonRuntimeFailure
 		}
-		return unavailableSandboxRuntimeAfterCleanup(reason, hostRedactions, cleanupErr)
+		return unavailableSandboxRuntimeAfterCleanup(reason, hostRedactions, hostComplete, cleanupErr)
 	}
 
 	privateDirectories := driver.PrivateDirectories()
@@ -163,13 +165,14 @@ func openSeatbeltSandboxRuntime(ctx context.Context, options sandboxOpenOptions,
 	})
 	environmentEntries := environment.Entries()
 	redactions := mergeSandboxRuntimeRedactions(hostRedactions, environment.RedactionValues())
+	redactionsComplete := hostComplete && environment.RedactionsComplete()
 	if environmentErr != nil || environmentEntries == nil || ctx.Err() != nil {
 		cleanupErr := driver.Close()
 		reason := app.SandboxReasonEnvironmentRejected
 		if ctx.Err() != nil {
 			reason = app.SandboxReasonRuntimeFailure
 		}
-		return unavailableSandboxRuntimeAfterCleanup(reason, redactions, cleanupErr)
+		return unavailableSandboxRuntimeAfterCleanup(reason, redactions, redactionsComplete, cleanupErr)
 	}
 
 	policy := sandbox.Policy{Filesystem: sandbox.FilesystemWorkspaceWrite, Network: options.Settings.Network}
@@ -185,28 +188,29 @@ func openSeatbeltSandboxRuntime(ctx context.Context, options sandboxOpenOptions,
 		if ctx.Err() != nil {
 			reason = app.SandboxReasonRuntimeFailure
 		}
-		return unavailableSandboxRuntimeAfterCleanup(reason, redactions, cleanupErr)
+		return unavailableSandboxRuntimeAfterCleanup(reason, redactions, redactionsComplete, cleanupErr)
 	}
 
 	return sandboxRuntime{
-		Executor:        executor,
-		Environment:     cloneSandboxRuntimeStrings(environmentEntries),
-		Info:            seatbeltSandboxInfo(options.Settings.Network),
-		RedactionValues: cloneSandboxRuntimeStrings(redactions),
-		close:           newSandboxRuntimeCloser(executor.Close),
+		Executor:           executor,
+		Environment:        cloneSandboxRuntimeStrings(environmentEntries),
+		Info:               seatbeltSandboxInfo(options.Settings.Network),
+		RedactionValues:    cloneSandboxRuntimeStrings(redactions),
+		RedactionsComplete: redactionsComplete,
+		close:              newSandboxRuntimeCloser(executor.Close),
 	}
 }
 
-func openDirectSandboxRuntime(ctx context.Context, options sandboxOpenOptions, hostRedactions []string, dependencies sandboxRuntimeDependencies) sandboxRuntime {
+func openDirectSandboxRuntime(ctx context.Context, options sandboxOpenOptions, hostRedactions []string, hostComplete bool, dependencies sandboxRuntimeDependencies) sandboxRuntime {
 	workspace, err := canonicalDirectory(options.Workspace)
 	if err != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonPolicyUnsupported, hostRedactions, hostComplete)
 	}
 	if _, err := canonicalExecutableFile(options.Shell); err != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonInvalidShell, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonInvalidShell, hostRedactions, hostComplete)
 	}
 	if ctx.Err() != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions)
+		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, hostRedactions, hostComplete)
 	}
 
 	environment, environmentErr := dependencies.resolveEnvironment(sandbox.EnvironmentOptions{
@@ -216,20 +220,21 @@ func openDirectSandboxRuntime(ctx context.Context, options sandboxOpenOptions, h
 	})
 	environmentEntries := environment.Entries()
 	redactions := mergeSandboxRuntimeRedactions(hostRedactions, environment.RedactionValues())
+	redactionsComplete := hostComplete && environment.RedactionsComplete()
 	if environmentErr != nil || environmentEntries == nil {
-		return unavailableSandboxRuntime(app.SandboxReasonEnvironmentRejected, redactions)
+		return unavailableSandboxRuntime(app.SandboxReasonEnvironmentRejected, redactions, redactionsComplete)
 	}
 	if ctx.Err() != nil {
-		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, redactions)
+		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, redactions, redactionsComplete)
 	}
 
 	driver := dependencies.newDirect()
 	if isNilSandboxRuntimeValue(driver) {
-		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, redactions)
+		return unavailableSandboxRuntime(app.SandboxReasonRuntimeFailure, redactions, redactionsComplete)
 	}
 	if ctx.Err() != nil {
 		cleanupErr := driver.Close()
-		return unavailableSandboxRuntimeAfterCleanup(app.SandboxReasonRuntimeFailure, redactions, cleanupErr)
+		return unavailableSandboxRuntimeAfterCleanup(app.SandboxReasonRuntimeFailure, redactions, redactionsComplete, cleanupErr)
 	}
 	policy := sandbox.Policy{Filesystem: sandbox.FilesystemUnconfined, Network: sandbox.NetworkAllow}
 	executor, executorErr := dependencies.newExecutor(driver, policy, workspace)
@@ -244,15 +249,16 @@ func openDirectSandboxRuntime(ctx context.Context, options sandboxOpenOptions, h
 		if ctx.Err() != nil {
 			reason = app.SandboxReasonRuntimeFailure
 		}
-		return unavailableSandboxRuntimeAfterCleanup(reason, redactions, cleanupErr)
+		return unavailableSandboxRuntimeAfterCleanup(reason, redactions, redactionsComplete, cleanupErr)
 	}
 
 	return sandboxRuntime{
-		Executor:        executor,
-		Environment:     cloneSandboxRuntimeStrings(environmentEntries),
-		Info:            app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone},
-		RedactionValues: cloneSandboxRuntimeStrings(redactions),
-		close:           newSandboxRuntimeCloser(executor.Close),
+		Executor:           executor,
+		Environment:        cloneSandboxRuntimeStrings(environmentEntries),
+		Info:               app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone},
+		RedactionValues:    cloneSandboxRuntimeStrings(redactions),
+		RedactionsComplete: redactionsComplete,
+		close:              newSandboxRuntimeCloser(executor.Close),
 	}
 }
 
@@ -263,11 +269,11 @@ func (r sandboxRuntime) Close() error {
 	return r.close()
 }
 
-func unavailableSandboxRuntime(reason app.SandboxReason, redactions []string) sandboxRuntime {
-	return unavailableSandboxRuntimeAfterCleanup(reason, redactions, nil)
+func unavailableSandboxRuntime(reason app.SandboxReason, redactions []string, complete bool) sandboxRuntime {
+	return unavailableSandboxRuntimeAfterCleanup(reason, redactions, complete, nil)
 }
 
-func unavailableSandboxRuntimeAfterCleanup(reason app.SandboxReason, redactions []string, cleanupErr error) sandboxRuntime {
+func unavailableSandboxRuntimeAfterCleanup(reason app.SandboxReason, redactions []string, complete bool, cleanupErr error) sandboxRuntime {
 	var reportCleanup func() error
 	if cleanupErr != nil {
 		reportCleanup = func() error { return cleanupErr }
@@ -278,8 +284,9 @@ func unavailableSandboxRuntimeAfterCleanup(reason app.SandboxReason, redactions 
 			BashAvailable: false,
 			Reason:        safeSandboxReason(reason),
 		},
-		RedactionValues: cloneSandboxRuntimeStrings(redactions),
-		close:           newSandboxRuntimeCloser(reportCleanup),
+		RedactionValues:    cloneSandboxRuntimeStrings(redactions),
+		RedactionsComplete: complete,
+		close:              newSandboxRuntimeCloser(reportCleanup),
 	}
 }
 

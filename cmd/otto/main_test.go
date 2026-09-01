@@ -354,7 +354,7 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 		{name: "unsupported provider", args: []string{"--config", unsupported, "--cwd", workspace}, want: "unsupported provider"},
 		{name: "missing resume", args: []string{"--config", valid, "--cwd", workspace, "--resume", filepath.Join(t.TempDir(), "missing.jsonl")}, want: "open session file"},
 		{name: "conflicting continue and resume", args: []string{"--continue", "--resume", "anything"}, want: "cannot be used together"},
-		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid value"},
+		{name: "invalid shell timeout", args: []string{"--shell-timeout", "never"}, want: "invalid command-line arguments"},
 		{name: "invalid ui mode", args: []string{"--ui", "popup"}, want: "must be one of auto, tui, repl"},
 	}
 	for _, test := range tests {
@@ -1115,8 +1115,8 @@ func TestRunRejectsUnknownMaxTurnsFlag(t *testing.T) {
 	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--max-turns", "1"}, strings.NewReader("/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
 	}))
-	if code != 2 || !strings.Contains(stderr.String(), "flag provided but not defined: -max-turns") {
-		t.Fatalf("code = %d, stderr = %q, want unknown flag rejection", code, stderr.String())
+	if code != 2 || stderr.String() != "otto: invalid command-line arguments\n" {
+		t.Fatalf("code = %d, stderr = %q, want fixed unknown flag rejection", code, stderr.String())
 	}
 }
 

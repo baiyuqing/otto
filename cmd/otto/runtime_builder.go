@@ -12,9 +12,11 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
 	"github.com/baiyuqing/otto/internal/provider/openaicompat"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
+	"github.com/baiyuqing/otto/internal/urlprivacy"
 )
 
 type preparedSession interface {
@@ -44,38 +46,40 @@ func (p *preparedStore) Close() error {
 }
 
 type runtimeBuilder struct {
-	config               config.File
-	environment          map[string]string
-	workspace            *tool.Workspace
-	workspacePath        string
-	sessionRoot          string
-	shell                string
-	noSession            bool
-	stderr               io.Writer
-	deps                 runDependencies
-	prepareSession       func(context.Context, string, string) (preparedSession, error)
-	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
-	buildRunnerOverride  func(session.Session, config.Runtime) (app.Runner, error)
-	runtimeOverrides     config.Overrides
-	commandExecutor      sandbox.CommandExecutor
-	sandboxEnvironment   []string
-	sandboxInfo          app.SandboxInfo
-	sandboxSecrets       []string
+	config                 config.File
+	environment            map[string]string
+	workspace              *tool.Workspace
+	workspacePath          string
+	sessionRoot            string
+	shell                  string
+	noSession              bool
+	stderr                 io.Writer
+	deps                   runDependencies
+	prepareSession         func(context.Context, string, string) (preparedSession, error)
+	prepareListedSession   func(context.Context, string, string, string) (preparedSession, error)
+	buildRunnerOverride    func(session.Session, config.Runtime) (app.Runner, error)
+	runtimeOverrides       config.Overrides
+	commandExecutor        sandbox.CommandExecutor
+	sandboxEnvironment     []string
+	sandboxInfo            app.SandboxInfo
+	sandboxSecrets         []string
+	sandboxSecretsComplete bool
 }
 
 func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
 	builder := runtimeBuilder{
-		config:               configFile,
-		environment:          environment,
-		workspace:            workspace,
-		workspacePath:        workspacePath,
-		sessionRoot:          sessionRoot,
-		shell:                shell,
-		noSession:            options.noSession,
-		stderr:               stderr,
-		deps:                 deps,
-		prepareSession:       deps.prepareSession,
-		prepareListedSession: deps.prepareListedSession,
+		config:                 configFile,
+		environment:            environment,
+		workspace:              workspace,
+		workspacePath:          workspacePath,
+		sessionRoot:            sessionRoot,
+		shell:                  shell,
+		noSession:              options.noSession,
+		stderr:                 stderr,
+		deps:                   deps,
+		prepareSession:         deps.prepareSession,
+		sandboxSecretsComplete: true,
+		prepareListedSession:   deps.prepareListedSession,
 		runtimeOverrides: config.Overrides{
 			BaseURL:        options.baseURL,
 			Thinking:       options.thinking,
@@ -122,7 +126,7 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 		tool.NewWriteTool(b.workspace),
 		tool.NewEditTool(b.workspace),
 	}
-	if b.commandExecutor != nil {
+	if b.bashConfigured() {
 		bash, err := tool.NewBashTool(
 			b.workspace,
 			b.commandExecutor,
@@ -142,9 +146,9 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
 	client := openaicompat.New(runtime.BaseURL, runtime.APIKey, nil)
-	redactor := agent.NewRedactor(cloneSandboxRuntimeStrings(redactionValues))
+	redactor := b.boundaryRedactor(&runtime)
 	return agent.New(client, registry, current, agent.Options{
-		Model: runtime.Model, SystemPrompt: systemPromptFor(registry.Definitions(), b.sandboxInfo), Thinking: runtime.Thinking,
+		Model: runtime.Model, SystemPrompt: systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()), Thinking: runtime.Thinking,
 		Compaction: agent.CompactionSettings{
 			Auto:             runtime.Compaction.Auto,
 			HardInputWindow:  runtime.Compaction.HardInputWindow,
@@ -153,6 +157,33 @@ func (b runtimeBuilder) buildRunner(current session.Session, runtime config.Runt
 			KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
 		},
 	}, redactor), nil
+}
+
+func (b runtimeBuilder) bashConfigured() bool {
+	return b.sandboxSecretsComplete && b.sandboxEnvironment != nil && !isNilSandboxRuntimeValue(b.commandExecutor)
+}
+
+func (b runtimeBuilder) effectiveSandboxInfo() app.SandboxInfo {
+	if !b.sandboxSecretsComplete {
+		return app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonEnvironmentRejected}
+	}
+	if b.sandboxInfo.BashAvailable && !b.bashConfigured() {
+		return app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonRuntimeFailure}
+	}
+	return b.sandboxInfo
+}
+
+func (b runtimeBuilder) runtimeInfo(runtime config.Runtime) app.RuntimeInfo {
+	info := app.RuntimeInfo{
+		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model,
+		ContextWindow: runtime.Compaction.ContextWindow, Sandbox: b.effectiveSandboxInfo(),
+	}
+	if !b.sandboxSecretsComplete {
+		info.Provider = ""
+		info.Profile = ""
+		info.Model = ""
+	}
+	return info
 }
 
 func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {
@@ -191,19 +222,11 @@ func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.Run
 	if err := ctx.Err(); err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
-	if err := updateSessionRuntime(ctx, candidate, runtime); err != nil {
+	if err := b.updateSessionRuntime(ctx, candidate, runtime); err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
 	return app.SessionReplacement{
-		Session: candidate,
-		Runner:  runner,
-		RuntimeInfo: app.RuntimeInfo{
-			Provider:      runtime.Provider,
-			Profile:       runtime.Profile,
-			Model:         runtime.Model,
-			ContextWindow: runtime.Compaction.ContextWindow,
-			Sandbox:       b.sandboxInfo,
-		},
+		Session: candidate, Runner: runner, RuntimeInfo: b.runtimeInfo(runtime),
 	}, nil
 }
 
@@ -234,20 +257,11 @@ func (b runtimeBuilder) openReplacement(ctx context.Context, path string) (app.S
 	if runner == nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, errors.New("runner factory returned nil runner"), &runtime)
 	}
-	if err := updateSessionRuntime(ctx, candidate, runtime); err != nil {
+	if err := b.updateSessionRuntime(ctx, candidate, runtime); err != nil {
 		return app.SessionReplacement{}, b.cleanupCandidate(candidate, err, &runtime)
 	}
 	return app.SessionReplacement{
-		Session: candidate,
-		Runner:  runner,
-		RuntimeInfo: app.RuntimeInfo{
-			Provider:      runtime.Provider,
-			Profile:       runtime.Profile,
-			Model:         runtime.Model,
-			ContextWindow: runtime.Compaction.ContextWindow,
-			Sandbox:       b.sandboxInfo,
-		},
-		Warnings: cloneWarnings(warnings),
+		Session: candidate, Runner: runner, RuntimeInfo: b.runtimeInfo(runtime), Warnings: cloneWarnings(warnings),
 	}, nil
 }
 
@@ -302,7 +316,7 @@ func (b runtimeBuilder) activatePrepared(ctx context.Context, prepared preparedS
 
 func (b runtimeBuilder) redactWarnings(warnings []session.Warning, runtime *config.Runtime) []session.Warning {
 	redacted := cloneWarnings(warnings)
-	boundary := agent.NewRedactor(b.secretValues(runtime))
+	boundary := b.boundaryRedactor(runtime)
 	for index := range redacted {
 		redacted[index].Message = boundary.RedactString(redacted[index].Message)
 	}
@@ -315,6 +329,13 @@ func activatedSessionMatchesPrepared(info session.SessionInfo, header session.He
 		info.Profile == header.Profile &&
 		info.Provider == header.Provider &&
 		info.Model == header.Model
+}
+
+func (b runtimeBuilder) updateSessionRuntime(ctx context.Context, current session.Session, runtime config.Runtime) error {
+	if !b.sandboxSecretsComplete {
+		return nil
+	}
+	return updateSessionRuntime(ctx, current, runtime)
 }
 
 func updateSessionRuntime(ctx context.Context, current session.Session, runtime config.Runtime) error {
@@ -361,7 +382,7 @@ func (b runtimeBuilder) redactError(err error, runtime *config.Runtime) error {
 	if err == nil {
 		return nil
 	}
-	message := agent.NewRedactor(b.secretValues(runtime)).RedactString(err.Error())
+	message := b.boundaryRedactor(runtime).RedactString(err.Error())
 	if message == err.Error() {
 		return err
 	}
@@ -384,10 +405,15 @@ func (e redactedIdentityError) Is(target error) bool {
 	return errors.Is(e.cause, target)
 }
 
+func (b runtimeBuilder) boundaryRedactor(runtime *config.Runtime) *agent.Redactor {
+	return agent.NewRedactorWithCompleteness(b.secretValues(runtime), b.sandboxSecretsComplete)
+}
+
 func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 	seen := make(map[string]struct{})
 	values := make([]string, 0, len(b.sandboxSecrets)+len(b.config.Profiles)+2)
 	add := func(value string) {
+		value = safetext.CanonicalizeUTF8(value)
 		if value == "" {
 			return
 		}
@@ -400,15 +426,18 @@ func (b runtimeBuilder) secretValues(runtime *config.Runtime) []string {
 	for _, value := range b.sandboxSecrets {
 		add(value)
 	}
+	add("OTTO_API_KEY")
 	add(b.environment["OTTO_API_KEY"])
 	for _, profile := range b.config.Profiles {
 		if profile.APIKeyEnv != "" {
+			add(profile.APIKeyEnv)
 			add(b.environment[profile.APIKeyEnv])
 		}
 		collectURLSecretValues(profile.BaseURL, add)
 	}
 	collectURLSecretValues(b.runtimeOverrides.BaseURL, add)
 	if runtime != nil {
+		add(runtime.APIKeyEnv)
 		add(runtime.APIKey)
 		collectURLSecretValues(runtime.BaseURL, add)
 	}
@@ -451,24 +480,9 @@ func collectURLSecretValues(raw string, add func(string)) {
 }
 
 func collectRawURLSecretValues(raw string, add func(string)) {
-	authority := rawURLAuthority(raw)
-	if separator := strings.LastIndexByte(authority, '@'); separator >= 0 {
-		rawUserinfo := authority[:separator]
-		add(rawUserinfo)
-		rawUsername, rawPassword, hasPassword := strings.Cut(rawUserinfo, ":")
-		add(rawUsername)
-		if decoded, err := url.PathUnescape(rawUsername); err == nil {
-			add(decoded)
-		}
-		if hasPassword {
-			add(rawPassword)
-			if decoded, err := url.PathUnescape(rawPassword); err == nil {
-				add(decoded)
-			}
-		}
-		if decoded, err := url.PathUnescape(rawUserinfo); err == nil {
-			add(decoded)
-		}
+	userinfo, _ := urlprivacy.UserinfoForms(raw)
+	for _, value := range userinfo {
+		add(value)
 	}
 
 	queryStart := strings.IndexByte(raw, '?')
@@ -501,20 +515,6 @@ func collectRawURLSecretValues(raw string, add func(string)) {
 			add(decoded)
 		}
 	}
-}
-
-func rawURLAuthority(raw string) string {
-	start := 0
-	if separator := strings.Index(raw, "://"); separator >= 0 {
-		start = separator + 3
-	} else if strings.HasPrefix(raw, "//") {
-		start = 2
-	}
-	end := len(raw)
-	if relativeEnd := strings.IndexAny(raw[start:], "/?#"); relativeEnd >= 0 {
-		end = start + relativeEnd
-	}
-	return raw[start:end]
 }
 
 func resolveInitialRuntime(file config.File, environment map[string]string, metadata *session.RuntimeMetadata, overrides config.Overrides) (config.Runtime, error) {

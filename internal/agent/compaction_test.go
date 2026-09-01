@@ -665,6 +665,54 @@ func TestCompactRedactsSummaryBeforeValidationPersistenceAndEvents(t *testing.T)
 	assertCompactionEventsContainNoText(t, events, secret, latest.Summary)
 }
 
+func TestCompactIncompleteRedactionSnapshotFailsClosedWithoutProviderOrSessionMutation(t *testing.T) {
+	const omitted = "omitted-compaction-message-id"
+	memory := session.NewMemory(testHeader(t))
+	appendCompactionMessages(t, memory,
+		compactionTextMessage("old-"+omitted, model.RoleUser, "old request"),
+		compactionTextMessage("old-a", model.RoleAssistant, "old answer"),
+		compactionTextMessage("latest-u", model.RoleUser, "latest request"),
+	)
+	before := memory.Messages()
+	wrapped := &compactionHookSession{Session: memory}
+	fake := &compactProvider{responses: []provider.Response{validCompactionResponse(model.Usage{})}}
+	runner := New(fake, nil, wrapped, testCompactionOptions(), NewRedactorWithCompleteness([]string{"known-secret"}, false))
+
+	var events []Event
+	result, err := runner.Compact(context.Background(), omitted, func(event Event) { events = append(events, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Noop || fake.calls != 0 || wrapped.appendCalls != 0 {
+		t.Fatalf("result=%#v provider calls=%d appends=%d", result, fake.calls, wrapped.appendCalls)
+	}
+	if !reflect.DeepEqual(memory.Messages(), before) {
+		t.Fatal("incomplete-redaction compaction mutated the session")
+	}
+	if len(events) != 2 || events[0].Type != EventCompactionStarted || events[1].Type != EventCompactionCompleted || events[1].Compaction == nil || !events[1].Compaction.Noop {
+		t.Fatalf("events=%#v", events)
+	}
+	assertCompactionEventsContainNoText(t, events, omitted)
+}
+
+func TestCompactIncompleteRedactionPreservesPreCanceledContext(t *testing.T) {
+	memory := populatedCompactionMemory(t)
+	wrapped := &compactionHookSession{Session: memory}
+	fake := &compactProvider{responses: []provider.Response{validCompactionResponse(model.Usage{})}}
+	runner := New(fake, nil, wrapped, testCompactionOptions(), NewRedactorWithCompleteness(nil, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var events []Event
+	result, err := runner.Compact(ctx, "safe focus", func(event Event) { events = append(events, event) })
+	if !errors.Is(err, context.Canceled) || result.CheckpointID != "" || fake.calls != 0 || wrapped.appendCalls != 0 {
+		t.Fatalf("result=%#v error=%v provider calls=%d appends=%d", result, err, fake.calls, wrapped.appendCalls)
+	}
+	if len(events) != 2 || events[0].Type != EventCompactionStarted || events[1].Type != EventAgentError {
+		t.Fatalf("events=%#v", events)
+	}
+}
+
 func TestCompactCancellationBeforeAppendDoesNotCommit(t *testing.T) {
 	memory := populatedCompactionMemory(t)
 	wrapped := &compactionHookSession{Session: memory}

@@ -224,6 +224,100 @@ func TestRuntimeBuilderCollectsEncodedAndMalformedEndpointSecretForms(t *testing
 	}
 }
 
+func TestRuntimeBuilderCanonicalizesInvalidUTF8DecodedEndpointForms(t *testing.T) {
+	const endpoint = "https://user%FF:pass%C0%AF@example.test/v1?ff=decoded%FF&over=overlong%C0%AF#fragment%FF"
+	file := configWithProfiles("active")
+	file.Profiles["inactive-invalid-utf8"] = config.Profile{
+		Provider: "openai-compatible", BaseURL: endpoint, Model: "inactive", APIKeyEnv: "INVALID_UTF8_KEY",
+	}
+	builder := newRuntimeBuilderForTest(t, file)
+	values := builder.secretValues(nil)
+
+	for _, value := range values {
+		if !utf8.ValidString(value) {
+			t.Fatalf("secretValues() retained invalid UTF-8: %q", value)
+		}
+	}
+	for _, want := range []string{
+		endpoint,
+		"user%FF", "pass%C0%AF", "decoded%FF", "overlong%C0%AF", "fragment%FF",
+		"user�", "pass��", "decoded�", "overlong��", "fragment�",
+	} {
+		if !containsString(values, want) {
+			t.Fatalf("secretValues() omitted canonical/raw endpoint form %q", want)
+		}
+	}
+}
+
+func TestRuntimeBuilderConservativelyExtractsMalformedEndpointAuthorities(t *testing.T) {
+	tests := []struct {
+		name     string
+		endpoint string
+		want     []string
+	}{
+		{
+			name:     "ambiguous extra slash",
+			endpoint: "https:///raw%20user:raw%2Fpass@example.test/v1",
+			want:     []string{"raw%20user:raw%2Fpass", "raw%20user", "raw%2Fpass", "raw user:raw/pass", "raw user", "raw/pass"},
+		},
+		{
+			name:     "backslash authority",
+			endpoint: `https:\\raw%20user:raw%2Fpass@example.test\v1`,
+			want:     []string{"raw%20user:raw%2Fpass", "raw%20user", "raw%2Fpass", "raw user:raw/pass", "raw user", "raw/pass"},
+		},
+		{
+			name:     "missing scheme",
+			endpoint: "raw%20user:raw%2Fpass@example.test/v1",
+			want:     []string{"raw%20user:raw%2Fpass", "raw user:raw/pass", "raw user", "raw/pass"},
+		},
+		{
+			name:     "one malformed component",
+			endpoint: "https://bad%zz:pass%2Fword@[::1]:8443/v1?next=@ignored#@ignored",
+			want:     []string{"bad%zz:pass%2Fword", "bad%zz", "pass%2Fword", "pass/word"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var values []string
+			collectURLSecretValues(test.endpoint, func(value string) { values = append(values, value) })
+			if !containsString(values, test.endpoint) {
+				t.Fatalf("complete raw endpoint was not retained: %#v", values)
+			}
+			for _, want := range test.want {
+				if !containsString(values, want) {
+					t.Fatalf("endpoint forms omitted %q: %#v", want, values)
+				}
+			}
+		})
+	}
+}
+
+func TestRuntimeBuilderDoesNotTreatValidEndpointPathAtAsUserinfo(t *testing.T) {
+	endpoint := "https://[2001:db8::1]:8443/path/user:pass@example.test"
+	var values []string
+	collectURLSecretValues(endpoint, func(value string) { values = append(values, value) })
+	for _, unexpected := range []string{"user:pass", "user", "pass"} {
+		if containsString(values, unexpected) {
+			t.Fatalf("valid endpoint path @ was misclassified as userinfo %q: %#v", unexpected, values)
+		}
+	}
+}
+
+func TestRuntimeBuilderMalformedEndpointPathAtDoesNotInventUserinfo(t *testing.T) {
+	endpoint := "https://[2001:db8::1]:8443/path/user:pass@example.test?broken=%zz"
+	var values []string
+	collectURLSecretValues(endpoint, func(value string) { values = append(values, value) })
+	if !containsString(values, endpoint) {
+		t.Fatalf("complete malformed endpoint was not retained: %#v", values)
+	}
+	for _, unexpected := range []string{"user:pass", "user", "pass"} {
+		if containsString(values, unexpected) {
+			t.Fatalf("malformed endpoint path @ was misclassified as userinfo %q: %#v", unexpected, values)
+		}
+	}
+}
+
 func TestRuntimeBuilderResolveSessionRejectsMissingModel(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
 
@@ -1414,6 +1508,58 @@ func TestRuntimeBuilderUnavailableSandboxRegistersExactlySixFileTools(t *testing
 	}
 }
 
+func TestRuntimeBuilderTypedNilExecutorKeepsFileToolsAndTruthfulStatus(t *testing.T) {
+	var toolNames []string
+	var systemPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if len(payload.Messages) > 0 {
+			systemPrompt = payload.Messages[0].Content
+		}
+		for _, item := range payload.Tools {
+			toolNames = append(toolNames, item.Function.Name)
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	var typedNil *recordingSandboxExecutor
+	builder.commandExecutor = typedNil
+	builder.sandboxEnvironment = []string{}
+	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true}
+	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "typed-nil", Workspace: builder.workspacePath, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC()})
+	runner, err := builder.buildRunner(memory, config.Runtime{
+		Provider: "openai-compatible", BaseURL: server.URL, Model: "test-model", APIKey: "provider-value",
+		ShellTimeout: time.Second, MaxOutputBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"read", "grep", "find", "ls", "write", "edit"}; !reflect.DeepEqual(toolNames, want) {
+		t.Fatalf("tool names = %#v, want %#v", toolNames, want)
+	}
+	if !strings.Contains(systemPrompt, "Bash is unavailable") || strings.Contains(systemPrompt, "Seatbelt confines Bash") {
+		t.Fatalf("typed-nil system prompt was not truthful: %q", systemPrompt)
+	}
+}
+
 func TestRuntimeBuilderReusesOneSandboxExecutorForInitialNewAndResume(t *testing.T) {
 	var providerCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1484,6 +1630,188 @@ func TestRuntimeBuilderReusesOneSandboxExecutorForInitialNewAndResume(t *testing
 		if !reflect.DeepEqual(request.Env, []string{"PATH=/usr/bin:/bin", "UNRELATED=preserved"}) {
 			t.Fatalf("request %d environment = %#v", index, request.Env)
 		}
+	}
+}
+
+func TestRuntimeBuilderIncompleteRedactionRemainsFailClosedAcrossInitialNewAndResume(t *testing.T) {
+	const omitted = "omitted-runtime-builder-environment-value"
+	var requestMu sync.Mutex
+	var requestBodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		requestMu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		requestMu.Unlock()
+		writeSSE(w, fmt.Sprintf(`{"choices":[{"delta":{"content":%q},"finish_reason":"stop"}]}`, "provider "+omitted))
+	}))
+	defer server.Close()
+
+	file := configWithProfiles("default")
+	profile := file.Profiles["default"]
+	profile.BaseURL = server.URL
+	file.Profiles["default"] = profile
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.commandExecutor = nil
+	builder.sandboxEnvironment = nil
+	builder.sandboxSecretsComplete = false
+	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonEnvironmentRejected}
+	runtime, err := config.Resolve(file, builder.environment, config.SessionDefaults{}, config.Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initial, err := session.Create(builder.sessionRoot, session.Header{
+		Version: session.CurrentVersion, ID: "incomplete-initial", Workspace: builder.workspacePath,
+		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{initial.Path()}
+	initialRunner, err := builder.buildRunner(initial, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initialRunner.Run(context.Background(), "initial "+omitted, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	newReplacement, err := builder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := newReplacement.Runner.Run(context.Background(), "new "+omitted, nil); err != nil {
+		_ = newReplacement.Session.Close()
+		t.Fatal(err)
+	}
+	paths = append(paths, newReplacement.Session.Path())
+	if err := newReplacement.Session.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumePath := createStoredSession(t, builder.sessionRoot, builder.workspacePath, session.Header{
+		Version: session.CurrentVersion, ID: "incomplete-resume", Workspace: builder.workspacePath,
+		Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
+	})
+	resumeReplacement, err := builder.openReplacement(context.Background(), resumePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resumeReplacement.Runner.Run(context.Background(), "resume "+omitted, nil); err != nil {
+		_ = resumeReplacement.Session.Close()
+		t.Fatal(err)
+	}
+	paths = append(paths, resumeReplacement.Session.Path())
+	if err := resumeReplacement.Session.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	requestMu.Lock()
+	bodies := append([]string(nil), requestBodies...)
+	requestMu.Unlock()
+	if len(bodies) != 3 {
+		t.Fatalf("provider requests = %d, want initial/new/resume", len(bodies))
+	}
+	for index, body := range bodies {
+		if strings.Contains(body, omitted) {
+			t.Fatalf("provider request %d retained omitted value", index)
+		}
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Tools []json.RawMessage `json:"tools"`
+		}
+		if err := json.Unmarshal([]byte(body), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Messages) == 0 || !strings.Contains(payload.Messages[0].Content, "Bash is unavailable") || len(payload.Tools) != 6 {
+			t.Fatalf("request %d status/tools are not truthful: %#v", index, payload)
+		}
+	}
+	for _, path := range paths {
+		persisted, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(persisted), omitted) {
+			t.Fatalf("Pi JSONL %q retained omitted value", path)
+		}
+	}
+}
+
+func TestRuntimeBuilderIncompleteRedactionSkipsRuntimeMetadataWritesForNewAndResume(t *testing.T) {
+	newBuilder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	newBuilder.sandboxSecretsComplete = false
+	newCandidate := &runtimeUpdateTrackingSession{Session: session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "new-incomplete", Workspace: newBuilder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
+	})}
+	newBuilder.deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
+		return newCandidate, nil
+	}
+	newBuilder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+	newReplacement, err := newBuilder.buildNewReplacement(context.Background(), app.RuntimeInfo{
+		Provider: "openai-compatible", Profile: "default", Model: "stored-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newCandidate.updateCalls.Load() != 0 {
+		t.Fatalf("new runtime update calls = %d, want 0", newCandidate.updateCalls.Load())
+	}
+	if newReplacement.RuntimeInfo.Provider != "" || newReplacement.RuntimeInfo.Profile != "" || newReplacement.RuntimeInfo.Model != "" {
+		t.Fatalf("new runtime info was not fail-closed: %#v", newReplacement.RuntimeInfo)
+	}
+	if err := newReplacement.Session.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	resumeBuilder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	resumeBuilder.sandboxSecretsComplete = false
+	resumeBuilder.runtimeOverrides.Model = "effective-model"
+	resumeCandidate := &runtimeUpdateTrackingSession{Session: session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "resume-incomplete", Workspace: resumeBuilder.workspacePath,
+		Provider: "openai-compatible", Profile: "default", Model: "stored-model", CreatedAt: time.Now().UTC(),
+	})}
+	resumeBuilder.prepareSession = func(context.Context, string, string) (preparedSession, error) {
+		return &fakePreparedSession{
+			info: session.SessionInfo{
+				Path: "/sessions/incomplete.jsonl", ID: "resume-incomplete", CWD: resumeBuilder.workspacePath,
+				Profile: "default", Provider: "openai-compatible", Model: "stored-model",
+			},
+			activate: func(context.Context) (session.Session, []session.Warning, error) { return resumeCandidate, nil, nil },
+		}, nil
+	}
+	resumeBuilder.buildRunnerOverride = func(session.Session, config.Runtime) (app.Runner, error) {
+		return commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil }), nil
+	}
+	resumeReplacement, err := resumeBuilder.openReplacement(context.Background(), "/sessions/incomplete.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumeCandidate.updateCalls.Load() != 0 {
+		t.Fatalf("resume runtime update calls = %d, want 0", resumeCandidate.updateCalls.Load())
+	}
+	if resumeReplacement.RuntimeInfo.Provider != "" || resumeReplacement.RuntimeInfo.Profile != "" || resumeReplacement.RuntimeInfo.Model != "" {
+		t.Fatalf("resume runtime info was not fail-closed: %#v", resumeReplacement.RuntimeInfo)
+	}
+	if err := resumeReplacement.Session.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1643,15 +1971,16 @@ func newRuntimeBuilderForTest(t *testing.T, file config.File) runtimeBuilder {
 		}
 	})
 	return runtimeBuilder{
-		config:             file,
-		environment:        environment,
-		workspace:          workspace,
-		workspacePath:      workspacePath,
-		sessionRoot:        filepath.Join(t.TempDir(), "sessions"),
-		shell:              canonicalSandboxRuntimeShell(t),
-		commandExecutor:    executor,
-		sandboxEnvironment: snapshot.Entries(),
-		sandboxSecrets:     snapshot.RedactionValues(),
+		config:                 file,
+		environment:            environment,
+		workspace:              workspace,
+		workspacePath:          workspacePath,
+		sessionRoot:            filepath.Join(t.TempDir(), "sessions"),
+		shell:                  canonicalSandboxRuntimeShell(t),
+		commandExecutor:        executor,
+		sandboxEnvironment:     snapshot.Entries(),
+		sandboxSecrets:         snapshot.RedactionValues(),
+		sandboxSecretsComplete: snapshot.RedactionsComplete(),
 		sandboxInfo: app.SandboxInfo{
 			Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone,
 		},

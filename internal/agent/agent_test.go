@@ -562,6 +562,290 @@ func TestRunBashCapCannotSynthesizeSecretAcrossAgentProviderAndPiSession(t *test
 	}
 }
 
+func TestRunCanonicalizesInvalidConfiguredSecretsAcrossEventsFollowUpErrorsAndPi(t *testing.T) {
+	invalidFF := string(append([]byte("decoded-prefix"), 0xff))
+	invalidOverlong := string(append([]byte("overlong-prefix"), 0xc0, 0xaf))
+	canonical := []string{"decoded-prefix�", "overlong-prefix��"}
+
+	streamBytes := append([]byte("stream "), []byte(invalidFF)...)
+	streamBytes = append(streamBytes, []byte(" | ")...)
+	streamBytes = append(streamBytes, []byte(invalidOverlong)...)
+	stream := make([]provider.StreamEvent, 0, len(streamBytes))
+	for _, value := range streamBytes {
+		stream = append(stream, provider.StreamEvent{Type: provider.StreamTextDelta, Text: string([]byte{value})})
+	}
+
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "tool " + strings.Join(canonical, " | ")}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: stream,
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "assistant " + strings.Join(canonical, " | ")},
+					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{err: errors.New("provider " + strings.Join(canonical, " | "))},
+	}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "invalid-configured-secret", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactor([]string{invalidFF, invalidOverlong}))
+	var events []Event
+	runErr := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) })
+	if runErr == nil {
+		_ = store.Close()
+		t.Fatal("Run() unexpectedly succeeded")
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want follow-up request", len(fakeProvider.requests))
+	}
+
+	boundaries := map[string]any{
+		"events":             events,
+		"provider follow-up": fakeProvider.requests[1],
+		"messages":           messages,
+		"error":              runErr.Error(),
+	}
+	for name, value := range boundaries {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if !utf8.Valid(encoded) {
+			t.Fatalf("%s returned invalid UTF-8: %q", name, encoded)
+		}
+		for _, secret := range canonical {
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("%s retained canonical configured value %q: %s", name, secret, encoded)
+			}
+		}
+	}
+	for _, secret := range canonical {
+		if strings.Contains(string(persisted), secret) || strings.Contains(string(persisted), strings.ReplaceAll(secret, "�", `\ufffd`)) {
+			t.Fatalf("Pi JSONL retained canonical configured value %q: %q", secret, persisted)
+		}
+	}
+}
+
+func TestRunExhaustiveMarkerFallbackBuffersEventsAndDeletesProviderHistoryAndPi(t *testing.T) {
+	const (
+		deleted     = "<DELETE-ME>"
+		synthesized = "leftright"
+	)
+	allRunes := allNonControlUnicodeRunes(t)
+	longPreferred := strings.Repeat(redactionMarker, 1<<20)
+	redactor := NewRedactor([]string{allRunes, longPreferred, deleted, synthesized})
+	if redactor.marker != "" {
+		t.Fatalf("exhaustive marker fallback = %d bytes, want deletion", len(redactor.marker))
+	}
+
+	recorder := &recordingTool{name: "echo"}
+	recorder.execute = func(context.Context, json.RawMessage) tool.Result {
+		return tool.Result{Content: "left" + deleted + "right"}
+	}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{
+			stream: []provider.StreamEvent{
+				{Type: provider.StreamTextDelta, Text: "left"},
+				{Type: provider.StreamTextDelta, Text: deleted},
+				{Type: provider.StreamTextDelta, Text: "right"},
+			},
+			response: provider.Response{
+				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+					{Type: model.BlockText, Text: "left" + deleted + "right"},
+					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
+				}},
+				FinishReason: model.FinishToolCalls,
+			},
+		},
+		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+	}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "deletion-session", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, redactor)
+	var events []Event
+	if err := runner.Run(context.Background(), "inspect deletion", func(event Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 2 {
+		t.Fatalf("provider requests = %d, want follow-up", len(fakeProvider.requests))
+	}
+
+	for name, value := range map[string]any{
+		"events":             events,
+		"provider follow-up": fakeProvider.requests[1],
+		"messages":           messages,
+	} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if len(encoded) > 64<<10 {
+			t.Fatalf("%s expanded to %d bytes in deletion mode", name, len(encoded))
+		}
+		for _, credential := range []string{deleted, synthesized, longPreferred} {
+			if strings.Contains(string(encoded), credential) {
+				t.Fatalf("%s retained configured credential %q", name, credential)
+			}
+		}
+	}
+	if len(persisted) > 64<<10 {
+		t.Fatalf("Pi JSONL expanded to %d bytes in deletion mode", len(persisted))
+	}
+	for _, credential := range []string{deleted, synthesized, longPreferred} {
+		if strings.Contains(string(persisted), credential) {
+			t.Fatalf("Pi JSONL retained configured credential %q", credential)
+		}
+	}
+	var streamed []string
+	for _, event := range events {
+		if event.Type == EventTextDelta {
+			streamed = append(streamed, event.Text)
+		}
+	}
+	if len(streamed) != 1 || streamed[0] != "done" {
+		t.Fatalf("deletion-mode stream events = %#v, want only the later safe response", streamed)
+	}
+}
+
+func TestRunIncompleteRedactionSnapshotSuppressesRequestsEventsAndPi(t *testing.T) {
+	const omitted = "omitted-513th-environment-value"
+	recorder := &recordingTool{name: "echo"}
+	registry, err := toolpkgNewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{
+		stream: []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "provider " + omitted}},
+		response: provider.Response{
+			Message: model.Message{ID: "response-" + omitted, Role: model.RoleAssistant, Blocks: []model.Block{
+				{Type: model.BlockText, Text: "provider " + omitted},
+				{Type: model.BlockToolCall, ToolName: "echo", ToolCallID: "call-" + omitted, Arguments: json.RawMessage(`{"value":"` + omitted + `"}`)},
+			}},
+			FinishReason: model.FinishToolCalls,
+		},
+	}}}
+	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "incomplete-redaction", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "safe", CreatedAt: fixedClock()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{
+		Model: omitted, SystemPrompt: "safe fixed system prompt", Thinking: omitted,
+		Now: fixedClock, NewID: fixedIDs(),
+	}, NewRedactorWithCompleteness(nil, false))
+	var events []Event
+	if err := runner.Run(context.Background(), "user "+omitted, func(event Event) { events = append(events, event) }); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	messages := store.Messages()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fakeProvider.requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fakeProvider.requests))
+	}
+	if len(messages) != 0 || len(recorder.calls) != 0 {
+		t.Fatalf("incomplete redaction mutated session or executed tool: messages=%#v calls=%#v", messages, recorder.calls)
+	}
+	for name, value := range map[string]any{
+		"provider request": fakeProvider.requests[0],
+		"events":           events,
+		"messages":         messages,
+	} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if strings.Contains(string(encoded), omitted) {
+			t.Fatalf("%s retained omitted environment value: %s", name, encoded)
+		}
+	}
+	if strings.Contains(string(persisted), omitted) {
+		t.Fatalf("Pi JSONL retained omitted environment value: %q", persisted)
+	}
+}
+
+func TestRunIncompleteRedactionPreservesCancellationWithoutProviderOrSessionMutation(t *testing.T) {
+	memory := session.NewMemory(testHeader(t))
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{response: provider.Response{
+		Message: model.Message{Role: model.RoleAssistant}, FinishReason: model.FinishStop,
+	}}}}
+	runner := New(fakeProvider, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactorWithCompleteness(nil, false))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var events []Event
+	err := runner.Run(ctx, "safe prompt", func(event Event) { events = append(events, event) })
+	if !errors.Is(err, context.Canceled) || len(fakeProvider.requests) != 0 || len(memory.Messages()) != 0 {
+		t.Fatalf("Run() error=%v provider calls=%d messages=%#v", err, len(fakeProvider.requests), memory.Messages())
+	}
+	if len(events) != 2 || events[0].Type != EventAgentStarted || events[1].Type != EventAgentError {
+		t.Fatalf("events=%#v", events)
+	}
+}
+
+func TestRunIncompleteRedactionProviderErrorDoesNotMutateSession(t *testing.T) {
+	const omitted = "omitted-provider-error-value"
+	memory := session.NewMemory(testHeader(t))
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{err: errors.New("provider exposed " + omitted)}}}
+	runner := New(fakeProvider, nil, memory, Options{Model: omitted, Now: fixedClock, NewID: fixedIDs()}, NewRedactorWithCompleteness(nil, false))
+
+	var events []Event
+	err := runner.Run(context.Background(), "user "+omitted, func(event Event) { events = append(events, event) })
+	if err == nil || err.Error() != "" || len(memory.Messages()) != 0 {
+		t.Fatalf("Run() error=%q messages=%#v", err, memory.Messages())
+	}
+	encoded, marshalErr := json.Marshal(events)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if strings.Contains(string(encoded), omitted) {
+		t.Fatalf("events retained omitted value: %s", encoded)
+	}
+}
+
 func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testing.T) {
 	credential := fmt.Sprintf("credential-%d", time.Now().UnixNano())
 	workspaceRoot := t.TempDir()

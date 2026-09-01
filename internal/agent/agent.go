@@ -47,6 +47,10 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 	if redactor == nil {
 		redactor = NewRedactor(nil)
 	}
+	if !redactor.complete {
+		options.Model = ""
+		options.Thinking = ""
+	}
 	return &Agent{provider: completionProvider, registry: registry, session: memory, options: options, redactor: redactor}
 }
 
@@ -56,6 +60,9 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 
 	if text := trimSpace(userText); text == "" {
 		return a.fail(emit, ErrEmptyUserText)
+	}
+	if !a.redactor.complete {
+		return a.runWithIncompleteRedactions(ctx, emit)
 	}
 
 	a.emit(emit, Event{Type: EventAgentStarted})
@@ -208,12 +215,20 @@ func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event)
 }
 
 func (a *Agent) buildNormalProviderRequest() (provider.Request, int) {
+	var messages []model.Message
+	if a.redactor.complete {
+		messages = cloneMessages(a.session.Messages())
+		for index := range messages {
+			messages[index] = a.redactMessage(messages[index])
+		}
+	}
+	tools := cloneTools(a.registry.Definitions())
 	request := provider.Request{
 		Model:        a.options.Model,
 		SystemPrompt: a.options.SystemPrompt,
 		Thinking:     a.options.Thinking,
-		Messages:     cloneMessages(a.session.Messages()),
-		Tools:        cloneTools(a.registry.Definitions()),
+		Messages:     messages,
+		Tools:        tools,
 	}
 	latest, hasLatest := a.session.LatestCompaction()
 	return request, estimateRequest(request, latest, hasLatest)
@@ -245,6 +260,23 @@ func (a *Agent) emit(emit func(Event), event Event) {
 	if emit != nil {
 		emit(event)
 	}
+}
+
+func (a *Agent) runWithIncompleteRedactions(ctx context.Context, emit func(Event)) error {
+	a.emit(emit, Event{Type: EventAgentStarted})
+	if err := ctx.Err(); err != nil {
+		return a.fail(emit, err)
+	}
+	response, err := a.dispatchNormalProviderStep(ctx, emit, &runDispatchState{})
+	if err != nil {
+		return a.fail(emit, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return a.fail(emit, err)
+	}
+	a.emit(emit, Event{Type: EventProviderUsage, Usage: response.Usage})
+	a.emit(emit, Event{Type: EventAgentFinished})
+	return nil
 }
 
 func (a *Agent) fail(emit func(Event), err error) error {

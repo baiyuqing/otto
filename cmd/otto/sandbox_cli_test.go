@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,7 +57,7 @@ func TestRunSandboxCLIOverridesTOML(t *testing.T) {
 	var opened sandboxOpenOptions
 	deps.openSandbox = func(_ context.Context, options sandboxOpenOptions) sandboxRuntime {
 		opened = options
-		return fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true}, nil, nil)
+		return fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -169,6 +170,181 @@ api_key_env = "TEST_KEY"
 	}
 }
 
+func TestRunLoadsCustomCredentialBoundaryBeforeDynamicStartupErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		paths     func(*testing.T) (secret string, workspace string, args []string)
+		wantClass string
+	}{
+		{
+			name: "cwd",
+			paths: func(t *testing.T) (string, string, []string) {
+				secret := filepath.Join(mustCanonicalDirectory(t, t.TempDir()), "CUSTOMVALUE", "missing-cwd")
+				return secret, secret, []string{"--cwd", secret}
+			},
+			wantClass: "resolve cwd",
+		},
+		{
+			name: "approve file",
+			paths: func(t *testing.T) (string, string, []string) {
+				secret := filepath.Join(mustCanonicalDirectory(t, t.TempDir()), "CUSTOMVALUE", "missing-approve")
+				workspace := t.TempDir()
+				return secret, workspace, []string{"--cwd", workspace, "--approve", "@" + secret}
+			},
+			wantClass: "read approve prompt",
+		},
+		{
+			name: "continue listing",
+			paths: func(t *testing.T) (string, string, []string) {
+				secret := filepath.Join(mustCanonicalDirectory(t, t.TempDir()), "CUSTOMVALUE")
+				if err := os.Mkdir(secret, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return secret, secret, []string{"--cwd", secret, "--continue"}
+			},
+			wantClass: "no session found for workspace",
+		},
+		{
+			name: "resume path",
+			paths: func(t *testing.T) (string, string, []string) {
+				secret := filepath.Join(mustCanonicalDirectory(t, t.TempDir()), "CUSTOMVALUE", "missing-session.jsonl")
+				workspace := t.TempDir()
+				return secret, workspace, []string{"--cwd", workspace, "--resume", secret}
+			},
+			wantClass: "open session file",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			secret, _, args := test.paths(t)
+			home := mustCanonicalDirectory(t, t.TempDir())
+			if err := os.MkdirAll(filepath.Join(home, ".otto", "sessions"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(t.TempDir(), "config.toml")
+			inactiveEndpoint := "https://example.test/v1?target=" + url.QueryEscape(secret)
+			configText := fmt.Sprintf(`default_profile = "active"
+[profiles.active]
+provider = "openai-compatible"
+base_url = "http://127.0.0.1:1"
+model = "test-model"
+api_key_env = "CUSTOMVALUE"
+[profiles.inactive]
+provider = "openai-compatible"
+base_url = %q
+model = "inactive-model"
+api_key_env = "INACTIVE_CUSTOMVALUE"
+`, inactiveEndpoint)
+			if err := os.WriteFile(configPath, []byte(configText), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args = append([]string{"--config", configPath}, args...)
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), args, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
+				"HOME": home, "SHELL": "/bin/sh", "CUSTOMVALUE": "active-provider-value", "INACTIVE_CUSTOMVALUE": secret,
+			}), deterministicRunDependencies(t))
+			if code != 1 || !strings.Contains(stderr.String(), test.wantClass) {
+				t.Fatalf("code = %d stderr = %q, want fixed class %q", code, stderr.String(), test.wantClass)
+			}
+			for _, forbidden := range []string{"CUSTOMVALUE", "INACTIVE_CUSTOMVALUE", secret, inactiveEndpoint} {
+				if strings.Contains(stderr.String(), forbidden) {
+					t.Fatalf("startup error retained custom credential name/value/endpoint %q: %q", forbidden, stderr.String())
+				}
+			}
+		})
+	}
+}
+
+func TestRunOversizedCustomCredentialFailsClosedBeforeApproveFileError(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(configPath, []byte(`default_profile = "active"
+[profiles.active]
+provider = "openai-compatible"
+base_url = "http://127.0.0.1:1"
+model = "test-model"
+api_key_env = "CUSTOMVALUE"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	omitted := strings.Repeat("oversized-custom-credential-", 42_000)
+	if len("CUSTOMVALUE="+omitted) <= maxLookupEnvironmentEntryBytes {
+		t.Fatal("fixture did not exceed the lookup entry ceiling")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath, "--approve", "@" + omitted,
+	}, strings.NewReader(""), &stdout, &stderr, func() []string {
+		return []string{"HOME=" + home, "SHELL=/bin/sh", "CUSTOMVALUE=" + omitted}
+	}, deterministicRunDependencies(t))
+	if code != 1 {
+		t.Fatalf("code = %d stderr bytes = %d", code, stderr.Len())
+	}
+	if strings.Contains(stderr.String(), omitted[:256]) || stderr.Len() > 1024 {
+		t.Fatalf("pre-sandbox approve error retained oversized custom credential (%d bytes)", stderr.Len())
+	}
+}
+
+func TestRunFlagParserErrorsUseFixedClass(t *testing.T) {
+	for _, args := range [][]string{
+		{"--shell-timeout", "flag-parser-sensitive-value"},
+		{"--flag-parser-sensitive-value", "1"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := runWithDependencies(context.Background(), args, strings.NewReader(""), &stdout, &stderr, func() []string {
+			t.Fatal("environment must not be captured after an unsafe flag parser error")
+			return nil
+		}, deterministicRunDependencies(t))
+		if code != 2 || stderr.String() != "otto: invalid command-line arguments\n" {
+			t.Fatalf("args = %q code = %d stderr = %q, want fixed parse class", args, code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "flag-parser-sensitive-value") {
+			t.Fatalf("flag parser retained raw value: %q", stderr.String())
+		}
+	}
+}
+
+func TestParseFlagsDiscardsRawParserDiagnostics(t *testing.T) {
+	const sensitive = "direct-flag-parser-sensitive-value"
+	for _, args := range [][]string{
+		{"--shell-timeout", sensitive},
+		{"--" + sensitive, "1"},
+	} {
+		var stderr bytes.Buffer
+		if _, _, err := parseFlags(args, io.Discard, &stderr); err == nil {
+			t.Fatalf("parseFlags(%q) succeeded", args)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("parseFlags(%q) wrote raw parser diagnostics: %q", args, stderr.String())
+		}
+	}
+}
+
+func TestRunConfigErrorsUseFixedPreBoundaryClass(t *testing.T) {
+	secretRoot := filepath.Join(t.TempDir(), "config-path-sensitive-value")
+	missing := filepath.Join(secretRoot, "missing.toml")
+	malformed := filepath.Join(t.TempDir(), "config-decode-sensitive-value.toml")
+	if err := os.WriteFile(malformed, []byte("config-toml-sensitive-value = ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{missing, malformed} {
+		var stdout, stderr bytes.Buffer
+		code := runWithDependencies(context.Background(), []string{"--config", path}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
+			"HOME": t.TempDir(), "SHELL": "/bin/sh",
+		}), deterministicRunDependencies(t))
+		if code != 1 || stderr.String() != "otto: load config: configuration is invalid or unavailable\n" {
+			t.Fatalf("path = %q code = %d stderr = %q, want fixed config class", path, code, stderr.String())
+		}
+		for _, forbidden := range []string{"config-path-sensitive-value", "config-decode-sensitive-value", "config-toml-sensitive-value"} {
+			if strings.Contains(stderr.String(), forbidden) {
+				t.Fatalf("config error retained pre-boundary content %q: %q", forbidden, stderr.String())
+			}
+		}
+	}
+}
+
 func TestRunRedactsProcessSecretsFromErrorsBeforeSandboxConstruction(t *testing.T) {
 	secretPath := filepath.Join(t.TempDir(), "missing-aws-startup-secret")
 	entries := []string{"HOME=" + t.TempDir(), "AWS_SECRET_ACCESS_KEY=" + secretPath}
@@ -256,6 +432,168 @@ func TestRunMalformedEnvironmentDisablesBashWithoutHidingProviderValues(t *testi
 	want := "warning: bash is unavailable because the configured sandbox could not be established (reason: environment-rejected); file tools remain available\n"
 	if stderr.String() != want {
 		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
+func TestRunIncompleteEnvironmentRedactionFailsClosedAcrossProviderEventsAndPi(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries func() ([]string, string)
+	}{
+		{
+			name: "513 sensitive values",
+			entries: func() ([]string, string) {
+				entries := make([]string, 0, 516)
+				entries = append(entries, "HOME="+t.TempDir(), "SHELL=/bin/sh", "TEST_KEY=provider-value")
+				for index := range 513 {
+					entries = append(entries, fmt.Sprintf("VALUE_%03d_TOKEN=environment-sensitive-value-%03d", index, index))
+				}
+				return entries, "environment-sensitive-value-512"
+			},
+		},
+		{
+			name: "over one MiB",
+			entries: func() ([]string, string) {
+				omitted := strings.Repeat("oversized-environment-value-", 42_000)
+				return []string{"HOME=" + t.TempDir(), "SHELL=/bin/sh", "TEST_KEY=provider-value", "LARGE_TOKEN=" + omitted}, omitted
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			entries, omitted := test.entries()
+			workspace := t.TempDir()
+			var requestMu sync.Mutex
+			var requestBody string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read request: %v", err)
+				}
+				requestMu.Lock()
+				requestBody = string(body)
+				requestMu.Unlock()
+				writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+			}))
+			defer server.Close()
+			configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+
+			fixture := newSandboxRuntimeFixture(t)
+			deps := deterministicRunDependencies(t)
+			deps.openSandbox = func(ctx context.Context, options sandboxOpenOptions) sandboxRuntime {
+				return openSandboxRuntimeWithDependencies(ctx, options, fixture.dependencies())
+			}
+			var stdout, stderr bytes.Buffer
+			code := runWithDependencies(context.Background(), []string{
+				"--config", configPath, "--cwd", workspace, "--approve", omitted,
+			}, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps)
+			if code != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			wantWarning := "warning: bash is unavailable because the configured sandbox could not be established (reason: environment-rejected); file tools remain available\n"
+			if stderr.String() != wantWarning {
+				t.Fatalf("stderr = %q, want fixed environment warning", stderr.String())
+			}
+			paths, err := filepath.Glob(filepath.Join(strings.TrimPrefix(entries[0], "HOME="), ".otto", "sessions", "*", "*.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(paths) != 0 {
+				t.Fatalf("incomplete run persisted session paths: %v", paths)
+			}
+			requestMu.Lock()
+			body := requestBody
+			requestMu.Unlock()
+			for boundary, content := range map[string]string{
+				"provider request": body,
+				"events":           stdout.String(),
+				"stderr":           stderr.String(),
+			} {
+				if strings.Contains(content, omitted) {
+					t.Fatalf("%s retained omitted environment value (content bytes %d)", boundary, len(content))
+				}
+			}
+			var payload struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+				Tools []json.RawMessage `json:"tools"`
+			}
+			if err := json.Unmarshal([]byte(body), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if len(payload.Tools) != 6 {
+				t.Fatalf("file tool definitions = %d, want 6", len(payload.Tools))
+			}
+			if len(payload.Messages) == 0 || payload.Messages[0].Role != "system" ||
+				!strings.Contains(payload.Messages[0].Content, "Bash is unavailable") ||
+				strings.Contains(payload.Messages[0].Content, "Bash is unsandboxed") ||
+				strings.Contains(payload.Messages[0].Content, "Seatbelt confines Bash") {
+				t.Fatalf("fail-closed system prompt was not truthful: %#v", payload.Messages)
+			}
+			if fixture.seatbeltCalls.Load() != 0 || fixture.directCalls.Load() != 0 || fixture.executorCalls.Load() != 0 {
+				t.Fatalf("incomplete environment constructed a host child path: seatbelt/direct/executor = %d/%d/%d", fixture.seatbeltCalls.Load(), fixture.directCalls.Load(), fixture.executorCalls.Load())
+			}
+		})
+	}
+}
+
+func TestRunIncompleteEnvironmentDoesNotPersistOmittedRuntimeModel(t *testing.T) {
+	const omitted = "environment-sensitive-value-512"
+	home := t.TempDir()
+	workspace := t.TempDir()
+	entries := []string{"HOME=" + home, "SHELL=/bin/sh", "TEST_KEY=provider-value"}
+	for index := range 513 {
+		entries = append(entries, fmt.Sprintf("VALUE_%03d_TOKEN=environment-sensitive-value-%03d", index, index))
+	}
+	entries = append(entries, "OTTO_MODEL="+omitted)
+
+	var requestMu sync.Mutex
+	var requestBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		requestMu.Lock()
+		requestBody = string(body)
+		requestMu.Unlock()
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	fixture := newSandboxRuntimeFixture(t)
+	deps := deterministicRunDependencies(t)
+	deps.openSandbox = func(ctx context.Context, options sandboxOpenOptions) sandboxRuntime {
+		return openSandboxRuntimeWithDependencies(ctx, options, fixture.dependencies())
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{
+		"--config", configPath, "--cwd", workspace, "--approve", "safe prompt",
+	}, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps)
+	if code != 0 {
+		t.Fatalf("code = %d stderr = %q", code, stderr.String())
+	}
+	requestMu.Lock()
+	body := requestBody
+	requestMu.Unlock()
+	if strings.Contains(body, omitted) || strings.Contains(stdout.String(), omitted) || strings.Contains(stderr.String(), omitted) {
+		t.Fatal("incomplete boundary retained the omitted runtime model")
+	}
+	paths, err := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		for _, path := range paths {
+			if persisted, readErr := os.ReadFile(path); readErr == nil && strings.Contains(string(persisted), omitted) {
+				t.Fatalf("Pi JSONL retained omitted runtime model: %q", persisted)
+			}
+		}
+		t.Fatalf("incomplete run persisted session paths: %v", paths)
 	}
 }
 
@@ -364,20 +702,23 @@ func TestRunUnavailableSandboxRedactsHostSecretsAcrossEveryBoundary(t *testing.T
 		configureOpen func(*sandboxRuntimeFixture)
 		shell         func(*testing.T) string
 		malformed     bool
+		proxy         string
+		wantRequests  int32
 	}{
 		{
-			name: "invalid shell",
+			name: "invalid shell", wantRequests: 2,
 			shell: func(t *testing.T) string {
 				return filepath.Join(t.TempDir(), "missing-shell")
 			},
 		},
 		{
-			name: "Seatbelt opener failure",
+			name: "Seatbelt opener failure", wantRequests: 2,
 			configureOpen: func(fixture *sandboxRuntimeFixture) {
 				fixture.openErr = &sandbox.UnavailableError{Reason: sandbox.ReasonSeatbeltMissing}
 			},
 		},
-		{name: "malformed entry after valid secrets", malformed: true},
+		{name: "malformed entry after valid secrets", malformed: true, wantRequests: 1},
+		{name: "malformed proxy authority", proxy: "http:///raw%20user:raw%2Fpass@example.test/path", wantRequests: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			const (
@@ -434,9 +775,13 @@ func TestRunUnavailableSandboxRedactsHostSecretsAcrossEveryBoundary(t *testing.T
 			if test.shell != nil {
 				shell = test.shell(t)
 			}
+			proxy := test.proxy
+			if proxy == "" {
+				proxy = "http://" + rawUserinfo + "@[::1]:8443/path"
+			}
 			entries := []string{
 				"AWS_SECRET_ACCESS_KEY=" + awsSecret,
-				"HTTPS_PROXY=http://" + rawUserinfo + "@[::1]:8443/path",
+				"HTTPS_PROXY=" + proxy,
 			}
 			if test.malformed {
 				entries = append(entries, "BROKEN")
@@ -447,24 +792,40 @@ func TestRunUnavailableSandboxRedactsHostSecretsAcrossEveryBoundary(t *testing.T
 			code := runWithDependencies(context.Background(), []string{
 				"--config", configPath, "--cwd", workspace, "--approve", "read the file",
 			}, strings.NewReader(""), &stdout, &stderr, func() []string { return entries }, deps)
-			if code != 0 || requests.Load() != 2 {
-				t.Fatalf("code/provider requests = %d/%d, stderr = %q", code, requests.Load(), stderr.String())
+			if code != 0 || requests.Load() != test.wantRequests {
+				t.Fatalf("code/provider requests = %d/%d, want %d requests; stderr = %q", code, requests.Load(), test.wantRequests, stderr.String())
 			}
-			persisted, err := os.ReadFile(onlySessionPath(t, home))
-			if err != nil {
-				t.Fatal(err)
+			var persisted []byte
+			if test.malformed {
+				paths, globErr := filepath.Glob(filepath.Join(home, ".otto", "sessions", "*", "*.jsonl"))
+				if globErr != nil {
+					t.Fatal(globErr)
+				}
+				if len(paths) != 0 {
+					t.Fatalf("incomplete malformed environment persisted sessions: %v", paths)
+				}
+			} else {
+				var readErr error
+				persisted, readErr = os.ReadFile(onlySessionPath(t, home))
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
 			}
 			requestMu.Lock()
 			bodies := append([]string(nil), requestBodies...)
 			requestMu.Unlock()
-			if len(bodies) != 2 {
-				t.Fatalf("provider request bodies = %d, want 2", len(bodies))
+			if len(bodies) != int(test.wantRequests) {
+				t.Fatalf("provider request bodies = %d, want %d", len(bodies), test.wantRequests)
 			}
 			boundaries := map[string]string{
 				"provider events and local output": stdout.String(),
 				"stderr":                           stderr.String(),
-				"provider follow-up":               bodies[1],
-				"Pi JSONL":                         string(persisted),
+			}
+			if len(persisted) != 0 {
+				boundaries["Pi JSONL"] = string(persisted)
+			}
+			if len(bodies) > 1 {
+				boundaries["provider follow-up"] = bodies[1]
 			}
 			for boundary, content := range boundaries {
 				for _, secret := range secretValues {
@@ -598,9 +959,10 @@ func TestRunStartupInterruptionOwnsPartialSandboxCleanup(t *testing.T) {
 				case <-abortOpen:
 				}
 				return sandboxRuntime{
-					Executor:    &recordingSandboxExecutor{},
-					Environment: []string{},
-					Info:        app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true},
+					Executor:           &recordingSandboxExecutor{},
+					Environment:        []string{},
+					Info:               app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true},
+					RedactionsComplete: true,
 					close: newSandboxRuntimeCloser(func() error {
 						sandboxCloses.Add(1)
 						return nil
@@ -705,8 +1067,9 @@ func TestRunClosesControllerBeforeSandboxAfterActiveBash(t *testing.T) {
 	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
 		return sandboxRuntime{
 			Executor: executor, Environment: []string{"PATH=/usr/bin:/bin"},
-			Info:  app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
-			close: newSandboxRuntimeCloser(func() error { appendOrder("sandbox"); return nil }),
+			Info:               app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
+			RedactionsComplete: true,
+			close:              newSandboxRuntimeCloser(func() error { appendOrder("sandbox"); return nil }),
 		}
 	}
 
@@ -761,8 +1124,9 @@ func TestRunClosesControllerBeforeSandboxAndClosesSandboxOnStartupFailure(t *tes
 		deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
 			return sandboxRuntime{
 				Executor: &recordingSandboxExecutor{}, Environment: []string{},
-				Info:  app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
-				close: newSandboxRuntimeCloser(func() error { appendOrder("sandbox"); return nil }),
+				Info:               app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
+				RedactionsComplete: true,
+				close:              newSandboxRuntimeCloser(func() error { appendOrder("sandbox"); return nil }),
 			}
 		}
 
@@ -790,8 +1154,9 @@ func TestRunClosesControllerBeforeSandboxAndClosesSandboxOnStartupFailure(t *tes
 		deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
 			return sandboxRuntime{
 				Executor: &recordingSandboxExecutor{}, Environment: []string{},
-				Info:  app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
-				close: newSandboxRuntimeCloser(func() error { sandboxCloses.Add(1); return nil }),
+				Info:               app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
+				RedactionsComplete: true,
+				close:              newSandboxRuntimeCloser(func() error { sandboxCloses.Add(1); return nil }),
 			}
 		}
 		deps.newSession = func(bool, string, string, config.Runtime) (session.Session, error) {
@@ -825,7 +1190,8 @@ func TestRunSandboxCloseErrorIsFixedAndControllerErrorStaysPrimary(t *testing.T)
 			deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
 				return sandboxRuntime{
 					Executor: &recordingSandboxExecutor{}, Environment: []string{},
-					Info: app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
+					Info:               app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
+					RedactionsComplete: true,
 					close: newSandboxRuntimeCloser(func() error {
 						sandboxCloses.Add(1)
 						return errors.New("raw sandbox state and profile")
@@ -932,7 +1298,8 @@ func fakeSandboxRuntime(info app.SandboxInfo, executor sandbox.CommandExecutor, 
 	}
 	return sandboxRuntime{
 		Executor: executor, Environment: append([]string{}, environment...), Info: info,
-		close: newSandboxRuntimeCloser(nil),
+		RedactionsComplete: true,
+		close:              newSandboxRuntimeCloser(nil),
 	}
 }
 

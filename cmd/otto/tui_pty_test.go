@@ -385,8 +385,9 @@ func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
 	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
 		return sandboxRuntime{
 			Executor: executor, Environment: []string{"PATH=/usr/bin:/bin"},
-			Info:  app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
-			close: newSandboxRuntimeCloser(nil),
+			Info:               app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkAllowed, BashAvailable: true},
+			RedactionsComplete: true,
+			close:              newSandboxRuntimeCloser(nil),
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
@@ -20,15 +21,24 @@ const redactionMarker = "█"
 // boundary. Its source values remain encapsulated and are never exposed
 // through agent options or errors.
 type Redactor struct {
-	values []string
-	marker string
+	values   []string
+	marker   string
+	complete bool
 }
 
 func NewRedactor(values []string) *Redactor {
+	return NewRedactorWithCompleteness(values, true)
+}
+
+func NewRedactorWithCompleteness(values []string, complete bool) *Redactor {
+	redactor := &Redactor{complete: complete}
+	if !complete {
+		return redactor
+	}
 	seen := make(map[string]struct{}, len(values))
-	redactor := &Redactor{}
 	for _, value := range values {
-		if value == "" || !utf8.ValidString(value) {
+		value = safetext.CanonicalizeUTF8(value)
+		if value == "" {
 			continue
 		}
 		if _, exists := seen[value]; exists {
@@ -51,19 +61,43 @@ func (r *Redactor) RedactString(text string) string {
 	if text == "" {
 		return text
 	}
-	text = strings.ToValidUTF8(text, string(utf8.RuneError))
+	text = safetext.CanonicalizeUTF8(text)
+	if r != nil && !r.complete {
+		return ""
+	}
 	if r == nil || len(r.values) == 0 {
 		return text
 	}
-	for _, value := range r.values {
-		text = strings.ReplaceAll(text, value, r.marker)
+	if r.marker != "" {
+		for _, value := range r.values {
+			text = strings.ReplaceAll(text, value, r.marker)
+		}
+		return text
 	}
-	return text
+	for {
+		before := len(text)
+		for _, value := range r.values {
+			text = strings.ReplaceAll(text, value, "")
+		}
+		if len(text) == before {
+			return text
+		}
+	}
 }
 
 func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
+	if r != nil && !r.complete {
+		return json.RawMessage("null")
+	}
 	if r == nil || len(r.values) == 0 {
-		return append(json.RawMessage(nil), raw...)
+		if utf8.Valid(raw) {
+			return append(json.RawMessage(nil), raw...)
+		}
+		canonical := json.RawMessage(safetext.CanonicalizeUTF8(string(raw)))
+		if !json.Valid(canonical) {
+			return json.RawMessage("null")
+		}
+		return append(json.RawMessage(nil), canonical...)
 	}
 	value, err := decodePairPreservingJSON(raw)
 	if err != nil {
@@ -78,7 +112,7 @@ func (r *Redactor) RedactJSONStrings(raw json.RawMessage) json.RawMessage {
 }
 
 func (r *Redactor) RedactError(err error) error {
-	if err == nil || r == nil || len(r.values) == 0 {
+	if err == nil || r == nil {
 		return err
 	}
 	message := r.RedactString(err.Error())
@@ -260,21 +294,7 @@ func safeRedactionMarker(values []string) string {
 		}
 	}
 
-	longestPreferredRun := 0
-	for _, value := range values {
-		currentRun := 0
-		for _, candidate := range value {
-			if candidate == preferred {
-				currentRun++
-				if currentRun > longestPreferredRun {
-					longestPreferredRun = currentRun
-				}
-				continue
-			}
-			currentRun = 0
-		}
-	}
-	return strings.Repeat(redactionMarker, longestPreferredRun+1)
+	return ""
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -302,6 +322,9 @@ func (s *streamRedactor) Write(text string) string {
 	if s == nil || text == "" {
 		return ""
 	}
+	if s.redactor != nil && !s.redactor.complete {
+		return ""
+	}
 	return s.writeNormalized(s.normalizeUTF8(text, false))
 }
 
@@ -313,6 +336,9 @@ func (s *streamRedactor) writeNormalized(text string) string {
 		return text
 	}
 	s.pending += text
+	if s.redactor.marker == "" {
+		return ""
+	}
 	var output strings.Builder
 	for len(s.pending) > 0 {
 		index, secret := s.firstSecret()
@@ -332,6 +358,11 @@ func (s *streamRedactor) writeNormalized(text string) string {
 
 func (s *streamRedactor) Flush() string {
 	if s == nil {
+		return ""
+	}
+	if s.redactor != nil && !s.redactor.complete {
+		s.pending = ""
+		s.invalidBoundary = nil
 		return ""
 	}
 	normalized := s.normalizeUTF8("", true)

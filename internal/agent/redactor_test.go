@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -27,11 +29,100 @@ func TestRedactorNormalizesInvalidUTF8BeforeExactReplacement(t *testing.T) {
 	}
 }
 
+func TestRedactorCanonicalizesInvalidConfiguredValues(t *testing.T) {
+	invalidFF := string(append([]byte("decoded-prefix"), 0xff))
+	invalidOverlong := string(append([]byte("overlong-prefix"), 0xc0, 0xaf))
+	canonical := []string{"decoded-prefix�", "overlong-prefix��"}
+	redactor := NewRedactor([]string{invalidFF, invalidOverlong})
+
+	for _, secret := range canonical {
+		if got := redactor.RedactString("before " + secret + " after"); strings.Contains(got, secret) {
+			t.Fatalf("RedactString() retained canonical configured value %q: %q", secret, got)
+		}
+	}
+
+	stream := redactor.newStream()
+	raw := append([]byte("decoded-prefix"), 0xff)
+	raw = append(raw, []byte(" overlong-prefix")...)
+	raw = append(raw, 0xc0, 0xaf)
+	var streamed strings.Builder
+	for _, value := range raw {
+		streamed.WriteString(stream.Write(string([]byte{value})))
+	}
+	streamed.WriteString(stream.Flush())
+	if !utf8.ValidString(streamed.String()) {
+		t.Fatalf("stream returned invalid UTF-8: %q", streamed.String())
+	}
+	for _, secret := range canonical {
+		if strings.Contains(streamed.String(), secret) {
+			t.Fatalf("stream retained canonical configured value %q: %q", secret, streamed.String())
+		}
+	}
+
+	boundaryErr := redactor.RedactError(errors.New(strings.Join(canonical, " | ")))
+	for _, secret := range canonical {
+		if strings.Contains(boundaryErr.Error(), secret) {
+			t.Fatalf("RedactError() retained canonical configured value %q: %q", secret, boundaryErr)
+		}
+	}
+}
+
+func TestRedactorCanonicalizesJSONWithoutConfiguredSecrets(t *testing.T) {
+	raw := json.RawMessage(append([]byte(`"prefix`), 0xff, '"'))
+	got := NewRedactor(nil).RedactJSONStrings(raw)
+	if !json.Valid(got) || !utf8.Valid(got) || string(got) != `"prefix�"` {
+		t.Fatalf("RedactJSONStrings() = %q", got)
+	}
+}
+
+func TestRedactorCanonicalizesErrorsWithoutConfiguredSecrets(t *testing.T) {
+	raw := errors.New(string([]byte{'e', 'r', 'r', 0xff, 0xc0, 0xaf}))
+	got := NewRedactor(nil).RedactError(raw)
+	if !utf8.ValidString(got.Error()) || got.Error() != "err���" {
+		t.Fatalf("RedactError() = %q", got)
+	}
+}
+
+func TestIncompleteRedactorSuppressesEveryDynamicBoundary(t *testing.T) {
+	redactor := NewRedactorWithCompleteness([]string{"known-secret"}, false)
+	if got := redactor.RedactString("unknown-attacker-content"); got != "" {
+		t.Fatalf("RedactString() = %q, want fail-closed empty text", got)
+	}
+	if got := string(redactor.RedactJSONStrings(json.RawMessage(`{"unknown":"content"}`))); got != "null" {
+		t.Fatalf("RedactJSONStrings() = %q, want fail-closed null", got)
+	}
+	boundaryErr := redactor.RedactError(fmt.Errorf("%w: unknown-attacker-content", context.Canceled))
+	if boundaryErr == nil || boundaryErr.Error() != "" || !errors.Is(boundaryErr, context.Canceled) {
+		t.Fatalf("RedactError() = %#v, want empty cancellation-preserving error", boundaryErr)
+	}
+	stream := redactor.newStream()
+	if got := stream.Write("unknown-"); got != "" {
+		t.Fatalf("stream Write() = %q, want no fail-closed event", got)
+	}
+	if got := stream.Write("attacker-content"); got != "" {
+		t.Fatalf("stream Write() = %q, want no fail-closed event", got)
+	}
+	if got := stream.Flush(); got != "" {
+		t.Fatalf("stream Flush() = %q, want no fail-closed event", got)
+	}
+}
+
 func TestRedactorPreservesInvalidCompactionSummaryIdentity(t *testing.T) {
 	err := fmt.Errorf("%w: response contains secret", ErrInvalidCompactionSummary)
 	got := NewRedactor([]string{"secret"}).RedactError(err)
 	if !errors.Is(got, ErrInvalidCompactionSummary) || strings.Contains(got.Error(), "secret") {
 		t.Fatalf("RedactError() = %v", got)
+	}
+}
+
+func TestRedactorUsesStableSingleRunePreferredMarkers(t *testing.T) {
+	first := NewRedactor(nil)
+	if first.marker != redactionMarker || utf8.RuneCountInString(first.marker) != 1 {
+		t.Fatalf("default marker = %q, want stable single rune %q", first.marker, redactionMarker)
+	}
+	second := NewRedactor([]string{redactionMarker})
+	if second.marker != "\ue000" || utf8.RuneCountInString(second.marker) != 1 {
+		t.Fatalf("fallback marker = %q, want stable single-rune fallback", second.marker)
 	}
 }
 
@@ -73,6 +164,32 @@ func TestRedactorReplacementCannotSynthesizeAnotherCredential(t *testing.T) {
 		if strings.Contains(streamed.String(), credential) {
 			t.Fatalf("stream output = %q, synthesized credential %q", streamed.String(), credential)
 		}
+	}
+}
+
+func TestRedactorExhaustiveMarkerFallbackDeletesToFixedPointWithoutStreaming(t *testing.T) {
+	allRunes := allNonControlUnicodeRunes(t)
+	longPreferred := strings.Repeat(redactionMarker, 1<<20)
+	redactor := NewRedactor([]string{allRunes, longPreferred, "X", "ab"})
+	if redactor.marker != "" {
+		t.Fatalf("exhaustive marker fallback = %d bytes, want explicit deletion", len(redactor.marker))
+	}
+
+	if got := redactor.RedactString("aXb"); got != "" {
+		t.Fatalf("fixed-point RedactString(aXb) = %q, want deletion of X then synthesized ab", got)
+	}
+	if got := redactor.RedactString("X"); len(got) > 0 {
+		t.Fatalf("deletion fallback expanded output to %d bytes", len(got))
+	}
+
+	stream := redactor.newStream()
+	for _, chunk := range []string{"a", "X", "b"} {
+		if got := stream.Write(chunk); got != "" {
+			t.Fatalf("stream Write(%q) emitted before Flush: %d bytes", chunk, len(got))
+		}
+	}
+	if got := stream.Flush(); got != "" {
+		t.Fatalf("stream Flush() = %q, want fixed-point deletion", got)
 	}
 }
 
@@ -249,4 +366,20 @@ func TestRedactorJSONOutputDoesNotAliasCompactionToolArguments(t *testing.T) {
 	if string(raw) != `{"path":"secret.go"}` {
 		t.Fatalf("redacted output aliases source tool arguments: %s", raw)
 	}
+}
+
+func allNonControlUnicodeRunes(t *testing.T) string {
+	t.Helper()
+	var value strings.Builder
+	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
+		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
+			continue
+		}
+		value.WriteRune(candidate)
+	}
+	result := value.String()
+	if !utf8.ValidString(result) || !strings.Contains(result, redactionMarker) {
+		t.Fatal("exhaustive marker fixture is invalid or omitted the preferred rune")
+	}
+	return result
 }

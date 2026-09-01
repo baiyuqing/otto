@@ -32,6 +32,8 @@ import (
 
 const maxApprovePromptBytes = 1 << 20
 
+var errUnsafeFlagParse = errors.New("unsafe flag parser diagnostic")
+
 func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) string {
 	policy := "Sandbox policy: Bash is unavailable."
 	bashUsable := false
@@ -163,23 +165,6 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, enumerate environmentEnumerator, deps runDependencies) int {
-	hostEntries, err := captureEnvironment(enumerate)
-	if err != nil {
-		return fail(stderr, "%v", err)
-	}
-	environmentLookup, err := newEnvironmentLookup(hostEntries)
-	if err != nil {
-		return fail(stderr, "%v", err)
-	}
-	processSnapshot, _ := sandbox.ResolveEnvironment(sandbox.EnvironmentOptions{
-		HostEntries:   cloneSandboxRuntimeStrings(hostEntries),
-		ProviderNames: []string{"OTTO_API_KEY"},
-	})
-	startupBoundary := runtimeBuilder{sandboxSecrets: processSnapshot.RedactionValues()}
-	redactStartupError := func(err error) error {
-		return startupBoundary.redactError(err, nil)
-	}
-
 	if deps.detectTerminal == nil {
 		deps.detectTerminal = detectTerminalIO
 	}
@@ -205,10 +190,52 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return 0
 	}
 	if err != nil {
-		_, _ = io.WriteString(stderr, redactStartupError(errors.New(parseErrors.String())).Error())
+		if errors.Is(err, errUnsafeFlagParse) {
+			_, _ = io.WriteString(stderr, "otto: invalid command-line arguments\n")
+		} else {
+			_, _ = io.WriteString(stderr, parseErrors.String())
+		}
 		return 2
 	}
+
+	hostEntries, err := captureEnvironment(enumerate)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	environmentLookup, err := newEnvironmentLookup(hostEntries)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	processSnapshot, _ := sandbox.ResolveEnvironment(sandbox.EnvironmentOptions{
+		HostEntries:   cloneSandboxRuntimeStrings(hostEntries),
+		ProviderNames: []string{"OTTO_API_KEY"},
+	})
+	startupBoundary := runtimeBuilder{
+		sandboxSecrets:         processSnapshot.RedactionValues(),
+		sandboxSecretsComplete: processSnapshot.RedactionsComplete(),
+	}
 	startupBoundary.runtimeOverrides.BaseURL = options.baseURL
+	redactStartupError := func(err error) error {
+		return startupBoundary.redactError(err, nil)
+	}
+
+	home, err := resolveHome(environmentLookup, deps.resolveUserHome)
+	if err != nil {
+		return fail(stderr, "%v", err)
+	}
+	configFile, err := loadConfig(options, home)
+	if err != nil {
+		return fail(stderr, "load config: configuration is invalid or unavailable")
+	}
+	environment := configEnvironment(configFile, environmentLookup)
+	configuredSnapshot, _ := sandbox.ResolveEnvironment(sandbox.EnvironmentOptions{
+		HostEntries:   cloneSandboxRuntimeStrings(hostEntries),
+		ProviderNames: sandboxProviderEnvironmentNames(configFile, ""),
+	})
+	startupBoundary.config = configFile
+	startupBoundary.environment = environment
+	startupBoundary.sandboxSecrets = mergeSandboxRuntimeRedactions(startupBoundary.sandboxSecrets, configuredSnapshot.RedactionValues())
+	startupBoundary.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete && configuredSnapshot.RedactionsComplete()
 
 	approvePrompt := options.approve
 	if options.approveSet && strings.HasPrefix(approvePrompt, "@") {
@@ -230,11 +257,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return fail(stderr, "%v", redactStartupError(fmt.Errorf("create workspace: %w", err)))
 	}
-
-	home, err := resolveHome(environmentLookup, deps.resolveUserHome)
-	if err != nil {
-		return fail(stderr, "%v", redactStartupError(err))
-	}
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
 	sessionPath := options.resumePath
@@ -251,13 +273,6 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		listedSessionPath = true
 	}
 
-	configFile, err := loadConfig(options, home)
-	if err != nil {
-		return fail(stderr, "%v", redactStartupError(fmt.Errorf("load config: %w", err)))
-	}
-	environment := configEnvironment(configFile, environmentLookup)
-	startupBoundary.config = configFile
-	startupBoundary.environment = environment
 	uiMode, err := config.ResolveUIMode(configFile, environment, options.ui)
 	if err != nil {
 		return fail(stderr, "%v", redactStartupError(err))
@@ -279,6 +294,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	builder := newRuntimeBuilder(configFile, environment, workspace, workspacePath, sessionRoot, shell, options, stderr, deps)
 	builder.sandboxSecrets = cloneSandboxRuntimeStrings(startupBoundary.sandboxSecrets)
+	builder.sandboxSecretsComplete = startupBoundary.sandboxSecretsComplete
 	var sandboxDriverOverride *string
 	if options.sandboxSet {
 		driver := strings.Clone(options.sandbox)
@@ -386,12 +402,26 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		_ = closeSandbox()
 		return 130
 	}
-	printSandboxRuntimeWarning(stderr, processSandbox.Info)
+	if !processSandbox.RedactionsComplete {
+		processSandbox.Executor = nil
+		processSandbox.Environment = nil
+		processSandbox.Info = app.SandboxInfo{
+			Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonEnvironmentRejected,
+		}
+	} else if processSandbox.Info.BashAvailable && (isNilSandboxRuntimeValue(processSandbox.Executor) || processSandbox.Environment == nil) {
+		processSandbox.Executor = nil
+		processSandbox.Environment = nil
+		processSandbox.Info = app.SandboxInfo{
+			Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonRuntimeFailure,
+		}
+	}
 
 	builder.commandExecutor = processSandbox.Executor
 	builder.sandboxEnvironment = cloneSandboxRuntimeStrings(processSandbox.Environment)
 	builder.sandboxInfo = processSandbox.Info
 	builder.sandboxSecrets = mergeSandboxRuntimeRedactions(builder.sandboxSecrets, processSandbox.RedactionValues)
+	builder.sandboxSecretsComplete = builder.sandboxSecretsComplete && processSandbox.RedactionsComplete
+	printSandboxRuntimeWarning(stderr, builder.effectiveSandboxInfo())
 	if processCtx.Err() != nil {
 		return 130
 	}
@@ -429,7 +459,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		_ = initialSession.Close()
 		return fail(stderr, "%v", builder.redactError(err, &resolvedRuntime))
 	}
-	if err := updateSessionRuntime(processCtx, initialSession, resolvedRuntime); err != nil {
+	if err := builder.updateSessionRuntime(processCtx, initialSession, resolvedRuntime); err != nil {
 		_ = initialSession.Close()
 		if processCtx.Err() != nil {
 			return 130
@@ -452,20 +482,14 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		}
 		return runner
 	}
-	controllerOptions := []app.Option{app.WithRuntimeInfo(app.RuntimeInfo{
-		Provider:      resolvedRuntime.Provider,
-		Profile:       resolvedRuntime.Profile,
-		Model:         resolvedRuntime.Model,
-		ContextWindow: resolvedRuntime.Compaction.ContextWindow,
-		Sandbox:       processSandbox.Info,
-	})}
+	controllerOptions := []app.Option{
+		app.WithRuntimeInfo(builder.runtimeInfo(resolvedRuntime)),
+		app.WithNewSessionBuilder(builder.buildNewReplacement),
+	}
 	if !options.noSession {
-		controllerOptions = append(controllerOptions,
-			app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
-				return session.List(ctx, sessionRoot, workspacePath, "", limit)
-			}, builder.openReplacement),
-			app.WithNewSessionBuilder(builder.buildNewReplacement),
-		)
+		controllerOptions = append(controllerOptions, app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
+			return session.List(ctx, sessionRoot, workspacePath, "", limit)
+		}, builder.openReplacement))
 	}
 	controller, err = app.New(initialSession, func() (session.Session, error) {
 		return deps.newSession(options.noSession, sessionRoot, workspacePath, resolvedRuntime)
@@ -559,7 +583,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, error) {
 	options := cliOptions{cwd: "."}
 	flags := flag.NewFlagSet("otto", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags.SetOutput(io.Discard)
 	var showHelp bool
 	flags.BoolVar(&showHelp, "help", false, "show help")
 	flags.BoolVar(&showHelp, "h", false, "show help")
@@ -578,9 +602,9 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.BoolVar(&options.noSession, "no-session", false, "use an in-memory session")
 	flags.BoolVar(&options.continueLast, "continue", false, "continue the newest workspace session")
 	flags.StringVar(&options.resumePath, "resume", "", "resume a session file")
-	flags.Usage = func() { printUsage(stderr) }
+	flags.Usage = func() {}
 	if err := flags.Parse(args); err != nil {
-		return options, false, err
+		return options, false, errUnsafeFlagParse
 	}
 	if showHelp {
 		printUsage(stdout)

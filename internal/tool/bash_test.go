@@ -319,6 +319,50 @@ func TestBashSandboxedNormalizesBeforeFinalRedactionAndCapsCompleteUTF8(t *testi
 	})
 }
 
+func TestBashSandboxedCanonicalizesInvalidRedactionsSeparatelyFromEnvironment(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	invalidFF := string(append([]byte("decoded-prefix"), 0xff))
+	invalidOverlong := string(append([]byte("overlong-prefix"), 0xc0, 0xaf))
+	canonical := []string{"decoded-prefix�", "overlong-prefix��"}
+	environment := []string{"RAW_ENDPOINT=" + invalidFF}
+
+	for _, maxOutput := range []int{1, 1024} {
+		t.Run(fmt.Sprintf("cap-%d", maxOutput), func(t *testing.T) {
+			fake := &fakeBashExecutor{execute: func(_ context.Context, request sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+				if !reflect.DeepEqual(request.Env, environment) {
+					t.Errorf("Executor environment = %q, want unmodified clone %q", request.Env, environment)
+				}
+				stdout := append([]byte("decoded-prefix"), 0xff)
+				stderr := append([]byte("overlong-prefix"), 0xc0, 0xaf)
+				for _, value := range stdout {
+					if _, err := streams.Stdout.Write([]byte{value}); err != nil {
+						return sandbox.ExitStatus{}, err
+					}
+				}
+				for _, value := range stderr {
+					if _, err := streams.Stderr.Write([]byte{value}); err != nil {
+						return sandbox.ExitStatus{}, err
+					}
+				}
+				return sandbox.ExitStatus{Code: 0}, nil
+			}}
+			bash := mustSandboxedBashTool(t, workspace, fake, environment, maxOutput, []string{invalidFF, invalidOverlong})
+			result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+			if result.IsError || !utf8.ValidString(result.Content) {
+				t.Fatalf("Execute() = %#v, want valid UTF-8", result)
+			}
+			for _, secret := range canonical {
+				if strings.Contains(result.Content, secret) {
+					t.Fatalf("Execute() retained canonical configured value %q: %q", secret, result.Content)
+				}
+			}
+			if maxOutput == 1 && (sandboxedBashStdout(t, result.Content) != "*" || !strings.Contains(result.Content, "stderr:\n*")) {
+				t.Fatalf("one-byte cap did not retain atomic redactions on both streams: %q", result.Content)
+			}
+		})
+	}
+}
+
 func TestBashSandboxedCollisionSafeMarkerSurvivesEveryByteCap(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	var printableASCII strings.Builder
@@ -388,6 +432,37 @@ func TestBashSandboxedConstructsWithEveryUTF8ByteClassInSensitiveValues(t *testi
 	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
 	if result.IsError || !utf8.ValidString(result.Content) || strings.Contains(result.Content, secret) {
 		t.Fatalf("Execute() did not safely redact the adversarial value: %#v", result)
+	}
+}
+
+func TestBashSandboxedExhaustiveMarkerFallbackIsBoundedFixedPointDeletion(t *testing.T) {
+	workspace := mustWorkspace(t, t.TempDir())
+	allRunes := allNonControlSandboxRunes(t)
+	longPreferred := strings.Repeat(string(preferredSandboxRedactionMarker), 1<<20)
+	values := []string{allRunes, longPreferred, string(preferredSandboxRedactionMarker), "X", "ab"}
+	fake := &fakeBashExecutor{
+		stdoutChunks: [][]byte{[]byte("a"), []byte("X"), []byte("b")},
+		stderrChunks: [][]byte{[]byte("aX"), []byte("b")},
+	}
+	bash := mustSandboxedBashTool(t, workspace, fake, []string{}, 2<<20, values)
+	if bash.redactionMarker != "" {
+		t.Fatalf("exhaustive marker fallback = %d bytes, want explicit deletion", len(bash.redactionMarker))
+	}
+
+	result := bash.Execute(context.Background(), mustJSON(t, map[string]string{"command": "ignored"}))
+	if result.IsError || !utf8.ValidString(result.Content) {
+		t.Fatalf("Execute() = %#v, want valid UTF-8", result)
+	}
+	if len(result.Content) > 1024 {
+		t.Fatalf("deletion fallback expanded bounded result to %d bytes", len(result.Content))
+	}
+	for _, credential := range []string{string(preferredSandboxRedactionMarker), "X", "ab", longPreferred} {
+		if strings.Contains(result.Content, credential) {
+			t.Fatalf("Execute() retained configured credential %q in %q", credential, result.Content)
+		}
+	}
+	if body := sandboxedBashStdout(t, result.Content); body != "" {
+		t.Fatalf("stdout = %q, want fixed-point deletion", body)
 	}
 }
 
@@ -810,6 +885,22 @@ func TestBashSandboxedDirectIntegration(t *testing.T) {
 			t.Fatalf("Execute() missing %q: %q", expected, result.Content)
 		}
 	}
+}
+
+func allNonControlSandboxRunes(t *testing.T) string {
+	t.Helper()
+	var value strings.Builder
+	for candidate := rune(1); candidate <= utf8.MaxRune; candidate++ {
+		if !utf8.ValidRune(candidate) || unicode.IsControl(candidate) {
+			continue
+		}
+		value.WriteRune(candidate)
+	}
+	result := value.String()
+	if !utf8.ValidString(result) || !strings.ContainsRune(result, preferredSandboxRedactionMarker) {
+		t.Fatal("exhaustive marker fixture is invalid or omitted the preferred rune")
+	}
+	return result
 }
 
 func markerByteClassAdversary(t *testing.T) string {

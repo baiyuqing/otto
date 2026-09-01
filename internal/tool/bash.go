@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 )
 
@@ -63,7 +64,7 @@ func NewBashTool(
 		return nil, errInvalidSandboxedBashConfiguration
 	}
 
-	redactValues := cloneSandboxedBashStrings(redactionValues)
+	redactValues := canonicalizeSandboxedBashRedactions(redactionValues)
 	redactionMarker, ok := collisionSafeSandboxRedactionMarker(redactValues)
 	if !ok {
 		return nil, errInvalidSandboxedBashConfiguration
@@ -190,11 +191,12 @@ func (t *bashTool) sandboxedResult(stdout, stderr *cappedByteCollector, status s
 	if status.Signaled && status.Signal != "" {
 		summary += "; signal: " + status.Signal
 	}
-	redactedSummary, err := redactExactText(summary, t.redactValues, t.redactionMarker)
+	formatted := formatBashResult(stdout, stderr, summary)
+	redacted, err := redactExactText(formatted, t.redactValues, t.redactionMarker)
 	if err != nil {
 		return sandboxedBashInfrastructureResult()
 	}
-	return Result{Content: formatBashResult(stdout, stderr, redactedSummary)}
+	return Result{Content: redacted}
 }
 
 func sandboxedBashInfrastructureResult() Result {
@@ -249,6 +251,17 @@ func cloneSandboxedBashStrings(values []string) []string {
 	return cloned
 }
 
+func canonicalizeSandboxedBashRedactions(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	canonical := make([]string, len(values))
+	for index, value := range values {
+		canonical[index] = strings.Clone(safetext.CanonicalizeUTF8(value))
+	}
+	return canonical
+}
+
 func collisionSafeSandboxRedactionMarker(values []string) (string, bool) {
 	usedRunes := make(map[rune]struct{})
 	for _, value := range values {
@@ -284,27 +297,7 @@ func collisionSafeSandboxRedactionMarker(values []string) (string, bool) {
 		}
 	}
 
-	longestPreferredRun := 0
-	for _, value := range values {
-		currentRun := 0
-		for _, candidate := range value {
-			if candidate == preferredSandboxRedactionMarker {
-				currentRun++
-				if currentRun > longestPreferredRun {
-					longestPreferredRun = currentRun
-				}
-				continue
-			}
-			currentRun = 0
-		}
-	}
-	marker := strings.Repeat(preferred, longestPreferredRun+1)
-	for _, value := range values {
-		if strings.Contains(value, marker) {
-			return "", false
-		}
-	}
-	return marker, true
+	return "", true
 }
 
 func formatBashResult(stdout, stderr *cappedByteCollector, status string) string {

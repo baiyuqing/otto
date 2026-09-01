@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseEnvironmentIsDeterministicAndLastDuplicateWins(t *testing.T) {
@@ -301,12 +302,131 @@ func TestResolveEnvironmentCollectsProxyUserinfoWithoutRewritingProxy(t *testing
 	assertRedactionsSorted(t, snapshot.RedactionValues())
 }
 
-func TestResolveEnvironmentRejectsMalformedProxyUserinfoSafely(t *testing.T) {
-	_, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{
-		"HTTPS_PROXY=http://user:invalid%zz@[::1]:8080",
-	}})
-	if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
-		t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
+func TestResolveEnvironmentConservativelyExtractsMalformedProxyAuthorities(t *testing.T) {
+	tests := []struct {
+		name  string
+		proxy string
+		want  []string
+	}{
+		{
+			name:  "ambiguous extra slash",
+			proxy: "http:///proxy-user:proxy-pass@example.test",
+			want:  []string{"proxy-user:proxy-pass", "proxy-user", "proxy-pass"},
+		},
+		{
+			name:  "backslash authority",
+			proxy: `http:\\proxy%20user:proxy%2Fpass@example.test\path`,
+			want:  []string{"proxy%20user:proxy%2Fpass", "proxy%20user", "proxy%2Fpass", "proxy user:proxy/pass", "proxy user", "proxy/pass"},
+		},
+		{
+			name:  "missing scheme",
+			proxy: "proxy%20user:proxy%2Fpass@example.test/path",
+			want:  []string{"proxy%20user:proxy%2Fpass", "proxy%20user", "proxy%2Fpass", "proxy user:proxy/pass", "proxy user", "proxy/pass"},
+		},
+		{
+			name:  "odd scheme",
+			proxy: "ht!tp://odd%20user:odd%2Fpass@example.test/path",
+			want:  []string{"odd%20user:odd%2Fpass", "odd%20user", "odd%2Fpass", "odd user:odd/pass", "odd user", "odd/pass"},
+		},
+		{
+			name:  "opaque odd scheme retains both interpretations",
+			proxy: "http:odd%20user:odd%2Fpass@example.test/path",
+			want:  []string{"http:odd%20user:odd%2Fpass", "odd%20user:odd%2Fpass", "odd%20user", "odd%2Fpass", "odd user", "odd/pass"},
+		},
+		{
+			name:  "host parse failure scans later authority-like at",
+			proxy: "http://[::1/path/proxy%20user:proxy%2Fpass@example.test",
+			want:  []string{"proxy%20user:proxy%2Fpass", "proxy%20user", "proxy%2Fpass", "proxy user", "proxy/pass"},
+		},
+		{
+			name:  "malformed username independently decodes password",
+			proxy: "http://bad%zz:pass%2Fword@[::1]:8080/path?next=@ignored#@ignored",
+			want:  []string{"bad%zz:pass%2Fword", "bad%zz", "pass%2Fword", "pass/word"},
+		},
+		{
+			name:  "malformed password independently decodes username",
+			proxy: "http://user%20name:bad%zz@[2001:db8::1]:8080/path",
+			want:  []string{"user%20name:bad%zz", "user%20name", "bad%zz", "user name"},
+		},
+		{
+			name:  "malformed normal authority survives later path at",
+			proxy: "http://bad%zz:pass%2Fword@[::1]:8080/path/user:other@example.test",
+			want:  []string{"bad%zz:pass%2Fword", "bad%zz", "pass%2Fword", "pass/word"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + test.proxy}})
+			if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
+				t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
+			}
+			if snapshot.Entries() != nil {
+				t.Fatalf("malformed proxy reached command environment: %#v", snapshot.Entries())
+			}
+			assertRedactionsContain(t, snapshot.RedactionValues(), test.want)
+			for _, value := range snapshot.RedactionValues() {
+				if !utf8.ValidString(value) {
+					t.Fatalf("redaction retained invalid UTF-8: %q", value)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveEnvironmentCanonicalizesPercentDecodedInvalidUTF8ProxyUserinfo(t *testing.T) {
+	proxy := "http://user%FF:pass%C0%AF@[::1]:8080/path"
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + proxy}})
+	if err != nil {
+		t.Fatalf("ResolveEnvironment() rejected syntactically valid encoded proxy: %v", err)
+	}
+	if got := snapshotEnvironment(t, snapshot)["HTTPS_PROXY"]; got != proxy {
+		t.Fatalf("proxy = %q, want unchanged raw form %q", got, proxy)
+	}
+	assertRedactionsContain(t, snapshot.RedactionValues(), []string{
+		"user%FF:pass%C0%AF", "user%FF", "pass%C0%AF", "user�:pass��", "user�", "pass��",
+	})
+	for _, value := range snapshot.RedactionValues() {
+		if !utf8.ValidString(value) {
+			t.Fatalf("redaction retained invalid UTF-8: %q", value)
+		}
+	}
+}
+
+func TestResolveEnvironmentDoesNotTreatValidProxyPathQueryOrFragmentAtAsUserinfo(t *testing.T) {
+	proxy := "http://[2001:db8::1]:8080/path/user:pass@example.test?next=user:pass@example.test#user:pass@example.test"
+	snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + proxy}})
+	if err != nil {
+		t.Fatalf("ResolveEnvironment() rejected valid balanced-IPv6 proxy: %v", err)
+	}
+	if got := snapshotEnvironment(t, snapshot)["HTTPS_PROXY"]; got != proxy {
+		t.Fatalf("proxy = %q, want unchanged %q", got, proxy)
+	}
+	if len(snapshot.RedactionValues()) != 0 {
+		t.Fatalf("path/query/fragment @ was misclassified as userinfo: %#v", snapshot.RedactionValues())
+	}
+}
+
+func TestResolveEnvironmentRejectsMalformedProxyWithoutInventingPathUserinfo(t *testing.T) {
+	for _, proxy := range []string{
+		"http://[2001:db8::1]:8080/path/user:pass@example.test?broken=%zz",
+		"http://example.test/path%zz",
+		"http:///example.test/path",
+		`http:\\example.test\path`,
+		"example.test:8080",
+	} {
+		t.Run(proxy, func(t *testing.T) {
+			snapshot, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=" + proxy}})
+			if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
+				t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
+			}
+			if snapshot.Entries() != nil || !snapshot.RedactionsComplete() {
+				t.Fatalf("rejected snapshot = entries %#v complete %t", snapshot.Entries(), snapshot.RedactionsComplete())
+			}
+			if len(snapshot.RedactionValues()) != 0 {
+				t.Fatalf("malformed proxy invented path userinfo: %#v", snapshot.RedactionValues())
+			}
+		})
 	}
 }
 
@@ -451,6 +571,36 @@ func TestResolveEnvironmentEnforcesSensitiveValueCountBound(t *testing.T) {
 	_, err = ResolveEnvironment(EnvironmentOptions{HostEntries: sensitiveEnvironmentEntries(513)})
 	if !errors.Is(err, ErrEnvironmentUnsafe) || err.Error() != ErrEnvironmentUnsafe.Error() {
 		t.Fatalf("ResolveEnvironment() error = %v, want fixed ErrEnvironmentUnsafe", err)
+	}
+}
+
+func TestResolveEnvironmentMarksIncompleteRedactionSnapshots(t *testing.T) {
+	complete, err := ResolveEnvironment(EnvironmentOptions{HostEntries: sensitiveEnvironmentEntries(512)})
+	if err != nil || !complete.RedactionsComplete() {
+		t.Fatalf("exact-limit snapshot = complete %t error %v, want complete success", complete.RedactionsComplete(), err)
+	}
+
+	overflow, err := ResolveEnvironment(EnvironmentOptions{HostEntries: sensitiveEnvironmentEntries(513)})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || overflow.RedactionsComplete() {
+		t.Fatalf("513-value snapshot = complete %t error %v, want incomplete failure", overflow.RedactionsComplete(), err)
+	}
+	if slices.Contains(overflow.RedactionValues(), "unique-sensitive-value-512") {
+		t.Fatal("overflow snapshot unexpectedly retained the omitted 513th value")
+	}
+
+	overBudget, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"LARGE_TOKEN=" + strings.Repeat("z", (1<<20)+1)}})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || overBudget.RedactionsComplete() {
+		t.Fatalf("over-budget snapshot = complete %t error %v, want incomplete failure", overBudget.RedactionsComplete(), err)
+	}
+
+	malformedEntry, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"BROKEN"}})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || malformedEntry.RedactionsComplete() {
+		t.Fatalf("malformed-entry snapshot = complete %t error %v, want incomplete failure", malformedEntry.RedactionsComplete(), err)
+	}
+
+	malformedProxy, err := ResolveEnvironment(EnvironmentOptions{HostEntries: []string{"HTTPS_PROXY=http:///user:pass@example.test"}})
+	if !errors.Is(err, ErrEnvironmentUnsafe) || !malformedProxy.RedactionsComplete() {
+		t.Fatalf("fully extracted malformed proxy = complete %t error %v, want complete redactions with rejected environment", malformedProxy.RedactionsComplete(), err)
 	}
 }
 

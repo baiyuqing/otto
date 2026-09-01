@@ -48,6 +48,7 @@ func (p *preparedStore) Close() error {
 }
 
 type runtimeBuilder struct {
+	configPath              string
 	config                  config.File
 	environment             map[string]string
 	workspace               *tool.Workspace
@@ -60,6 +61,7 @@ type runtimeBuilder struct {
 	prepareSession          func(context.Context, string, string) (preparedSession, error)
 	prepareListedSession    func(context.Context, string, string, string) (preparedSession, error)
 	buildRunnerOverride     func(session.Session, config.Runtime) (app.Runner, error)
+	setDefaultProfile       func(context.Context, string) error
 	runtimeOverrides        config.Overrides
 	memoryService           memory.Service
 	memoryUsable            bool
@@ -73,8 +75,9 @@ type runtimeBuilder struct {
 	extraTools []tool.Tool
 }
 
-func newRuntimeBuilder(configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
+func newRuntimeBuilder(configPath string, configFile config.File, environment map[string]string, workspace *tool.Workspace, workspacePath, sessionRoot, shell string, options cliOptions, stderr io.Writer, deps runDependencies) runtimeBuilder {
 	builder := runtimeBuilder{
+		configPath:           configPath,
 		config:               configFile,
 		environment:          environment,
 		workspace:            workspace,
@@ -229,6 +232,16 @@ func (b runtimeBuilder) buildProfileReplacement(ctx context.Context, profile str
 		return app.SessionReplacement{}, b.redactError(err, nil)
 	}
 	return b.freshReplacement(ctx, runtime)
+}
+
+func (b runtimeBuilder) persistDefaultProfile(ctx context.Context, profile string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b.setDefaultProfile != nil {
+		return b.setDefaultProfile(ctx, profile)
+	}
+	return config.SetDefaultProfile(b.configPath, profile)
 }
 
 // profileNames returns the configured profile names in sorted order for
@@ -416,7 +429,7 @@ func (b runtimeBuilder) resumeEnvironment() map[string]string {
 	environment := make(map[string]string, len(b.environment))
 	for key, value := range b.environment {
 		switch key {
-		case "OTTO_PROVIDER", "OTTO_MODEL", "OTTO_UI":
+		case "OTTO_PROVIDER", "OTTO_PROFILE", "OTTO_MODEL", "OTTO_UI":
 			continue
 		default:
 			environment[key] = value

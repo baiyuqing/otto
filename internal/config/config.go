@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,6 +86,59 @@ type Runtime struct {
 	ShellTimeout   time.Duration
 	MaxOutputBytes int
 	Compaction     CompactionRuntime
+}
+
+func Save(path string, file File) error {
+	data, err := toml.Marshal(file)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func SetDefaultProfile(path, profile string) error {
+	if profile == "" {
+		return fmt.Errorf("missing profile")
+	}
+	file, err := Load(path)
+	if err != nil {
+		return err
+	}
+	if _, ok := file.Profiles[profile]; !ok {
+		return fmt.Errorf("profile %q not found", profile)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && path == DefaultPath() {
+			file.DefaultProfile = profile
+			return Save(path, file)
+		}
+		return err
+	}
+	updated := replaceDefaultProfile(string(content), profile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(updated), 0o600)
+}
+
+var defaultProfileLineRE = regexp.MustCompile(`(?m)^\s*default_profile\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(#.*)?$`)
+
+func replaceDefaultProfile(content, profile string) string {
+	line := "default_profile = " + strconv.Quote(profile)
+	if defaultProfileLineRE.MatchString(content) {
+		return defaultProfileLineRE.ReplaceAllString(content, line)
+	}
+	if strings.TrimSpace(content) == "" {
+		return line + "\n"
+	}
+	if strings.HasSuffix(content, "\n") {
+		return line + "\n" + content
+	}
+	return line + "\n" + content + "\n"
 }
 
 func DefaultPath() string {

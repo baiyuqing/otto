@@ -24,10 +24,13 @@ func Resolve(file File, env map[string]string, session SessionDefaults, override
 	explicitProfile := overrides.Profile != ""
 	selectedProfile := overrides.Profile
 	if selectedProfile == "" {
+		selectedProfile = envValue(env, "OTTO_PROFILE")
+	}
+	if selectedProfile == "" {
 		selectedProfile = file.DefaultProfile
-		if selectedProfile != "" {
-			runtime.Profile = selectedProfile
-		}
+	}
+	if selectedProfile != "" {
+		runtime.Profile = selectedProfile
 	}
 
 	var (

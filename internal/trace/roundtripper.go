@@ -14,14 +14,21 @@ import (
 	"time"
 )
 
-// redactedHeaders carry credentials and are replaced before the request is
-// recorded. The value is never written to the trace (AGENTS.md secrets rule).
+// redactedHeaders carry credentials or account identity and are replaced
+// before the request is recorded. The value is never written to the trace
+// (AGENTS.md secrets rule). chatgpt-account-id is not a credential, but trace
+// files are written into the working tree, so it is redacted with the rest.
 var redactedHeaders = map[string]bool{
 	"Authorization":       true,
 	"Proxy-Authorization": true,
 	"Api-Key":             true,
 	"X-Api-Key":           true,
+	"Chatgpt-Account-Id":  true,
 }
+
+// redactedValue replaces every redacted header value. It deliberately keeps no
+// shape information about what it replaced.
+const redactedValue = "[redacted]"
 
 type record struct {
 	TS          string      `json:"ts"`
@@ -116,7 +123,7 @@ func redactHeaders(h http.Header) http.Header {
 	}
 	for name := range clone {
 		if redactedHeaders[http.CanonicalHeaderKey(name)] {
-			clone.Set(name, "Bearer [redacted]")
+			clone.Set(name, redactedValue)
 		}
 	}
 	return clone

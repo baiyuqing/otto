@@ -30,8 +30,8 @@
   .tabs button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
   pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; overflow:auto; max-height:460px; margin:0; white-space:pre-wrap; word-break:break-word; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
   .bar { height:8px; background:var(--accent); border-radius:4px; }
-  .ctxrow { display:grid; grid-template-columns:90px 1fr 70px; gap:10px; align-items:center; margin:3px 0; }
-  .ctxrow .role { font-size:12px; color:var(--muted); }
+  .ctxrow { display:grid; grid-template-columns:minmax(90px,260px) 1fr 70px; gap:10px; align-items:center; margin:3px 0; }
+  .ctxrow .role { font-size:12px; color:var(--muted); word-break:break-all; }
   .drop { border:2px dashed var(--line); border-radius:10px; padding:40px; text-align:center; color:var(--muted); margin:24px 0; }
   input[type=file]{ font:inherit; }
   a { color:var(--accent); }
@@ -80,7 +80,7 @@ function parseSSE(raw){
     if (obj.type === "response.output_text.delta" && typeof obj.delta === "string") text += obj.delta;
     if (obj.response && obj.response.usage) usage = obj.response.usage;
     const item = obj.type === "response.output_item.done" ? obj.item : null;
-    if (item && item.type === "function_call") text += `\n[tool call] ${item.name}(${item.arguments||""})\n`;
+    if (item && item.type === "function_call") text += `\n[tool call] ${item.name}(${item.arguments||""}) call_id=${item.call_id||item.id||"?"}\n`;
   }
   return { text, usage };
 }
@@ -90,8 +90,15 @@ function parseSSE(raw){
 // function calls) carry a type instead of a role.
 function requestMessages(req){
   if (Array.isArray(req.messages)) return req.messages;
-  if (Array.isArray(req.input)) return req.input.map(it => ({ role: it.role || it.type || "item", content: it.content ?? it }));
+  if (Array.isArray(req.input)) return req.input.map(it => ({ ...it, role: it.role || it.type || "item", content: it.content ?? it }));
   return [];
+}
+
+// msgLabel names a context row. Tool traffic keeps its call_id so a call can be
+// matched to the output that answers it, in either wire shape.
+function msgLabel(m){
+  const id = m.call_id ?? m.tool_call_id ?? (Array.isArray(m.tool_calls) ? m.tool_calls.map(c => c.id).join(",") : null);
+  return m.role + (m.name ? ` ${m.name}` : "") + (id ? ` ${id}` : "");
 }
 
 // requestSystem returns the system prompt under either name.
@@ -152,14 +159,14 @@ function buildDetail(rec, req, msgs, text, usage){
 
   // Context breakdown: per-message byte size (the real context sent this turn).
   const ctx = document.createElement("div");
-  const sizes = msgs.map(m=>({ role:m.role, n:new Blob([typeof m.content==="string"?m.content:JSON.stringify(m.content)]).size }));
+  const sizes = msgs.map(m=>({ label:msgLabel(m), n:new Blob([typeof m.content==="string"?m.content:JSON.stringify(m.content)]).size }));
   const sysVal = requestSystem(req);
   const sys = (sysVal!=null) ? new Blob([typeof sysVal==="string"?sysVal:JSON.stringify(sysVal)]).size : 0;
   const tools = req.tools ? new Blob([JSON.stringify(req.tools)]).size : 0;
   const max = Math.max(1, sys, tools, ...sizes.map(s=>s.n));
   const line=(label,n)=>`<div class="ctxrow"><span class="role">${label}</span><div class="bar" style="width:${Math.max(2,100*n/max)}%"></div><span class="muted">${bytes(n)}</span></div>`;
   ctx.innerHTML = (sys?line("system",sys):"") + (tools?line(`tools (${req.tools.length})`,tools):"") +
-    sizes.map((s,i)=>line(`${i}. ${s.role}`, s.n)).join("");
+    sizes.map((s,i)=>line(`${i}. ${s.label}`, s.n)).join("");
 
   const reqPane = document.createElement("div");
   reqPane.innerHTML = `<pre>${esc(JSON.stringify(req, null, 2))}</pre>`;

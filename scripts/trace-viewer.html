@@ -54,8 +54,12 @@
 <script>
 const $ = s => document.querySelector(s);
 
+// --- pure parsing start ---
+// Otto traces two wire shapes: chat-completions (internal/provider/openaicompat)
+// and the Responses API (internal/provider/openairesponses). Both are decoded
+// here. Tested by scripts/trace-viewer.test.mjs.
 function parseSSE(raw){
-  // Returns {text, usage} reconstructed from a raw OpenAI-style SSE stream.
+  // Returns {text, usage} reconstructed from a raw SSE stream.
   let text = "", usage = null;
   for (const line of (raw||"").split("\n")){
     const t = line.trim();
@@ -69,10 +73,32 @@ function parseSSE(raw){
       const d = ch.delta || {};
       if (d.content) text += d.content;
       if (ch.message && ch.message.content) text += ch.message.content; // non-stream fallback
+      continue;
     }
+    // Responses API: text arrives as output_text deltas, usage rides on the
+    // terminal response.completed event, tool calls as function_call items.
+    if (obj.type === "response.output_text.delta" && typeof obj.delta === "string") text += obj.delta;
+    if (obj.response && obj.response.usage) usage = obj.response.usage;
+    const item = obj.type === "response.output_item.done" ? obj.item : null;
+    if (item && item.type === "function_call") text += `\n[tool call] ${item.name}(${item.arguments||""})\n`;
   }
   return { text, usage };
 }
+
+// requestMessages normalizes a request body into {role, content} rows. The
+// Responses API sends `input` items whose non-message entries (tool output,
+// function calls) carry a type instead of a role.
+function requestMessages(req){
+  if (Array.isArray(req.messages)) return req.messages;
+  if (Array.isArray(req.input)) return req.input.map(it => ({ role: it.role || it.type || "item", content: it.content ?? it }));
+  return [];
+}
+
+// requestSystem returns the system prompt under either name.
+function requestSystem(req){
+  return req.system ?? req.instructions ?? null;
+}
+// --- pure parsing end ---
 
 function safeParse(s){ try { return JSON.parse(s); } catch { return null; } }
 function bytes(n){ return n>=1024 ? (n/1024).toFixed(1)+" KB" : n+" B"; }
@@ -85,7 +111,7 @@ function render(records){
   for (const rec of records){
     const req = safeParse(rec.req_body) || {};
     const { text, usage } = parseSSE(rec.resp_body);
-    const msgs = Array.isArray(req.messages) ? req.messages : [];
+    const msgs = requestMessages(req);
     const pt = usage ? (usage.prompt_tokens ?? usage.input_tokens ?? "") : "";
     const ct = usage ? (usage.completion_tokens ?? usage.output_tokens ?? "") : "";
     if (usage) totTok += (usage.total_tokens ?? ((usage.prompt_tokens||0)+(usage.completion_tokens||0)));
@@ -127,7 +153,8 @@ function buildDetail(rec, req, msgs, text, usage){
   // Context breakdown: per-message byte size (the real context sent this turn).
   const ctx = document.createElement("div");
   const sizes = msgs.map(m=>({ role:m.role, n:new Blob([typeof m.content==="string"?m.content:JSON.stringify(m.content)]).size }));
-  const sys = (req.system!=null) ? new Blob([typeof req.system==="string"?req.system:JSON.stringify(req.system)]).size : 0;
+  const sysVal = requestSystem(req);
+  const sys = (sysVal!=null) ? new Blob([typeof sysVal==="string"?sysVal:JSON.stringify(sysVal)]).size : 0;
   const tools = req.tools ? new Blob([JSON.stringify(req.tools)]).size : 0;
   const max = Math.max(1, sys, tools, ...sizes.map(s=>s.n));
   const line=(label,n)=>`<div class="ctxrow"><span class="role">${label}</span><div class="bar" style="width:${Math.max(2,100*n/max)}%"></div><span class="muted">${bytes(n)}</span></div>`;
@@ -137,7 +164,10 @@ function buildDetail(rec, req, msgs, text, usage){
   const reqPane = document.createElement("div");
   reqPane.innerHTML = `<pre>${esc(JSON.stringify(req, null, 2))}</pre>`;
   const respPane = document.createElement("div");
-  respPane.innerHTML = (usage?`<p class="muted">usage: ${esc(JSON.stringify(usage))}</p>`:"")+
+  // Only the token counts; the Responses API also nests a large per-item
+  // attribution blob under usage that is not worth rendering here.
+  const tok = usage ? { input: usage.prompt_tokens ?? usage.input_tokens, output: usage.completion_tokens ?? usage.output_tokens, total: usage.total_tokens } : null;
+  respPane.innerHTML = (tok?`<p class="muted">usage: ${esc(JSON.stringify(tok))}</p>`:"")+
     `<pre>${esc(text || "(no assistant text — tool call or empty)")}</pre>`;
   const rawPane = document.createElement("div");
   rawPane.innerHTML = `<p class="muted">${esc(rec.method||"")} ${esc(rec.url||"")}${rec.error?` — error: ${esc(rec.error)}`:""}</p>`+

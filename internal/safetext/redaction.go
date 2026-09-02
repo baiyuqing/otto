@@ -13,7 +13,7 @@ const (
 	MaxSecretBytes       = 1 << 20
 	MaxDynamicValues     = 64
 	MaxDynamicBytes      = 16 << 10
-	MaxDynamicValueBytes = 256
+	MaxDynamicValueBytes = 8 << 10
 )
 
 const preferredDynamicMarker = '\uE000'

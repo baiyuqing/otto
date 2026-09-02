@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	// maxWorkspaceContextFileBytes caps how much of AGENTS.md/CLAUDE.md is
-	// embedded in the system prompt.
+	// maxWorkspaceContextFileBytes caps how much of the workspace instruction
+	// file is embedded in the system prompt.
 	maxWorkspaceContextFileBytes = 8 << 10
 	// maxWorkspaceListingEntries caps the one-level workspace listing.
 	maxWorkspaceListingEntries = 200
@@ -27,9 +27,10 @@ const (
 
 // workspaceContextFor builds the dynamic "## Environment" section appended
 // to the static system prompt: cwd, platform/date, git branch and dirty
-// count, a one-level workspace listing, and AGENTS.md/CLAUDE.md content when
-// present. It embeds file content from the user's workspace, so callers must
-// redact the result before sending it to a provider.
+// count, a one-level workspace listing, and the workspace instruction file
+// (AGENTS.md, else CLAUDE.md) when present. It embeds file content from the
+// user's workspace, so callers must redact the result before sending it to a
+// provider.
 func workspaceContextFor(workspacePath string, now time.Time) string {
 	var b strings.Builder
 	b.WriteString("\n\n## Environment\n")
@@ -40,9 +41,16 @@ func workspaceContextFor(workspacePath string, now time.Time) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(workspaceListing(workspacePath))
+	// Only one instruction file is embedded. Both are re-sent on every request
+	// of a session, so a second file costs its full size per request; measured
+	// against this repo that was ~1100 tokens per request for a file the model
+	// never asked to read. AGENTS.md wins when both exist: it is the canonical
+	// rulebook, and CLAUDE.md is Claude Code's own config, which typically
+	// references AGENTS.md rather than adding to it.
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 		if content, ok := readWorkspaceDocFile(workspacePath, name); ok {
 			fmt.Fprintf(&b, "\n## %s\n%s\n", name, content)
+			break
 		}
 	}
 	return b.String()

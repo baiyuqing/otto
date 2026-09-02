@@ -124,7 +124,7 @@ func TestSystemPromptLegacyOffExactText(t *testing.T) {
 	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "grep"}, {Name: "find"}, {Name: "ls"}, {Name: "write"}, {Name: "edit"}, {Name: "bash"}}
 	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
 	const want = "You are Otto, a concise coding agent.\n\n" +
-		"Repository instructions (AGENTS.md / CLAUDE.md) are included below; follow them.\n" +
+		"Repository instructions are included below; follow them.\n" +
 		"Read README.md before answering questions about what the project is, how it is built, or how it is used; do not guess from file names.\n" +
 		"Before each batch of tool calls, state in one sentence what you are about to do and why.\n" +
 		"Inspect the workspace before changing it. Prefer exact, minimal changes.\n" +

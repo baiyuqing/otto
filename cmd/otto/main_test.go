@@ -1418,7 +1418,7 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	const expectedStaticSystemPrompt = "You are Otto, a concise coding agent.\n\n" +
-		"Repository instructions (AGENTS.md / CLAUDE.md) are included below; follow them.\n" +
+		"Repository instructions are included below; follow them.\n" +
 		"Read README.md before answering questions about what the project is, how it is built, or how it is used; do not guess from file names.\n" +
 		"Before each batch of tool calls, state in one sentence what you are about to do and why.\n" +
 		"Inspect the workspace before changing it. Prefer exact, minimal changes.\n" +

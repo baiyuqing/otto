@@ -28,7 +28,7 @@ func TestWorkspaceContextForIncludesEnvironmentHeaderAndCwd(t *testing.T) {
 	}
 }
 
-func TestWorkspaceContextForIncludesBothDocFilesWhenPresent(t *testing.T) {
+func TestWorkspaceContextForPrefersAgentsOverClaudeWhenBothPresent(t *testing.T) {
 	dir := t.TempDir()
 	writeWorkspaceFile(t, dir, "AGENTS.md", "agents rules")
 	writeWorkspaceFile(t, dir, "CLAUDE.md", "claude rules")
@@ -36,6 +36,15 @@ func TestWorkspaceContextForIncludesBothDocFilesWhenPresent(t *testing.T) {
 	if !strings.Contains(got, "\n## AGENTS.md\nagents rules\n") {
 		t.Fatalf("workspaceContextFor() = %q, want AGENTS.md section", got)
 	}
+	if strings.Contains(got, "## CLAUDE.md") {
+		t.Fatalf("workspaceContextFor() = %q, want no CLAUDE.md section when AGENTS.md exists", got)
+	}
+}
+
+func TestWorkspaceContextForFallsBackToClaudeWhenAgentsMissing(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkspaceFile(t, dir, "CLAUDE.md", "claude rules")
+	got := workspaceContextFor(dir, time.Now())
 	if !strings.Contains(got, "\n## CLAUDE.md\nclaude rules\n") {
 		t.Fatalf("workspaceContextFor() = %q, want CLAUDE.md section", got)
 	}

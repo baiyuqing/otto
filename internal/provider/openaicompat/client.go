@@ -48,7 +48,7 @@ func New(baseURL, apiKey string, httpClient *http.Client) *Client {
 		sleep:      sleepContext,
 	}
 	if client.httpClient == nil {
-		client.httpClient = defaultHTTPClient()
+		client.httpClient = DefaultHTTPClient()
 	}
 	client.baseURL, client.err = NormalizeBaseURL(baseURL)
 	return client
@@ -205,14 +205,17 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// defaultHTTPClient returns the hardened client used when callers do not
+// DefaultHTTPClient returns the hardened client used when callers do not
 // supply their own. The zero http.Client (http.DefaultClient) has no dial,
 // handshake, response-header, or redirect limits, so a stalled or malicious
 // endpoint could hold a request open indefinitely. Streaming chat completion
 // bodies can legitimately stay open for minutes, so there is intentionally no
 // overall Client.Timeout; cancellation still works through the request context
 // and the transport-level timeouts bound every pre-body phase.
-func defaultHTTPClient() *http.Client {
+//
+// It is exported so callers can wrap its Transport (e.g. request tracing)
+// without losing the tuned timeouts or the redirect policy.
+func DefaultHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy:                  http.ProxyFromEnvironment,

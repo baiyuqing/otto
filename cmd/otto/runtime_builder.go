@@ -256,8 +256,10 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 			return nil, b.redactError(err, &runtime)
 		}
 	}
+	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()) +
+		redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now()))
 	return agent.New(client, registry, current, agent.Options{
-		Model: runtime.Model, SystemPrompt: systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()), Thinking: runtime.Thinking,
+		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
 		Compaction: agent.CompactionSettings{
 			Auto:             runtime.Compaction.Auto,
 			HardInputWindow:  runtime.Compaction.HardInputWindow,

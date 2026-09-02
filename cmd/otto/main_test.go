@@ -1417,8 +1417,15 @@ func TestRunRejectsInvalidThinkingLevel(t *testing.T) {
 }
 
 func TestRunEndToEndToolCallSmoke(t *testing.T) {
-	const expectedSystemPrompt = "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Usable tools: read, grep, find, ls, write, edit, bash, memory_search, remember, forget. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
+	const expectedStaticSystemPrompt = "You are Otto, a concise coding agent.\n\n" +
+		"Repository instructions (AGENTS.md / CLAUDE.md) are included below; follow them.\n" +
+		"Read README.md before answering questions about what the project is, how it is built, or how it is used; do not guess from file names.\n" +
+		"Before each batch of tool calls, state in one sentence what you are about to do and why.\n" +
+		"Inspect the workspace before changing it. Prefer exact, minimal changes.\n" +
+		"Report what changed and what verification ran.\n" +
+		"Usable tools: read, grep, find, ls, write, edit, bash, memory_search, remember, forget. File tools are restricted to the workspace. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
 	var requestCount int
+	var workspace string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		var payload struct {
@@ -1436,8 +1443,22 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if len(payload.Messages) == 0 || payload.Messages[0].Role != "system" || payload.Messages[0].Content != expectedSystemPrompt {
+		if len(payload.Messages) == 0 || payload.Messages[0].Role != "system" {
 			t.Errorf("system message = %#v", payload.Messages)
+		} else {
+			content := payload.Messages[0].Content
+			if !strings.HasPrefix(content, expectedStaticSystemPrompt) {
+				t.Errorf("system message missing static prefix, content = %q", content)
+			}
+			if !strings.Contains(content, "\n\n## Environment\ncwd: "+workspace+"\n") {
+				t.Errorf("system message missing cwd line for %q, content = %q", workspace, content)
+			}
+			if !strings.Contains(content, "platform: ") || !strings.Contains(content, "date: ") {
+				t.Errorf("system message missing platform/date line, content = %q", content)
+			}
+			if strings.Contains(content, "## AGENTS.md") || strings.Contains(content, "## CLAUDE.md") || strings.Contains(content, "git:") {
+				t.Errorf("system message has unexpected dynamic section for an empty, non-repo workspace, content = %q", content)
+			}
 		}
 		if payload.ReasoningEffort != "xhigh" {
 			t.Errorf("reasoning_effort = %q, want xhigh", payload.ReasoningEffort)
@@ -1458,10 +1479,15 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 	defer server.Close()
 
 	home := t.TempDir()
-	workspace := t.TempDir()
+	rawWorkspace := t.TempDir()
+	canonicalWorkspace, err := filepath.EvalSymlinks(rawWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace = canonicalWorkspace
 	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
 	var stdout, stderr bytes.Buffer
-	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--thinking", "xhigh"}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", rawWorkspace, "--thinking", "xhigh"}, strings.NewReader("create it\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
 		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "smoke-secret",
 	}))
 	if code != 0 {

@@ -70,8 +70,8 @@ func TestSystemPromptForSandboxPoliciesAndRegisteredToolOrder(t *testing.T) {
 					t.Fatalf("system prompt = %q, want no %q", prompt, forbidden)
 				}
 			}
-			if strings.ContainsAny(prompt, "\n\r\t\x00\x1b\a") {
-				t.Fatalf("system prompt is not a safe single line: %q", prompt)
+			if strings.ContainsAny(prompt, "\r\t\x00\x1b\a") {
+				t.Fatalf("system prompt contains unsafe control characters: %q", prompt)
 			}
 		})
 	}
@@ -96,7 +96,7 @@ func TestSystemPromptUsesOnlyActualSafeDefinitions(t *testing.T) {
 			t.Fatalf("system prompt invented unregistered tool %q: %q", staticName, prompt)
 		}
 	}
-	if strings.Contains(prompt, payload) || strings.ContainsAny(prompt, "\n\r\t\x00\x1b\a") {
+	if strings.Contains(prompt, payload) || strings.ContainsAny(prompt, "\r\t\x00\x1b\a") {
 		t.Fatalf("system prompt leaked control-bearing tool name: %q", prompt)
 	}
 }
@@ -114,7 +114,7 @@ func TestSystemPromptUnavailableAndInvalidStatesNeverExposeReasonOrBashTool(t *t
 		if !strings.Contains(prompt, "Usable tools: read, write.") || !strings.HasSuffix(prompt, "Sandbox policy: Bash is unavailable.") {
 			t.Fatalf("state %d system prompt = %q, want fail-closed tool list and policy", index, prompt)
 		}
-		if strings.Contains(prompt, payload) || strings.Contains(prompt, "runtime-failure") || strings.Contains(prompt, "self-test") || strings.ContainsAny(prompt, "\n\r\t\x00\x1b\a") {
+		if strings.Contains(prompt, payload) || strings.Contains(prompt, "runtime-failure") || strings.Contains(prompt, "self-test") || strings.ContainsAny(prompt, "\r\t\x00\x1b\a") {
 			t.Fatalf("state %d leaked diagnostics or controls: %q", index, prompt)
 		}
 	}
@@ -123,7 +123,13 @@ func TestSystemPromptUnavailableAndInvalidStatesNeverExposeReasonOrBashTool(t *t
 func TestSystemPromptLegacyOffExactText(t *testing.T) {
 	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "grep"}, {Name: "find"}, {Name: "ls"}, {Name: "write"}, {Name: "edit"}, {Name: "bash"}}
 	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
-	const want = "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. Sandbox policy: Bash is unsandboxed and has the current macOS user's access."
+	const want = "You are Otto, a concise coding agent.\n\n" +
+		"Repository instructions (AGENTS.md / CLAUDE.md) are included below; follow them.\n" +
+		"Read README.md before answering questions about what the project is, how it is built, or how it is used; do not guess from file names.\n" +
+		"Before each batch of tool calls, state in one sentence what you are about to do and why.\n" +
+		"Inspect the workspace before changing it. Prefer exact, minimal changes.\n" +
+		"Report what changed and what verification ran.\n" +
+		"Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Sandbox policy: Bash is unsandboxed and has the current macOS user's access."
 	if got := systemPromptFor(definitions, info); got != want {
 		t.Fatalf("systemPromptFor() = %q, want %q", got, want)
 	}

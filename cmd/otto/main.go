@@ -1002,6 +1002,7 @@ func configEnvironment(file config.File, lookup environmentLookup) map[string]st
 		"OTTO_MODEL":    {},
 		"OTTO_API_KEY":  {},
 		"OTTO_UI":       {},
+		"OTTO_TRACE":    {},
 	}
 	for _, profile := range file.Profiles {
 		if profile.APIKeyEnv != "" {

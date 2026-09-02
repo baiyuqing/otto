@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
@@ -24,6 +28,7 @@ import (
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/tool"
+	"github.com/baiyuqing/otto/internal/trace"
 	"github.com/baiyuqing/otto/internal/urlprivacy"
 )
 
@@ -93,6 +98,9 @@ type runtimeBuilder struct {
 	memoryWorkspaceScope    memory.Scope
 	memoryRecallLimit       int
 	memoryRecallTokenBudget int
+	// traceWriter is non-nil only when OTTO_TRACE is set; the provider's
+	// HTTP transport is wrapped to append raw request/response records to it.
+	traceWriter io.Writer
 	// extraTools is test-only: appended before registry construction so
 	// tests can force tool.NewRegistry to fail (e.g. a duplicate name) and
 	// exercise the memory-binding cleanup path deterministically.
@@ -121,6 +129,7 @@ func newRuntimeBuilder(configPath string, configFile config.File, environment ma
 			MaxOutputBytes: options.maxOutput,
 		},
 	}
+	builder.traceWriter = openTraceWriter(environment["OTTO_TRACE"], sessionRoot, stderr)
 	if builder.prepareSession == nil {
 		builder.prepareSession = prepareSession
 	}
@@ -300,7 +309,7 @@ func (b runtimeBuilder) runtimeInfo(runtime config.Runtime) app.RuntimeInfo {
 
 func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtime) (provider.Provider, error) {
 	if runtime.Provider != config.ProviderChatGPT {
-		return openaicompat.New(runtime.BaseURL, runtime.APIKey, nil), nil
+		return openaicompat.New(runtime.BaseURL, runtime.APIKey, b.tracingHTTPClient()), nil
 	}
 	if !b.authCredentialsLoaded {
 		return nil, auth.ErrNoCredentials
@@ -311,6 +320,49 @@ func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtim
 	}
 	creds := b.authCredentials
 	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, nil), nil
+}
+
+// tracingHTTPClient returns the hardened provider client wrapped to record raw
+// HTTP wire, or nil when tracing is off (openaicompat builds its own hardened
+// default for nil). Wrapping DefaultHTTPClient's transport preserves the tuned
+// timeouts and redirect policy.
+func (b runtimeBuilder) tracingHTTPClient() *http.Client {
+	if b.traceWriter == nil {
+		return nil
+	}
+	client := openaicompat.DefaultHTTPClient()
+	client.Transport = trace.NewRoundTripper(client.Transport, b.traceWriter)
+	return client
+}
+
+// openTraceWriter resolves OTTO_TRACE into an append writer for raw provider
+// HTTP records, or nil when tracing is off. Empty disables it; "1"/"true"/"on"
+// writes to ~/.otto/traces/<timestamp>-<pid>.jsonl; any other value is a file
+// path. Failures degrade to no tracing with a stderr warning — this is a
+// development aid, not a required feature.
+func openTraceWriter(value, sessionRoot string, stderr io.Writer) io.Writer {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	path := value
+	switch strings.ToLower(value) {
+	case "1", "true", "on", "yes":
+		dir := filepath.Join(filepath.Dir(sessionRoot), "traces")
+		name := fmt.Sprintf("%s-%d.jsonl", time.Now().UTC().Format("20060102T150405"), os.Getpid())
+		path = filepath.Join(dir, name)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		fmt.Fprintf(stderr, "otto: OTTO_TRACE disabled: %v\n", err)
+		return nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		fmt.Fprintf(stderr, "otto: OTTO_TRACE disabled: %v\n", err)
+		return nil
+	}
+	fmt.Fprintf(stderr, "otto: tracing provider HTTP to %s\n", path)
+	return file
 }
 
 func (b runtimeBuilder) buildNewReplacement(ctx context.Context, current app.RuntimeInfo) (app.SessionReplacement, error) {

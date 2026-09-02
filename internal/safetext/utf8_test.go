@@ -65,8 +65,20 @@ func TestDynamicRedactionMarkerAvoidsNestedJSONEscapeSynthesis(t *testing.T) {
 	}
 }
 
+func TestDynamicRedactionMarkerAcceptsTypicalOAuthCredentialSet(t *testing.T) {
+	values := []string{
+		strings.Repeat("a", 1708),
+		strings.Repeat("r", 196),
+		strings.Repeat("i", 1774),
+		strings.Repeat("c", 36),
+	}
+	if marker, ok := DynamicRedactionMarker(values); !ok || marker == "" {
+		t.Fatalf("typical OAuth marker = %q ok=%t, want representable", marker, ok)
+	}
+}
+
 func TestDynamicRedactionMarkerRejectsOversizedCapabilitySets(t *testing.T) {
-	if marker, ok := DynamicRedactionMarker([]string{strings.Repeat("a", 257)}); ok || marker != "" {
+	if marker, ok := DynamicRedactionMarker([]string{strings.Repeat("a", MaxDynamicValueBytes+1)}); ok || marker != "" {
 		t.Fatalf("oversized form marker = %q ok=%t, want suppression", marker, ok)
 	}
 	forms := make([]string, 65)

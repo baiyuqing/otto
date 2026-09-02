@@ -117,10 +117,8 @@ func TestCompleteParsesTextAndToolCall(t *testing.T) {
 }
 
 func TestCompleteSuccessfulStreamAndResponseRedactRotatedCredentials(t *testing.T) {
-	const (
-		accessToken = "rotated-token-123"
-		accountID   = "acct-rotated-456"
-	)
+	accessToken := "rotated-token-" + strings.Repeat("a", 1694)
+	const accountID = "acct-rotated-456"
 	marker := requestRedactionMarker(t, accessToken, accountID)
 	stream := strings.Join([]string{
 		`event: response.output_text.delta`,

@@ -52,6 +52,55 @@ func TestRunREPLAuthCommandsUseCapturedAuthPath(t *testing.T) {
 	}
 }
 
+func TestRunTypicalOAuthCredentialsKeepSandboxAndSessionPersistenceEnabled(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	credentials := auth.Credentials{
+		AccessToken:  strings.Repeat("a", 1708),
+		RefreshToken: strings.Repeat("r", 196),
+		IDToken:      strings.Repeat("i", 1774),
+		AccountID:    strings.Repeat("c", 36),
+	}
+	if err := credentials.Save(auth.PathForHome(home)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".otto", "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeCLIConfig(t, "chatgpt", "", "")
+	deps := deterministicRunDependencies(t)
+	deps.detectTerminal = func(io.Reader, io.Writer) bool { return true }
+	deps.runTUI = func(ctx context.Context, _ io.Reader, _ io.Writer, backend app.Backend) error {
+		info := backend.Info()
+		if !info.Sandbox.BashAvailable || info.Sandbox.Mode != app.SandboxSeatbelt {
+			return errors.New("default startup disabled the sandbox")
+		}
+		browser, ok := backend.(app.SessionBrowser)
+		if !ok {
+			return errors.New("backend omitted SessionBrowser")
+		}
+		if _, err := browser.ListSessions(ctx, 20); err != nil {
+			return err
+		}
+		if err := backend.NewSession(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(),
+		[]string{"--config", configPath, "--cwd", workspace, "--ui", "tui"},
+		strings.NewReader(""), &stdout, &stderr,
+		testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh"}), deps)
+	if code != 0 {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), app.ErrPersistenceDisabled.Error()) || strings.Contains(stderr.String(), app.ErrPersistenceDisabled.Error()) {
+		t.Fatalf("startup reported disabled session persistence: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunSuppressedREPLAuthCommandsStayUnavailable(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()

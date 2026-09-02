@@ -18,10 +18,15 @@ func withTUIAuthSeams(t *testing.T, login func(context.Context, func(string) err
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "chatgpt.json")
 	prevLogin := authLoginFn
+	prevOpenBrowser := tuiOpenBrowser
 	if login != nil {
 		authLoginFn = login
 	}
-	t.Cleanup(func() { authLoginFn = prevLogin })
+	tuiOpenBrowser = func(string) {}
+	t.Cleanup(func() {
+		authLoginFn = prevLogin
+		tuiOpenBrowser = prevOpenBrowser
+	})
 	return auth.ContextWithPath(context.Background(), path), path
 }
 
@@ -76,10 +81,15 @@ func TestLoginStatusReportsNotSignedIn(t *testing.T) {
 }
 
 func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
+	// A missing PATH entry makes any accidental direct exec.Command("open", ...)
+	// fail closed instead of launching the host browser during this test.
+	t.Setenv("PATH", t.TempDir())
 	ctx, path := withTUIAuthSeams(t, func(_ context.Context, open func(string) error) (auth.Credentials, error) {
 		_ = open("https://auth.example/authorize?x=1")
 		return auth.Credentials{AccessToken: "secret-token", AccountID: "acct-7"}, nil
 	})
+	browserLaunches := 0
+	tuiOpenBrowser = func(string) { browserLaunches++ }
 	m := resizeModel(t, NewModel(ctx, &fakeBackend{info: app.Info{Provider: config.ProviderChatGPT}}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 24)
 	pending, cmd := submitCommand(t, m, "/login")
 	if cmd == nil {
@@ -118,6 +128,9 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 	}
 	if creds.AccountID != "acct-7" {
 		t.Fatalf("saved account = %q", creds.AccountID)
+	}
+	if browserLaunches != 1 {
+		t.Fatalf("browser launch seam calls = %d, want 1", browserLaunches)
 	}
 }
 

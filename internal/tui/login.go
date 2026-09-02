@@ -15,7 +15,10 @@ import (
 
 // Seam so tests can supply credentials without a browser or network.
 var (
-	authLoginFn        = auth.Login
+	authLoginFn    = auth.Login
+	tuiOpenBrowser = func(url string) {
+		_ = exec.Command("open", url).Start()
+	}
 	errTUILoginFailed  = errors.New("chatgpt sign-in failed")
 	errTUILogoutFailed = errors.New("stored chatgpt credentials could not be removed")
 )
@@ -121,7 +124,7 @@ func runLoginWorker(ctx context.Context, path string, generation uint64, channel
 	defer close(channel)
 	opener := func(url string) error {
 		channel <- loginResultMsg{generation: generation, url: url}
-		_ = exec.Command("open", url).Start()
+		tuiOpenBrowser(url)
 		return nil
 	}
 	creds, err := authLoginFn(rootContext(ctx), opener)

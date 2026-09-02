@@ -88,7 +88,7 @@ func TestTracingCapturesRequestAndResponse(t *testing.T) {
 		t.Fatalf("req_headers not an object: %v", rec["req_headers"])
 	}
 	auth, _ := headers["Authorization"].([]any)
-	if len(auth) != 1 || auth[0] != "Bearer [redacted]" {
+	if len(auth) != 1 || auth[0] != "[redacted]" {
 		t.Fatalf("Authorization header = %v, want redacted", headers["Authorization"])
 	}
 }
@@ -129,4 +129,25 @@ func mustRequest(t *testing.T, url string) *http.Request {
 	}
 	req.Header.Set("Authorization", "Bearer secret-xyz")
 	return req
+}
+
+// chatgpt-account-id identifies the account behind a ChatGPT subscription
+// request. It is not a credential, but trace files sit in the working tree
+// where they are easy to commit by accident, so it is redacted too.
+func TestRedactHeadersRedactsAccountID(t *testing.T) {
+	const accountID = "df8db0e8-0000-0000-0000-000000000000"
+	redacted := redactHeaders(http.Header{
+		"Authorization":      []string{"Bearer secret-token-value"},
+		"Chatgpt-Account-Id": []string{accountID},
+		"Content-Type":       []string{"application/json"},
+	})
+	if got := redacted.Get("Chatgpt-Account-Id"); got != "[redacted]" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "[redacted]")
+	}
+	if got := redacted.Get("Authorization"); got != "[redacted]" {
+		t.Fatalf("Authorization = %q, want %q", got, "[redacted]")
+	}
+	if got := redacted.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want it left untouched", got)
+	}
 }

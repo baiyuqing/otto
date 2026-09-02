@@ -309,7 +309,7 @@ func (b runtimeBuilder) runtimeInfo(runtime config.Runtime) app.RuntimeInfo {
 
 func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtime) (provider.Provider, error) {
 	if runtime.Provider != config.ProviderChatGPT {
-		return openaicompat.New(runtime.BaseURL, runtime.APIKey, b.tracingHTTPClient()), nil
+		return openaicompat.New(runtime.BaseURL, runtime.APIKey, b.tracingHTTPClient(openaicompat.DefaultHTTPClient())), nil
 	}
 	if !b.authCredentialsLoaded {
 		return nil, auth.ErrNoCredentials
@@ -319,18 +319,20 @@ func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtim
 		return nil, auth.ErrCredentialsUnavailable
 	}
 	creds := b.authCredentials
-	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, nil), nil
+	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, b.tracingHTTPClient(openairesponses.DefaultHTTPClient())), nil
 }
 
-// tracingHTTPClient returns the hardened provider client wrapped to record raw
-// HTTP wire, or nil when tracing is off (openaicompat builds its own hardened
-// default for nil). Wrapping DefaultHTTPClient's transport preserves the tuned
-// timeouts and redirect policy.
-func (b runtimeBuilder) tracingHTTPClient() *http.Client {
+// tracingHTTPClient wraps a hardened provider client to record raw HTTP wire,
+// or returns nil when tracing is off (providers build their own hardened
+// defaults for nil). Wrapping each provider's default transport preserves its
+// tuned timeouts and redirect policy.
+func (b runtimeBuilder) tracingHTTPClient(client *http.Client) *http.Client {
 	if b.traceWriter == nil {
 		return nil
 	}
-	client := openaicompat.DefaultHTTPClient()
+	if client == nil {
+		client = http.DefaultClient
+	}
 	client.Transport = trace.NewRoundTripper(client.Transport, b.traceWriter)
 	return client
 }

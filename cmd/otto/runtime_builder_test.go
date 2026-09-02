@@ -1301,6 +1301,33 @@ func TestRuntimeBuilderBuildProviderUsesCapturedCredentialSnapshot(t *testing.T)
 	}
 }
 
+func TestRuntimeBuilderBuildProviderTracesChatGPTHTTPClient(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, config.File{})
+	builder.authPath = filepath.Join(t.TempDir(), "auth.json")
+	builder.authCredentials = auth.Credentials{
+		AccessToken: "captured-token", RefreshToken: "captured-refresh", AccountID: "captured-account", Expiry: time.Now().Add(time.Hour),
+	}
+	builder.authCredentialsLoaded = true
+	builder.traceWriter = &bytes.Buffer{}
+
+	providerClient, err := builder.buildProvider(context.Background(), config.Runtime{Provider: "chatgpt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	clientValue := reflect.ValueOf(providerClient).Elem().FieldByName("httpClient")
+	if clientValue.IsNil() {
+		t.Fatal("chatgpt provider httpClient is nil")
+	}
+	transportValue := clientValue.Elem().FieldByName("Transport")
+	if transportValue.IsNil() {
+		t.Fatal("chatgpt provider transport is nil")
+	}
+	if got := transportValue.Elem().Type().String(); got != "*trace.RoundTripper" {
+		t.Fatalf("chatgpt provider transport type = %s, want *trace.RoundTripper", got)
+	}
+}
+
 func TestRuntimeBuilderBuildProviderRequiresInjectedAuthPath(t *testing.T) {
 	builder := newRuntimeBuilderForTest(t, config.File{})
 	builder.environment = map[string]string{"HOME": t.TempDir()}

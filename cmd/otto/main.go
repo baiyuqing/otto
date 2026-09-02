@@ -67,7 +67,13 @@ func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) s
 	if len(toolNames) > 0 {
 		tools = strings.Join(toolNames, ", ")
 	}
-	return "You are Otto, a concise coding agent. Inspect the workspace before changing it, including reading AGENTS.md when present and following relevant repository instructions. Usable tools: " + tools + ". File tools are restricted to the workspace. Prefer exact, minimal changes. Report what changed and what verification ran. " + policy
+	return "You are Otto, a concise coding agent.\n\n" +
+		"Repository instructions (AGENTS.md / CLAUDE.md) are included below; follow them.\n" +
+		"Read README.md before answering questions about what the project is, how it is built, or how it is used; do not guess from file names.\n" +
+		"Before each batch of tool calls, state in one sentence what you are about to do and why.\n" +
+		"Inspect the workspace before changing it. Prefer exact, minimal changes.\n" +
+		"Report what changed and what verification ran.\n" +
+		"Usable tools: " + tools + ". File tools are restricted to the workspace. " + policy
 }
 
 func safePromptToolName(name string) bool {

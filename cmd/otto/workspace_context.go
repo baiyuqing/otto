@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	// maxWorkspaceContextFileBytes caps how much of AGENTS.md/CLAUDE.md is
-	// embedded in the system prompt.
+	// maxWorkspaceContextFileBytes caps how much of the workspace instruction
+	// file is embedded in the system prompt.
 	maxWorkspaceContextFileBytes = 8 << 10
 	// maxWorkspaceListingEntries caps the one-level workspace listing.
 	maxWorkspaceListingEntries = 200
@@ -27,9 +27,10 @@ const (
 
 // workspaceContextFor builds the dynamic "## Environment" section appended
 // to the static system prompt: cwd, platform/date, git branch and dirty
-// count, a one-level workspace listing, and AGENTS.md/CLAUDE.md content when
-// present. It embeds file content from the user's workspace, so callers must
-// redact the result before sending it to a provider.
+// count, a one-level workspace listing, and the workspace instruction file
+// (AGENTS.md, else CLAUDE.md) when present. It embeds file content from the
+// user's workspace, so callers must redact the result before sending it to a
+// provider.
 func workspaceContextFor(workspacePath string, now time.Time) string {
 	var b strings.Builder
 	b.WriteString("\n\n## Environment\n")
@@ -40,12 +41,65 @@ func workspaceContextFor(workspacePath string, now time.Time) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(workspaceListing(workspacePath))
+	// Only one instruction file is embedded. Both are re-sent on every request
+	// of a session, so a second file costs its full size per request; measured
+	// against this repo that was ~1100 tokens per request for a file the model
+	// never asked to read. AGENTS.md wins when both exist: it is the canonical
+	// rulebook, and CLAUDE.md is Claude Code's own config, which typically
+	// references AGENTS.md rather than adding to it.
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 		if content, ok := readWorkspaceDocFile(workspacePath, name); ok {
-			fmt.Fprintf(&b, "\n## %s\n%s\n", name, content)
+			fmt.Fprintf(&b, "\n## Workspace instructions\n<workspace-instructions file=%q>\n%s\n</workspace-instructions>\n",
+				name, neutralizeInstructionFence(content))
+			break
 		}
 	}
 	return b.String()
+}
+
+// instructionFencePrefix is the delimiter the workspace instruction file is
+// wrapped in. The file belongs to whoever wrote the repository, so without a
+// fence its text is indistinguishable from the surrounding system prompt and
+// can forge Otto's own sections.
+const instructionFencePrefix = "<workspace-instructions"
+
+// neutralizeInstructionFence makes the fence delimiter unforgeable by breaking
+// any occurrence of it inside the file, including the closing tag. Unlike
+// renderMemoryContext, which escapes record text wholesale, only the delimiter
+// is touched: an instruction file is markdown full of backticked shell
+// snippets and comparisons that full escaping would turn into entities the
+// model then has to read through.
+//
+// Matching walks the original bytes rather than a lowercased copy, because
+// lowercasing can change byte length (U+0130 becomes two runes) and shift
+// every offset after it.
+func neutralizeInstructionFence(content string) string {
+	var b strings.Builder
+	for index := 0; index < len(content); {
+		matched := fenceMatchLen(content[index:])
+		if matched == 0 {
+			b.WriteByte(content[index])
+			index++
+			continue
+		}
+		// Keep the file's own bytes, minus the "<" that makes it a tag.
+		b.WriteString("<_")
+		b.WriteString(content[index+1 : index+matched])
+		index += matched
+	}
+	return b.String()
+}
+
+// fenceMatchLen reports the byte length of a fence tag opening at the start of
+// text, or 0 when there is none. Both forms are ASCII, so a case-insensitive
+// match over a fixed byte window consumes exactly that many bytes.
+func fenceMatchLen(text string) int {
+	for _, form := range []string{"</workspace-instructions", instructionFencePrefix} {
+		if len(text) >= len(form) && strings.EqualFold(text[:len(form)], form) {
+			return len(form)
+		}
+	}
+	return 0
 }
 
 // gitStatusLine reports "git: <branch>, <N> modified", or "" if the

@@ -60,7 +60,7 @@ func New(tokenSource oauth2.TokenSource, accountID string, httpClient *http.Clie
 
 func newWithBaseURL(baseURL string, tokenSource oauth2.TokenSource, accountID string, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = defaultHTTPClient()
+		httpClient = DefaultHTTPClient()
 	}
 	return &Client{
 		baseURL:     strings.TrimSuffix(baseURL, "/"),
@@ -153,7 +153,10 @@ func tokenForContext(ctx context.Context, source oauth2.TokenSource) (*oauth2.To
 	return source.Token()
 }
 
-func defaultHTTPClient() *http.Client {
+// DefaultHTTPClient returns the hardened default client used by the ChatGPT
+// Responses provider. It is exported so callers can wrap its Transport (e.g.
+// request tracing) without losing the tuned timeouts or redirect policy.
+func DefaultHTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy:                  http.ProxyFromEnvironment,

@@ -15,8 +15,8 @@ import { fileURLToPath } from "node:url";
 const html = readFileSync(fileURLToPath(new URL("./trace-viewer.html", import.meta.url)), "utf8");
 const block = html.match(/\/\/ --- pure parsing start ---\n([\s\S]*?)\n\/\/ --- pure parsing end ---/);
 assert.ok(block, "trace-viewer.html must delimit its pure parsing helpers with the marker comments");
-const { parseSSE, requestMessages, requestSystem } = new Function(
-  `${block[1]}\nreturn { parseSSE, requestMessages, requestSystem };`,
+const { parseSSE, requestMessages, requestSystem, msgLabel } = new Function(
+  `${block[1]}\nreturn { parseSSE, requestMessages, requestSystem, msgLabel };`,
 )();
 
 const sse = (objs) => objs.map((o) => `data: ${JSON.stringify(o)}\n`).join("\n") + "\ndata: [DONE]\n\n";
@@ -60,6 +60,16 @@ test("parseSSE surfaces Responses API tool calls", () => {
   assert.match(text, /AGENTS\.md/);
 });
 
+test("parseSSE prints the tool call_id", () => {
+  const raw = sse([
+    {
+      type: "response.output_item.done",
+      item: { type: "function_call", name: "ls", arguments: "{}", call_id: "call_abc", id: "fc_1" },
+    },
+  ]);
+  assert.match(parseSSE(raw).text, /call_abc/);
+});
+
 test("requestMessages and requestSystem cover both request shapes", () => {
   const chat = { messages: [{ role: "user", content: "hi" }], system: "sys" };
   assert.equal(requestMessages(chat).length, 1);
@@ -77,4 +87,25 @@ test("requestMessages and requestSystem cover both request shapes", () => {
   assert.equal(msgs[0].role, "user");
   assert.equal(msgs[1].role, "function_call_output");
   assert.equal(requestSystem(responses), "sys");
+});
+
+test("msgLabel carries the call_id of tool traffic in both shapes", () => {
+  const responses = requestMessages({
+    input: [
+      { type: "function_call", name: "ls", call_id: "call_abc", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_abc", output: "done" },
+    ],
+  });
+  assert.match(msgLabel(responses[0]), /call_abc/);
+  assert.match(msgLabel(responses[1]), /call_abc/);
+
+  const chat = requestMessages({
+    messages: [
+      { role: "assistant", tool_calls: [{ id: "call_xyz", function: { name: "ls" } }] },
+      { role: "tool", tool_call_id: "call_xyz", content: "done" },
+    ],
+  });
+  assert.match(msgLabel(chat[0]), /call_xyz/);
+  assert.match(msgLabel(chat[1]), /call_xyz/);
+  assert.equal(msgLabel({ role: "user", content: "hi" }), "user");
 });

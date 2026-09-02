@@ -25,10 +25,15 @@ func withAuthSeams(t *testing.T, login func(context.Context, func(string) error)
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "chatgpt.json")
 	prevLogin := replAuthLogin
+	prevOpenBrowser := replOpenBrowser
 	if login != nil {
 		replAuthLogin = login
 	}
-	t.Cleanup(func() { replAuthLogin = prevLogin })
+	replOpenBrowser = func(string) {}
+	t.Cleanup(func() {
+		replAuthLogin = prevLogin
+		replOpenBrowser = prevOpenBrowser
+	})
 	return auth.ContextWithPath(context.Background(), path), path
 }
 
@@ -60,10 +65,15 @@ func TestREPLLoginStatusReportsSignedIn(t *testing.T) {
 }
 
 func TestREPLLoginSavesCredentials(t *testing.T) {
+	// A missing PATH entry makes any accidental direct exec.Command("open", ...)
+	// fail closed instead of launching the host browser during this test.
+	t.Setenv("PATH", t.TempDir())
 	ctx, path := withAuthSeams(t, func(_ context.Context, open func(string) error) (auth.Credentials, error) {
 		_ = open("https://auth.example/authorize?x=1")
 		return auth.Credentials{AccessToken: "secret-token", AccountID: "acct-7"}, nil
 	})
+	browserLaunches := 0
+	replOpenBrowser = func(string) { browserLaunches++ }
 	var stdout, stderr bytes.Buffer
 	r := New(strings.NewReader("/login\n/exit\n"), &stdout, &stderr, chatgptBackend())
 	if err := r.Run(ctx); err != nil {
@@ -85,6 +95,9 @@ func TestREPLLoginSavesCredentials(t *testing.T) {
 	}
 	if creds.AccountID != "acct-7" {
 		t.Fatalf("saved account = %q", creds.AccountID)
+	}
+	if browserLaunches != 1 {
+		t.Fatalf("browser launch seam calls = %d, want 1", browserLaunches)
 	}
 }
 

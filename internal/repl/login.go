@@ -14,7 +14,10 @@ import (
 
 // Seam so tests can supply credentials without a browser or network.
 var (
-	replAuthLogin       = auth.Login
+	replAuthLogin   = auth.Login
+	replOpenBrowser = func(url string) {
+		_ = exec.Command("open", url).Start()
+	}
 	errREPLLoginFailed  = errors.New("chatgpt sign-in failed")
 	errREPLLogoutFailed = errors.New("stored chatgpt credentials could not be removed")
 )
@@ -92,7 +95,7 @@ func (r *REPL) authPath(ctx context.Context) (string, bool) {
 func (r *REPL) browserOpener() func(string) error {
 	return func(url string) error {
 		_, _ = fmt.Fprintf(r.stdout, "Open this URL to sign in:\n\n  %s\n\n", url)
-		_ = exec.Command("open", url).Start()
+		replOpenBrowser(url)
 		return nil
 	}
 }

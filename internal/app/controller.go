@@ -247,6 +247,14 @@ type SessionArchiver interface {
 	ArchiveCurrentSession(context.Context) (session.ArchiveResult, error)
 }
 
+// TaskLister exposes the sub-agent task registry of the current runner.
+// Frontends use it through a type assertion, like SessionArchiver.
+type TaskLister interface {
+	Tasks() *agent.Tasks
+}
+
+var _ TaskLister = (*Controller)(nil)
+
 // ProfileSwitcher exposes the configured profile names and a switch that
 // starts a fresh session on the chosen profile. Frontends type-assert it on
 // the Backend, matching how SessionBrowser and SessionArchiver are consumed.
@@ -1126,6 +1134,21 @@ func (c *Controller) Info() Info {
 		info.Usage, info.UsagePresent = usageSource.AggregateUsage()
 	}
 	return info
+}
+
+// Tasks returns the sub-agent task registry of the current runner, or nil
+// when the runner does not track tasks or the controller is closed.
+func (c *Controller) Tasks() *agent.Tasks {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	lister, ok := c.runner.(TaskLister)
+	if !ok {
+		return nil
+	}
+	return lister.Tasks()
 }
 
 func (c *Controller) DynamicContentAvailable() bool {

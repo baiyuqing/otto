@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -612,23 +613,90 @@ func TestRunServeRefusesWhenDynamicContentUnavailable(t *testing.T) {
 	}
 }
 
-func TestRunServeReachesStubWithResolvedAbsoluteSocketPath(t *testing.T) {
+func TestRunServeStartsAgentServer(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
-	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"served"},"finish_reason":"stop"}]}`)
+	}))
+	defer provider.Close()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", provider.URL)
 	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
-	wantSocket, err := filepath.Abs("relative-otto-test.sock")
+	socketDir, err := os.MkdirTemp("/tmp", "otto-serve-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "otto.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := deterministicRunDependencies(t)
+	deps.subscribeTerminate = func() interruptSubscription { return interruptSubscription{stop: func() {}} }
+	done := make(chan int, 1)
+	go func() {
+		done <- runWithDependencies(ctx, []string{"serve", "--config", configPath, "--cwd", workspace, "--socket", socketPath}, strings.NewReader(""), io.Discard, io.Discard, env, deps)
+	}()
 
-	var stdout, stderr bytes.Buffer
-	code := runForTest(t, context.Background(), []string{"serve", "--config", configPath, "--cwd", workspace, "--socket", "relative-otto-test.sock"}, strings.NewReader(""), &stdout, &stderr, env)
-	if code != 1 {
-		t.Fatalf("code = %d, stderr = %q, want 1", code, stderr.String())
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	var resp *http.Response
+	var requestErr error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, requestErr = client.Post("http://otto/v1/sessions", "application/json", strings.NewReader(`{}`))
+		if resp != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if !strings.Contains(stderr.String(), "serve: not wired") || !strings.Contains(stderr.String(), wantSocket) {
-		t.Fatalf("stderr = %q, want it to mention the stub and %q", stderr.String(), wantSocket)
+	if resp == nil {
+		select {
+		case code := <-done:
+			t.Fatalf("agent server exited with code %d; last request error: %v", code, requestErr)
+		default:
+			t.Fatalf("agent server did not start; last request error: %v", requestErr)
+		}
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if created.ID == "" {
+		t.Fatal("created session has no id")
+	}
+
+	turnResp, err := client.Post("http://otto/v1/sessions/"+created.ID+"/turns", "application/json", strings.NewReader(`{"text":"hello","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turn struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(turnResp.Body).Decode(&turn); err != nil {
+		t.Fatal(err)
+	}
+	turnResp.Body.Close()
+	if turn.Text != "served" {
+		t.Fatalf("turn text = %q, want served", turn.Text)
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("serve exit code = %d, want 0", code)
+		}
+	case <-time.After(7 * time.Second):
+		t.Fatal("serve did not stop")
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("socket still exists after shutdown: %v", err)
 	}
 }
 

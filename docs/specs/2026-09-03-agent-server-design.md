@@ -70,10 +70,9 @@ Priority: `--socket` flag > `[server].socket` (TOML) > default
   with the same ownership/mode test `internal/memory/sqlite/path_unix.go:79-89`
   uses: owner UID must equal the current UID and the mode must carry no
   group or world bits.
-- If a file already exists at the socket path, `net.Dial` probes it: a
-  successful connection means a server is already listening there and
-  `Listen` returns an "already running at `<path>`" error; otherwise the
-  stale file is removed before `net.Listen("unix", path)`.
+- If a socket already exists at the path, `net.Dial` probes it: a successful
+  connection means a server is already listening there; otherwise the stale
+  socket is removed. Existing non-socket files are rejected and preserved.
 - After `net.Listen` succeeds, the socket is `chmod`ed to `0600`.
 - `http.Server{ReadHeaderTimeout: 10 * time.Second}`; no `WriteTimeout`,
   because SSE responses stay open for the duration of a turn.
@@ -475,7 +474,7 @@ check`, one commit.
 | 5 | `internal/server/events.go` | JSON shape per `agent.EventType`; `Err` to string; `ToolArgs` as `RawMessage` |
 | 6 | `internal/server/turn.go` | concurrent readers from an arbitrary seq, cancel, done state, text/usage accumulation, `-race` |
 | 7 | `internal/server/server.go` | real `*app.Controller` built from `app.New(session.NewMemory(hdr), ...)` plus a scripted fake `app.Runner`; `httptest.NewServer` covers every endpoint: 201/200/204/404/409/400, SSE streaming with `after` and `Last-Event-ID`, `stream:false`, cancel, `DELETE` canceling an active turn, resume of an already-open session returning 200 without a second `Open`, two concurrent resumes calling `Open` once, two sessions running turns concurrently, metrics/logs free of prompt text, fixed 500 body |
-| 8 | `internal/server/listen.go` | `t.Chdir(t.TempDir())` with a relative socket path (avoids the 104-byte `sun_path` limit); `0600` permission, parent-directory permission check, stale-socket cleanup, "already running" |
+| 8 | `internal/server/listen.go` | `t.Chdir(t.TempDir())` with a relative socket path (avoids the 104-byte `sun_path` limit); `0600` permission, parent-directory permission check, stale-socket cleanup, non-socket preservation, "already running" |
 | 9 | `openapi.yaml` + `go:embed` | every `ServeMux` pattern appears under `paths:` in the embedded document |
 | 10 | `cmd/otto` wiring | `newController` extraction (existing tests unchanged) → `serve` dispatch/`--socket`/conflicting-flag checks/skip `selectFrontend` → SIGTERM → `List` on `ENOENT` returns empty → end-to-end test: `run(ctx, ["serve","--config",cfg,"--cwd",ws,"--socket","otto.sock"])` in a goroutine, an `http.Transport{DialContext: unix}` client creates a session, posts a turn, reads SSE text from a fake provider, lists sessions, then `ctx` is canceled and the test asserts exit code 0 and socket-file removal |
 | 11 | docs | README "Configuration and precedence" + new "Agent server" section, `docs/user-manual.md` command table and config example plus a new "Agent server" chapter, `CLAUDE.md` architecture bullet 9 (and fixing bullet 6's link to the now-deleted `docs/superpowers/` path to point at `docs/specs/`) |

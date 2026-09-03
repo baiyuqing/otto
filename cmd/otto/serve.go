@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/config"
+	"github.com/baiyuqing/otto/internal/server"
 	"github.com/baiyuqing/otto/internal/session"
 )
 
@@ -19,7 +21,7 @@ const maxServeListSessions = 20
 
 // errSessionNotFound is returned by serveFactories.open for an id with no
 // matching session in the workspace's session root.
-var errSessionNotFound = errors.New("session not found")
+var errSessionNotFound = server.ErrSessionNotFound
 
 // subscribeOSTerminate mirrors subscribeOSInterrupts but for SIGTERM, the
 // signal used to ask a long-running otto serve process to shut down.
@@ -32,16 +34,57 @@ func subscribeOSTerminate() interruptSubscription {
 	}
 }
 
-// runServe is the entry point for `otto serve`, reached once the CLI has
-// resolved an absolute socket path and confirmed dynamic content is
-// available. It does not yet start internal/server's listener.
-//
-// ponytail: internal/server owns the accept loop and the SIGTERM-driven
-// shutdown; subscribeTerminate is threaded through now so that wiring is a
-// pure addition later, add the goroutine that reads from it when the real
-// listener lands.
-func runServe(ctx context.Context, socketPath string, subscribeTerminate func() interruptSubscription, stdout, stderr io.Writer) int {
-	return fail(stderr, "serve: not wired (socket %s)", socketPath)
+func (b runtimeBuilder) runServe(ctx context.Context, runtime config.Runtime, socketPath string, subscribeTerminate func() interruptSubscription, stderr io.Writer) int {
+	listener, err := server.Listen(socketPath)
+	if err != nil {
+		return fail(stderr, "serve: %v", b.redactError(err, &runtime))
+	}
+	defer listener.Close()
+
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	termination := subscribeTerminate()
+	if termination.stop == nil {
+		termination.stop = func() {}
+	}
+	defer termination.stop()
+	terminated := make(chan struct{})
+	go func() {
+		defer close(terminated)
+		select {
+		case <-termination.signals:
+			cancel()
+		case <-serveCtx.Done():
+		}
+	}()
+
+	factories := b.serveFactories(runtime)
+	runtimeInfo := b.runtimeInfo(runtime)
+	srv := server.New(serveCtx, server.Options{
+		Create: factories.create,
+		Open:   factories.open,
+		List:   factories.list,
+		Info: server.Info{
+			Workspace: b.workspacePath,
+			Provider:  runtimeInfo.Provider,
+			Profile:   runtimeInfo.Profile,
+			Model:     runtimeInfo.Model,
+			Sandbox:   runtimeInfo.Sandbox.Summary(),
+			Profiles:  b.profileNames(),
+		},
+		Logger: slog.New(slog.NewTextHandler(stderr, nil)),
+	})
+	serveErr := server.Serve(serveCtx, listener, srv)
+	cancel()
+	<-terminated
+	closeErr := srv.Close()
+	if serveErr != nil {
+		return fail(stderr, "serve: %v", b.redactError(serveErr, &runtime))
+	}
+	if closeErr != nil {
+		return fail(stderr, "serve: %v", b.redactError(closeErr, &runtime))
+	}
+	return 0
 }
 
 // serveFactories builds one app.Controller per server-side session, on top

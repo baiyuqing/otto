@@ -567,7 +567,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 				return fail(stderr, "%v", builder.redactError(err, nil))
 			}
 		}
-		return runServe(processCtx, socketPath, deps.subscribeTerminate, stdout, stderr)
+		return builder.runServe(processCtx, resolvedRuntime, socketPath, deps.subscribeTerminate, stderr)
 	}
 
 	var (

@@ -63,11 +63,15 @@ func currentUID() uint32 {
 }
 
 func removeStaleSocket(path string) error {
-	if _, err := os.Stat(path); err != nil {
+	info, err := os.Lstat(path)
+	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("stat socket %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("socket path %s exists and is not a socket", path)
 	}
 
 	conn, dialErr := net.Dial("unix", path)

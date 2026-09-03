@@ -70,12 +70,10 @@ func TestListenRemovesStaleSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Listen: %v", err)
 	}
-	l1.Close()
-
-	// Simulate a leftover socket file from a crashed process: nothing is
-	// listening on it, but the path still exists.
-	if err := os.WriteFile("sub/otto.sock", []byte("stale"), 0o600); err != nil {
-		t.Fatalf("recreate stale file: %v", err)
+	unixListener := l1.(*net.UnixListener)
+	unixListener.SetUnlinkOnClose(false)
+	if err := l1.Close(); err != nil {
+		t.Fatalf("close first listener: %v", err)
 	}
 
 	l2, err := Listen("sub/otto.sock")
@@ -83,6 +81,28 @@ func TestListenRemovesStaleSocket(t *testing.T) {
 		t.Fatalf("Listen should remove the stale socket and succeed: %v", err)
 	}
 	defer l2.Close()
+}
+
+func TestListenPreservesNonSocketFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("sub", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const path = "sub/otto.sock"
+	if err := os.WriteFile(path, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Listen(path); err == nil {
+		t.Fatal("Listen should reject an existing non-socket file")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("existing file was removed: %v", err)
+	}
+	if string(content) != "keep me" {
+		t.Fatalf("existing file content = %q", content)
+	}
 }
 
 func TestListenRejectsUnsafeParentDirectory(t *testing.T) {

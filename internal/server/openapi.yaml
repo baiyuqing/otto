@@ -1,0 +1,447 @@
+openapi: 3.1.0
+info:
+  title: Otto agent server
+  version: "1"
+  description: >
+    HTTP+JSON+SSE frontend for otto serve. One app.Controller per session;
+    turns stream as Server-Sent Events. See
+    docs/specs/2026-09-03-agent-server-design.md.
+servers:
+  - url: http://otto
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+          required: [code, message]
+      required: [error]
+    Usage:
+      type: object
+      properties:
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        cached_input_tokens:
+          type: integer
+    Sandbox:
+      type: object
+      properties:
+        mode:
+          type: string
+        network:
+          type: string
+        bash_available:
+          type: boolean
+        summary:
+          type: string
+    SessionTurn:
+      type: [object, "null"]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [running, ok, error, canceled]
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+        workspace:
+          type: string
+        provider:
+          type: string
+        profile:
+          type: string
+        model:
+          type: string
+        context_window:
+          type: integer
+        usage:
+          $ref: "#/components/schemas/Usage"
+        context_input_tokens:
+          type: integer
+        sandbox:
+          $ref: "#/components/schemas/Sandbox"
+        turn:
+          $ref: "#/components/schemas/SessionTurn"
+      required: [id, workspace, provider, model, sandbox, turn]
+    SessionListRow:
+      type: object
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+        workspace:
+          type: string
+        provider:
+          type: string
+        model:
+          type: string
+        open:
+          type: boolean
+      required: [id, open]
+    SessionList:
+      type: object
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionListRow"
+      required: [sessions]
+    Message:
+      type: object
+      description: internal/model.Message; see internal/model for the full shape.
+    TurnSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [running, ok, error, canceled]
+        error:
+          type: string
+        text:
+          type: string
+        usage:
+          $ref: "#/components/schemas/Usage"
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+      required: [id, status, text, usage, started_at]
+    WireEvent:
+      type: object
+      description: >
+        One SSE frame's data payload; shape depends on the event's type
+        (see docs/specs/2026-09-03-agent-server-design.md#wire-events).
+      properties:
+        type:
+          type: string
+        turn_id:
+          type: string
+        text:
+          type: string
+        tool_name:
+          type: string
+        tool_call_id:
+          type: string
+        tool_args: {}
+        result:
+          type: object
+          properties:
+            content:
+              type: string
+            is_error:
+              type: boolean
+        usage:
+          $ref: "#/components/schemas/Usage"
+        compaction:
+          type: object
+        plan:
+          type: object
+        error:
+          type: string
+      required: [type]
+    Healthz:
+      type: object
+      properties:
+        status:
+          type: string
+        sessions_open:
+          type: integer
+      required: [status, sessions_open]
+    Info:
+      type: object
+      properties:
+        workspace:
+          type: string
+        provider:
+          type: string
+        profile:
+          type: string
+        model:
+          type: string
+        sandbox:
+          type: string
+        profiles:
+          type: array
+          items:
+            type: string
+      required: [workspace, provider, profile, model, sandbox, profiles]
+  parameters:
+    sessionID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    turnID:
+      name: turn_id
+      in: path
+      required: true
+      schema:
+        type: string
+    after:
+      name: after
+      in: query
+      required: false
+      description: Resume the event stream after this seq number.
+      schema:
+        type: integer
+        minimum: 0
+paths:
+  /v1/sessions:
+    post:
+      summary: Create or resume a session
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resume:
+                  type: string
+                  description: An existing session id. Omit to create a new session.
+      responses:
+        "201":
+          description: New session created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "200":
+          description: An already-open session, resumed or already tracked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          description: resume id not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      summary: List sessions (disk sessions merged with open sessions)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionList"
+  /v1/sessions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: Get an open session
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Cancel any active turn and close the session
+      responses:
+        "204":
+          description: Closed
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/history:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: Session message history
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/turns:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Start a turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                stream:
+                  type: boolean
+                  default: true
+              required: [text]
+      responses:
+        "200":
+          description: >
+            stream:true (default) returns a text/event-stream of WireEvent
+            frames starting at seq 0; stream:false waits for the turn to
+            finish and returns its TurnSummary.
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/WireEvent"
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TurnSummary"
+        "400":
+          description: Empty turn text
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A turn is already active for this session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/turns/{turn_id}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/turnID"
+    get:
+      summary: Get a turn's summary
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TurnSummary"
+        "404":
+          description: Session or turn not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/turns/{turn_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/turnID"
+      - $ref: "#/components/parameters/after"
+    get:
+      summary: Stream (or resume streaming) a turn's events over SSE
+      description: Also honors the Last-Event-ID header as an alternative to ?after=.
+      responses:
+        "200":
+          description: text/event-stream of WireEvent frames
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/WireEvent"
+        "400":
+          description: after is not a non-negative integer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session or turn not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/turns/{turn_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/turnID"
+    post:
+      summary: Cancel a running turn
+      responses:
+        "202":
+          description: Cancellation requested
+        "404":
+          description: Session or turn not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/info:
+    get:
+      summary: Process-level static info
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Info"
+  /v1/openapi.yaml:
+    get:
+      summary: This document
+      responses:
+        "200":
+          description: OK
+          content:
+            application/yaml: {}
+  /healthz:
+    get:
+      summary: Liveness check
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Healthz"
+  /metrics:
+    get:
+      summary: Prometheus text exposition
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: {}

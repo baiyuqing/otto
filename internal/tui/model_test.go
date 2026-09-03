@@ -312,8 +312,8 @@ func TestViewPositionsRealCursorAtEditorLocation(t *testing.T) {
 	// The live region above the editor is empty for an idle, history-less
 	// session (liveLines() == 0), so the editor sits near the top of the
 	// inline view rather than at a fixed full-screen row.
-	if cursor.X != 9 || cursor.Y != 2 {
-		t.Fatalf("view cursor = (%d,%d), want (9,2) at the visible editor", cursor.X, cursor.Y)
+	if cursor.X != 9 || cursor.Y != 3 {
+		t.Fatalf("view cursor = (%d,%d), want (9,3) at the visible editor", cursor.X, cursor.Y)
 	}
 }
 
@@ -327,8 +327,8 @@ func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
 	}
 
 	cursor := m.View().Cursor
-	if cursor == nil || cursor.X != 5 || cursor.Y != 7 {
-		t.Fatalf("suggestion view cursor = %#v, want (5,7) at the editor", cursor)
+	if cursor == nil || cursor.X != 5 || cursor.Y != 8 {
+		t.Fatalf("suggestion view cursor = %#v, want (5,8) at the editor", cursor)
 	}
 }
 
@@ -340,15 +340,15 @@ func TestViewTracksRealCursorAcrossMultilineEditorRows(t *testing.T) {
 	m.editor.CursorUp()
 	m.editor.CursorStart()
 	first := m.View().Cursor
-	if first == nil || first.Y != 2 {
-		t.Fatalf("first-line cursor = %#v, want row 2", first)
+	if first == nil || first.Y != 3 {
+		t.Fatalf("first-line cursor = %#v, want row 3", first)
 	}
 
 	m.editor.CursorDown()
 	m.editor.CursorEnd()
 	last := m.View().Cursor
-	if last == nil || last.Y != 3 {
-		t.Fatalf("last-line cursor = %#v, want row 3", last)
+	if last == nil || last.Y != 4 {
+		t.Fatalf("last-line cursor = %#v, want row 4", last)
 	}
 }
 

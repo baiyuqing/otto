@@ -620,7 +620,7 @@ func newRootView(m Model, content string) tea.View {
 	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), m.liveLines())
 	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && !m.profilePicker.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
-			cursor.Y += layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
+			cursor.Y += 1 + layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
 			if layout.inputBoxed {
 				// The textarea sits below the top border and the label row.
 				cursor.Y += 1 + inputBoxLabel

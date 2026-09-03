@@ -86,6 +86,7 @@ Parameters:
 |---|---|---|---|
 | `prompt` | string | yes | The complete task. The child sees nothing else unless `context` is `inherit`. |
 | `description` | string | no | Short label (≤ 80 chars) shown in status output and the TUI panel. |
+| `model` | string | no | Provider model id for the child. Default: the session model, or the definition's `model`. Passed through unchanged; Otto keeps no model catalog, allowlist, or price data, and an id the endpoint rejects fails the task with the provider's error. |
 | `agent` | string | no | Definition name. `enum` lists the catalog when non-empty. Unknown name → error result. |
 | `context` | `"fresh"` \| `"inherit"` | no | Default `fresh`, or the definition's `context` field. See "Context: fresh or inherit". |
 | `wait` | bool | no | `true` = start and block until the task ends; equivalent to `agent` followed by `agent_wait`. |
@@ -287,8 +288,8 @@ prompt = `PromptFor(childDefinitions)` + `"\n\n## Sub-agent role\n"` +
 (definition body, or the generic instruction) → `Redactor.RedactString` →
 `session.NewMemory(header)` (with the inherited messages appended when
 `context: inherit`) → `agent.New(provider, registry, memory, options, redactor)`
-with `options.Inbox = task.inbox`, `options.Model` overridden by the
-definition's `model` when set → goroutine: `child.Run(taskCtx, prompt, emit)`.
+with `options.Inbox = task.inbox`, `options.Model` = the call's `model`, else the
+definition's `model`, else the session model → goroutine: `child.Run(taskCtx, prompt, emit)`.
 
 Generic instruction: "You are running as a sub-agent of Otto. Complete only
 the delegated task below with the available tools, then reply with a
@@ -445,9 +446,9 @@ You review code. Report findings as file:line bullets ordered by severity.
   names produce a startup warning and are ignored; an empty value produces the
   warning "tools must be a comma-separated list" (the frontmatter parser drops
   YAML block lists silently).
-- `model`: optional provider model id; overrides the parent model for this
-  definition. This is the cost knob: definitions for exploration should name a
-  cheaper model.
+- `model`: optional provider model id; the default for this definition. A
+  per-call `model` overrides it. Otto keeps no model catalog or price data;
+  the model decides which id to pass.
 - `context`: optional, `fresh` (default) or `inherit`; the tool parameter
   overrides it.
 - Body: Markdown after the frontmatter, appended to the child system prompt
@@ -520,7 +521,8 @@ roots are added to the Seatbelt read paths at process start, like skill roots.
   `custom_message` does not keep usage, so after `/resume` the session total
   excludes child usage. `Info().Usage` (session aggregate) never includes child
   usage. This is a known gap, listed under Follow-ups.
-- Cost controls: `max_parallel`, per-definition `model`, `context: fresh` by
+- Cost controls: per-call `model` (chosen by the model; Otto holds no price
+  data), per-definition default `model`, `max_parallel`, `context: fresh` by
   default, `agent_wait` timeouts.
 
 ## Persistence and resume
@@ -577,6 +579,19 @@ Each phase is one PR on `feat/subagents`-derived branches; `make check` and
 8. Docs: README "Sub-agents" section (Phase A1 scope only), AGENTS.md,
    CLAUDE.md.
 
+### Phase A1b: per-call model
+
+1. `agent` gains the free-form `model` parameter; `StartRequest.Model`;
+   `Task.Model` records the effective id; the child runs with that
+   `Options.Model` after redaction.
+2. The completion header and the `agent_status`/`/task <id>` detail show the
+   model; the status table is unchanged.
+3. The system-prompt guidance states the provider name, the endpoint host
+   (host only, never userinfo or query), and the session model, and says that
+   Otto keeps no model list or price data, so the model picks the cheapest
+   adequate id from its own knowledge and reruns on the session model if the
+   endpoint rejects the id.
+
 ### Phase A2: TUI and server
 
 1. TUI: task panel, `taskUpdateMsg` loop, `maybeWake`, `/tasks`, `/task`,
@@ -590,8 +605,9 @@ Each phase is one PR on `feat/subagents`-derived branches; `make check` and
    rules above; `prompt.go`.
 2. `config/agents.go`; `[agents]` in README precedence docs; Seatbelt read
    paths.
-3. `agent` tool: `agent` and `context` parameters, `model` override,
-   definition body in the system prompt; `inherit.go` snapshot rule.
+3. `agent` tool: `agent` and `context` parameters, definition `model` as the
+   per-call default, definition body in the system prompt; `inherit.go`
+   snapshot rule.
 4. `## Agents` prompt section in `buildRunner`.
 
 ### Phase C: two-way messages
@@ -672,3 +688,10 @@ All offline, next to their packages.
   support.
 - `skill.ParseFrontmatter` is exported instead of adding an
   `internal/frontmatter` package.
+- The sub-agent model is chosen per call by the model, not by
+  configuration: `agent` takes a free-form `model` id, Otto keeps no catalog,
+  allowlist, or price data, and the system prompt states the provider,
+  endpoint host, and session model so the model can choose. Model
+  availability and pricing change faster than a maintained list, and the
+  model can look them up itself (`bash` with `curl` under the default
+  `network = "allow"`).

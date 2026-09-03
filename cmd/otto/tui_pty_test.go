@@ -30,12 +30,21 @@ import (
 )
 
 const (
-	ptyTestTimeout              = 5 * time.Second
-	ptyStepTimeout              = 2 * time.Second
-	ptyQuietWindow              = 50 * time.Millisecond
-	altScreenEnterSeq           = "\x1b[?1049h"
-	altScreenExitSeq            = "\x1b[?1049l"
-	bubbleTeaFullRedrawSeq      = "\x1b[H\x1b[2J"
+	ptyTestTimeout = 5 * time.Second
+	ptyStepTimeout = 2 * time.Second
+	ptyQuietWindow = 50 * time.Millisecond
+	// cursorShowSeq marks the end of a completed render in inline mode; it
+	// appears after every frame, so it is used only to confirm the TUI has
+	// drawn at least once before sending input.
+	cursorShowSeq = "\x1b[?25h"
+	// exitRestoreSeq is the OSC 112 cursor-color reset Bubble Tea writes once,
+	// at final terminal-state teardown after tui.Run returns. It is the
+	// inline-mode replacement for waiting on an alternate-screen exit.
+	exitRestoreSeq = "\x1b]112\a"
+	// fullRedrawSeq is the erase-display (CSI J, mode 0) Bubble Tea's inline
+	// renderer issues immediately before redrawing the live region from
+	// scratch; its presence in captured output is evidence of a full redraw.
+	fullRedrawSeq               = "\x1b[J"
 	assistantStreamText         = "stream visible from pty smoke backend"
 	ctrlCExitStatusText         = "Ctrl+C again to exit"
 	contextCanceledText         = "context canceled"
@@ -80,7 +89,7 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
 				writePTY(t, master, "/exit\r")
 				waitForRunReturn(t, runResult)
-				waitForSubsequence(t, collector, 0, altScreenExitSeq)
+				waitForSubsequence(t, collector, 0, exitRestoreSeq)
 			},
 		},
 		{
@@ -112,7 +121,7 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
 				writePTY(t, master, "/exit\r")
 				waitForRunReturn(t, runResult)
-				waitForSubsequence(t, collector, 0, altScreenExitSeq)
+				waitForSubsequence(t, collector, 0, exitRestoreSeq)
 			},
 		},
 	})
@@ -177,7 +186,6 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 		}
 	})
 
-	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
 	waitForSubsequence(t, collector, 0, "current transcript marker")
 	writePTY(t, master, "/resume\r")
 	waitForSubsequence(t, collector, 0, "Resume Session")
@@ -197,30 +205,36 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
-	resumeScreen, resizeRaw := waitForTerminalScreen(t, collector, resizeOffset, 140, 34, ptyScreenHasResumeEvidence)
-	redrawOffset := bytes.Index(resizeRaw, []byte(bubbleTeaFullRedrawSeq))
+	// The finished transcript (selectedAssistantTranscript) was already
+	// flushed to native scrollback via tea.Println before this resize, so it
+	// is outside the emulator's tracked screen window in inline mode; only
+	// the footer's session ID and the absence of the Resume picker remain
+	// checkable here.
+	resumeScreen, resizeRaw := waitForTerminalScreen(t, collector, resizeOffset, 140, 34, func(screen *ptyTerminalScreen) bool {
+		if screen.FullRedraws() == 0 || !screen.Complete() {
+			return false
+		}
+		content := screen.String()
+		return strings.Contains(content, selectedResumeSessionID) && !strings.Contains(content, "Resume Session")
+	})
+	redrawOffset := bytes.Index(resizeRaw, []byte(fullRedrawSeq))
 	if redrawOffset < 0 {
-		t.Fatalf("post-resize raw output = %s, want Bubble Tea full-redraw delimiter %q", tailTerminalOutput(resizeRaw), bubbleTeaFullRedrawSeq)
+		t.Fatalf("post-resize raw output = %s, want Bubble Tea full-redraw delimiter %q", tailTerminalOutput(resizeRaw), fullRedrawSeq)
 	}
 	if resumeScreen.width != 140 || resumeScreen.height != 34 {
 		t.Fatalf("post-resize terminal screen = %dx%d, want 140x34", resumeScreen.width, resumeScreen.height)
 	}
-	if x, y, visible := resumeScreen.Cursor(); !visible || x != 4 || y != 30 {
-		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (4,30) visible", x, y, visible)
+	if x, y, visible := resumeScreen.Cursor(); !visible || x != 4 || y != 2 {
+		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (4,2) visible", x, y, visible)
 	}
-	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains transcript+session ID and no Resume modal; accepted sequences=%q", bubbleTeaFullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
+	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains session ID and no Resume modal; accepted sequences=%q", fullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
 
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, altScreenExitSeq)
+	waitForSubsequence(t, collector, 0, exitRestoreSeq)
 
 	if !runResult.Finished() {
 		t.Fatal("run process was still active before terminal restoration check")
-	}
-	output := collector.Snapshot()
-	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
-	if enters != 1 || exits != 1 {
-		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
 	}
 	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
 	if err != nil {
@@ -229,7 +243,6 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if *restoredMode != *initialMode {
 		t.Fatalf("terminal mode leaked after process exit: %s", diffTermios(*initialMode, *restoredMode))
 	}
-	t.Logf("PTY escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
 }
 
 func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
@@ -291,7 +304,6 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 		}
 	})
 
-	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
 	waitForSubsequence(t, collector, 0, "current archive transcript")
 	writePTY(t, master, "/archive\r")
 	waitForSubsequence(t, collector, 0, "Archive Session")
@@ -311,15 +323,10 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, altScreenExitSeq)
+	waitForSubsequence(t, collector, 0, exitRestoreSeq)
 
 	if !runResult.Finished() {
 		t.Fatal("run process was still active before terminal restoration check")
-	}
-	output := collector.Snapshot()
-	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
-	if enters != 1 || exits != 1 {
-		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
 	}
 	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
 	if err != nil {
@@ -328,7 +335,7 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 	if *restoredMode != *initialMode {
 		t.Fatalf("terminal mode leaked after process exit: %s", diffTermios(*initialMode, *restoredMode))
 	}
-	t.Logf("PTY archive evidence: picker opened, target archived to %s, alt-screen enter=%d exit=%d, termios restored", archivedPath, enters, exits)
+	t.Logf("PTY archive evidence: picker opened, target archived to %s, termios restored", archivedPath)
 }
 
 func diffTermios(initial, restored unix.Termios) string {
@@ -428,9 +435,7 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 		}
 	})
 
-	enterOffset := waitForSubsequence(t, collector, 0, altScreenEnterSeq)
-	screenOffset := enterOffset + len(altScreenEnterSeq)
-	waitForSubsequence(t, collector, screenOffset, wideFooterMarker)
+	screenOffset := waitForSubsequence(t, collector, 0, wideFooterMarker)
 
 	writePTY(t, master, "/c")
 	waitForSubsequence(t, collector, screenOffset, "compact context")
@@ -452,8 +457,8 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 			!strings.Contains(content, "compact context")
 	})
 	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
-	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 26 {
-		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,26) visible", x, y, visible, expectedCursorX)
+	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 2 {
+		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,2) visible", x, y, visible, expectedCursorX)
 	}
 
 	writePTY(t, master, "\r")
@@ -475,32 +480,31 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
+	// contextCanceledText was already confirmed above (waitForSubsequence at
+	// screenOffset); by this point later turns have pushed it into native
+	// scrollback, outside the emulator's tracked screen window, so it is not
+	// re-checked here.
 	compactScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
 		return screen.FullRedraws() > 0 && screen.Complete() &&
 			strings.Contains(content, narrowFooterMarker) &&
 			strings.Contains(content, "[context] no-op") &&
-			strings.Contains(content, contextCanceledText) &&
 			!strings.Contains(content, "compact context")
 	})
-	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 20 {
-		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,20) visible", x, y, visible)
+	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 2 {
+		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,2) visible", x, y, visible)
 	}
 	if sequences := compactScreen.AcceptedCSI(); len(sequences) == 0 {
 		t.Fatal("compaction screen accepted no CSI sequences")
 	}
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, altScreenExitSeq)
+	waitForSubsequence(t, collector, 0, exitRestoreSeq)
 
 	if !runResult.Finished() {
 		t.Fatal("run process was still active before terminal restoration check")
 	}
 	output := collector.Snapshot()
-	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
-	if enters != 1 || exits != 1 {
-		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
-	}
 	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
 	if err != nil {
 		t.Fatalf("read restored terminal mode: %v", err)
@@ -513,7 +517,6 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	}
 
 	t.Logf("PTY compaction accepted sequences=%q", compactScreen.AcceptedCSI())
-	t.Logf("PTY compaction escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
 }
 
 func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
@@ -588,7 +591,7 @@ func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
 		}
 	})
 
-	if _, err := collector.WaitForEvent(0, []byte(altScreenEnterSeq), ptyStepTimeout); err != nil {
+	if _, err := collector.WaitForEvent(0, []byte(cursorShowSeq), ptyStepTimeout); err != nil {
 		t.Fatal(err)
 	}
 	writePTY(t, master, "run sandboxed bash\r")
@@ -600,7 +603,7 @@ func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
 	}
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	if _, err := collector.WaitForEvent(0, []byte(altScreenExitSeq), ptyStepTimeout); err != nil {
+	if _, err := collector.WaitForEvent(0, []byte(exitRestoreSeq), ptyStepTimeout); err != nil {
 		t.Fatal(err)
 	}
 
@@ -655,7 +658,6 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 		t.Fatalf("pty.Setsize(100x30) error = %v", err)
 	}
 
-	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
 	waitForSubsequence(t, collector, 0, wideFooterMarker)
 
 	writePTY(t, master, "lifecycle prompt\r")
@@ -675,8 +677,8 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 			strings.Contains(content, narrowFooterMarker) &&
 			!strings.Contains(content, footerSessionMarker)
 	})
-	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 20 {
-		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,20) visible", x, y, visible)
+	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 6 {
+		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,6) visible", x, y, visible)
 	}
 	t.Logf("PTY lifecycle accepted sequences=%q", lifecycleScreen.AcceptedCSI())
 
@@ -689,7 +691,7 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 
 	writePTY(t, master, "\x03")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, altScreenExitSeq)
+	waitForSubsequence(t, collector, 0, exitRestoreSeq)
 }
 
 type ptySmokeBackend struct {
@@ -1106,7 +1108,7 @@ func TestPTYTerminalScreenRejectsUnsupportedControlsAndCSI(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			screen := newPTYTerminalScreen(140, 34)
-			validEvidence := bubbleTeaFullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID
+			validEvidence := fullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID
 			if _, err := screen.Write([]byte(validEvidence)); err != nil {
 				t.Fatalf("write valid evidence: %v", err)
 			}
@@ -1152,7 +1154,7 @@ func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.
 		{
 			name: "split incremental insert-line update preserves one screen",
 			chunks: []string{
-				bubbleTeaFullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID,
+				fullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID,
 				"\r\x1b[2", "d\x1b[1", "L",
 			},
 			want:        true,
@@ -1160,7 +1162,7 @@ func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.
 		},
 		{
 			name:        "one full redraw still showing modal",
-			chunks:      []string{bubbleTeaFullRedrawSeq + selectedAssistantTranscript + " " + selectedResumeSessionID + " Resume Session"},
+			chunks:      []string{fullRedrawSeq + selectedAssistantTranscript + " " + selectedResumeSessionID + " Resume Session"},
 			want:        false,
 			wantRedraws: 1,
 		},

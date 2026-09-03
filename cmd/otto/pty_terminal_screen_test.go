@@ -21,7 +21,6 @@ type ptyTerminalScreen struct {
 	x, y          int
 	cells         [][]rune
 	pending       []byte
-	homePending   bool
 	cursorVisible bool
 	fullRedraws   int
 	acceptedCSI   map[string]struct{}
@@ -71,7 +70,6 @@ func (s *ptyTerminalScreen) consume() (int, bool, error) {
 		return s.consumeCSI()
 	}
 
-	s.homePending = false
 	switch s.pending[0] {
 	case '\r':
 		s.x = 0
@@ -146,9 +144,6 @@ func (s *ptyTerminalScreen) consumeCSI() (int, bool, error) {
 }
 
 func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
-	wasHome := s.homePending
-	s.homePending = false
-
 	switch final {
 	case 'm':
 		if err := validatePTYSGRParams(rawParams); err != nil {
@@ -167,7 +162,6 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 		row := ptyCSIParam(params, 0, 1) - 1
 		column := ptyCSIParam(params, 1, 1) - 1
 		s.moveTo(column, row)
-		s.homePending = s.x == 0 && s.y == 0
 	case 'd':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
@@ -186,25 +180,45 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 			return err
 		}
 		s.moveTo(s.x, s.y-ptyCSIParam(params, 0, 1))
+	case 'B':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		s.moveTo(s.x, s.y+ptyCSIParam(params, 0, 1))
 	case 'C':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
 			return err
 		}
 		s.moveTo(s.x+ptyCSIParam(params, 0, 1), s.y)
+	case 'D':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		s.moveTo(s.x-ptyCSIParam(params, 0, 1), s.y)
 	case 'J':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
 			return err
 		}
 		mode := ptyCSIParam(params, 0, 0)
-		if mode != 2 {
+		switch mode {
+		case 0:
+			s.eraseRow(s.y, s.x, s.width-1)
+			for row := s.y + 1; row < s.height; row++ {
+				s.cells[row] = blankPTYRow(s.width)
+			}
+		case 2:
+			s.clear()
+		default:
 			return fmt.Errorf("unsupported erase-display mode %d", mode)
 		}
-		s.clear()
-		if wasHome {
-			s.fullRedraws++
-		}
+		// Bubble Tea's inline renderer issues erase-display immediately before
+		// redrawing the live region from scratch, so every accepted erase is a
+		// full-frame redraw boundary.
+		s.fullRedraws++
 	case 'K':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
@@ -253,7 +267,7 @@ func validatePTYSGRParams(raw string) error {
 
 	// These are the exact SGR forms observed in both post-resize PTY slices.
 	switch raw {
-	case "", "1", "22", "30", "37", "37;40", "38;5;240", "38;5;240;27", "38;5;252", "39", "39;7", "40", "48;5;236":
+	case "", "0", "1", "22", "30", "37", "37;40", "38;5;240", "38;5;240;27", "38;5;252", "39", "39;7", "40", "48;5;236":
 		return nil
 	default:
 		return fmt.Errorf("unobserved SGR params %q", raw)
@@ -267,6 +281,7 @@ func TestValidatePTYSGRParams(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "accept empty", raw: ""},
+		{name: "accept reset", raw: "0"},
 		{name: "accept bold", raw: "1"},
 		{name: "accept normal intensity", raw: "22"},
 		{name: "accept black foreground", raw: "30"},
@@ -402,7 +417,6 @@ func (s *ptyTerminalScreen) insertLines(count int) {
 }
 
 func (s *ptyTerminalScreen) reverseIndex() {
-	s.homePending = false
 	if s.y > 0 {
 		s.y--
 		return

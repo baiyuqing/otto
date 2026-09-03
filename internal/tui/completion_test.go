@@ -24,7 +24,7 @@ func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 	// Seed the transcript so the empty-state hint (which legitimately mentions
 	// /help and /resume) does not interfere with the suggestion scan below.
 	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: "context", Rendered: "context", RenderWidth: 80}}
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 	m = typeEditorText(t, m, "/s")
 
 	content := m.View().Content
@@ -155,6 +155,14 @@ func TestSlashCommandCompletionClampsStaleSelection(t *testing.T) {
 
 func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
+	// Seed a live (uncommitted) assistant entry tall enough to fill the
+	// available transcript space; with no live content the transcript
+	// height floors at 1 regardless of the suggestion panel, so the height
+	// transitions this test exercises need real live content to observe.
+	m.running = true
+	m.activeAssistant = 0
+	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: strings.Repeat("line\n", 40)}}
+	m.rerenderAndRefreshViewportContent()
 	if got := m.viewport.Height(); got != 6 {
 		t.Fatalf("initial viewport height = %d, want 6", got)
 	}
@@ -220,60 +228,33 @@ func TestSlashCommandMultilineArrowsAndOverlayTransitionsUseUpdate(t *testing.T)
 	}
 }
 
-func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
+// TestSlashCommandResizeStaysConsistent replaces the old scroll/autoFollow
+// test: PageUp/PageDown/Home/End no longer route to the viewport (native
+// terminal scrollback replaces them), so this only checks that resizing a
+// live (uncommitted) multi-line entry keeps the live region within bounds
+// and that suggestions still work afterward.
+func TestSlashCommandResizeStaysConsistent(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
+	m.running = true
+	m.activeAssistant = 0
 	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: strings.Repeat("line\n", 40)}}
-	m.rerenderAndRefreshViewportContent(false)
-	m.autoFollow = false
-	m.viewport.SetYOffset(3)
-	m = typeEditorText(t, m, "/")
-	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 1 {
-		t.Fatalf("suggestion scroll state: offset=%d follow=%v height=%d", m.viewport.YOffset(), m.autoFollow, m.viewport.Height())
+	m.rerenderAndRefreshViewportContent()
+	if m.viewport.Height() < 1 {
+		t.Fatalf("viewport height = %d, want at least 1", m.viewport.Height())
 	}
-
-	beforePageUp := m.viewport.YOffset()
-	updated, _ := m.Update(keyPress(tea.KeyPgUp))
-	m = updated.(Model)
-	if m.viewport.YOffset() >= beforePageUp {
-		t.Fatalf("page up offset = %d, want less than %d", m.viewport.YOffset(), beforePageUp)
-	}
-	updated, _ = m.Update(keyPress(tea.KeyPgDown))
-	m = updated.(Model)
-	if m.viewport.YOffset() <= 0 {
-		t.Fatalf("page down offset = %d, want positive", m.viewport.YOffset())
-	}
-	m.editor.CursorStart()
-	updated, _ = m.Update(keyPress(tea.KeyHome))
-	m = updated.(Model)
-	if m.viewport.YOffset() != 0 {
-		t.Fatalf("home offset = %d, want 0", m.viewport.YOffset())
-	}
-	m.editor.CursorEnd()
-	updated, _ = m.Update(keyPress(tea.KeyEnd))
-	m = updated.(Model)
-	if !m.viewport.AtBottom() || !m.autoFollow {
-		t.Fatalf("end state: bottom=%v follow=%v", m.viewport.AtBottom(), m.autoFollow)
-	}
+	assertRenderedBounds(t, m.View().Content, 80, 12)
 
 	m = resizeModel(t, m, 40, 8)
-	if m.viewport.Height() != 1 {
-		t.Fatalf("minimum viewport height = %d, want 1", m.viewport.Height())
-	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
 	m = resizeModel(t, m, 100, 20)
-	if m.viewport.Height() != 2 {
-		t.Fatalf("expanded viewport height = %d, want 2", m.viewport.Height())
-	}
 	assertRenderedBounds(t, m.View().Content, 100, 20)
 
 	m.editor.SetValue("")
 	m.commandSuggestionIndex = 0
-	m.rerenderAndRefreshViewportContent(false)
-	m.autoFollow = true
-	m.viewport.GotoBottom()
+	m.rerenderAndRefreshViewportContent()
 	m = typeEditorText(t, m, "/")
-	if !m.autoFollow || !m.viewport.AtBottom() {
-		t.Fatalf("bottom transition: follow=%v bottom=%v", m.autoFollow, m.viewport.AtBottom())
+	if len(m.commandSuggestions()) == 0 {
+		t.Fatalf("expected slash suggestions after typing /")
 	}
 }
 
@@ -303,7 +284,12 @@ func TestSlashCommandSuggestionsDoNotOverrideRunningCancellation(t *testing.T) {
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, start := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. tea.Batch doesn't invoke its
+	// sub-commands when called, so start() below would never start the
+	// backend goroutine and <-started would hang forever.
+	updated, start := m.dispatch(keyPress(tea.KeyEnter))
 	m = updated.(Model)
 	done := make(chan tea.Msg, 1)
 	go func() { done <- start() }()
@@ -314,7 +300,11 @@ func TestSlashCommandSuggestionsDoNotOverrideRunningCancellation(t *testing.T) {
 	}
 
 	m = typeEditorText(t, m, "/")
-	updated, cmd := m.Update(keyPress(tea.KeyEscape))
+	// dispatch, not Update: the "question" submission above left
+	// pendingPrints undrained (it also used dispatch, for the same reason
+	// noted there). An Update call here would auto-flush that leftover
+	// chunk and return a non-nil cmd unrelated to escape handling.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEscape))
 	m = updated.(Model)
 	if cmd != nil || !m.running {
 		t.Fatalf("escape state: cmd=%v running=%v", cmd, m.running)

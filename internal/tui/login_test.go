@@ -33,7 +33,7 @@ func withTUIAuthSeams(t *testing.T, login func(context.Context, func(string) err
 func submitCommand(t *testing.T, m Model, value string) (Model, tea.Cmd) {
 	t.Helper()
 	m.editor.SetValue(value)
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	return updated.(Model), cmd
 }
 
@@ -66,8 +66,8 @@ func TestLoginStatusCommandRendersStatus(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("cmd = %v, want nil", cmd)
 	}
-	if content := got.View().Content; strings.Contains(content, "acct-42") || !strings.Contains(content, "Signed in to ChatGPT") {
-		t.Fatalf("view = %q", content)
+	if content := strings.Join(got.pendingPrints, "\n"); strings.Contains(content, "acct-42") || !strings.Contains(content, "Signed in to ChatGPT") {
+		t.Fatalf("committed transcript = %q", content)
 	}
 }
 
@@ -75,8 +75,8 @@ func TestLoginStatusReportsNotSignedIn(t *testing.T) {
 	ctx, _ := withTUIAuthSeams(t, nil)
 	m := resizeModel(t, NewModel(ctx, &fakeBackend{}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 20)
 	got, _ := submitCommand(t, m, "/login status")
-	if !strings.Contains(got.View().Content, "Not signed in") {
-		t.Fatalf("view = %q", got.View().Content)
+	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "Not signed in") {
+		t.Fatalf("committed transcript = %q", content)
 	}
 }
 
@@ -100,27 +100,27 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 	}
 
 	urlMsg := runCommandWithin(t, cmd, time.Second)
-	updated, cmd := pending.Update(urlMsg)
+	updated, cmd := pending.dispatch(urlMsg)
 	pending = updated.(Model)
 	if cmd == nil {
 		t.Fatal("expected a follow-up wait command after URL notice")
 	}
-	if !strings.Contains(pending.View().Content, "auth.example") {
-		t.Fatalf("view missing URL: %q", pending.View().Content)
+	if content := strings.Join(pending.pendingPrints, "\n"); !strings.Contains(content, "auth.example") {
+		t.Fatalf("committed transcript missing URL: %q", content)
 	}
 
 	doneMsg := runCommandWithin(t, cmd, time.Second)
-	updated, _ = pending.Update(doneMsg)
+	updated, _ = pending.dispatch(doneMsg)
 	got := updated.(Model)
 	if got.loginPending {
 		t.Fatal("loginPending = true after completion")
 	}
-	content := got.View().Content
+	content := strings.Join(got.pendingPrints, "\n")
 	if strings.Contains(content, "acct-7") || !strings.Contains(content, "Signed in to ChatGPT") || !strings.Contains(content, "Restart Otto") {
-		t.Fatalf("view = %q", content)
+		t.Fatalf("committed transcript = %q", content)
 	}
 	if strings.Contains(content, "secret-token") {
-		t.Fatalf("view leaked the access token: %q", content)
+		t.Fatalf("committed transcript leaked the access token: %q", content)
 	}
 	creds, err := auth.Load(path)
 	if err != nil {
@@ -152,8 +152,8 @@ func TestLoginNonChatGPTProviderExplainsAPIKey(t *testing.T) {
 	if called {
 		t.Fatal("login ran the OAuth flow for a non-chatgpt provider")
 	}
-	if !strings.Contains(got.View().Content, "API key") {
-		t.Fatalf("view = %q", got.View().Content)
+	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "API key") {
+		t.Fatalf("committed transcript = %q", content)
 	}
 }
 
@@ -164,8 +164,8 @@ func TestLogoutCommandRemovesCredentials(t *testing.T) {
 	}
 	m := resizeModel(t, NewModel(ctx, &fakeBackend{}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 20)
 	got, _ := submitCommand(t, m, "/logout")
-	if !strings.Contains(got.View().Content, "Signed out") {
-		t.Fatalf("view = %q", got.View().Content)
+	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "Signed out") {
+		t.Fatalf("committed transcript = %q", content)
 	}
 	if _, err := auth.Load(path); err != auth.ErrNoCredentials {
 		t.Fatalf("credentials still present: %v", err)
@@ -192,8 +192,8 @@ func TestLogoutCommandWhenNotSignedIn(t *testing.T) {
 	ctx, _ := withTUIAuthSeams(t, nil)
 	m := resizeModel(t, NewModel(ctx, &fakeBackend{}, WithRenderer(rendererFunc(func(text string, _ int) (string, error) { return text, nil }))), 80, 20)
 	got, _ := submitCommand(t, m, "/logout")
-	if !strings.Contains(got.View().Content, "Not signed in") {
-		t.Fatalf("view = %q", got.View().Content)
+	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "Not signed in") {
+		t.Fatalf("committed transcript = %q", content)
 	}
 }
 
@@ -214,8 +214,9 @@ func TestLoginCommandsUnavailableWhenDynamicContentIsSuppressed(t *testing.T) {
 			t.Fatalf("%s scheduled cmd %v, want nil", command, cmd)
 		}
 		m = updated
-		if !strings.Contains(m.View().Content, auth.ErrInteractiveUnavailable.Error()) {
-			t.Fatalf("%s view = %q", command, m.View().Content)
+		content := strings.Join(m.pendingPrints, "\n")
+		if !strings.Contains(content, auth.ErrInteractiveUnavailable.Error()) {
+			t.Fatalf("%s committed transcript = %q", command, content)
 		}
 	}
 	if loginCalls != 0 {

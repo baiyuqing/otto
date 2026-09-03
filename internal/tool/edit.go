@@ -51,7 +51,7 @@ func (t *editTool) Definition() model.ToolDefinition {
 
 func (t *editTool) Execute(_ context.Context, arguments json.RawMessage) Result {
 	var args editArgs
-	if err := decodeStrictJSON(arguments, &args, "path", "old_text", "new_text"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "path", "old_text", "new_text"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if args.Path == "" {

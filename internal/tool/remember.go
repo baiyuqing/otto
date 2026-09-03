@@ -56,7 +56,7 @@ func (t *rememberTool) Definition() model.ToolDefinition {
 
 func (t *rememberTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args rememberArgs
-	if err := decodeStrictJSON(arguments, &args, "kind", "text"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "kind", "text"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if err := ctx.Err(); err != nil {

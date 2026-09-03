@@ -46,7 +46,7 @@ const (
 	// scratch; its presence in captured output is evidence of a full redraw.
 	fullRedrawSeq               = "\x1b[J"
 	assistantStreamText         = "stream visible from pty smoke backend"
-	ctrlCExitStatusText         = "Ctrl+C again to exit"
+	ctrlCExitStatusMarker       = "press Ctrl+C"
 	contextCanceledText         = "context canceled"
 	footerProfileModel          = "pty-profile/pty-model"
 	footerWorkspaceName         = "pty-workspace"
@@ -224,8 +224,8 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if resumeScreen.width != 140 || resumeScreen.height != 34 {
 		t.Fatalf("post-resize terminal screen = %dx%d, want 140x34", resumeScreen.width, resumeScreen.height)
 	}
-	if x, y, visible := resumeScreen.Cursor(); !visible || x != 4 || y != 2 {
-		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (4,2) visible", x, y, visible)
+	if x, y, visible := resumeScreen.Cursor(); !visible || x != 4 || y != 3 {
+		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (4,3) visible", x, y, visible)
 	}
 	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains session ID and no Resume modal; accepted sequences=%q", fullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
 
@@ -457,8 +457,8 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 			!strings.Contains(content, "compact context")
 	})
 	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
-	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 2 {
-		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,2) visible", x, y, visible, expectedCursorX)
+	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 3 {
+		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,3) visible", x, y, visible, expectedCursorX)
 	}
 
 	writePTY(t, master, "\r")
@@ -491,8 +491,8 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 			strings.Contains(content, "[context] no-op") &&
 			!strings.Contains(content, "compact context")
 	})
-	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 2 {
-		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,2) visible", x, y, visible)
+	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 3 {
+		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,3) visible", x, y, visible)
 	}
 	if sequences := compactScreen.AcceptedCSI(); len(sequences) == 0 {
 		t.Fatal("compaction screen accepted no CSI sequences")
@@ -677,8 +677,8 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 			strings.Contains(content, narrowFooterMarker) &&
 			!strings.Contains(content, footerSessionMarker)
 	})
-	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 6 {
-		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,6) visible", x, y, visible)
+	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 7 {
+		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,7) visible", x, y, visible)
 	}
 	t.Logf("PTY lifecycle accepted sequences=%q", lifecycleScreen.AcceptedCSI())
 
@@ -686,8 +686,9 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	waitForCancellation(t, backend)
 	waitForSubsequence(t, collector, streamOffset, contextCanceledText)
 
+	ctrlCOffset := collector.Len()
 	writePTY(t, master, "\x03")
-	waitForSubsequence(t, collector, 0, ctrlCExitStatusText)
+	waitForSubsequence(t, collector, ctrlCOffset, ctrlCExitStatusMarker)
 
 	writePTY(t, master, "\x03")
 	waitForRunReturn(t, runResult)

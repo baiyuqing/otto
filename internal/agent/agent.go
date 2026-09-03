@@ -67,12 +67,19 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 	return &Agent{provider: completionProvider, registry: registry, session: memory, options: options, redactor: redactor}
 }
 
-// Close releases resources held by the agent's memory binding, if any.
+// Close releases resources held by the agent's memory binding, if any, and
+// cancels any tasks still tracked by the agent's task registry.
 func (a *Agent) Close() error {
+	a.options.Tasks.Close()
 	if a.options.Memory == nil {
 		return nil
 	}
 	return a.options.Memory.Close()
+}
+
+// Tasks returns the agent's sub-agent task registry, or nil if none is set.
+func (a *Agent) Tasks() *Tasks {
+	return a.options.Tasks
 }
 
 func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) error {
@@ -82,33 +89,43 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 	if !a.redactor.complete {
 		return a.runWithIncompleteRedactions(ctx, emit)
 	}
-	if text := trimSpace(userText); text == "" {
+	text := trimSpace(userText)
+	if text == "" && a.options.Inbox.Len() == 0 {
 		return a.fail(emit, ErrEmptyUserText)
 	}
 
 	a.emit(emit, Event{Type: EventAgentStarted})
-	userText = a.redactor.RedactString(userText)
-	if err := a.session.Append(ctx, model.Message{
-		ID:        a.options.NewID(),
-		Role:      model.RoleUser,
-		CreatedAt: a.options.Now(),
-		Blocks:    []model.Block{{Type: model.BlockText, Text: userText}},
-	}); err != nil {
-		return a.fail(emit, fmt.Errorf("persist user message: %w", err))
-	}
 
 	dispatchState := runDispatchState{}
-	if a.options.Memory != nil {
-		result, err := a.options.Memory.Recall(ctx, memory.RecallRequest{
-			Query:       userText,
-			Limit:       a.options.MemoryRecallLimit,
-			TokenBudget: a.options.MemoryRecallTokenBudget,
-		})
-		if err != nil {
-			a.emit(emit, Event{Type: EventMemoryWarning, Err: err})
-		} else {
-			dispatchState.memoryContext = a.redactor.RedactString(renderMemoryContext(result.Records))
+	if text != "" {
+		userText = a.redactor.RedactString(userText)
+		if err := a.session.Append(ctx, model.Message{
+			ID:        a.options.NewID(),
+			Role:      model.RoleUser,
+			CreatedAt: a.options.Now(),
+			Blocks:    []model.Block{{Type: model.BlockText, Text: userText}},
+		}); err != nil {
+			return a.fail(emit, fmt.Errorf("persist user message: %w", err))
 		}
+
+		if a.options.Memory != nil {
+			result, err := a.options.Memory.Recall(ctx, memory.RecallRequest{
+				Query:       userText,
+				Limit:       a.options.MemoryRecallLimit,
+				TokenBudget: a.options.MemoryRecallTokenBudget,
+			})
+			if err != nil {
+				a.emit(emit, Event{Type: EventMemoryWarning, Err: err})
+			} else {
+				dispatchState.memoryContext = a.redactor.RedactString(renderMemoryContext(result.Records))
+			}
+		}
+	}
+	// text == "" here only when the inbox is non-empty (a wake turn): no
+	// user message is appended and memory recall is skipped, since there is
+	// no user text to query with.
+	if err := a.deliverNotifications(ctx, emit); err != nil {
+		return a.fail(emit, err)
 	}
 
 	for {
@@ -191,7 +208,37 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 			a.emit(emit, Event{Type: EventAgentFinished})
 			return nil
 		}
+		if err := a.deliverNotifications(ctx, emit); err != nil {
+			return a.fail(emit, err)
+		}
 	}
+}
+
+// deliverNotifications drains the agent's inbox and appends each
+// notification to the session as a display context message, emitting an
+// EventNotification for each. It is a no-op when Options.Inbox is nil or
+// empty.
+func (a *Agent) deliverNotifications(ctx context.Context, emit func(Event)) error {
+	for _, notification := range a.options.Inbox.Drain() {
+		text := a.redactor.RedactString(notification.Text)
+		if err := a.session.Append(ctx, model.Message{
+			ID:          a.options.NewID(),
+			Role:        model.RoleContext,
+			ContextType: notification.ContextType(),
+			Display:     true,
+			CreatedAt:   a.options.Now(),
+			Usage:       notification.Usage,
+			Blocks:      []model.Block{{Type: model.BlockText, Text: text}},
+		}); err != nil {
+			return fmt.Errorf("persist notification: %w", err)
+		}
+		var usage model.Usage
+		if notification.Usage != nil {
+			usage = *notification.Usage
+		}
+		a.emit(emit, Event{Type: EventNotification, TaskID: notification.TaskID, Text: text, Usage: usage})
+	}
+	return nil
 }
 
 func (a *Agent) dispatchNormalProviderStep(ctx context.Context, emit func(Event), state *runDispatchState) (provider.Response, error) {

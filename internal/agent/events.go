@@ -25,6 +25,7 @@ const (
 	EventCompactionWarning   EventType = "compaction_warning"
 	EventMemoryWarning       EventType = "memory_warning"
 	EventAgentError          EventType = "agent_error"
+	EventNotification        EventType = "notification"
 )
 
 type Event struct {
@@ -38,6 +39,7 @@ type Event struct {
 	Compaction *CompactionEvent
 	Plan       *CompactionPlan
 	Err        error
+	TaskID     string
 }
 
 // CompactionReason identifies why a checkpoint was requested.
@@ -115,6 +117,8 @@ type Options struct {
 	Memory                  memory.Binding
 	MemoryRecallLimit       int
 	MemoryRecallTokenBudget int
+	Inbox                   *Inbox
+	Tasks                   *Tasks
 }
 
 var (

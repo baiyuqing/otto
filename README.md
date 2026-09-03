@@ -24,6 +24,7 @@ For the full usage reference, see the [Otto user manual](docs/user-manual.md).
 - Persistent append-only Pi v3 JSONL sessions with `--continue` and `--resume`
 - Non-destructive session archiving with `/archive`, `--archive PATH`, and the `archive/` storage directory
 - Global TOML configuration at `~/.config/otto/config.toml`
+- On-demand skills: reusable instruction sets loaded from `~/.otto/skills` and workspace `.otto/skills` directories
 - `--thinking` pass-through for model reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`)
 - `--approve` headless mode for non-interactive single-prompt runs
 
@@ -32,7 +33,7 @@ For the full usage reference, see the [Otto user manual](docs/user-manual.md).
 - Codex subscription login
 - Claude subscription login
 - Anthropic-native provider support
-- Plugins, skills, or project-local config
+- Plugins or project-local config (workspace-level skills are included; see [Skills](#skills))
 - Windows or Linux support commitments
 - Session trees/forks, session naming, deletion, or search
 
@@ -89,6 +90,10 @@ driver = "auto"
 network = "allow"
 read_paths = []
 allow_env = []
+
+[skills]
+enabled = true
+paths = ["~/.otto/skills", ".otto/skills"]
 
 [profiles.deepseek]
 provider = "openai-compatible"
@@ -213,6 +218,7 @@ Startup resolution is field-specific:
 - **ChatGPT subscription:** the `chatgpt` provider uses OAuth credentials from `otto login` (`~/.otto/auth/chatgpt.json`) and ignores `base_url` and API-key settings; it still requires `model`. See [ChatGPT subscription](#chatgpt-subscription-stage-2).
 - **Agent limits:** direct `--shell-timeout` and `--max-output-bytes` values override `[agent]` values, which override built-in defaults. Profiles and resumed sessions do not contain these limits.
 - **Sandbox:** `--sandbox auto|seatbelt|off` overrides `[sandbox].driver`; otherwise `[sandbox].driver` overrides the built-in `auto`. `network`, `read_paths`, and `allow_env` come from `[sandbox]` only. Sandbox policy is process-wide and does not change on `/new`, `--continue`, or `/resume`.
+- **Skills:** `[skills]` is TOML-only with no CLI flags or environment variables. Skill discovery runs on each runner build (startup, `/new`, `/resume`, `/model`); within a session the catalog is fixed. Existing skill roots are appended to Seatbelt read paths only at process start.
 - **Thinking effort:** `--thinking` (`low`, `medium`, `high`, `xhigh`, or `max`) is sent as `reasoning_effort` on OpenAI-compatible requests. It has no environment variable or TOML key and is omitted from requests when unset. Like agent limits, it stays in effect across in-process `/resume` and `/new`.
 
 Startup `--continue` / `--resume` therefore restores session provider/model only as defaults: direct flags and `OTTO_PROVIDER` / `OTTO_MODEL` can override them as described above. In contrast, an in-process TUI `/resume` restores the selected session's stored provider/model and ignores the process's provider/model/profile/base-URL overrides and `OTTO_PROVIDER` / `OTTO_MODEL`; its stored profile selects the endpoint and key environment. Agent-limit overrides remain in effect. `/new` returns to the runtime resolved at process startup.
@@ -328,6 +334,41 @@ Not yet implemented:
 - No `otto memory backup|backups|verify|restore` subcommands.
 
 Design reference: [`docs/superpowers/specs/2026-08-29-extensible-memory-design.md`](docs/superpowers/specs/2026-08-29-extensible-memory-design.md).
+
+## Skills
+
+Otto can load reusable instruction sets ("skills") on demand. A skill is a directory containing a `SKILL.md` file with YAML frontmatter and Markdown body, following the Agent Skills format so existing skills can be copied in unchanged. Skills from `~/.otto/skills` (user level) and `<workspace>/.otto/skills` (workspace level) are discovered automatically on startup and `/new` / `/resume` / `/model`. The model sees a compact listing of every available skill in the system prompt and can request the full instructions of a specific skill by name.
+
+Config (`[skills]` in TOML; all keys optional):
+
+```toml
+[skills]
+enabled = true                              # default true
+paths = ["~/.otto/skills", ".otto/skills"]  # default; later entries win on a name conflict
+```
+
+- `~/` expands to the user's home directory.
+- Relative entries resolve against the workspace.
+- `paths = []` leaves no roots; `enabled = false` turns the feature off.
+- `enabled = false` skips discovery, the tool, the prompt section, and sandbox read paths.
+
+What's wired:
+
+- **Prompt listing:** when at least one skill is found, a `## Skills` section appears in the system prompt after the `## Environment` section, capped at 8 KiB; skills that do not fit are dropped with a stderr warning.
+- **Skill tool:** the `skill` tool is registered only when the catalog is non-empty and returns a skill's instructions by name, plus a listing of supporting files within the skill directory. A second optional `file` parameter reads a single file inside the skill directory.
+- **Sandbox integration:** existing skill roots are appended to the macOS Seatbelt read paths at process start, so `bash` can run skill scripts by absolute path. Roots that do not exist are not added; `enabled = false` adds none.
+- **Validation and warnings:** `name` must equal the directory name (1 to 64 characters of `a-z`, `0-9`, `-`; no leading, trailing, or doubled hyphen) and `description` must be 1 to 1024 characters. Other frontmatter keys are ignored. An invalid skill or an unreadable root prints one `warning: skill ...` line on stderr and is skipped; startup never fails because of a skill.
+- **Cost and persistence:** the listing is re-sent on every request (about 80 tokens per skill). A loaded `SKILL.md` body is a normal tool result: it is written to the session file, survives `/resume`, and is re-sent on every later request until compaction. Tool output is capped at `[agent].max_output_bytes`.
+- **Trust:** skill text is user- or repository-provided instruction text of the same class as `AGENTS.md`; it cannot override the system prompt, the user's requests, or the sandbox policy, and it passes through the API-key redactor. Never store secrets in skill files.
+
+Not yet implemented:
+
+- `/skills` and `/skill <name>` user commands — the skill tool is available to the model only today.
+- `allowed-tools` enforcement per skill (parsed but ignored).
+- Hot reload inside a session: a skill added while Otto runs is discovered on the next `/new`, `/resume`, or `/model`; a root created while Otto runs becomes readable by `bash` on the next start.
+- Reading `~/.claude/skills`.
+
+Design reference: [`docs/specs/2026-09-03-skills-design.md`](docs/specs/2026-09-03-skills-design.md).
 
 ## Frontends
 
@@ -472,11 +513,13 @@ The six file tools are always enabled and always restricted to the initial canon
 - `write` writes a complete file atomically.
 - `edit` requires exactly one exact text match and shares the 64 MiB file-size limit with `read`.
 
+The `skill` tool reads supporting files inside a selected skill directory, confined to that directory via canonical path and symlink resolution; `..`, absolute paths outside the directory, symlink escapes, and directories are rejected.
+
 Recursive `grep` and `find` skip `.git` and discovered symbolic links but include other dotfiles. Binary files, invalid UTF-8 files, and files containing lines larger than 1 MiB are skipped by `grep`. Otto canonicalizes input paths, resolves symlinks, and rejects workspace escapes.
 
 ### `bash` sandbox policy
 
-On macOS, the default is `--sandbox auto`, which means Seatbelt with whole-workspace write access plus private `home`, `tmp`, and `cache` directories under your user cache. Otto also keeps generated profile files in a separate private `profiles` directory that the sandboxed child cannot read. Host dotfiles, host caches, Git config, and other home content are not automatically readable. Broader `read_paths` are high risk: command code can read them, and with `network = "allow"` it can exfiltrate them over the network. Otto rejects `read_paths` that would include Otto's own private sandbox state.
+On macOS, the default is `--sandbox auto`, which means Seatbelt with whole-workspace write access plus private `home`, `tmp`, and `cache` directories under your user cache. Otto also keeps generated profile files in a separate private `profiles` directory that the sandboxed child cannot read. Host dotfiles, host caches, Git config, and other home content are not automatically readable. Broader `read_paths` are high risk: command code can read them, and with `network = "allow"` it can exfiltrate them over the network. Otto rejects `read_paths` that would include Otto's own private sandbox state. Existing skill roots are appended to `read_paths` automatically so skill scripts are readable; roots that do not exist are not added.
 
 `network = "allow"` is the default and permits ordinary IP networking; `network = "deny"` removes IP networking and local binds. Phase 1 has no domain allowlist, and Unix sockets stay blocked in both modes, so Docker/Podman sockets, SSH agents, and similar host control sockets are unavailable.
 

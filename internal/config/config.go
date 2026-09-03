@@ -25,6 +25,7 @@ type File struct {
 	UI             UI                 `toml:"ui"`
 	Agent          Agent              `toml:"agent"`
 	Memory         Memory             `toml:"memory"`
+	Skills         Skills             `toml:"skills"`
 	Sandbox        SandboxConfig      `toml:"sandbox"`
 	Profiles       map[string]Profile `toml:"profiles"`
 }

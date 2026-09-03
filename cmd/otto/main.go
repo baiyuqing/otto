@@ -367,7 +367,14 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		driver := strings.Clone(options.sandbox)
 		sandboxDriverOverride = &driver
 	}
-	sandboxSettings, err := config.ResolveSandbox(configFile.Sandbox, sandboxDriverOverride)
+	sandboxConfig := configFile.Sandbox
+	sandboxConfig.ReadPaths = append([]string(nil), sandboxConfig.ReadPaths...)
+	for _, root := range config.ResolveSkills(configFile, environment, workspacePath).Roots {
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			sandboxConfig.ReadPaths = append(sandboxConfig.ReadPaths, root)
+		}
+	}
+	sandboxSettings, err := config.ResolveSandbox(sandboxConfig, sandboxDriverOverride)
 	if err != nil {
 		return fail(stderr, "%v", builder.redactError(err, nil))
 	}

@@ -31,6 +31,7 @@ import (
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/sandbox/direct"
 	"github.com/baiyuqing/otto/internal/session"
+	"github.com/baiyuqing/otto/internal/skill"
 	"github.com/baiyuqing/otto/internal/tool"
 )
 
@@ -2271,6 +2272,7 @@ func TestRuntimeBuilderMandatoryFieldCollisionsSuppressBeforeProviderAndSessionM
 				tool.NewWriteTool(builder.workspace).Definition(),
 				tool.NewEditTool(builder.workspace).Definition(),
 				bashDefinition.Definition(),
+				tool.NewSkillTool(skill.Catalog{}, runtime.MaxOutputBytes).Definition(),
 			}
 			return systemPromptFor(definitions, builder.sandboxInfo)
 		}},

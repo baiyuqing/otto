@@ -549,6 +549,89 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 	}
 }
 
+func TestRunServeRejectsConflictingFlags(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	base := []string{"serve", "--config", configPath, "--cwd", workspace}
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "ui", args: append(append([]string{}, base...), "--ui", "repl"), want: "otto: serve cannot be combined with --ui\n"},
+		{name: "approve", args: append(append([]string{}, base...), "--approve", "x"), want: "otto: serve cannot be combined with --approve\n"},
+		{name: "resume", args: append(append([]string{}, base...), "--resume", "anything"), want: "otto: serve cannot be combined with --resume\n"},
+		{name: "continue", args: append(append([]string{}, base...), "--continue"), want: "otto: serve cannot be combined with --continue\n"},
+		{name: "archive", args: append(append([]string{}, base...), "--archive", "anything"), want: "otto: serve cannot be combined with --archive\n"},
+		{name: "no-session", args: append(append([]string{}, base...), "--no-session"), want: "otto: serve cannot be combined with --no-session\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runForTest(t, context.Background(), test.args, strings.NewReader(""), &stdout, &stderr, env)
+			if code != 2 || stderr.String() != test.want {
+				t.Fatalf("code = %d, stderr = %q, want code 2, stderr %q", code, stderr.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestRunSocketFlagRequiresServeSubcommand(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+
+	var stdout, stderr bytes.Buffer
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--socket", "/tmp/otto-test.sock"}, strings.NewReader(""), &stdout, &stderr, env)
+	if want := "otto: --socket requires the serve subcommand\n"; code != 2 || stderr.String() != want {
+		t.Fatalf("code = %d, stderr = %q, want code 2, stderr %q", code, stderr.String(), want)
+	}
+}
+
+func TestRunServeRefusesWhenDynamicContentUnavailable(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.RedactionsComplete = false
+		return runtime
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"serve", "--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if want := "otto: " + errSessionOperationUnavailable.Error() + "\n"; code != 1 || !strings.HasSuffix(stderr.String(), want) {
+		t.Fatalf("code = %d, stderr = %q, want code 1 and stderr ending %q", code, stderr.String(), want)
+	}
+}
+
+func TestRunServeReachesStubWithResolvedAbsoluteSocketPath(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	wantSocket, err := filepath.Abs("relative-otto-test.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runForTest(t, context.Background(), []string{"serve", "--config", configPath, "--cwd", workspace, "--socket", "relative-otto-test.sock"}, strings.NewReader(""), &stdout, &stderr, env)
+	if code != 1 {
+		t.Fatalf("code = %d, stderr = %q, want 1", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "serve: not wired") || !strings.Contains(stderr.String(), wantSocket) {
+		t.Fatalf("stderr = %q, want it to mention the stub and %q", stderr.String(), wantSocket)
+	}
+}
+
 func TestRunRejectsInvalidBaseURLBeforeOpeningSession(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()

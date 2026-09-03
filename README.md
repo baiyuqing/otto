@@ -404,13 +404,14 @@ otto --approve @prompt.txt --no-session
 
 ### TUI behavior
 
-- The TUI uses the terminal alternate screen buffer.
+- The TUI renders inline into the terminal. Finished transcript entries are printed into the terminal's native scrollback; text selection and scrolling are handled by the terminal.
 - Assistant responses render as Markdown in the transcript.
 - If Markdown rendering fails, Otto falls back to escaped plain text instead of raw control sequences.
-- Tool calls and compaction checkpoints are folded by default; `Ctrl+O` toggles full tool arguments/output and expanded compaction summaries.
-- Mouse-wheel transcript scrolling remains enabled. Hold `Shift` while dragging to select visible terminal text, then use the terminal's normal copy command.
+- Tool calls and compaction checkpoints are folded by default; `Ctrl+O` toggles full tool arguments/output and expanded compaction summaries. Toggling affects only entries not yet printed and later entries.
+- The bottom of the screen holds a live region for the in-progress turn, slash-command suggestions, editor, and footer; its height follows its content.
 - The footer adapts to the available width and shows workspace/profile/model, token totals, and session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message until the window is large enough.
+- Window resize redraws only the live region; the terminal handles reflow of scrollback lines.
 
 ### TUI keys
 
@@ -422,9 +423,6 @@ otto --approve @prompt.txt --no-session
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle complete tool arguments, tool output, and folded compaction summaries |
-| `Shift`+drag | Select visible terminal text while mouse reporting is active |
-| Mouse wheel or `PgUp` / `PgDn` | Scroll the transcript |
-| `Home` / `End` | Jump to the top or bottom of the transcript |
 | `Esc` | Cancel the active turn or close the current overlay |
 | `Ctrl+C` | Cancel, clear, then quit on a second press within one second |
 

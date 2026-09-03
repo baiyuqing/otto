@@ -27,6 +27,7 @@ import (
 	"github.com/baiyuqing/otto/internal/safetext"
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
+	"github.com/baiyuqing/otto/internal/skill"
 	"github.com/baiyuqing/otto/internal/tool"
 	"github.com/baiyuqing/otto/internal/trace"
 	"github.com/baiyuqing/otto/internal/urlprivacy"
@@ -237,6 +238,17 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 		binding = bound
 	}
+	skills := config.ResolveSkills(b.config, b.environment, b.workspacePath)
+	catalog, skillWarnings := skill.Discover(skills.Roots)
+	skillSection, sectionWarnings := skill.PromptSection(catalog)
+	for _, warning := range append(skillWarnings, sectionWarnings...) {
+		if b.stderr != nil {
+			fmt.Fprintf(b.stderr, "warning: %s\n", warning)
+		}
+	}
+	if catalog.Len() > 0 {
+		tools = append(tools, tool.NewSkillTool(catalog, runtime.MaxOutputBytes))
+	}
 	tools = append(tools, b.extraTools...)
 	registry, err := tool.NewRegistry(tools...)
 	if err != nil {
@@ -257,7 +269,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 	}
 	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()) +
-		redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now()))
+		redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now())+skillSection)
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
 		Compaction: agent.CompactionSettings{
@@ -977,6 +989,9 @@ func (b runtimeBuilder) boundaryToolDefinitions(runtime *config.Runtime) []model
 	}
 	if b.plannedBashAvailable() {
 		definitions = append(definitions, (&boundaryBashDefinition{}).Definition())
+	}
+	if config.ResolveSkills(b.config, b.environment, b.workspacePath).Enabled {
+		definitions = append(definitions, tool.NewSkillTool(skill.Catalog{}, maxOutput).Definition())
 	}
 	return definitions
 }

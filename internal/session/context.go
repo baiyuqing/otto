@@ -16,6 +16,14 @@ const (
 	branchContextType     = "branch_summary"
 	maxContextWarnings    = 32
 	maxWarningTypeBytes   = 32
+
+	// taskNotificationContextType and parentMessageContextType are Otto's own
+	// context message types (see internal/agent's sub-agent notifications).
+	// Store.Append persists them as custom_message entries, and they round-trip
+	// through customContextText without the "[Custom context: ...]" decoration
+	// applied to custom types written by other Pi-compatible tools.
+	taskNotificationContextType = "task_notification"
+	parentMessageContextType    = "parent_message"
 )
 
 var warningTypeCharacter = regexp.MustCompile(`[A-Za-z0-9._-]`)
@@ -472,6 +480,9 @@ func newContextMessage(id, contextType string, display bool, text string, create
 }
 
 func customContextText(customType, text string) string {
+	if customType == taskNotificationContextType || customType == parentMessageContextType {
+		return text
+	}
 	return "[Custom context: " + customType + "]\n" + text
 }
 

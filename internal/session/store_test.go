@@ -1300,6 +1300,137 @@ func TestMessagesReturnsIndependentSlices(t *testing.T) {
 	}
 }
 
+func TestStoreRoundTripsRoleContextAsCustomMessage(t *testing.T) {
+	for _, contextType := range []string{"task_notification", "parent_message"} {
+		t.Run(contextType, func(t *testing.T) {
+			header := testHeader(t)
+			store, err := Create(t.TempDir(), header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			userMessage := model.Message{
+				Role:      model.RoleUser,
+				Blocks:    []model.Block{{Type: model.BlockText, Text: "hello"}},
+				CreatedAt: time.Unix(2, 0).UTC(),
+			}
+			if err := store.Append(context.Background(), userMessage); err != nil {
+				t.Fatal(err)
+			}
+			text := "[task-notification] task t1 succeeded\nreport"
+			contextMessage := model.Message{
+				Role:        model.RoleContext,
+				ContextType: contextType,
+				Display:     true,
+				CreatedAt:   time.Unix(3, 123000000).UTC(),
+				Usage:       &model.Usage{InputTokens: 5},
+				Blocks:      []model.Block{{Type: model.BlockText, Text: text}},
+			}
+			if err := store.Append(context.Background(), contextMessage); err != nil {
+				t.Fatal(err)
+			}
+
+			persisted := store.Messages()
+			if len(persisted) != 2 {
+				t.Fatalf("Messages() = %#v, want 2 messages", persisted)
+			}
+			got := persisted[1]
+			if got.Usage != nil {
+				t.Fatalf("in-memory context message Usage = %#v, want nil (usage is dropped)", got.Usage)
+			}
+			if got.Role != model.RoleContext || got.ContextType != contextType || !got.Display || got.Text() != text {
+				t.Fatalf("in-memory context message = %#v, want role=context type=%q display=true text=%q", got, contextType, text)
+			}
+
+			path := store.Path()
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			var entryLine []byte
+			for _, line := range readJSONLines(t, path) {
+				var probe struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(line, &probe); err != nil {
+					t.Fatal(err)
+				}
+				if probe.Type == "custom_message" {
+					entryLine = line
+				}
+			}
+			if entryLine == nil {
+				t.Fatal("no custom_message entry written")
+			}
+			var entryFields struct {
+				Type       string `json:"type"`
+				CustomType string `json:"customType"`
+				Display    bool   `json:"display"`
+				Content    string `json:"content"`
+			}
+			if err := json.Unmarshal(entryLine, &entryFields); err != nil {
+				t.Fatal(err)
+			}
+			if entryFields.Type != "custom_message" || entryFields.CustomType != contextType || !entryFields.Display || entryFields.Content != text {
+				t.Fatalf("custom_message entry = %#v, want type=custom_message customType=%q display=true content=%q", entryFields, contextType, text)
+			}
+
+			reopened, warnings, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if len(warnings) != 0 {
+				t.Fatalf("Open() warnings = %#v", warnings)
+			}
+			reopenedMessages := reopened.Messages()
+			if len(reopenedMessages) != 2 {
+				t.Fatalf("reopened Messages() = %#v, want 2 messages", reopenedMessages)
+			}
+			reopenedContext := reopenedMessages[1]
+			if reopenedContext.Role != model.RoleContext || reopenedContext.ContextType != contextType || !reopenedContext.Display || reopenedContext.Text() != text {
+				t.Fatalf("reopened context message = %#v, want role=context type=%q display=true text=%q", reopenedContext, contextType, text)
+			}
+			if reopenedContext.Usage != nil {
+				t.Fatalf("reopened context message Usage = %#v, want nil", reopenedContext.Usage)
+			}
+		})
+	}
+}
+
+func TestStoreAppendRejectsInvalidRoleContext(t *testing.T) {
+	textBlock := []model.Block{{Type: model.BlockText, Text: "hello"}}
+	toolBlock := []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{}`)}}
+	tests := []struct {
+		name        string
+		contextType string
+		blocks      []model.Block
+	}{
+		{name: "empty context type", contextType: "", blocks: textBlock},
+		{name: "reserved compaction type", contextType: "compaction", blocks: textBlock},
+		{name: "reserved branch_summary type", contextType: "branch_summary", blocks: textBlock},
+		{name: "tool block", contextType: "task_notification", blocks: toolBlock},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := Create(t.TempDir(), testHeader(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			message := model.Message{
+				Role:        model.RoleContext,
+				ContextType: tc.contextType,
+				Display:     true,
+				CreatedAt:   time.Unix(2, 0).UTC(),
+				Blocks:      tc.blocks,
+			}
+			if err := store.Append(context.Background(), message); !errors.Is(err, ErrInvalidSession) {
+				t.Fatalf("Append() error = %v, want ErrInvalidSession", err)
+			}
+		})
+	}
+}
+
 func createSessionWithDanglingCall(t *testing.T) string {
 	t.Helper()
 	store, err := Create(t.TempDir(), testHeader(t))

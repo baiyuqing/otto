@@ -92,12 +92,12 @@ func TestRunReturnsManualCompactionFatalPersistenceError(t *testing.T) {
 			current := model.(Model)
 			current.editor.SetValue("/compact")
 			started, cmd := current.Update(keyPress(tea.KeyEnter))
-			if cmd == nil || !started.(Model).View().AltScreen {
-				t.Fatal("manual compaction did not start in alternate screen")
+			if cmd == nil {
+				t.Fatal("manual compaction did not start")
 			}
 			finished, quitCmd := started.(Model).Update(runCommandWithin(t, cmd, time.Second))
-			if quitCmd == nil || !finished.(Model).View().AltScreen {
-				t.Fatal("fatal compaction did not request quit from alternate screen")
+			if quitCmd == nil {
+				t.Fatal("fatal compaction did not request quit")
 			}
 			_ = runCommandWithin(t, quitCmd, time.Second)
 			return finished, nil

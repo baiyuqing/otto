@@ -30,6 +30,10 @@ func TestHelpOverlayAtMinimumTerminalShowsEveryControlWithinBounds(t *testing.T)
 	m.overlay = overlayHelp
 	content := m.View().Content
 	assertRenderedBounds(t, content, 40, 8)
+	// PgUp/PgDn and Home/End are gone from the help overlay at every size:
+	// scrolling is now handled by the terminal's own mouse drag/wheel, not
+	// an Otto keybinding, and Home/End were never advertised here even in
+	// the full-size overlay (they just edit the composer natively).
 	for _, control := range []string{
 		"Help",
 		"?",
@@ -38,8 +42,6 @@ func TestHelpOverlayAtMinimumTerminalShowsEveryControlWithinBounds(t *testing.T)
 		"Shift+Enter",
 		"Alt+Enter",
 		"Ctrl+O",
-		"PgUp/PgDn",
-		"Home/End",
 		"Esc",
 		"Ctrl+C",
 		"/session",
@@ -98,11 +100,17 @@ func TestLongSessionOverlayAndFooterStayWithinBounds(t *testing.T) {
 func TestResumePickerResizeClampsSelectionAndRestoresTranscriptOnClose(t *testing.T) {
 	m := loadedResumeModel(t, 20)
 	m.entries = []Entry{{Kind: EntryAssistant, Raw: "underlying transcript", Rendered: "underlying transcript"}}
-	m = resizeModel(t, m, 100, 20)
+	// dispatch (not the Update-based resizeModel/updateResumeKey helpers)
+	// from here on, so pendingPrints keeps the transcript text committed
+	// below instead of an auto-flush popping it into an uninspectable
+	// tea.Cmd before the final assertion can see it.
+	resized, _ := m.dispatch(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m = resized.(Model)
 	m.resume.selected = 19
 	m.resume.sessions[18].Current = true
 
-	m = resizeModel(t, m, 40, 8)
+	resized, _ = m.dispatch(tea.WindowSizeMsg{Width: 40, Height: 8})
+	m = resized.(Model)
 	start, end := resumeVisibleRange(len(m.resume.sessions), m.resume.selected, resumeVisibleRows(m.width, m.height))
 	if m.resume.selected != 19 || m.resume.selected < start || m.resume.selected >= end {
 		t.Fatalf("shrunk range=%d:%d selected=%d", start, end, m.resume.selected)
@@ -116,18 +124,20 @@ func TestResumePickerResizeClampsSelectionAndRestoresTranscriptOnClose(t *testin
 	}
 
 	m.resume.selected = 99
-	m = resizeModel(t, m, 100, 20)
+	resized, _ = m.dispatch(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m = resized.(Model)
 	if m.resume.selected != 19 {
 		t.Fatalf("resized selected = %d, want clamped 19", m.resume.selected)
 	}
 	content = m.View().Content
 	assertResumeRowMarkers(t, content, "Session 20", true, false)
 	assertResumeRowMarkers(t, content, "Session 19", false, true)
-	m, _ = updateResumeKey(t, m, tea.KeyEscape)
+	updated, _ := m.dispatch(keyPress(tea.KeyEscape))
+	m = updated.(Model)
 	content = m.View().Content
 	assertRenderedBounds(t, content, 100, 20)
-	if !strings.Contains(content, "underlying transcript") {
-		t.Fatalf("closed picker did not restore transcript: %q", content)
+	if printed := strings.Join(m.pendingPrints, "\n"); !strings.Contains(printed, "underlying transcript") {
+		t.Fatalf("closed picker did not restore transcript: view=%q printed=%q", content, printed)
 	}
 }
 

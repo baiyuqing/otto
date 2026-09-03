@@ -23,9 +23,10 @@ type hideOverlayMsg struct{}
 
 type toggleDetailsMsg struct{}
 
-type scrollViewportMsg struct {
-	Delta int
-}
+// commitFlushedMsg signals that the in-flight tea.Println for the current
+// pendingPrints chunk has completed, so the next queued chunk (if any) may
+// now be sent. See flushNextPrintCmd.
+type commitFlushedMsg struct{}
 
 type turnEnvelope struct {
 	event                 *agent.Event

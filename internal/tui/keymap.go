@@ -12,10 +12,6 @@ type KeyMap struct {
 	Complete       key.Binding
 	SuggestionUp   key.Binding
 	SuggestionDown key.Binding
-	PageUp         key.Binding
-	PageDown       key.Binding
-	Home           key.Binding
-	End            key.Binding
 	ResumeUp       key.Binding
 	ResumeDown     key.Binding
 	ResumePageUp   key.Binding
@@ -35,10 +31,6 @@ func DefaultKeyMap() KeyMap {
 		Complete:       key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "complete command")),
 		SuggestionUp:   key.NewBinding(key.WithKeys("up"), key.WithHelp("up", "previous suggestion")),
 		SuggestionDown: key.NewBinding(key.WithKeys("down"), key.WithHelp("down", "next suggestion")),
-		PageUp:         key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "page up")),
-		PageDown:       key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdown", "page down")),
-		Home:           key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
-		End:            key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 		ResumeUp:       key.NewBinding(key.WithKeys("up"), key.WithHelp("up", "previous session")),
 		ResumeDown:     key.NewBinding(key.WithKeys("down"), key.WithHelp("down", "next session")),
 		ResumePageUp:   key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "previous page")),

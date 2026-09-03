@@ -35,6 +35,7 @@ type wirePlan struct {
 type wireEvent struct {
 	Type       string          `json:"type"`
 	TurnID     string          `json:"turn_id,omitempty"`
+	TaskID     string          `json:"task_id,omitempty"`
 	Text       string          `json:"text,omitempty"`
 	ToolName   string          `json:"tool_name,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
@@ -63,6 +64,11 @@ func toWire(event agent.Event) wireEvent {
 		wire.ToolCallID = event.ToolCallID
 		wire.Result = &wireToolResult{Content: event.ToolResult.Content, IsError: event.ToolResult.IsError}
 	case agent.EventProviderUsage:
+		usage := event.Usage
+		wire.Usage = &usage
+	case agent.EventNotification:
+		wire.TaskID = event.TaskID
+		wire.Text = event.Text
 		usage := event.Usage
 		wire.Usage = &usage
 	case agent.EventCompactionStarted, agent.EventCompactionCompleted:

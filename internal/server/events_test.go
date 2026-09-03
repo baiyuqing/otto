@@ -73,6 +73,11 @@ func TestToWire(t *testing.T) {
 			want:  `{"type":"provider_usage","usage":{"input_tokens":12,"output_tokens":34}}`,
 		},
 		{
+			name:  "notification carries task id, text, and usage",
+			event: agent.Event{Type: agent.EventNotification, TaskID: "t1", Text: "[task-notification] task t1 succeeded\nreport", Usage: model.Usage{InputTokens: 5, OutputTokens: 6}},
+			want:  `{"type":"notification","task_id":"t1","text":"[task-notification] task t1 succeeded\nreport","usage":{"input_tokens":5,"output_tokens":6}}`,
+		},
+		{
 			name: "compaction_started without usage",
 			event: agent.Event{Type: agent.EventCompactionStarted, Compaction: &agent.CompactionEvent{
 				Reason: agent.CompactionThreshold, TokensBefore: 1000, EstimatedTokensAfter: 400, Automatic: true,

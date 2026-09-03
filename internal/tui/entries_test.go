@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -49,6 +50,66 @@ func TestEntriesFromHistoryKeepsFoldedCompactionBeforeRetainedTail(t *testing.T)
 	}
 	if entries[2].Kind != EntryAssistant || entries[2].Raw != "retained answer" {
 		t.Fatalf("tail assistant=%#v", entries[2])
+	}
+}
+
+func TestNotificationEntryTextTruncatesLongBody(t *testing.T) {
+	header := "[task-notification] task t1 (explorer) succeeded · 42s · 7 tool calls · 12,310 tokens"
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	text := header + "\n" + strings.Join(lines, "\n")
+
+	got := notificationEntryText("t1", text)
+
+	want := header + "\n" + strings.Join(lines[:20], "\n") + "\n… (10 more lines; /task t1)"
+	if got != want {
+		t.Fatalf("got = %q, want %q", got, want)
+	}
+}
+
+func TestNotificationEntryTextKeepsShortBodyIntact(t *testing.T) {
+	text := "[task-notification] task t2 (reviewer) failed · 12s · 3 tool calls\nerror text"
+	if got := notificationEntryText("t2", text); got != text {
+		t.Fatalf("got = %q, want unchanged %q", got, text)
+	}
+}
+
+func TestEntriesFromHistoryTruncatesTaskNotificationBody(t *testing.T) {
+	header := "[task-notification] task t1 (explorer) succeeded · 42s · 7 tool calls · 12,310 tokens"
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	text := header + "\n" + strings.Join(lines, "\n")
+	history := []model.Message{{
+		ID: "note-1", Role: model.RoleContext, ContextType: "task_notification", Display: true,
+		Blocks: []model.Block{{Type: model.BlockText, Text: text}},
+	}}
+
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 1 || entries[0].Kind != EntrySystem {
+		t.Fatalf("entries = %#v", entries)
+	}
+	if entries[0].Raw != notificationEntryText("t1", text) {
+		t.Fatalf("raw = %q, want %q", entries[0].Raw, notificationEntryText("t1", text))
+	}
+	if strings.Contains(entries[0].Raw, "line 21") {
+		t.Fatalf("raw = %q, should not contain lines beyond 20", entries[0].Raw)
+	}
+}
+
+func TestEntriesFromHistoryKeepsShortTaskNotificationIntact(t *testing.T) {
+	text := "[task-notification] task t2 (reviewer) failed · 12s · 3 tool calls\nerror text"
+	history := []model.Message{{
+		ID: "note-2", Role: model.RoleContext, ContextType: "task_notification", Display: true,
+		Blocks: []model.Block{{Type: model.BlockText, Text: text}},
+	}}
+
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 1 || entries[0].Kind != EntrySystem || entries[0].Raw != text {
+		t.Fatalf("entries = %#v", entries)
 	}
 }
 

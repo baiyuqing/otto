@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -118,6 +119,78 @@ func TestTracingCapturesErrorResponse(t *testing.T) {
 	}
 	if !strings.Contains(records[0]["resp_body"].(string), "rate limited") {
 		t.Fatalf("resp_body = %v, want the error body captured", records[0]["resp_body"])
+	}
+}
+
+// callRecorder records the exact byte slice passed to every Write call. It
+// lets a test assert that one full record (JSON line + trailing newline)
+// reaches the underlying writer in a single Write, which is the only way to
+// guarantee no interleaving when multiple RoundTrippers share one writer
+// (concurrent agent runners writing to one trace file).
+type callRecorder struct {
+	mu    sync.Mutex
+	calls [][]byte
+}
+
+func (c *callRecorder) Write(p []byte) (int, error) {
+	cp := append([]byte(nil), p...)
+	c.mu.Lock()
+	c.calls = append(c.calls, cp)
+	c.mu.Unlock()
+	return len(p), nil
+}
+
+// TestConcurrentRoundTrippersWriteRecordsAtomically drives two RoundTrippers
+// that share one writer from two goroutines. Each record must reach the
+// writer as a single Write call so records from different trippers can never
+// interleave mid-line, regardless of scheduling.
+func TestConcurrentRoundTrippersWriteRecordsAtomically(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	rec := &callRecorder{}
+	rt1 := NewRoundTripper(http.DefaultTransport, rec)
+	rt2 := NewRoundTripper(http.DefaultTransport, rec)
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for _, rt := range []*RoundTripper{rt1, rt2} {
+		client := &http.Client{Transport: rt}
+		go func() {
+			defer wg.Done()
+			for i := 0; i < n; i++ {
+				resp, err := client.Do(mustRequest(t, srv.URL))
+				if err != nil {
+					t.Errorf("round trip: %v", err)
+					continue
+				}
+				io.ReadAll(resp.Body)
+				resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+
+	rec.mu.Lock()
+	calls := rec.calls
+	rec.mu.Unlock()
+
+	if len(calls) != 2*n {
+		t.Fatalf("got %d Write calls, want %d (one per record)", len(calls), 2*n)
+	}
+	for i, call := range calls {
+		if len(call) == 0 || call[len(call)-1] != '\n' {
+			t.Fatalf("call %d does not end with a newline: %q", i, call)
+		}
+		if got := bytes.Count(call, []byte("\n")); got != 1 {
+			t.Fatalf("call %d has %d newlines, want exactly 1 (a split write would interleave): %q", i, got, call)
+		}
+		if !json.Valid(bytes.TrimSuffix(call, []byte("\n"))) {
+			t.Fatalf("call %d is not one complete JSON record: %q", i, call)
+		}
 	}
 }
 

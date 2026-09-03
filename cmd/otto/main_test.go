@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -546,6 +547,156 @@ func TestRunReportsResolutionErrors(t *testing.T) {
 				t.Fatalf("code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
 			}
 		})
+	}
+}
+
+func TestRunServeRejectsConflictingFlags(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	base := []string{"serve", "--config", configPath, "--cwd", workspace}
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "ui", args: append(append([]string{}, base...), "--ui", "repl"), want: "otto: serve cannot be combined with --ui\n"},
+		{name: "approve", args: append(append([]string{}, base...), "--approve", "x"), want: "otto: serve cannot be combined with --approve\n"},
+		{name: "resume", args: append(append([]string{}, base...), "--resume", "anything"), want: "otto: serve cannot be combined with --resume\n"},
+		{name: "continue", args: append(append([]string{}, base...), "--continue"), want: "otto: serve cannot be combined with --continue\n"},
+		{name: "archive", args: append(append([]string{}, base...), "--archive", "anything"), want: "otto: serve cannot be combined with --archive\n"},
+		{name: "no-session", args: append(append([]string{}, base...), "--no-session"), want: "otto: serve cannot be combined with --no-session\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runForTest(t, context.Background(), test.args, strings.NewReader(""), &stdout, &stderr, env)
+			if code != 2 || stderr.String() != test.want {
+				t.Fatalf("code = %d, stderr = %q, want code 2, stderr %q", code, stderr.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestRunSocketFlagRequiresServeSubcommand(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+
+	var stdout, stderr bytes.Buffer
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", workspace, "--socket", "/tmp/otto-test.sock"}, strings.NewReader(""), &stdout, &stderr, env)
+	if want := "otto: --socket requires the serve subcommand\n"; code != 2 || stderr.String() != want {
+		t.Fatalf("code = %d, stderr = %q, want code 2, stderr %q", code, stderr.String(), want)
+	}
+}
+
+func TestRunServeRefusesWhenDynamicContentUnavailable(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", "http://127.0.0.1:1")
+	deps := deterministicRunDependencies(t)
+	deps.openSandbox = func(context.Context, sandboxOpenOptions) sandboxRuntime {
+		runtime := fakeSandboxRuntime(app.SandboxInfo{Mode: app.SandboxSeatbelt, BashAvailable: true}, &recordingSandboxExecutor{}, []string{})
+		runtime.RedactionsComplete = false
+		return runtime
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runWithDependencies(context.Background(), []string{"serve", "--config", configPath, "--cwd", workspace}, strings.NewReader(""), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}), deps)
+	if want := "otto: " + errSessionOperationUnavailable.Error() + "\n"; code != 1 || !strings.HasSuffix(stderr.String(), want) {
+		t.Fatalf("code = %d, stderr = %q, want code 1 and stderr ending %q", code, stderr.String(), want)
+	}
+}
+
+func TestRunServeStartsAgentServer(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"served"},"finish_reason":"stop"}]}`)
+	}))
+	defer provider.Close()
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", provider.URL)
+	env := testEnviron(map[string]string{"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret"})
+	socketDir, err := os.MkdirTemp("/tmp", "otto-serve-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "otto.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps := deterministicRunDependencies(t)
+	deps.subscribeTerminate = func() interruptSubscription { return interruptSubscription{stop: func() {}} }
+	done := make(chan int, 1)
+	go func() {
+		done <- runWithDependencies(ctx, []string{"serve", "--config", configPath, "--cwd", workspace, "--socket", socketPath}, strings.NewReader(""), io.Discard, io.Discard, env, deps)
+	}()
+
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport}
+	var resp *http.Response
+	var requestErr error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, requestErr = client.Post("http://otto/v1/sessions", "application/json", strings.NewReader(`{}`))
+		if resp != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if resp == nil {
+		select {
+		case code := <-done:
+			t.Fatalf("agent server exited with code %d; last request error: %v", code, requestErr)
+		default:
+			t.Fatalf("agent server did not start; last request error: %v", requestErr)
+		}
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if created.ID == "" {
+		t.Fatal("created session has no id")
+	}
+
+	turnResp, err := client.Post("http://otto/v1/sessions/"+created.ID+"/turns", "application/json", strings.NewReader(`{"text":"hello","stream":false}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turn struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(turnResp.Body).Decode(&turn); err != nil {
+		t.Fatal(err)
+	}
+	turnResp.Body.Close()
+	if turn.Text != "served" {
+		t.Fatalf("turn text = %q, want served", turn.Text)
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("serve exit code = %d, want 0", code)
+		}
+	case <-time.After(7 * time.Second):
+		t.Fatal("serve did not stop")
+	}
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Fatalf("socket still exists after shutdown: %v", err)
 	}
 }
 

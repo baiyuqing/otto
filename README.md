@@ -95,6 +95,9 @@ allow_env = []
 enabled = true
 paths = ["~/.otto/skills", ".otto/skills"]
 
+[server]
+socket = "~/.otto/otto.sock"
+
 [profiles.deepseek]
 provider = "openai-compatible"
 base_url = "https://api.deepseek.com/v1"
@@ -220,6 +223,7 @@ Startup resolution is field-specific:
 - **Sandbox:** `--sandbox auto|seatbelt|off` overrides `[sandbox].driver`; otherwise `[sandbox].driver` overrides the built-in `auto`. `network`, `read_paths`, and `allow_env` come from `[sandbox]` only. Sandbox policy is process-wide and does not change on `/new`, `--continue`, or `/resume`.
 - **Skills:** `[skills]` is TOML-only with no CLI flags or environment variables. Skill discovery runs on each runner build (startup, `/new`, `/resume`, `/model`); within a session the catalog is fixed. Existing skill roots are appended to Seatbelt read paths only at process start.
 - **Thinking effort:** `--thinking` (`low`, `medium`, `high`, `xhigh`, or `max`) is sent as `reasoning_effort` on OpenAI-compatible requests. It has no environment variable or TOML key and is omitted from requests when unset. Like agent limits, it stays in effect across in-process `/resume` and `/new`.
+- **Agent server socket:** `--socket` overrides `[server].socket`, which overrides the built-in default `~/.otto/otto.sock`. There is no environment variable. This setting only applies to `otto serve`; see [Agent server](#agent-server).
 
 Startup `--continue` / `--resume` therefore restores session provider/model only as defaults: direct flags and `OTTO_PROVIDER` / `OTTO_MODEL` can override them as described above. In contrast, an in-process TUI `/resume` restores the selected session's stored provider/model and ignores the process's provider/model/profile/base-URL overrides and `OTTO_PROVIDER` / `OTTO_MODEL`; its stored profile selects the endpoint and key environment. Agent-limit overrides remain in effect. `/new` returns to the runtime resolved at process startup.
 
@@ -452,6 +456,64 @@ TUI-only commands:
 - `/exit` or EOF exits.
 - `Ctrl+C` during an active provider call, tool run, or manual compaction cancels only that turn and returns you to the prompt.
 - `Ctrl+C` while Otto is idle exits with status 130.
+
+## Agent server
+
+`otto serve` runs Otto as a long-lived HTTP+JSON+SSE frontend over a Unix domain socket, instead of the TUI or REPL. One process serves one workspace and manages any number of sessions; turns in different sessions run concurrently, and starting a second turn on a session that already has one active returns `409`. Stage 1 listens on a Unix domain socket only; there is no TCP listener.
+
+```bash
+otto serve [--socket PATH]
+```
+
+`serve` accepts the same startup flags as the interactive frontends (`--config`, `--cwd`, `--profile`, `--provider`, `--base-url`, `--model`, `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus `--socket`. It rejects `--ui`, `--approve`, `--resume`, `--continue`, `--archive`, and `--no-session`.
+
+### Socket
+
+The socket path resolves in this order: `--socket` > `[server].socket` (TOML) > the built-in default `~/.otto/otto.sock`. Otto creates a missing parent directory with mode `0700`, creates the socket file with mode `0600`, and refuses to start if a live server already owns that path.
+
+### HTTP API
+
+API endpoints are under `/v1/`; `/healthz` and `/metrics` are served at the root. Request and error bodies are JSON; an error body has the shape `{"error":{"code":"...","message":"..."}}`.
+
+| Method and path | Behavior |
+| --- | --- |
+| `POST /v1/sessions` | Create a session (`{}`) or attach to one already open in this process (`{"resume":"<id>"}`). `201` for a new session, `200` for an already-open one. Returns the session object. |
+| `GET /v1/sessions` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. |
+| `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
+| `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
+| `GET /v1/sessions/{id}/history` | Return the session's message history. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
+| `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
+| `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
+| `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |
+| `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
+| `GET /v1/openapi.yaml` | The OpenAPI 3.1 document for this API. |
+| `GET /healthz` | `{"status":"ok","sessions_open":N,"turns_active":N,"uptime_seconds":N}`. |
+| `GET /metrics` | Prometheus text-format metrics. |
+
+A turn keeps running after its client disconnects; `POST .../cancel` is the only way to stop it.
+
+### Events
+
+Each SSE frame carries `id: <sequence>`, `event: <name>`, and a JSON `data:` payload. Event names are the `agent.Event` type names: `agent_started`, `text_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`, `compaction_planned`, `compaction_started`, `compaction_completed`, `compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`.
+
+### Observability
+
+`GET /metrics` exposes `otto_http_requests_total{route,method,status}`, `otto_http_request_duration_seconds{route}`, `otto_sessions_open`, `otto_turns_total{status}`, `otto_turns_active`, `otto_turn_duration_seconds`, `otto_tool_calls_total{tool,status}`, `otto_tool_call_duration_seconds{tool}`, `otto_provider_tokens_total{kind}`, and `otto_event_stream_clients`.
+
+Otto logs one line per HTTP request (method, route, status, duration, request ID) and one line per turn start and finish (session ID, turn ID, status, duration, token usage). Prompt text and tool arguments or output are never logged.
+
+### Shutdown
+
+`otto serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new requests, cancels every active turn, closes every session, removes the socket file, and exits `0`.
+
+### Examples
+
+```bash
+curl -s --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions -d '{}'
+curl -N --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/turns -d '{"text":"list files"}'
+curl -s --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/turns/<turn_id>/cancel
+```
 
 ## Sessions
 

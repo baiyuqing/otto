@@ -152,21 +152,24 @@ func TestCompactionCheckpointAppendsOnceAndPreservesLiveTranscript(t *testing.T)
 	m.entries = append(m.entries, Entry{ID: "live-user", Kind: EntryUser, Raw: "keep live transcript"})
 	m.editor.SetValue("/compact")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("compact cmd = nil")
 	}
-	updated, _ = updated.(Model).Update(runCommandWithin(t, cmd, time.Second))
+	updated, _ = updated.(Model).dispatch(runCommandWithin(t, cmd, time.Second))
 	got := updated.(Model)
 	if countEntriesOfKind(got.entries, EntryCompaction) != 1 {
 		t.Fatalf("entries = %#v, want one folded checkpoint", got.entries)
 	}
-	content := got.View().Content
+	// The user entry and the (now non-running) compaction checkpoint are
+	// both final, so both are committed to scrollback rather than staying
+	// in the live view.
+	content := strings.Join(got.pendingPrints, "\n")
 	if !strings.Contains(content, "keep live transcript") || !strings.Contains(content, "[context] compacted 258k → 23k tokens") {
-		t.Fatalf("view = %q, want preserved live transcript and live token label", content)
+		t.Fatalf("printed = %q, want preserved live transcript and live token label", content)
 	}
 	if strings.Contains(content, "[Compaction summary]") {
-		t.Fatalf("view = %q, want hidden compaction prefix", content)
+		t.Fatalf("printed = %q, want hidden compaction prefix", content)
 	}
 }
 
@@ -189,19 +192,23 @@ func TestAutomaticCompactionCheckpointAppearsInsideToolTurnWithoutReplacingToolT
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry that
+	// is immediately final and commits to pendingPrints within this same
+	// dispatch, which Update's auto-flush wrapper would batch together with
+	// the real turn-start command, corrupting the message chain below.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	state := updated.(Model)
-	updated, next := state.Update(runCommandWithin(t, cmd, time.Second))
+	updated, next := state.dispatch(runCommandWithin(t, cmd, time.Second))
 	state = updated.(Model)
 	if len(state.entries) != 3 || state.entries[2].Kind != EntryTool || state.entries[2].ToolDone {
 		t.Fatalf("after tool start entries = %#v", state.entries)
 	}
-	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	updated, next = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if len(state.entries) != 4 || state.entries[2].Kind != EntryTool || state.entries[3].Kind != EntryCompaction {
 		t.Fatalf("after compaction entries = %#v", state.entries)
 	}
-	updated, _ = state.Update(runCommandWithin(t, next, time.Second))
+	updated, _ = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if !state.entries[2].ToolDone || state.entries[2].ToolOutput != "tool output" || state.entries[3].CheckpointID != "checkpoint" {
 		t.Fatalf("final entries = %#v", state.entries)
@@ -237,11 +244,15 @@ func TestCompactionCheckpointApplicationAckPreservesWorkerAheadHistoryAndToolOut
 
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 24)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch together
+	// with the real turn-start command, corrupting the message chain below.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	state := updated.(Model)
 	for index := 0; index < 3; index++ {
 		message := runCommandWithin(t, cmd, time.Second)
-		updated, cmd = state.Update(message)
+		updated, cmd = state.dispatch(message)
 		state = updated.(Model)
 	}
 	if got := state.entries[len(state.entries)-2:]; got[0].ToolCallID != "call-1" || !got[0].ToolDone || got[0].ToolOutput != "ordinary callback result" || got[1].ToolCallID != "call-2" || got[1].ToolDone {
@@ -254,7 +265,7 @@ func TestCompactionCheckpointApplicationAckPreservesWorkerAheadHistoryAndToolOut
 		t.Fatal("backend advanced to checkpoint B before the UI applied checkpoint A")
 	default:
 	}
-	updated, cmd = state.Update(checkpointAMessage)
+	updated, cmd = state.dispatch(checkpointAMessage)
 	state = updated.(Model)
 	if len(checkpointEntries(state.entries)) != 1 || checkpointEntries(state.entries)[0].CheckpointID != "checkpoint-a" {
 		t.Fatalf("checkpoint A was not visible after its Update: %#v", state.entries)
@@ -267,7 +278,7 @@ func TestCompactionCheckpointApplicationAckPreservesWorkerAheadHistoryAndToolOut
 	case <-time.After(time.Second):
 		t.Fatal("backend did not advance to checkpoint B after checkpoint A was applied")
 	}
-	updated, cmd = state.Update(runCommandWithin(t, cmd, time.Second))
+	updated, cmd = state.dispatch(runCommandWithin(t, cmd, time.Second))
 	state = updated.(Model)
 	checkpoints := checkpointEntries(state.entries)
 	if len(checkpoints) != 2 || checkpoints[0].CheckpointID != "checkpoint-a" || checkpoints[1].CheckpointID != "checkpoint-b" {
@@ -276,7 +287,7 @@ func TestCompactionCheckpointApplicationAckPreservesWorkerAheadHistoryAndToolOut
 	assertTurnToolOutput(t, state.entries, "call-1", "persisted ordinary result")
 	assertTurnToolOutput(t, state.entries, "call-2", "persisted result omitted by B")
 
-	updated, _ = state.Update(runCommandWithin(t, cmd, time.Second))
+	updated, _ = state.dispatch(runCommandWithin(t, cmd, time.Second))
 	if updated.(Model).running {
 		t.Fatal("turn remained active after both acknowledged checkpoints")
 	}
@@ -371,7 +382,11 @@ func TestCompactionMissingCheckpointHistoryAcknowledgesBeforeFatalDone(t *testin
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch together
+	// with the real turn-start command, corrupting the message chain below.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	state := updated.(Model)
 	completion := runCommandWithin(t, cmd, time.Second)
 	select {
@@ -380,14 +395,14 @@ func TestCompactionMissingCheckpointHistoryAcknowledgesBeforeFatalDone(t *testin
 	default:
 	}
 
-	updated, cmd = state.Update(completion)
+	updated, cmd = state.dispatch(completion)
 	state = updated.(Model)
 	select {
 	case <-backendReturned:
 	case <-time.After(time.Second):
 		t.Fatal("missing-history completion was not acknowledged")
 	}
-	updated, quit := state.Update(runCommandWithin(t, cmd, time.Second))
+	updated, quit := state.dispatch(runCommandWithin(t, cmd, time.Second))
 	finished := updated.(Model)
 	if quit == nil || !errors.Is(finished.fatalErr, fatalErr) {
 		t.Fatalf("fatal completion state: quit=%v fatal=%v", quit, finished.fatalErr)
@@ -499,12 +514,16 @@ func TestStaleGenerationCannotApplyCompactionEventOnActiveChannel(t *testing.T) 
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch together
+	// with the real turn-start command, corrupting the message chain below.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	first := runCommandWithin(t, cmd, time.Second).(turnMsg)
 
 	completion := agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "stale", TokensBefore: 10}}
-	updated, next := running.Update(turnMsg{
+	updated, next := running.dispatch(turnMsg{
 		channel:    first.channel,
 		stream:     first.stream,
 		generation: first.generation - 1,
@@ -531,25 +550,29 @@ func TestAutomaticCompactionEventsApplyInsidePromptStream(t *testing.T) {
 	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch together
+	// with the real turn-start command, corrupting the message chain below.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	state := updated.(Model)
 
-	updated, next := state.Update(runCommandWithin(t, cmd, time.Second))
+	updated, next := state.dispatch(runCommandWithin(t, cmd, time.Second))
 	state = updated.(Model)
 	if !strings.Contains(state.statusText, "compacting") {
 		t.Fatalf("started status = %q", state.statusText)
 	}
-	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	updated, next = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if state.statusText != warningErr.Error() {
 		t.Fatalf("warning status = %q", state.statusText)
 	}
-	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	updated, next = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if !strings.Contains(state.statusText, "compacted") || state.usage != backend.info.Usage {
 		t.Fatalf("completed status=%q usage=%#v want=%#v", state.statusText, state.usage, backend.info.Usage)
 	}
-	updated, _ = state.Update(runCommandWithin(t, next, time.Second))
+	updated, _ = state.dispatch(runCommandWithin(t, next, time.Second))
 	if got := updated.(Model); got.running || len(got.entries) != 1 || got.entries[0].Kind != EntryUser {
 		t.Fatalf("done running=%v entries=%#v", got.running, got.entries)
 	}
@@ -579,20 +602,24 @@ func TestAutomaticCompactionNoopCompletionClearsPromptStreamStatusWithoutDuplica
 	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch together
+	// with the real turn-start command, corrupting the message chain below.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	state := updated.(Model)
 
-	updated, next := state.Update(runCommandWithin(t, cmd, time.Second))
+	updated, next := state.dispatch(runCommandWithin(t, cmd, time.Second))
 	state = updated.(Model)
 	if state.statusText != "compacting context" || !state.running {
 		t.Fatalf("started status=%q running=%v", state.statusText, state.running)
 	}
-	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	updated, next = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if state.statusText != "[context] no-op" || !state.running {
 		t.Fatalf("no-op status=%q running=%v", state.statusText, state.running)
 	}
-	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	updated, next = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if next != nil || state.running || state.statusText != "[context] no-op" || state.usage != usage {
 		t.Fatalf("done cmd=%v running=%v status=%q usage=%#v", next, state.running, state.statusText, state.usage)
@@ -624,20 +651,24 @@ func TestCompactionCompletionReconcilesAggregateUsageWithoutDuplication(t *testi
 	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch together
+	// with the real turn-start command, corrupting the message chain below.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	state := updated.(Model)
 
-	updated, next := state.Update(runCommandWithin(t, cmd, time.Second))
+	updated, next := state.dispatch(runCommandWithin(t, cmd, time.Second))
 	state = updated.(Model)
 	if state.usage != (model.Usage{InputTokens: 130, OutputTokens: 14}) {
 		t.Fatalf("usage after completion = %#v", state.usage)
 	}
-	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	updated, next = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if state.usage != (model.Usage{InputTokens: 135, OutputTokens: 16}) {
 		t.Fatalf("usage after ordinary provider call = %#v", state.usage)
 	}
-	updated, _ = state.Update(runCommandWithin(t, next, time.Second))
+	updated, _ = state.dispatch(runCommandWithin(t, next, time.Second))
 	if got := updated.(Model).usage; got != (model.Usage{InputTokens: 135, OutputTokens: 16}) {
 		t.Fatalf("final usage = %#v", got)
 	}
@@ -1017,10 +1048,17 @@ func TestCompactionCallbackMutationDoesNotRaceQueuedPayload(t *testing.T) {
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch the real
+	// turn-start command with a flush command. tea.Batch does not invoke its
+	// sub-commands when called, only returns them, so the batched cmd here
+	// would never actually start the backend goroutine below and the test
+	// would hang forever on <-mutationDone.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	message := runCommandWithin(t, cmd, time.Second)
 	close(startMutation)
-	applied, _ := updated.(Model).Update(message)
+	applied, _ := updated.(Model).dispatch(message)
 	<-mutationDone
 	close(releaseBackend)
 	if got := applied.(Model).statusText; !strings.Contains(got, "2k") {
@@ -1041,7 +1079,13 @@ func TestCompactionCompletionUsesCallbackUsageSnapshotBeforeWorkerAdvances(t *te
 	}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" makes a new User entry
+	// that is immediately final and commits to pendingPrints within this
+	// same dispatch, which Update's auto-flush wrapper would batch together
+	// with the real turn-start command. tea.Batch does not invoke its
+	// sub-commands when called, only returns them, so runCommandWithin would
+	// never actually start the backend goroutine and the test would hang.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	completion := runCommandWithin(t, cmd, time.Second)
 	select {
 	case <-advanced:
@@ -1049,18 +1093,18 @@ func TestCompactionCompletionUsesCallbackUsageSnapshotBeforeWorkerAdvances(t *te
 	default:
 	}
 
-	updated, next := updated.(Model).Update(completion)
+	updated, next := updated.(Model).dispatch(completion)
 	<-advanced
 	state := updated.(Model)
 	if state.usage != (model.Usage{InputTokens: 130, OutputTokens: 14}) {
 		t.Fatalf("usage after completion = %#v, want callback boundary", state.usage)
 	}
-	updated, next = state.Update(runCommandWithin(t, next, time.Second))
+	updated, next = state.dispatch(runCommandWithin(t, next, time.Second))
 	state = updated.(Model)
 	if state.usage != (model.Usage{InputTokens: 135, OutputTokens: 16}) {
 		t.Fatalf("usage after queued provider event = %#v, want counted once", state.usage)
 	}
-	updated, _ = state.Update(runCommandWithin(t, next, time.Second))
+	updated, _ = state.dispatch(runCommandWithin(t, next, time.Second))
 	if got := updated.(Model).usage; got != (model.Usage{InputTokens: 135, OutputTokens: 16}) {
 		t.Fatalf("final usage = %#v, want counted once", got)
 	}

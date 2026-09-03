@@ -169,14 +169,36 @@ func newTestModel(t *testing.T) Model {
 	return newTestModelWithBackend(t, &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}})
 }
 
+// resizeModel simulates a window resize by calling the unexported dispatch
+// directly rather than the public Update wrapper, then drains any
+// transcript chunk this resize committed to scrollback (as the real
+// runtime's continuous Update-driven flush would eventually do), so the
+// returned model is safe as generic setup: a later Update call in the test
+// won't have its own command unexpectedly batched with a leftover flush
+// command from this resize. A test that needs to inspect what this resize
+// itself committed should call dispatch(tea.WindowSizeMsg{...}) directly
+// instead of going through this helper.
 func resizeModel(t *testing.T, model Model, width, height int) Model {
 	t.Helper()
-	updated, _ := model.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	updated, _ := model.dispatch(tea.WindowSizeMsg{Width: width, Height: height})
 	got, ok := updated.(Model)
 	if !ok {
 		t.Fatalf("updated model type = %T, want tui.Model", updated)
 	}
+	got.pendingPrints = nil
 	return got
+}
+
+// entriesText joins every entry's raw source text, regardless of whether it
+// has already committed to scrollback (m.entries itself is never cleared on
+// commit; only m.committed advances). Use this instead of View().Content or
+// pendingPrints when a test only needs to confirm an entry is still present.
+func entriesText(entries []Entry) string {
+	texts := make([]string, len(entries))
+	for i, e := range entries {
+		texts[i] = e.Raw
+	}
+	return strings.Join(texts, "\n")
 }
 
 func TestInitRequestsBackgroundColorAndStartsSingleSpinnerTick(t *testing.T) {
@@ -213,7 +235,7 @@ func TestBackgroundColorMessageCachesDarkAndLightRenderers(t *testing.T) {
 	// Remove the injected test renderer so this test exercises the production renderer.
 	m.renderer = newGlamourRenderer(true)
 	m.rendererInjected = false
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 	beforeAssistant, beforeCompaction := m.entries[0].Rendered, m.entries[1].Rendered
 
 	updated, _ := m.Update(tea.BackgroundColorMsg{Color: color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 0xff}})
@@ -273,8 +295,8 @@ func TestWindowResizeProducesResponsiveLayout(t *testing.T) {
 		t.Fatalf("viewport = %dx%d", got.viewport.Width(), got.viewport.Height())
 	}
 	view := got.View()
-	if !view.AltScreen || view.MouseMode != tea.MouseModeCellMotion || !strings.Contains(view.Content, "profile/model") {
-		t.Fatalf("view = %#v, want alternate screen with mouse-wheel reporting", view)
+	if view.AltScreen || view.MouseMode != tea.MouseModeNone || !strings.Contains(view.Content, "profile/model") {
+		t.Fatalf("view = %#v, want inline rendering with native terminal mouse handling", view)
 	}
 }
 
@@ -287,8 +309,11 @@ func TestViewPositionsRealCursorAtEditorLocation(t *testing.T) {
 	if cursor == nil {
 		t.Fatal("view cursor = nil, want a real terminal cursor for IME positioning")
 	}
-	if cursor.X != 9 || cursor.Y != 8 {
-		t.Fatalf("view cursor = (%d,%d), want (9,8) at the visible editor", cursor.X, cursor.Y)
+	// The live region above the editor is empty for an idle, history-less
+	// session (liveLines() == 0), so the editor sits near the top of the
+	// inline view rather than at a fixed full-screen row.
+	if cursor.X != 9 || cursor.Y != 2 {
+		t.Fatalf("view cursor = (%d,%d), want (9,2) at the visible editor", cursor.X, cursor.Y)
 	}
 }
 
@@ -296,34 +321,34 @@ func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
 	m.editor.SetValue("/")
 	m.editor.CursorEnd()
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 	if len(m.commandSuggestions()) == 0 {
 		t.Fatal("test setup has no slash-command suggestions")
 	}
 
 	cursor := m.View().Cursor
-	if cursor == nil || cursor.X != 5 || cursor.Y != 8 {
-		t.Fatalf("suggestion view cursor = %#v, want (5,8) at the editor", cursor)
+	if cursor == nil || cursor.X != 5 || cursor.Y != 7 {
+		t.Fatalf("suggestion view cursor = %#v, want (5,7) at the editor", cursor)
 	}
 }
 
 func TestViewTracksRealCursorAcrossMultilineEditorRows(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
 	m.editor.SetValue("first\nsecond")
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 
 	m.editor.CursorUp()
 	m.editor.CursorStart()
 	first := m.View().Cursor
-	if first == nil || first.Y != 8 {
-		t.Fatalf("first-line cursor = %#v, want row 8", first)
+	if first == nil || first.Y != 2 {
+		t.Fatalf("first-line cursor = %#v, want row 2", first)
 	}
 
 	m.editor.CursorDown()
 	m.editor.CursorEnd()
 	last := m.View().Cursor
-	if last == nil || last.Y != 9 {
-		t.Fatalf("last-line cursor = %#v, want row 9", last)
+	if last == nil || last.Y != 3 {
+		t.Fatalf("last-line cursor = %#v, want row 3", last)
 	}
 }
 
@@ -366,18 +391,25 @@ func TestViewResetsMalformedAssistantStyleBeforeNextEntryAndFooter(t *testing.T)
 			{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "next entry"}}},
 		},
 	}
-	view := resizeModel(t, NewModel(context.Background(), backend), 100, 30).View().Content
-	red := strings.Index(view, "red")
-	next := strings.Index(view, "next entry")
-	footer := strings.Index(view, "profile/model")
-	if red < 0 || next <= red || footer <= next {
-		t.Fatalf("view does not contain entries and footer in order: %q", view)
+	// Both history entries are final immediately (no active turn), so a
+	// single window resize commits them together into one scrollback chunk
+	// in m.pendingPrints; the footer stays part of the live View() content,
+	// rendered independently of the transcript chunk. Call dispatch
+	// directly (not resizeModel, which drains pendingPrints for use as
+	// generic setup) so that chunk is still inspectable below.
+	updated, _ := NewModel(context.Background(), backend).dispatch(tea.WindowSizeMsg{Width: 100, Height: 30})
+	got := updated.(Model)
+	committed := strings.Join(got.pendingPrints, "\n")
+	red := strings.Index(committed, "red")
+	next := strings.Index(committed, "next entry")
+	if red < 0 || next <= red {
+		t.Fatalf("committed scrollback does not contain entries in order: %q", committed)
 	}
-	if reset := strings.Index(view[red:next], "\x1b[0m"); reset < 0 {
-		t.Fatalf("assistant SGR was not reset before the next entry: %q", view)
+	if reset := strings.Index(committed[red:next], "\x1b[0m"); reset < 0 {
+		t.Fatalf("assistant SGR was not reset before the next entry: %q", committed)
 	}
-	if reset := strings.Index(view[red:footer], "\x1b[0m"); reset < 0 {
-		t.Fatalf("assistant SGR was not reset before the footer: %q", view)
+	if footer := got.View().Content; !strings.Contains(footer, "profile/model") {
+		t.Fatalf("live view = %q, want footer still rendered", footer)
 	}
 }
 
@@ -402,7 +434,11 @@ func TestInitialUsagePrefersBackendAggregateOverCompactedHistoryFallback(t *test
 	}
 }
 
-func TestInitialHistoryStartsAtBottom(t *testing.T) {
+func TestInitialHistoryIsCommittedToScrollbackInOrder(t *testing.T) {
+	// Native terminal scrollback is not height-clipped the way the old
+	// full-screen viewport was, so loading history no longer hides the
+	// oldest entries behind a fixed-height window: every entry commits to
+	// m.pendingPrints on the first resize, oldest first.
 	history := make([]model.Message, 0, 12)
 	for i := range 12 {
 		history = append(history, model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: fmt.Sprintf("line %02d", i)}}})
@@ -412,29 +448,33 @@ func TestInitialHistoryStartsAtBottom(t *testing.T) {
 		history: history,
 	})
 
-	got := resizeModel(t, model, 60, 10)
-	content := got.View().Content
-	if !strings.Contains(content, "line 11") {
-		t.Fatalf("content = %q, want newest history visible", content)
-	}
-	if strings.Contains(content, "line 00") {
-		t.Fatalf("content = %q, want viewport positioned at newest history", content)
+	// dispatch directly (not resizeModel, which drains pendingPrints for use
+	// as generic setup) so the resize's own commit is still inspectable.
+	updated, _ := model.dispatch(tea.WindowSizeMsg{Width: 60, Height: 10})
+	got := updated.(Model)
+	committed := strings.Join(got.pendingPrints, "\n")
+	first := strings.Index(committed, "line 00")
+	last := strings.Index(committed, "line 11")
+	if first < 0 || last < 0 || last <= first {
+		t.Fatalf("committed = %q, want every history line present, oldest first", committed)
 	}
 }
 
-func TestWidthChangeRerendersCachedEntries(t *testing.T) {
-	backend := &fakeBackend{
-		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
-		history: []model.Message{{
-			Role:   model.RoleAssistant,
-			Blocks: []model.Block{{Type: model.BlockText, Text: "render me"}},
-		}},
-	}
+func TestWidthChangeRerendersLiveEntry(t *testing.T) {
+	// renderEntries only re-renders entries from m.committed onward, so a
+	// finished entry that has already been printed to scrollback is frozen
+	// at its original render width (the plan's accepted staleness
+	// tradeoff). Only a still-live, uncommitted entry re-renders on resize;
+	// seed one via an in-progress turn so it stays past m.committed.
+	backend := &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}
 	var widths []int
 	model := NewModel(context.Background(), backend, WithRenderer(rendererFunc(func(text string, width int) (string, error) {
 		widths = append(widths, width)
 		return fmt.Sprintf("%s [w=%d]", text, width), nil
 	})))
+	model.running = true
+	model.activeAssistant = 0
+	model.entries = []Entry{{ID: "live", Kind: EntryAssistant, Raw: "render me"}}
 
 	wide := resizeModel(t, model, 100, 20)
 	if len(wide.entries) != 1 || wide.entries[0].RenderWidth <= 0 {
@@ -490,7 +530,7 @@ func TestOverlayContentIncludesHelpAndSession(t *testing.T) {
 
 	updated, _ := model.Update(showHelpOverlayMsg{})
 	help := updated.(Model).View().Content
-	if !strings.Contains(help, "Ctrl+O") || !strings.Contains(help, "Shift+drag") || !strings.Contains(help, "/session") || !strings.Contains(help, "Sandbox: seatbelt · workspace-write · network allowed") {
+	if !strings.Contains(help, "Ctrl+O") || !strings.Contains(help, "Drag to select, scroll to scroll (handled by your terminal)") || !strings.Contains(help, "/session") || !strings.Contains(help, "Sandbox: seatbelt · workspace-write · network allowed") {
 		t.Fatalf("help overlay = %q, want controls and Sandbox presentation", help)
 	}
 
@@ -523,38 +563,54 @@ func TestSandboxUnavailableSessionOverlayShowsOnlySafeReason(t *testing.T) {
 }
 
 func TestToolExpansionToggle(t *testing.T) {
-	backend := &fakeBackend{
-		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
-		history: []model.Message{
-			{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}},
-			{Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-1", ToolName: "read", Text: "tool output line"}}},
-		},
+	// A completed tool call (ToolDone=true) is always final and commits to
+	// scrollback on the very next refresh; once committed, a later
+	// expandedDetails toggle cannot retroactively rewrite the already-
+	// printed text (see Model.commitFinalEntries). So this seeds the entry
+	// directly after the initial resize, exercising the toggle against
+	// m.pendingPrints (what actually gets printed) rather than the live
+	// View(), which excludes committed entries.
+	toolEntry := Entry{
+		ID: "tool-1", Kind: EntryTool, ToolCallID: "call-1", ToolName: "read",
+		ToolArgs: `{"path":"README.md"}`, ToolOutput: "tool output line", ToolDone: true,
 	}
-	model := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
-	collapsedByDefault := model.View().Content
-	if model.expandedDetails || strings.Contains(collapsedByDefault, "tool output line") {
-		t.Fatalf("default expanded=%v content=%q, want tool output folded", model.expandedDetails, collapsedByDefault)
+	backend := &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}
+
+	collapsed := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	collapsed.entries = []Entry{toolEntry}
+	// dispatch directly (not resizeModel, which drains pendingPrints for use
+	// as generic setup) so this second resize's commit is still inspectable.
+	updatedCollapsed, _ := collapsed.dispatch(tea.WindowSizeMsg{Width: 100, Height: 20})
+	collapsed = updatedCollapsed.(Model)
+	if collapsedCommitted := strings.Join(collapsed.pendingPrints, "\n"); strings.Contains(collapsedCommitted, "tool output line") {
+		t.Fatalf("collapsed committed = %q, want tool output folded", collapsedCommitted)
 	}
 
-	updated, _ := model.Update(toggleDetailsMsg{})
+	live := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	live.entries = []Entry{toolEntry}
+	updated, _ := live.dispatch(toggleDetailsMsg{})
 	expanded := updated.(Model)
 	if !expanded.expandedDetails {
 		t.Fatalf("expandedDetails = false after toggle, want true")
 	}
-	if content := expanded.View().Content; !strings.Contains(content, "tool output line") || !strings.Contains(content, `{"path":"README.md"}`) {
-		t.Fatalf("expanded content = %q, want full arguments and output", content)
+	expandedCommitted := strings.Join(expanded.pendingPrints, "\n")
+	if !strings.Contains(expandedCommitted, "tool output line") || !strings.Contains(expandedCommitted, `{"path":"README.md"}`) {
+		t.Fatalf("expanded committed = %q, want full arguments and output", expandedCommitted)
 	}
 
-	toggledBack, _ := expanded.Update(toggleDetailsMsg{})
+	toggledBack, _ := expanded.dispatch(toggleDetailsMsg{})
 	if toggledBack.(Model).expandedDetails {
 		t.Fatalf("expandedDetails = true after second toggle, want false")
-	}
-	if content := toggledBack.View().Content; strings.Contains(content, "tool output line") {
-		t.Fatalf("re-collapsed content = %q, want tool output hidden", content)
 	}
 }
 
 func TestCompactionDetailsToggleShowsCollapsedAndExpandedCheckpointMarkdown(t *testing.T) {
+	// A compaction entry is only final once !m.running (see isEntryFinal);
+	// once final it commits to scrollback and freezes at whatever
+	// expandedDetails was in effect (commitFinalEntries never re-renders a
+	// committed entry). Keep the turn "running" so this entry stays in the
+	// live region across both toggle states, letting the toggle's effect be
+	// observed directly via View() instead of m.pendingPrints.
 	backend := &fakeBackend{
 		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
 		history: []model.Message{{
@@ -566,7 +622,9 @@ func TestCompactionDetailsToggleShowsCollapsedAndExpandedCheckpointMarkdown(t *t
 			Blocks:              []model.Block{{Type: model.BlockText, Text: "[Compaction summary]\n## Goal\n\nship\n\tkeep whitespace"}},
 		}},
 	}
-	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	m := newTestModelWithBackend(t, backend)
+	m.running = true
+	m = resizeModel(t, m, 100, 20)
 	collapsed := m.View().Content
 	if !strings.Contains(collapsed, "[context] compacted 258k tokens") || strings.Contains(collapsed, "## Goal") || strings.Contains(collapsed, "[Compaction summary]") {
 		t.Fatalf("collapsed compaction view = %q", collapsed)
@@ -628,20 +686,13 @@ func TestExpandedToolPreservesArgumentAndOutputWhitespace(t *testing.T) {
 }
 
 func TestTypingKeysDoNotScrollViewport(t *testing.T) {
-	history := make([]model.Message, 0, 24)
-	for i := range 24 {
-		history = append(history, model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: fmt.Sprintf("entry %02d", i)}}})
-	}
-	m := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{
-		info:    app.Info{Profile: "profile", Model: "model", SessionID: "session"},
-		history: history,
-	}), 80, 10)
-	m.viewport.SetYOffset(6)
-	m.autoFollow = false
+	// The live-region viewport's own KeyMap is zeroed at construction
+	// (see NewModel), so typed characters that collide with the upstream
+	// viewport package's default pager bindings (space/f/b/u/d/j/k/h/l)
+	// must never move it. Everything is ordinary composer input instead.
+	m := resizeModel(t, newTestModel(t), 80, 10)
 	before := m.viewport.YOffset()
 
-	// Space, letters, and digits are ordinary composer input and must not
-	// trigger the viewport's default pager bindings (space/f/b/u/d/j/k/h/l).
 	spacePress := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Text: " "})
 	updated, _ := m.Update(spacePress)
 	got := updated.(Model)
@@ -659,26 +710,6 @@ func TestTypingKeysDoNotScrollViewport(t *testing.T) {
 	}
 	if got := m.editor.Value(); got != " fbudjkhla1" {
 		t.Fatalf("composer value = %q, want all typed keys inserted", got)
-	}
-}
-
-func TestViewportScrollDisablesAutoFollow(t *testing.T) {
-	history := make([]model.Message, 0, 16)
-	for i := range 16 {
-		history = append(history, model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: fmt.Sprintf("entry %02d", i)}}})
-	}
-	model := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{
-		info:    app.Info{Profile: "profile", Model: "model", SessionID: "session"},
-		history: history,
-	}), 80, 10)
-	if !model.autoFollow {
-		t.Fatalf("autoFollow = false, want true at bottom")
-	}
-
-	updated, _ := model.Update(scrollViewportMsg{Delta: -3})
-	got := updated.(Model)
-	if got.autoFollow {
-		t.Fatalf("autoFollow = true, want false after scrolling up")
 	}
 }
 
@@ -716,6 +747,11 @@ func TestShiftEnterRequiresKeyboardEnhancements(t *testing.T) {
 }
 
 func TestCtrlOTogglesDetailExpansionForToolsAndCompaction(t *testing.T) {
+	// Compaction entries only become final once !m.running, and
+	// commitFinalEntries commits entries strictly in order (it stops at the
+	// first non-final entry). Keeping the turn "running" holds the
+	// compaction entry, and therefore the tool entry behind it, in the live
+	// region across both toggle states, so View() still reflects them.
 	backend := &fakeBackend{
 		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
 		history: []model.Message{
@@ -724,7 +760,9 @@ func TestCtrlOTogglesDetailExpansionForToolsAndCompaction(t *testing.T) {
 			{Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-1", ToolName: "read", Text: "tool output line"}}},
 		},
 	}
-	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	m := newTestModelWithBackend(t, backend)
+	m.running = true
+	m = resizeModel(t, m, 100, 20)
 	if m.expandedDetails || strings.Contains(m.View().Content, "tool output line") || strings.Contains(m.View().Content, "summary details") {
 		t.Fatalf("default expanded=%v content=%q, want details folded", m.expandedDetails, m.View().Content)
 	}
@@ -744,86 +782,69 @@ func TestCtrlOTogglesDetailExpansionForToolsAndCompaction(t *testing.T) {
 }
 
 func TestCtrlOTogglesToolExpansionKey(t *testing.T) {
-	backend := &fakeBackend{
-		info: app.Info{Profile: "profile", Model: "model", SessionID: "session"},
-		history: []model.Message{
-			{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{"path":"README.md"}`)}}},
-			{Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-1", ToolName: "read", Text: "tool output line"}}},
-		},
+	// Same commit-then-freeze constraint as TestToolExpansionToggle: a
+	// completed tool call commits to scrollback on the very next refresh,
+	// so this seeds the entry after the initial resize and inspects
+	// m.pendingPrints across the real Ctrl+O keybinding (via dispatch, so
+	// Update's auto-flush doesn't pop the chunk before the test can see it).
+	toolEntry := Entry{
+		ID: "tool-1", Kind: EntryTool, ToolCallID: "call-1", ToolName: "read",
+		ToolArgs: `{"path":"README.md"}`, ToolOutput: "tool output line", ToolDone: true,
 	}
-	m := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
-	if m.expandedDetails || strings.Contains(m.View().Content, "tool output line") {
-		t.Fatalf("default expanded=%v content=%q, want output folded", m.expandedDetails, m.View().Content)
+	backend := &fakeBackend{info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}
+
+	collapsed := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	collapsed.entries = []Entry{toolEntry}
+	// dispatch directly (not resizeModel, which drains pendingPrints for use
+	// as generic setup) so this second resize's commit is still inspectable.
+	updatedCollapsed, _ := collapsed.dispatch(tea.WindowSizeMsg{Width: 100, Height: 20})
+	collapsed = updatedCollapsed.(Model)
+	if committed := strings.Join(collapsed.pendingPrints, "\n"); strings.Contains(committed, "tool output line") {
+		t.Fatalf("collapsed committed = %q, want tool output folded", committed)
 	}
 
-	updated, _ := m.Update(keyPress('o', tea.ModCtrl))
+	live := resizeModel(t, newTestModelWithBackend(t, backend), 100, 20)
+	live.entries = []Entry{toolEntry}
+	updated, _ := live.dispatch(keyPress('o', tea.ModCtrl))
 	expanded := updated.(Model)
-	if !expanded.expandedDetails || !strings.Contains(expanded.View().Content, "tool output line") {
-		t.Fatalf("after ctrl+o expanded=%v content=%q, want output visible", expanded.expandedDetails, expanded.View().Content)
+	if !expanded.expandedDetails {
+		t.Fatalf("expandedDetails = false after ctrl+o, want true")
+	}
+	if committed := strings.Join(expanded.pendingPrints, "\n"); !strings.Contains(committed, "tool output line") {
+		t.Fatalf("expanded committed = %q, want tool output visible", committed)
 	}
 
-	toggledBack, _ := expanded.Update(keyPress('o', tea.ModCtrl))
-	got := toggledBack.(Model)
-	if got.expandedDetails || strings.Contains(got.View().Content, "tool output line") {
-		t.Fatalf("after second ctrl+o expanded=%v content=%q, want output folded", got.expandedDetails, got.View().Content)
+	toggledBack, _ := expanded.dispatch(keyPress('o', tea.ModCtrl))
+	if toggledBack.(Model).expandedDetails {
+		t.Fatalf("expandedDetails = true after second ctrl+o, want false")
 	}
 }
 
-func TestPageKeysAndHomeEndRouteBetweenViewportAndEditor(t *testing.T) {
-	history := make([]model.Message, 0, 24)
-	for i := range 24 {
-		history = append(history, model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: fmt.Sprintf("entry %02d", i)}}})
-	}
-	m := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{
-		info:    app.Info{Profile: "profile", Model: "model", SessionID: "session"},
-		history: history,
-	}), 80, 10)
-	m.viewport.SetYOffset(6)
-	m.autoFollow = false
+func TestHomeAndEndEditComposerCursor(t *testing.T) {
+	// Home/End were removed from Otto's own KeyMap, so these keys now fall
+	// straight through to the textarea's native handling; there is no more
+	// viewport-vs-editor routing to test (PageUp/PageDown are unbound and
+	// unhandled, and the viewport's own KeyMap is zeroed, so neither key
+	// moves the live-region viewport at all).
+	m := resizeModel(t, newTestModel(t), 80, 10)
+	m.editor.SetValue("abc")
 
-	updated, _ := m.Update(keyPress(tea.KeyPgUp))
-	pageUp := updated.(Model)
-	if pageUp.viewport.YOffset() >= 6 {
-		t.Fatalf("pgup offset = %d, want < 6", pageUp.viewport.YOffset())
+	updated, _ := m.Update(keyPress(tea.KeyHome))
+	afterHome := updated.(Model)
+	if afterHome.editor.Column() != 0 {
+		t.Fatalf("home column = %d, want 0", afterHome.editor.Column())
 	}
-
-	updated, _ = pageUp.Update(keyPress(tea.KeyPgDown))
-	pageDown := updated.(Model)
-	if pageDown.viewport.YOffset() <= pageUp.viewport.YOffset() {
-		t.Fatalf("pgdn offset = %d, want > %d", pageDown.viewport.YOffset(), pageUp.viewport.YOffset())
+	if afterHome.viewport.YOffset() != 0 {
+		t.Fatalf("home moved viewport offset to %d, want 0", afterHome.viewport.YOffset())
 	}
 
-	pageDown.viewport.SetYOffset(4)
-	pageDown.autoFollow = false
-	pageDown.editor.SetValue("abc")
-	updated, _ = pageDown.Update(keyPress(tea.KeyHome))
-	consumedHome := updated.(Model)
-	if consumedHome.editor.Column() != 0 {
-		t.Fatalf("home column = %d, want 0", consumedHome.editor.Column())
+	updated, _ = afterHome.Update(keyPress(tea.KeyEnd))
+	afterEnd := updated.(Model)
+	if afterEnd.editor.Column() != len("abc") {
+		t.Fatalf("end column = %d, want %d", afterEnd.editor.Column(), len("abc"))
 	}
-	if consumedHome.viewport.YOffset() != 4 {
-		t.Fatalf("home consumed viewport offset = %d, want 4", consumedHome.viewport.YOffset())
-	}
-
-	updated, _ = consumedHome.Update(keyPress(tea.KeyHome))
-	transcriptTop := updated.(Model)
-	if transcriptTop.viewport.YOffset() != 0 {
-		t.Fatalf("home transcript offset = %d, want 0", transcriptTop.viewport.YOffset())
-	}
-
-	updated, _ = transcriptTop.Update(keyPress(tea.KeyEnd))
-	consumedEnd := updated.(Model)
-	if consumedEnd.editor.Column() != len("abc") {
-		t.Fatalf("end column = %d, want %d", consumedEnd.editor.Column(), len("abc"))
-	}
-	if consumedEnd.viewport.YOffset() != 0 {
-		t.Fatalf("end consumed viewport offset = %d, want 0", consumedEnd.viewport.YOffset())
-	}
-
-	updated, _ = consumedEnd.Update(keyPress(tea.KeyEnd))
-	transcriptBottom := updated.(Model)
-	if !transcriptBottom.viewport.AtBottom() || !transcriptBottom.autoFollow {
-		t.Fatalf("end did not route to transcript bottom: offset=%d autoFollow=%v", transcriptBottom.viewport.YOffset(), transcriptBottom.autoFollow)
+	if afterEnd.viewport.YOffset() != 0 {
+		t.Fatalf("end moved viewport offset to %d, want 0", afterEnd.viewport.YOffset())
 	}
 }
 
@@ -915,7 +936,12 @@ func TestOverlayIsModalAndEscapeDismissesBeforeCancel(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. tea.Batch doesn't invoke its
+	// sub-commands when called, so cmd() below would never start the
+	// backend goroutine and <-started would hang forever.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	turnDone := make(chan tea.Msg, 1)
 	go func() { turnDone <- cmd() }()
@@ -975,7 +1001,12 @@ func TestWhitespaceOnlyPromptIsRejectedAndOrdinaryWhitespaceIsPreserved(t *testi
 
 	const prompt = "  keep this whitespace \n "
 	rejected.editor.SetValue(prompt)
-	updated, cmd = rejected.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting this prompt commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. runCommandWithin below
+	// invokes cmd() and expects it to run the backend prompt synchronously;
+	// a batched cmd would instead yield an unrun tea.BatchMsg.
+	updated, cmd = rejected.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	if cmd == nil || !running.running || len(running.entries) != 1 || running.entries[0].Raw != prompt {
 		t.Fatalf("ordinary submit: cmd=%v running=%v entries=%#v", cmd, running.running, running.entries)
@@ -1060,7 +1091,12 @@ func TestNewCommandResultCannotResetNewerActiveTurn(t *testing.T) {
 	updated, _ = pending.startPrompt("newer active prompt")
 	active := updated.(Model)
 	activeChannel := active.activeTurnChannel
-	updated, cmd := active.Update(newSessionResultMsg{generation: generation})
+	// dispatch, not Update: startPrompt above commits a final User entry
+	// directly (it's a dispatch-level helper, not routed through Update's
+	// auto-flush wrapper), leaving pendingPrints undrained. An Update call
+	// here would auto-flush that leftover chunk and return a non-nil cmd
+	// unrelated to this stale-generation check.
+	updated, cmd := active.dispatch(newSessionResultMsg{generation: generation})
 	got := updated.(Model)
 	if cmd != nil || !got.running || got.activeTurnChannel != activeChannel || got.newSessionPending || len(got.entries) != 2 || got.entries[len(got.entries)-1].Raw != "newer active prompt" {
 		t.Fatalf("/new result reset active turn: cmd=%v running=%v pending=%v entries=%#v", cmd, got.running, got.newSessionPending, got.entries)
@@ -1079,8 +1115,8 @@ func TestNewCommandIgnoresStaleResults(t *testing.T) {
 
 	updated, _ = first.Update(newSessionResultMsg{generation: firstGeneration + 1})
 	stillPending := updated.(Model)
-	if !stillPending.newSessionPending || stillPending.editor.Value() != "/new" || !strings.Contains(stillPending.View().Content, "keep transcript") {
-		t.Fatalf("mismatched result changed state: pending=%v editor=%q view=%q", stillPending.newSessionPending, stillPending.editor.Value(), stillPending.View().Content)
+	if !stillPending.newSessionPending || stillPending.editor.Value() != "/new" || !strings.Contains(entriesText(stillPending.entries), "keep transcript") {
+		t.Fatalf("mismatched result changed state: pending=%v editor=%q entries=%q", stillPending.newSessionPending, stillPending.editor.Value(), entriesText(stillPending.entries))
 	}
 
 	updated, _ = stillPending.Update(newSessionResultMsg{generation: firstGeneration, err: errors.New("first failed")})
@@ -1098,8 +1134,8 @@ func TestNewCommandIgnoresStaleResults(t *testing.T) {
 	second.editor.SetValue("newer draft")
 	updated, _ = second.Update(newSessionResultMsg{generation: firstGeneration})
 	got := updated.(Model)
-	if !got.newSessionPending || got.editor.Value() != "newer draft" || !strings.Contains(got.View().Content, "keep transcript") {
-		t.Fatalf("stale success reset newer state: pending=%v editor=%q view=%q", got.newSessionPending, got.editor.Value(), got.View().Content)
+	if !got.newSessionPending || got.editor.Value() != "newer draft" || !strings.Contains(entriesText(got.entries), "keep transcript") {
+		t.Fatalf("stale success reset newer state: pending=%v editor=%q entries=%q", got.newSessionPending, got.editor.Value(), entriesText(got.entries))
 	}
 
 	_ = firstCmd
@@ -1148,13 +1184,18 @@ func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 120, 12)
 	m.editor.SetValue("  /new  ")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch (not Update) so cmd stays the bare runNewSessionCommand
+	// closure: Update would batch it with the pending print-flush command
+	// left over from resizeModel's initial commit of "old transcript",
+	// and calling that batch would yield a tea.BatchMsg instead of the
+	// newSessionResultMsg the next step expects.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	waiting := updated.(Model)
-	if cmd == nil || waiting.editor.Value() != "  /new  " || !strings.Contains(waiting.View().Content, "old transcript") {
-		t.Fatalf("waiting editor=%q cmd=%v view=%q", waiting.editor.Value(), cmd, waiting.View().Content)
+	if cmd == nil || waiting.editor.Value() != "  /new  " || !strings.Contains(entriesText(waiting.entries), "old transcript") {
+		t.Fatalf("waiting editor=%q cmd=%v entries=%q", waiting.editor.Value(), cmd, entriesText(waiting.entries))
 	}
 
-	updated, next := waiting.Update(cmd())
+	updated, next := waiting.dispatch(cmd())
 	got := updated.(Model)
 	if next != nil {
 		t.Fatalf("new session result scheduled unexpected cmd %v", next)
@@ -1162,7 +1203,11 @@ func TestNewCommandSuccessReplacesHistoryAndUsage(t *testing.T) {
 	if got.editor.Value() != "" || got.usage.InputTokens != 7 || got.usage.OutputTokens != 9 {
 		t.Fatalf("editor=%q usage=%#v", got.editor.Value(), got.usage)
 	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "session-new") || !strings.Contains(content, "ctx ?%") || strings.Contains(content, "23.4%") {
+	entries := entriesText(got.entries)
+	if strings.Contains(entries, "old transcript") || !strings.Contains(entries, "fresh transcript") {
+		t.Fatalf("entries = %q", entries)
+	}
+	if content := got.View().Content; !strings.Contains(content, "session-new") || !strings.Contains(content, "ctx ?%") || strings.Contains(content, "23.4%") {
 		t.Fatalf("view = %q", content)
 	}
 }
@@ -1180,13 +1225,15 @@ func TestNewCommandFailureRetainsDraftAndState(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue(" /new ")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: see the identical rationale in
+	// TestNewCommandSuccessReplacesHistoryAndUsage.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	waiting := updated.(Model)
 	if cmd == nil || waiting.editor.Value() != " /new " {
 		t.Fatalf("waiting editor=%q cmd=%v", waiting.editor.Value(), cmd)
 	}
 
-	updated, next := waiting.Update(cmd())
+	updated, next := waiting.dispatch(cmd())
 	got := updated.(Model)
 	if next != nil {
 		t.Fatalf("failure scheduled unexpected cmd %v", next)
@@ -1194,8 +1241,11 @@ func TestNewCommandFailureRetainsDraftAndState(t *testing.T) {
 	if got.editor.Value() != " /new " || got.usage.InputTokens != 3 || got.usage.OutputTokens != 4 {
 		t.Fatalf("editor=%q usage=%#v", got.editor.Value(), got.usage)
 	}
-	if content := got.View().Content; !strings.Contains(content, "keep me") || !strings.Contains(content, "replacement failed") {
-		t.Fatalf("view = %q", content)
+	if entries := entriesText(got.entries); !strings.Contains(entries, "keep me") {
+		t.Fatalf("entries = %q, want history retained", entries)
+	}
+	if content := got.View().Content; !strings.Contains(content, "replacement failed") {
+		t.Fatalf("view = %q, want failure status", content)
 	}
 }
 
@@ -1218,14 +1268,23 @@ func TestNewCommandIsRejectedWhileTurnIsActive(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. tea.Batch doesn't invoke its
+	// sub-commands when called, so cmd() below would never start the
+	// backend goroutine and <-started would hang forever.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	turnDone := make(chan tea.Msg, 1)
 	go func() { turnDone <- cmd() }()
 	<-started
 
 	running.editor.SetValue("/new")
-	updated, rejectCmd := running.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: the earlier "question" submission above left
+	// pendingPrints undrained (it also used dispatch, for the same reason
+	// noted there). An Update call here would auto-flush that leftover
+	// chunk and return a non-nil cmd unrelated to this rejection path.
+	updated, rejectCmd := running.dispatch(keyPress(tea.KeyEnter))
 	got := updated.(Model)
 	if rejectCmd != nil || got.editor.Value() != "/new" || !strings.Contains(got.View().Content, app.ErrPromptActive.Error()) {
 		t.Fatalf("editor=%q cmd=%v view=%q", got.editor.Value(), rejectCmd, got.View().Content)
@@ -1265,14 +1324,23 @@ func TestExitCommandOnlyQuitsWhenIdle(t *testing.T) {
 	}, info: app.Info{Profile: "profile", Model: "model", SessionID: "session"}}
 	runningModel := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	runningModel.editor.SetValue("question")
-	updated, cmd := runningModel.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. tea.Batch doesn't invoke its
+	// sub-commands when called, so cmd() below would never start the
+	// backend goroutine and <-started would hang forever.
+	updated, cmd := runningModel.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	turnDone := make(chan tea.Msg, 1)
 	go func() { turnDone <- cmd() }()
 	<-started
 
 	running.editor.SetValue("/exit")
-	updated, quitCmd = running.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: the earlier "question" submission above left
+	// pendingPrints undrained (it also used dispatch, for the same reason
+	// noted there). An Update call here would auto-flush that leftover
+	// chunk and return a non-nil cmd unrelated to this quit-rejection path.
+	updated, quitCmd = running.dispatch(keyPress(tea.KeyEnter))
 	got := updated.(Model)
 	if quitCmd != nil || got.editor.Value() != "/exit" || !got.running {
 		t.Fatalf("running=%v editor=%q cmd=%v", got.running, got.editor.Value(), quitCmd)
@@ -1381,7 +1449,12 @@ func TestCtrlCRunningCancelsArmsAndSecondQuits(t *testing.T) {
 	}))), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. tea.Batch doesn't invoke its
+	// sub-commands when called, so cmd() below would never start the
+	// backend goroutine and <-started would hang forever.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	turnDone := make(chan tea.Msg, 1)
 	go func() { turnDone <- cmd() }()
@@ -1506,7 +1579,12 @@ func TestStaleTurnMessagesCannotMutateActiveOrCompletedTurn(t *testing.T) {
 
 	completedModel := resizeModel(t, newTestModel(t), 80, 12)
 	completedModel.editor.SetValue("completed")
-	started, startCmd := completedModel.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "completed" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. runCommandWithin below
+	// expects the raw turnMsg back; a batched cmd yields an unrun
+	// tea.BatchMsg instead, and the type assertion below would panic.
+	started, startCmd := completedModel.dispatch(keyPress(tea.KeyEnter))
 	doneMsg := runCommandWithin(t, startCmd, time.Second).(turnMsg)
 	finished, _ := started.(Model).Update(doneMsg)
 	idle := finished.(Model)
@@ -1531,7 +1609,13 @@ func TestPromptCommandStreamsEventsAndCompletes(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch (not Update) throughout: submitting the prompt appends a
+	// User entry that's immediately final (see isEntryFinal) and commits on
+	// this very dispatch, so Update's automatic flush wrapper would batch
+	// its print command together with the real turnMsg-producing cmd,
+	// turning cmd() into a tea.BatchMsg instead of the bare turnMsg these
+	// assertions expect.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	if !running.running || running.editor.Value() != "" {
 		t.Fatalf("running=%v editor=%q", running.running, running.editor.Value())
@@ -1549,7 +1633,7 @@ func TestPromptCommandStreamsEventsAndCompletes(t *testing.T) {
 		t.Fatalf("ordinary turn permits = %d, want 63", cap(firstTurn.stream.regularEventSlots))
 	}
 
-	afterFirst, next := running.Update(first)
+	afterFirst, next := running.dispatch(first)
 	streaming := afterFirst.(Model)
 	if len(streaming.entries) != 2 || streaming.entries[0].Kind != EntryUser || streaming.entries[1].Kind != EntryAssistant {
 		t.Fatalf("entries = %#v", streaming.entries)
@@ -1565,7 +1649,7 @@ func TestPromptCommandStreamsEventsAndCompletes(t *testing.T) {
 	}
 
 	second := batch[0]()
-	afterSecond, next := streaming.Update(second)
+	afterSecond, next := streaming.dispatch(second)
 	more := afterSecond.(Model)
 	if more.entries[1].Raw != "hello world" || !more.renderTickActive {
 		t.Fatalf("second delta state = %#v tick=%v", more.entries[1], more.renderTickActive)
@@ -1575,20 +1659,24 @@ func TestPromptCommandStreamsEventsAndCompletes(t *testing.T) {
 	if _, ok := usageMsg.(tea.BatchMsg); ok {
 		t.Fatalf("second delta scheduled an extra render batch: %#v", usageMsg)
 	}
-	afterUsage, next := more.Update(usageMsg)
+	afterUsage, next := more.dispatch(usageMsg)
 	withUsage := afterUsage.(Model)
 	if withUsage.usage.InputTokens != 3 || withUsage.usage.OutputTokens != 2 {
 		t.Fatalf("usage = %#v", withUsage.usage)
 	}
 
 	done := next()
-	afterDone, doneCmd := withUsage.Update(done)
+	afterDone, doneCmd := withUsage.dispatch(done)
 	final := afterDone.(Model)
 	if doneCmd != nil || final.running || final.cancel != nil || final.dirtyStreaming || final.renderTickActive {
 		t.Fatalf("final running=%v cancel=%v dirty=%v tick=%v cmd=%v", final.running, final.cancel != nil, final.dirtyStreaming, final.renderTickActive, doneCmd)
 	}
-	if final.entries[1].Rendered != "hello world" || !strings.Contains(final.View().Content, "hello world") {
-		t.Fatalf("final rendered assistant = %#v view=%q", final.entries[1], final.View().Content)
+	// The assistant entry finalizes and commits to scrollback as part of
+	// this same dispatch (commitFinalEntries never re-renders it
+	// afterward), so it no longer appears in the live View(); check the
+	// committed chunk in pendingPrints instead.
+	if final.entries[1].Rendered != "hello world" || !strings.Contains(strings.Join(final.pendingPrints, "\n"), "hello world") {
+		t.Fatalf("final rendered assistant = %#v pendingPrints=%q", final.entries[1], final.pendingPrints)
 	}
 }
 
@@ -1597,7 +1685,12 @@ func TestTurnChannelClosesAfterDone(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. runCommandWithin below
+	// expects the raw turnMsg back; a batched cmd yields an unrun
+	// tea.BatchMsg instead, and the type assertion below would panic.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	first := runCommandWithin(t, cmd, time.Second).(turnMsg)
 	afterDone, _ := updated.(Model).Update(first)
 	if got := afterDone.(Model); got.running || got.cancel != nil {
@@ -1636,10 +1729,15 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch throughout: same rationale as
+	// TestPromptCommandStreamsEventsAndCompletes — submitting the prompt
+	// commits the User entry immediately, so Update would batch that print
+	// command together with the real message/cmd this chain manually feeds
+	// forward.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	first := cmd()
-	afterStart, next := running.Update(first)
+	afterStart, next := running.dispatch(first)
 	started := afterStart.(Model)
 	if len(started.entries) != 2 || started.entries[1].Kind != EntryTool || started.entries[1].ToolName != "read" || started.entries[1].ToolDone {
 		t.Fatalf("started entries = %#v", started.entries)
@@ -1649,26 +1747,34 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 	}
 
 	finished := next()
-	afterFinish, next := started.Update(finished)
+	afterFinish, next := started.dispatch(finished)
 	result := afterFinish.(Model)
 	if !result.entries[1].ToolDone || !result.entries[1].ToolError || result.entries[1].ToolOutput != "README\nfull output" {
 		t.Fatalf("finished tool entry = %#v", result.entries[1])
 	}
 
-	afterDone, doneCmd := result.Update(next())
+	afterDone, doneCmd := result.dispatch(next())
 	idle := afterDone.(Model)
 	if doneCmd != nil || idle.running || idle.cancel != nil {
 		t.Fatalf("idle running=%v cancel=%v cmd=%v", idle.running, idle.cancel != nil, doneCmd)
 	}
 
-	content := idle.View().Content
-	if idle.expandedDetails || !strings.Contains(content, "read") || !strings.Contains(content, "README.md") || !strings.Contains(content, "full output") || !strings.Contains(content, "✗") {
-		t.Fatalf("default tool summary expanded=%v content=%q, want concise failed preview", idle.expandedDetails, content)
+	// EventToolCallFinished calls refreshViewportContent as soon as it
+	// marks the entry ToolDone (model.go:1071), so the completed tool call
+	// is already committed to scrollback here; check the committed chunk
+	// in pendingPrints rather than the live View(), which excludes it.
+	committed := strings.Join(idle.pendingPrints, "\n")
+	if idle.expandedDetails || !strings.Contains(committed, "read") || !strings.Contains(committed, "README.md") || !strings.Contains(committed, "full output") || !strings.Contains(committed, "✗") {
+		t.Fatalf("default tool summary expanded=%v committed=%q, want concise failed preview", idle.expandedDetails, committed)
 	}
 
-	expanded, _ := idle.Update(toggleDetailsMsg{})
-	if content := expanded.View().Content; !strings.Contains(content, "full output") {
-		t.Fatalf("expanded tool content = %q, want full output", content)
+	// Toggling after commit cannot retroactively rewrite the already-
+	// printed chunk above (see Model.commitFinalEntries); the flag flip is
+	// still real and observable, and the pre-commit case is covered by
+	// TestToolExpansionToggle / TestCtrlOTogglesToolExpansionKey.
+	expanded, _ := idle.dispatch(toggleDetailsMsg{})
+	if !expanded.(Model).expandedDetails {
+		t.Fatalf("expandedDetails = false after toggle, want true")
 	}
 }
 
@@ -1683,7 +1789,12 @@ func TestDraftRemainsEditableWhileRunningAndEnterDoesNotQueue(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. tea.Batch doesn't invoke its
+	// sub-commands when called, so cmd() below would never start the
+	// backend goroutine and <-started would hang forever.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	turnDone := make(chan tea.Msg, 1)
 	go func() { turnDone <- cmd() }()
@@ -1719,13 +1830,22 @@ func TestEscapeCancelsActiveTurnAndWaitsForCompletion(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. tea.Batch doesn't invoke its
+	// sub-commands when called, so cmd() below would never start the
+	// backend goroutine and <-started would hang forever.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	turnDone := make(chan tea.Msg, 1)
 	go func() { turnDone <- cmd() }()
 	<-started
 
-	cancelled, cancelCmd := running.Update(keyPress(tea.KeyEscape))
+	// dispatch, not Update: the earlier "question" submission above left
+	// pendingPrints undrained (it also used dispatch, for the same reason
+	// noted there). An Update call here would auto-flush that leftover
+	// chunk and return a non-nil cmd unrelated to cancellation.
+	cancelled, cancelCmd := running.dispatch(keyPress(tea.KeyEscape))
 	stillRunning := cancelled.(Model)
 	if cancelCmd != nil || !stillRunning.running {
 		t.Fatalf("running=%v cmd=%v, want active until done", stillRunning.running, cancelCmd)
@@ -1738,7 +1858,10 @@ func TestEscapeCancelsActiveTurnAndWaitsForCompletion(t *testing.T) {
 		t.Fatal("canceled turn did not complete")
 	}
 
-	afterDone, doneCmd := stillRunning.Update(done)
+	// dispatch, not Update: same undrained-pendingPrints reasoning as
+	// above; the finalized error entry this produces is asserted below via
+	// idle.entries directly, not via a flushed print chunk.
+	afterDone, doneCmd := stillRunning.dispatch(done)
 	idle := afterDone.(Model)
 	if doneCmd != nil || idle.running || idle.cancel != nil {
 		t.Fatalf("idle running=%v cancel=%v cmd=%v", idle.running, idle.cancel != nil, doneCmd)
@@ -1765,8 +1888,22 @@ func TestPromptErrorLeavesModelUsable(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("first")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
-	firstTurn, waitDone := updated.(Model).Update(cmd())
+	// dispatch, not Update: submitting "first" commits a final User entry
+	// within this same call, which Update's auto-flush wrapper would batch
+	// with the real turn-start command. cmd() below is invoked directly and
+	// fed into another Update call expecting the real turnMsg; a batched
+	// cmd would instead yield an unrun tea.BatchMsg that dispatch silently
+	// ignores.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	// dispatch, not Update: afterErrEvent below is reused as the receiver
+	// for three independent derivations further down. Model has value
+	// semantics, so each .Update call on the same undrained afterErrEvent
+	// copy would independently trigger Update's auto-flush wrapper (it
+	// only skips flushing once printInFlight is latched on THAT specific
+	// copy's own history) and batch a leftover print chunk with the real
+	// result, corrupting waitDone (invoked directly below) and randomly
+	// flipping blockedCmd/completionCmd's nil-ness.
+	firstTurn, waitDone := updated.(Model).dispatch(cmd())
 	afterErrEvent := firstTurn.(Model)
 	if waitDone == nil || !afterErrEvent.running || afterErrEvent.cancel == nil {
 		t.Fatalf("error event state running=%v cancel=%v cmd=%v", afterErrEvent.running, afterErrEvent.cancel != nil, waitDone)
@@ -1775,13 +1912,13 @@ func TestPromptErrorLeavesModelUsable(t *testing.T) {
 		t.Fatalf("entries = %#v", afterErrEvent.entries)
 	}
 
-	blocked, blockedCmd := afterErrEvent.Update(keyPress(tea.KeyEnter))
+	blocked, blockedCmd := afterErrEvent.dispatch(keyPress(tea.KeyEnter))
 	if blockedCmd != nil || !blocked.(Model).running {
 		t.Fatalf("resubmit before done running=%v cmd=%v", blocked.(Model).running, blockedCmd)
 	}
 
 	close(releaseFirst)
-	completed, completionCmd := afterErrEvent.Update(waitDone())
+	completed, completionCmd := afterErrEvent.dispatch(waitDone())
 	afterErr := completed.(Model)
 	if completionCmd != nil || afterErr.running || afterErr.cancel != nil {
 		t.Fatalf("completion state running=%v cancel=%v cmd=%v", afterErr.running, afterErr.cancel != nil, completionCmd)
@@ -1791,7 +1928,7 @@ func TestPromptErrorLeavesModelUsable(t *testing.T) {
 	}
 
 	afterErr.editor.SetValue("second")
-	retryUpdated, retryCmd := afterErr.Update(keyPress(tea.KeyEnter))
+	retryUpdated, retryCmd := afterErr.dispatch(keyPress(tea.KeyEnter))
 	retrying := retryUpdated.(Model)
 	if !retrying.running || retryCmd == nil {
 		t.Fatalf("retry running=%v cmd=%v", retrying.running, retryCmd)
@@ -1807,8 +1944,17 @@ func TestFatalPersistenceErrorQuitsAfterCompletion(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
-	afterEvent, waitDone := updated.(Model).Update(cmd())
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. cmd() below is invoked
+	// directly and fed into another Update call expecting the real
+	// turnMsg; a batched cmd would instead yield an unrun tea.BatchMsg that
+	// dispatch silently ignores.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	// dispatch, not Update: same reasoning as above -- Update here would
+	// batch a leftover print chunk into waitDone, and waitDone is invoked
+	// directly below expecting the real completion message.
+	afterEvent, waitDone := updated.(Model).dispatch(cmd())
 	waiting := afterEvent.(Model)
 	if !waiting.running || waitDone == nil || waiting.fatalErr != nil {
 		t.Fatalf("event state running=%v wait=%v fatalErr=%v", waiting.running, waitDone != nil, waiting.fatalErr)
@@ -1841,27 +1987,39 @@ func TestStreamingRenderTickThenLaterDeltaCompletesWithFullRaw(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, start := m.Update(keyPress(tea.KeyEnter))
-	afterFirst, batchCmd := updated.(Model).Update(start())
+	// dispatch, not Update, throughout: submitting "question" makes a new
+	// User entry that is immediately final and commits to pendingPrints
+	// within the same dispatch, which Update's auto-flush wrapper would
+	// batch together with the real turn-start command, corrupting the
+	// message chain this test manually threads through by hand. The
+	// tea.BatchMsg values consumed below (batch, secondBatch) are the
+	// legitimate internal batching updateTurn itself produces (turn
+	// processing + streaming tick), unrelated to the flush wrapper.
+	updated, start := m.dispatch(keyPress(tea.KeyEnter))
+	afterFirst, batchCmd := updated.(Model).dispatch(start())
 	batch := batchCmd().(tea.BatchMsg)
 
-	afterTick, _ := afterFirst.(Model).Update(batch[1]())
+	afterTick, _ := afterFirst.(Model).dispatch(batch[1]())
 	renderedFirst := afterTick.(Model)
 	if renderedFirst.entries[1].Rendered != "first" || renderedFirst.dirtyStreaming {
 		t.Fatalf("first tick entry=%#v dirty=%v", renderedFirst.entries[1], renderedFirst.dirtyStreaming)
 	}
 
 	close(releaseSecond)
-	afterSecond, secondBatchCmd := renderedFirst.Update(batch[0]())
+	afterSecond, secondBatchCmd := renderedFirst.dispatch(batch[0]())
 	withSecond := afterSecond.(Model)
 	if withSecond.entries[1].Raw != "first second" || !withSecond.dirtyStreaming {
 		t.Fatalf("second delta entry=%#v dirty=%v", withSecond.entries[1], withSecond.dirtyStreaming)
 	}
 	secondBatch := secondBatchCmd().(tea.BatchMsg)
-	afterDone, _ := withSecond.Update(secondBatch[0]())
+	afterDone, _ := withSecond.dispatch(secondBatch[0]())
 	completed := afterDone.(Model)
-	if completed.entries[1].Rendered != "first second" || !strings.Contains(completed.View().Content, "first second") {
-		t.Fatalf("completed entry=%#v view=%q", completed.entries[1], completed.View().Content)
+	// The completed assistant entry is final (turn done) and commits to
+	// scrollback immediately, so it leaves the live View().Content and shows
+	// up in pendingPrints instead.
+	printed := strings.Join(completed.pendingPrints, "\n")
+	if completed.entries[1].Rendered != "first second" || !strings.Contains(printed, "first second") {
+		t.Fatalf("completed entry=%#v printed=%q", completed.entries[1], printed)
 	}
 }
 
@@ -1874,10 +2032,12 @@ func TestToolTransitionFlushesDirtyAssistantText(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, start := m.Update(keyPress(tea.KeyEnter))
-	afterText, batchCmd := updated.(Model).Update(start())
+	// dispatch, not Update: see the comment in
+	// TestStreamingRenderTickThenLaterDeltaCompletesWithFullRaw above.
+	updated, start := m.dispatch(keyPress(tea.KeyEnter))
+	afterText, batchCmd := updated.(Model).dispatch(start())
 	batch := batchCmd().(tea.BatchMsg)
-	afterTool, _ := afterText.(Model).Update(batch[0]())
+	afterTool, _ := afterText.(Model).dispatch(batch[0]())
 	got := afterTool.(Model)
 	if len(got.entries) != 3 || got.entries[1].Rendered != "before tool" || got.dirtyStreaming {
 		t.Fatalf("tool transition entries=%#v dirty=%v", got.entries, got.dirtyStreaming)
@@ -1901,10 +2061,12 @@ func TestToolResultTransitionFlushesDirtyAssistantText(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, start := m.Update(keyPress(tea.KeyEnter))
-	afterText, batchCmd := updated.(Model).Update(start())
+	// dispatch, not Update: see the comment in
+	// TestStreamingRenderTickThenLaterDeltaCompletesWithFullRaw above.
+	updated, start := m.dispatch(keyPress(tea.KeyEnter))
+	afterText, batchCmd := updated.(Model).dispatch(start())
 	batch := batchCmd().(tea.BatchMsg)
-	afterResult, _ := afterText.(Model).Update(batch[0]())
+	afterResult, _ := afterText.(Model).dispatch(batch[0]())
 	got := afterResult.(Model)
 	if len(got.entries) != 3 || got.entries[1].Rendered != "before result" || got.dirtyStreaming {
 		t.Fatalf("tool result transition entries=%#v dirty=%v", got.entries, got.dirtyStreaming)
@@ -1928,7 +2090,12 @@ func TestCanceledFullTurnChannelDeliversRealCompletion(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, start := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. start() below is invoked
+	// directly and type-asserted to turnMsg; a batched cmd would instead
+	// yield an unrun tea.BatchMsg and the assertion would panic.
+	updated, start := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	first := start().(turnMsg)
 	deadline := time.Now().Add(time.Second)
@@ -2012,7 +2179,12 @@ func TestCanceledFullTurnChannelReconcilesPersistedToolResultsAfterBaseline(t *t
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, start := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. runCommandWithin below
+	// expects the raw turnMsg back; a batched cmd yields an unrun
+	// tea.BatchMsg instead, and the type assertion would panic.
+	updated, start := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	first := runCommandWithin(t, start, time.Second).(turnMsg)
 	deadline := time.Now().Add(time.Second)
@@ -2240,23 +2412,32 @@ func TestStaleRenderTickDoesNotMutateNextTurn(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("first")
 
-	startedA, startA := m.Update(keyPress(tea.KeyEnter))
-	afterDeltaA, batchCmdA := startedA.(Model).Update(startA())
+	// dispatch, not Update, throughout: submitting "first"/"second" makes a
+	// new User entry that is immediately final and commits to
+	// pendingPrints within the same dispatch, which Update's auto-flush
+	// wrapper would batch together with the real turn-start command,
+	// corrupting the message chain this test manually threads through by
+	// hand. See the fuller comment in
+	// TestStreamingRenderTickThenLaterDeltaCompletesWithFullRaw. The
+	// tea.BatchMsg value consumed below (batchA) is updateTurn's own
+	// legitimate internal batching (turn processing + streaming tick).
+	startedA, startA := m.dispatch(keyPress(tea.KeyEnter))
+	afterDeltaA, batchCmdA := startedA.(Model).dispatch(startA())
 	batchA := batchCmdA().(tea.BatchMsg)
 	staleTick := batchA[1]
 	close(releaseFirst)
-	finishedA, _ := afterDeltaA.(Model).Update(batchA[0]())
+	finishedA, _ := afterDeltaA.(Model).dispatch(batchA[0]())
 
 	idle := finishedA.(Model)
 	idle.editor.SetValue("second")
-	startedB, startB := idle.Update(keyPress(tea.KeyEnter))
-	afterDeltaB, _ := startedB.(Model).Update(startB())
+	startedB, startB := idle.dispatch(keyPress(tea.KeyEnter))
+	afterDeltaB, _ := startedB.(Model).dispatch(startB())
 	streamingB := afterDeltaB.(Model)
 	if !streamingB.dirtyStreaming || !streamingB.renderTickActive {
 		t.Fatalf("turn B dirty=%v tick=%v", streamingB.dirtyStreaming, streamingB.renderTickActive)
 	}
 
-	afterStale, _ := streamingB.Update(staleTick())
+	afterStale, _ := streamingB.dispatch(staleTick())
 	got := afterStale.(Model)
 	if !got.dirtyStreaming || !got.renderTickActive || got.entries[len(got.entries)-1].Rendered != "" {
 		t.Fatalf("stale tick changed turn B: dirty=%v tick=%v entry=%#v", got.dirtyStreaming, got.renderTickActive, got.entries[len(got.entries)-1])
@@ -2264,20 +2445,30 @@ func TestStaleRenderTickDoesNotMutateNextTurn(t *testing.T) {
 	close(releaseSecond)
 }
 
-func TestViewportRefreshPreservesOffsetBeforeTemporaryClamp(t *testing.T) {
+// TestViewportRefreshAlwaysGoesToBottom: under the inline design the live
+// region shows only the in-progress turn, and finished history is printed to
+// the terminal's native scrollback (which the user scrolls directly, via
+// their terminal, not via this viewport). refreshViewportContent therefore
+// calls GotoBottom() unconditionally on every refresh, superseding the old
+// full-screen design's offset-preserving behavior tested here previously.
+func TestViewportRefreshAlwaysGoesToBottom(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 40, 10)
 	m.viewport.SetContent(strings.Repeat("old line\n", 59))
 	m.viewport.SetHeight(5)
 	m.viewport.SetYOffset(40)
-	m.autoFollow = false
 	width := m.transcriptWidth()
 	longContent := strings.Repeat("new line\n", 119)
 	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: longContent, Rendered: longContent, RenderWidth: width}}
+	// Mark the entry as the in-progress assistant turn (isEntryFinal treats
+	// any assistant entry other than activeAssistant as final, evicting it
+	// into scrollback via commitFinalEntries) so it stays live for this
+	// viewport-refresh assertion instead of being committed away.
+	m.activeAssistant = 0
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
 	got := updated.(Model)
-	if got.viewport.YOffset() != 40 {
-		t.Fatalf("viewport offset=%d, want exact prior offset 40", got.viewport.YOffset())
+	if !got.viewport.AtBottom() {
+		t.Fatalf("viewport offset=%d, want refresh to always land at bottom", got.viewport.YOffset())
 	}
 }
 
@@ -2341,11 +2532,16 @@ func TestPromptHistorySubmitAddsAndDedupes(t *testing.T) {
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	submit := func(text string) Model {
 		m.editor.SetValue(text)
-		updated, cmd := m.Update(keyPress(tea.KeyEnter))
+		// dispatch, not Update: submitting a non-empty prompt commits a
+		// final User entry within this same call, which Update's
+		// auto-flush wrapper would batch with the real turn-start command,
+		// leaving the model permanently "running" once the corrupted
+		// completion message below is silently dropped by dispatch.
+		updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 		got := updated.(Model)
 		if cmd != nil {
 			msg := runCommandWithin(t, cmd, time.Second)
-			updated, _ = got.Update(msg)
+			updated, _ = got.dispatch(msg)
 			got = updated.(Model)
 		}
 		return got
@@ -2370,7 +2566,7 @@ func TestPromptHistoryBrowsingDoesNotInterfereWithSlashSuggestions(t *testing.T)
 	m.promptHistory = []string{"hello"}
 	m.promptHistoryIndex = -1
 	m.editor.SetValue("/")
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 	if len(m.commandSuggestions()) == 0 {
 		t.Fatal("test setup has no slash-command suggestions")
 	}
@@ -2546,7 +2742,13 @@ func TestTurnCompletionSetsCompletedInDuration(t *testing.T) {
 	}))), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. cmd() below is invoked
+	// directly via runCommandWithin and fed into another Update call
+	// expecting the real turnMsg; a batched cmd would instead yield an
+	// unrun tea.BatchMsg that dispatch silently ignores.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	if !running.running || running.turnStartedAt.IsZero() {
 		t.Fatalf("running=%v turnStartedAt=%v", running.running, running.turnStartedAt)
@@ -2554,7 +2756,7 @@ func TestTurnCompletionSetsCompletedInDuration(t *testing.T) {
 	clock.Advance(3661 * time.Second)
 
 	first := runCommandWithin(t, cmd, time.Second)
-	afterEvent, next := running.Update(first)
+	afterEvent, next := running.dispatch(first)
 	streaming := afterEvent.(Model)
 	if next == nil {
 		t.Fatal("finished event did not schedule wait")
@@ -2590,12 +2792,18 @@ func TestTurnErrorDoesNotOverwriteErrorStatus(t *testing.T) {
 	}))), 80, 12)
 	m.editor.SetValue("question")
 
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	// dispatch, not Update: submitting "question" commits a final User
+	// entry within this same call, which Update's auto-flush wrapper would
+	// batch with the real turn-start command. cmd() below is invoked
+	// directly via runCommandWithin and fed into another Update call
+	// expecting the real turnMsg; a batched cmd would instead yield an
+	// unrun tea.BatchMsg that dispatch silently ignores.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	running := updated.(Model)
 	clock.Advance(5 * time.Second)
 
 	first := runCommandWithin(t, cmd, time.Second)
-	afterError, next := running.Update(first)
+	afterError, next := running.dispatch(first)
 	got := afterError.(Model)
 	if len(got.entries) == 0 || got.entries[len(got.entries)-1].Kind != EntryError {
 		t.Fatalf("entries = %#v, want error entry recorded", got.entries)
@@ -2614,31 +2822,49 @@ func TestTurnErrorDoesNotOverwriteErrorStatus(t *testing.T) {
 	}
 }
 
+// TestEmptyTranscriptShowsHint: under the inline design the empty-session
+// hint is a one-time scrollback banner (queueBannerIfEmpty), not part of the
+// live View(). Dispatch directly (not resizeModel, which drains
+// pendingPrints for use as generic setup) so the queued banner is still
+// inspectable, and confirm it is absent from the live View() content.
 func TestEmptyTranscriptShowsHint(t *testing.T) {
-	m := resizeModel(t, newTestModel(t), 80, 12)
-	content := m.View().Content
-	if !strings.Contains(content, "Ask Otto anything") {
-		t.Fatalf("content = %q, want empty-state hint", content)
+	updated, _ := newTestModel(t).dispatch(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m := updated.(Model)
+	committed := strings.Join(m.pendingPrints, "\n")
+	if !strings.Contains(committed, "Ask Otto anything") {
+		t.Fatalf("pendingPrints = %q, want empty-state hint", committed)
+	}
+	if strings.Contains(m.View().Content, "Ask Otto anything") {
+		t.Fatalf("content = %q, hint should be in scrollback, not the live view", m.View().Content)
 	}
 }
 
-func TestHintDisappearsAfterFirstEntry(t *testing.T) {
-	m := resizeModel(t, newTestModel(t), 80, 12)
-	if !strings.Contains(m.View().Content, "Ask Otto anything") {
-		t.Fatalf("fresh content = %q, want hint", m.View().Content)
-	}
-
+// TestHintNotShownWhenTranscriptAlreadyHasEntries: queueBannerIfEmpty only
+// queues the banner when entries are empty AND it has never fired before
+// (bannerShown latches). A resumed session that already has history must
+// never see the banner, and once it has fired it must not fire again just
+// because entries are later cleared.
+func TestHintNotShownWhenTranscriptAlreadyHasEntries(t *testing.T) {
+	m := newTestModel(t)
 	m.entries = []Entry{{ID: "user", Kind: EntryUser, Raw: "hello"}}
-	m.rerenderAndRefreshViewportContent(false)
-	if strings.Contains(m.View().Content, "Ask Otto anything") {
-		t.Fatalf("content = %q, want hint gone after first entry", m.View().Content)
+	updated, _ := m.dispatch(tea.WindowSizeMsg{Width: 80, Height: 12})
+	withHistory := updated.(Model)
+	if committed := strings.Join(withHistory.pendingPrints, "\n"); strings.Contains(committed, "Ask Otto anything") {
+		t.Fatalf("pendingPrints = %q, hint must not show when history already has entries", committed)
 	}
 
-	m.entries = nil
-	m.running = true
-	m.rerenderAndRefreshViewportContent(false)
-	if strings.Contains(m.View().Content, "Ask Otto anything") {
-		t.Fatalf("content = %q, want hint gone while running", m.View().Content)
+	fresh := newTestModel(t)
+	firstResize, _ := fresh.dispatch(tea.WindowSizeMsg{Width: 80, Height: 12})
+	afterFirst := firstResize.(Model)
+	if committed := strings.Join(afterFirst.pendingPrints, "\n"); !strings.Contains(committed, "Ask Otto anything") {
+		t.Fatalf("pendingPrints = %q, want hint queued on first empty dispatch", committed)
+	}
+	afterFirst.pendingPrints = nil
+	afterFirst.entries = nil
+	secondResize, _ := afterFirst.dispatch(tea.WindowSizeMsg{Width: 90, Height: 12})
+	afterSecond := secondResize.(Model)
+	if committed := strings.Join(afterSecond.pendingPrints, "\n"); strings.Contains(committed, "Ask Otto anything") {
+		t.Fatalf("pendingPrints = %q, hint must not be re-queued once bannerShown has latched", committed)
 	}
 }
 
@@ -2681,10 +2907,15 @@ func TestTurnChannelCancellationDoesNotLeakWorker(t *testing.T) {
 		m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 		m.editor.SetValue("question")
 
-		updated, cmd := m.Update(keyPress(tea.KeyEnter))
+		// dispatch, not Update: submitting "question" commits the User
+		// entry to pendingPrints within this same dispatch, which Update's
+		// auto-flush wrapper would batch alongside the real start-turn cmd,
+		// so cmd() returns an uninvoked tea.BatchMsg instead of the real
+		// turnMsg and the backend goroutine never starts.
+		updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 		running := updated.(Model)
 		first := cmd()
-		afterFirst, next := running.Update(first)
+		afterFirst, next := running.dispatch(first)
 		nextMsg := next()
 		if batch, ok := nextMsg.(tea.BatchMsg); !ok || len(batch) != 2 {
 			t.Fatalf("iteration %d next command = %#v, want wait+render batch", i, nextMsg)
@@ -2704,7 +2935,7 @@ func TestInputBoxAppearsAsBorderedPanelOnStandardTerminal(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 20)
 	m.editor.SetValue("hello")
 	m.editor.CursorEnd()
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 	content := m.View().Content
 	assertRenderedBounds(t, content, 80, 20)
 	if !strings.Contains(content, "Ask Otto") {
@@ -2718,7 +2949,7 @@ func TestInputBoxAppearsAsBorderedPanelOnStandardTerminal(t *testing.T) {
 func TestInputBoxStaysCompactOnMinimumTerminal(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 40, 8)
 	m.editor.SetValue("hello")
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 	content := m.View().Content
 	assertRenderedBounds(t, content, 40, 8)
 	if strings.Contains(content, "╭") {
@@ -2729,7 +2960,7 @@ func TestInputBoxStaysCompactOnMinimumTerminal(t *testing.T) {
 func TestInputBoxGrowsWithMultilineEditorInsideFrame(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 20)
 	m.editor.SetValue("line one\nline two")
-	m.rerenderAndRefreshViewportContent(false)
+	m.rerenderAndRefreshViewportContent()
 	content := m.View().Content
 	assertRenderedBounds(t, content, 80, 20)
 	lines := strings.Split(content, "\n")
@@ -2747,5 +2978,23 @@ func TestInputBoxGrowsWithMultilineEditorInsideFrame(t *testing.T) {
 	}
 	if !sawOpen || !sawLabel || !sawClose {
 		t.Fatalf("bordered input frame missing: open=%v label=%v close=%v\n%s", sawOpen, sawLabel, sawClose, content)
+	}
+}
+
+// Each scrollback chunk must end with a newline so tea.Println leaves one
+// blank line between it and whatever follows (the next chunk or the live
+// region), matching the "\n\n" block separator used inside a chunk.
+func TestQueuedPrintsEndWithBlankLine(t *testing.T) {
+	updated, _ := newTestModel(t).dispatch(tea.WindowSizeMsg{Width: 100, Height: 30})
+	model := updated.(Model)
+	if len(model.pendingPrints) != 1 || !strings.HasSuffix(model.pendingPrints[0], "\n") {
+		t.Fatalf("banner chunk = %q, want trailing newline", model.pendingPrints)
+	}
+	model.pendingPrints = nil
+	model.entries = append(model.entries, Entry{Kind: EntryUser, Raw: "hello"})
+	model.renderEntries(model.transcriptWidth())
+	model.refreshViewportContent()
+	if len(model.pendingPrints) != 1 || !strings.HasSuffix(model.pendingPrints[0], "\n") {
+		t.Fatalf("committed chunk = %q, want trailing newline", model.pendingPrints)
 	}
 }

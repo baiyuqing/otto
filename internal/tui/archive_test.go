@@ -90,14 +90,19 @@ func newTestArchiveModel(t *testing.T, backend *archiveBackend) Model {
 
 func loadArchivePicker(t *testing.T, backend *archiveBackend, result session.ListResult) Model {
 	t.Helper()
-	m := resizeModel(t, newTestArchiveModel(t, backend), 80, 12)
+	// dispatch (not Update) throughout, so pendingPrints keeps whatever
+	// history text got committed on the initial resize instead of an
+	// auto-flush popping it into an uninspectable tea.Cmd before the test
+	// body can look at it.
+	resized, _ := newTestArchiveModel(t, backend).dispatch(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m := resized.(Model)
 	m.editor.SetValue("/archive")
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	loading := updated.(Model)
 	if cmd == nil {
 		t.Fatalf("/archive cmd = nil")
 	}
-	updated, _ = loading.Update(sessionListResultMsg{generation: loading.archive.generation, result: result})
+	updated, _ = loading.dispatch(sessionListResultMsg{generation: loading.archive.generation, result: result})
 	loaded := updated.(Model)
 	if loaded.archive.mode != archiveLoaded {
 		t.Fatalf("archive.mode = %v, want %v", loaded.archive.mode, archiveLoaded)
@@ -370,13 +375,13 @@ func TestArchiveNonCurrentSessionSuccessClosesPickerWithStatus(t *testing.T) {
 		return session.ArchiveResult{Path: "/sessions/archive/other.jsonl", ID: "other"}, nil
 	}
 	m := loadArchivePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "other", Path: "/sessions/other.jsonl"}}})
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	archiving := updated.(Model)
 	if cmd == nil || archiving.archive.mode != archiveArchiving {
 		t.Fatalf("cmd=%v archive=%#v", cmd, archiving.archive)
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, next := archiving.Update(result)
+	updated, next := archiving.dispatch(result)
 	got := updated.(Model)
 	if next != nil {
 		t.Fatalf("archive success scheduled unexpected cmd %v", next)
@@ -387,8 +392,11 @@ func TestArchiveNonCurrentSessionSuccessClosesPickerWithStatus(t *testing.T) {
 	if got.statusText != "archived session other" {
 		t.Fatalf("status = %q", got.statusText)
 	}
-	if content := got.View().Content; !strings.Contains(content, "current transcript") {
-		t.Fatalf("current transcript was replaced: %q", content)
+	// "other" is a non-current session, so archiving it must not touch this
+	// session's own transcript: it stays committed to scrollback exactly as
+	// it was before /archive ran.
+	if printed := strings.Join(got.pendingPrints, "\n"); !strings.Contains(printed, "current transcript") {
+		t.Fatalf("current transcript was replaced: %q", printed)
 	}
 }
 
@@ -414,7 +422,12 @@ func TestArchiveCurrentSessionSuccessRebuildsFreshView(t *testing.T) {
 		t.Fatalf("cmd=%v archive=%#v", cmd, archiving.archive)
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, next := archiving.Update(result)
+	// dispatch, not Update: archive success on the current session rebuilds
+	// an empty view and queues the empty-session banner for scrollback, which
+	// Update's auto-flush wrapper would turn into a real (non-nil) print cmd
+	// unrelated to what this test checks (state reset), so inspect the raw
+	// dispatch result instead of Update's flush-wrapped one.
+	updated, next := archiving.dispatch(result)
 	got := updated.(Model)
 	if next != nil {
 		t.Fatalf("archive success scheduled unexpected cmd %v", next)
@@ -437,11 +450,16 @@ func TestArchiveFailureKeepsPickerAndOldUI(t *testing.T) {
 	backend.archiveSession = func(context.Context, string) (session.ArchiveResult, error) {
 		return session.ArchiveResult{}, errors.New("archive failed")
 	}
+	// dispatch (not Update) throughout: loadArchivePicker leaves the
+	// empty-session banner queued in pendingPrints (no seeded history here),
+	// so an Update call at this point would batch-wrap its own command with
+	// the pending flush command, corrupting the message this test manually
+	// feeds back into the next step.
 	m := loadArchivePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "other", Path: "/sessions/other.jsonl"}}})
-	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
 	archiving := updated.(Model)
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, _ = archiving.Update(result)
+	updated, _ = archiving.dispatch(result)
 	got := updated.(Model)
 	if got.archive.mode != archiveError || got.archive.errText != "archive failed" {
 		t.Fatalf("archive state = %#v", got.archive)
@@ -456,13 +474,13 @@ func TestArchiveFailureKeepsPickerAndOldUI(t *testing.T) {
 	backend.archiveSession = func(context.Context, string) (session.ArchiveResult, error) {
 		return session.ArchiveResult{Path: "/sessions/archive/other.jsonl", ID: "other"}, nil
 	}
-	updated, cmd = got.Update(keyPress(tea.KeyEnter))
+	updated, cmd = got.dispatch(keyPress(tea.KeyEnter))
 	archiving = updated.(Model)
 	if cmd == nil || archiving.archive.mode != archiveArchiving {
 		t.Fatalf("retry cmd=%v archive=%#v", cmd, archiving.archive)
 	}
 	result = runCommandWithin(t, cmd, time.Second)
-	updated, _ = archiving.Update(result)
+	updated, _ = archiving.dispatch(result)
 	got = updated.(Model)
 	if got.archive.mode != archiveClosed || got.statusText != "archived session other" {
 		t.Fatalf("retry state = %#v status = %q", got.archive, got.statusText)

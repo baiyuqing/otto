@@ -178,11 +178,11 @@ func (m Model) applyMemoryCommandResult(msg memoryCommandResultMsg) (tea.Model, 
 	if msg.errText != "" {
 		m.statusText = msg.errText
 		m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("memory"), Kind: EntryError, Raw: msg.errText})
-		m.rerenderAndRefreshViewportContent(!m.autoFollow)
+		m.rerenderAndRefreshViewportContent()
 		return m, nil
 	}
 	m.statusText = ""
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("memory"), Kind: EntrySystem, Raw: msg.text})
-	m.rerenderAndRefreshViewportContent(!m.autoFollow)
+	m.rerenderAndRefreshViewportContent()
 	return m, nil
 }

@@ -351,13 +351,16 @@ OTTO_UI=repl otto
 
 ### TUI behavior
 
-- Uses the terminal alternate screen buffer.
+- Renders inline into the terminal. Finished transcript entries are printed into
+  the terminal's native scrollback; text selection and scrolling are handled by
+  the terminal.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
 - Tool calls and compaction checkpoints are folded by default; `Ctrl+O` toggles
-  full tool arguments/output and expanded compaction summaries.
-- Mouse-wheel transcript scrolling is enabled. Hold `Shift` while dragging to
-  select visible terminal text.
+  full tool arguments/output and expanded compaction summaries. Toggling affects
+  only entries not yet printed and later entries.
+- The bottom of the screen holds a live region for the in-progress turn,
+  slash-command suggestions, editor, and footer; its height follows its content.
 - The footer shows workspace/profile/model, token totals, and session ID when
   space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
@@ -372,9 +375,6 @@ OTTO_UI=repl otto
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle complete tool arguments/output and folded summaries |
-| `Shift`+drag | Select visible terminal text while mouse reporting is active |
-| Mouse wheel, `PgUp` / `PgDn` | Scroll the transcript |
-| `Home` / `End` | Jump to the top or bottom of the transcript |
 | `Esc` | Cancel the active turn or close the current overlay |
 | `Ctrl+C` | Cancel; a second press within one second clears and quits |
 

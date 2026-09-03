@@ -43,7 +43,7 @@ type layoutState struct {
 	inputBoxHeight   int
 }
 
-func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight int) layoutState {
+func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight, liveLines int) layoutState {
 	layout := layoutState{
 		transcriptWidth: max(0, width),
 		editorHeight:    clamp(editorHeight(editor), minEditorHeight, maxEditorHeight),
@@ -66,13 +66,7 @@ func calculateLayout(width, height int, editor textarea.Model, requestedSuggesti
 	}
 	availableHeight := height - layout.inputBoxHeight - layout.footerHeight - layout.editorSpacing
 	layout.suggestionHeight = min(max(0, requestedSuggestionHeight), max(0, availableHeight-1))
-	transcriptHeight := availableHeight - layout.suggestionHeight
-	if transcriptHeight <= 0 {
-		layout.tooSmall = true
-		layout.transcriptHeight = max(0, height)
-		return layout
-	}
-	layout.transcriptHeight = transcriptHeight
+	layout.transcriptHeight = min(max(0, liveLines), max(0, availableHeight-layout.suggestionHeight))
 	return layout
 }
 
@@ -373,9 +367,7 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
 		"Ctrl+O toggle details",
-		"Shift+drag select terminal text",
-		"PgUp/PgDn scroll",
-		"Home/End transcript top/bottom",
+		"Drag to select, scroll to scroll (handled by your terminal)",
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
 	)
@@ -389,7 +381,7 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 		compact := []string{
 			"Help ? /help Enter Esc",
 			"Shift+Enter Alt+Enter",
-			"Ctrl+O PgUp/PgDn Home/End Ctrl+C",
+			"Ctrl+O toggle details, Ctrl+C cancel/quit",
 			"/session /new /exit",
 		}
 		compact = append(compact, sandboxLines...)
@@ -400,7 +392,7 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 		"Help (?/help) · Enter · Esc",
 		"Shift+Enter/Alt+Enter newline",
 		"Ctrl+O toggle details",
-		"PgUp/PgDn · Home/End · Ctrl+C",
+		"Ctrl+C cancel, clear, then quit",
 	}
 	if remaining := innerHeight - len(compact); remaining > len(sandboxLines) {
 		compact = append(compact, sandboxLines...)

@@ -175,5 +175,5 @@ func (m Model) applyLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) appendLoginEntry(kind EntryKind, text string) {
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("login"), Kind: kind, Raw: text})
-	m.rerenderAndRefreshViewportContent(!m.autoFollow)
+	m.rerenderAndRefreshViewportContent()
 }

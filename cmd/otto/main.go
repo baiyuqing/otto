@@ -114,6 +114,7 @@ type environmentEnumerator func() []string
 
 type runDependencies struct {
 	subscribeInterrupts  func() interruptSubscription
+	subscribeTerminate   func() interruptSubscription
 	prepareSession       func(context.Context, string, string) (preparedSession, error)
 	prepareListedSession func(context.Context, string, string, string) (preparedSession, error)
 	newSession           func(bool, string, string, config.Runtime) (session.Session, error)
@@ -130,6 +131,7 @@ type runDependencies struct {
 func defaultRunDependencies() runDependencies {
 	return runDependencies{
 		subscribeInterrupts:  subscribeOSInterrupts,
+		subscribeTerminate:   subscribeOSTerminate,
 		prepareSession:       prepareSession,
 		prepareListedSession: prepareListedSession,
 		newSession:           newSession,
@@ -174,6 +176,9 @@ type cliOptions struct {
 	explicitConfig bool
 	sandbox        string
 	sandboxSet     bool
+	serve          bool
+	socket         string
+	socketSet      bool
 }
 
 func main() {
@@ -193,6 +198,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	}
 	if deps.subscribeInterrupts == nil {
 		deps.subscribeInterrupts = func() interruptSubscription { return interruptSubscription{stop: func() {}} }
+	}
+	if deps.subscribeTerminate == nil {
+		deps.subscribeTerminate = subscribeOSTerminate
 	}
 	if deps.openSandbox == nil {
 		deps.openSandbox = openSandboxRuntime
@@ -342,7 +350,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return fail(stderr, "%v", redactStartupError(err))
 	}
 	frontend := frontendOnce
-	if !options.approveSet {
+	if !options.approveSet && !options.serve {
 		frontend, err = selectFrontend(uiMode, stdin, stdout, deps.detectTerminal)
 		if err != nil {
 			return fail(stderr, "%v", redactStartupError(err))
@@ -518,7 +526,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return 130
 	}
 	dynamicContent := builder.boundaryAllowsDynamic(&resolvedRuntime)
-	if preparedInitial != nil && !dynamicContent {
+	if (preparedInitial != nil || options.serve) && !dynamicContent {
 		return fail(stderr, "%v", errSessionOperationUnavailable)
 	}
 	if processCtx.Err() != nil {
@@ -546,6 +554,21 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	builder.memoryWorkspaceScope = memoryWorkspaceScope
 	builder.memoryRecallLimit = memoryCfg.MaxResults
 	builder.memoryRecallTokenBudget = memoryCfg.RecallTokens
+
+	if options.serve {
+		serverRuntime, err := config.ResolveServer(configFile, environment, options.socket)
+		if err != nil {
+			return fail(stderr, "%v", builder.redactError(err, nil))
+		}
+		socketPath := serverRuntime.Socket
+		if !filepath.IsAbs(socketPath) {
+			socketPath, err = filepath.Abs(socketPath)
+			if err != nil {
+				return fail(stderr, "%v", builder.redactError(err, nil))
+			}
+		}
+		return builder.runServe(processCtx, resolvedRuntime, socketPath, deps.subscribeTerminate, stderr)
+	}
 
 	var (
 		initialSession  session.Session
@@ -600,45 +623,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		closeInitialResources()
 		return 130
 	}
-	initialRunnerPending := true
-	buildRunner := func(current session.Session) app.Runner {
-		if initialRunnerPending {
-			initialRunnerPending = false
-			return initialRunner
-		}
-		runner, buildErr := builder.buildRunner(context.Background(), current, resolvedRuntime)
-		if buildErr != nil {
-			return nil
-		}
-		return runner
-	}
-	controllerOptions := []app.Option{
-		app.WithRuntimeInfo(builder.runtimeInfo(resolvedRuntime)),
-		app.WithDynamicContent(dynamicContent),
-		app.WithProfileSwitcher(builder.profileNames(), builder.buildProfileReplacement),
-		app.WithDefaultProfileSetter(builder.persistDefaultProfile),
-		app.WithNewSessionBuilder(builder.buildNewReplacement),
-	}
-	if memoryService != nil {
-		controllerOptions = append(controllerOptions, app.WithMemory(memoryService, memoryUserScope, memoryWorkspaceScope))
-	}
-	if !options.noSession {
-		controllerOptions = append(controllerOptions,
-			app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
-				return session.List(ctx, sessionRoot, workspacePath, "", limit)
-			}, builder.openReplacement),
-			app.WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
-				return session.Archive(ctx, sessionRoot, workspacePath, path)
-			}),
-		)
-	}
-	createSession := func() (session.Session, error) {
-		if !dynamicContent {
-			return nil, errSessionOperationUnavailable
-		}
-		return deps.newSession(options.noSession, sessionRoot, workspacePath, resolvedRuntime)
-	}
-	controller, err = deps.newController(initialSession, createSession, buildRunner, controllerOptions...)
+	controller, err = builder.newController(initialSession, initialRunner, builder.runtimeInfo(resolvedRuntime), dynamicContent)
 	if err != nil {
 		closeInitialResources()
 		if processCtx.Err() != nil {
@@ -728,6 +713,10 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 
 func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, error) {
 	options := cliOptions{cwd: "."}
+	if len(args) > 0 && args[0] == "serve" {
+		options.serve = true
+		args = args[1:]
+	}
 	flags := flag.NewFlagSet("otto", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var showHelp bool
@@ -749,6 +738,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.BoolVar(&options.continueLast, "continue", false, "continue the newest workspace session")
 	flags.StringVar(&options.resumePath, "resume", "", "resume a session file")
 	flags.StringVar(&options.archivePath, "archive", "", "archive an active session file")
+	flags.StringVar(&options.socket, "socket", "", "unix socket path for the serve subcommand")
 	flags.Usage = func() {}
 	if err := flags.Parse(args); err != nil {
 		return options, false, errUnsafeFlagParse
@@ -768,6 +758,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	options.maxOutputSet = visited["max-output-bytes"]
 	options.approveSet = visited["approve"]
 	options.sandboxSet = visited["sandbox"]
+	options.socketSet = visited["socket"]
 	if options.sandboxSet {
 		switch options.sandbox {
 		case string(sandbox.DriverAuto), string(sandbox.DriverSeatbelt), string(sandbox.DriverOff):
@@ -801,6 +792,31 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 			return options, false, errors.New("conflicting archive flag")
 		}
 	}
+	if options.serve {
+		conflict := ""
+		switch {
+		case visited["ui"]:
+			conflict = "--ui"
+		case options.approveSet:
+			conflict = "--approve"
+		case options.resumePath != "":
+			conflict = "--resume"
+		case options.continueLast:
+			conflict = "--continue"
+		case options.archivePath != "":
+			conflict = "--archive"
+		case options.noSession:
+			conflict = "--no-session"
+		}
+		if conflict != "" {
+			_, _ = fmt.Fprintf(stderr, "otto: serve cannot be combined with %s\n", conflict)
+			return options, false, errors.New("conflicting serve flag")
+		}
+	}
+	if options.socketSet && !options.serve {
+		_, _ = fmt.Fprintln(stderr, "otto: --socket requires the serve subcommand")
+		return options, false, errors.New("socket requires serve")
+	}
 	if options.shellTimeSet && options.shellTimeout <= 0 {
 		_, _ = fmt.Fprintln(stderr, "otto: --shell-timeout must be greater than zero")
 		return options, false, errors.New("invalid shell timeout")
@@ -828,6 +844,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 
 func printUsage(output io.Writer) {
 	_, _ = io.WriteString(output, `Usage: otto [options]
+       otto serve [options] [--socket PATH]
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto memory status|forget <id>
@@ -854,6 +871,7 @@ Options:
   --continue             continue newest workspace session
   --resume PATH          resume a session file
   --archive PATH         archive an active session file
+  --socket PATH          unix socket path for the serve subcommand
 `)
 }
 

@@ -614,6 +614,38 @@ func updateSessionRuntime(ctx context.Context, current session.Session, runtime 
 	})
 }
 
+// newController assembles a Controller from an already-built initial session
+// and runner, wiring the profile/new-session/browser/archiver/memory options
+// shared by every frontend and by the agent server's per-session factories.
+// The build/create closures given to app.New are dead paths once
+// WithNewSessionBuilder is set (app.New calls build exactly once; later
+// replacements route through buildNewReplacement), so they stay minimal.
+func (b runtimeBuilder) newController(initial session.Session, runner app.Runner, info app.RuntimeInfo, dynamicContent bool) (*app.Controller, error) {
+	build := func(session.Session) app.Runner { return runner }
+	create := func() (session.Session, error) { return nil, errSessionOperationUnavailable }
+	options := []app.Option{
+		app.WithRuntimeInfo(info),
+		app.WithDynamicContent(dynamicContent),
+		app.WithProfileSwitcher(b.profileNames(), b.buildProfileReplacement),
+		app.WithDefaultProfileSetter(b.persistDefaultProfile),
+		app.WithNewSessionBuilder(b.buildNewReplacement),
+	}
+	if b.memoryService != nil {
+		options = append(options, app.WithMemory(b.memoryService, b.memoryUserScope, b.memoryWorkspaceScope))
+	}
+	if !b.noSession {
+		options = append(options,
+			app.WithSessionBrowser(func(ctx context.Context, limit int) (session.ListResult, error) {
+				return session.List(ctx, b.sessionRoot, b.workspacePath, "", limit)
+			}, b.openReplacement),
+			app.WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
+				return session.Archive(ctx, b.sessionRoot, b.workspacePath, path)
+			}),
+		)
+	}
+	return b.deps.newController(initial, create, build, options...)
+}
+
 func closeRuntimeRunner(runner app.Runner) error {
 	if closer, ok := runner.(io.Closer); ok {
 		return closer.Close()

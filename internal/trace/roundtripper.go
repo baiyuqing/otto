@@ -108,10 +108,10 @@ func (rt *RoundTripper) write(rec record) {
 	if err != nil {
 		return
 	}
+	line = append(line, '\n')
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.w.Write(line)
-	rt.w.Write([]byte("\n"))
 }
 
 // redactHeaders returns a clone with credential headers replaced. The original

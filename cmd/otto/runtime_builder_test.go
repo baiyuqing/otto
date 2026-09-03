@@ -2671,6 +2671,91 @@ func markerExhaustingProviderSecret(t *testing.T) string {
 	return result
 }
 
+func TestRuntimeBuilderServeFactoriesCreatePromptListAndOpen(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	file := configWithProfiles("active")
+	active := file.Profiles["active"]
+	active.BaseURL = server.URL
+	file.Profiles["active"] = active
+	builder := newRuntimeBuilderForTest(t, file)
+	builder.deps.newController = app.New
+
+	runtime, err := builder.resolveSession(session.RuntimeMetadata{Profile: "active", Provider: "openai-compatible", Model: "active-profile-model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factories := builder.serveFactories(runtime)
+
+	ctrl, err := factories.create(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ctrl.Close()
+	info := ctrl.Info()
+	if info.SessionID == "" {
+		t.Fatal("create() returned a Controller with an empty SessionID")
+	}
+	if info.Model != "active-profile-model" {
+		t.Fatalf("create() Info().Model = %q, want active-profile-model", info.Model)
+	}
+	if err := ctrl.Prompt(context.Background(), "hello from serve", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := factories.list(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listedFound bool
+	for _, entry := range listed.Sessions {
+		if entry.ID == info.SessionID {
+			listedFound = true
+		}
+	}
+	if !listedFound {
+		t.Fatalf("list() = %#v, want an entry for %q", listed, info.SessionID)
+	}
+
+	opened, err := factories.open(context.Background(), info.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+	var sawPrompt bool
+	for _, message := range opened.History() {
+		for _, block := range message.Blocks {
+			if block.Type == model.BlockText && strings.Contains(block.Text, "hello from serve") {
+				sawPrompt = true
+			}
+		}
+	}
+	if !sawPrompt {
+		t.Fatalf("open() History() = %#v, want the persisted prompt", opened.History())
+	}
+
+	if _, err := factories.open(context.Background(), "does-not-exist"); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("open() unknown id error = %v, want errSessionNotFound", err)
+	}
+}
+
+func TestRuntimeBuilderServeFactoriesListReturnsEmptyResultForMissingSessionRoot(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("active"))
+	builder.sessionRoot = filepath.Join(t.TempDir(), "does-not-exist")
+	factories := builder.serveFactories(config.Runtime{})
+
+	result, err := factories.list(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Sessions) != 0 || result.Skipped != 0 {
+		t.Fatalf("list() = %#v, want an empty result", result)
+	}
+}
+
 func newRuntimeBuilderForTest(t *testing.T, file config.File) runtimeBuilder {
 	t.Helper()
 	workspacePath := mustCanonicalDirectory(t, t.TempDir())

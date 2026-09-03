@@ -23,7 +23,8 @@ covers only what the CLI actually does today, not planned roadmap features.
 11. [Tools and safety](#tools-and-safety)
 12. [Headless mode](#headless-mode)
 13. [Memory core (internal, unwired)](#memory-core)
-14. [Troubleshooting](#troubleshooting)
+14. [Skills](#skills)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -223,6 +224,10 @@ network = "allow"
 read_paths = []
 allow_env = []
 
+[skills]
+enabled = true
+paths = ["~/.otto/skills", ".otto/skills"]
+
 [profiles.example]
 provider = "openai-compatible"
 base_url = "https://example.invalid/v1"
@@ -252,6 +257,10 @@ Key points:
   auto-falls back to Docker. If Seatbelt cannot be established, Otto fails
   closed by disabling `bash` while keeping `read`, `grep`, `find`, `ls`,
   `write`, and `edit` available.
+- `[skills]` discovers reusable instruction sets from configured roots and
+  registers the `skill` tool when at least one skill is found. Config keys are
+  `enabled` (default true) and `paths` (default `["~/.otto/skills", ".otto/skills"]`);
+  TOML-only, no CLI flags or environment variables.
 - `[agent.compaction]` configures automatic context compaction (see
   [Context compaction](#context-compaction)).
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
@@ -636,6 +645,41 @@ Not yet implemented:
 - No automatic extraction (`Binding.Observe` is not wired).
 - No backup/restore/verify commands.
 - No `otto memory backup|backups|verify|restore` subcommands.
+
+## Skills
+
+Otto loads reusable instruction sets ("skills") from `~/.otto/skills` (user level)
+and workspace `.otto/skills` directories. A skill is a directory containing
+`SKILL.md` with YAML frontmatter and Markdown body, following the Agent Skills
+format.
+
+Config (`[skills]` in TOML; all keys optional):
+
+```toml
+[skills]
+enabled = true                              # default true
+paths = ["~/.otto/skills", ".otto/skills"]  # default; later entries win on name conflict
+```
+
+What's wired:
+
+- Skill listing in the system prompt (capped at 8 KiB).
+- The `skill` tool for the model to load instructions by name or read supporting
+  files.
+- Automatic appending of existing skill roots to Seatbelt read paths at process
+  start.
+- Validation: `name` equals the directory name (`a-z`, `0-9`, `-`; 1 to 64
+  characters) and `description` is 1 to 1024 characters. Invalid skills print
+  one stderr warning and are skipped.
+- Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is
+  fixed within a session. A loaded body is a normal tool result stored in the
+  session and re-sent on every later request until compaction.
+
+Not yet implemented:
+
+- `/skills` and `/skill <name>` user commands.
+- `allowed-tools` enforcement.
+- Reading `~/.claude/skills`; hot reload inside a session.
 
 ## Troubleshooting
 

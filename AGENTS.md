@@ -26,7 +26,8 @@ Keep responsibilities split along the current Go package layout:
 - `internal/repl`: line-oriented REPL rendering and commands
 - `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
 - `internal/session`: in-memory and JSONL session storage
-- `internal/tool`: workspace validation plus `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`
+- `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
+- `internal/tool`: workspace validation plus `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`
 - `internal/tui`: full-screen Bubble Tea frontend, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
 
 Rules:
@@ -36,6 +37,7 @@ Rules:
 - Keep session persistence append-only.
 - Keep `bash` delegated through `internal/sandbox`; only explicit sandbox `off` may use direct execution, and it still starts in the selected workspace.
 - Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store directly — only through `memory.Binding`/`memory.Reader`/`memory.Proposer` or the `app.Controller` memory facade. Per-turn recall and explicit management (`memory_search`/`remember`/`forget` tools, `/memory`/`/remember` in both frontends, `otto memory status|forget`) are wired end to end via `[memory]` TOML config; model- and human-originated writes always land as pending candidates requiring review. Automatic extraction (`Binding.Observe`) and durability (backup/restore/verify) remain unwired — do not document those as working Stage 1 features.
+- Keep `internal/skill` free of imports from other Otto packages; the skill tool's file reads stay confined to the skill directory via `tool.Workspace`. Do not document `/skills`, `/skill`, or `allowed-tools` enforcement as working Stage 1 features.
 
 ## Working preferences
 
@@ -89,8 +91,9 @@ Do not add production behavior without a failing test first unless the user expl
 - Never add `--api-key`; Stage 1 uses environment variables only.
 - Never put raw API keys, OAuth tokens, or auth headers in TOML, JSONL session fixtures, logs, docs, or tests.
 - Redact sample values in errors and examples.
-- `read`, `grep`, `find`, `ls`, `write`, and `edit` must reject workspace escapes after canonical path and symlink validation.
+- `read`, `grep`, `find`, `ls`, `write`, `edit`, and `skill` must reject workspace/skill-directory escapes after canonical path and symlink validation.
 - Do not describe `bash` as always unsandboxed; Stage 1 defaults to macOS Seatbelt and only explicit sandbox `off` is unsandboxed.
+- Never put secrets in skill files; skill content is user- or repository-provided instruction text of the same class as `AGENTS.md` and `CLAUDE.md`.
 
 ## Documentation expectations
 

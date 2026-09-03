@@ -28,12 +28,17 @@ import (
 	"github.com/baiyuqing/otto/internal/sandbox"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/skill"
+	"github.com/baiyuqing/otto/internal/subagent"
 	"github.com/baiyuqing/otto/internal/tool"
 	"github.com/baiyuqing/otto/internal/trace"
 	"github.com/baiyuqing/otto/internal/urlprivacy"
 )
 
 var errSessionOperationUnavailable = errors.New("session operation is unavailable")
+
+// defaultMaxParallelAgents caps concurrent sub-agent tasks per session. This
+// is a literal for Phase A1; a future [agents] config gate is Phase B.
+const defaultMaxParallelAgents = 4
 
 type preparedSession interface {
 	Info() session.SessionInfo
@@ -250,15 +255,10 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		tools = append(tools, tool.NewSkillTool(catalog, runtime.MaxOutputBytes))
 	}
 	tools = append(tools, b.extraTools...)
-	registry, err := tool.NewRegistry(tools...)
-	if err != nil {
-		if binding != nil {
-			_ = binding.Close()
-		}
-		return nil, fmt.Errorf("create tool registry: %w", err)
-	}
+
 	redactor := b.boundaryRedactor(&runtime)
 	var client provider.Provider
+	var err error
 	if b.boundaryAllowsDynamic(&runtime) {
 		client, err = b.buildProvider(ctx, runtime)
 		if err != nil {
@@ -268,20 +268,57 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 			return nil, b.redactError(err, &runtime)
 		}
 	}
-	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()) +
-		redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now())+skillSection)
+
+	// promptTail is the redacted workspace-context-and-skills suffix shared
+	// by the parent's final system prompt and the sub-agent runner's
+	// PromptFor closure, computed once so both stay in sync.
+	promptTail := redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now()) + skillSection)
+	compaction := agent.CompactionSettings{
+		Auto:             runtime.Compaction.Auto,
+		HardInputWindow:  runtime.Compaction.HardInputWindow,
+		WorkingWindow:    runtime.Compaction.WorkingWindow,
+		ReserveTokens:    runtime.Compaction.ReserveTokens,
+		KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
+	}
+
+	var tasks *agent.Tasks
+	var inbox *agent.Inbox
+	if client != nil {
+		tasks = agent.NewTasks()
+		subagentRunner, subagentErr := subagent.NewRunner(subagent.Config{
+			Provider: client, Tools: tools, Redactor: redactor,
+			Options: agent.Options{Model: runtime.Model, Thinking: runtime.Thinking, Compaction: compaction},
+			PromptFor: func(defs []model.ToolDefinition) string {
+				return systemPromptFor(defs, b.effectiveSandboxInfo()) + promptTail
+			},
+			Header: current.Header(), Tasks: tasks, MaxParallel: defaultMaxParallelAgents, MaxOutputBytes: runtime.MaxOutputBytes,
+		})
+		if subagentErr != nil {
+			if binding != nil {
+				_ = binding.Close()
+			}
+			return nil, fmt.Errorf("create sub-agent runner: %w", subagentErr)
+		}
+		tools = append(tools, subagentRunner.Tools()...)
+		inbox = tasks.Notifications()
+	}
+
+	registry, err := tool.NewRegistry(tools...)
+	if err != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
+		return nil, fmt.Errorf("create tool registry: %w", err)
+	}
+	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()) + promptTail
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
-		Compaction: agent.CompactionSettings{
-			Auto:             runtime.Compaction.Auto,
-			HardInputWindow:  runtime.Compaction.HardInputWindow,
-			WorkingWindow:    runtime.Compaction.WorkingWindow,
-			ReserveTokens:    runtime.Compaction.ReserveTokens,
-			KeepRecentTokens: runtime.Compaction.KeepRecentTokens,
-		},
+		Compaction:              compaction,
 		Memory:                  binding,
 		MemoryRecallLimit:       b.memoryRecallLimit,
 		MemoryRecallTokenBudget: b.memoryRecallTokenBudget,
+		Tasks:                   tasks,
+		Inbox:                   inbox,
 	}, redactor), nil
 }
 
@@ -1024,6 +1061,17 @@ func (b runtimeBuilder) boundaryToolDefinitions(runtime *config.Runtime) []model
 	}
 	if config.ResolveSkills(b.config, b.environment, b.workspacePath).Enabled {
 		definitions = append(definitions, tool.NewSkillTool(skill.Catalog{}, maxOutput).Definition())
+	}
+	// Mirrors buildRunner's gating condition for building a provider client
+	// (b.boundaryAllowsDynamic) without calling it: boundaryAllowsDynamic
+	// calls boundaryRedactor, which calls boundaryFieldsUnchanged, which
+	// calls this function, so calling boundaryAllowsDynamic here would
+	// recurse. b.secretRedactor(runtime).AllowsDynamicContent() is the
+	// non-recursive check boundaryAllowsDynamic itself starts from; every
+	// caller of boundaryFieldsUnchanged (and so of this function) already
+	// has that condition true, so this is equivalent in practice.
+	if b.secretRedactor(runtime).AllowsDynamicContent() {
+		definitions = append(definitions, subagent.ToolDefinitions()...)
 	}
 	return definitions
 }

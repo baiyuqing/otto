@@ -33,6 +33,20 @@ func (r *Runner) Tools() []tool.Tool {
 	}
 }
 
+// ToolDefinitions returns the agent, agent_wait, and agent_status tool
+// definitions without a fully built Runner. It lets callers (the redaction
+// boundary check in cmd/otto) predict the tool set a real Runner would
+// register without duplicating these JSON schemas outside this package;
+// none of the three Definition() methods read Runner fields.
+func ToolDefinitions() []model.ToolDefinition {
+	zero := &Runner{}
+	return []model.ToolDefinition{
+		(&agentTool{runner: zero}).Definition(),
+		(&agentWaitTool{runner: zero}).Definition(),
+		(&agentStatusTool{runner: zero}).Definition(),
+	}
+}
+
 type agentTool struct {
 	runner *Runner
 }

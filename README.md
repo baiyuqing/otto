@@ -349,7 +349,7 @@ paths = ["~/.otto/skills", ".otto/skills"]  # default; later entries win on a na
 
 - `~/` expands to the user's home directory.
 - Relative entries resolve against the workspace.
-- `paths = []` disables all roots and is the only way to turn off skill discovery.
+- `paths = []` leaves no roots; `enabled = false` turns the feature off.
 - `enabled = false` skips discovery, the tool, the prompt section, and sandbox read paths.
 
 What's wired:
@@ -357,12 +357,16 @@ What's wired:
 - **Prompt listing:** when at least one skill is found, a `## Skills` section appears in the system prompt after the `## Environment` section, capped at 8 KiB; skills that do not fit are dropped with a stderr warning.
 - **Skill tool:** the `skill` tool is registered only when the catalog is non-empty and returns a skill's instructions by name, plus a listing of supporting files within the skill directory. A second optional `file` parameter reads a single file inside the skill directory.
 - **Sandbox integration:** existing skill roots are appended to the macOS Seatbelt read paths at process start, so `bash` can run skill scripts by absolute path. Roots that do not exist are not added; `enabled = false` adds none.
+- **Validation and warnings:** `name` must equal the directory name (1 to 64 characters of `a-z`, `0-9`, `-`; no leading, trailing, or doubled hyphen) and `description` must be 1 to 1024 characters. Other frontmatter keys are ignored. An invalid skill or an unreadable root prints one `warning: skill ...` line on stderr and is skipped; startup never fails because of a skill.
+- **Cost and persistence:** the listing is re-sent on every request (about 80 tokens per skill). A loaded `SKILL.md` body is a normal tool result: it is written to the session file, survives `/resume`, and is re-sent on every later request until compaction. Tool output is capped at `[agent].max_output_bytes`.
+- **Trust:** skill text is user- or repository-provided instruction text of the same class as `AGENTS.md`; it cannot override the system prompt, the user's requests, or the sandbox policy, and it passes through the API-key redactor. Never store secrets in skill files.
 
 Not yet implemented:
 
 - `/skills` and `/skill <name>` user commands — the skill tool is available to the model only today.
 - `allowed-tools` enforcement per skill (parsed but ignored).
-- `/new` discovery does not automatically pick a skill; the model must fetch it explicitly.
+- Hot reload inside a session: a skill added while Otto runs is discovered on the next `/new`, `/resume`, or `/model`; a root created while Otto runs becomes readable by `bash` on the next start.
+- Reading `~/.claude/skills`.
 
 Design reference: [`docs/specs/2026-09-03-skills-design.md`](docs/specs/2026-09-03-skills-design.md).
 

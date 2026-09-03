@@ -668,11 +668,18 @@ What's wired:
   files.
 - Automatic appending of existing skill roots to Seatbelt read paths at process
   start.
+- Validation: `name` equals the directory name (`a-z`, `0-9`, `-`; 1 to 64
+  characters) and `description` is 1 to 1024 characters. Invalid skills print
+  one stderr warning and are skipped.
+- Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is
+  fixed within a session. A loaded body is a normal tool result stored in the
+  session and re-sent on every later request until compaction.
 
 Not yet implemented:
 
 - `/skills` and `/skill <name>` user commands.
 - `allowed-tools` enforcement.
+- Reading `~/.claude/skills`; hot reload inside a session.
 
 ## Troubleshooting
 

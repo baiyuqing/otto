@@ -273,6 +273,59 @@ func TestAgentWaitTool(t *testing.T) {
 	})
 }
 
+// The agent tool's optional model parameter: an explicit value overrides
+// the parent's model, an absent or whitespace-only value falls back to it.
+// The fake provider's request and the finished task record must agree.
+func TestAgentToolModelSelection(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantModel string
+	}{
+		{name: "explicit model overrides parent", body: `{"prompt":"go","model":"cheap-model"}`, wantModel: "cheap-model"},
+		{name: "missing model falls back to parent's model", body: `{"prompt":"go"}`, wantModel: "gpt-parent"},
+		{name: "whitespace-only model falls back to parent's model", body: `{"prompt":"go","model":"   "}`, wantModel: "gpt-parent"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newFakeProvider()
+			fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+			tasks := agent.NewTasks()
+			defer tasks.Close()
+			cfg := newTestConfig(fp, tasks)
+			cfg.Options.Model = "gpt-parent"
+			runner, err := NewRunner(cfg)
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+
+			agentTool := toolByName(t, runner.Tools(), "agent")
+			result := agentTool.Execute(context.Background(), json.RawMessage(tc.body))
+			if result.IsError {
+				t.Fatalf("agent tool returned error: %s", result.Content)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			final, err := tasks.Wait(ctx, "t1")
+			if err != nil {
+				t.Fatalf("Wait: %v", err)
+			}
+			if final.Model != tc.wantModel {
+				t.Fatalf("Task.Model = %q, want %q", final.Model, tc.wantModel)
+			}
+
+			reqs := fp.requests()
+			if len(reqs) == 0 {
+				t.Fatal("expected at least one provider request")
+			}
+			if reqs[0].Model != tc.wantModel {
+				t.Fatalf("provider request Model = %q, want %q", reqs[0].Model, tc.wantModel)
+			}
+		})
+	}
+}
+
 // Test 11: agent_status output, both the multi-task listing and the
 // per-task detail view.
 func TestAgentStatusTool(t *testing.T) {
@@ -404,6 +457,37 @@ func TestAgentStatusTool(t *testing.T) {
 		}
 		if !strings.HasSuffix(result.Content, "result:\nwrap-up") {
 			t.Fatalf("missing result tail in detail:\n%s", result.Content)
+		}
+	})
+
+	t.Run("task_id detail shows model when set", func(t *testing.T) {
+		fp := newFakeProvider()
+		fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+		tasks := agent.NewTasks()
+		defer tasks.Close()
+		cfg := newTestConfig(fp, tasks)
+		runner, err := NewRunner(cfg)
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		if _, err := runner.Start(StartRequest{Prompt: "go", Model: "gpt-test-model"}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := tasks.Wait(ctx, "t1"); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+
+		statusTool := toolByName(t, runner.Tools(), "agent_status")
+		result := statusTool.Execute(context.Background(), json.RawMessage(`{"task_id":"t1"}`))
+		if result.IsError {
+			t.Fatalf("unexpected error: %s", result.Content)
+		}
+		lines := strings.Split(result.Content, "\n")
+		if len(lines) < 2 || lines[1] != "model: gpt-test-model" {
+			t.Fatalf("expected model line right after the status line, got:\n%s", result.Content)
 		}
 	})
 

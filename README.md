@@ -376,9 +376,11 @@ Design reference: [`docs/specs/2026-09-03-skills-design.md`](docs/specs/2026-09-
 
 ## Sub-agents
 
-The `agent` tool starts a child agent loop in the same workspace, sandbox, and provider/model as the parent, with a fresh context: the child's session holds only its own system prompt and the delegated prompt, not the parent's conversation. The child runs asynchronously in a goroutine while the parent keeps working.
+The `agent` tool starts a child agent loop in the same workspace, sandbox, and provider as the parent, on the session model or the `model` given in the call, with a fresh context: the child's session holds only its own system prompt and the delegated prompt, not the parent's conversation. The child runs asynchronously in a goroutine while the parent keeps working.
 
-Parameters: `prompt` (required), `description` (optional, capped at 80 characters, shown in status output), `wait` (optional bool: start the task and block until it ends, returning its result instead of its id).
+Parameters: `prompt` (required), `description` (optional, capped at 80 characters, shown in status output), `wait` (optional bool: start the task and block until it ends, returning its result instead of its id), `model` (optional, provider model id; default the session model; not validated by Otto).
+
+Otto keeps no model list or price data; the model chooses which model id to pass, and an id the endpoint rejects fails the task with the provider's error.
 
 Result: `task t3 (default) started`, or `task t3 (default) queued (4 running, limit 4)` once four children are already running.
 
@@ -389,7 +391,7 @@ What's wired:
 - **Notifications**: a finished task pushes a `[task-notification]` message into the parent's inbox, for example:
 
   ```
-  [task-notification] task t1 (default) succeeded · 42s · 7 tool calls · 12,310 tokens
+  [task-notification] task t1 (default) succeeded · gpt-4o-mini · 42s · 7 tool calls · 12,310 tokens
   <final report>
   ```
 

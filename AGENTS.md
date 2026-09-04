@@ -1,14 +1,11 @@
 # Repository Guidelines
 
-## Stage 1 scope
+## Scope
 
-This branch implements Stage 1 only.
-
-- Supported provider: `openai-compatible`
-- Planned later: Codex subscription support, Claude subscription support
+- Supported providers: `openai-compatible` (Chat Completions over HTTP with an API key) and `chatgpt` (ChatGPT subscription signed in with `otto login`, Responses API)
 - Target platform: macOS
 
-Do not document or implement Codex/Claude as working Stage 1 providers.
+Do not document or implement other providers, and do not list planned providers or roadmap stages in user-facing docs.
 
 ## Package boundaries
 
@@ -22,7 +19,9 @@ Keep responsibilities split along the current Go package layout:
 - `internal/memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation composing them with a `Store`/`Retriever`, a null service fallback, and the shared Store conformance harness
 - `internal/memory/sqlite`: secure local SQLite/FTS5 store and retriever implementing the memory contracts
 - `internal/provider`: neutral provider contract
-- `internal/provider/openaicompat`: all Stage 1 provider-specific HTTP/JSON/SSE code
+- `internal/provider/openaicompat`: all OpenAI-compatible Chat Completions HTTP/JSON/SSE wire code
+- `internal/provider/openairesponses`: all ChatGPT Responses API HTTP/JSON/SSE wire code
+- `internal/auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
 - `internal/repl`: line-oriented REPL rendering and commands
 - `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
 - `internal/session`: in-memory and JSONL session storage
@@ -33,13 +32,13 @@ Keep responsibilities split along the current Go package layout:
 
 Rules:
 
-- Keep provider-specific wire structs inside `internal/provider/openaicompat`.
+- Keep provider-specific wire structs inside `internal/provider/openaicompat` and `internal/provider/openairesponses`.
 - Keep file-tool workspace enforcement inside `internal/tool`.
 - Keep session persistence append-only.
 - Keep `bash` delegated through `internal/sandbox`; only explicit sandbox `off` may use direct execution, and it still starts in the selected workspace.
-- Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store directly — only through `memory.Binding`/`memory.Reader`/`memory.Proposer` or the `app.Controller` memory facade. Per-turn recall and explicit management (`memory_search`/`remember`/`forget` tools, `/memory`/`/remember` in both frontends, `otto memory status|forget`) are wired end to end via `[memory]` TOML config; model- and human-originated writes always land as pending candidates requiring review. Automatic extraction (`Binding.Observe`) and durability (backup/restore/verify) remain unwired — do not document those as working Stage 1 features.
-- Keep `internal/skill` free of imports from other Otto packages; the skill tool's file reads stay confined to the skill directory via `tool.Workspace`. Do not document `/skills`, `/skill`, or `allowed-tools` enforcement as working Stage 1 features.
-- Keep `internal/subagent` behind `agent.New`: children are built only through `agent.New`; `internal/agent` knows tasks only through `agent.Tasks`/`agent.Inbox` and never imports `internal/subagent`; frontends reach tasks only through `app.TaskLister`; children never receive `agent*`, `remember`, `forget`, or `memory_search`; child transcripts are not persisted. Definitions cannot add tools outside the child tool set; `tools` only narrows it. `[agents]` is TOML only, same as `[skills]`. Do not document `agent_send`/`agent_cancel`/`agent_report` as working Stage 1 features.
+- Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store directly — only through `memory.Binding`/`memory.Reader`/`memory.Proposer` or the `app.Controller` memory facade. Per-turn recall and explicit management (`memory_search`/`remember`/`forget` tools, `/memory`/`/remember` in both frontends, `otto memory status|forget`) are wired end to end via `[memory]` TOML config; model- and human-originated writes always land as pending candidates requiring review. Automatic extraction (`Binding.Observe`) and durability (backup/restore/verify) remain unwired — do not document those as working features.
+- Keep `internal/skill` free of imports from other Otto packages; the skill tool's file reads stay confined to the skill directory via `tool.Workspace`. Do not document `/skills`, `/skill`, or `allowed-tools` enforcement as working features.
+- Keep `internal/subagent` behind `agent.New`: children are built only through `agent.New`; `internal/agent` knows tasks only through `agent.Tasks`/`agent.Inbox` and never imports `internal/subagent`; frontends reach tasks only through `app.TaskLister`; children never receive `agent*`, `remember`, `forget`, or `memory_search`; child transcripts are not persisted. Definitions cannot add tools outside the child tool set; `tools` only narrows it. `[agents]` is TOML only, same as `[skills]`. Do not document `agent_send`/`agent_cancel`/`agent_report` as working features.
 
 ## Working preferences
 
@@ -90,19 +89,19 @@ Do not add production behavior without a failing test first unless the user expl
 
 ## Secrets and safety
 
-- Never add `--api-key`; Stage 1 uses environment variables only.
+- Never add `--api-key`; API keys come only from environment variables, and ChatGPT credentials only from `otto login`.
 - Never put raw API keys, OAuth tokens, or auth headers in TOML, JSONL session fixtures, logs, docs, or tests.
 - Redact sample values in errors and examples.
 - `read`, `grep`, `find`, `ls`, `write`, `edit`, and `skill` must reject workspace/skill-directory escapes after canonical path and symlink validation.
-- Do not describe `bash` as always unsandboxed; Stage 1 defaults to macOS Seatbelt and only explicit sandbox `off` is unsandboxed.
+- Do not describe `bash` as always unsandboxed; Otto defaults to macOS Seatbelt and only explicit sandbox `off` is unsandboxed.
 - Never put secrets in skill files; skill content is user- or repository-provided instruction text of the same class as `AGENTS.md` and `CLAUDE.md`.
 
 ## Documentation expectations
 
 When updating docs:
 
-- Keep README limited to Stage 1 claims.
-- List Codex and Claude only as planned roadmap items.
+- Keep README limited to implemented, tested behavior; list unsupported behavior under Limitations.
+- Do not list roadmap stages or planned providers.
 - Keep command examples aligned with the actual CLI flags in `cmd/otto/main.go`.
 - Document the config/session/safety behavior that tests enforce today, not aspirational behavior.
 
@@ -111,6 +110,6 @@ When updating docs:
 Use small, focused commits with imperative subjects, for example:
 
 - `feat: add OpenAI-compatible streaming`
-- `docs: document Otto Stage 1`
+- `docs: document the ChatGPT sign-in flow`
 
 Before committing, run the relevant Go gates and confirm the working tree only contains intentional changes.

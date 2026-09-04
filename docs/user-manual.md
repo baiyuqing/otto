@@ -4,9 +4,9 @@ Otto is a minimal macOS coding agent written in Go. It turns a natural-language
 prompt into a loop of model completions, optional tool calls, and — when needed —
 context compaction, all in a full-screen TUI or a line-oriented REPL.
 
-This manual describes the behavior implemented by the current build: the Stage 1
-OpenAI-compatible provider and the Stage 2 ChatGPT-subscription provider. It
-covers only what the CLI actually does today, not planned roadmap features.
+This manual describes the behavior implemented by the current build: the
+OpenAI-compatible provider and the ChatGPT-subscription provider. It covers only
+what the CLI actually does today.
 
 ## Contents
 
@@ -23,7 +23,7 @@ covers only what the CLI actually does today, not planned roadmap features.
 11. [Tools and safety](#tools-and-safety)
 12. [Headless mode](#headless-mode)
 13. [Agent server](#agent-server)
-14. [Memory core (internal, unwired)](#memory-core)
+14. [Memory](#memory)
 15. [Skills](#skills)
 16. [Troubleshooting](#troubleshooting)
 
@@ -159,7 +159,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | --- | --- |
 | `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
 | `otto logout` | Remove stored ChatGPT credentials. |
-| `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory core](#memory-core). |
+| `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
 | `otto serve [--socket PATH]` | Run Otto as an HTTP+JSON+SSE agent server over a Unix domain socket instead of an interactive frontend. See [Agent server](#agent-server). |
 
 | Flag | Description |
@@ -516,7 +516,7 @@ so it can size compaction conservatively.
   `*-chat-latest` aliases use their catalog chat values.
 - GPT-4.1, GPT-4o, o1/o3/o4, and listed Claude aliases use the static catalog.
 - Claude metadata is used only when an OpenAI-compatible endpoint exposes a
-  Claude-family model ID; Otto does not add an Anthropic provider in Stage 1.
+  Claude-family model ID; Otto has no Anthropic provider.
 
 If a model ID is unknown, proactive automation is disabled (no trustworthy local
 window), but reactive one-shot recovery can still happen after a typed provider
@@ -589,12 +589,12 @@ constrain the shell.
 
 ### Seatbelt limitations
 
-Stage 1 depends on Apple's deprecated `/usr/bin/sandbox-exec`. It improves
+Otto depends on Apple's deprecated `/usr/bin/sandbox-exec`. It improves
 command isolation on macOS, but it is not a VM boundary. Otto does not claim
 protection against same-user or same-kernel attacks, pre-existing hard links,
 `setsid` escaping Otto's process-group cleanup, resource exhaustion, or
 intentional damage inside the writable workspace. Docker and Apple Container are
-planned future drivers only; Stage 1 does not detect or support them.
+not detected or supported.
 
 Default limits remain a 120-second shell timeout and a 50 KiB tool-output cap.
 Override them with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
@@ -620,8 +620,8 @@ read the prompt from a file (bounded to 1 MiB).
 domain socket, instead of the TUI or REPL. One process serves one workspace
 and manages any number of sessions; turns in different sessions run
 concurrently, and starting a second turn on a session that already has one
-active returns `409`. Stage 1 listens on a Unix domain socket only; there is
-no TCP listener.
+active returns `409`. Otto listens on a Unix domain socket only; there is no
+TCP listener.
 
 ```bash
 otto serve [--socket PATH]
@@ -758,7 +758,7 @@ curl -N --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/tur
 curl -s --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/turns/<turn_id>/cancel
 ```
 
-### Out of scope in Stage 1
+### Not supported
 
 - TCP listeners; only a Unix domain socket is supported.
 - Authentication beyond socket file permissions (owner-only directory and

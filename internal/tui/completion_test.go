@@ -27,18 +27,14 @@ func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 	m.rerenderAndRefreshViewportContent()
 	m = typeEditorText(t, m, "/s")
 
-	view := m.View()
-	content := view.Overlay
+	content := m.View().Content
 	if !strings.Contains(content, "/session") || !strings.Contains(content, "show session details") {
-		t.Fatalf("overlay = %q, want matching session suggestion", content)
+		t.Fatalf("view = %q, want matching session suggestion", content)
 	}
 	for _, command := range []string{"/help", "/new", "/resume", "/compact", "/exit"} {
 		if strings.Contains(content, command) {
-			t.Fatalf("overlay = %q, contains nonmatching suggestion %q", content, command)
+			t.Fatalf("view = %q, contains nonmatching suggestion %q", content, command)
 		}
-	}
-	if strings.Contains(view.Content, "show session details") {
-		t.Fatalf("suggestions polluted root content: %q", view.Content)
 	}
 }
 
@@ -46,14 +42,15 @@ func TestSlashCommandSuggestionsRenderAsTransientOverlay(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)
 	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: "stable transcript", Rendered: "stable transcript", RenderWidth: 80}}
 	m.rerenderAndRefreshViewportContent()
+	viewportHeight := m.viewport.Height()
 	m = typeEditorText(t, m, "/s")
 
-	view := m.View()
-	if strings.Contains(view.Content, "show session details") || strings.Contains(view.Content, "> /session") {
-		t.Fatalf("suggestions polluted root content: %q", view.Content)
+	if m.viewport.Height() != viewportHeight {
+		t.Fatalf("viewport height = %d, want unchanged %d", m.viewport.Height(), viewportHeight)
 	}
-	if !strings.Contains(view.Overlay, "show session details") || !strings.Contains(view.Overlay, "> /session") {
-		t.Fatalf("suggestion overlay = %q, want /session suggestion", view.Overlay)
+	content := m.View().Content
+	if !strings.Contains(content, "show session details") || !strings.Contains(content, "> /session") {
+		t.Fatalf("view = %q, want /session suggestion", content)
 	}
 }
 
@@ -61,14 +58,16 @@ func TestSlashCommandSuggestionOverlayDoesNotCoverInputBox(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)
 	m = typeEditorText(t, m, "/s")
 
-	view := m.View()
-	if !strings.Contains(view.Content, "/s") {
-		t.Fatalf("root content = %q, want visible editor text", view.Content)
+	content := m.View().Content
+	if !strings.Contains(content, "/s") {
+		t.Fatalf("view = %q, want visible editor text", content)
 	}
-	if strings.HasPrefix(view.Overlay, "\n") {
-		t.Fatalf("suggestion overlay starts with blank rows and can cover input: %q", view.Overlay)
+	layout := calculateLayout(m.width, m.height, m.editor, 0, m.liveLines(), m.taskPanelLines())
+	overlay := m.commandSuggestionOverlay(layout)
+	if strings.HasPrefix(overlay, "\n") {
+		t.Fatalf("suggestion overlay starts with blank rows and can cover input: %q", overlay)
 	}
-	if got := len(strings.Split(strings.TrimRight(view.Overlay, "\n"), "\n")); got != len(m.commandSuggestions()) {
+	if got := len(strings.Split(strings.TrimRight(overlay, "\n"), "\n")); got != len(m.commandSuggestions()) {
 		t.Fatalf("suggestion overlay lines = %d, want %d", got, len(m.commandSuggestions()))
 	}
 }
@@ -134,9 +133,7 @@ func TestSlashCommandSuggestionsKeepEditorVisibleAtMinimumHeight(t *testing.T) {
 func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 40, 8)
 	m = typeEditorText(t, m, "/")
-	view := m.View()
-	content := view.Overlay
-	assertRenderedBounds(t, view.Content, 40, 8)
+	content := m.View().Content
 	assertRenderedBounds(t, content, 40, 8)
 	// The minimum terminal fits only a few suggestion rows above the taller input box.
 	for _, text := range []string{"/help", "show help", "/session", "show session details", "/new", "start a new session"} {
@@ -146,9 +143,7 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 	}
 
 	m = resizeModel(t, m, 60, 20)
-	view = m.View()
-	content = view.Overlay
-	assertRenderedBounds(t, view.Content, 60, 20)
+	content = m.View().Content
 	assertRenderedBounds(t, content, 60, 20)
 	for _, text := range []string{"/resume", "resume a session", "/compact", "compact context", "/tasks", "/task", "/exit", "quit"} {
 		if !strings.Contains(content, text) {
@@ -272,11 +267,8 @@ func TestSlashCommandMultilineArrowsAndOverlayTransitionsUseUpdate(t *testing.T)
 	}
 	updated, _ = m.Update(hideOverlayMsg{})
 	m = updated.(Model)
-	if m.overlay != overlayNone || len(m.commandSuggestions()) != 1 || !strings.Contains(m.View().Overlay, "> /session") {
-		t.Fatalf("hide transition: overlay=%v suggestions=%d suggestionOverlay=%q", m.overlay, len(m.commandSuggestions()), m.View().Overlay)
-	}
-	if strings.Contains(m.View().Content, "> /session") {
-		t.Fatalf("hide transition polluted content: %q", m.View().Content)
+	if m.overlay != overlayNone || len(m.commandSuggestions()) != 1 || !strings.Contains(m.View().Content, "> /session") {
+		t.Fatalf("hide transition: overlay=%v suggestions=%d view=%q", m.overlay, len(m.commandSuggestions()), m.View().Content)
 	}
 }
 

@@ -335,8 +335,8 @@ func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
 	}
 
 	cursor := m.View().Cursor
-	if cursor == nil || cursor.X != 5 || cursor.Y != 8 {
-		t.Fatalf("suggestion view cursor = %#v, want (5,8) at the editor", cursor)
+	if cursor == nil || cursor.X != 5 || cursor.Y != 3 {
+		t.Fatalf("suggestion view cursor = %#v, want (5,3) at the editor", cursor)
 	}
 }
 

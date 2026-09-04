@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 
 	"github.com/baiyuqing/otto/internal/model"
@@ -101,20 +101,28 @@ func (t *skillTool) readSkillFile(s skill.Skill, file string) Result {
 	if err != nil {
 		return Result{Content: fmt.Sprintf("skill %s: %s", s.Name, err), IsError: true}
 	}
-	resolved, err := workspace.ResolveExisting(file)
+	defer workspace.Close()
+	opened, err := workspace.Open(file)
 	if err != nil {
 		return Result{Content: fmt.Sprintf("skill %s: %s", s.Name, err), IsError: true}
 	}
-	info, err := os.Stat(resolved)
+	defer opened.Close()
+	info, err := opened.Stat()
 	if err != nil {
 		return Result{Content: fmt.Sprintf("skill %s: %s", s.Name, err), IsError: true}
 	}
 	if !info.Mode().IsRegular() {
 		return Result{Content: fmt.Sprintf("not a regular file: %s", file), IsError: true}
 	}
-	data, err := os.ReadFile(resolved)
+	if info.Size() > maxReadFileBytes {
+		return Result{Content: fmt.Sprintf("file is too large (%d bytes); maximum readable size is %d bytes", info.Size(), maxReadFileBytes), IsError: true}
+	}
+	data, err := io.ReadAll(io.LimitReader(opened, maxReadFileBytes+1))
 	if err != nil {
 		return Result{Content: fmt.Sprintf("skill %s: %s", s.Name, err), IsError: true}
+	}
+	if len(data) > maxReadFileBytes {
+		return Result{Content: fmt.Sprintf("file is too large (%d bytes); maximum readable size is %d bytes", len(data), maxReadFileBytes), IsError: true}
 	}
 	return CappedTextResult(string(data), t.maxOutputBytes)
 }

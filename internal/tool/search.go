@@ -77,17 +77,6 @@ func cappedCollectorResult(collector *cappedByteCollector, marker string) Result
 	return Result{Content: content}
 }
 
-func workspaceRelativePath(workspace *Workspace, filePath string) (string, error) {
-	relative, err := filepath.Rel(workspace.root, filePath)
-	if err != nil {
-		return "", err
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes workspace: %s", filePath)
-	}
-	return filepath.ToSlash(relative), nil
-}
-
 func searchRelativePath(root, filePath string) (string, error) {
 	relative, err := filepath.Rel(root, filePath)
 	if err != nil {
@@ -113,11 +102,7 @@ func resolveSearchLimit(value *int, defaultValue, maximum int) (int, error) {
 }
 
 func searchRootInsideGit(workspace *Workspace, requestedPath, resolvedRoot string) (bool, error) {
-	resolvedRelative, err := workspaceRelativePath(workspace, resolvedRoot)
-	if err != nil {
-		return false, err
-	}
-	if pathHasGitSegment(resolvedRelative) {
+	if pathHasGitSegment(filepath.ToSlash(resolvedRoot)) {
 		return true, nil
 	}
 	return requestedGitAliasInsideWorkspace(workspace, requestedPath)

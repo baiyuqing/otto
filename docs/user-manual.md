@@ -525,6 +525,20 @@ overflow. For private deployments, set `context_window` and optionally
 
 ## Tools and safety
 
+Startup reads `AGENTS.md` (or `CLAUDE.md`) through the workspace directory
+handle and includes at most 8 KiB. Links outside the workspace and non-regular
+files are skipped. Automatic Git status queries use the configured sandbox
+executor with fsmonitor disabled; unavailable executors produce no Git status.
+
+`SKILL.md` and `AGENT.md` must stay within their respective skill or agent
+definition directory. Configured external roots and linked definition
+directories remain supported.
+
+When enabled, `OTTO_TRACE` records HTTP metadata only, including status and
+time to response headers. It omits URLs, request/response bodies, raw errors,
+and unknown headers; credential and cookie headers contain a redaction marker.
+It does not buffer or alter the model response stream.
+
 ### File tools
 
 The six file tools are always enabled and always restricted to the initial
@@ -546,7 +560,9 @@ canonical workspace, even when `--sandbox off` is selected:
 Recursive `grep` and `find` skip `.git` and discovered symlinks but include
 other dotfiles. Binary files, invalid UTF-8 files, and files with lines larger
 than 1 MiB are skipped by `grep`. Otto canonicalizes paths, resolves symlinks,
-and rejects workspace escapes.
+and rejects workspace escapes. Actual file operations use a directory handle
+so replacing a path during an operation cannot redirect them outside the
+initial workspace.
 
 ### `bash` sandbox policy
 

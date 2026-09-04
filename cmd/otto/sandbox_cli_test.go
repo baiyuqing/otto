@@ -1610,6 +1610,11 @@ type recordingSandboxExecutor struct {
 }
 
 func (e *recordingSandboxExecutor) Execute(ctx context.Context, request sandbox.Request, streams sandbox.Streams) (sandbox.ExitStatus, error) {
+	// These fixtures model shell tool calls in non-repository workspaces.
+	// Startup Git queries have their own recording executor coverage.
+	if len(request.Argv) > 0 && request.Argv[0] == "git" {
+		return sandbox.ExitStatus{Code: 128}, nil
+	}
 	e.calls.Add(1)
 	e.mu.Lock()
 	e.requests = append(e.requests, request.Clone())

@@ -2907,6 +2907,7 @@ func newRuntimeBuilderForTest(t *testing.T, file config.File) runtimeBuilder {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = workspace.Close() })
 	environment := environmentForProfiles(file)
 	hostEntries := []string{"HOME=", "PATH=/usr/bin:/bin", "OTTO_RUNTIME_BUILDER_UNRELATED=keep-me"}
 	names := make([]string, 0, len(environment))

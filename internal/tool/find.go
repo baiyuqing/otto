@@ -74,7 +74,7 @@ func (t *findTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	if searchPath == "" {
 		searchPath = "."
 	}
-	root, err := t.workspace.ResolveExisting(searchPath)
+	root, err := t.workspace.existingRelative(searchPath)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
@@ -88,7 +88,7 @@ func (t *findTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 
 	matches := make([]string, 0, min(limit, 128))
 	truncated := false
-	err = filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(t.workspace.rootFS.FS(), root, func(filePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -125,11 +125,7 @@ func (t *findTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 			truncated = true
 			return errFindLimitReached
 		}
-		relative, err := workspaceRelativePath(t.workspace, filePath)
-		if err != nil {
-			return err
-		}
-		matches = append(matches, relative)
+		matches = append(matches, filepath.ToSlash(filePath))
 		return nil
 	})
 	if err != nil && !errors.Is(err, errFindLimitReached) {

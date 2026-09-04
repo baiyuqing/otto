@@ -5,13 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
 	goruntime "runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/baiyuqing/otto/internal/sandbox"
+	"github.com/baiyuqing/otto/internal/tool"
 )
 
 const (
@@ -31,16 +31,16 @@ const (
 // (AGENTS.md, else CLAUDE.md) when present. It embeds file content from the
 // user's workspace, so callers must redact the result before sending it to a
 // provider.
-func workspaceContextFor(workspacePath string, now time.Time) string {
+func workspaceContextFor(workspacePath string, now time.Time, executor sandbox.CommandExecutor, environment []string, workspace *tool.Workspace) string {
 	var b strings.Builder
 	b.WriteString("\n\n## Environment\n")
 	fmt.Fprintf(&b, "cwd: %s\n", workspacePath)
 	fmt.Fprintf(&b, "platform: %s, date: %s\n", goruntime.GOOS, now.Format("2006-01-02"))
-	if line := gitStatusLine(workspacePath); line != "" {
+	if line := gitStatusLine(workspacePath, executor, environment); line != "" {
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	b.WriteString(workspaceListing(workspacePath))
+	b.WriteString(workspaceListing(workspace))
 	// Only one instruction file is embedded. Both are re-sent on every request
 	// of a session, so a second file costs its full size per request; measured
 	// against this repo that was ~1100 tokens per request for a file the model
@@ -48,7 +48,7 @@ func workspaceContextFor(workspacePath string, now time.Time) string {
 	// rulebook, and CLAUDE.md is Claude Code's own config, which typically
 	// references AGENTS.md rather than adding to it.
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if content, ok := readWorkspaceDocFile(workspacePath, name); ok {
+		if content, ok := readWorkspaceDocFile(workspace, name); ok {
 			fmt.Fprintf(&b, "\n## Workspace instructions\n<workspace-instructions file=%q>\n%s\n</workspace-instructions>\n",
 				name, neutralizeInstructionFence(content))
 			break
@@ -103,16 +103,19 @@ func fenceMatchLen(text string) int {
 }
 
 // gitStatusLine reports "git: <branch>, <N> modified", or "" if the
-// workspace is not a git repository, git is unavailable, or either command
-// fails or times out.
-func gitStatusLine(workspacePath string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), gitStatusTimeout)
-	defer cancel()
-	branch, err := runGit(ctx, workspacePath, "rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil {
+// workspace is not a git repository, Git is unavailable, the sandbox executor
+// is unavailable, or either command fails or times out.
+func gitStatusLine(workspacePath string, executor sandbox.CommandExecutor, environment []string) string {
+	if isNilSandboxRuntimeValue(executor) || environment == nil {
 		return ""
 	}
-	status, err := runGit(ctx, workspacePath, "status", "--porcelain")
+	ctx, cancel := context.WithTimeout(context.Background(), gitStatusTimeout)
+	defer cancel()
+	branch, err := runGit(ctx, executor, workspacePath, environment, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil || strings.TrimSpace(branch) == "" {
+		return ""
+	}
+	status, err := runGit(ctx, executor, workspacePath, environment, "status", "--porcelain")
 	if err != nil {
 		return ""
 	}
@@ -125,23 +128,33 @@ func gitStatusLine(workspacePath string) string {
 	return fmt.Sprintf("git: %s, %d modified", strings.TrimSpace(branch), modified)
 }
 
-func runGit(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
+func runGit(ctx context.Context, executor sandbox.CommandExecutor, dir string, environment []string, args ...string) (string, error) {
+	argv := append([]string{"git", "-c", "core.fsmonitor=false"}, args...)
 	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
+	status, err := executor.Execute(ctx, sandbox.Request{
+		Argv: argv,
+		Dir:  dir,
+		Env:  append([]string(nil), environment...),
+	}, sandbox.Streams{Stdout: &out, Stderr: io.Discard})
+	if err != nil {
 		return "", err
+	}
+	if status.Code != 0 || status.Signaled {
+		return "", fmt.Errorf("git exited with status %d", status.Code)
 	}
 	return out.String(), nil
 }
 
-// workspaceListing returns a sorted, one-level listing of workspacePath
+// workspaceListing returns a sorted, one-level listing of the workspace
 // (directories marked with a trailing "/", ".git" skipped), capped at
 // maxWorkspaceListingEntries. Returns "" if the directory can't be read.
-func workspaceListing(workspacePath string) string {
-	entries, err := os.ReadDir(workspacePath)
+func workspaceListing(workspace *tool.Workspace) string {
+	directory, err := workspace.Open(".")
+	if err != nil {
+		return ""
+	}
+	defer directory.Close()
+	entries, err := directory.ReadDir(-1)
 	if err != nil {
 		return ""
 	}
@@ -176,16 +189,25 @@ func workspaceListing(workspacePath string) string {
 	return b.String()
 }
 
-// readWorkspaceDocFile reads workspacePath/name, cut at
+// readWorkspaceDocFile reads a file through the initial workspace handle, cut at
 // maxWorkspaceContextFileBytes with a trailing marker when truncated.
 // Returns ok=false if the file doesn't exist or can't be read.
-func readWorkspaceDocFile(workspacePath, name string) (string, bool) {
-	data, err := os.ReadFile(filepath.Join(workspacePath, name))
+func readWorkspaceDocFile(workspace *tool.Workspace, name string) (string, bool) {
+	file, err := workspace.Open(name)
+	if err != nil {
+		return "", false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxWorkspaceContextFileBytes+1))
 	if err != nil {
 		return "", false
 	}
 	if len(data) > maxWorkspaceContextFileBytes {
-		total := len(data)
+		total := max(info.Size(), int64(len(data)))
 		return fmt.Sprintf("%s\n[truncated: %d bytes, showing first %d]", data[:maxWorkspaceContextFileBytes], total, maxWorkspaceContextFileBytes), true
 	}
 	return string(data), true

@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func typeEditorText(t *testing.T, model Model, text string) Model {
@@ -38,7 +39,7 @@ func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 	}
 }
 
-func TestSlashCommandSuggestionsRenderAsTransientOverlay(t *testing.T) {
+func TestSlashCommandSuggestionsKeepIdleViewportHeight(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)
 	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: "stable transcript", Rendered: "stable transcript", RenderWidth: 80}}
 	m.rerenderAndRefreshViewportContent()
@@ -54,23 +55,42 @@ func TestSlashCommandSuggestionsRenderAsTransientOverlay(t *testing.T) {
 	}
 }
 
-func TestSlashCommandSuggestionOverlayDoesNotCoverInputBox(t *testing.T) {
+// Inline mode: when a frame shrinks, the renderer moves the cursor up from
+// its row in the previous frame, clamped to the new height. Suggestions
+// therefore render below the input box so the editor row does not move.
+func TestSlashCommandSuggestionsRenderBelowInputBox(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)
-	m = typeEditorText(t, m, "/s")
+	m = typeEditorText(t, m, "/")
 
-	content := m.View().Content
-	if !strings.Contains(content, "/s") {
-		t.Fatalf("view = %q, want visible editor text", content)
+	view := m.View()
+	assertRenderedBounds(t, view.Content, 80, 16)
+	lines := strings.Split(view.Content, "\n")
+	suggestionRow := indexOfLineContaining(lines, "show help")
+	editorRow := indexOfLineContaining(lines, "│ > /")
+	footerRow := indexOfLineContaining(lines, "profile/model")
+	if suggestionRow < 0 || editorRow < 0 || footerRow < 0 {
+		t.Fatalf("view = %q, want suggestion panel, visible editor text, and footer", view.Content)
 	}
-	layout := calculateLayout(m.width, m.height, m.editor, 0, m.liveLines(), m.taskPanelLines())
-	overlay := m.commandSuggestionOverlay(layout)
-	if strings.HasPrefix(overlay, "\n") {
-		t.Fatalf("suggestion overlay starts with blank rows and can cover input: %q", overlay)
+	if suggestionRow <= editorRow || suggestionRow >= footerRow {
+		t.Fatalf("suggestion row %d is not between editor row %d and footer row %d:\n%s", suggestionRow, editorRow, footerRow, view.Content)
 	}
-	if got := len(strings.Split(strings.TrimRight(overlay, "\n"), "\n")); got != len(m.commandSuggestions()) {
-		t.Fatalf("suggestion overlay lines = %d, want %d", got, len(m.commandSuggestions()))
+	if footerRow != len(lines)-1 {
+		t.Fatalf("footer row = %d, want last row %d", footerRow, len(lines)-1)
+	}
+	if view.Cursor == nil || view.Cursor.Y != editorRow {
+		t.Fatalf("cursor = %+v, want row %d", view.Cursor, editorRow)
 	}
 }
+
+func indexOfLineContaining(lines []string, text string) int {
+	for i, line := range lines {
+		if strings.Contains(ansi.Strip(line), text) {
+			return i
+		}
+	}
+	return -1
+}
+
 
 func TestSlashCommandSuggestionSelectionAndTabCompletion(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)
@@ -213,13 +233,13 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 
 	updated, _ := m.Update(tea.PasteMsg{Content: "/s"})
 	m = updated.(Model)
-	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 1 || m.viewport.Height() != 6 {
+	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 1 || m.viewport.Height() != 5 {
 		t.Fatalf("paste state: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 14 || m.viewport.Height() != 6 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 14 || m.viewport.Height() != 1 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))

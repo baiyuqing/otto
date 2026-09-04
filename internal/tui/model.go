@@ -356,7 +356,8 @@ func (m Model) updateComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() tea.View {
 	_ = m.reservedStateActive()
 
-	layout := calculateLayout(m.width, m.height, m.editor, 0, m.liveLines(), m.taskPanelLines())
+	suggestions := m.commandSuggestions()
+	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions), m.liveLines(), m.taskPanelLines())
 	if layout.tooSmall {
 		return newRootView(m, smallTerminalView(m.width, m.height))
 	}
@@ -384,13 +385,17 @@ func (m Model) View() tea.View {
 	} else {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View()))
 	}
+	// Suggestions sit below the input box so the editor row does not move
+	// when they open or close; see overlayCursor for the renderer rule.
+	if layout.suggestionHeight > 0 {
+		parts = append(parts, renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, layout.suggestionHeight))
+	}
 	parts = append(parts, footer)
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	if m.overlay != overlayNone {
 		content = renderOverlay(m.width, m.height, m.overlayContent())
-		return newRootView(m, content)
 	}
-	return newRootViewWithOverlay(m, content, m.commandSuggestionOverlay(layout))
+	return newRootView(m, content)
 }
 
 func (m Model) footerStatus() string {
@@ -625,52 +630,29 @@ func isShiftEnterKey(msg tea.KeyPressMsg) bool {
 }
 
 func newRootView(m Model, content string) tea.View {
-	return newRootViewWithOverlay(m, content, "")
-}
-
-func newRootViewWithOverlay(m Model, content, overlay string) tea.View {
-	content = fitToBounds(content, m.width, m.height)
-	if overlay != "" {
-		content = lipgloss.NewCompositor(lipgloss.NewLayer(content), lipgloss.NewLayer(overlay).Z(1)).Render()
-	}
-	view := tea.NewView(content)
+	view := tea.NewView(fitToBounds(content, m.width, m.height))
 	view.AltScreen = false
 	view.MouseMode = tea.MouseModeNone
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
-	layout := calculateLayout(m.width, m.height, m.editor, 0, m.liveLines(), m.taskPanelLines())
-	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && !m.profilePicker.active() && m.overlay == overlayNone {
-		if cursor := m.editor.Cursor(); cursor != nil {
-			cursor.Y += 1 + layout.transcriptHeight + layout.taskLines + layout.editorSpacing
-			if layout.inputBoxed {
-				// The textarea sits below the top border and the label row.
-				cursor.Y += 1 + inputBoxLabel
-				cursor.X += 1 + inputBoxPadding
-			}
-			view.Cursor = cursor
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), m.liveLines(), m.taskPanelLines())
+	if layout.tooSmall {
+		return view
+	}
+	if m.resume.active() || m.archive.active() || m.profilePicker.active() || m.overlay != overlayNone {
+		view.Cursor = overlayCursor(content)
+		return view
+	}
+	if cursor := m.editor.Cursor(); cursor != nil {
+		cursor.Y += 1 + layout.transcriptHeight + layout.taskLines + layout.editorSpacing
+		if layout.inputBoxed {
+			// The textarea sits below the top border and the label row.
+			cursor.Y += 1 + inputBoxLabel
+			cursor.X += 1 + inputBoxPadding
 		}
+		view.Cursor = cursor
 	}
 	return view
-}
-
-func (m Model) commandSuggestionOverlay(layout layoutState) string {
-	suggestions := m.commandSuggestions()
-	if len(suggestions) == 0 || m.width <= 0 || m.height <= 0 || layout.tooSmall {
-		return ""
-	}
-	availableRows := m.height - layout.footerHeight - layout.inputBoxHeight - layout.editorSpacing
-	if layout.taskLines > 0 {
-		availableRows -= layout.taskLines
-	}
-	height := min(len(suggestions), max(0, availableRows))
-	if height <= 0 {
-		return ""
-	}
-	panel := renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, height)
-	if panel == "" {
-		return ""
-	}
-	return fitToBounds(panel, m.width, m.height)
 }
 
 func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
@@ -1552,7 +1534,7 @@ func (m *Model) refreshViewportContent() {
 	width := m.transcriptWidth()
 	m.commitFinalEntries(width)
 	content, _ := renderTranscript(m.entries[m.committed:], m.committedAssistantTurn, width, m.expandedDetails, m.darkBackground)
-	layout := calculateLayout(m.width, m.height, m.editor, 0, lineCount(content), m.taskPanelLines())
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), lineCount(content), m.taskPanelLines())
 	editorWidth := m.width
 	if layout.inputBoxed {
 		editorWidth = max(1, m.width-inputBoxPadding*2-inputBoxBorder)

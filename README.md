@@ -6,8 +6,11 @@
 
 **Otto is a local-first coding agent for macOS.** It gives developers an
 interactive AI teammate that can inspect a workspace, edit files, run commands in
-a sandbox, preserve session history, and delegate bounded work to sub-agents —
+a sandbox, preserve session history, and delegate bounded work to sub-agents,
 all from a small Go CLI.
+
+Otto connects to any OpenAI-compatible endpoint with an API key, or to a ChatGPT
+Plus/Pro/Team/Enterprise subscription through `otto login`.
 
 Otto is designed for day-to-day development work: understand an unfamiliar
 repository, make focused changes, run the relevant checks, keep context across
@@ -19,7 +22,8 @@ For the complete command and configuration reference, see the
 ## Highlights
 
 - **Native macOS CLI** with automatic TUI/REPL selection.
-- **OpenAI-compatible provider support** using streaming Chat Completions.
+- **Two ways to connect:** any OpenAI-compatible endpoint using streaming Chat
+  Completions, or a ChatGPT subscription using OpenAI's sign-in flow.
 - **Workspace-aware tools** for reading, searching, listing, writing, and exact
   file edits.
 - **Sandboxed shell execution by default** through macOS Seatbelt, with an
@@ -37,17 +41,14 @@ For the complete command and configuration reference, see the
 - **Headless mode and local server mode** for scripts, automation, and editor or
   client integrations.
 
-## Current release scope
-
-Otto's current GA scope is the Stage 1 macOS product surface.
-
-### Included
+## What's included
 
 - `otto` CLI for macOS.
-- OpenAI-compatible provider support only.
+- Providers: `openai-compatible` (base URL plus API key) and `chatgpt`
+  (subscription sign-in with `otto login`).
 - Adaptive frontend selection: full-screen TUI on terminal stdin/stdout, REPL
   otherwise.
-- Streaming TUI and REPL with session, compaction, archive, and basic lifecycle
+- Streaming TUI and REPL with session, compaction, archive, and lifecycle
   commands.
 - Built-in tools: `read`, `grep`, `find`, `ls`, `write`, `edit`, `bash`, and
   model-facing `skill` when skills are configured.
@@ -60,28 +61,31 @@ Otto's current GA scope is the Stage 1 macOS product surface.
 - `otto serve` over a Unix domain socket.
 - `--approve` for non-interactive single-prompt runs.
 
-### Not included in Stage 1
+## Limitations
 
-- Codex or ChatGPT subscription login as a working Stage 1 provider.
-- Claude subscription login.
-- Anthropic-native provider support.
-- Plugins or automatic project-local config discovery.
-- Windows or Linux support commitments.
-- Session trees/forks, session naming, deletion, or search.
-- Automatic memory extraction, memory backup/restore/verify commands, skill user
-  commands, per-skill `allowed-tools` enforcement, nested sub-agent delegation,
-  or persisted child transcripts.
-
-Planned providers are listed in [Roadmap](#roadmap).
+- macOS only. Linux and Windows are not supported.
+- No Anthropic-native provider. Claude-family models are reachable only through
+  an OpenAI-compatible endpoint.
+- No plugins and no automatic project-local config discovery.
+- No session trees/forks, session naming, deletion, or search.
+- No automatic memory extraction and no memory backup/restore/verify commands.
+- No user-facing `/skills` or `/skill` commands and no per-skill `allowed-tools`
+  enforcement.
+- No nested sub-agent delegation. Child transcripts are not persisted.
+- `otto serve` listens on a Unix domain socket only, with no TCP listener and no
+  authentication beyond socket file permissions.
 
 ## Requirements
 
 - macOS.
-- Go 1.26 or newer.
-- An OpenAI-compatible HTTP(S) endpoint that supports SSE streaming Chat
-  Completions.
-- An API key exported through an environment variable. Otto does not accept an
-  `--api-key` flag and API keys should not be stored in TOML.
+- Go 1.26 or newer to build from source.
+- One of:
+  - an OpenAI-compatible HTTP(S) endpoint that supports SSE streaming Chat
+    Completions, plus an API key exported through an environment variable, or
+  - a ChatGPT Plus/Pro/Team/Enterprise subscription.
+
+Otto does not accept an `--api-key` flag, and API keys should not be stored in
+TOML.
 
 ## Install from source
 
@@ -107,6 +111,8 @@ make check
 ```
 
 ## Quick start
+
+### With an OpenAI-compatible endpoint
 
 Create `~/.config/otto/config.toml`:
 
@@ -169,6 +175,49 @@ EXAMPLE_API_KEY=your-key ./otto \
   --model example-model \
   --no-session
 ```
+
+### With a ChatGPT subscription
+
+Sign in once:
+
+```bash
+./otto login
+```
+
+`otto login` opens the OpenAI authorization page in your browser and also prints
+the URL. After you approve, it writes credentials to `~/.otto/auth/chatgpt.json`
+with file mode `0600`. Check or remove the stored credentials with:
+
+```bash
+./otto login --status
+./otto logout
+```
+
+Then select the `chatgpt` provider. It needs a `model` but no `base_url` and no
+API key:
+
+```toml
+default_profile = "chatgpt"
+
+[profiles.chatgpt]
+provider = "chatgpt"
+model = "gpt-5-codex"
+```
+
+```bash
+./otto --profile chatgpt
+```
+
+Or ad hoc, without a profile:
+
+```bash
+./otto --provider chatgpt --model gpt-5-codex
+```
+
+Subscription requests go to OpenAI's Responses backend and are authorized with
+the OAuth access token, which Otto refreshes automatically. Tokens are never
+written to TOML, session files, or logs. The CLI, tools, sessions, and compaction
+behave the same as with the `openai-compatible` provider.
 
 ## Common workflows
 
@@ -250,7 +299,7 @@ otto memory forget <id> --cwd /path/to/project
 ```
 
 Model-originated writes are pending candidates until a human reviews them.
-Automatic memory extraction is not wired in Stage 1.
+Otto does not extract memories automatically.
 
 ### Add reusable skills
 
@@ -277,8 +326,8 @@ Follow the project's release-note style. Group changes by user-visible impact.
 ```
 
 Discovered skills appear in the model's system prompt. The model can request a
-skill's full instructions with the `skill` tool. User-facing `/skills` and
-`/skill` commands are not part of Stage 1.
+skill's full instructions with the `skill` tool. There are no user-facing
+`/skills` or `/skill` commands.
 
 ### Delegate work to sub-agents
 
@@ -317,8 +366,8 @@ Interactive task commands:
 /task cancel <id|name> cancel a queued or running task
 ```
 
-Child agents cannot start nested agents and their transcripts are not persisted
-in Stage 1.
+Child agents cannot start nested agents, and their transcripts are not
+persisted.
 
 ### Run Otto as a local server
 
@@ -342,7 +391,7 @@ curl -N --unix-socket ~/.otto/otto.sock \
 ```
 
 The server provides session routes, turn streaming, task routes, health checks,
-and Prometheus metrics. It listens on Unix sockets only in Stage 1.
+and Prometheus metrics. It listens on Unix sockets only.
 
 ## Configuration model
 
@@ -362,8 +411,10 @@ Important precedence rules:
 - `--provider` and `--model` override `OTTO_PROVIDER` and `OTTO_MODEL`; those
   environment variables override the selected profile.
 - `--base-url` overrides the selected profile's `base_url`.
-- API keys are read only from the profile's `api_key_env` variable, with `OPENAI_API_KEY`
-  as a fallback.
+- For `openai-compatible`, API keys are read only from the profile's
+  `api_key_env` variable, with `OPENAI_API_KEY` as a fallback.
+- For `chatgpt`, credentials come only from `otto login`; the profile needs
+  `model` and does not use `base_url` or `api_key_env`.
 - `--sandbox auto|seatbelt|off` overrides `[sandbox].driver`.
 - `[memory]`, `[skills]`, and `[agents]` are TOML-only.
 - `--thinking low|medium|high|xhigh|max` is passed through as provider reasoning
@@ -403,6 +454,8 @@ values to sessions.
 ```text
 otto [options] [prompt]
 otto serve [options] [--socket PATH]
+otto login [--status]
+otto logout
 otto memory status|forget <id> [--config PATH] [--cwd PATH]
 ```
 
@@ -412,7 +465,7 @@ Common options:
 --config PATH          configuration file
 --cwd PATH             workspace directory
 --profile NAME         configuration profile
---provider NAME        provider override
+--provider NAME        openai-compatible or chatgpt
 --base-url URL         provider base URL override
 --model NAME           model override
 --thinking LEVEL       low, medium, high, xhigh, or max
@@ -450,13 +503,20 @@ make check
 
 ### `otto: missing api key`
 
-Export the environment variable named by the selected profile's `api_key_env`, or
-set `OPENAI_API_KEY` as a fallback.
+Applies to the `openai-compatible` provider. Export the environment variable
+named by the selected profile's `api_key_env`, or set `OPENAI_API_KEY` as a
+fallback.
+
+### `no chatgpt credentials; run 'otto login'`
+
+The `chatgpt` provider found no stored credentials. Run `otto login`, or check
+the sign-in state with `otto login --status`.
 
 ### `otto: missing base_url`, `otto: invalid base_url`, or request failures
 
-Check the selected profile, `--base-url`, and endpoint path. Stage 1 expects an
-HTTP(S) OpenAI-compatible base URL and posts to `<base-url>/chat/completions`.
+Check the selected profile, `--base-url`, and endpoint path. The
+`openai-compatible` provider expects an HTTP(S) base URL and posts to
+`<base-url>/chat/completions`.
 
 ### Streaming errors
 
@@ -481,16 +541,5 @@ private model IDs so proactive compaction can size requests safely.
 ## Contributing
 
 See [`AGENTS.md`](AGENTS.md) for repository conventions, Go workflow, testing
-expectations, and safety rules.
-
-## Roadmap
-
-- **Stage 1:** macOS GA with OpenAI-compatible provider support.
-- **Stage 2:** ChatGPT/Codex subscription support.
-- **Stage 3:** Claude subscription support.
-
-Codex/ChatGPT subscription support and Claude support are roadmap items, not
-working Stage 1 providers.
-
-The staged design lives in
-[`docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md`](docs/superpowers/specs/2026-08-26-otto-coding-agent-design.md).
+expectations, and safety rules. Design notes for the agent server, skills, and
+sub-agents live in [`docs/specs/`](docs/specs/).

@@ -91,6 +91,33 @@ func indexOfLineContaining(lines []string, text string) int {
 	return -1
 }
 
+func TestEscapeClearsSlashCommandInput(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 16)
+	m = typeEditorText(t, m, "/s")
+	updated, _ := m.Update(keyPress(tea.KeyEscape))
+	m = updated.(Model)
+	if m.editor.Value() != "" || len(m.commandSuggestions()) != 0 {
+		t.Fatalf("escape with suggestions: editor=%q suggestions=%d", m.editor.Value(), len(m.commandSuggestions()))
+	}
+
+	m = typeEditorText(t, m, "/wat")
+	updated, _ = m.Update(keyPress(tea.KeyEnter))
+	m = updated.(Model)
+	if m.statusText != "unknown command: /wat" || m.editor.Value() != "/wat" {
+		t.Fatalf("unknown command: status=%q editor=%q", m.statusText, m.editor.Value())
+	}
+	updated, _ = m.Update(keyPress(tea.KeyEscape))
+	m = updated.(Model)
+	if m.editor.Value() != "" {
+		t.Fatalf("escape after unknown command left editor=%q", m.editor.Value())
+	}
+
+	m = typeEditorText(t, m, "hello")
+	updated, _ = m.Update(keyPress(tea.KeyEscape))
+	if got := updated.(Model).editor.Value(); got != "hello" {
+		t.Fatalf("escape cleared prompt draft: editor=%q", got)
+	}
+}
 
 func TestSlashCommandSuggestionSelectionAndTabCompletion(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 16)

@@ -470,8 +470,13 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if isEscapeKey(msg) {
-		if m.running && m.cancel != nil {
-			m.cancel()
+		switch {
+		case m.running:
+			if m.cancel != nil {
+				m.cancel()
+			}
+		case strings.HasPrefix(m.editor.Value(), "/"):
+			m.clearEditor()
 		}
 		return m, nil
 	}

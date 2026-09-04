@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/model"
 )
 
@@ -56,17 +57,22 @@ type metrics struct {
 	tokensTotal map[string]uint64
 
 	streamClientsValue int64
+
+	tasksStartedValue  uint64
+	tasksFinishedTotal map[string]uint64
+	tasksRunningValue  int64
 }
 
 func newMetrics() *metrics {
 	return &metrics{
-		httpTotal:      make(map[httpKey]uint64),
-		httpDuration:   make(map[string]*histogram),
-		turnsTotal:     make(map[string]uint64),
-		turnDuration:   newHistogram(turnToolBuckets),
-		toolCallsTotal: make(map[toolKey]uint64),
-		toolDuration:   make(map[string]*histogram),
-		tokensTotal:    make(map[string]uint64),
+		httpTotal:          make(map[httpKey]uint64),
+		httpDuration:       make(map[string]*histogram),
+		turnsTotal:         make(map[string]uint64),
+		turnDuration:       newHistogram(turnToolBuckets),
+		toolCallsTotal:     make(map[toolKey]uint64),
+		toolDuration:       make(map[string]*histogram),
+		tokensTotal:        make(map[string]uint64),
+		tasksFinishedTotal: make(map[string]uint64),
 	}
 }
 
@@ -140,6 +146,53 @@ func (m *metrics) streamClients(delta int) {
 	m.streamClientsValue += int64(delta)
 }
 
+func (m *metrics) taskStarted() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasksStartedValue++
+}
+
+func (m *metrics) taskFinished(status string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasksFinishedTotal[status]++
+}
+
+func (m *metrics) tasksRunning(delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasksRunningValue += int64(delta)
+}
+
+// diffTasks compares list against seen (each task id's last-observed
+// status, updated in place) and adjusts the task counters/gauge for every
+// change: an id absent from seen counts one started; a task whose status is
+// newly final counts one finished{status}; the running gauge changes by the
+// number of tasks whose status became, or stopped being, exactly
+// agent.TaskRunning. An id that is both unseen and already final counts as
+// both started and finished, since Tasks().Updates() has capacity 1 and
+// coalesces signals, so a fast task can skip past being observed as running.
+func (m *metrics) diffTasks(seen map[string]agent.TaskStatus, list []agent.Task) {
+	for _, task := range list {
+		prev, existed := seen[task.ID]
+		wasRunning := existed && prev == agent.TaskRunning
+		wasFinal := existed && (agent.Task{Status: prev}).Final()
+
+		if !existed {
+			m.taskStarted()
+		}
+		if task.Status == agent.TaskRunning && !wasRunning {
+			m.tasksRunning(1)
+		} else if wasRunning && task.Status != agent.TaskRunning {
+			m.tasksRunning(-1)
+		}
+		if task.Final() && !wasFinal {
+			m.taskFinished(string(task.Status))
+		}
+		seen[task.ID] = task.Status
+	}
+}
+
 func (m *metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
@@ -155,6 +208,9 @@ func (m *metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	writeHistogramByLabel(&b, "otto_tool_call_duration_seconds", "tool", "Tool call duration in seconds.", m.toolDuration)
 	writeCounterByLabel(&b, "otto_provider_tokens_total", "kind", "Total provider tokens by kind.", m.tokensTotal)
 	writeGauge(&b, "otto_event_stream_clients", "Number of connected event stream clients.", m.streamClientsValue)
+	writeCounter(&b, "otto_tasks_started_total", "Total sub-agent tasks started.", m.tasksStartedValue)
+	writeCounterByLabel(&b, "otto_tasks_finished_total", "status", "Total sub-agent tasks finished by status.", m.tasksFinishedTotal)
+	writeGauge(&b, "otto_tasks_running", "Number of sub-agent tasks currently running.", m.tasksRunningValue)
 	m.mu.Unlock()
 
 	_, _ = w.Write([]byte(b.String()))
@@ -182,6 +238,11 @@ func formatFloat(v float64) string {
 
 func writeGauge(b *strings.Builder, name, help string, v int64) {
 	writeHelp(b, name, "gauge", help)
+	fmt.Fprintf(b, "%s %d\n", name, v)
+}
+
+func writeCounter(b *strings.Builder, name, help string, v uint64) {
+	writeHelp(b, name, "counter", help)
 	fmt.Fprintf(b, "%s %d\n", name, v)
 }
 

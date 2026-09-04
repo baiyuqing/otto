@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
@@ -59,6 +60,19 @@ type openSession struct {
 
 	mu   sync.Mutex
 	turn *turn
+
+	// turnFinished is signaled (non-blocking, capacity 1) after every turn
+	// on this session finishes. startWakeLoop is the only reader; routing
+	// the end-of-turn wake check through it, instead of calling startTurn
+	// directly from the finishing turn's own goroutine, serializes every
+	// Pending()-then-startTurn decision through one goroutine so a stale
+	// read from one trigger can never race a fresh read from the other
+	// into starting two wake turns for the same pending notification.
+	turnFinished chan struct{}
+}
+
+func newOpenSession(ctrl *app.Controller) *openSession {
+	return &openSession{ctrl: ctrl, turnFinished: make(chan struct{}, 1)}
 }
 
 // Server is otto serve's HTTP handler plus the session registry and turn
@@ -72,6 +86,8 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]*openSession
 	opening  map[string]*openPlaceholder // in-flight Open calls, keyed by id
+
+	wakeWG sync.WaitGroup // one entry per running wake loop (startWakeLoop)
 
 	mux http.Handler
 }
@@ -133,6 +149,7 @@ func (s *Server) Close() error {
 		}
 	}
 	s.metrics.sessionsOpen(-len(sessions))
+	s.wakeWG.Wait() // closing ctrl closes its Tasks registry, ending every wake loop
 	return errors.Join(errs...)
 }
 
@@ -203,6 +220,9 @@ func (s *Server) routeTable() []routeEntry {
 		{"GET /v1/sessions/{id}/turns/{turn_id}", s.handleGetTurn},
 		{"GET /v1/sessions/{id}/turns/{turn_id}/events", s.handleTurnEvents},
 		{"POST /v1/sessions/{id}/turns/{turn_id}/cancel", s.handleCancelTurn},
+		{"GET /v1/sessions/{id}/tasks", s.handleListTasks},
+		{"GET /v1/sessions/{id}/tasks/{task_id}", s.handleGetTask},
+		{"POST /v1/sessions/{id}/tasks/{task_id}/cancel", s.handleCancelTask},
 		{"GET /v1/info", s.handleInfo},
 		{"GET /v1/openapi.yaml", s.handleOpenAPI},
 		{"GET /healthz", s.handleHealthz},
@@ -359,23 +379,67 @@ func (s *Server) resumeOrCreate(ctx context.Context, id string) (os *openSession
 		close(placeholder.ready)
 		return nil, false, openErr
 	}
-	sess := &openSession{ctrl: ctrl}
+	sess := newOpenSession(ctrl)
 	s.sessions[id] = sess
 	placeholder.sess = sess
 	s.mu.Unlock()
 	close(placeholder.ready)
 
 	s.metrics.sessionsOpen(1)
+	s.startWakeLoop(sess)
 	return sess, false, nil
 }
 
 func (s *Server) register(ctrl *app.Controller) *openSession {
-	os := &openSession{ctrl: ctrl}
+	os := newOpenSession(ctrl)
 	s.mu.Lock()
 	s.sessions[ctrl.Info().SessionID] = os
 	s.mu.Unlock()
 	s.metrics.sessionsOpen(1)
+	s.startWakeLoop(os)
 	return os
+}
+
+// startWakeLoop starts a goroutine that automatically drains os's pending
+// sub-agent task notifications. It is the sole caller of startTurn(os, "",
+// triggerTask): both a os.ctrl.Tasks().Updates() signal and the end of any
+// turn on os (via os.turnFinished, sent by startTurn) route through this one
+// goroutine, so every "is a notification pending and no turn active" check
+// happens one at a time — no two goroutines can race a stale check into
+// starting two wake turns for the same notification. When a notification is
+// pending and no turn is active, it starts a task-triggered wake turn (an
+// active turn's own inbox drain handles the signal instead, so errTurnActive
+// is expected and ignored). On every Updates() signal it also diffs
+// Tasks().List() into the task-started/finished/running metrics. It returns
+// immediately when the runner behind os.ctrl does not track tasks. It exits
+// when Updates() closes (the controller closed) or s.ctx is done.
+func (s *Server) startWakeLoop(os *openSession) {
+	tasks := os.ctrl.Tasks()
+	if tasks == nil {
+		return
+	}
+	s.wakeWG.Add(1)
+	go func() {
+		defer s.wakeWG.Done()
+		seen := make(map[string]agent.TaskStatus)
+		for {
+			select {
+			case _, open := <-tasks.Updates():
+				if !open {
+					return
+				}
+				s.metrics.diffTasks(seen, tasks.List())
+			case <-os.turnFinished:
+			case <-s.ctx.Done():
+				return
+			}
+			if tasks.Pending() > 0 {
+				if _, err := s.startTurn(os, "", triggerTask); err != nil && !errors.Is(err, errTurnActive) {
+					s.log.Error("wake_turn_error", "error", err)
+				}
+			}
+		}
+	}()
 }
 
 func (s *Server) lookup(id string) (*openSession, bool) {
@@ -405,8 +469,9 @@ type sandboxWire struct {
 }
 
 type sessionTurnWire struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
+	ID      string `json:"id"`
+	Trigger string `json:"trigger"`
+	Status  string `json:"status"`
 }
 
 type sessionWire struct {
@@ -431,7 +496,7 @@ func (s *Server) sessionWire(os *openSession) sessionWire {
 	var turnWire *sessionTurnWire
 	if t != nil {
 		sum := t.summary()
-		turnWire = &sessionTurnWire{ID: sum.ID, Status: sum.Status}
+		turnWire = &sessionTurnWire{ID: sum.ID, Trigger: sum.Trigger, Status: sum.Status}
 	}
 
 	return sessionWire{
@@ -592,6 +657,55 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, history)
 }
 
+// errTurnActive is returned by startTurn when the session already has a
+// turn running.
+var errTurnActive = errors.New("turn already active")
+
+// startTurn starts a turn on os with the given trigger ("user" or "task")
+// and returns it. The turn runs in its own goroutine; startTurn returns as
+// soon as it is recorded on os. Once the turn finishes, it signals
+// os.turnFinished so startWakeLoop can recheck Tasks().Pending(): a task can
+// finish after the parent's last provider request, with no further
+// Tasks().Updates() signal to catch it otherwise.
+func (s *Server) startTurn(os *openSession, text, trigger string) (*turn, error) {
+	os.mu.Lock()
+	if os.turn != nil && !os.turn.isDone() {
+		os.mu.Unlock()
+		return nil, errTurnActive
+	}
+	turnID, err := newID()
+	if err != nil {
+		os.mu.Unlock()
+		return nil, err
+	}
+	turnCtx, cancel := context.WithCancel(s.ctx)
+	t := newTurn(turnID, cancel)
+	t.trigger = trigger
+	os.turn = t
+	os.mu.Unlock()
+
+	s.metrics.turnStarted()
+	emit := t.emit(s.metrics)
+	go func() {
+		defer cancel()
+		err := os.ctrl.Prompt(turnCtx, text, emit)
+		t.finish(err)
+		s.metrics.turnFinished(t.summary().Status, t.duration())
+		if err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("turn_error", "turn_id", turnID, "trigger", trigger, "error", err)
+		}
+		s.log.Info("turn_finished", "turn_id", turnID, "trigger", trigger, "status", t.summary().Status, "duration_ms", t.duration().Milliseconds())
+
+		select {
+		case os.turnFinished <- struct{}{}:
+		default:
+		}
+	}()
+
+	s.log.Info("turn_started", "turn_id", turnID, "trigger", trigger)
+	return t, nil
+}
+
 func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 	os, ok := s.lookup(r.PathValue("id"))
 	if !ok {
@@ -616,37 +730,15 @@ func (s *Server) handleStartTurn(w http.ResponseWriter, r *http.Request) {
 		stream = *body.Stream
 	}
 
-	os.mu.Lock()
-	if os.turn != nil && !os.turn.isDone() {
-		os.mu.Unlock()
-		writeError(w, http.StatusConflict, "turn_active", "a turn is already active for this session")
-		return
-	}
-	turnID, err := newID()
+	t, err := s.startTurn(os, body.Text, triggerUser)
 	if err != nil {
-		os.mu.Unlock()
+		if errors.Is(err, errTurnActive) {
+			writeError(w, http.StatusConflict, "turn_active", "a turn is already active for this session")
+			return
+		}
 		internalError(w, s.log, err)
 		return
 	}
-	turnCtx, cancel := context.WithCancel(s.ctx)
-	t := newTurn(turnID, cancel)
-	os.turn = t
-	os.mu.Unlock()
-
-	s.metrics.turnStarted()
-	emit := t.emit(s.metrics)
-	go func() {
-		defer cancel()
-		err := os.ctrl.Prompt(turnCtx, body.Text, emit)
-		t.finish(err)
-		s.metrics.turnFinished(t.summary().Status, t.duration())
-		if err != nil && !errors.Is(err, context.Canceled) {
-			s.log.Error("turn_error", "turn_id", turnID, "error", err)
-		}
-		s.log.Info("turn_finished", "turn_id", turnID, "status", t.summary().Status, "duration_ms", t.duration().Milliseconds())
-	}()
-
-	s.log.Info("turn_started", "turn_id", turnID)
 
 	if stream {
 		s.streamSSE(w, r, t, 0)

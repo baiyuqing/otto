@@ -198,7 +198,7 @@ own.
   "usage": {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0},
   "context_input_tokens": 0,
   "sandbox": {"mode": "…", "network": "…", "bash_available": true, "summary": "…"},
-  "turn": {"id": "…", "status": "…"}
+  "turn": {"id": "…", "trigger": "…", "status": "…"}
 }
 ```
 
@@ -285,7 +285,7 @@ terminal event.
 Turn summary:
 
 ```json
-{"id": "…", "status": "ok", "error": "", "text": "…", "usage": {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}, "started_at": "…", "finished_at": "…"}
+{"id": "…", "trigger": "user", "status": "ok", "error": "", "text": "…", "usage": {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}, "started_at": "…", "finished_at": "…"}
 ```
 
 SSE frame format: `id: <seq>`, `event: <agent.EventType literal>`,
@@ -323,6 +323,114 @@ JSON it is embedded as a `json.RawMessage` value, otherwise it is embedded
 as a JSON string. `Err` fields become the string `err.Error()`; the agent
 has already redacted these before they reach `emit`.
 
+## Sub-agent tasks
+
+See `docs/specs/2026-09-03-subagents-design.md` for the task registry
+(`agent.Tasks`) and the `agent` tool that populates it. This section covers
+only the server's use of that registry: wake turns, the task routes, and the
+task metrics.
+
+### Wake turns
+
+Each `openSession` starts a goroutine (`startWakeLoop`) as soon as the
+session opens, if the runner exposes a task registry (`app.TaskLister`); it
+returns immediately otherwise.
+
+That goroutine is the sole place that starts a task-triggered turn
+(`startTurn(os, "", triggerTask)`). It reacts to two signals:
+
+- `os.ctrl.Tasks().Updates()` — the registry changed (a task added, a task
+  updated, or a notification pushed).
+- `os.turnFinished` — a turn on this session just finished. `startTurn`
+  sends this after every turn, regardless of trigger.
+
+Both signals are handled by the same goroutine instead of each
+independently calling `startTurn`. A task can finish between the parent's
+last provider request and the turn actually returning, with no further
+`Updates()` signal to catch it, so the end-of-turn check is needed. But if
+that check ran inline on the finishing turn's own goroutine, it and a
+concurrent `Updates()` reaction could both read `Tasks().Pending() > 0` from
+the same notification and both start a turn — one call landing after the
+other's wake turn has already drained the notification, producing two wake
+turns for one notification. Routing both signals through one goroutine's
+`select` loop makes every "`Pending() > 0`, then `startTurn`" decision
+atomic with respect to the other trigger, so exactly one wake turn starts
+per pending notification.
+
+On each signal, if `Tasks().Pending() > 0` and no turn is active, the
+goroutine starts a wake turn with `trigger: "task"` and empty text.
+`errTurnActive` (a turn is already running) is expected and ignored: the
+running turn drains its own inbox before its next provider request, so no
+separate wake turn is needed while one is active. The goroutine exits when
+`Tasks().Updates()` closes (the controller closed) or the server's context
+is done.
+
+A wake turn is an ordinary turn otherwise: it is recorded on the session,
+its events stream over SSE, and both `GET /v1/sessions/{id}/turns/{turn_id}`
+and the session's `turn` field carry `trigger: "task"` so a client can tell
+it apart from a user turn (`trigger: "user"`).
+
+### Task routes
+
+| Method path | Behavior |
+|---|---|
+| `GET /v1/sessions/{id}/tasks` | `{"tasks": [Task, …]}`, in registry creation order; empty when the session has no task registry |
+| `GET /v1/sessions/{id}/tasks/{task_id}` | a `Task` plus `"history": [model.Message, …]` in the same wire form as `GET .../history`; 404 `not_found` for an unknown id |
+| `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | cancels the task; 200 with the `Task` re-read after cancel; 404 `not_found` for an unknown id; 409 `task_done` if the task already finished |
+
+`Task` (`internal/server/tasks.go`, `taskWire`):
+
+```json
+{
+  "id": "t1",
+  "agent": "reviewer",
+  "description": "…",
+  "model": "…",
+  "status": "running",
+  "created_at": "…",
+  "started_at": "…",
+  "finished_at": null,
+  "steps": 2,
+  "tool_calls": 3,
+  "last_tool": "grep",
+  "last_text": "…",
+  "usage": {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0},
+  "result": "",
+  "error": ""
+}
+```
+
+`model`, `started_at`, `finished_at`, `last_tool`, `last_text`, `result`, and
+`error` are omitted when empty/zero. Fields map 1:1 from `agent.Task`
+(`internal/agent/tasks.go`); the server never adds a field `agent.Task`
+doesn't have. All three routes reach the registry only through
+`app.Controller.Tasks()` (`app.TaskLister`), never through
+`internal/subagent` or the runner directly.
+
+```bash
+curl -s --unix-socket ./otto.sock http://otto/v1/sessions/<id>/tasks
+curl -s --unix-socket ./otto.sock http://otto/v1/sessions/<id>/tasks/t1
+curl -s --unix-socket ./otto.sock -X POST http://otto/v1/sessions/<id>/tasks/t1/cancel
+```
+
+### Task metrics
+
+- `otto_tasks_started_total` — counter, incremented once per task the wake
+  loop first observes in `Tasks().List()`.
+- `otto_tasks_finished_total{status}` — counter, `status` one of
+  `succeeded`/`failed`/`canceled`, incremented once per task the first time
+  its status is observed as final.
+- `otto_tasks_running` — gauge, the number of tasks currently observed with
+  status `running`, summed across sessions.
+
+The server only sees tasks through `Tasks().List()`, not a push per
+status change, so each session's wake-loop goroutine keeps a
+`map[task ID]agent.TaskStatus` of what it last observed and diffs it
+against `List()` on every `Updates()` signal (`metrics.diffTasks`). Because
+`Updates()` is a capacity-1 channel that coalesces signals, a fast task can
+go from unseen straight to a final status between two observations; that
+case counts as both a start and a finish.
+
 ## Errors
 
 Error body: `{"error":{"code","message"}}`.
@@ -354,6 +462,8 @@ text.
   calls run one at a time
 - `otto_provider_tokens_total{kind}`
 - `otto_event_stream_clients`
+- `otto_tasks_started_total`, `otto_tasks_finished_total{status}`,
+  `otto_tasks_running` — see [Task metrics](#task-metrics)
 
 Durations use fixed histogram buckets. `GET /metrics` renders all of these
 in Prometheus text exposition format.
@@ -427,6 +537,7 @@ already use.
 | `internal/server` (new) | HTTP server, routing, session registry, turn lifecycle, event conversion, metrics, socket listener |
 | `internal/server/server.go` | `Server`, routes, session table, handlers |
 | `internal/server/turn.go` | turn buffering, broadcast, cancellation |
+| `internal/server/tasks.go` | task wire conversion (`taskWire`), the three task route handlers |
 | `internal/server/events.go` | `agent.Event` → wire JSON |
 | `internal/server/metrics.go` | counters/histograms and Prometheus text rendering |
 | `internal/server/listen.go` | socket creation and permission checks |

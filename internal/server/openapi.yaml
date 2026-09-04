@@ -47,6 +47,9 @@ components:
       properties:
         id:
           type: string
+        trigger:
+          type: string
+          enum: [user, task]
         status:
           type: string
           enum: [running, ok, error, canceled]
@@ -106,6 +109,9 @@ components:
       properties:
         id:
           type: string
+        trigger:
+          type: string
+          enum: [user, task]
         status:
           type: string
           enum: [running, ok, error, canceled]
@@ -121,7 +127,64 @@ components:
         finished_at:
           type: [string, "null"]
           format: date-time
-      required: [id, status, text, usage, started_at]
+      required: [id, trigger, status, text, usage, started_at]
+    Task:
+      type: object
+      description: internal/agent.Task; see internal/agent/tasks.go for the full shape.
+      properties:
+        id:
+          type: string
+        agent:
+          type: string
+        description:
+          type: string
+        model:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, canceled]
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+        steps:
+          type: integer
+        tool_calls:
+          type: integer
+        last_tool:
+          type: string
+        last_text:
+          type: string
+        usage:
+          $ref: "#/components/schemas/Usage"
+        result:
+          type: string
+        error:
+          type: string
+      required: [id, agent, description, status, created_at, steps, tool_calls, usage]
+    TaskList:
+      type: object
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/Task"
+      required: [tasks]
+    TaskWithHistory:
+      allOf:
+        - $ref: "#/components/schemas/Task"
+        - type: object
+          properties:
+            history:
+              type: array
+              items:
+                $ref: "#/components/schemas/Message"
+          required: [history]
     WireEvent:
       type: object
       description: >
@@ -130,6 +193,20 @@ components:
       properties:
         type:
           type: string
+          enum:
+            - agent_started
+            - agent_finished
+            - text_delta
+            - tool_call_started
+            - tool_call_finished
+            - provider_usage
+            - compaction_started
+            - compaction_planned
+            - compaction_completed
+            - compaction_warning
+            - memory_warning
+            - agent_error
+            - notification
         turn_id:
           type: string
         task_id:
@@ -192,6 +269,12 @@ components:
         type: string
     turnID:
       name: turn_id
+      in: path
+      required: true
+      schema:
+        type: string
+    taskID:
+      name: task_id
       in: path
       required: true
       schema:
@@ -407,6 +490,62 @@ paths:
           description: Cancellation requested
         "404":
           description: Session or turn not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/tasks:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List a session's sub-agent tasks, in creation order
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskList"
+  /v1/sessions/{id}/tasks/{task_id}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/taskID"
+    get:
+      summary: Get a task, plus its child session's history
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskWithHistory"
+        "404":
+          description: Session or task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/tasks/{task_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/taskID"
+    post:
+      summary: Cancel a running task
+      responses:
+        "200":
+          description: Canceled; returns the task
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          description: Session or task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Task already finished
           content:
             application/json:
               schema:

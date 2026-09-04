@@ -377,13 +377,77 @@ Design reference: [`docs/specs/2026-09-03-skills-design.md`](docs/specs/2026-09-
 
 ## Sub-agents
 
-The `agent` tool starts a child agent loop in the same workspace, sandbox, and provider as the parent, on the session model or the `model` given in the call, with a fresh context: the child's session holds only its own system prompt and the delegated prompt, not the parent's conversation. The child runs asynchronously in a goroutine while the parent keeps working.
+The `agent` tool starts a child agent loop in the same workspace, sandbox, and provider as the parent, on the session model, the definition's `model`, or the `model` given in the call. The context is fresh by default — the child's session holds only its own system prompt and the delegated prompt, not the parent's conversation — or, with `context: inherit`, a copy of the conversation up to the call. The child runs asynchronously in a goroutine while the parent keeps working.
 
-Parameters: `prompt` (required), `description` (optional, capped at 80 characters, shown in status output), `wait` (optional bool: start the task and block until it ends, returning its result instead of its id), `model` (optional, provider model id; default the session model; not validated by Otto).
+Parameters: `prompt` (required), `description` (optional, capped at 80 characters, shown in status output), `wait` (optional bool: start the task and block until it ends, returning its result instead of its id), `model` (optional, provider model id; not validated by Otto), `agent` (optional, name of a definition from the `## Agents` prompt section; an unknown name returns the error result `unknown agent: <name>; available: …`), `context` (optional, `fresh` or `inherit`; default `fresh` or the definition's `context`). Precedence: call `model` > definition `model` > session model; call `context` > definition `context` > `fresh`.
 
 Otto keeps no model list or price data; the model chooses which model id to pass, and an id the endpoint rejects fails the task with the provider's error.
 
-Result: `task t3 (default) started`, or `task t3 (default) queued (4 running, limit 4)` once four children are already running.
+Result: `task t3 (default) started`, or `task t3 (reviewer) started` for a named definition, or `task t3 (default) queued (4 running, limit 4)` once four children are already running.
+
+### Agent definitions
+
+A definition is a directory containing an `AGENT.md` file with YAML frontmatter and a Markdown body:
+
+```
+~/.otto/agents/reviewer/AGENT.md
+---
+name: reviewer
+description: Review a diff for correctness and missing tests. Use after code changes.
+tools: read, grep, find, ls, bash
+model: gpt-4o-mini
+context: fresh
+---
+You review code. Report findings as file:line bullets ordered by severity.
+```
+
+- `name`: required, must equal the directory name; same rules as a skill name (1 to 64 characters of `a-z`, `0-9`, `-`; no leading, trailing, or doubled hyphen).
+- `description`: required, 1 to 1024 characters; shown to the model in the `## Agents` section.
+- `tools`: optional, comma-separated allowlist of child tool names. Absent means the full child tool set. An unknown tool name prints a startup warning and is ignored; an empty value prints the warning `tools must be a comma-separated list` and the whole definition is skipped.
+- `model`: optional provider model id, the default for this definition; a per-call `model` overrides it.
+- `context`: optional, `fresh` (default) or `inherit`; a per-call `context` overrides it.
+- Body: Markdown after the frontmatter, appended to the child's system prompt under `## Sub-agent role`. An empty body falls back to a generic sub-agent instruction.
+
+Discovery mirrors skills: `~/.otto/agents` (user level) and `<workspace>/.otto/agents` (workspace level), one directory level deep, a later root wins on a name conflict, and it runs on each runner build (startup, `/new`, `/resume`, `/model`); within a session the catalog is fixed.
+
+When the catalog is non-empty, a `## Agents` section appears in the system prompt:
+
+```
+## Agents
+Named sub-agent definitions for the `agent` tool (`agent` parameter):
+<available_agents>
+<agent name="reviewer">Review a diff for correctness and missing tests. Use after code changes.</agent>
+</available_agents>
+```
+
+Capped at 8 KiB, same as `## Skills`; definitions that do not fit are dropped with a stderr warning.
+
+Definitions are instruction text of the same trust class as `SKILL.md`, `AGENTS.md`, and `CLAUDE.md`: they pass through the API-key redactor and cannot widen the child's tool set beyond the default child tools or change the sandbox policy.
+
+### Context: fresh or inherit
+
+With `context: fresh` (the default), the child's session holds only its own system prompt and the delegated prompt.
+
+With `context: inherit`, the child's session additionally receives a copy of the parent's current message list (the post-compaction view) up to, but excluding, the assistant message that carries the `agent` call; results of sibling `agent` calls appended after that message are excluded too. The copy does not include the parent's memory-recall context or its system prompt.
+
+Cost: every child step resends the copy. A 60,000-token parent context and 8 child steps cost about 480,000 input tokens (prefix caching lowers the price per token, not the count). Prefer `fresh` and put what the child needs in `prompt`.
+
+### Configuration
+
+Config (`[agents]` in TOML; all keys optional):
+
+```toml
+[agents]
+enabled = true                              # default true
+paths = ["~/.otto/agents", ".otto/agents"]  # default; later entries win on a name conflict
+max_parallel = 4                            # default; concurrent children per session, 1 to 16
+```
+
+- `~/` expands to the user's home directory; relative entries resolve against the workspace.
+- `max_parallel` must be between 1 and 16; any other value is a startup error.
+- `enabled = false` removes the `agent`, `agent_wait`, and `agent_status` tools and the `## Agents` section.
+- TOML only; no CLI flags or environment variables.
+- Existing agent roots are appended to the Seatbelt read paths at process start, like skill roots.
 
 What's wired:
 
@@ -394,18 +458,21 @@ What's wired:
   ```
   [task-notification] task t1 (default) succeeded · gpt-4o-mini · 42s · 7 tool calls · 12,310 tokens
   <final report>
+
+  [task-notification] task t2 (reviewer) succeeded · gpt-4o-mini · 18s · 3 tool calls · 4,102 tokens
+  <final report>
   ```
 
   (A `failed` task shows its error instead of the report; a `canceled` task shows neither; both omit the token count.) The notification is appended to the session as a display context message and persisted as a Pi v3 `custom_message` entry, so `/resume` still shows it. A finished task with no active turn wakes the REPL, the TUI, or `otto serve` automatically and runs an empty-text turn to deliver it; the TUI truncates a notification body longer than 20 lines in the transcript, with a `… (N more lines; /task <id>)` trailer.
 - **`otto serve`**: each open session runs a goroutine that starts an empty-text turn (`trigger: "task"` in the turn summary and the session's `turn` field) whenever a task notification is pending and no turn is already running, so a client streaming the session's turns sees task results without polling. `GET /v1/sessions/{id}/tasks` lists the session's tasks, `GET /v1/sessions/{id}/tasks/{task_id}` returns one task plus its child session's history, and `POST /v1/sessions/{id}/tasks/{task_id}/cancel` cancels it. SSE clients also receive the notification directly as a `notification` event (`task_id`, `text`, `usage`). Metrics: `otto_tasks_started_total`, `otto_tasks_finished_total{status}`, `otto_tasks_running`. See `docs/specs/2026-09-03-agent-server-design.md` "Sub-agent tasks".
 - **Child tool set**: the parent's tools minus `agent`, `agent_wait`, `agent_status`, `remember`, `forget`, and `memory_search` — no memory recall, no nested delegation. `bash` runs under the same sandbox mode as the parent.
-- **Concurrency**: at most 4 children run at once per session, a fixed limit; further `agent` calls wait in the `queued` state and can still be canceled.
+- **Concurrency**: at most `[agents].max_parallel` children (default 4) run at once per session; further `agent` calls wait in the `queued` state and can still be canceled.
 - **REPL and TUI commands**: `/tasks` lists every task in the session; `/task <id>` shows one task's line, its recent steps, and its result or error once finished; `/task cancel <id>` cancels a queued or running task.
 
   ```
   > /tasks
-  t1   (default)  succeeded    42s   7 tools  12,310 tokens            review the diff
-  t2   (default)  running      12s   4 tools  grep "session"           find where sessions are written
+  t1   (default)   succeeded    42s   7 tools  12,310 tokens            review the diff
+  t2   (reviewer)  running      12s   4 tools  grep "session"           find where sessions are written
   ```
 - **TUI task panel**: while at least one task is queued or running, the TUI shows a panel between the transcript and the input box: a header line, then up to 5 task rows in the same format as `/tasks`, then a `+N more` line when more tasks exist. The panel is absent when no task is queued or running.
 - **Session replacement**: `/new`, `/resume`, and `/model` close the current session's task registry, canceling every queued or running task; the TUI then appends a `canceled N running tasks` notice to the new transcript when `N` is greater than zero. Archiving the current session with `/archive` replaces it the same way and cancels tasks too; archiving another session does not.
@@ -413,7 +480,6 @@ What's wired:
 
 Not yet implemented:
 
-- Named agent definitions, `[agents]` TOML configuration, and `context: inherit`.
 - Parent-to-child messages (`agent_send`, `agent_cancel`, `agent_report`).
 - Child transcript persistence: transcripts live in memory only and are lost on `/new`, `/resume`, `/model`, archiving the current session, and exit, which also cancel any children still running.
 - Child token usage in the session's overall usage total: `agent_status`, `/tasks`, and the notification show it, but it is not part of the session usage total and does not survive `/resume`.

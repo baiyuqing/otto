@@ -87,7 +87,7 @@ Parameters:
 | `prompt` | string | yes | The complete task. The child sees nothing else unless `context` is `inherit`. |
 | `description` | string | no | Short label (≤ 80 chars) shown in status output and the TUI panel. |
 | `model` | string | no | Provider model id for the child. Default: the session model, or the definition's `model`. Passed through unchanged; Otto keeps no model catalog, allowlist, or price data, and an id the endpoint rejects fails the task with the provider's error. |
-| `agent` | string | no | Definition name. `enum` lists the catalog when non-empty. Unknown name → error result. |
+| `agent` | string | no | Definition name. No enum; see Decisions taken. Unknown name → error result. |
 | `context` | `"fresh"` \| `"inherit"` | no | Default `fresh`, or the definition's `context` field. See "Context: fresh or inherit". |
 | `wait` | bool | no | `true` = start and block until the task ends; equivalent to `agent` followed by `agent_wait`. |
 
@@ -601,6 +601,8 @@ Each phase is one PR on `feat/subagents`-derived branches; `make check` and
 
 ### Phase B: definitions, configuration, inherit
 
+Status: implemented.
+
 1. `skill.ParseFrontmatter`; `subagent/definition.go` with the validation
    rules above; `prompt.go`.
 2. `config/agents.go`; `[agents]` in README precedence docs; Seatbelt read
@@ -695,3 +697,8 @@ All offline, next to their packages.
   availability and pricing change faster than a maintained list, and the
   model can look them up itself (`bash` with `curl` under the default
   `network = "allow"`).
+- The `agent` parameter has no JSON-schema `enum`. Keeping the tool
+  definitions independent of the catalog lets `subagent.ToolDefinitions()`
+  serve the redaction boundary check without a catalog and keeps the tool
+  block identical across sessions for prompt caching; the `## Agents`
+  section plus the `unknown agent` error result replace the enum.

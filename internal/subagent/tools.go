@@ -17,7 +17,7 @@ const (
 	maxWaitTimeoutSeconds     = 3600
 )
 
-const agentDescription = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context, the same workspace and file tools, and cannot see this conversation. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress. Put everything the sub-agent needs into prompt: goal, relevant paths, what to report back."
+const agentDescription = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and cannot see this conversation. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress. Put everything the sub-agent needs into prompt: goal, relevant paths, what to report back. Pass agent to use a named definition from the Agents list."
 
 const agentWaitDescription = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown."
 
@@ -56,6 +56,8 @@ type agentToolArgs struct {
 	Description string `json:"description,omitempty"`
 	Wait        bool   `json:"wait,omitempty"`
 	Model       string `json:"model,omitempty"`
+	Agent       string `json:"agent,omitempty"`
+	Context     string `json:"context,omitempty"`
 }
 
 func (t *agentTool) Definition() model.ToolDefinition {
@@ -80,7 +82,16 @@ func (t *agentTool) Definition() model.ToolDefinition {
 				},
 				"model": map[string]any{
 					"type":        "string",
-					"description": "Provider model id for the sub-agent. Default: this session's model. Otto does not validate it; an id the endpoint rejects fails the task with the provider's error.",
+					"description": "Provider model id for the sub-agent. Default: this session's model. Otto does not validate it; an id the endpoint rejects fails the task with the provider's error. Overrides the definition's model.",
+				},
+				"agent": map[string]any{
+					"type":        "string",
+					"description": "Name of a definition from the Agents list in the system prompt: it sets the sub-agent's instructions, tool set, and default model. Omit for the default sub-agent.",
+				},
+				"context": map[string]any{
+					"type":        "string",
+					"enum":        []string{"fresh", "inherit"},
+					"description": "fresh (default, or the definition's setting): the sub-agent starts with only prompt. inherit: it also receives a copy of this conversation up to this call; every one of its steps resends that copy, so a 60,000-token conversation costs about 480,000 input tokens over 8 steps. Prefer fresh and put what matters in prompt.",
 				},
 			},
 			"required": []string{"prompt"},
@@ -96,9 +107,14 @@ func (t *agentTool) Execute(ctx context.Context, arguments json.RawMessage) tool
 	if strings.TrimSpace(args.Prompt) == "" {
 		return tool.Result{Content: "prompt is required", IsError: true}
 	}
+	if name := strings.TrimSpace(args.Agent); name != "" {
+		if _, ok := t.runner.config.Catalog.Lookup(name); !ok {
+			return tool.Result{Content: unknownAgentMessage(t.runner.config.Catalog, name), IsError: true}
+		}
+	}
 
 	runningBefore := countRunning(t.runner.config.Tasks)
-	task, err := t.runner.Start(StartRequest{Prompt: args.Prompt, Description: args.Description, Model: args.Model})
+	task, err := t.runner.Start(StartRequest{Prompt: args.Prompt, Description: args.Description, Model: args.Model, Agent: args.Agent, Context: args.Context})
 	if err != nil {
 		return tool.Result{Content: err.Error(), IsError: true}
 	}
@@ -118,6 +134,22 @@ func (t *agentTool) Execute(ctx context.Context, arguments json.RawMessage) tool
 		return tool.Result{Content: fmt.Sprintf("wait canceled; still running: %s", strings.Join(remaining, ", ")), IsError: true}
 	}
 	return tool.Result{Content: text}
+}
+
+// unknownAgentMessage renders the agent tool's unknown-agent error: the
+// bare "unknown agent: <name>" when the catalog is empty, else with an
+// "; available: a, b" suffix listing every definition name.
+func unknownAgentMessage(catalog Catalog, name string) string {
+	msg := "unknown agent: " + name
+	defs := catalog.Definitions()
+	if len(defs) == 0 {
+		return msg
+	}
+	names := make([]string, len(defs))
+	for i, d := range defs {
+		names[i] = d.Name
+	}
+	return msg + "; available: " + strings.Join(names, ", ")
 }
 
 func countRunning(tasks *agent.Tasks) int {

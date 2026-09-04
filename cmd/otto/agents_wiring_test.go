@@ -16,6 +16,21 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 )
 
+// writeAgentFileForTest writes <root>/<name>/AGENT.md with the given
+// frontmatter name and description, and returns the agent directory.
+func writeAgentFileForTest(t *testing.T, root, dirName, frontmatterName, description, body string) string {
+	t.Helper()
+	dir := filepath.Join(root, dirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nname: " + frontmatterName + "\ndescription: " + description + "\n---\n" + body
+	if err := os.WriteFile(filepath.Join(dir, "AGENT.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func writeCLIConfigWithAgentsDisabled(t *testing.T, providerName, keyEnv, baseURL string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "otto.toml")
@@ -125,5 +140,118 @@ func TestRunAgentsMaxParallelOutOfRangeFailsStartup(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "[agents].max_parallel must be between 1 and 16, got 17") {
 		t.Fatalf("stderr = %q, want max_parallel range error", stderr.String())
+	}
+}
+
+// TestRunAgentsSectionPresentInSystemPrompt covers a workspace-level agent
+// definition appearing in the system prompt's "## Agents" section and in
+// the tool list.
+func TestRunAgentsSectionPresentInSystemPrompt(t *testing.T) {
+	home := t.TempDir()
+	rawWorkspace := t.TempDir()
+	workspace, err := filepath.EvalSymlinks(rawWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFileForTest(t, filepath.Join(workspace, ".otto", "agents"), "reviewer", "reviewer",
+		"Reviews code for style and correctness.", "# Reviewer\nFocus on style.\n")
+
+	var systemPrompt string
+	var toolNames []string
+	server := newStopServer(t, func(payload skillPromptPayload) {
+		if len(payload.Messages) > 0 {
+			systemPrompt = payload.Messages[0].Content
+		}
+		toolNames = skillPromptToolNames(payload)
+	})
+
+	configPath := writeCLIConfig(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", rawWorkspace}, strings.NewReader("hi\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(systemPrompt, "\n\n## Agents\n") {
+		t.Fatalf("system prompt missing Agents section, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, `<agent name="reviewer">`) {
+		t.Fatalf("system prompt missing reviewer agent entry, got %q", systemPrompt)
+	}
+	if !slices.Contains(toolNames, "agent") {
+		t.Fatalf("tool names = %v, want agent", toolNames)
+	}
+}
+
+// TestRunAgentsDisabledOmitsSectionAndTools covers [agents] enabled = false
+// with a definition present: neither the "## Agents" section nor the
+// agent/agent_wait/agent_status tools appear.
+func TestRunAgentsDisabledOmitsSectionAndTools(t *testing.T) {
+	home := t.TempDir()
+	rawWorkspace := t.TempDir()
+	workspace, err := filepath.EvalSymlinks(rawWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAgentFileForTest(t, filepath.Join(workspace, ".otto", "agents"), "reviewer", "reviewer",
+		"Reviews code for style and correctness.", "body\n")
+
+	var systemPrompt string
+	var toolNames []string
+	server := newStopServer(t, func(payload skillPromptPayload) {
+		if len(payload.Messages) > 0 {
+			systemPrompt = payload.Messages[0].Content
+		}
+		toolNames = skillPromptToolNames(payload)
+	})
+
+	configPath := writeCLIConfigWithAgentsDisabled(t, "openai-compatible", "TEST_KEY", server.URL)
+	var stdout, stderr bytes.Buffer
+	code := runForTest(t, context.Background(), []string{"--config", configPath, "--cwd", rawWorkspace}, strings.NewReader("hi\n/exit\n"), &stdout, &stderr, testEnviron(map[string]string{
+		"HOME": home, "SHELL": "/bin/sh", "TEST_KEY": "secret",
+	}))
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(systemPrompt, "## Agents") {
+		t.Fatalf("system prompt should not contain an Agents section when disabled, got %q", systemPrompt)
+	}
+	for _, name := range []string{"agent", "agent_wait", "agent_status"} {
+		if slices.Contains(toolNames, name) {
+			t.Fatalf("tool names should not contain %q when disabled, got %v", name, toolNames)
+		}
+	}
+}
+
+// TestRuntimeBuilderBoundaryToolDefinitionsExcludesAgentToolsWhenAgentsDisabled
+// covers boundaryToolDefinitions dropping the agent/agent_wait/agent_status
+// tools when [agents].enabled = false, mirroring buildRunner's own gate.
+func TestRuntimeBuilderBoundaryToolDefinitionsExcludesAgentToolsWhenAgentsDisabled(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+
+	names := func() []string {
+		definitions := builder.boundaryToolDefinitions(nil)
+		out := make([]string, len(definitions))
+		for i, d := range definitions {
+			out[i] = d.Name
+		}
+		return out
+	}
+
+	got := names()
+	for _, want := range []string{"agent", "agent_wait", "agent_status"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("boundaryToolDefinitions() = %v, want it to include %q", got, want)
+		}
+	}
+
+	disabled := false
+	builder.config.Agents.Enabled = &disabled
+	got = names()
+	for _, unwanted := range []string{"agent", "agent_wait", "agent_status"} {
+		if slices.Contains(got, unwanted) {
+			t.Fatalf("boundaryToolDefinitions() = %v, want it to exclude %q when [agents] is disabled", got, unwanted)
+		}
 	}
 }

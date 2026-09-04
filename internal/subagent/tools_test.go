@@ -24,7 +24,7 @@ func TestAgentToolWaitTrueBlocksAndReturnsCompletion(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestAgentToolRejectsBlankPrompt(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAgentWaitTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -112,7 +112,7 @@ func TestAgentWaitTool(t *testing.T) {
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
 		cfg.MaxParallel = 2
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -157,7 +157,7 @@ func TestAgentWaitTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -177,7 +177,7 @@ func TestAgentWaitTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -197,7 +197,7 @@ func TestAgentWaitTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -217,7 +217,7 @@ func TestAgentWaitTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -246,7 +246,7 @@ func TestAgentWaitTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -294,7 +294,7 @@ func TestAgentToolModelSelection(t *testing.T) {
 			defer tasks.Close()
 			cfg := newTestConfig(fp, tasks)
 			cfg.Options.Model = "gpt-parent"
-			runner, err := NewRunner(cfg)
+			runner, _, err := NewRunner(cfg)
 			if err != nil {
 				t.Fatalf("NewRunner: %v", err)
 			}
@@ -334,7 +334,7 @@ func TestAgentStatusTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -354,7 +354,7 @@ func TestAgentStatusTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -381,7 +381,7 @@ func TestAgentStatusTool(t *testing.T) {
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
 		cfg.MaxParallel = 1
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -427,7 +427,7 @@ func TestAgentStatusTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks, echo)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -466,7 +466,7 @@ func TestAgentStatusTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -497,7 +497,7 @@ func TestAgentStatusTool(t *testing.T) {
 		tasks := agent.NewTasks()
 		defer tasks.Close()
 		cfg := newTestConfig(fp, tasks)
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -520,4 +520,97 @@ func TestAgentStatusTool(t *testing.T) {
 			t.Fatalf("missing error tail in detail:\n%s", result.Content)
 		}
 	})
+}
+
+// An unknown agent name is rejected without starting a task, naming the
+// requested name and every available definition.
+func TestAgentToolUnknownAgentError(t *testing.T) {
+	fp := newFakeProvider()
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer"}}}
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	agentTool := toolByName(t, runner.Tools(), "agent")
+	result := agentTool.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"nope"}`))
+	if !result.IsError {
+		t.Fatal("expected an error result")
+	}
+	if !strings.Contains(result.Content, "unknown agent: nope") || !strings.Contains(result.Content, "available: reviewer") {
+		t.Fatalf("content = %q, want it to mention the unknown name and the available agents", result.Content)
+	}
+	if len(tasks.List()) != 0 {
+		t.Fatalf("expected no task to be created, got %d", len(tasks.List()))
+	}
+}
+
+// A named agent's started message includes its definition name.
+func TestAgentToolNamedAgentStartedMessage(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer"}}}
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	agentTool := toolByName(t, runner.Tools(), "agent")
+	result := agentTool.Execute(context.Background(), json.RawMessage(`{"prompt":"go","agent":"reviewer"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if result.Content != "task t1 (reviewer) started" {
+		t.Fatalf("content = %q, want %q", result.Content, "task t1 (reviewer) started")
+	}
+}
+
+// The agent tool's model parameter still overrides a named definition's
+// model, which itself falls back to the session's when the call omits it.
+func TestAgentToolModelSelectionWithDefinition(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		wantModel string
+	}{
+		{name: "call model overrides definition", body: `{"prompt":"go","agent":"reviewer","model":"call-model"}`, wantModel: "call-model"},
+		{name: "definition model used when call omits it", body: `{"prompt":"go","agent":"reviewer"}`, wantModel: "def-model"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newFakeProvider()
+			fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+			tasks := agent.NewTasks()
+			defer tasks.Close()
+			cfg := newTestConfig(fp, tasks)
+			cfg.Options.Model = "gpt-parent"
+			cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer", Model: "def-model"}}}
+			runner, _, err := NewRunner(cfg)
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+
+			agentTool := toolByName(t, runner.Tools(), "agent")
+			result := agentTool.Execute(context.Background(), json.RawMessage(tc.body))
+			if result.IsError {
+				t.Fatalf("agent tool returned error: %s", result.Content)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			final, err := tasks.Wait(ctx, "t1")
+			if err != nil {
+				t.Fatalf("Wait: %v", err)
+			}
+			if final.Model != tc.wantModel {
+				t.Fatalf("Task.Model = %q, want %q", final.Model, tc.wantModel)
+			}
+		})
+	}
 }

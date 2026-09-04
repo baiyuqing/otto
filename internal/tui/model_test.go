@@ -28,6 +28,14 @@ type fakeBackend struct {
 	newSession func() error
 	info       app.Info
 	history    []model.Message
+	tasks      *agent.Tasks
+}
+
+// Tasks implements app.TaskLister so tests can populate f.tasks with
+// agent.NewTasks() and Add/Update to exercise the TUI's task panel, wake
+// turns, and sub-agent commands.
+func (f *fakeBackend) Tasks() *agent.Tasks {
+	return f.tasks
 }
 
 func (f *fakeBackend) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {

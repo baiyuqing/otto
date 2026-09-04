@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/agent"
@@ -315,7 +314,7 @@ func CompletionText(task agent.Task, maxOutputBytes int) string {
 
 	switch task.Status {
 	case agent.TaskSucceeded:
-		tokens := formatThousands(task.Usage.InputTokens + task.Usage.OutputTokens)
+		tokens := CommaInt(task.Usage.InputTokens + task.Usage.OutputTokens)
 		header := fmt.Sprintf("[task-notification] task %s %s succeeded%s · %s · %s · %s tokens", task.ID, name, modelSegment, duration, calls, tokens)
 		return header + "\n" + tool.CappedTextResult(task.Result, maxOutputBytes).Content
 	case agent.TaskFailed:
@@ -357,26 +356,6 @@ func lastAssistantText(messages []model.Message) string {
 	return ""
 }
 
-// formatThousands renders n with "," thousands separators.
-func formatThousands(n int) string {
-	negative := n < 0
-	if negative {
-		n = -n
-	}
-	digits := fmt.Sprintf("%d", n)
-	var groups []string
-	for len(digits) > 3 {
-		groups = append([]string{digits[len(digits)-3:]}, groups...)
-		digits = digits[:len(digits)-3]
-	}
-	groups = append([]string{digits}, groups...)
-	result := strings.Join(groups, ",")
-	if negative {
-		result = "-" + result
-	}
-	return result
-}
-
 func pluralizeToolCalls(n int) string {
 	if n == 1 {
 		return "1 tool call"
@@ -389,16 +368,6 @@ func pluralizeTools(n int) string {
 		return "1 tool"
 	}
 	return fmt.Sprintf("%d tools", n)
-}
-
-// truncateRunes returns the first maxRunes runes of s, unchanged if
-// shorter. No truncation marker is added.
-func truncateRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes])
 }
 
 // truncateRunesEllipsis returns s unchanged if it has at most maxRunes
@@ -435,30 +404,11 @@ func compactJSON(raw string) string {
 	if json.Compact(&buf, []byte(raw)) == nil {
 		return buf.String()
 	}
-	return collapseToOneLine(raw)
+	return OneLine(raw)
 }
 
 // compactArgsPreview renders tool call arguments as compact JSON capped at
 // maxRunes runes (with a trailing "…" when truncated).
 func compactArgsPreview(raw string, maxRunes int) string {
 	return truncateRunesEllipsis(compactJSON(raw), maxRunes)
-}
-
-// collapseToOneLine replaces every run of whitespace with a single space
-// and trims the ends.
-func collapseToOneLine(s string) string {
-	var b strings.Builder
-	lastSpace := false
-	for _, r := range strings.TrimSpace(s) {
-		if unicode.IsSpace(r) {
-			if !lastSpace {
-				b.WriteRune(' ')
-			}
-			lastSpace = true
-			continue
-		}
-		lastSpace = false
-		b.WriteRune(r)
-	}
-	return b.String()
 }

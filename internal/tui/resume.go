@@ -215,6 +215,7 @@ func (m Model) handleResumeKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bo
 	m.resume.operationPath = selected.Path
 	m.resume.errText = ""
 	m.statusText = ""
+	m.pendingCanceledTasks = m.countActiveTasks()
 	return m, runSessionResumeCommand(m.rootCtx, browser, m.resume.generation, selected.Path), true
 }
 
@@ -265,6 +266,7 @@ func (m Model) applySessionResumeResult(msg sessionResumeResultMsg) (tea.Model, 
 	status := resumeSuccessStatus(result, warningsSkipped)
 	m.resetSessionViewFromBackend(status)
 	m.closeResumePicker()
+	m.noteCanceledTasks(m.pendingCanceledTasks)
 	return m, nil
 }
 
@@ -293,6 +295,7 @@ func (m Model) reconcileCommittedStaleResume(msg sessionResumeResultMsg) (tea.Mo
 	// and other result payload are intentionally ignored.
 	m.resetSessionViewFromBackend("resumed session")
 	m.closeResumePicker()
+	m.noteCanceledTasks(m.pendingCanceledTasks)
 	return m, nil
 }
 

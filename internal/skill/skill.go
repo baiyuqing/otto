@@ -130,7 +130,7 @@ func loadCandidate(dir, skillPath, dirName string) (Skill, string) {
 	if err != nil {
 		return Skill{}, fmt.Sprintf("skill %s: %s", skillPath, err)
 	}
-	fields, _, err := parseFrontmatter(data)
+	fields, _, err := ParseFrontmatter(data)
 	if err != nil {
 		return Skill{}, fmt.Sprintf("skill %s: %s", skillPath, err)
 	}
@@ -176,7 +176,7 @@ func Load(s Skill) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, body, err := parseFrontmatter(data)
+	_, body, err := ParseFrontmatter(data)
 	if err != nil {
 		return "", err
 	}

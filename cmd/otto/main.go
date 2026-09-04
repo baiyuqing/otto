@@ -34,14 +34,31 @@ import (
 
 const maxApprovePromptBytes = 1 << 20
 
-const agentGuidanceLine = "Use the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result."
+// agentGuidance renders the two-line agent-tool guidance appended to the
+// system prompt when the agent tool is present. provider, endpointHost, and
+// sessionModel let the model pick a per-call model id for a sub-agent
+// (see the agent tool's model parameter); endpointHost is the host of the
+// runtime's base URL, never the full URL (which may carry userinfo or a
+// query string), and is dropped from line 2 entirely when empty.
+func agentGuidance(provider, endpointHost, sessionModel string) string {
+	line1 := "Use the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result."
+	endpointSegment := ""
+	if endpointHost != "" {
+		endpointSegment = "endpoint: " + endpointHost + ", "
+	}
+	line2 := fmt.Sprintf(
+		"A sub-agent can run on a different model: pass model with any model id this provider accepts (provider: %s, %sthis session's model: %s). Otto keeps no model list or price data; pick the cheapest model adequate for the task from your own knowledge, and rerun on the session model if a task fails with a model error.",
+		provider, endpointSegment, sessionModel,
+	)
+	return line1 + "\n" + line2
+}
 
 var (
 	errUnsafeFlagParse      = errors.New("unsafe flag parser diagnostic")
 	errArchiveSessionFailed = errors.New("archive session failed")
 )
 
-func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) string {
+func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo, provider, endpointHost, sessionModel string) string {
 	policy := "Sandbox policy: Bash is unavailable."
 	bashUsable := false
 	switch {
@@ -83,7 +100,7 @@ func systemPromptFor(definitions []model.ToolDefinition, info app.SandboxInfo) s
 		"Report what changed and what verification ran.\n" +
 		"Usable tools: " + tools + ". File tools are restricted to the workspace. " + policy
 	if hasAgentTool {
-		prompt += "\n" + agentGuidanceLine
+		prompt += "\n" + agentGuidance(provider, endpointHost, sessionModel)
 	}
 	return prompt
 }

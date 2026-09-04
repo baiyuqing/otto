@@ -2019,6 +2019,59 @@ func TestRuntimeBuilderMarkerExhaustionDisablesDynamicRuntimeAndBash(t *testing.
 	}
 }
 
+func TestEndpointHostForStripsUserinfoPathAndQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+	}{
+		{name: "userinfo path and query stripped", baseURL: "https://acct9f2b:tok7k2q@gw.example.com/v1?key=secret", want: "gw.example.com"},
+		{name: "port preserved", baseURL: "https://acct9f2b:tok7k2q@gw.example.com:8443/v1", want: "gw.example.com:8443"},
+		{name: "empty base URL", baseURL: "", want: ""},
+		{name: "unparsable base URL", baseURL: "http://gw.example.com/\x7f", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := endpointHostFor(tt.baseURL); got != tt.want {
+				t.Fatalf("endpointHostFor(%q) = %q, want %q", tt.baseURL, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildRunnerAgentGuidanceStripsUserinfoFromEndpointHost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("provider must not be called while only inspecting the built system prompt")
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	// acct9f2b/tok7k2q are arbitrary non-dictionary strings: a real word
+	// (e.g. "user") would collide with the static system prompt's own text
+	// ("the user's requests") and trip the redaction boundary's fail-closed
+	// ambiguity guard, which is a false positive for this test's purpose.
+	baseURL := "http://acct9f2b:tok7k2q@" + host + "/v1"
+
+	file := configWithProfiles("active")
+	builder := newRuntimeBuilderForTest(t, file)
+	runtime := config.Runtime{
+		Profile: "active", Provider: "openai-compatible", BaseURL: baseURL, Model: "route-model",
+		APIKey: "active-secret", APIKeyEnv: "ACTIVE_KEY", ShellTimeout: time.Second, MaxOutputBytes: 4096,
+	}
+	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "userinfo-strip", Workspace: builder.workspacePath, Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC()})
+	runner, err := builder.buildRunner(context.Background(), memory, runtime)
+	if err != nil {
+		t.Fatalf("buildRunner() error = %v", err)
+	}
+	prompt := reflect.ValueOf(runner).Elem().FieldByName("options").FieldByName("SystemPrompt").String()
+	wantDetail := "provider: openai-compatible, endpoint: " + host + ", this session's model: route-model"
+	if !strings.Contains(prompt, wantDetail) {
+		t.Fatalf("system prompt = %q, want it to contain %q", prompt, wantDetail)
+	}
+	if strings.Contains(prompt, "acct9f2b") || strings.Contains(prompt, "tok7k2q") {
+		t.Fatalf("system prompt leaked BaseURL userinfo: %q", prompt)
+	}
+}
+
 func TestRuntimeBuilderBuildRunnerEnforcesShellTimeoutOutputLimitAndRedaction(t *testing.T) {
 	const (
 		apiKey          = "runtime-secret"
@@ -2365,7 +2418,7 @@ func TestRuntimeBuilderMandatoryFieldCollisionsSuppressBeforeProviderAndSessionM
 				tool.NewSkillTool(skill.Catalog{}, runtime.MaxOutputBytes).Definition(),
 			}
 			definitions = append(definitions, subagent.ToolDefinitions()...)
-			return systemPromptFor(definitions, builder.sandboxInfo)
+			return systemPromptFor(definitions, builder.sandboxInfo, runtime.Provider, endpointHostFor(runtime.BaseURL), runtime.Model)
 		}},
 		{name: "tool-name", secret: func(config.Runtime, runtimeBuilder) string { return "read" }},
 	} {

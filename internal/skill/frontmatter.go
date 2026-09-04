@@ -15,11 +15,11 @@ var frontmatterKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // accepted but has no effect on the parsed value.
 var blockScalarPattern = regexp.MustCompile(`^[|>][-+]?$`)
 
-// parseFrontmatter splits data into its YAML-subset frontmatter fields and
+// ParseFrontmatter splits data into its YAML-subset frontmatter fields and
 // the Markdown body that follows. See the package doc for the supported
 // subset. Any construct outside that subset returns an error rather than
 // guessing.
-func parseFrontmatter(data []byte) (map[string]string, string, error) {
+func ParseFrontmatter(data []byte) (map[string]string, string, error) {
 	lines := strings.Split(string(data), "\n")
 	if len(lines) == 0 || !isFrontmatterDelimiter(lines[0]) {
 		return nil, "", errors.New("missing frontmatter")

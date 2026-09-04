@@ -26,8 +26,8 @@ Keep responsibilities split along the current Go package layout:
 - `internal/repl`: line-oriented REPL rendering and commands
 - `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
 - `internal/session`: in-memory and JSONL session storage
-- `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
-- `internal/subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status` tools, and shared task-formatting helpers (`format.go`) used by both the REPL and the TUI
+- `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing; `ParseFrontmatter` is exported for `internal/subagent`'s AGENT.md parsing
+- `internal/subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status` tools, shared task-formatting helpers (`format.go`) used by both the REPL and the TUI, AGENT.md definition discovery (`definition.go`, may import `internal/skill` for `ParseFrontmatter`), the `## Agents` prompt section (`prompt.go`), and the `context: inherit` snapshot (`inherit.go`)
 - `internal/tool`: workspace validation plus `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`
 - `internal/tui`: inline Bubble Tea frontend, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
 
@@ -39,7 +39,7 @@ Rules:
 - Keep `bash` delegated through `internal/sandbox`; only explicit sandbox `off` may use direct execution, and it still starts in the selected workspace.
 - Keep `internal/memory` behind its neutral contracts; the agent loop, tools, and frontends must never reach a Store directly — only through `memory.Binding`/`memory.Reader`/`memory.Proposer` or the `app.Controller` memory facade. Per-turn recall and explicit management (`memory_search`/`remember`/`forget` tools, `/memory`/`/remember` in both frontends, `otto memory status|forget`) are wired end to end via `[memory]` TOML config; model- and human-originated writes always land as pending candidates requiring review. Automatic extraction (`Binding.Observe`) and durability (backup/restore/verify) remain unwired — do not document those as working Stage 1 features.
 - Keep `internal/skill` free of imports from other Otto packages; the skill tool's file reads stay confined to the skill directory via `tool.Workspace`. Do not document `/skills`, `/skill`, or `allowed-tools` enforcement as working Stage 1 features.
-- Keep `internal/subagent` behind `agent.New`: children are built only through `agent.New`; `internal/agent` knows tasks only through `agent.Tasks`/`agent.Inbox` and never imports `internal/subagent`; frontends reach tasks only through `app.TaskLister`; children never receive `agent*`, `remember`, `forget`, or `memory_search`; child transcripts are not persisted. Do not document named agent definitions, `[agents]` configuration, `context: inherit`, or `agent_send`/`agent_cancel`/`agent_report` as working Stage 1 features.
+- Keep `internal/subagent` behind `agent.New`: children are built only through `agent.New`; `internal/agent` knows tasks only through `agent.Tasks`/`agent.Inbox` and never imports `internal/subagent`; frontends reach tasks only through `app.TaskLister`; children never receive `agent*`, `remember`, `forget`, or `memory_search`; child transcripts are not persisted. Definitions cannot add tools outside the child tool set; `tools` only narrows it. `[agents]` is TOML only, same as `[skills]`. Do not document `agent_send`/`agent_cancel`/`agent_report` as working Stage 1 features.
 
 ## Working preferences
 

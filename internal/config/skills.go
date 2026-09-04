@@ -39,6 +39,15 @@ func ResolveSkills(file File, env map[string]string, workspacePath string) Skill
 		paths = defaultSkillsPaths
 	}
 
+	return SkillsRuntime{Enabled: true, Roots: resolveRoots(paths, env, workspacePath)}
+}
+
+// resolveRoots expands each entry of paths into an absolute, cleaned
+// directory: a "~/" prefix is resolved against home in env (skipped when
+// home is unresolvable), a relative path is joined against workspacePath,
+// and an absolute path is cleaned as-is. An empty entry is skipped. Shared
+// by ResolveSkills and ResolveAgents.
+func resolveRoots(paths []string, env map[string]string, workspacePath string) []string {
 	var roots []string
 	home := homeFromEnv(env)
 	for _, path := range paths {
@@ -56,5 +65,5 @@ func ResolveSkills(file File, env map[string]string, workspacePath string) Skill
 			roots = append(roots, filepath.Clean(filepath.Join(workspacePath, path)))
 		}
 	}
-	return SkillsRuntime{Enabled: true, Roots: roots}
+	return roots
 }

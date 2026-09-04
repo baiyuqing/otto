@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -26,7 +27,7 @@ func TestAgentStartsTaskAndPushesMatchingNotification(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestChildRegistryExcludesControlAndMemoryTools(t *testing.T) {
 	parentTools = append(parentTools, newStubTool("grep", tool.Result{}))
 
 	cfg := newTestConfig(fp, tasks, parentTools...)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestChildSystemPromptShape(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -151,7 +152,7 @@ func TestSharedRedactorNotMutatedBySubagentRun(t *testing.T) {
 		cfg.Redactor = redactor
 		cfg.Options.Model = secret
 
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -187,7 +188,7 @@ func TestSharedRedactorNotMutatedBySubagentRun(t *testing.T) {
 		cfg.Redactor = redactor
 		cfg.Options.Model = "gpt-parent"
 
-		runner, err := NewRunner(cfg)
+		runner, _, err := NewRunner(cfg)
 		if err != nil {
 			t.Fatalf("NewRunner: %v", err)
 		}
@@ -249,7 +250,7 @@ func TestMaxParallelLimitsConcurrency(t *testing.T) {
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
 	cfg.MaxParallel = 2
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestCancelRunningTask(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -349,7 +350,7 @@ func TestCancelQueuedTask(t *testing.T) {
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
 	cfg.MaxParallel = 1
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -399,7 +400,7 @@ func TestProviderErrorFailsTask(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -436,7 +437,7 @@ func TestTaskRecordFieldsUpdateAcrossProviderSteps(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks, echo)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -485,7 +486,7 @@ func TestHistoryIsSafeWhileStartPublishesTask(t *testing.T) {
 	tasks := agent.NewTasks()
 	defer tasks.Close()
 	cfg := newTestConfig(fp, tasks)
-	runner, err := NewRunner(cfg)
+	runner, _, err := NewRunner(cfg)
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
 	}
@@ -517,5 +518,454 @@ func TestHistoryIsSafeWhileStartPublishesTask(t *testing.T) {
 
 	for _, task := range tasks.List() {
 		tasks.Cancel(task.ID)
+	}
+}
+
+// An unknown Agent name is rejected before any task is created.
+func TestStartUnknownAgentRejectedBeforeTaskCreated(t *testing.T) {
+	fp := newFakeProvider()
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	if _, err := runner.Start(StartRequest{Prompt: "go", Agent: "nope"}); err == nil {
+		t.Fatal("expected an error")
+	} else if want := `unknown agent "nope"`; err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+	if len(tasks.List()) != 0 {
+		t.Fatalf("expected no task to be created, got %d", len(tasks.List()))
+	}
+}
+
+// A named agent's task record carries its definition name.
+func TestStartNamedAgentSetsTaskAgent(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer"}}}
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	task, err := runner.Start(StartRequest{Prompt: "go", Agent: "reviewer"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if task.Agent != "reviewer" {
+		t.Fatalf("task.Agent = %q, want %q", task.Agent, "reviewer")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	final, err := tasks.Wait(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if final.Agent != "reviewer" {
+		t.Fatalf("final.Agent = %q, want %q", final.Agent, "reviewer")
+	}
+}
+
+// Model precedence: request.Model > definition.Model > Options.Model.
+func TestStartModelPrecedence(t *testing.T) {
+	cases := []struct {
+		name      string
+		callModel string
+		defModel  string
+		sessModel string
+		wantModel string
+	}{
+		{name: "call overrides definition and session", callModel: "call-model", defModel: "def-model", sessModel: "sess-model", wantModel: "call-model"},
+		{name: "definition overrides session", callModel: "", defModel: "def-model", sessModel: "sess-model", wantModel: "def-model"},
+		{name: "session is the fallback", callModel: "", defModel: "", sessModel: "sess-model", wantModel: "sess-model"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newFakeProvider()
+			fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+			tasks := agent.NewTasks()
+			defer tasks.Close()
+			cfg := newTestConfig(fp, tasks)
+			cfg.Options.Model = tc.sessModel
+			cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer", Model: tc.defModel}}}
+			runner, _, err := NewRunner(cfg)
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+
+			if _, err := runner.Start(StartRequest{Prompt: "go", Agent: "reviewer", Model: tc.callModel}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := tasks.Wait(ctx, "t1"); err != nil {
+				t.Fatalf("Wait: %v", err)
+			}
+
+			reqs := fp.requests()
+			if len(reqs) == 0 {
+				t.Fatal("expected at least one provider request")
+			}
+			if reqs[0].Model != tc.wantModel {
+				t.Fatalf("provider request Model = %q, want %q", reqs[0].Model, tc.wantModel)
+			}
+		})
+	}
+}
+
+// A definition's Tools allowlist limits its registry to exactly those
+// default child tools, in the parent's tool order.
+func TestNewRunnerToolsAllowlistParentOrder(t *testing.T) {
+	fp := newFakeProvider()
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+
+	parentTools := []tool.Tool{
+		newStubTool("grep", tool.Result{}),
+		newStubTool("read", tool.Result{}),
+		newStubTool("write", tool.Result{}),
+	}
+	cfg := newTestConfig(fp, tasks, parentTools...)
+	cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer", Tools: []string{"read", "grep"}}}}
+	runner, warnings, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+
+	got := toolDefNames(runner.registries["reviewer"].Definitions())
+	want := []string{"grep", "read"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("registry tools = %v, want %v", got, want)
+	}
+}
+
+// A definition's Tools entry that names no default child tool - including
+// an excluded tool like "agent" or "remember" - produces a warning and is
+// left out of that definition's registry.
+func TestNewRunnerUnknownToolWarning(t *testing.T) {
+	cases := []struct {
+		name    string
+		badTool string
+	}{
+		{name: "tool name that does not exist", badTool: "bogus"},
+		{name: "excluded control tool", badTool: "agent"},
+		{name: "excluded memory tool", badTool: "remember"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newFakeProvider()
+			tasks := agent.NewTasks()
+			defer tasks.Close()
+			parentTools := []tool.Tool{newStubTool("read", tool.Result{})}
+			cfg := newTestConfig(fp, tasks, parentTools...)
+			cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer", Tools: []string{"read", tc.badTool}}}}
+			runner, warnings, err := NewRunner(cfg)
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+
+			wantWarning := fmt.Sprintf(`agent reviewer: unknown tool %q ignored`, tc.badTool)
+			found := false
+			for _, w := range warnings {
+				if w == wantWarning {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("warnings = %v, want to contain %q", warnings, wantWarning)
+			}
+
+			got := toolDefNames(runner.registries["reviewer"].Definitions())
+			want := []string{"read"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("registry tools = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// A non-empty definition body replaces the generic instruction under the
+// "## Sub-agent role" heading.
+func TestStartSystemPromptUsesDefinitionBody(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer", Body: "You are a reviewer."}}}
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if _, err := runner.Start(StartRequest{Prompt: "go", Agent: "reviewer"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := tasks.Wait(ctx, "t1"); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	reqs := fp.requests()
+	prompt := reqs[0].SystemPrompt
+	if !strings.Contains(prompt, "## Sub-agent role\nYou are a reviewer.") {
+		t.Fatalf("system prompt missing definition body:\n%s", prompt)
+	}
+	if strings.Contains(prompt, genericSubagentInstruction) {
+		t.Fatalf("system prompt should not contain the generic instruction when a body is set:\n%s", prompt)
+	}
+}
+
+// An empty definition body falls back to the generic instruction, same as
+// having no definition at all.
+func TestStartSystemPromptEmptyBodyUsesGenericInstruction(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer"}}}
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if _, err := runner.Start(StartRequest{Prompt: "go", Agent: "reviewer"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := tasks.Wait(ctx, "t1"); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	reqs := fp.requests()
+	if !strings.Contains(reqs[0].SystemPrompt, genericSubagentInstruction) {
+		t.Fatalf("system prompt missing generic instruction:\n%s", reqs[0].SystemPrompt)
+	}
+}
+
+// context "inherit" seeds the child's memory with InheritSnapshot of
+// Config.ParentSession(), so the child's first provider request carries
+// that snapshot followed by the new user prompt message.
+func TestStartContextInheritSnapshotInFirstRequest(t *testing.T) {
+	userMsg := func(id, text string) model.Message {
+		return model.Message{ID: id, Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: text}}}
+	}
+	assistantTextMsg := func(id, text string) model.Message {
+		return model.Message{ID: id, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: text}}}
+	}
+	assistantToolCallMsg := func(id, toolName string) model.Message {
+		return model.Message{ID: id, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolName: toolName, ToolCallID: "call-1"}}}
+	}
+	toolResultMsg := func(id string) model.Message {
+		return model.Message{ID: id, Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, ToolCallID: "call-0"}}}
+	}
+
+	parent := []model.Message{
+		userMsg("u1", "first"),
+		assistantTextMsg("a1", "reply one"),
+		userMsg("u2", "second"),
+		assistantToolCallMsg("a2", "agent"),
+		toolResultMsg("tr1"), // a sibling call's result, appended after the pending agent call
+	}
+	wantSnapshot := append([]model.Message{}, parent[:3]...)
+
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	cfg.ParentSession = func() []model.Message { return parent }
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	task, err := runner.Start(StartRequest{Prompt: "delegated task", Context: "inherit"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if task.Context != "inherit" {
+		t.Fatalf("task.Context = %q, want %q", task.Context, "inherit")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := tasks.Wait(ctx, task.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	reqs := fp.requests()
+	if len(reqs) == 0 {
+		t.Fatal("expected at least one provider request")
+	}
+	got := reqs[0].Messages
+	if len(got) != len(wantSnapshot)+1 {
+		t.Fatalf("Messages len = %d, want %d:\n%+v", len(got), len(wantSnapshot)+1, got)
+	}
+	if !reflect.DeepEqual(got[:len(wantSnapshot)], wantSnapshot) {
+		t.Fatalf("inherited prefix = %+v, want %+v", got[:len(wantSnapshot)], wantSnapshot)
+	}
+	last := got[len(wantSnapshot)]
+	if last.Role != model.RoleUser || last.Text() != "delegated task" {
+		t.Fatalf("last message = %+v, want a user message with text %q", last, "delegated task")
+	}
+}
+
+// context "fresh" (the default) never consults ParentSession, and the
+// child's first provider request carries only the prompt.
+func TestStartContextFreshOnlyPrompt(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	cfg.ParentSession = func() []model.Message {
+		t.Fatal("ParentSession must not be consulted for context fresh")
+		return nil
+	}
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	task, err := runner.Start(StartRequest{Prompt: "go", Context: "fresh"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if task.Context != "fresh" {
+		t.Fatalf("task.Context = %q, want %q", task.Context, "fresh")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := tasks.Wait(ctx, task.ID); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	reqs := fp.requests()
+	if len(reqs) == 0 {
+		t.Fatal("expected at least one provider request")
+	}
+	if len(reqs[0].Messages) != 1 {
+		t.Fatalf("Messages = %+v, want exactly the prompt message", reqs[0].Messages)
+	}
+	if reqs[0].Messages[0].Text() != "go" {
+		t.Fatalf("Messages[0].Text() = %q, want %q", reqs[0].Messages[0].Text(), "go")
+	}
+}
+
+// A definition's context: inherit is honoured when the call omits Context,
+// and an explicit call Context "fresh" overrides it.
+func TestStartContextDefinitionInheritHonouredAndCallOverride(t *testing.T) {
+	parent := []model.Message{
+		{ID: "u1", Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}},
+		{ID: "a1", Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolName: "agent", ToolCallID: "call-1"}}},
+	}
+	wantSnapshotLen := 1
+
+	cases := []struct {
+		name           string
+		requestContext string
+		wantContext    string
+		wantMessageLen int
+	}{
+		{name: "definition inherit honoured", requestContext: "", wantContext: "inherit", wantMessageLen: wantSnapshotLen + 1},
+		{name: "call fresh overrides definition inherit", requestContext: "fresh", wantContext: "fresh", wantMessageLen: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := newFakeProvider()
+			fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+			tasks := agent.NewTasks()
+			defer tasks.Close()
+			cfg := newTestConfig(fp, tasks)
+			cfg.ParentSession = func() []model.Message { return parent }
+			cfg.Catalog = Catalog{definitions: []Definition{{Name: "reviewer", Context: "inherit"}}}
+			runner, _, err := NewRunner(cfg)
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+
+			task, err := runner.Start(StartRequest{Prompt: "go", Agent: "reviewer", Context: tc.requestContext})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if task.Context != tc.wantContext {
+				t.Fatalf("task.Context = %q, want %q", task.Context, tc.wantContext)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := tasks.Wait(ctx, task.ID); err != nil {
+				t.Fatalf("Wait: %v", err)
+			}
+
+			reqs := fp.requests()
+			if len(reqs) == 0 {
+				t.Fatal("expected at least one provider request")
+			}
+			if len(reqs[0].Messages) != tc.wantMessageLen {
+				t.Fatalf("Messages len = %d, want %d", len(reqs[0].Messages), tc.wantMessageLen)
+			}
+		})
+	}
+}
+
+// context "inherit" with no Config.ParentSession configured is rejected
+// before any task is created.
+func TestStartContextInheritWithoutParentSessionErrors(t *testing.T) {
+	fp := newFakeProvider()
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks) // ParentSession left nil
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	if _, err := runner.Start(StartRequest{Prompt: "go", Context: "inherit"}); err == nil {
+		t.Fatal("expected an error")
+	} else if want := "context inherit is not available in this session"; err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+	if len(tasks.List()) != 0 {
+		t.Fatalf("expected no task to be created, got %d", len(tasks.List()))
+	}
+}
+
+// A Context value other than "fresh" or "inherit" is rejected before any
+// task is created.
+func TestStartInvalidContextErrors(t *testing.T) {
+	fp := newFakeProvider()
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	if _, err := runner.Start(StartRequest{Prompt: "go", Context: "bogus"}); err == nil {
+		t.Fatal("expected an error")
+	} else if want := `context must be "fresh" or "inherit"`; err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+	if len(tasks.List()) != 0 {
+		t.Fatalf("expected no task to be created, got %d", len(tasks.List()))
 	}
 }

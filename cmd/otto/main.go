@@ -409,6 +409,15 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 			sandboxConfig.ReadPaths = append(sandboxConfig.ReadPaths, root)
 		}
 	}
+	agentsRuntime, err := config.ResolveAgents(configFile, environment, workspacePath)
+	if err != nil {
+		return fail(stderr, "%v", builder.redactError(err, nil))
+	}
+	for _, root := range agentsRuntime.Roots {
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			sandboxConfig.ReadPaths = append(sandboxConfig.ReadPaths, root)
+		}
+	}
 	sandboxSettings, err := config.ResolveSandbox(sandboxConfig, sandboxDriverOverride)
 	if err != nil {
 		return fail(stderr, "%v", builder.redactError(err, nil))

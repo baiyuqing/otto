@@ -281,11 +281,14 @@ func TestRunOnceWaitsForRunningTaskAndWakes(t *testing.T) {
 			tasks.Update(taskID, func(tk *agent.Task) { tk.Status = agent.TaskRunning })
 			go func() {
 				time.Sleep(20 * time.Millisecond)
+				// Push before the final update, as Runner.finish does: Wait
+				// unblocks on the update, and drainTasks must then find the
+				// notification already pending.
+				tasks.Notifications().Push(agent.Notification{TaskID: taskID, Text: "[task-notification] task " + taskID + " succeeded\nchild done"})
 				tasks.Update(taskID, func(tk *agent.Task) {
 					tk.Status = agent.TaskSucceeded
 					tk.Result = "child done"
 				})
-				tasks.Notifications().Push(agent.Notification{TaskID: taskID, Text: "[task-notification] task " + taskID + " succeeded\nchild done"})
 			}()
 			return nil
 		}

@@ -56,6 +56,13 @@ func (t Task) Final() bool {
 
 var errTasksClosed = errors.New("task registry closed")
 
+// ErrTaskNotFound and ErrTaskFinished are wrapped by Cancel and Wait so
+// callers can classify the failure with errors.Is.
+var (
+	ErrTaskNotFound = errors.New("not found")
+	ErrTaskFinished = errors.New("already finished")
+)
+
 type taskEntry struct {
 	task    Task
 	cancel  func()
@@ -180,17 +187,17 @@ func (t *Tasks) History(id string) ([]model.Message, bool) {
 // change the task's status.
 func (t *Tasks) Cancel(id string) error {
 	if t == nil {
-		return fmt.Errorf("task %q not found", id)
+		return fmt.Errorf("task %q %w", id, ErrTaskNotFound)
 	}
 	t.mu.Lock()
 	entry, ok := t.entries[id]
 	if !ok {
 		t.mu.Unlock()
-		return fmt.Errorf("task %q not found", id)
+		return fmt.Errorf("task %q %w", id, ErrTaskNotFound)
 	}
 	if entry.task.Final() {
 		t.mu.Unlock()
-		return fmt.Errorf("task %q already finished", id)
+		return fmt.Errorf("task %q %w", id, ErrTaskFinished)
 	}
 	cancel := entry.cancel
 	t.mu.Unlock()
@@ -203,13 +210,13 @@ func (t *Tasks) Cancel(id string) error {
 // Wait blocks until the task reaches a final status or ctx is done.
 func (t *Tasks) Wait(ctx context.Context, id string) (Task, error) {
 	if t == nil {
-		return Task{}, fmt.Errorf("task %q not found", id)
+		return Task{}, fmt.Errorf("task %q %w", id, ErrTaskNotFound)
 	}
 	t.mu.Lock()
 	entry, ok := t.entries[id]
 	t.mu.Unlock()
 	if !ok {
-		return Task{}, fmt.Errorf("task %q not found", id)
+		return Task{}, fmt.Errorf("task %q %w", id, ErrTaskNotFound)
 	}
 	select {
 	case <-entry.done:

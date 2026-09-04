@@ -46,7 +46,11 @@ func matchGlobSegments(segments []string, name string) bool {
 	return match(0, 0)
 }
 
-func cappedTextResult(content string, maxOutputBytes int) Result {
+// CappedTextResult returns content as a Result, truncated to maxOutputBytes
+// with an omission marker.
+// CappedTextResult returns content as a Result, truncated to maxOutputBytes
+// with an omission marker.
+func CappedTextResult(content string, maxOutputBytes int) Result {
 	collector := newCappedByteCollector(maxOutputBytes)
 	_, _ = io.WriteString(collector, content)
 	if collector.Discarded() == 0 {

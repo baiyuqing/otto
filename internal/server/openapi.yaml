@@ -132,6 +132,8 @@ components:
           type: string
         turn_id:
           type: string
+        task_id:
+          type: string
         text:
           type: string
         tool_name:

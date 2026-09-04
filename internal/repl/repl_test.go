@@ -683,6 +683,14 @@ type fakeBackend struct {
 	newSession func() error
 	prompt     func(context.Context, string, func(agent.Event)) error
 	compact    func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
+	tasks      *agent.Tasks
+}
+
+// Tasks implements app.TaskLister so tests can populate f.tasks with
+// agent.NewTasks() and Add/Update to exercise the REPL's sub-agent commands
+// and wake turns.
+func (f *fakeBackend) Tasks() *agent.Tasks {
+	return f.tasks
 }
 
 func (f *fakeBackend) Prompt(ctx context.Context, prompt string, emit func(agent.Event)) error {

@@ -32,6 +32,7 @@ import (
 	"github.com/baiyuqing/otto/internal/sandbox/direct"
 	"github.com/baiyuqing/otto/internal/session"
 	"github.com/baiyuqing/otto/internal/skill"
+	"github.com/baiyuqing/otto/internal/subagent"
 	"github.com/baiyuqing/otto/internal/tool"
 )
 
@@ -926,6 +927,73 @@ func TestRuntimeBuilderBuildRunnerMapsResolvedCompactionAndKeepsClientRequestSiz
 	}
 	if requestSizer := options.FieldByName("RequestSizer"); !requestSizer.IsValid() || requestSizer.IsNil() {
 		t.Fatal("OpenAI-compatible client was not retained as automatic RequestSizer")
+	}
+}
+
+// TestRuntimeBuilderBuildRunnerAddsAgentToolsAfterParentToolsAndGuidanceLine
+// covers T4: when a provider client is built, buildRunner appends the three
+// sub-agent tools after the parent's own tools, the built agent exposes a
+// non-nil task registry via Tasks(), and the emitted system prompt lists the
+// agent tools and ends with the agent guidance line.
+func TestRuntimeBuilderBuildRunnerAddsAgentToolsAfterParentToolsAndGuidanceLine(t *testing.T) {
+	var toolNames []string
+	var systemPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if len(payload.Messages) > 0 {
+			systemPrompt = payload.Messages[0].Content
+		}
+		for _, item := range payload.Tools {
+			toolNames = append(toolNames, item.Function.Name)
+		}
+		writeSSE(w, `{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.commandExecutor = nil
+	builder.sandboxEnvironment = nil
+	builder.sandboxInfo = app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonSelfTestFailed}
+	memory := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "agent-tools", Workspace: builder.workspacePath, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC()})
+	runner, err := builder.buildRunner(context.Background(), memory, config.Runtime{
+		Provider: "openai-compatible", BaseURL: server.URL, Model: "test-model", APIKey: "provider-value",
+		ShellTimeout: time.Second, MaxOutputBytes: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lister, ok := runner.(interface{ Tasks() *agent.Tasks })
+	if !ok {
+		t.Fatal("runner does not implement Tasks() *agent.Tasks")
+	}
+	if lister.Tasks() == nil {
+		t.Fatal("Tasks() = nil, want a non-nil task registry when a provider client is built")
+	}
+
+	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"read", "grep", "find", "ls", "write", "edit", "agent", "agent_wait", "agent_status"}
+	if !reflect.DeepEqual(toolNames, want) {
+		t.Fatalf("tool names = %#v, want %#v", toolNames, want)
+	}
+	const guidance = "Use the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result."
+	if !strings.Contains(systemPrompt, guidance) {
+		t.Fatalf("system prompt = %q, want it to contain the agent guidance line", systemPrompt)
 	}
 }
 
@@ -1905,6 +1973,28 @@ func TestRuntimeBuilderMarkerExhaustionDisablesDynamicRuntimeAndBash(t *testing.
 		_ = store.Close()
 		t.Fatalf("buildRunner() rejected marker adversary: %v", err)
 	}
+	agentValue := reflect.ValueOf(runner)
+	if agentValue.Kind() != reflect.Pointer || agentValue.Elem().Type().PkgPath() != "github.com/baiyuqing/otto/internal/agent" {
+		_ = store.Close()
+		t.Fatalf("runner type = %T, want *agent.Agent", runner)
+	}
+	agentOptions := agentValue.Elem().FieldByName("options")
+	if !agentOptions.IsValid() {
+		_ = store.Close()
+		t.Fatal("agent options field not found")
+	}
+	if tasks := agentOptions.FieldByName("Tasks"); !tasks.IsValid() || !tasks.IsNil() {
+		_ = store.Close()
+		t.Fatal("suppressed runtime built a sub-agent task registry")
+	}
+	if inbox := agentOptions.FieldByName("Inbox"); !inbox.IsValid() || !inbox.IsNil() {
+		_ = store.Close()
+		t.Fatal("suppressed runtime built a sub-agent notification inbox")
+	}
+	if prompt := agentOptions.FieldByName("SystemPrompt").String(); strings.Contains(prompt, "agent_wait") || strings.Contains(prompt, "agent_status") || strings.Contains(prompt, "Use the agent tool to delegate") {
+		_ = store.Close()
+		t.Fatalf("suppressed runtime exposed agent tools in system prompt: %q", prompt)
+	}
 	var events []agent.Event
 	if err := runner.Run(context.Background(), "run safely", func(event agent.Event) { events = append(events, event) }); err != nil {
 		_ = store.Close()
@@ -2053,7 +2143,7 @@ func TestRuntimeBuilderUnavailableSandboxRegistersExactlySixFileTools(t *testing
 	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"read", "grep", "find", "ls", "write", "edit"}
+	want := []string{"read", "grep", "find", "ls", "write", "edit", "agent", "agent_wait", "agent_status"}
 	if !reflect.DeepEqual(toolNames, want) {
 		t.Fatalf("tool names = %#v, want %#v", toolNames, want)
 	}
@@ -2106,7 +2196,7 @@ func TestRuntimeBuilderTypedNilExecutorKeepsFileToolsAndTruthfulStatus(t *testin
 	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"read", "grep", "find", "ls", "write", "edit"}; !reflect.DeepEqual(toolNames, want) {
+	if want := []string{"read", "grep", "find", "ls", "write", "edit", "agent", "agent_wait", "agent_status"}; !reflect.DeepEqual(toolNames, want) {
 		t.Fatalf("tool names = %#v, want %#v", toolNames, want)
 	}
 	if !strings.Contains(systemPrompt, "Bash is unavailable") || strings.Contains(systemPrompt, "Seatbelt confines Bash") {
@@ -2274,6 +2364,7 @@ func TestRuntimeBuilderMandatoryFieldCollisionsSuppressBeforeProviderAndSessionM
 				bashDefinition.Definition(),
 				tool.NewSkillTool(skill.Catalog{}, runtime.MaxOutputBytes).Definition(),
 			}
+			definitions = append(definitions, subagent.ToolDefinitions()...)
 			return systemPromptFor(definitions, builder.sandboxInfo)
 		}},
 		{name: "tool-name", secret: func(config.Runtime, runtimeBuilder) string { return "read" }},

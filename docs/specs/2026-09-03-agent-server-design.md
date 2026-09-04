@@ -316,6 +316,7 @@ event with the same type name and this `data` shape:
 | `compaction_warning` | `{"error": "<string>"}` |
 | `memory_warning` | `{"error": "<string>"}` |
 | `agent_error` | `{"error": "<string>"}` |
+| `notification` | `{"task_id": "<string>", "text": "<string>", "usage": {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}}` — emitted when a sub-agent task finishes |
 
 `tool_args` is `agent.Event.ToolArgs` (a string): when it parses as valid
 JSON it is embedded as a `json.RawMessage` value, otherwise it is embedded

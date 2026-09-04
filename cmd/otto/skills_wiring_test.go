@@ -152,7 +152,7 @@ func TestRunSkillListingAndToolRoundTrip(t *testing.T) {
 	if envIndex, skillsIndex := strings.Index(firstSystemPrompt, "## Environment"), strings.Index(firstSystemPrompt, "## Skills"); envIndex < 0 || skillsIndex < envIndex {
 		t.Fatalf("Skills section must follow Environment section, envIndex=%d skillsIndex=%d", envIndex, skillsIndex)
 	}
-	wantTools := []string{"read", "grep", "find", "ls", "write", "edit", "bash", "memory_search", "remember", "forget", "skill"}
+	wantTools := []string{"read", "grep", "find", "ls", "write", "edit", "bash", "memory_search", "remember", "forget", "skill", "agent", "agent_wait", "agent_status"}
 	if !reflect.DeepEqual(firstToolNames, wantTools) {
 		t.Fatalf("tool names = %v, want %v", firstToolNames, wantTools)
 	}
@@ -388,5 +388,35 @@ func TestRuntimeBuilderBoundaryToolDefinitionsIncludesSkillWhenEnabled(t *testin
 	builder.config.Skills.Enabled = &disabled
 	if got := names(); slices.Contains(got, "skill") {
 		t.Fatalf("boundaryToolDefinitions() = %v, want it to exclude skill when disabled", got)
+	}
+}
+
+// TestRuntimeBuilderBoundaryToolDefinitionsIncludesAgentToolsWhenDynamicAllowed
+// covers T4: boundaryToolDefinitions predicts the same agent/agent_wait/
+// agent_status tools that buildRunner registers when a provider client will
+// be built, and drops them when the redaction boundary does not allow
+// dynamic content (mirroring buildRunner's own gating condition).
+func TestRuntimeBuilderBoundaryToolDefinitionsIncludesAgentToolsWhenDynamicAllowed(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+
+	names := func() []string {
+		definitions := builder.boundaryToolDefinitions(nil)
+		out := make([]string, len(definitions))
+		for i, d := range definitions {
+			out[i] = d.Name
+		}
+		return out
+	}
+
+	got := names()
+	for _, want := range []string{"agent", "agent_wait", "agent_status"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("boundaryToolDefinitions() = %v, want it to include %q", got, want)
+		}
+	}
+
+	builder.environment["OTTO_API_KEY"] = markerExhaustingProviderSecret(t)
+	if got := names(); slices.Contains(got, "agent") {
+		t.Fatalf("boundaryToolDefinitions() = %v, want it to exclude agent tools when dynamic content is not allowed", got)
 	}
 }

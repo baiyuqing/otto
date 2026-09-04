@@ -63,7 +63,7 @@ func (t *grepTool) Definition() model.ToolDefinition {
 
 func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args grepArgs
-	if err := decodeStrictJSON(arguments, &args, "pattern"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "pattern"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if args.Pattern == "" {

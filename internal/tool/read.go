@@ -56,7 +56,7 @@ func (t *readTool) Definition() model.ToolDefinition {
 
 func (t *readTool) Execute(_ context.Context, arguments json.RawMessage) Result {
 	var args readArgs
-	if err := decodeStrictJSON(arguments, &args, "path"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "path"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if args.Path == "" {
@@ -109,7 +109,11 @@ func validUTF8Prefix(data []byte) []byte {
 	return prefix
 }
 
-func decodeStrictJSON(arguments json.RawMessage, destination any, required ...string) error {
+// DecodeStrictJSON decodes tool arguments, rejecting unknown fields, trailing
+// tokens, and missing required keys.
+// DecodeStrictJSON decodes tool arguments, rejecting unknown fields, trailing
+// tokens, and missing required keys.
+func DecodeStrictJSON(arguments json.RawMessage, destination any, required ...string) error {
 	decoder := json.NewDecoder(bytes.NewReader(arguments))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {

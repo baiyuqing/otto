@@ -47,7 +47,7 @@ func (t *writeTool) Definition() model.ToolDefinition {
 
 func (t *writeTool) Execute(_ context.Context, arguments json.RawMessage) Result {
 	var args writeArgs
-	if err := decodeStrictJSON(arguments, &args, "path", "content"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "path", "content"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if args.Path == "" {

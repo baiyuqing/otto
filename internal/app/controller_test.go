@@ -3218,6 +3218,94 @@ func (r *recordingRunner) CloseCalls() int {
 	return r.closeCalls
 }
 
+// taskRunner is a runnerFunc-based Runner test double that also implements
+// TaskLister, for exercising Controller.Tasks().
+type taskRunner struct {
+	runnerFunc
+	tasks *agent.Tasks
+}
+
+func (r taskRunner) Tasks() *agent.Tasks { return r.tasks }
+
+func TestControllerTasksReturnsRunnerTasksWhenSupported(t *testing.T) {
+	tasks := agent.NewTasks()
+	initial := &fakeSession{header: testHeader("initial")}
+	controller, err := New(initial, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner {
+		return taskRunner{runnerFunc: runnerFunc(noopRun), tasks: tasks}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Tasks(); got != tasks {
+		t.Fatalf("Tasks() = %p, want %p", got, tasks)
+	}
+}
+
+func TestControllerTasksNilWhenRunnerLacksTaskLister(t *testing.T) {
+	initial := &fakeSession{header: testHeader("initial")}
+	controller, err := New(initial, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner { return &recordingRunner{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Tasks(); got != nil {
+		t.Fatalf("Tasks() = %v, want nil", got)
+	}
+}
+
+func TestControllerTasksReflectsRunnerAfterNewSession(t *testing.T) {
+	initialTasks := agent.NewTasks()
+	freshTasks := agent.NewTasks()
+	initial := &fakeSession{header: testHeader("initial")}
+	fresh := &fakeSession{header: testHeader("fresh")}
+	controller, err := New(initial, func() (session.Session, error) {
+		return fresh, nil
+	}, func(current session.Session) Runner {
+		switch current {
+		case initial:
+			return taskRunner{runnerFunc: runnerFunc(noopRun), tasks: initialTasks}
+		case fresh:
+			return taskRunner{runnerFunc: runnerFunc(noopRun), tasks: freshTasks}
+		default:
+			return nil
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Tasks(); got != initialTasks {
+		t.Fatalf("Tasks() before NewSession = %p, want %p", got, initialTasks)
+	}
+	if err := controller.NewSession(); err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Tasks(); got != freshTasks {
+		t.Fatalf("Tasks() after NewSession = %p, want %p", got, freshTasks)
+	}
+}
+
+func TestControllerTasksNilAfterClose(t *testing.T) {
+	tasks := agent.NewTasks()
+	initial := &fakeSession{header: testHeader("initial")}
+	controller, err := New(initial, func() (session.Session, error) {
+		return &fakeSession{header: testHeader("next")}, nil
+	}, func(session.Session) Runner {
+		return taskRunner{runnerFunc: runnerFunc(noopRun), tasks: tasks}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := controller.Tasks(); got != nil {
+		t.Fatalf("Tasks() after Close = %v, want nil", got)
+	}
+}
+
 type aggregateUsageSession struct {
 	session.Session
 	usage   model.Usage

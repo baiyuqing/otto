@@ -52,6 +52,29 @@ func TestRegistryReturnsUnknownToolError(t *testing.T) {
 	}
 }
 
+func TestRegistryLookupAndToolsPreserveOrder(t *testing.T) {
+	first, second := fakeTool{name: "first"}, fakeTool{name: "second"}
+	registry, err := NewRegistry(first, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, ok := registry.Lookup("second"); !ok || got.Definition().Name != "second" {
+		t.Fatalf("Lookup(second) = %#v, %v", got, ok)
+	}
+	if _, ok := registry.Lookup("missing"); ok {
+		t.Fatal("Lookup(missing) reported a tool")
+	}
+	tools := registry.Tools()
+	if len(tools) != 2 || tools[0].Definition().Name != "first" || tools[1].Definition().Name != "second" {
+		t.Fatalf("Tools() = %#v", tools)
+	}
+	tools[0] = second
+	if registry.Tools()[0].Definition().Name != "first" {
+		t.Fatal("Tools() returned the internal slice")
+	}
+}
+
 func TestResultCollectorRetainsLimitAndCountsDiscarded(t *testing.T) {
 	collector := newCappedByteCollector(4)
 	if n, err := collector.Write([]byte("abcdef")); err != nil || n != 6 {

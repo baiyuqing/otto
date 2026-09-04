@@ -1176,7 +1176,7 @@ func TestRunInvalidShellContinuesWithExactlySixFileTools(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
 	}
-	if want := []string{"read", "grep", "find", "ls", "write", "edit", "memory_search", "remember", "forget"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"read", "grep", "find", "ls", "write", "edit", "memory_search", "remember", "forget", "agent", "agent_wait", "agent_status"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("tool names = %#v, want %#v", names, want)
 	}
 	wantWarning := "warning: bash is unavailable because the configured sandbox could not be established (reason: invalid-shell); file tools remain available\n"

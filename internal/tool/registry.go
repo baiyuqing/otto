@@ -42,6 +42,17 @@ func (r *Registry) Definitions() []model.ToolDefinition {
 	return definitions
 }
 
+// Lookup returns the registered tool with the given name.
+func (r *Registry) Lookup(name string) (Tool, bool) {
+	tool, ok := r.byName[name]
+	return tool, ok
+}
+
+// Tools returns the registered tools in registration order.
+func (r *Registry) Tools() []Tool {
+	return append([]Tool(nil), r.ordered...)
+}
+
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) Result {
 	tool, ok := r.byName[name]
 	if !ok {

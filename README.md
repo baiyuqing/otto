@@ -374,6 +374,48 @@ Not yet implemented:
 
 Design reference: [`docs/specs/2026-09-03-skills-design.md`](docs/specs/2026-09-03-skills-design.md).
 
+## Sub-agents
+
+The `agent` tool starts a child agent loop in the same workspace, sandbox, and provider/model as the parent, with a fresh context: the child's session holds only its own system prompt and the delegated prompt, not the parent's conversation. The child runs asynchronously in a goroutine while the parent keeps working.
+
+Parameters: `prompt` (required), `description` (optional, capped at 80 characters, shown in status output), `wait` (optional bool: start the task and block until it ends, returning its result instead of its id).
+
+Result: `task t3 (default) started`, or `task t3 (default) queued (4 running, limit 4)` once four children are already running.
+
+What's wired:
+
+- **`agent_wait`**: blocks the parent turn until selected tasks finish. Parameters: `task_id` (optional; omitted waits for every queued or running task), `timeout_seconds` (optional, default 600, max 3600). Returns each task's completion text. A canceled turn ends the wait with `wait canceled; still running: ...`; the tasks keep running. A timeout returns `timed out after Ns; still running: ...`.
+- **`agent_status`**: without `task_id`, one line per task (id, status, elapsed time, tool count, current activity or final token total, and a label). With `task_id`, that line plus the task's last 10 steps and, once finished, its result or error.
+- **Notifications**: a finished task pushes a `[task-notification]` message into the parent's inbox, for example:
+
+  ```
+  [task-notification] task t1 (default) succeeded · 42s · 7 tool calls · 12,310 tokens
+  <final report>
+  ```
+
+  (A `failed` task shows its error instead of the report; a `canceled` task shows neither; both omit the token count.) The notification is appended to the session as a display context message and persisted as a Pi v3 `custom_message` entry, so `/resume` still shows it. A finished task with no active turn wakes the REPL automatically and runs an empty-text turn to deliver it. In the TUI and `otto serve`, the same notification renders only at the start of the next turn; neither frontend starts a turn on its own yet.
+- **Child tool set**: the parent's tools minus `agent`, `agent_wait`, `agent_status`, `remember`, `forget`, and `memory_search` — no memory recall, no nested delegation. `bash` runs under the same sandbox mode as the parent.
+- **Concurrency**: at most 4 children run at once per session, a fixed limit; further `agent` calls wait in the `queued` state and can still be canceled.
+- **REPL commands**: `/tasks` lists every task in the session; `/task <id>` shows one task's line, its recent steps, and its result or error once finished; `/task cancel <id>` cancels a queued or running task.
+
+  ```
+  > /tasks
+  t1   (default)  succeeded    42s   7 tools  12,310 tokens            review the diff
+  t2   (default)  running      12s   4 tools  grep "session"           find where sessions are written
+  ```
+- **Cancellation**: Esc/Ctrl-C cancels the parent's turn only; canceling a task needs `/task cancel <id>`.
+
+Not yet implemented:
+
+- Named agent definitions, `[agents]` TOML configuration, and `context: inherit`.
+- Parent-to-child messages (`agent_send`, `agent_cancel`, `agent_report`).
+- A TUI task panel and automatic wake in the TUI and `otto serve`.
+- Server task routes (list/get/cancel).
+- Child transcript persistence: transcripts live in memory only and are lost on `/new`, `/resume`, `/model`, and exit, which also cancel any children still running.
+- Child token usage in the session's overall usage total: `agent_status`, `/tasks`, and the notification show it, but it is not part of the session usage total and does not survive `/resume`.
+
+Design reference: [`docs/specs/2026-09-03-subagents-design.md`](docs/specs/2026-09-03-subagents-design.md).
+
 ## Frontends
 
 Examples:

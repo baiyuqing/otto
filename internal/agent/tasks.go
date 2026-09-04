@@ -30,6 +30,7 @@ type Task struct {
 	Description string
 	Prompt      string
 	Context     string
+	Model       string
 	Status      TaskStatus
 	CreatedAt   time.Time
 	StartedAt   time.Time

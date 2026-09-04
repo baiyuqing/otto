@@ -102,6 +102,11 @@ func TestToolArgumentPreviewExtractsHumanReadableSummary(t *testing.T) {
 		{"find omits default path", "find", `{"pattern":"*.go","path":"."}`, "*.go"},
 		{"edit shows path and old_string prefix", "edit", `{"path":"a.go","old_string":"func main() {\n\tfmt.Println(\"hello world long string here\")","new_string":"x"}`, `a.go func main() { fmt.Println("hello world l… → …`},
 		{"memory_search shows query", "memory_search", `{"query":"deployment config"}`, "deployment config"},
+		{"agent shows description when set", "agent", `{"prompt":"do the thing","description":"review the diff"}`, "review the diff"},
+		{"agent falls back to prompt", "agent", `{"prompt":"review the diff please"}`, "review the diff please"},
+		{"agent_wait shows task id", "agent_wait", `{"task_id":"t1"}`, "t1"},
+		{"agent_wait without task_id shows all", "agent_wait", `{}`, "all"},
+		{"agent_send shows task id", "agent_send", `{"task_id":"t2","text":"status?"}`, "t2"},
 		{"bash unchanged", "bash", `{"command":"go test ./..."}`, "go test ./..."},
 		{"unknown tool falls back to raw", "custom_tool", `{"x":1}`, `{"x":1}`},
 	}

@@ -179,12 +179,12 @@ func TestCalculateLayoutLiveLinesDrivesTranscriptHeightOnly(t *testing.T) {
 	editor := textarea.New()
 	width, height := 80, 24
 
-	zero := calculateLayout(width, height, editor, 0, 0)
+	zero := calculateLayout(width, height, editor, 0, 0, 0)
 	if zero.transcriptHeight != 0 {
 		t.Fatalf("transcriptHeight with liveLines=0 = %d, want 0", zero.transcriptHeight)
 	}
 
-	huge := calculateLayout(width, height, editor, 0, 1000)
+	huge := calculateLayout(width, height, editor, 0, 1000, 0)
 	availableHeight := height - zero.inputBoxHeight - zero.footerHeight - zero.editorSpacing - zero.suggestionHeight
 	if huge.transcriptHeight != availableHeight {
 		t.Fatalf("transcriptHeight with liveLines=1000 = %d, want clamped to available height %d", huge.transcriptHeight, availableHeight)
@@ -196,15 +196,43 @@ func TestCalculateLayoutLiveLinesDrivesTranscriptHeightOnly(t *testing.T) {
 	}
 }
 
+// TestCalculateLayoutTaskLinesReducesTranscriptHeightAndIsClamped exercises
+// the taskLines parameter added for the sub-agent task panel: it reserves
+// its own rows ahead of the transcript and is clamped to the height left
+// after the suggestion panel, the same way liveLines is clamped for the
+// transcript.
+func TestCalculateLayoutTaskLinesReducesTranscriptHeightAndIsClamped(t *testing.T) {
+	editor := textarea.New()
+	width, height := 80, 24
+
+	none := calculateLayout(width, height, editor, 0, 1000, 0)
+	withTasks := calculateLayout(width, height, editor, 0, 1000, 3)
+	if withTasks.taskLines != 3 {
+		t.Fatalf("taskLines = %d, want 3", withTasks.taskLines)
+	}
+	if withTasks.transcriptHeight != none.transcriptHeight-3 {
+		t.Fatalf("transcriptHeight with taskLines=3 = %d, want %d (3 less than without tasks)", withTasks.transcriptHeight, none.transcriptHeight-3)
+	}
+
+	availableHeight := height - none.inputBoxHeight - none.footerHeight - none.editorSpacing - none.suggestionHeight
+	huge := calculateLayout(width, height, editor, 0, 1000, 1000)
+	if huge.taskLines != availableHeight {
+		t.Fatalf("taskLines with taskLines=1000 = %d, want clamped to available height %d", huge.taskLines, availableHeight)
+	}
+	if huge.transcriptHeight != 0 {
+		t.Fatalf("transcriptHeight when taskLines fills all available height = %d, want 0", huge.transcriptHeight)
+	}
+}
+
 func TestCalculateLayoutTooSmallRuleUnchanged(t *testing.T) {
 	editor := textarea.New()
-	if got := calculateLayout(minTerminalWidth-1, 24, editor, 0, 5); !got.tooSmall {
+	if got := calculateLayout(minTerminalWidth-1, 24, editor, 0, 5, 0); !got.tooSmall {
 		t.Fatal("tooSmall = false for width below minimum, want true")
 	}
-	if got := calculateLayout(80, minTerminalHeight-1, editor, 0, 5); !got.tooSmall {
+	if got := calculateLayout(80, minTerminalHeight-1, editor, 0, 5, 0); !got.tooSmall {
 		t.Fatal("tooSmall = false for height below minimum, want true")
 	}
-	if got := calculateLayout(minTerminalWidth, minTerminalHeight, editor, 0, 5); got.tooSmall {
+	if got := calculateLayout(minTerminalWidth, minTerminalHeight, editor, 0, 5, 0); got.tooSmall {
 		t.Fatal("tooSmall = true at the minimum bounds, want false")
 	}
 }

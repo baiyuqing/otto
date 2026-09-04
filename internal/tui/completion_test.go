@@ -54,8 +54,8 @@ func TestSlashCommandSuggestionSelectionAndTabCompletion(t *testing.T) {
 	m = typeEditorText(t, m, "/")
 	updated, _ = m.Update(keyPress(tea.KeyUp))
 	updated, _ = updated.(Model).Update(keyPress(tea.KeyTab))
-	if got := updated.(Model).editor.Value(); got != "/exit" {
-		t.Fatalf("wrapped completion = %q, want /exit", got)
+	if got := updated.(Model).editor.Value(); got != "/task" {
+		t.Fatalf("wrapped completion = %q, want /task", got)
 	}
 }
 
@@ -98,10 +98,10 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 		}
 	}
 
-	m = resizeModel(t, m, 60, 18)
+	m = resizeModel(t, m, 60, 20)
 	content = m.View().Content
-	assertRenderedBounds(t, content, 60, 18)
-	for _, text := range []string{"/resume", "resume a session", "/compact", "compact context", "/exit", "quit"} {
+	assertRenderedBounds(t, content, 60, 20)
+	for _, text := range []string{"/resume", "resume a session", "/compact", "compact context", "/tasks", "/task", "/exit", "quit"} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("suggestion panel = %q, want %q", content, text)
 		}
@@ -109,8 +109,8 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 
 	m.overlay = overlayHelp
 	help := m.View().Content
-	assertRenderedBounds(t, help, 60, 18)
-	for _, command := range []string{"/help", "/session", "/new", "/resume", "/compact", "/exit"} {
+	assertRenderedBounds(t, help, 60, 20)
+	for _, command := range []string{"/help", "/session", "/new", "/resume", "/compact", "/tasks", "/task", "/exit"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("help = %q, want registry command %q", help, command)
 		}
@@ -148,8 +148,8 @@ func TestSlashCommandCompletionClampsStaleSelection(t *testing.T) {
 	m.commandSuggestionIndex = 99
 
 	updated, _ := m.Update(keyPress(tea.KeyTab))
-	if got := updated.(Model).editor.Value(); got != "/exit" {
-		t.Fatalf("clamped completion = %q, want /exit", got)
+	if got := updated.(Model).editor.Value(); got != "/task" {
+		t.Fatalf("clamped completion = %q, want /task", got)
 	}
 }
 
@@ -175,7 +175,7 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 12 || m.viewport.Height() != 1 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 14 || m.viewport.Height() != 1 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))

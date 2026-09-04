@@ -24,7 +24,11 @@ type archiveBackend struct {
 	archiveCurrent func(context.Context) (session.ArchiveResult, error)
 	info           app.Info
 	history        []model.Message
+	tasks          *agent.Tasks
 }
+
+// Tasks implements app.TaskLister.
+func (b *archiveBackend) Tasks() *agent.Tasks { return b.tasks }
 
 func (b *archiveBackend) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {
 	if b.prompt == nil {
@@ -440,6 +444,62 @@ func TestArchiveCurrentSessionSuccessRebuildsFreshView(t *testing.T) {
 	}
 	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "new-profile/new-model") {
 		t.Fatalf("view = %q", content)
+	}
+}
+
+func TestArchiveCurrentSessionNotesCanceledTasks(t *testing.T) {
+	tasks := agent.NewTasks()
+	addTask(t, tasks, agent.TaskRunning, "explorer")
+	backend := &archiveBackend{
+		info:  app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/session-old.jsonl"},
+		tasks: tasks,
+	}
+	backend.archiveCurrent = func(ctx context.Context) (session.ArchiveResult, error) {
+		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new", SessionPath: "/sessions/session-new.jsonl"}
+		return session.ArchiveResult{Path: "/sessions/archive/session-old.jsonl", ID: "session-old"}, nil
+	}
+	m := loadArchivePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "session-old", Path: "/sessions/session-old.jsonl", Current: true}}})
+
+	// dispatch (not Update): no history is seeded here, so the empty-session
+	// banner is already queued in pendingPrints (see loadArchivePicker and
+	// TestArchiveFailureKeepsPickerAndOldUI); an Update call would batch-wrap
+	// the archive command with that flush command, and runCommandWithin would
+	// return the resulting BatchMsg instead of the real archiveSessionResultMsg.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	archiving := updated.(Model)
+	if cmd == nil || archiving.archive.mode != archiveArchiving {
+		t.Fatalf("cmd=%v archive=%#v", cmd, archiving.archive)
+	}
+	result := runCommandWithin(t, cmd, time.Second)
+	updated, next := archiving.dispatch(result)
+	got := updated.(Model)
+	if next != nil {
+		t.Fatalf("applyArchiveSessionResult() cmd = %v, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)", next)
+	}
+	if text := lastEntryText(t, got); text != "canceled 1 running tasks" {
+		t.Fatalf("entry = %q", text)
+	}
+}
+
+func TestArchiveNonCurrentSelectionDoesNotCountTasksForNotice(t *testing.T) {
+	tasks := agent.NewTasks()
+	addTask(t, tasks, agent.TaskRunning, "explorer")
+	backend := &archiveBackend{
+		info:  app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/session-old.jsonl"},
+		tasks: tasks,
+	}
+	backend.archiveSession = func(ctx context.Context, path string) (session.ArchiveResult, error) {
+		return session.ArchiveResult{Path: "/sessions/archive/other.jsonl", ID: "other"}, nil
+	}
+	m := loadArchivePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "other", Path: "/sessions/other.jsonl"}}})
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	archiving := updated.(Model)
+	if cmd == nil || archiving.archive.mode != archiveArchiving {
+		t.Fatalf("cmd=%v archive=%#v", cmd, archiving.archive)
+	}
+	if archiving.pendingCanceledTasks != 0 {
+		t.Fatalf("pendingCanceledTasks = %d, want 0 for a non-current selection", archiving.pendingCanceledTasks)
 	}
 }
 

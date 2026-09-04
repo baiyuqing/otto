@@ -51,6 +51,10 @@ func EntriesFromHistory(history []model.Message) ([]Entry, model.Usage) {
 			entries = append(entries, entry)
 			continue
 		}
+		if entry, ok := notificationEntryFromMessage(message, msgIndex); ok {
+			entries = append(entries, entry)
+			continue
+		}
 		baseID := messageEntryBaseID(message, msgIndex)
 		textOrdinal := 0
 		var text strings.Builder
@@ -130,6 +134,57 @@ func compactionEntryFromMessage(message model.Message, index int) (Entry, bool) 
 		CheckpointID: message.ID,
 		TokensBefore: max(0, message.ContextTokensBefore),
 	}, true
+}
+
+const taskNotificationContextType = "task_notification"
+
+// notificationBodyLineLimit is the number of report lines kept after a task
+// notification's header line before EntriesFromHistory/applyTurnEvent
+// truncate the rest.
+const notificationBodyLineLimit = 20
+
+// notificationEntryText truncates a task notification's body (everything
+// after the header line) to notificationBodyLineLimit lines, keeping the
+// header intact. A longer body gets a trailing "/task <id>" hint pointing at
+// the full text. Used for both the live EventNotification render and the
+// resumed-history render so they match.
+func notificationEntryText(taskID, text string) string {
+	lines := strings.Split(text, "\n")
+	body := lines[1:]
+	if len(body) <= notificationBodyLineLimit {
+		return text
+	}
+	omitted := len(body) - notificationBodyLineLimit
+	kept := append([]string{lines[0]}, body[:notificationBodyLineLimit]...)
+	kept = append(kept, fmt.Sprintf("… (%d more lines; /task %s)", omitted, taskID))
+	return strings.Join(kept, "\n")
+}
+
+// notificationTaskID recovers the task id from a persisted notification's
+// header line ("[task-notification] task <id> ..."). model.Message carries
+// no separate TaskID field, so resumed history must parse it back out of the
+// text to reproduce the live EventNotification.TaskID rendering.
+func notificationTaskID(text string) string {
+	header, _, _ := strings.Cut(text, "\n")
+	const prefix = "[task-notification] task "
+	rest, ok := strings.CutPrefix(header, prefix)
+	if !ok {
+		return ""
+	}
+	id, _, _ := strings.Cut(rest, " ")
+	return id
+}
+
+func notificationEntryFromMessage(message model.Message, index int) (Entry, bool) {
+	if message.Role != model.RoleContext || message.ContextType != taskNotificationContextType || !message.Display {
+		return Entry{}, false
+	}
+	id := message.ID
+	if id == "" {
+		id = messageEntryBaseID(message, index)
+	}
+	text := message.Text()
+	return Entry{ID: id, Kind: EntrySystem, Raw: notificationEntryText(notificationTaskID(text), text)}, true
 }
 
 func entryKindForRole(role model.Role) EntryKind {

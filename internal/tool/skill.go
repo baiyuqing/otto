@@ -53,7 +53,7 @@ func (t *skillTool) Definition() model.ToolDefinition {
 
 func (t *skillTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args skillToolArgs
-	if err := decodeStrictJSON(arguments, &args, "name"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "name"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if err := ctx.Err(); err != nil {
@@ -82,7 +82,7 @@ func (t *skillTool) loadSkill(s skill.Skill) Result {
 	}
 	content := fmt.Sprintf("skill: %s\nlocation: %s\nfiles: %s\n\n%s",
 		s.Name, s.Dir, formatSkillFileListing(files, total), body)
-	return cappedTextResult(content, t.maxOutputBytes)
+	return CappedTextResult(content, t.maxOutputBytes)
 }
 
 func formatSkillFileListing(files []string, total int) string {
@@ -116,7 +116,7 @@ func (t *skillTool) readSkillFile(s skill.Skill, file string) Result {
 	if err != nil {
 		return Result{Content: fmt.Sprintf("skill %s: %s", s.Name, err), IsError: true}
 	}
-	return cappedTextResult(string(data), t.maxOutputBytes)
+	return CappedTextResult(string(data), t.maxOutputBytes)
 }
 
 var _ Tool = (*skillTool)(nil)

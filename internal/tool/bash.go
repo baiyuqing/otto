@@ -105,7 +105,7 @@ func (t *bashTool) Definition() model.ToolDefinition {
 
 func (t *bashTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args bashArgs
-	if err := decodeStrictJSON(arguments, &args, "command"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "command"); err != nil {
 		return t.sandboxedArgumentError(err.Error())
 	}
 	if strings.TrimSpace(args.Command) == "" {

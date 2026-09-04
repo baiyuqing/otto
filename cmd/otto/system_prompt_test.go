@@ -120,6 +120,25 @@ func TestSystemPromptUnavailableAndInvalidStatesNeverExposeReasonOrBashTool(t *t
 	}
 }
 
+func TestSystemPromptForIncludesAgentGuidanceLineWhenAgentToolPresent(t *testing.T) {
+	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "agent"}, {Name: "agent_wait"}, {Name: "agent_status"}}
+	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
+	const want = "Use the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result."
+	prompt := systemPromptFor(definitions, info)
+	if !strings.HasSuffix(prompt, want) {
+		t.Fatalf("system prompt = %q, want it to end with the agent guidance line %q", prompt, want)
+	}
+}
+
+func TestSystemPromptForOmitsAgentGuidanceLineWithoutAgentTool(t *testing.T) {
+	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "write"}}
+	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
+	prompt := systemPromptFor(definitions, info)
+	if strings.Contains(prompt, "Use the agent tool to delegate") {
+		t.Fatalf("system prompt = %q, want no agent guidance line without an agent tool", prompt)
+	}
+}
+
 func TestSystemPromptLegacyOffExactText(t *testing.T) {
 	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "grep"}, {Name: "find"}, {Name: "ls"}, {Name: "write"}, {Name: "edit"}, {Name: "bash"}}
 	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}

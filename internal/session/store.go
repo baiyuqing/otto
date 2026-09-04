@@ -542,6 +542,9 @@ func decodeRuntimeMetadata(raw json.RawMessage) (RuntimeMetadata, error) {
 }
 
 func modelMessageToPiEntry(message model.Message, entryID string, parentID *string, header Header) (piEntry, model.Message, error) {
+	if message.Role == model.RoleContext {
+		return modelContextMessageToPiEntry(message, entryID, parentID)
+	}
 	timestamp, err := formatPersistedTimestamp(message.CreatedAt, "message")
 	if err != nil {
 		return piEntry{}, model.Message{}, err
@@ -612,6 +615,68 @@ func modelMessageToPiEntry(message model.Message, entryID string, parentID *stri
 	}
 	persisted := cloneMessage(message)
 	persisted.ID = entryID
+	return entry, persisted, nil
+}
+
+// modelContextMessageToPiEntry encodes a model.RoleContext message as a Pi v3
+// custom_message entry. compactionContextType and branchContextType are
+// reserved: those context messages are written through Store.AppendCompaction
+// and the branch-summary path instead, which anchor them to a checkpoint;
+// they must not reach Store.Append directly.
+func modelContextMessageToPiEntry(message model.Message, entryID string, parentID *string) (piEntry, model.Message, error) {
+	timestamp, err := formatPersistedTimestamp(message.CreatedAt, "context message")
+	if err != nil {
+		return piEntry{}, model.Message{}, err
+	}
+	if message.ContextType == "" {
+		return piEntry{}, model.Message{}, fmt.Errorf("%w: context message type is required", ErrInvalidSession)
+	}
+	if message.ContextType == compactionContextType || message.ContextType == branchContextType {
+		return piEntry{}, model.Message{}, fmt.Errorf("%w: context type %q is reserved", ErrInvalidSession, message.ContextType)
+	}
+	if message.FinishReason != "" {
+		return piEntry{}, model.Message{}, fmt.Errorf("%w: context message contains assistant-only metadata", ErrInvalidSession)
+	}
+	if len(message.Blocks) == 0 {
+		return piEntry{}, model.Message{}, fmt.Errorf("%w: context message content is required", ErrInvalidSession)
+	}
+	var text strings.Builder
+	for _, block := range message.Blocks {
+		if block.Type != model.BlockText || block.ToolCallID != "" || block.ToolName != "" || len(block.Arguments) != 0 || block.IsError {
+			return piEntry{}, model.Message{}, fmt.Errorf("%w: context message must contain only text blocks", ErrInvalidSession)
+		}
+		text.WriteString(block.Text)
+	}
+	content := text.String()
+	contentJSON, err := json.Marshal(content)
+	if err != nil {
+		return piEntry{}, model.Message{}, fmt.Errorf("encode context message content: %w", err)
+	}
+
+	entry := piEntry{
+		piEntryBase: piEntryBase{
+			Type:      "custom_message",
+			ID:        entryID,
+			ParentID:  cloneStringPointer(parentID),
+			Timestamp: timestamp,
+		},
+		CustomMessage: &piCustomMessage{
+			CustomType:  message.ContextType,
+			Content:     contentJSON,
+			Display:     message.Display,
+			ContentText: &content,
+		},
+	}
+	// Usage is dropped: piCustomMessage has no usage field in the Pi v3
+	// format, so a notification's token cost is not persisted.
+	persisted := model.Message{
+		ID:          entryID,
+		Role:        model.RoleContext,
+		Blocks:      []model.Block{{Type: model.BlockText, Text: content}},
+		CreatedAt:   message.CreatedAt,
+		ContextType: message.ContextType,
+		Display:     message.Display,
+	}
 	return entry, persisted, nil
 }
 

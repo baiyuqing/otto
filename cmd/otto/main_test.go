@@ -1576,7 +1576,8 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 		"Before each batch of tool calls, state in one sentence what you are about to do and why.\n" +
 		"Inspect the workspace before changing it. Prefer exact, minimal changes.\n" +
 		"Report what changed and what verification ran.\n" +
-		"Usable tools: read, grep, find, ls, write, edit, bash, memory_search, remember, forget. File tools are restricted to the workspace. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed."
+		"Usable tools: read, grep, find, ls, write, edit, bash, memory_search, remember, forget, agent, agent_wait, agent_status. File tools are restricted to the workspace. Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed.\n" +
+		"Use the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result."
 	var requestCount int
 	var workspace string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1621,7 +1622,7 @@ func TestRunEndToEndToolCallSmoke(t *testing.T) {
 			for _, item := range payload.Tools {
 				names = append(names, item.Function.Name)
 			}
-			if !reflect.DeepEqual(names, []string{"read", "grep", "find", "ls", "write", "edit", "bash", "memory_search", "remember", "forget"}) {
+			if !reflect.DeepEqual(names, []string{"read", "grep", "find", "ls", "write", "edit", "bash", "memory_search", "remember", "forget", "agent", "agent_wait", "agent_status"}) {
 				t.Errorf("tool names = %v", names)
 			}
 			writeSSE(w, `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-write","type":"function","function":{"name":"write","arguments":"{\"path\":\"created.txt\",\"content\":\"hello\"}"}}]},"finish_reason":"tool_calls"}]}`)

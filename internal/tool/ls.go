@@ -39,7 +39,7 @@ func (t *lsTool) Definition() model.ToolDefinition {
 
 func (t *lsTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args lsArgs
-	if err := decodeStrictJSON(arguments, &args); err != nil {
+	if err := DecodeStrictJSON(arguments, &args); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if err := ctx.Err(); err != nil {
@@ -78,7 +78,7 @@ func (t *lsTool) Execute(ctx context.Context, arguments json.RawMessage) Result 
 		}
 		output.WriteByte('\n')
 	}
-	return cappedTextResult(output.String(), t.maxOutputBytes)
+	return CappedTextResult(output.String(), t.maxOutputBytes)
 }
 
 var _ Tool = (*lsTool)(nil)

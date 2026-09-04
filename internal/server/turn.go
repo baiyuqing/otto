@@ -77,6 +77,10 @@ func (t *turn) emit(m *metrics) func(agent.Event) {
 			t.usage.InputTokens += event.Usage.InputTokens
 			t.usage.OutputTokens += event.Usage.OutputTokens
 			t.usage.CachedInputTokens += event.Usage.CachedInputTokens
+		case agent.EventNotification:
+			t.usage.InputTokens += event.Usage.InputTokens
+			t.usage.OutputTokens += event.Usage.OutputTokens
+			t.usage.CachedInputTokens += event.Usage.CachedInputTokens
 		case agent.EventToolCallStarted:
 			t.toolStart = time.Now()
 		case agent.EventToolCallFinished:

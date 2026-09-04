@@ -315,12 +315,12 @@ func statusLine(task agent.Task, now time.Time) string {
 
 	detail := task.LastTool
 	if task.Final() {
-		detail = formatThousands(task.Usage.InputTokens+task.Usage.OutputTokens) + " tokens"
+		detail = CommaInt(task.Usage.InputTokens+task.Usage.OutputTokens) + " tokens"
 	}
 
 	label := task.Description
 	if label == "" {
-		label = collapseToOneLine(truncateRunes(task.Prompt, 60))
+		label = OneLine(FirstRunes(task.Prompt, 60))
 	}
 
 	line := fmt.Sprintf("%-4s %-10s %-9s %6s %9s  %-24s %s", task.ID, agentLabel(task), string(task.Status), elapsed, toolsColumn, detail, label)
@@ -340,7 +340,7 @@ func historyLines(history []model.Message) []string {
 				continue
 			}
 			line := "  → " + block.ToolName
-			if preview := truncateRunes(compactJSON(string(block.Arguments)), 80); preview != "" {
+			if preview := FirstRunes(compactJSON(string(block.Arguments)), 80); preview != "" {
 				line += " " + preview
 			}
 			lines = append(lines, line)

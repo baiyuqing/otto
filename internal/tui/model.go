@@ -20,6 +20,7 @@ import (
 	"github.com/baiyuqing/otto/internal/app"
 	otmodel "github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/session"
+	"github.com/baiyuqing/otto/internal/subagent"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -109,6 +110,7 @@ type Model struct {
 	newSessionGeneration    uint64
 	profileSwitchPending    bool
 	profileSwitchGeneration uint64
+	pendingCanceledTasks    int
 	resume                  resumePickerState
 	archive                 archivePickerState
 	profilePicker           profilePickerState
@@ -194,7 +196,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tea.RequestBackgroundColor, m.spinner.Tick)
+	return tea.Batch(tea.RequestBackgroundColor, m.spinner.Tick, m.armTaskUpdates())
 }
 
 // Update dispatches msg and then, regardless of which branch handled it,
@@ -296,6 +298,17 @@ func (m Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case turnMsg:
 		return m.updateTurn(msg)
+	case taskUpdateMsg:
+		// The sole re-arm point for the task-update wait: every taskUpdateMsg,
+		// including a closed:true from a registry swapped out by a session
+		// replacement, re-arms here. Session-replacement result handlers
+		// (applyNewSessionResult, applyProfileSwitchResult,
+		// applySessionResumeResult, reconcileCommittedStaleResume,
+		// applyArchiveSessionResult) must not call armTaskUpdates themselves,
+		// or every replacement leaves an extra goroutine waiting on the same
+		// channel.
+		next, cmd := m.maybeWake()
+		return next, tea.Batch(cmd, next.armTaskUpdates())
 	case renderStreamingMsg:
 		if msg.generation != m.turnGeneration || !m.running {
 			return m, nil
@@ -344,7 +357,7 @@ func (m Model) View() tea.View {
 	_ = m.reservedStateActive()
 
 	suggestions := m.commandSuggestions()
-	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions), m.liveLines())
+	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions), m.liveLines(), m.taskPanelLines())
 	if layout.tooSmall {
 		return newRootView(m, smallTerminalView(m.width, m.height))
 	}
@@ -361,6 +374,9 @@ func (m Model) View() tea.View {
 	transcript := lipgloss.NewStyle().Width(layout.transcriptWidth).Height(layout.transcriptHeight).MaxHeight(layout.transcriptHeight).Render(m.viewport.View())
 	footer := lipgloss.NewStyle().Width(m.width).Render(renderFooter(m.width, infoFromBackend(m.backend), m.usage, m.footerStatus()))
 	parts := []string{transcript}
+	if layout.taskLines > 0 {
+		parts = append(parts, lipgloss.NewStyle().Width(m.width).Render(taskPanelContent(m.activeTasks(), m.now(), m.spinner.View(), m.width)))
+	}
 	if layout.suggestionHeight > 0 {
 		parts = append(parts, renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, layout.suggestionHeight))
 	}
@@ -617,10 +633,10 @@ func newRootView(m Model, content string) tea.View {
 	view.MouseMode = tea.MouseModeNone
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
-	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), m.liveLines())
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), m.liveLines(), m.taskPanelLines())
 	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && !m.profilePicker.active() && m.overlay == overlayNone {
 		if cursor := m.editor.Cursor(); cursor != nil {
-			cursor.Y += 1 + layout.transcriptHeight + layout.suggestionHeight + layout.editorSpacing
+			cursor.Y += 1 + layout.transcriptHeight + layout.taskLines + layout.suggestionHeight + layout.editorSpacing
 			if layout.inputBoxed {
 				// The textarea sits below the top border and the label row.
 				cursor.Y += 1 + inputBoxLabel
@@ -642,6 +658,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m.handleCommand(trimmed)
 	}
 	if m.running || m.newSessionPending {
+		m.statusText = app.ErrPromptActive.Error()
 		return m, nil
 	}
 	m.addPromptHistory(trimmed)
@@ -650,7 +667,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 	command, argument, ok := parseSlashCommand(value)
-	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember || command.Kind == slashCommandLogin || command.Kind == slashCommandModel
+	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember || command.Kind == slashCommandLogin || command.Kind == slashCommandModel || command.Kind == slashCommandTask
 	if !ok || (argument != "" && !argumentAllowed) {
 		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
@@ -676,6 +693,7 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 		}
 		m.newSessionGeneration++
 		m.newSessionPending = true
+		m.pendingCanceledTasks = m.countActiveTasks()
 		m.statusText = ""
 		return m, runNewSessionCommand(m.backend, m.newSessionGeneration)
 	case slashCommandModel:
@@ -703,6 +721,10 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.quit()
+	case slashCommandTasks:
+		return m.handleTasksCommand()
+	case slashCommandTask:
+		return m.handleTaskCommand(argument)
 	default:
 		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
@@ -731,6 +753,7 @@ func (m Model) applyNewSessionResult(msg newSessionResultMsg) (tea.Model, tea.Cm
 		return m, nil
 	}
 	m.resetSessionViewFromBackend("")
+	m.noteCanceledTasks(m.pendingCanceledTasks)
 	return m, nil
 }
 
@@ -840,6 +863,14 @@ func (m *Model) clearEditor() {
 }
 
 func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
+	return m.startTurn(text, true)
+}
+
+// startTurn sets up turn state and starts the provider call, shared by a
+// user-submitted prompt and a sub-agent wake turn. When appendUserEntry is
+// false (a wake turn), no EntryUser is appended and the editor is left
+// untouched, so text the user was composing survives the turn.
+func (m Model) startTurn(text string, appendUserEntry bool) (Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(rootContext(m.rootCtx))
 	stream := newTurnStream()
 
@@ -863,9 +894,11 @@ func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
 	m.registerActiveOperation(stream, cancel)
 	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
 	m.turnEntryStart = len(m.entries)
-	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
-	m.editor.SetValue("")
-	m.commandSuggestionIndex = 0
+	if appendUserEntry {
+		m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("user"), Kind: EntryUser, Raw: text})
+		m.editor.SetValue("")
+		m.commandSuggestionIndex = 0
+	}
 	m.rerenderAndRefreshViewportContent()
 
 	return m, startTurnCommand(ctx, m.backend, text, stream)
@@ -1394,7 +1427,7 @@ func (m Model) finishTurn(envelope turnEnvelope) (tea.Model, tea.Cmd) {
 		m.fatalErr = err
 		return m.quit()
 	}
-	return m, nil
+	return m.maybeWake()
 }
 
 func (m *Model) reconcilePendingTools(err error) bool {
@@ -1487,14 +1520,14 @@ func (m *Model) rerenderAndRefreshViewportContent() {
 }
 
 func (m Model) transcriptWidth() int {
-	return max(1, calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), 0).transcriptWidth)
+	return max(1, calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), 0, 0).transcriptWidth)
 }
 
 func (m *Model) refreshViewportContent() {
 	width := m.transcriptWidth()
 	m.commitFinalEntries(width)
 	content, _ := renderTranscript(m.entries[m.committed:], m.committedAssistantTurn, width, m.expandedDetails, m.darkBackground)
-	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), lineCount(content))
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), lineCount(content), 0)
 	editorWidth := m.width
 	if layout.inputBoxed {
 		editorWidth = max(1, m.width-inputBoxPadding*2-inputBoxBorder)
@@ -1799,14 +1832,17 @@ func renderToolBlock(entry Entry, width int, expanded bool, dark bool) string {
 
 func toolArgumentPreview(name, raw string) string {
 	var fields struct {
-		Command   string `json:"command"`
-		Path      string `json:"path"`
-		FilePath  string `json:"file_path"`
-		Pattern   string `json:"pattern"`
-		Glob      string `json:"glob"`
-		Query     string `json:"query"`
-		OldString string `json:"old_string"`
-		NewString string `json:"new_string"`
+		Command     string `json:"command"`
+		Path        string `json:"path"`
+		FilePath    string `json:"file_path"`
+		Pattern     string `json:"pattern"`
+		Glob        string `json:"glob"`
+		Query       string `json:"query"`
+		OldString   string `json:"old_string"`
+		NewString   string `json:"new_string"`
+		Prompt      string `json:"prompt"`
+		Description string `json:"description"`
+		TaskID      string `json:"task_id"`
 	}
 	if json.Unmarshal([]byte(raw), &fields) != nil {
 		return escapePlainText(raw)
@@ -1868,6 +1904,17 @@ func toolArgumentPreview(name, raw string) string {
 	case "memory_search":
 		if fields.Query != "" {
 			return escapePlainText(fields.Query)
+		}
+	case "agent":
+		return escapePlainText(subagent.TaskLabel(agent.Task{Description: fields.Description, Prompt: fields.Prompt}))
+	case "agent_wait":
+		if fields.TaskID != "" {
+			return escapePlainText(fields.TaskID)
+		}
+		return escapePlainText("all")
+	case "agent_send":
+		if fields.TaskID != "" {
+			return escapePlainText(fields.TaskID)
 		}
 	}
 	return escapePlainText(raw)

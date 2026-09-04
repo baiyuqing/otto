@@ -3,14 +3,12 @@ package repl
 import (
 	"context"
 	"fmt"
-	"io"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
-	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/subagent"
 )
 
 // taskLister returns the active runner's task registry and whether it is
@@ -38,7 +36,7 @@ func (r *REPL) tasksCommand(ctx context.Context) (bool, error) {
 	}
 	now := time.Now()
 	for _, task := range list {
-		_, _ = fmt.Fprintln(r.stdout, taskLine(task, now))
+		_, _ = fmt.Fprintln(r.stdout, subagent.TaskLine(task, now))
 	}
 	return false, nil
 }
@@ -69,12 +67,12 @@ func (r *REPL) taskCommand(ctx context.Context, args string) (bool, error) {
 		_, _ = fmt.Fprintf(r.stderr, "unknown task: %s\n", id)
 		return false, nil
 	}
-	_, _ = fmt.Fprintln(r.stdout, taskLine(task, time.Now()))
+	_, _ = fmt.Fprintln(r.stdout, subagent.TaskLine(task, time.Now()))
 	if task.Model != "" {
 		_, _ = fmt.Fprintf(r.stdout, "model: %s\n", task.Model)
 	}
 	if history, _ := tasks.History(id); len(history) > 0 {
-		writeTaskSteps(r.stdout, history)
+		_, _ = fmt.Fprint(r.stdout, subagent.TaskSteps(history))
 	}
 	if task.Final() {
 		if task.Error != "" {
@@ -84,104 +82,4 @@ func (r *REPL) taskCommand(ctx context.Context, args string) (bool, error) {
 		}
 	}
 	return false, nil
-}
-
-// writeTaskSteps renders a child's transcript as tool calls and assistant
-// text, in order. Tool results and the delegated prompt (a user message) are
-// not shown, matching agent_status's step listing.
-func writeTaskSteps(w io.Writer, history []model.Message) {
-	for _, message := range history {
-		for _, block := range message.Blocks {
-			switch {
-			case block.Type == model.BlockToolCall:
-				_, _ = fmt.Fprintf(w, "  → %s %s\n", block.ToolName, firstRunes(oneLine(string(block.Arguments)), 80))
-			case block.Type == model.BlockText && message.Role == model.RoleAssistant && block.Text != "":
-				_, _ = fmt.Fprintf(w, "  assistant: %s\n", block.Text)
-			}
-		}
-	}
-}
-
-// taskLine renders one task in the layout shared with agent_status: id,
-// name, status, elapsed, tool count, last tool (or final token total), and a
-// description/prompt label.
-func taskLine(task agent.Task, now time.Time) string {
-	name := task.Agent
-	if name == "" {
-		name = "(default)"
-	}
-	line := fmt.Sprintf("%-4s %-10s %-9s %6s %9s  %-24s %s",
-		task.ID, name, string(task.Status), taskElapsed(task, now), taskToolsColumn(task), taskDetail(task), taskLabel(task))
-	return strings.TrimRight(line, " ")
-}
-
-func taskElapsed(task agent.Task, now time.Time) string {
-	switch task.Status {
-	case agent.TaskQueued:
-		return ""
-	case agent.TaskRunning:
-		return now.Sub(task.StartedAt).Round(time.Second).String()
-	default:
-		// A task canceled while still queued never got a StartedAt; treat
-		// its elapsed time as 0s rather than measuring from the zero time.
-		if task.StartedAt.IsZero() {
-			return "0s"
-		}
-		return task.FinishedAt.Sub(task.StartedAt).Round(time.Second).String()
-	}
-}
-
-func taskToolsColumn(task agent.Task) string {
-	if task.Status == agent.TaskQueued {
-		return ""
-	}
-	if task.ToolCalls == 1 {
-		return "1 tool"
-	}
-	return fmt.Sprintf("%d tools", task.ToolCalls)
-}
-
-func taskDetail(task agent.Task) string {
-	if task.Status == agent.TaskQueued {
-		return ""
-	}
-	if task.Final() {
-		return fmt.Sprintf("%s tokens", commaInt(task.Usage.InputTokens+task.Usage.OutputTokens))
-	}
-	return task.LastTool
-}
-
-func taskLabel(task agent.Task) string {
-	if task.Description != "" {
-		return task.Description
-	}
-	return firstRunes(oneLine(task.Prompt), 60)
-}
-
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
-}
-
-func firstRunes(s string, n int) string {
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n])
-}
-
-// commaInt formats n with thousands separators, e.g. 12310 -> "12,310".
-func commaInt(n int) string {
-	s := strconv.Itoa(n)
-	neg := strings.HasPrefix(s, "-")
-	if neg {
-		s = s[1:]
-	}
-	for i := len(s) - 3; i > 0; i -= 3 {
-		s = s[:i] + "," + s[i:]
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
 }

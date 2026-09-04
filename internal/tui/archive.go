@@ -177,6 +177,10 @@ func (m Model) handleArchiveKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, b
 	m.archive.operationPath = selected.Path
 	m.archive.errText = ""
 	m.statusText = ""
+	m.pendingCanceledTasks = 0
+	if selected.Current {
+		m.pendingCanceledTasks = m.countActiveTasks()
+	}
 	return m, runArchiveSessionCommand(m.rootCtx, archiver, m.archive.generation, selected.Path), true
 }
 
@@ -234,6 +238,7 @@ func (m Model) applyArchiveSessionResult(msg archiveSessionResultMsg) (tea.Model
 		// The controller swapped the current session for a fresh one.
 		status += "; started new session"
 		m.resetSessionViewFromBackend(status)
+		m.noteCanceledTasks(m.pendingCanceledTasks)
 	} else {
 		m.statusText = status
 	}

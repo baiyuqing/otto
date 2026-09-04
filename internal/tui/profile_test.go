@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 )
 
@@ -128,6 +129,35 @@ func TestModelCommandSwitchErrorReported(t *testing.T) {
 	}
 	if !strings.Contains(got.statusText, "not found") {
 		t.Fatalf("statusText = %q, want not found error", got.statusText)
+	}
+}
+
+func TestModelCommandSwitchNotesCanceledTasks(t *testing.T) {
+	tasks := agent.NewTasks()
+	addTask(t, tasks, agent.TaskRunning, "explorer")
+	backend := &switchBackend{
+		fakeBackend: fakeBackend{info: app.Info{Profile: "default", Provider: "openai-compatible", Model: "gpt-4o"}, tasks: tasks},
+		profiles:    []string{"default", "chatgpt"},
+	}
+	backend.switchProfile = func(_ context.Context, name string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: name, Provider: "chatgpt", Model: "gpt-5"}
+		return app.ResumeResult{}, nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 24)
+	pending, cmd := submitCommand(t, m, "/model chatgpt")
+	if cmd == nil {
+		t.Fatal("/model <profile> cmd = nil, want async switch")
+	}
+	msg := runCommandWithin(t, cmd, time.Second)
+	// dispatch (not Update): Update batches in the pending-print flush cmd,
+	// which is unrelated to the assertion below.
+	updated, resultCmd := pending.dispatch(msg)
+	got := updated.(Model)
+	if text := lastEntryText(t, got); text != "canceled 1 running tasks" {
+		t.Fatalf("entry = %q", text)
+	}
+	if resultCmd != nil {
+		t.Fatal("applyProfileSwitchResult() cmd = non-nil, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)")
 	}
 }
 

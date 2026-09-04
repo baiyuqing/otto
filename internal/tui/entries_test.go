@@ -69,6 +69,19 @@ func TestNotificationEntryTextTruncatesLongBody(t *testing.T) {
 	}
 }
 
+func TestNotificationEntryTextKeepsExactLimitBodyIntact(t *testing.T) {
+	header := "[task-notification] task t1 (explorer) succeeded · 42s · 7 tool calls · 12,310 tokens"
+	lines := make([]string, notificationBodyLineLimit)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	text := header + "\n" + strings.Join(lines, "\n")
+
+	if got := notificationEntryText("t1", text); got != text {
+		t.Fatalf("got = %q, want unchanged %q", got, text)
+	}
+}
+
 func TestNotificationEntryTextKeepsShortBodyIntact(t *testing.T) {
 	text := "[task-notification] task t2 (reviewer) failed · 12s · 3 tool calls\nerror text"
 	if got := notificationEntryText("t2", text); got != text {

@@ -28,6 +28,13 @@ type resumeBackend struct {
 	resumeSession func(context.Context, string) (app.ResumeResult, error)
 	info          app.Info
 	history       []model.Message
+	tasks         *agent.Tasks
+}
+
+// Tasks implements app.TaskLister so tests can exercise the cancel-on-resume
+// notice with a populated task registry.
+func (b *resumeBackend) Tasks() *agent.Tasks {
+	return b.tasks
 }
 
 func (b *resumeBackend) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {
@@ -706,6 +713,36 @@ func TestResumeSuccessRendersFoldedCompactionBeforeRetainedTail(t *testing.T) {
 	}
 }
 
+func TestResumeSuccessNotesCanceledTasks(t *testing.T) {
+	tasks := agent.NewTasks()
+	addTask(t, tasks, agent.TaskRunning, "explorer")
+	backend := &resumeBackend{
+		info:  app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old"},
+		tasks: tasks,
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new"}
+		return app.ResumeResult{SessionPath: path}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
+
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	if cmd == nil {
+		t.Fatal("resume cmd = nil")
+	}
+	// dispatch (not Update): Update batches in the pending-print flush cmd,
+	// which is unrelated to the assertion below.
+	updated, resultCmd := resuming.dispatch(runCommandWithin(t, cmd, time.Second))
+	got := updated.(Model)
+	if text := lastEntryText(t, got); text != "canceled 1 running tasks" {
+		t.Fatalf("entry = %q", text)
+	}
+	if resultCmd != nil {
+		t.Fatal("applySessionResumeResult() cmd = non-nil, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)")
+	}
+}
+
 func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	backend := &resumeBackend{
 		info: app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", ContextWindow: 128_000, ContextInputTokens: 64_000, ContextInputTokensPresent: true},
@@ -928,6 +965,37 @@ func TestResumeResultReconcilesCommittedSuccessWithStaleGeneration(t *testing.T)
 	}
 	if got.statusText != "resumed session" || strings.Contains(got.statusText, "stale payload warning") {
 		t.Fatalf("status = %q, want generic reconciled status", got.statusText)
+	}
+}
+
+func TestResumeResultReconcileStaleNotesCanceledTasksAndDoesNotArm(t *testing.T) {
+	tasks := agent.NewTasks()
+	addTask(t, tasks, agent.TaskRunning, "explorer")
+	backend := &resumeBackend{
+		info:  app.Info{Profile: "old-profile", Model: "old-model", SessionID: "session-old", SessionPath: "/sessions/old.jsonl"},
+		tasks: tasks,
+	}
+	backend.resumeSession = func(_ context.Context, path string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: "new-profile", Model: "new-model", SessionID: "session-new", SessionPath: path}
+		return app.ResumeResult{SessionPath: path}, nil
+	}
+	m := loadResumePicker(t, backend, session.ListResult{Sessions: []session.SessionInfo{{ID: "fresh", Path: "/sessions/fresh.jsonl"}}})
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
+	resuming := updated.(Model)
+	if cmd == nil {
+		t.Fatal("resume cmd = nil")
+	}
+
+	result := runCommandWithin(t, cmd, time.Second)
+	resuming.closeResumePicker()
+	resuming.resume.generation++
+	updated, next := resuming.dispatch(result)
+	got := updated.(Model)
+	if next != nil {
+		t.Fatalf("reconcileCommittedStaleResume() cmd = %v, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)", next)
+	}
+	if text := lastEntryText(t, got); text != "canceled 1 running tasks" {
+		t.Fatalf("entry = %q", text)
 	}
 }
 

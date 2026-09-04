@@ -37,13 +37,14 @@ type layoutState struct {
 	transcriptHeight int
 	editorHeight     int
 	suggestionHeight int
+	taskLines        int
 	footerHeight     int
 	editorSpacing    int
 	inputBoxed       bool
 	inputBoxHeight   int
 }
 
-func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight, liveLines int) layoutState {
+func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight, liveLines, taskLines int) layoutState {
 	layout := layoutState{
 		transcriptWidth: max(0, width),
 		editorHeight:    clamp(editorHeight(editor), minEditorHeight, maxEditorHeight),
@@ -66,7 +67,8 @@ func calculateLayout(width, height int, editor textarea.Model, requestedSuggesti
 	}
 	availableHeight := height - layout.inputBoxHeight - layout.footerHeight - layout.editorSpacing
 	layout.suggestionHeight = min(max(0, requestedSuggestionHeight), max(0, availableHeight-1))
-	layout.transcriptHeight = min(max(0, liveLines), max(0, availableHeight-layout.suggestionHeight))
+	layout.taskLines = min(max(0, taskLines), max(0, availableHeight-layout.suggestionHeight))
+	layout.transcriptHeight = min(max(0, liveLines), max(0, availableHeight-layout.suggestionHeight-layout.taskLines))
 	return layout
 }
 

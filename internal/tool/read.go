@@ -69,11 +69,12 @@ func (t *readTool) Execute(_ context.Context, arguments json.RawMessage) Result 
 		return Result{Content: "limit must be >= 0", IsError: true}
 	}
 
-	path, err := t.workspace.ResolveExisting(args.Path)
+	file, err := t.workspace.Open(args.Path)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
-	text, err := readValidatedTextFile(path)
+	defer file.Close()
+	text, err := readValidatedTextFile(file, args.Path)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
@@ -146,17 +147,23 @@ func DecodeStrictJSON(arguments json.RawMessage, destination any, required ...st
 
 const maxReadFileBytes = 64 << 20
 
-func readValidatedTextFile(path string) (string, error) {
-	info, err := os.Stat(path)
+func readValidatedTextFile(file *os.File, path string) (string, error) {
+	info, err := file.Stat()
 	if err != nil {
 		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("not a regular file: %s", path)
 	}
 	if info.Size() > maxReadFileBytes {
 		return "", fmt.Errorf("file is too large (%d bytes); maximum readable size is %d bytes", info.Size(), maxReadFileBytes)
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(file, maxReadFileBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(data) > maxReadFileBytes {
+		return "", fmt.Errorf("file is too large (%d bytes); maximum readable size is %d bytes", len(data), maxReadFileBytes)
 	}
 	if bytes.IndexByte(data, 0) >= 0 {
 		return "", fmt.Errorf("binary file not supported: %s", path)

@@ -451,6 +451,7 @@ func mustWorkspace(t *testing.T, root string) *Workspace {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = workspace.Close() })
 	return workspace
 }
 

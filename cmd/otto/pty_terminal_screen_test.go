@@ -22,6 +22,7 @@ type ptyTerminalScreen struct {
 	cells         [][]rune
 	pending       []byte
 	cursorVisible bool
+	insertMode    bool
 	fullRedraws   int
 	acceptedCSI   map[string]struct{}
 }
@@ -41,6 +42,16 @@ func blankPTYRow(width int) []rune {
 		row[column] = ' '
 	}
 	return row
+}
+
+func TestPTYTerminalScreenInsertMode(t *testing.T) {
+	screen := newPTYTerminalScreen(20, 1)
+	if _, err := screen.Write([]byte("conTAIL\x1b[4D\x1b[4htext\x1b[4l.")); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(screen.String()); got != "context.AIL" {
+		t.Fatalf("screen = %q, want inserted text followed by overwrite", got)
+	}
 }
 
 func (s *ptyTerminalScreen) Write(p []byte) (int, error) {
@@ -184,10 +195,14 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 			return err
 		}
 	case 'h', 'l':
-		if rawParams != "?25" {
+		switch rawParams {
+		case "4":
+			s.insertMode = final == 'h'
+		case "?25":
+			s.cursorVisible = final == 'h'
+		default:
 			return fmt.Errorf("unsupported terminal mode %q", rawParams)
 		}
-		s.cursorVisible = final == 'h'
 	case 'H', 'f':
 		params, err := parsePTYCSIParams(rawParams, 2, true)
 		if err != nil {
@@ -411,6 +426,10 @@ func (s *ptyTerminalScreen) putRune(r rune) {
 	if s.x >= s.width {
 		s.x = 0
 		s.lineFeed()
+	}
+	if s.insertMode {
+		shift := min(width, s.width-s.x)
+		copy(s.cells[s.y][s.x+shift:], s.cells[s.y][s.x:])
 	}
 	s.cells[s.y][s.x] = r
 	for offset := 1; offset < width && s.x+offset < s.width; offset++ {

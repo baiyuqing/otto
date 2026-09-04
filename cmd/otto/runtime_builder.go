@@ -101,7 +101,7 @@ type runtimeBuilder struct {
 	memoryRecallLimit       int
 	memoryRecallTokenBudget int
 	// traceWriter is non-nil only when OTTO_TRACE is set; the provider's
-	// HTTP transport is wrapped to append raw request/response records to it.
+	// HTTP transport is wrapped to append safe request/response metadata to it.
 	traceWriter io.Writer
 	// extraTools is test-only: appended before registry construction so
 	// tests can force tool.NewRegistry to fail (e.g. a duplicate name) and
@@ -289,7 +289,11 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 	// by the parent's final system prompt and the sub-agent runner's
 	// PromptFor closure, computed once so both stay in sync. The Agents
 	// section is parent-only: children never have the agent tool.
-	promptTail := redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now()) + skillSection)
+	var contextExecutor sandbox.CommandExecutor
+	if redactor.AllowsDynamicContent() && b.bashConfigured() {
+		contextExecutor = b.commandExecutor
+	}
+	promptTail := redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now(), contextExecutor, b.sandboxEnvironment, b.workspace) + skillSection)
 	parentAgentSection := redactor.RedactString(agentSection)
 	endpointHost := endpointHostFor(runtime.BaseURL)
 	compaction := agent.CompactionSettings{
@@ -402,7 +406,7 @@ func (b runtimeBuilder) buildProvider(ctx context.Context, runtime config.Runtim
 	return openairesponses.New(creds.TokenSource(ctx, path), creds.AccountID, b.tracingHTTPClient(openairesponses.DefaultHTTPClient())), nil
 }
 
-// tracingHTTPClient wraps a hardened provider client to record raw HTTP wire,
+// tracingHTTPClient wraps a hardened provider client to record safe HTTP metadata,
 // or returns nil when tracing is off (providers build their own hardened
 // defaults for nil). Wrapping each provider's default transport preserves its
 // tuned timeouts and redirect policy.
@@ -417,7 +421,7 @@ func (b runtimeBuilder) tracingHTTPClient(client *http.Client) *http.Client {
 	return client
 }
 
-// openTraceWriter resolves OTTO_TRACE into an append writer for raw provider
+// openTraceWriter resolves OTTO_TRACE into an append writer for safe provider
 // HTTP records, or nil when tracing is off. Empty disables it; "1"/"true"/"on"
 // writes to ~/.otto/traces/<timestamp>-<pid>.jsonl; any other value is a file
 // path. Failures degrade to no tracing with a stderr warning — this is a

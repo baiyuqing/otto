@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -54,23 +55,24 @@ func (t *writeTool) Execute(_ context.Context, arguments json.RawMessage) Result
 		return Result{Content: "missing required argument: path", IsError: true}
 	}
 
-	path, err := t.workspace.ResolveForWrite(args.Path)
+	path, err := t.workspace.writeRelative(args.Path)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
-	if err := writeFileAtomic(path, []byte(args.Content)); err != nil {
+	if err := writeFileAtomic(t.workspace, path, []byte(args.Content)); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	return Result{Content: fmt.Sprintf("wrote %s (%d bytes)", args.Path, len(args.Content))}
 }
 
-func writeFileAtomic(path string, content []byte) (err error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+func writeFileAtomic(workspace *Workspace, path string, content []byte) (err error) {
+	directory := filepath.Dir(path)
+	if err := workspace.rootFS.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
 
 	mode := os.FileMode(0o644)
-	if info, statErr := os.Stat(path); statErr == nil {
+	if info, statErr := workspace.rootFS.Stat(path); statErr == nil {
 		if info.IsDir() {
 			return fmt.Errorf("path is a directory: %s", path)
 		}
@@ -79,18 +81,17 @@ func writeFileAtomic(path string, content []byte) (err error) {
 		return statErr
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".otto-*")
+	tmpPath, tmp, err := createWorkspaceTemp(workspace, directory, mode)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
 	cleanup := true
 	defer func() {
 		if !cleanup {
 			return
 		}
 		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
+		_ = workspace.rootFS.Remove(tmpPath)
 	}()
 
 	if err := tmp.Chmod(mode); err != nil {
@@ -105,9 +106,27 @@ func writeFileAtomic(path string, content []byte) (err error) {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := workspace.rootFS.Rename(tmpPath, path); err != nil {
 		return err
 	}
 	cleanup = false
 	return nil
+}
+
+func createWorkspaceTemp(workspace *Workspace, directory string, mode os.FileMode) (string, *os.File, error) {
+	for range 100 {
+		var suffix [8]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return "", nil, err
+		}
+		name := filepath.Join(directory, fmt.Sprintf(".otto-%x", suffix))
+		file, err := workspace.rootFS.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if err == nil {
+			return name, file, nil
+		}
+		if !os.IsExist(err) {
+			return "", nil, err
+		}
+	}
+	return "", nil, fmt.Errorf("could not create temporary file")
 }

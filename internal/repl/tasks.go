@@ -58,7 +58,7 @@ func (r *REPL) taskCommand(ctx context.Context, args string) (bool, error) {
 		return false, nil
 	}
 	if len(fields) != 1 || fields[0] == "cancel" {
-		_, _ = fmt.Fprintln(r.stderr, "usage: /task <id> | /task cancel <id>")
+		_, _ = fmt.Fprintln(r.stderr, "usage: /task <id|name> | /task cancel <id|name>")
 		return false, nil
 	}
 	id := fields[0]

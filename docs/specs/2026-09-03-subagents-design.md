@@ -86,14 +86,16 @@ Parameters:
 |---|---|---|---|
 | `prompt` | string | yes | The complete task. The child sees nothing else unless `context` is `inherit`. |
 | `description` | string | no | Short label (≤ 80 chars) shown in status output and the TUI panel. |
+| `name` | string | no | Optional task name, unique in this session; usable instead of the task id in `agent_wait`, `agent_status`, and `/task`. 1 to 64 letters, digits, `_` or `-`, not of the form `tN`. A name already used in the session, including by a finished task, returns an error result and no task is created. |
 | `model` | string | no | Provider model id for the child. Default: the session model, or the definition's `model`. Passed through unchanged; Otto keeps no model catalog, allowlist, or price data, and an id the endpoint rejects fails the task with the provider's error. |
-| `agent` | string | no | Definition name. `enum` lists the catalog when non-empty. Unknown name → error result. |
+| `agent` | string | no | Definition name. No enum; see Decisions taken. Unknown name → error result. |
 | `context` | `"fresh"` \| `"inherit"` | no | Default `fresh`, or the definition's `context` field. See "Context: fresh or inherit". |
 | `wait` | bool | no | `true` = start and block until the task ends; equivalent to `agent` followed by `agent_wait`. |
 
 Result on success: `task t3 (explorer) started` or `task t3 (explorer) queued
-(2 running, limit 2)`. With `wait: true` the result is the task's completion
-text (see `agent_wait`).
+(2 running, limit 2)`. With `name` set: `task t3 lint-check (explorer)
+started`. With `wait: true` the result is the task's completion text (see
+`agent_wait`).
 
 Description text given to the model: "Start a sub-agent on a self-contained
 task and return immediately with its task id. The sub-agent runs in parallel
@@ -105,8 +107,9 @@ the sub-agent needs into prompt: goal, relevant paths, what to report back."
 
 ### `agent_wait`
 
-Parameters: `task_id` (optional; omitted = every task that is queued or
-running), `timeout_seconds` (optional integer, default 600, max 3600).
+Parameters: `task_id` (optional, id or name; omitted = every task that is
+queued or running), `timeout_seconds` (optional integer, default 600, max
+3600).
 
 Blocks the parent turn until the selected tasks reach a terminal state or the
 timeout elapses, then returns the completion text of each task (the same text
@@ -119,7 +122,7 @@ Timeout returns an error result naming the tasks still running.
 
 ### `agent_status`
 
-Parameters: `task_id` (optional).
+Parameters: `task_id` (optional, id or name).
 
 Without `task_id`: one line per task in the session:
 
@@ -351,6 +354,11 @@ func (t *Tasks) Updates() <-chan struct{}                     // capacity 1, sig
 func (t *Tasks) Notifications() *Inbox                        // the parent's inbox
 func (t *Tasks) Close()                                       // cancel all, close Updates
 ```
+
+`Tasks.Add` validates and indexes an optional task name under the same lock
+that assigns the id; `Get`, `History`, `Cancel`, and `Wait` resolve their `id`
+argument as a task id first, then as a task name, so both forms work
+everywhere a task id is accepted. `Update` stays id-keyed.
 
 `agent.Options.Tasks *Tasks` and `Agent.Tasks()` expose it; `Agent.Close`
 calls `Tasks.Close()`. `app.Controller.Tasks() *agent.Tasks` returns the
@@ -601,6 +609,8 @@ Each phase is one PR on `feat/subagents`-derived branches; `make check` and
 
 ### Phase B: definitions, configuration, inherit
 
+Status: implemented.
+
 1. `skill.ParseFrontmatter`; `subagent/definition.go` with the validation
    rules above; `prompt.go`.
 2. `config/agents.go`; `[agents]` in README precedence docs; Seatbelt read
@@ -695,3 +705,13 @@ All offline, next to their packages.
   availability and pricing change faster than a maintained list, and the
   model can look them up itself (`bash` with `curl` under the default
   `network = "allow"`).
+- The `agent` parameter has no JSON-schema `enum`. Keeping the tool
+  definitions independent of the catalog lets `subagent.ToolDefinitions()`
+  serve the redaction boundary check without a catalog and keeps the tool
+  block identical across sessions for prompt caching; the `## Agents`
+  section plus the `unknown agent` error result replace the enum.
+- Task names are unique for the whole session, finished tasks included, and
+  names of the form tN are rejected: a reference is then always unambiguous
+  and needs no precedence rule between ids and names. Reuse after completion
+  can be added later by dropping the name from the index when the task
+  becomes final.

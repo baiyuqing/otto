@@ -124,6 +124,18 @@ func TestCompletionText(t *testing.T) {
 			maxOutputBytes: 16384,
 			want:           "[task-notification] task t1 (default) canceled · gpt-4o-mini · 12s · 3 tool calls",
 		},
+		{
+			name: "succeeded with a name",
+			task: agent.Task{
+				ID: "t1", Name: "lint-check", Status: agent.TaskSucceeded,
+				StartedAt: base, FinishedAt: base.Add(42 * time.Second),
+				ToolCalls: 7,
+				Usage:     model.Usage{InputTokens: 10000, OutputTokens: 2310},
+				Result:    "the full report",
+			},
+			maxOutputBytes: 16384,
+			want:           "[task-notification] task t1 lint-check (default) succeeded · 42s · 7 tool calls · 12,310 tokens\nthe full report",
+		},
 	}
 
 	for _, tc := range cases {

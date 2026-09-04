@@ -1842,6 +1842,7 @@ func toolArgumentPreview(name, raw string) string {
 		NewString   string `json:"new_string"`
 		Prompt      string `json:"prompt"`
 		Description string `json:"description"`
+		Name        string `json:"name"`
 		TaskID      string `json:"task_id"`
 	}
 	if json.Unmarshal([]byte(raw), &fields) != nil {
@@ -1906,7 +1907,7 @@ func toolArgumentPreview(name, raw string) string {
 			return escapePlainText(fields.Query)
 		}
 	case "agent":
-		return escapePlainText(subagent.TaskLabel(agent.Task{Description: fields.Description, Prompt: fields.Prompt}))
+		return escapePlainText(subagent.TaskLabel(agent.Task{Name: fields.Name, Description: fields.Description, Prompt: fields.Prompt}))
 	case "agent_wait":
 		if fields.TaskID != "" {
 			return escapePlainText(fields.TaskID)

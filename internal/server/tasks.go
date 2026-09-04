@@ -13,6 +13,7 @@ import (
 // docs/specs/2026-09-03-agent-server-design.md "Sub-agent tasks".
 type taskWire struct {
 	ID          string      `json:"id"`
+	Name        string      `json:"name,omitempty"`
 	Agent       string      `json:"agent"`
 	Description string      `json:"description"`
 	Model       string      `json:"model,omitempty"`
@@ -42,6 +43,7 @@ func optionalTime(t time.Time) *time.Time {
 func toTaskWire(task agent.Task) taskWire {
 	return taskWire{
 		ID:          task.ID,
+		Name:        task.Name,
 		Agent:       task.Agent,
 		Description: task.Description,
 		Model:       task.Model,

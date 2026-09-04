@@ -42,6 +42,12 @@ type Config struct {
 	Header session.Header
 	// Tasks is the session's task registry.
 	Tasks *agent.Tasks
+	// Catalog holds the named definitions; the zero value means none.
+	Catalog Catalog
+	// ParentSession returns the parent's current message list (the
+	// post-compaction view the parent sends on its next request). nil
+	// disables context: inherit.
+	ParentSession func() []model.Message
 	// MaxParallel caps concurrent children; <= 0 means 4.
 	MaxParallel int
 	// MaxOutputBytes caps the report text inside notification/wait text;
@@ -54,9 +60,9 @@ type Config struct {
 // tools (children get no memory binding).
 var ExcludedChildTools = []string{"agent", "agent_wait", "agent_status", "agent_send", "agent_cancel", "remember", "forget", "memory_search"}
 
-// genericSubagentInstruction is appended to a child's system prompt. Named
-// agent definitions do not exist yet in this phase, so every child gets
-// this instruction.
+// genericSubagentInstruction is appended to a child's system prompt under
+// "## Sub-agent role" when it has no definition, or its definition's body
+// is empty.
 const genericSubagentInstruction = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result; nothing else you write is."
 
 const (
@@ -69,19 +75,22 @@ const (
 type Runner struct {
 	config        Config
 	childRegistry *tool.Registry
+	registries    map[string]*tool.Registry
 	sem           chan struct{}
 }
 
-// NewRunner validates config and builds the child tool registry once.
-func NewRunner(config Config) (*Runner, error) {
+// NewRunner validates config and builds the default child tool registry plus
+// one registry per catalog definition. The returned warnings name any
+// definition tools entry that does not match a default child tool.
+func NewRunner(config Config) (*Runner, []string, error) {
 	if config.Provider == nil {
-		return nil, errors.New("subagent: Provider is required")
+		return nil, nil, errors.New("subagent: Provider is required")
 	}
 	if config.Tasks == nil {
-		return nil, errors.New("subagent: Tasks is required")
+		return nil, nil, errors.New("subagent: Tasks is required")
 	}
 	if config.PromptFor == nil {
-		return nil, errors.New("subagent: PromptFor is required")
+		return nil, nil, errors.New("subagent: PromptFor is required")
 	}
 	if config.MaxParallel <= 0 {
 		config.MaxParallel = defaultMaxParallel
@@ -94,42 +103,119 @@ func NewRunner(config Config) (*Runner, error) {
 	for _, name := range ExcludedChildTools {
 		excluded[name] = struct{}{}
 	}
-	childTools := make([]tool.Tool, 0, len(config.Tools))
+	var defaultChildTools []tool.Tool
+	defaultChildNames := make(map[string]struct{})
 	for _, t := range config.Tools {
-		if _, skip := excluded[t.Definition().Name]; skip {
+		name := t.Definition().Name
+		if _, skip := excluded[name]; skip {
 			continue
 		}
-		childTools = append(childTools, t)
+		defaultChildTools = append(defaultChildTools, t)
+		defaultChildNames[name] = struct{}{}
 	}
-	childRegistry, err := tool.NewRegistry(childTools...)
+	childRegistry, err := tool.NewRegistry(defaultChildTools...)
 	if err != nil {
-		return nil, fmt.Errorf("subagent: child registry: %w", err)
+		return nil, nil, fmt.Errorf("subagent: child registry: %w", err)
+	}
+
+	var warnings []string
+	registries := make(map[string]*tool.Registry)
+	for _, def := range config.Catalog.Definitions() {
+		if def.Tools == nil {
+			registries[def.Name] = childRegistry
+			continue
+		}
+		wanted := make(map[string]struct{}, len(def.Tools))
+		for _, name := range def.Tools {
+			if _, ok := defaultChildNames[name]; !ok {
+				warnings = append(warnings, fmt.Sprintf("agent %s: unknown tool %q ignored", def.Name, name))
+				continue
+			}
+			wanted[name] = struct{}{}
+		}
+		var defTools []tool.Tool
+		for _, t := range defaultChildTools {
+			if _, ok := wanted[t.Definition().Name]; ok {
+				defTools = append(defTools, t)
+			}
+		}
+		registry, err := tool.NewRegistry(defTools...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("subagent: child registry for %s: %w", def.Name, err)
+		}
+		registries[def.Name] = registry
 	}
 
 	return &Runner{
 		config:        config,
 		childRegistry: childRegistry,
+		registries:    registries,
 		sem:           make(chan struct{}, config.MaxParallel),
-	}, nil
+	}, warnings, nil
 }
 
 // StartRequest is one delegation request.
 type StartRequest struct {
 	Prompt      string
 	Description string
+	// Name is an optional task name, unique for the session (including
+	// finished tasks); see agent.Tasks.Add for the validation rules. Empty
+	// means no name.
+	Name string
 	// Model is the provider model id the child runs on. Empty (or
-	// whitespace-only) falls back to Config.Options.Model.
+	// whitespace-only) falls back to the definition's model, then
+	// Config.Options.Model.
 	Model string
+	// Agent is a catalog definition name, or "" for the default sub-agent.
+	Agent string
+	// Context is "fresh" or "inherit". Empty falls back to the
+	// definition's context, then "fresh".
+	Context string
 }
 
 // Start registers a task and starts its child goroutine, or leaves it
-// queued when MaxParallel children are already running.
+// queued when MaxParallel children are already running. An unknown Agent
+// name, an invalid Context, or Context "inherit" with no ParentSession
+// configured is rejected before any task is created.
 func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 	now := r.now()
 	description := truncateRunesEllipsis(strings.TrimSpace(request.Description), maxDescriptionRunes)
+
+	agentName := strings.TrimSpace(request.Agent)
+	var def Definition
+	if agentName != "" {
+		found, ok := r.config.Catalog.Lookup(agentName)
+		if !ok {
+			return agent.Task{}, fmt.Errorf("unknown agent %q", agentName)
+		}
+		def = found
+	}
+
 	effectiveModel := strings.TrimSpace(request.Model)
 	if effectiveModel == "" {
+		effectiveModel = strings.TrimSpace(def.Model)
+	}
+	if effectiveModel == "" {
 		effectiveModel = r.config.Options.Model
+	}
+
+	effectiveContext := strings.TrimSpace(request.Context)
+	if effectiveContext == "" {
+		effectiveContext = strings.TrimSpace(def.Context)
+	}
+	if effectiveContext == "" {
+		effectiveContext = "fresh"
+	}
+	if effectiveContext != "fresh" && effectiveContext != "inherit" {
+		return agent.Task{}, errors.New(`context must be "fresh" or "inherit"`)
+	}
+	if effectiveContext == "inherit" && r.config.ParentSession == nil {
+		return agent.Task{}, errors.New("context inherit is not available in this session")
+	}
+
+	var inheritSnapshot []model.Message
+	if effectiveContext == "inherit" {
+		inheritSnapshot = InheritSnapshot(r.config.ParentSession())
 	}
 
 	taskCtx, cancel := context.WithCancel(context.Background())
@@ -149,9 +235,11 @@ func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 	}
 
 	task, err := r.config.Tasks.Add(agent.Task{
+		Name:        strings.TrimSpace(request.Name),
+		Agent:       def.Name,
 		Description: description,
 		Prompt:      request.Prompt,
-		Context:     "fresh",
+		Context:     effectiveContext,
 		Model:       effectiveModel,
 		CreatedAt:   now,
 	}, cancel, history)
@@ -166,8 +254,26 @@ func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 	mem := session.NewMemory(childHeader)
 	childMemory.Store(mem)
 
+	for _, msg := range inheritSnapshot {
+		if err := mem.Append(context.Background(), msg); err != nil {
+			cancel()
+			r.finish(task.ID, agent.TaskFailed, r.now(), nil, err)
+			return task, err
+		}
+	}
+
+	registry := r.childRegistry
+	if named, ok := r.registries[def.Name]; ok {
+		registry = named
+	}
+
+	roleBody := def.Body
+	if roleBody == "" {
+		roleBody = genericSubagentInstruction
+	}
+
 	systemPrompt := r.config.Redactor.RedactString(
-		r.config.PromptFor(r.childRegistry.Definitions()) + "\n\n## Sub-agent role\n" + genericSubagentInstruction,
+		r.config.PromptFor(registry.Definitions()) + "\n\n## Sub-agent role\n" + roleBody,
 	)
 	childOptions := r.config.Options
 	childOptions.SystemPrompt = systemPrompt
@@ -177,7 +283,7 @@ func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 	childOptions.Tasks = nil
 	childOptions.Memory = nil
 
-	child := agent.New(r.config.Provider, r.childRegistry, mem, childOptions, r.config.Redactor)
+	child := agent.New(r.config.Provider, registry, mem, childOptions, r.config.Redactor)
 
 	go r.runChild(taskCtx, cancel, task.ID, request.Prompt, child, mem)
 
@@ -325,10 +431,23 @@ func CompletionText(task agent.Task, maxOutputBytes int) string {
 	}
 }
 
-// agentLabel is the parenthesized name shown after a task id, e.g.
-// "(default)" or "(explorer)". Named definitions do not exist yet in this
-// phase, so Task.Agent is always empty and every task shows "(default)".
+// agentLabel is the label shown after a task id: the parenthesized
+// definition name, e.g. "(default)" or "(explorer)", prefixed by the
+// task's name and a space when it has one, e.g. "lint-check (explorer)".
+// Task.Agent is the catalog definition name, or "" for the default
+// sub-agent.
 func agentLabel(task agent.Task) string {
+	label := definitionLabel(task)
+	if task.Name != "" {
+		label = task.Name + " " + label
+	}
+	return label
+}
+
+// definitionLabel is the parenthesized definition name alone, e.g.
+// "(default)" or "(explorer)"; statusLine uses it for its definition column
+// so a task name appears only once per line, in the label.
+func definitionLabel(task agent.Task) string {
 	name := task.Agent
 	if name == "" {
 		name = "default"

@@ -36,10 +36,6 @@ import (
 
 var errSessionOperationUnavailable = errors.New("session operation is unavailable")
 
-// defaultMaxParallelAgents caps concurrent sub-agent tasks per session. This
-// is a literal for Phase A1; a future [agents] config gate is Phase B.
-const defaultMaxParallelAgents = 4
-
 type preparedSession interface {
 	Info() session.SessionInfo
 	Activate(context.Context) (session.Session, []session.Warning, error)
@@ -254,6 +250,26 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 	if catalog.Len() > 0 {
 		tools = append(tools, tool.NewSkillTool(catalog, runtime.MaxOutputBytes))
 	}
+
+	agents, agentsErr := config.ResolveAgents(b.config, b.environment, b.workspacePath)
+	if agentsErr != nil {
+		if binding != nil {
+			_ = binding.Close()
+		}
+		return nil, agentsErr
+	}
+	var agentCatalog subagent.Catalog
+	var agentWarnings []string
+	if agents.Enabled {
+		agentCatalog, agentWarnings = subagent.Discover(agents.Roots)
+	}
+	agentSection, agentSectionWarnings := subagent.PromptSection(agentCatalog)
+	for _, warning := range append(agentWarnings, agentSectionWarnings...) {
+		if b.stderr != nil {
+			fmt.Fprintf(b.stderr, "warning: %s\n", warning)
+		}
+	}
+
 	tools = append(tools, b.extraTools...)
 
 	redactor := b.boundaryRedactor(&runtime)
@@ -271,8 +287,10 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 
 	// promptTail is the redacted workspace-context-and-skills suffix shared
 	// by the parent's final system prompt and the sub-agent runner's
-	// PromptFor closure, computed once so both stay in sync.
+	// PromptFor closure, computed once so both stay in sync. The Agents
+	// section is parent-only: children never have the agent tool.
 	promptTail := redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now()) + skillSection)
+	parentAgentSection := redactor.RedactString(agentSection)
 	endpointHost := endpointHostFor(runtime.BaseURL)
 	compaction := agent.CompactionSettings{
 		Auto:             runtime.Compaction.Auto,
@@ -284,21 +302,31 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 
 	var tasks *agent.Tasks
 	var inbox *agent.Inbox
-	if client != nil {
+	if client != nil && agents.Enabled {
 		tasks = agent.NewTasks()
-		subagentRunner, subagentErr := subagent.NewRunner(subagent.Config{
+		subagentRunner, runnerWarnings, subagentErr := subagent.NewRunner(subagent.Config{
 			Provider: client, Tools: tools, Redactor: redactor,
 			Options: agent.Options{Model: runtime.Model, Thinking: runtime.Thinking, Compaction: compaction},
 			PromptFor: func(defs []model.ToolDefinition) string {
 				return systemPromptFor(defs, b.effectiveSandboxInfo(), runtime.Provider, endpointHost, runtime.Model) + promptTail
 			},
-			Header: current.Header(), Tasks: tasks, MaxParallel: defaultMaxParallelAgents, MaxOutputBytes: runtime.MaxOutputBytes,
+			Header:         current.Header(),
+			Tasks:          tasks,
+			Catalog:        agentCatalog,
+			ParentSession:  current.Messages,
+			MaxParallel:    agents.MaxParallel,
+			MaxOutputBytes: runtime.MaxOutputBytes,
 		})
 		if subagentErr != nil {
 			if binding != nil {
 				_ = binding.Close()
 			}
 			return nil, fmt.Errorf("create sub-agent runner: %w", subagentErr)
+		}
+		for _, warning := range runnerWarnings {
+			if b.stderr != nil {
+				fmt.Fprintf(b.stderr, "warning: %s\n", warning)
+			}
 		}
 		tools = append(tools, subagentRunner.Tools()...)
 		inbox = tasks.Notifications()
@@ -311,7 +339,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
-	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo(), runtime.Provider, endpointHost, runtime.Model) + promptTail
+	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo(), runtime.Provider, endpointHost, runtime.Model) + promptTail + parentAgentSection
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
 		Compaction:              compaction,
@@ -1091,7 +1119,15 @@ func (b runtimeBuilder) boundaryToolDefinitions(runtime *config.Runtime) []model
 	// caller of boundaryFieldsUnchanged (and so of this function) already
 	// has that condition true, so this is equivalent in practice.
 	if b.secretRedactor(runtime).AllowsDynamicContent() {
-		definitions = append(definitions, subagent.ToolDefinitions()...)
+		// ResolveAgents' error is ignored here (treated as enabled): this
+		// mirrors buildRunner's own recursion-avoidance rationale above, and
+		// erring toward including the agent tools keeps the boundary check
+		// conservative (a false "unchanged" is safe; the actual gate is
+		// buildRunner's ResolveAgents call, which does surface the error).
+		agentsRuntime, agentsErr := config.ResolveAgents(b.config, b.environment, b.workspacePath)
+		if agentsErr != nil || agentsRuntime.Enabled {
+			definitions = append(definitions, subagent.ToolDefinitions()...)
+		}
 	}
 	return definitions
 }

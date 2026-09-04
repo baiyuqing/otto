@@ -23,6 +23,8 @@ const agentWaitDescription = "Wait for a sub-agent task to finish. With task_id,
 
 const agentStatusDescription = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error."
 
+const agentNameDescription = "Optional task name, unique in this session; usable instead of the task id in agent_wait, agent_status, and /task. 1 to 64 letters, digits, '_' or '-'."
+
 // Tools returns the parent-side tools: agent, agent_wait, agent_status, in
 // that order.
 func (r *Runner) Tools() []tool.Tool {
@@ -58,6 +60,7 @@ type agentToolArgs struct {
 	Model       string `json:"model,omitempty"`
 	Agent       string `json:"agent,omitempty"`
 	Context     string `json:"context,omitempty"`
+	Name        string `json:"name,omitempty"`
 }
 
 func (t *agentTool) Definition() model.ToolDefinition {
@@ -75,6 +78,10 @@ func (t *agentTool) Definition() model.ToolDefinition {
 				"description": map[string]any{
 					"type":        "string",
 					"description": "Short label (<= 80 chars) shown in status output.",
+				},
+				"name": map[string]any{
+					"type":        "string",
+					"description": agentNameDescription,
 				},
 				"wait": map[string]any{
 					"type":        "boolean",
@@ -114,7 +121,7 @@ func (t *agentTool) Execute(ctx context.Context, arguments json.RawMessage) tool
 	}
 
 	runningBefore := countRunning(t.runner.config.Tasks)
-	task, err := t.runner.Start(StartRequest{Prompt: args.Prompt, Description: args.Description, Model: args.Model, Agent: args.Agent, Context: args.Context})
+	task, err := t.runner.Start(StartRequest{Prompt: args.Prompt, Description: args.Description, Model: args.Model, Agent: args.Agent, Context: args.Context, Name: args.Name})
 	if err != nil {
 		return tool.Result{Content: err.Error(), IsError: true}
 	}
@@ -204,7 +211,7 @@ func (t *agentWaitTool) Definition() model.ToolDefinition {
 			"properties": map[string]any{
 				"task_id": map[string]any{
 					"type":        "string",
-					"description": "Task to wait for; omit to wait for every queued or running task.",
+					"description": "Task id or name; omit to wait for every queued or running task.",
 				},
 				"timeout_seconds": map[string]any{
 					"type":        "integer",
@@ -235,10 +242,11 @@ func (t *agentWaitTool) Execute(ctx context.Context, arguments json.RawMessage) 
 	tasks := t.runner.config.Tasks
 	var ids []string
 	if args.TaskID != "" {
-		if _, ok := tasks.Get(args.TaskID); !ok {
+		task, ok := tasks.Get(args.TaskID)
+		if !ok {
 			return tool.Result{Content: fmt.Sprintf("unknown task: %s", args.TaskID), IsError: true}
 		}
-		ids = []string{args.TaskID}
+		ids = []string{task.ID}
 	} else {
 		for _, task := range tasks.List() {
 			if !task.Final() {
@@ -280,7 +288,7 @@ func (t *agentStatusTool) Definition() model.ToolDefinition {
 			"properties": map[string]any{
 				"task_id": map[string]any{
 					"type":        "string",
-					"description": "Show one task's detail, including its recent steps.",
+					"description": "Task id or name; show one task's detail, including its recent steps.",
 				},
 			},
 		},
@@ -350,12 +358,7 @@ func statusLine(task agent.Task, now time.Time) string {
 		detail = CommaInt(task.Usage.InputTokens+task.Usage.OutputTokens) + " tokens"
 	}
 
-	label := task.Description
-	if label == "" {
-		label = OneLine(FirstRunes(task.Prompt, 60))
-	}
-
-	line := fmt.Sprintf("%-4s %-10s %-9s %6s %9s  %-24s %s", task.ID, agentLabel(task), string(task.Status), elapsed, toolsColumn, detail, label)
+	line := fmt.Sprintf("%-4s %-10s %-9s %6s %9s  %-24s %s", task.ID, definitionLabel(task), string(task.Status), elapsed, toolsColumn, detail, TaskLabel(task))
 	return strings.TrimRight(line, " ")
 }
 

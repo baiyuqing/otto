@@ -236,6 +236,31 @@ func TestTaskCommandCancel(t *testing.T) {
 	}
 }
 
+func TestTaskCommandByName(t *testing.T) {
+	tasks := agent.NewTasks()
+	canceled := false
+	added, err := tasks.Add(agent.Task{Name: "lint-check", Description: "review"}, func() { canceled = true }, nil)
+	if err != nil {
+		t.Fatalf("Add() = %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	backend := &fakeBackend{tasks: tasks}
+	r := New(strings.NewReader("/task lint-check\n/task cancel lint-check\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, added.ID) {
+		t.Fatalf("stdout missing task id %q shown by name: %q", added.ID, out)
+	}
+	if !canceled {
+		t.Fatal("Cancel func was not invoked by name")
+	}
+	if !strings.Contains(out, "canceled lint-check") {
+		t.Fatalf("stdout = %q, want it to confirm the cancel by name", out)
+	}
+}
+
 func TestTaskCommandUnknownID(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	backend := &fakeBackend{tasks: agent.NewTasks(), prompt: func(_ context.Context, prompt string, _ func(agent.Event)) error {

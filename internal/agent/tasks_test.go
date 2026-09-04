@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,6 +224,108 @@ func TestTasksLifecycle(t *testing.T) {
 	if _, err := tasks.Add(Task{}, nil, nil); err == nil {
 		t.Fatal("Add() after Close() succeeded")
 	}
+}
+
+func TestTasksNames(t *testing.T) {
+	t.Run("Get/History/Cancel/Wait resolve a name to the same task as its id", func(t *testing.T) {
+		tasks := NewTasks()
+		canceled := false
+		history := []model.Message{{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "child prompt"}}}}
+		task, err := tasks.Add(Task{Name: "lint-check", Prompt: "lint"}, func() { canceled = true }, func() []model.Message { return history })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.ID != "t1" || task.Name != "lint-check" {
+			t.Fatalf("Add() = %#v", task)
+		}
+		byID, ok := tasks.Get("t1")
+		if !ok {
+			t.Fatal("Get(id) missing")
+		}
+		if byName, ok := tasks.Get("lint-check"); !ok || byName != byID {
+			t.Fatalf("Get(name) = %#v, %v, want %#v", byName, ok, byID)
+		}
+		if h, ok := tasks.History("lint-check"); !ok || len(h) != 1 || h[0].Text() != "child prompt" {
+			t.Fatalf("History(name) = %#v, %v", h, ok)
+		}
+
+		waitErr := make(chan error, 1)
+		go func() {
+			_, err := tasks.Wait(context.Background(), "lint-check")
+			waitErr <- err
+		}()
+		select {
+		case <-waitErr:
+			t.Fatal("Wait(name) returned before the task finished")
+		case <-time.After(20 * time.Millisecond):
+		}
+
+		if err := tasks.Cancel("lint-check"); err != nil || !canceled {
+			t.Fatalf("Cancel(name) err = %v, canceled = %v", err, canceled)
+		}
+		tasks.Update("t1", func(task *Task) { task.Status = TaskCanceled })
+		if err := <-waitErr; err != nil {
+			t.Fatalf("Wait(name) error = %v", err)
+		}
+	})
+
+	t.Run("duplicate name is rejected and names the existing id", func(t *testing.T) {
+		tasks := NewTasks()
+		if _, err := tasks.Add(Task{Name: "lint-check"}, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		_, err := tasks.Add(Task{Name: "lint-check"}, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), `"lint-check" already used by t1`) {
+			t.Fatalf("Add() duplicate name error = %v", err)
+		}
+	})
+
+	t.Run("a name of the form tN is reserved for task ids, even when no such task exists", func(t *testing.T) {
+		tasks := NewTasks()
+		_, err := tasks.Add(Task{Name: "t7"}, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), `"t7" is reserved for task ids`) {
+			t.Fatalf("Add() reserved-name error = %v", err)
+		}
+		if _, ok := tasks.Get("t7"); ok {
+			t.Fatal("Get(\"t7\") found a task that was never created")
+		}
+	})
+
+	t.Run("an invalid name is rejected", func(t *testing.T) {
+		tasks := NewTasks()
+		for _, name := range []string{"bad name", strings.Repeat("a", 65)} {
+			_, err := tasks.Add(Task{Name: name}, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "is invalid") {
+				t.Fatalf("Add(%q) error = %v, want it to mention \"is invalid\"", name, err)
+			}
+		}
+	})
+
+	t.Run("a rejected Add does not consume an id", func(t *testing.T) {
+		tasks := NewTasks()
+		if _, err := tasks.Add(Task{Name: "bad name"}, nil, nil); err == nil {
+			t.Fatal("expected an error")
+		}
+		task, err := tasks.Add(Task{}, nil, nil)
+		if err != nil || task.ID != "t1" {
+			t.Fatalf("Add() after a rejected Add = %#v, %v, want id t1", task, err)
+		}
+	})
+
+	t.Run("two unnamed tasks do not collide", func(t *testing.T) {
+		tasks := NewTasks()
+		first, err := tasks.Add(Task{}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := tasks.Add(Task{}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.ID == second.ID {
+			t.Fatalf("unnamed tasks got the same id: %q", first.ID)
+		}
+	})
 }
 
 func TestTasksWaitHonorsContext(t *testing.T) {

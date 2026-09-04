@@ -134,6 +134,8 @@ components:
       properties:
         id:
           type: string
+        name:
+          type: string
         agent:
           type: string
         description:
@@ -277,6 +279,7 @@ components:
       name: task_id
       in: path
       required: true
+      description: Task id or name.
       schema:
         type: string
     after:

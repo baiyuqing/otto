@@ -571,6 +571,121 @@ func TestAgentToolNamedAgentStartedMessage(t *testing.T) {
 	}
 }
 
+// A named task's started message shows its name before the parenthesized
+// agent name.
+func TestAgentToolNameInStartedMessage(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	agentTool := toolByName(t, runner.Tools(), "agent")
+	result := agentTool.Execute(context.Background(), json.RawMessage(`{"prompt":"go","name":"lint-check"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if result.Content != "task t1 lint-check (default) started" {
+		t.Fatalf("content = %q, want %q", result.Content, "task t1 lint-check (default) started")
+	}
+}
+
+// A second agent call reusing a name already used in this session (even by
+// a still-running task) returns an error result and starts no task.
+func TestAgentToolDuplicateNameIsErrorResult(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	agentTool := toolByName(t, runner.Tools(), "agent")
+	first := agentTool.Execute(context.Background(), json.RawMessage(`{"prompt":"go","name":"lint-check"}`))
+	if first.IsError {
+		t.Fatalf("unexpected error: %s", first.Content)
+	}
+	second := agentTool.Execute(context.Background(), json.RawMessage(`{"prompt":"go again","name":"lint-check"}`))
+	if !second.IsError {
+		t.Fatal("expected an error result")
+	}
+	if !strings.Contains(second.Content, "already used by t1") {
+		t.Fatalf("content = %q, want it to mention %q", second.Content, "already used by t1")
+	}
+	if len(tasks.List()) != 1 {
+		t.Fatalf("expected exactly 1 task, got %d", len(tasks.List()))
+	}
+}
+
+// agent_wait accepts a task name in task_id and removes the notification
+// under the task's real id.
+func TestAgentWaitByNameRemovesNotification(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if _, err := runner.Start(StartRequest{Prompt: "go", Name: "lint-check"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	waitTool := toolByName(t, runner.Tools(), "agent_wait")
+	result := waitTool.Execute(context.Background(), json.RawMessage(`{"task_id":"lint-check"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	final, _ := tasks.Get("t1")
+	if want := CompletionText(final, cfg.MaxOutputBytes); result.Content != want {
+		t.Fatalf("content = %q, want %q", result.Content, want)
+	}
+	if tasks.Pending() != 0 {
+		t.Fatalf("Pending() = %d, want 0", tasks.Pending())
+	}
+}
+
+// agent_status accepts a task name in task_id for both the detail view and
+// rejects an unknown name the same way it rejects an unknown id.
+func TestAgentStatusByName(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	if _, err := runner.Start(StartRequest{Prompt: "go", Name: "lint-check"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := tasks.Wait(ctx, "t1"); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+
+	statusTool := toolByName(t, runner.Tools(), "agent_status")
+	result := statusTool.Execute(context.Background(), json.RawMessage(`{"task_id":"lint-check"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if !strings.Contains(result.Content, "t1") || !strings.Contains(result.Content, "succeeded") {
+		t.Fatalf("detail = %q, want it to mention t1 and succeeded", result.Content)
+	}
+}
+
 // The agent tool's model parameter still overrides a named definition's
 // model, which itself falls back to the session's when the call omits it.
 func TestAgentToolModelSelectionWithDefinition(t *testing.T) {

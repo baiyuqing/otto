@@ -67,12 +67,17 @@ func TaskDetail(task agent.Task) string {
 }
 
 // TaskLabel is a task's description, or the first 60 runes of its prompt
-// collapsed to one line when no description was given.
+// collapsed to one line when no description was given, prefixed by the
+// task's name and ": " when it has one.
 func TaskLabel(task agent.Task) string {
-	if task.Description != "" {
-		return task.Description
+	label := task.Description
+	if label == "" {
+		label = FirstRunes(OneLine(task.Prompt), 60)
 	}
-	return FirstRunes(OneLine(task.Prompt), 60)
+	if task.Name != "" {
+		label = task.Name + ": " + label
+	}
+	return label
 }
 
 // OneLine collapses s to a single line, joining fields with a single space.

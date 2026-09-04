@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ const (
 // frontends.
 type Task struct {
 	ID          string
+	Name        string
 	Agent       string
 	Description string
 	Prompt      string
@@ -56,6 +59,15 @@ func (t Task) Final() bool {
 
 var errTasksClosed = errors.New("task registry closed")
 
+// taskNamePattern matches a valid task name: 1 to 64 letters, digits, '_'
+// or '-', starting with a letter or digit. The length is checked
+// separately so the error message can report it precisely.
+var taskNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+
+// reservedTaskNamePattern matches the shape of an auto-assigned task id
+// ("t" followed by digits), which a caller-supplied name may not use.
+var reservedTaskNamePattern = regexp.MustCompile(`^t[0-9]+$`)
+
 // ErrTaskNotFound and ErrTaskFinished are wrapped by Cancel and Wait so
 // callers can classify the failure with errors.Is.
 var (
@@ -80,6 +92,7 @@ type Tasks struct {
 	counter int
 	order   []string
 	entries map[string]*taskEntry
+	names   map[string]string
 	updates chan struct{}
 	inbox   *Inbox
 }
@@ -88,6 +101,7 @@ type Tasks struct {
 func NewTasks() *Tasks {
 	t := &Tasks{
 		entries: make(map[string]*taskEntry),
+		names:   make(map[string]string),
 		updates: make(chan struct{}, 1),
 	}
 	t.inbox = NewInbox(t.signal)
@@ -96,20 +110,56 @@ func NewTasks() *Tasks {
 
 // Add registers a new task, assigning it the next "tN" id and TaskQueued
 // status regardless of the status passed in. cancel and history may be nil.
+//
+// task.Name, after trimming whitespace, is validated and reserved for the
+// life of the registry (finished tasks included): empty means no name;
+// otherwise it must be 1 to 64 bytes of letters, digits, '_' or '-'
+// starting with a letter or digit, must not look like a task id ("t"
+// followed by digits), and must not already be in use. Any validation
+// error leaves the registry unchanged: no id is consumed.
 func (t *Tasks) Add(task Task, cancel func(), history func() []model.Message) (Task, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
 		return Task{}, errTasksClosed
 	}
+	name := strings.TrimSpace(task.Name)
+	if name != "" {
+		if len(name) > 64 || !taskNamePattern.MatchString(name) {
+			return Task{}, fmt.Errorf("task name %q is invalid: 1 to 64 letters, digits, '_' or '-', starting with a letter or digit", name)
+		}
+		if reservedTaskNamePattern.MatchString(name) {
+			return Task{}, fmt.Errorf("task name %q is reserved for task ids", name)
+		}
+		if existingID, ok := t.names[name]; ok {
+			return Task{}, fmt.Errorf("task name %q already used by %s", name, existingID)
+		}
+	}
 	t.counter++
 	task.ID = fmt.Sprintf("t%d", t.counter)
+	task.Name = name
 	task.Status = TaskQueued
 	entry := &taskEntry{task: task, cancel: cancel, history: history, done: make(chan struct{})}
 	t.entries[task.ID] = entry
 	t.order = append(t.order, task.ID)
+	if name != "" {
+		t.names[name] = task.ID
+	}
 	t.signalLocked()
 	return entry.task, nil
+}
+
+// entryLocked resolves ref as a task id, then as a task name. Caller must
+// hold t.mu.
+func (t *Tasks) entryLocked(ref string) (*taskEntry, bool) {
+	if entry, ok := t.entries[ref]; ok {
+		return entry, true
+	}
+	if id, ok := t.names[ref]; ok {
+		entry, ok := t.entries[id]
+		return entry, ok
+	}
+	return nil, false
 }
 
 // Update applies fn to the task under the registry lock. When the task
@@ -149,14 +199,15 @@ func (t *Tasks) List() []Task {
 	return list
 }
 
-// Get returns a copy of one task.
-func (t *Tasks) Get(id string) (Task, bool) {
+// Get returns a copy of one task, resolving ref as a task id or a task
+// name.
+func (t *Tasks) Get(ref string) (Task, bool) {
 	if t == nil {
 		return Task{}, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	entry, ok := t.entries[id]
+	entry, ok := t.entryLocked(ref)
 	if !ok {
 		return Task{}, false
 	}
@@ -165,13 +216,14 @@ func (t *Tasks) Get(id string) (Task, bool) {
 
 // History returns the task's child session messages, calling the stored
 // history func outside the registry lock. It returns nil, true when the
-// task exists but has no history func.
-func (t *Tasks) History(id string) ([]model.Message, bool) {
+// task exists but has no history func. ref may be a task id or a task
+// name.
+func (t *Tasks) History(ref string) ([]model.Message, bool) {
 	if t == nil {
 		return nil, false
 	}
 	t.mu.Lock()
-	entry, ok := t.entries[id]
+	entry, ok := t.entryLocked(ref)
 	t.mu.Unlock()
 	if !ok {
 		return nil, false
@@ -183,21 +235,21 @@ func (t *Tasks) History(id string) ([]model.Message, bool) {
 }
 
 // Cancel invokes the task's cancel func outside the registry lock. It
-// errors for an unknown id or an already-final task; it does not itself
-// change the task's status.
-func (t *Tasks) Cancel(id string) error {
+// errors for an unknown ref (a task id or a task name) or an already-final
+// task; it does not itself change the task's status.
+func (t *Tasks) Cancel(ref string) error {
 	if t == nil {
-		return fmt.Errorf("task %q %w", id, ErrTaskNotFound)
+		return fmt.Errorf("task %q %w", ref, ErrTaskNotFound)
 	}
 	t.mu.Lock()
-	entry, ok := t.entries[id]
+	entry, ok := t.entryLocked(ref)
 	if !ok {
 		t.mu.Unlock()
-		return fmt.Errorf("task %q %w", id, ErrTaskNotFound)
+		return fmt.Errorf("task %q %w", ref, ErrTaskNotFound)
 	}
 	if entry.task.Final() {
 		t.mu.Unlock()
-		return fmt.Errorf("task %q %w", id, ErrTaskFinished)
+		return fmt.Errorf("task %q %w", ref, ErrTaskFinished)
 	}
 	cancel := entry.cancel
 	t.mu.Unlock()
@@ -207,16 +259,17 @@ func (t *Tasks) Cancel(id string) error {
 	return nil
 }
 
-// Wait blocks until the task reaches a final status or ctx is done.
-func (t *Tasks) Wait(ctx context.Context, id string) (Task, error) {
+// Wait blocks until the task reaches a final status or ctx is done. ref may
+// be a task id or a task name.
+func (t *Tasks) Wait(ctx context.Context, ref string) (Task, error) {
 	if t == nil {
-		return Task{}, fmt.Errorf("task %q %w", id, ErrTaskNotFound)
+		return Task{}, fmt.Errorf("task %q %w", ref, ErrTaskNotFound)
 	}
 	t.mu.Lock()
-	entry, ok := t.entries[id]
+	entry, ok := t.entryLocked(ref)
 	t.mu.Unlock()
 	if !ok {
-		return Task{}, fmt.Errorf("task %q %w", id, ErrTaskNotFound)
+		return Task{}, fmt.Errorf("task %q %w", ref, ErrTaskNotFound)
 	}
 	select {
 	case <-entry.done:

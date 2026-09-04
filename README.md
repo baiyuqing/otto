@@ -379,11 +379,11 @@ Design reference: [`docs/specs/2026-09-03-skills-design.md`](docs/specs/2026-09-
 
 The `agent` tool starts a child agent loop in the same workspace, sandbox, and provider as the parent, on the session model, the definition's `model`, or the `model` given in the call. The context is fresh by default — the child's session holds only its own system prompt and the delegated prompt, not the parent's conversation — or, with `context: inherit`, a copy of the conversation up to the call. The child runs asynchronously in a goroutine while the parent keeps working.
 
-Parameters: `prompt` (required), `description` (optional, capped at 80 characters, shown in status output), `wait` (optional bool: start the task and block until it ends, returning its result instead of its id), `model` (optional, provider model id; not validated by Otto), `agent` (optional, name of a definition from the `## Agents` prompt section; an unknown name returns the error result `unknown agent: <name>; available: …`), `context` (optional, `fresh` or `inherit`; default `fresh` or the definition's `context`). Precedence: call `model` > definition `model` > session model; call `context` > definition `context` > `fresh`.
+Parameters: `prompt` (required), `description` (optional, capped at 80 characters, shown in status output), `name` (optional; unique per session; 1 to 64 letters, digits, `_` or `-`; not of the form `tN`; usable instead of the task id in `agent_wait`, `agent_status`, `/task`, and the task routes; a name already used in the session, including by a finished task, returns an error result and no task is created), `wait` (optional bool: start the task and block until it ends, returning its result instead of its id), `model` (optional, provider model id; not validated by Otto), `agent` (optional, name of a definition from the `## Agents` prompt section; an unknown name returns the error result `unknown agent: <name>; available: …`), `context` (optional, `fresh` or `inherit`; default `fresh` or the definition's `context`). Precedence: call `model` > definition `model` > session model; call `context` > definition `context` > `fresh`.
 
 Otto keeps no model list or price data; the model chooses which model id to pass, and an id the endpoint rejects fails the task with the provider's error.
 
-Result: `task t3 (default) started`, or `task t3 (reviewer) started` for a named definition, or `task t3 (default) queued (4 running, limit 4)` once four children are already running.
+Result: `task t3 (default) started`, or `task t3 (reviewer) started` for a named definition, or `task t3 (default) queued (4 running, limit 4)` once four children are already running. With `name` set: `task t2 lint-check (reviewer) started`.
 
 ### Agent definitions
 
@@ -451,8 +451,8 @@ max_parallel = 4                            # default; concurrent children per s
 
 What's wired:
 
-- **`agent_wait`**: blocks the parent turn until selected tasks finish. Parameters: `task_id` (optional; omitted waits for every queued or running task), `timeout_seconds` (optional, default 600, max 3600). Returns each task's completion text. A canceled turn ends the wait with `wait canceled; still running: ...`; the tasks keep running. A timeout returns `timed out after Ns; still running: ...`.
-- **`agent_status`**: without `task_id`, one line per task (id, status, elapsed time, tool count, current activity or final token total, and a label). With `task_id`, that line plus the task's last 10 steps and, once finished, its result or error.
+- **`agent_wait`**: blocks the parent turn until selected tasks finish. Parameters: `task_id` (optional, id or name; omitted waits for every queued or running task), `timeout_seconds` (optional, default 600, max 3600). Returns each task's completion text. A canceled turn ends the wait with `wait canceled; still running: ...`; the tasks keep running. A timeout returns `timed out after Ns; still running: ...`.
+- **`agent_status`**: without `task_id`, one line per task (id, status, elapsed time, tool count, current activity or final token total, and a label). With `task_id` (id or name), that line plus the task's last 10 steps and, once finished, its result or error.
 - **Notifications**: a finished task pushes a `[task-notification]` message into the parent's inbox, for example:
 
   ```
@@ -464,10 +464,10 @@ What's wired:
   ```
 
   (A `failed` task shows its error instead of the report; a `canceled` task shows neither; both omit the token count.) The notification is appended to the session as a display context message and persisted as a Pi v3 `custom_message` entry, so `/resume` still shows it. A finished task with no active turn wakes the REPL, the TUI, or `otto serve` automatically and runs an empty-text turn to deliver it; the TUI truncates a notification body longer than 20 lines in the transcript, with a `… (N more lines; /task <id>)` trailer.
-- **`otto serve`**: each open session runs a goroutine that starts an empty-text turn (`trigger: "task"` in the turn summary and the session's `turn` field) whenever a task notification is pending and no turn is already running, so a client streaming the session's turns sees task results without polling. `GET /v1/sessions/{id}/tasks` lists the session's tasks, `GET /v1/sessions/{id}/tasks/{task_id}` returns one task plus its child session's history, and `POST /v1/sessions/{id}/tasks/{task_id}/cancel` cancels it. SSE clients also receive the notification directly as a `notification` event (`task_id`, `text`, `usage`). Metrics: `otto_tasks_started_total`, `otto_tasks_finished_total{status}`, `otto_tasks_running`. See `docs/specs/2026-09-03-agent-server-design.md` "Sub-agent tasks".
+- **`otto serve`**: each open session runs a goroutine that starts an empty-text turn (`trigger: "task"` in the turn summary and the session's `turn` field) whenever a task notification is pending and no turn is already running, so a client streaming the session's turns sees task results without polling. `GET /v1/sessions/{id}/tasks` lists the session's tasks, `GET /v1/sessions/{id}/tasks/{task_id}` returns one task plus its child session's history, and `POST /v1/sessions/{id}/tasks/{task_id}/cancel` cancels it; `{task_id}` accepts a task id or a name, and the wire form carries a `name` field when the task has one. SSE clients also receive the notification directly as a `notification` event (`task_id`, `text`, `usage`). Metrics: `otto_tasks_started_total`, `otto_tasks_finished_total{status}`, `otto_tasks_running`. See `docs/specs/2026-09-03-agent-server-design.md` "Sub-agent tasks".
 - **Child tool set**: the parent's tools minus `agent`, `agent_wait`, `agent_status`, `remember`, `forget`, and `memory_search` — no memory recall, no nested delegation. `bash` runs under the same sandbox mode as the parent.
 - **Concurrency**: at most `[agents].max_parallel` children (default 4) run at once per session; further `agent` calls wait in the `queued` state and can still be canceled.
-- **REPL and TUI commands**: `/tasks` lists every task in the session; `/task <id>` shows one task's line, its recent steps, and its result or error once finished; `/task cancel <id>` cancels a queued or running task.
+- **REPL and TUI commands**: `/tasks` lists every task in the session; `/task <id|name>` shows one task's line, its recent steps, and its result or error once finished; `/task cancel <id|name>` cancels a queued or running task.
 
   ```
   > /tasks
@@ -476,7 +476,7 @@ What's wired:
   ```
 - **TUI task panel**: while at least one task is queued or running, the TUI shows a panel between the transcript and the input box: a header line, then up to 5 task rows in the same format as `/tasks`, then a `+N more` line when more tasks exist. The panel is absent when no task is queued or running.
 - **Session replacement**: `/new`, `/resume`, and `/model` close the current session's task registry, canceling every queued or running task; the TUI then appends a `canceled N running tasks` notice to the new transcript when `N` is greater than zero. Archiving the current session with `/archive` replaces it the same way and cancels tasks too; archiving another session does not.
-- **Cancellation**: Esc/Ctrl-C cancels the parent's turn only; canceling a task needs `/task cancel <id>`.
+- **Cancellation**: Esc/Ctrl-C cancels the parent's turn only; canceling a task needs `/task cancel <id|name>`.
 
 Not yet implemented:
 

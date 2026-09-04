@@ -325,6 +325,28 @@ func TestGetTaskRouteWithHistory(t *testing.T) {
 	}
 }
 
+func TestGetTaskRouteByName(t *testing.T) {
+	tasks := agent.NewTasks()
+	task, err := tasks.Add(agent.Task{Name: "lint-check", Agent: "reviewer", Description: "review PR"}, nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	ts, sessID := newTasksTestServer(t, tasks)
+
+	resp := doJSON(t, ts, "GET", "/v1/sessions/"+sessID+"/tasks/lint-check", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		taskWire
+		History []model.Message `json:"history"`
+	}
+	decodeJSON(t, resp, &got)
+	if got.ID != task.ID || got.Name != "lint-check" {
+		t.Fatalf("task = %+v, want id %q name lint-check", got.taskWire, task.ID)
+	}
+}
+
 func TestGetTaskRouteUnknownID(t *testing.T) {
 	tasks := agent.NewTasks()
 	ts, sessID := newTasksTestServer(t, tasks)

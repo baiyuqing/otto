@@ -158,6 +158,10 @@ func NewRunner(config Config) (*Runner, []string, error) {
 type StartRequest struct {
 	Prompt      string
 	Description string
+	// Name is an optional task name, unique for the session (including
+	// finished tasks); see agent.Tasks.Add for the validation rules. Empty
+	// means no name.
+	Name string
 	// Model is the provider model id the child runs on. Empty (or
 	// whitespace-only) falls back to the definition's model, then
 	// Config.Options.Model.
@@ -231,6 +235,7 @@ func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 	}
 
 	task, err := r.config.Tasks.Add(agent.Task{
+		Name:        strings.TrimSpace(request.Name),
 		Agent:       def.Name,
 		Description: description,
 		Prompt:      request.Prompt,
@@ -426,10 +431,23 @@ func CompletionText(task agent.Task, maxOutputBytes int) string {
 	}
 }
 
-// agentLabel is the parenthesized name shown after a task id, e.g.
-// "(default)" or "(explorer)". Task.Agent is the catalog definition name,
-// or "" for the default sub-agent.
+// agentLabel is the label shown after a task id: the parenthesized
+// definition name, e.g. "(default)" or "(explorer)", prefixed by the
+// task's name and a space when it has one, e.g. "lint-check (explorer)".
+// Task.Agent is the catalog definition name, or "" for the default
+// sub-agent.
 func agentLabel(task agent.Task) string {
+	label := definitionLabel(task)
+	if task.Name != "" {
+		label = task.Name + " " + label
+	}
+	return label
+}
+
+// definitionLabel is the parenthesized definition name alone, e.g.
+// "(default)" or "(explorer)"; statusLine uses it for its definition column
+// so a task name appears only once per line, in the label.
+func definitionLabel(task agent.Task) string {
 	name := task.Agent
 	if name == "" {
 		name = "default"

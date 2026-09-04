@@ -177,6 +177,7 @@ func TestTaskCommandShowsStepsAndResult(t *testing.T) {
 	tasks.Update(added.ID, func(task *agent.Task) {
 		task.Status = agent.TaskSucceeded
 		task.Result = "no issues found"
+		task.Model = "gpt-test-model"
 	})
 	var stdout, stderr bytes.Buffer
 	backend := &fakeBackend{tasks: tasks}
@@ -186,6 +187,7 @@ func TestTaskCommandShowsStepsAndResult(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
+		"model: gpt-test-model",
 		"→ read " + `{"path":"main.go"}`,
 		"assistant: looks fine",
 		"result: no issues found",
@@ -193,6 +195,17 @@ func TestTaskCommandShowsStepsAndResult(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout missing %q: %q", want, out)
 		}
+	}
+	lines := strings.Split(out, "\n")
+	modelIdx := -1
+	for i, line := range lines {
+		if line == "model: gpt-test-model" {
+			modelIdx = i
+			break
+		}
+	}
+	if modelIdx <= 0 || !strings.Contains(lines[modelIdx-1], added.ID) {
+		t.Fatalf("expected model line right after the task line, got: %q", out)
 	}
 	if strings.Contains(out, "review please") {
 		t.Fatalf("stdout should not render the delegated prompt as a step: %q", out)

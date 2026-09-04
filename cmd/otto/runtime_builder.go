@@ -273,6 +273,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 	// by the parent's final system prompt and the sub-agent runner's
 	// PromptFor closure, computed once so both stay in sync.
 	promptTail := redactor.RedactString(workspaceContextFor(b.workspacePath, time.Now()) + skillSection)
+	endpointHost := endpointHostFor(runtime.BaseURL)
 	compaction := agent.CompactionSettings{
 		Auto:             runtime.Compaction.Auto,
 		HardInputWindow:  runtime.Compaction.HardInputWindow,
@@ -289,7 +290,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 			Provider: client, Tools: tools, Redactor: redactor,
 			Options: agent.Options{Model: runtime.Model, Thinking: runtime.Thinking, Compaction: compaction},
 			PromptFor: func(defs []model.ToolDefinition) string {
-				return systemPromptFor(defs, b.effectiveSandboxInfo()) + promptTail
+				return systemPromptFor(defs, b.effectiveSandboxInfo(), runtime.Provider, endpointHost, runtime.Model) + promptTail
 			},
 			Header: current.Header(), Tasks: tasks, MaxParallel: defaultMaxParallelAgents, MaxOutputBytes: runtime.MaxOutputBytes,
 		})
@@ -310,7 +311,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		}
 		return nil, fmt.Errorf("create tool registry: %w", err)
 	}
-	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo()) + promptTail
+	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo(), runtime.Provider, endpointHost, runtime.Model) + promptTail
 	return agent.New(client, registry, current, agent.Options{
 		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
 		Compaction:              compaction,
@@ -1019,12 +1020,17 @@ func (b runtimeBuilder) boundaryFieldsUnchanged(redactor *agent.Redactor, runtim
 	if b.workspacePath != "" && redactor.RedactString(b.workspacePath) != b.workspacePath {
 		return false
 	}
+	var promptProvider, promptModel, endpointHost string
 	if runtime != nil {
+		promptProvider = runtime.Provider
+		promptModel = runtime.Model
+		endpointHost = endpointHostFor(runtime.BaseURL)
 		for _, value := range []string{
 			runtime.Provider,
 			runtime.Profile,
 			runtime.Model,
 			runtime.Thinking,
+			endpointHost,
 			strconv.Itoa(runtime.Compaction.ContextWindow),
 		} {
 			if redactor.RedactString(value) != value {
@@ -1039,8 +1045,22 @@ func (b runtimeBuilder) boundaryFieldsUnchanged(redactor *agent.Redactor, runtim
 	if !boundaryValueUnchanged(redactor, definitions) {
 		return false
 	}
-	prompt := systemPromptFor(definitions, b.plannedSandboxInfo())
+	prompt := systemPromptFor(definitions, b.plannedSandboxInfo(), promptProvider, endpointHost, promptModel)
 	return redactor.RedactString(prompt) == prompt
+}
+
+// endpointHostFor returns the host[:port] of baseURL, never its userinfo,
+// path, or query (which may carry secrets); "" when baseURL is empty or
+// unparsable.
+func endpointHostFor(baseURL string) string {
+	if baseURL == "" {
+		return ""
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
 }
 
 func (b runtimeBuilder) boundaryToolDefinitions(runtime *config.Runtime) []model.ToolDefinition {

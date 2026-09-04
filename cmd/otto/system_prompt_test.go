@@ -61,7 +61,7 @@ func TestSystemPromptForSandboxPoliciesAndRegisteredToolOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prompt := systemPromptFor(definitions, tt.info)
+			prompt := systemPromptFor(definitions, tt.info, "", "", "")
 			if !strings.Contains(prompt, tt.wantTools) || !strings.HasSuffix(prompt, tt.wantPolicy) {
 				t.Fatalf("system prompt = %q, want tools %q and final policy %q", prompt, tt.wantTools, tt.wantPolicy)
 			}
@@ -87,7 +87,7 @@ func TestSystemPromptUsesOnlyActualSafeDefinitions(t *testing.T) {
 	}
 	prompt := systemPromptFor(definitions, app.SandboxInfo{
 		Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkDenied, BashAvailable: true, Reason: app.SandboxReasonNone,
-	})
+	}, "", "", "")
 	if !strings.Contains(prompt, "Usable tools: zeta, alpha-2.") {
 		t.Fatalf("system prompt did not preserve safe definition order: %q", prompt)
 	}
@@ -110,7 +110,7 @@ func TestSystemPromptUnavailableAndInvalidStatesNeverExposeReasonOrBashTool(t *t
 		{Mode: app.SandboxSeatbelt, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone},
 	}
 	for index, info := range states {
-		prompt := systemPromptFor(definitions, info)
+		prompt := systemPromptFor(definitions, info, "", "", "")
 		if !strings.Contains(prompt, "Usable tools: read, write.") || !strings.HasSuffix(prompt, "Sandbox policy: Bash is unavailable.") {
 			t.Fatalf("state %d system prompt = %q, want fail-closed tool list and policy", index, prompt)
 		}
@@ -123,17 +123,38 @@ func TestSystemPromptUnavailableAndInvalidStatesNeverExposeReasonOrBashTool(t *t
 func TestSystemPromptForIncludesAgentGuidanceLineWhenAgentToolPresent(t *testing.T) {
 	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "agent"}, {Name: "agent_wait"}, {Name: "agent_status"}}
 	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
-	const want = "Use the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result."
-	prompt := systemPromptFor(definitions, info)
+	prompt := systemPromptFor(definitions, info, "openai-compatible", "gw.example.com", "gpt-test")
+	want := agentGuidance("openai-compatible", "gw.example.com", "gpt-test")
 	if !strings.HasSuffix(prompt, want) {
-		t.Fatalf("system prompt = %q, want it to end with the agent guidance line %q", prompt, want)
+		t.Fatalf("system prompt = %q, want it to end with the agent guidance %q", prompt, want)
+	}
+	const wantDetail = "provider: openai-compatible, endpoint: gw.example.com, this session's model: gpt-test"
+	if !strings.Contains(prompt, wantDetail) {
+		t.Fatalf("system prompt = %q, want it to contain %q", prompt, wantDetail)
+	}
+}
+
+// TestSystemPromptForAgentGuidanceOmitsEndpointSegmentWhenHostEmpty covers an
+// empty endpointHost (as produced by endpointHostFor for an empty or
+// unparsable BaseURL): the "endpoint: " segment must be dropped entirely
+// rather than rendered empty.
+func TestSystemPromptForAgentGuidanceOmitsEndpointSegmentWhenHostEmpty(t *testing.T) {
+	definitions := []model.ToolDefinition{{Name: "agent"}}
+	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
+	prompt := systemPromptFor(definitions, info, "openai-compatible", "", "gpt-test")
+	if strings.Contains(prompt, "endpoint:") {
+		t.Fatalf("system prompt = %q, want no endpoint segment when endpointHost is empty", prompt)
+	}
+	const wantDetail = "provider: openai-compatible, this session's model: gpt-test"
+	if !strings.Contains(prompt, wantDetail) {
+		t.Fatalf("system prompt = %q, want it to contain %q", prompt, wantDetail)
 	}
 }
 
 func TestSystemPromptForOmitsAgentGuidanceLineWithoutAgentTool(t *testing.T) {
 	definitions := []model.ToolDefinition{{Name: "read"}, {Name: "write"}}
 	info := app.SandboxInfo{Mode: app.SandboxOff, Network: app.SandboxNetworkUnconfined, BashAvailable: true, Reason: app.SandboxReasonNone}
-	prompt := systemPromptFor(definitions, info)
+	prompt := systemPromptFor(definitions, info, "", "", "")
 	if strings.Contains(prompt, "Use the agent tool to delegate") {
 		t.Fatalf("system prompt = %q, want no agent guidance line without an agent tool", prompt)
 	}
@@ -151,7 +172,7 @@ func TestSystemPromptLegacyOffExactText(t *testing.T) {
 		"Inspect the workspace before changing it. Prefer exact, minimal changes.\n" +
 		"Report what changed and what verification ran.\n" +
 		"Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Sandbox policy: Bash is unsandboxed and has the current macOS user's access."
-	if got := systemPromptFor(definitions, info); got != want {
+	if got := systemPromptFor(definitions, info, "", "", ""); got != want {
 		t.Fatalf("systemPromptFor() = %q, want %q", got, want)
 	}
 }

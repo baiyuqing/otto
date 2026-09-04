@@ -132,42 +132,92 @@ func TestChildSystemPromptShape(t *testing.T) {
 // Test 4: running a sub-agent task through a redactor holding a real secret
 // leaves that redactor able to redact the secret afterward. A naive
 // implementation that fed the raw (unredacted) Model into agent.New would
-// trip the boundary-mutation guard and permanently disable it.
+// trip the boundary-mutation guard and permanently disable it. This holds
+// whether the secret arrives as the parent's configured model or as a
+// per-call model argument.
 func TestSharedRedactorNotMutatedBySubagentRun(t *testing.T) {
-	fp := newFakeProvider()
-	fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
-
-	tasks := agent.NewTasks()
-	defer tasks.Close()
-
 	secret := "sk-supersecret123"
-	redactor := agent.NewRedactor([]string{secret})
 
-	cfg := newTestConfig(fp, tasks)
-	cfg.Redactor = redactor
-	cfg.Options.Model = secret
+	t.Run("parent model contains the secret", func(t *testing.T) {
+		fp := newFakeProvider()
+		fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
 
-	runner, err := NewRunner(cfg)
-	if err != nil {
-		t.Fatalf("NewRunner: %v", err)
-	}
-	if _, err := runner.Start(StartRequest{Prompt: "go"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+		tasks := agent.NewTasks()
+		defer tasks.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	final, err := tasks.Wait(ctx, "t1")
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if final.Status != agent.TaskSucceeded {
-		t.Fatalf("status = %s, want succeeded", final.Status)
-	}
+		redactor := agent.NewRedactor([]string{secret})
 
-	if got := redactor.RedactString(secret); got == secret {
-		t.Fatal("redactor no longer redacts its configured secret; shared redactor was corrupted")
-	}
+		cfg := newTestConfig(fp, tasks)
+		cfg.Redactor = redactor
+		cfg.Options.Model = secret
+
+		runner, err := NewRunner(cfg)
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		if _, err := runner.Start(StartRequest{Prompt: "go"}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		final, err := tasks.Wait(ctx, "t1")
+		if err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if final.Status != agent.TaskSucceeded {
+			t.Fatalf("status = %s, want succeeded", final.Status)
+		}
+
+		if got := redactor.RedactString(secret); got == secret {
+			t.Fatal("redactor no longer redacts its configured secret; shared redactor was corrupted")
+		}
+	})
+
+	t.Run("per-call model contains the secret", func(t *testing.T) {
+		fp := newFakeProvider()
+		fp.addRoute(matchAny, routeStep{resp: assistantText("done", model.Usage{})})
+
+		tasks := agent.NewTasks()
+		defer tasks.Close()
+
+		redactor := agent.NewRedactor([]string{secret})
+
+		cfg := newTestConfig(fp, tasks)
+		cfg.Redactor = redactor
+		cfg.Options.Model = "gpt-parent"
+
+		runner, err := NewRunner(cfg)
+		if err != nil {
+			t.Fatalf("NewRunner: %v", err)
+		}
+		if _, err := runner.Start(StartRequest{Prompt: "go", Model: secret}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		final, err := tasks.Wait(ctx, "t1")
+		if err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+		if final.Status != agent.TaskSucceeded {
+			t.Fatalf("status = %s, want succeeded", final.Status)
+		}
+
+		wantRedacted := redactor.RedactString(secret)
+		reqs := fp.requests()
+		if len(reqs) == 0 {
+			t.Fatal("expected at least one provider request")
+		}
+		if reqs[0].Model != wantRedacted {
+			t.Fatalf("child provider request Model = %q, want redacted form %q", reqs[0].Model, wantRedacted)
+		}
+
+		if got := redactor.RedactString(secret); got == secret {
+			t.Fatal("redactor no longer redacts its configured secret; shared redactor was corrupted")
+		}
+	})
 }
 
 // Test 7: MaxParallel = 2 with 3 started tasks runs at most 2 children

@@ -88,6 +88,42 @@ func TestCompletionText(t *testing.T) {
 			maxOutputBytes: 16384,
 			want:           "[task-notification] task t5 (default) succeeded · 1m5s · 2 tool calls · 0 tokens\ndone",
 		},
+		{
+			name: "succeeded with model",
+			task: agent.Task{
+				ID: "t1", Status: agent.TaskSucceeded,
+				StartedAt: base, FinishedAt: base.Add(42 * time.Second),
+				ToolCalls: 7,
+				Model:     "gpt-4o-mini",
+				Usage:     model.Usage{InputTokens: 10000, OutputTokens: 2310},
+				Result:    "the full report",
+			},
+			maxOutputBytes: 16384,
+			want:           "[task-notification] task t1 (default) succeeded · gpt-4o-mini · 42s · 7 tool calls · 12,310 tokens\nthe full report",
+		},
+		{
+			name: "failed with model",
+			task: agent.Task{
+				ID: "t1", Status: agent.TaskFailed,
+				StartedAt: base, FinishedAt: base.Add(12 * time.Second),
+				ToolCalls: 3,
+				Model:     "gpt-4o-mini",
+				Error:     "provider exploded",
+			},
+			maxOutputBytes: 16384,
+			want:           "[task-notification] task t1 (default) failed · gpt-4o-mini · 12s · 3 tool calls\nprovider exploded",
+		},
+		{
+			name: "canceled with model",
+			task: agent.Task{
+				ID: "t1", Status: agent.TaskCanceled,
+				StartedAt: base, FinishedAt: base.Add(12 * time.Second),
+				ToolCalls: 3,
+				Model:     "gpt-4o-mini",
+			},
+			maxOutputBytes: 16384,
+			want:           "[task-notification] task t1 (default) canceled · gpt-4o-mini · 12s · 3 tool calls",
+		},
 	}
 
 	for _, tc := range cases {

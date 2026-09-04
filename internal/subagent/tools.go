@@ -55,6 +55,7 @@ type agentToolArgs struct {
 	Prompt      string `json:"prompt"`
 	Description string `json:"description,omitempty"`
 	Wait        bool   `json:"wait,omitempty"`
+	Model       string `json:"model,omitempty"`
 }
 
 func (t *agentTool) Definition() model.ToolDefinition {
@@ -77,6 +78,10 @@ func (t *agentTool) Definition() model.ToolDefinition {
 					"type":        "boolean",
 					"description": "Block until the task ends and return its result instead of its id.",
 				},
+				"model": map[string]any{
+					"type":        "string",
+					"description": "Provider model id for the sub-agent. Default: this session's model. Otto does not validate it; an id the endpoint rejects fails the task with the provider's error.",
+				},
 			},
 			"required": []string{"prompt"},
 		},
@@ -93,7 +98,7 @@ func (t *agentTool) Execute(ctx context.Context, arguments json.RawMessage) tool
 	}
 
 	runningBefore := countRunning(t.runner.config.Tasks)
-	task, err := t.runner.Start(StartRequest{Prompt: args.Prompt, Description: args.Description})
+	task, err := t.runner.Start(StartRequest{Prompt: args.Prompt, Description: args.Description, Model: args.Model})
 	if err != nil {
 		return tool.Result{Content: err.Error(), IsError: true}
 	}
@@ -276,6 +281,9 @@ func (t *agentStatusTool) Execute(ctx context.Context, arguments json.RawMessage
 		return tool.Result{Content: fmt.Sprintf("unknown task: %s", args.TaskID), IsError: true}
 	}
 	lines := []string{statusLine(task, t.runner.now())}
+	if task.Model != "" {
+		lines = append(lines, "model: "+task.Model)
+	}
 	history, _ := tasks.History(args.TaskID)
 	lines = append(lines, historyLines(history)...)
 	if task.Final() {

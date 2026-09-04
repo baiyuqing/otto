@@ -118,6 +118,9 @@ func NewRunner(config Config) (*Runner, error) {
 type StartRequest struct {
 	Prompt      string
 	Description string
+	// Model is the provider model id the child runs on. Empty (or
+	// whitespace-only) falls back to Config.Options.Model.
+	Model string
 }
 
 // Start registers a task and starts its child goroutine, or leaves it
@@ -125,6 +128,10 @@ type StartRequest struct {
 func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 	now := r.now()
 	description := truncateRunesEllipsis(strings.TrimSpace(request.Description), maxDescriptionRunes)
+	effectiveModel := strings.TrimSpace(request.Model)
+	if effectiveModel == "" {
+		effectiveModel = r.config.Options.Model
+	}
 
 	taskCtx, cancel := context.WithCancel(context.Background())
 
@@ -146,6 +153,7 @@ func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 		Description: description,
 		Prompt:      request.Prompt,
 		Context:     "fresh",
+		Model:       effectiveModel,
 		CreatedAt:   now,
 	}, cancel, history)
 	if err != nil {
@@ -164,7 +172,7 @@ func (r *Runner) Start(request StartRequest) (agent.Task, error) {
 	)
 	childOptions := r.config.Options
 	childOptions.SystemPrompt = systemPrompt
-	childOptions.Model = r.config.Redactor.RedactString(r.config.Options.Model)
+	childOptions.Model = r.config.Redactor.RedactString(effectiveModel)
 	childOptions.Thinking = r.config.Redactor.RedactString(r.config.Options.Thinking)
 	childOptions.Inbox = agent.NewInbox(nil)
 	childOptions.Tasks = nil
@@ -300,17 +308,21 @@ func CompletionText(task agent.Task, maxOutputBytes int) string {
 	name := agentLabel(task)
 	duration := completionDuration(task)
 	calls := pluralizeToolCalls(task.ToolCalls)
+	modelSegment := ""
+	if task.Model != "" {
+		modelSegment = " · " + task.Model
+	}
 
 	switch task.Status {
 	case agent.TaskSucceeded:
 		tokens := formatThousands(task.Usage.InputTokens + task.Usage.OutputTokens)
-		header := fmt.Sprintf("[task-notification] task %s %s succeeded · %s · %s · %s tokens", task.ID, name, duration, calls, tokens)
+		header := fmt.Sprintf("[task-notification] task %s %s succeeded%s · %s · %s · %s tokens", task.ID, name, modelSegment, duration, calls, tokens)
 		return header + "\n" + tool.CappedTextResult(task.Result, maxOutputBytes).Content
 	case agent.TaskFailed:
-		header := fmt.Sprintf("[task-notification] task %s %s failed · %s · %s", task.ID, name, duration, calls)
+		header := fmt.Sprintf("[task-notification] task %s %s failed%s · %s · %s", task.ID, name, modelSegment, duration, calls)
 		return header + "\n" + task.Error
 	default: // agent.TaskCanceled
-		return fmt.Sprintf("[task-notification] task %s %s canceled · %s · %s", task.ID, name, duration, calls)
+		return fmt.Sprintf("[task-notification] task %s %s canceled%s · %s · %s", task.ID, name, modelSegment, duration, calls)
 	}
 }
 

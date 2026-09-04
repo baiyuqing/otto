@@ -70,6 +70,9 @@ func (r *REPL) taskCommand(ctx context.Context, args string) (bool, error) {
 		return false, nil
 	}
 	_, _ = fmt.Fprintln(r.stdout, taskLine(task, time.Now()))
+	if task.Model != "" {
+		_, _ = fmt.Fprintf(r.stdout, "model: %s\n", task.Model)
+	}
 	if history, _ := tasks.History(id); len(history) > 0 {
 		writeTaskSteps(r.stdout, history)
 	}

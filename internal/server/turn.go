@@ -18,6 +18,13 @@ const (
 	turnCanceled = "canceled"
 )
 
+// Trigger identifies why a turn started: a user request, or an automatic
+// wake turn draining pending sub-agent task notifications.
+const (
+	triggerUser = "user"
+	triggerTask = "task"
+)
+
 // turn buffers one session's most-recent turn: the wire events emitted so
 // far, accumulated text/usage, and terminal status. emit runs on the agent
 // goroutine and performs no I/O, so a slow HTTP reader never applies
@@ -27,8 +34,9 @@ const (
 // ponytail: only the latest turn per session is retained; add a ring buffer
 // of turns if event replay across turns is needed.
 type turn struct {
-	id     string
-	cancel context.CancelFunc
+	id      string
+	cancel  context.CancelFunc
+	trigger string // set once before the turn is published; read-only after
 
 	mu         sync.Mutex
 	events     []wireEvent
@@ -147,6 +155,7 @@ func (t *turn) snapshot(after int) (events []wireEvent, done bool, changed <-cha
 
 type turnSummary struct {
 	ID         string      `json:"id"`
+	Trigger    string      `json:"trigger"`
 	Status     string      `json:"status"`
 	Error      string      `json:"error,omitempty"`
 	Text       string      `json:"text"`
@@ -160,6 +169,7 @@ func (t *turn) summary() turnSummary {
 	defer t.mu.Unlock()
 	s := turnSummary{
 		ID:        t.id,
+		Trigger:   t.trigger,
 		Status:    t.status,
 		Error:     t.errText,
 		Text:      t.text.String(),

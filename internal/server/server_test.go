@@ -518,6 +518,38 @@ func TestPostTurnStreamFalse(t *testing.T) {
 	}
 }
 
+func TestStartTurnAndGetTurnCarryUserTrigger(t *testing.T) {
+	opts := Options{Create: func(ctx context.Context) (*app.Controller, error) {
+		id, _ := newID()
+		return newTestController(t, id, noopRun), nil
+	}}
+	_, ts := newServerForTest(t, opts)
+	created := doJSON(t, ts, "POST", "/v1/sessions", nil)
+	var sess sessionWire
+	decodeJSON(t, created, &sess)
+
+	resp := doJSON(t, ts, "POST", "/v1/sessions/"+sess.ID+"/turns", map[string]any{"text": "hi", "stream": false})
+	var sum turnSummary
+	decodeJSON(t, resp, &sum)
+	if sum.Trigger != triggerUser {
+		t.Fatalf("POST turn trigger = %q, want %q", sum.Trigger, triggerUser)
+	}
+
+	getResp := doJSON(t, ts, "GET", "/v1/sessions/"+sess.ID+"/turns/"+sum.ID, nil)
+	var got turnSummary
+	decodeJSON(t, getResp, &got)
+	if got.Trigger != triggerUser {
+		t.Fatalf("GET turn trigger = %q, want %q", got.Trigger, triggerUser)
+	}
+
+	sessResp := doJSON(t, ts, "GET", "/v1/sessions/"+sess.ID, nil)
+	var sessGot sessionWire
+	decodeJSON(t, sessResp, &sessGot)
+	if sessGot.Turn == nil || sessGot.Turn.Trigger != triggerUser {
+		t.Fatalf("session turn = %+v, want trigger %q", sessGot.Turn, triggerUser)
+	}
+}
+
 func TestTurnEventsAfterAndLastEventID(t *testing.T) {
 	gate := make(chan struct{})
 	run := func(ctx context.Context, text string, emit func(agent.Event)) error {

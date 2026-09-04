@@ -100,9 +100,21 @@ Behavior of `ctrl+o`: toggles only uncommitted and later entries; already-printe
 lines do not re-render. Window resize redraws only the live region; the terminal
 handles reflowing scrollback.
 
-Picker and overlay continue to use full `m.height` rendering; on close, the live
-region shrinks. Trailing blank lines after exit are a known issue recorded here
-and not handled in this iteration.
+Frame-shrink rule: Bubble Tea's inline renderer erases a shrinking frame by
+moving the cursor up from its row in the previous frame, and it clamps that row
+to the new frame height first (ultraviolet `TerminalRenderer.move`). Rows above
+the clamped position are not erased. Every layout transition therefore keeps the
+previous frame's cursor row at or below the next frame height minus one:
+
+- Slash-command suggestions render below the input box, so the editor row does
+  not move when they open or close.
+- Pickers and overlays render at content height, horizontally centered, and keep
+  a visible cursor after the title on row 1 (`overlayCursor`). A hidden cursor
+  would stay on the modal's last row, and closing a 25-row modal into a 7-row
+  frame would leave 18 rows on screen.
+
+Trailing blank lines after exit are a known issue recorded here and not handled
+in this iteration.
 
 ### 5. Exit
 
@@ -113,6 +125,9 @@ The inline view remains on screen after exit, consistent with Claude Code.
 - `ctrl+o` does not affect already-printed entries.
 - `/new` does not clear scrollback.
 - Window resize does not re-render scrollback; the terminal does that automatically.
-- The live region may leave trailing blank lines when exiting or closing an overlay.
+- The live region may leave trailing blank lines when exiting.
+- The frame-shrink rule in section 4 is not enforced for the editor: clearing a
+  draft taller than three rows in one frame (for example Ctrl+C on a six-line
+  draft) leaves rows above the new frame.
 - In-progress entries exceeding terminal height show only their tail; no keyboard
   scroll keys are implemented for the live region yet.

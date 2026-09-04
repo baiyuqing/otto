@@ -334,9 +334,13 @@ func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
 		t.Fatal("test setup has no slash-command suggestions")
 	}
 
-	cursor := m.View().Cursor
-	if cursor == nil || cursor.X != 5 || cursor.Y != 3 {
-		t.Fatalf("suggestion view cursor = %#v, want (5,3) at the editor", cursor)
+	view := m.View()
+	editorRow := indexOfLineContaining(strings.Split(view.Content, "\n"), "│ > /")
+	if editorRow < 0 {
+		t.Fatalf("view = %q, want visible editor row", view.Content)
+	}
+	if cursor := view.Cursor; cursor == nil || cursor.X != 5 || cursor.Y != editorRow {
+		t.Fatalf("suggestion view cursor = %#v, want (5,%d) at the editor", cursor, editorRow)
 	}
 }
 
@@ -360,17 +364,17 @@ func TestViewTracksRealCursorAcrossMultilineEditorRows(t *testing.T) {
 	}
 }
 
-func TestOverlayHidesRealCursor(t *testing.T) {
+func TestOverlayKeepsRealCursorOnTitleRow(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
 	m.overlay = overlayHelp
 
-	if cursor := m.View().Cursor; cursor != nil {
-		t.Fatalf("help overlay cursor = (%d,%d), want hidden", cursor.X, cursor.Y)
+	if cursor := m.View().Cursor; cursor == nil || cursor.Y != 1 {
+		t.Fatalf("help overlay cursor = %+v, want row 1", cursor)
 	}
 
 	m.overlay = overlaySession
-	if cursor := m.View().Cursor; cursor != nil {
-		t.Fatalf("session overlay cursor = (%d,%d), want hidden", cursor.X, cursor.Y)
+	if cursor := m.View().Cursor; cursor == nil || cursor.Y != 1 {
+		t.Fatalf("session overlay cursor = %+v, want row 1", cursor)
 	}
 }
 

@@ -241,7 +241,7 @@ func modalEditorModel(t *testing.T) Model {
 	return m
 }
 
-func TestResumePickerModalInputsPreserveCompleteEditorStateAndHideCursor(t *testing.T) {
+func TestResumePickerModalInputsPreserveCompleteEditorStateAndKeepCursorOnTitleRow(t *testing.T) {
 	inputs := []struct {
 		name string
 		msg  tea.Msg
@@ -269,8 +269,8 @@ func TestResumePickerModalInputsPreserveCompleteEditorStateAndHideCursor(t *test
 			if cmd != nil || got.resume.mode != resumeLoaded || got.resume.selected != 0 {
 				t.Fatalf("cmd=%v resume=%#v", cmd, got.resume)
 			}
-			if cursor := got.View().Cursor; cursor != nil {
-				t.Fatalf("modal view cursor = %#v, want nil", cursor)
+			if cursor := got.View().Cursor; cursor == nil || cursor.Y != 1 {
+				t.Fatalf("modal view cursor = %#v, want row 1", cursor)
 			}
 		})
 	}

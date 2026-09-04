@@ -520,7 +520,7 @@ otto --approve @prompt.txt --no-session
 - Assistant responses render as Markdown in the transcript.
 - If Markdown rendering fails, Otto falls back to escaped plain text instead of raw control sequences.
 - Tool calls and compaction checkpoints are folded by default; `Ctrl+O` toggles full tool arguments/output and expanded compaction summaries. Toggling affects only entries not yet printed and later entries.
-- The bottom of the screen holds a live region for the in-progress turn, slash-command suggestions, editor, and footer; its height follows its content.
+- The bottom of the screen holds a live region for the in-progress turn, editor, slash-command suggestions, and footer; its height follows its content.
 - The footer adapts to the available width and shows workspace/profile/model, token totals, and session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message until the window is large enough.
 - Window resize redraws only the live region; the terminal handles reflow of scrollback lines.
@@ -535,12 +535,12 @@ otto --approve @prompt.txt --no-session
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle complete tool arguments, tool output, and folded compaction summaries |
-| `Esc` | Cancel the active turn or close the current overlay |
+| `Esc` | Cancel the active turn, close the current overlay, or clear a slash-command draft |
 | `Ctrl+C` | Cancel, clear, then quit on a second press within one second |
 
 ### Slash commands
 
-In the TUI, typing `/` opens a filtered command suggestion panel. Use `↑`/`↓` to select a command and `Tab` to complete it; `Enter` executes only an exact command.
+In the TUI, typing `/` opens a filtered command suggestion panel below the input box. Use `↑`/`↓` to select a command and `Tab` to complete it; `Enter` executes only an exact command.
 
 Shared commands:
 

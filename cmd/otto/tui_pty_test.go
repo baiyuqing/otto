@@ -1186,3 +1186,72 @@ func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.
 		})
 	}
 }
+
+func TestTUIPseudoTerminalHelpOverlayClosesWithoutResidue(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open() error = %v", err)
+	}
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize(100x30) error = %v", err)
+	}
+	collector := newPTYOutputCollector(master)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{})}
+	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
+	defer func() {
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+	}()
+
+	waitForSubsequence(t, collector, 0, wideFooterMarker)
+	helpOffset := collector.Len()
+	writePTY(t, master, "/help\r")
+	waitForSubsequence(t, collector, helpOffset, "Ctrl+O toggle details")
+	closeOffset := collector.Len()
+	writePTY(t, master, "\x1b")
+	waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+	waitForTerminalScreen(t, collector, helpOffset, 100, 30, func(screen *ptyTerminalScreen) bool {
+		content := screen.String()
+		return screen.Complete() && strings.Contains(content, wideFooterMarker) && !strings.Contains(content, "Ctrl+O toggle details")
+	})
+	writePTY(t, master, "/exit\r")
+	waitForRunReturn(t, runResult)
+}
+
+func TestTUIPseudoTerminalSlashSuggestionsCloseWithoutResidue(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open: %v", err)
+	}
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize: %v", err)
+	}
+	collector := newPTYOutputCollector(master)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{})}
+	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
+	defer func() {
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+	}()
+
+	waitForSubsequence(t, collector, 0, wideFooterMarker)
+	openOffset := collector.Len()
+	writePTY(t, master, "/")
+	waitForSubsequence(t, collector, openOffset, "show help")
+	closeOffset := collector.Len()
+	writePTY(t, master, "\x1b")
+	waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+	waitForTerminalScreen(t, collector, openOffset, 100, 30, func(screen *ptyTerminalScreen) bool {
+		content := screen.String()
+		return screen.Complete() && strings.Contains(content, wideFooterMarker) && !strings.Contains(content, "show help")
+	})
+
+	writePTY(t, master, "/exit\r")
+	waitForRunReturn(t, runResult)
+}

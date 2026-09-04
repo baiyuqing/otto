@@ -67,6 +67,9 @@ func (s *ptyTerminalScreen) consume() (int, bool, error) {
 			s.reverseIndex()
 			return 2, true, nil
 		}
+		if s.pending[1] == ']' {
+			return s.consumeOSC()
+		}
 		return s.consumeCSI()
 	}
 
@@ -127,10 +130,17 @@ func (s *ptyTerminalScreen) consumeCSI() (int, bool, error) {
 			// Parameter bytes are validated for each supported final below.
 		case current >= 0x40 && current <= 0x7e:
 			sequence := string(s.pending[:index+1])
+			if current == 'q' && index > 2 && s.pending[index-1] == ' ' {
+				// DECSCUSR (cursor style): emitted by Bubble Tea when the
+				// cursor is re-shown; it does not change screen content.
+				return index + 1, true, nil
+			}
 			if err := s.applyCSI(string(s.pending[2:index]), current); err != nil {
 				return 0, false, fmt.Errorf("%w in %q", err, sequence)
 			}
 			return index + 1, true, nil
+		case current == ' ' && index+1 < len(s.pending) && s.pending[index+1] == 'q':
+			// Intermediate of DECSCUSR; accepted with the final above.
 		case current >= 0x20 && current <= 0x2f:
 			return 0, false, fmt.Errorf("unsupported CSI intermediate 0x%02x", current)
 		default:
@@ -138,6 +148,30 @@ func (s *ptyTerminalScreen) consumeCSI() (int, bool, error) {
 		}
 		if index+1 >= maxPTYCSISequence {
 			return 0, false, fmt.Errorf("CSI sequence exceeds %d bytes", maxPTYCSISequence)
+		}
+	}
+	return 0, false, nil
+}
+
+// consumeOSC skips an operating-system command (ESC ] ... BEL or ESC ] ... ESC \\).
+// Bubble Tea emits OSC 112 (reset cursor color) when it hides the cursor for
+// an overlay; no OSC changes screen content.
+func (s *ptyTerminalScreen) consumeOSC() (int, bool, error) {
+	for index := 2; index < len(s.pending); index++ {
+		switch s.pending[index] {
+		case '\a':
+			return index + 1, true, nil
+		case '\x1b':
+			if index+1 >= len(s.pending) {
+				return 0, false, nil
+			}
+			if s.pending[index+1] != '\\' {
+				return 0, false, fmt.Errorf("invalid OSC terminator %q", s.pending[index:index+2])
+			}
+			return index + 2, true, nil
+		}
+		if index+1 >= maxPTYCSISequence {
+			return 0, false, fmt.Errorf("OSC sequence exceeds %d bytes", maxPTYCSISequence)
 		}
 	}
 	return 0, false, nil

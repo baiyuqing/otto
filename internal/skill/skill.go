@@ -5,12 +5,14 @@ package skill
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 )
 
@@ -59,6 +61,7 @@ var skillNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 const maxSkillNameLength = 64
 const maxSkillDescriptionRunes = 1024
+const maxSkillFileBytes = 64 << 20
 
 // Discover scans roots in order; a later root overrides an earlier one on
 // the same name. roots are absolute directories. A missing root is skipped
@@ -69,7 +72,7 @@ func Discover(roots []string) (Catalog, []string) {
 	byName := make(map[string]Skill)
 
 	for _, root := range roots {
-		entries, err := os.ReadDir(root)
+		rootFS, err := os.OpenRoot(root)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -77,24 +80,43 @@ func Discover(roots []string) (Catalog, []string) {
 			warnings = append(warnings, fmt.Sprintf("skills root %s: %s", root, err))
 			continue
 		}
+		canonicalRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			_ = rootFS.Close()
+			warnings = append(warnings, fmt.Sprintf("skills root %s: %s", root, err))
+			continue
+		}
+		entries, err := fs.ReadDir(rootFS.FS(), ".")
+		if err != nil {
+			_ = rootFS.Close()
+			warnings = append(warnings, fmt.Sprintf("skills root %s: %s", root, err))
+			continue
+		}
 		for _, entry := range entries {
-			if !entryIsDir(root, entry) {
+			dirFS, ok := openSkillDir(rootFS, canonicalRoot, entry)
+			if !ok {
 				continue
 			}
 			dir := filepath.Join(root, entry.Name())
 			skillPath := filepath.Join(dir, "SKILL.md")
-			info, err := os.Stat(skillPath)
+			info, err := dirFS.Stat("SKILL.md")
 			if err != nil || !info.Mode().IsRegular() {
+				_ = dirFS.Close()
+				if err != nil && !errors.Is(err, fs.ErrNotExist) {
+					warnings = append(warnings, fmt.Sprintf("skill %s: %s", skillPath, err))
+				}
 				// A directory without SKILL.md is silently ignored.
 				continue
 			}
-			skill, warning := loadCandidate(dir, skillPath, entry.Name())
+			skill, warning := loadCandidate(dir, skillPath, entry.Name(), dirFS)
+			_ = dirFS.Close()
 			if warning != "" {
 				warnings = append(warnings, warning)
 				continue
 			}
 			byName[skill.Name] = skill
 		}
+		_ = rootFS.Close()
 	}
 
 	names := make([]string, 0, len(byName))
@@ -109,24 +131,35 @@ func Discover(roots []string) (Catalog, []string) {
 	return Catalog{skills: skills}, warnings
 }
 
-// entryIsDir reports whether entry (or, if entry is a symlink, its target)
-// is a directory.
-func entryIsDir(root string, entry os.DirEntry) bool {
+func openSkillDir(rootFS *os.Root, root string, entry os.DirEntry) (*os.Root, bool) {
 	if entry.IsDir() {
-		return true
+		dirFS, err := rootFS.OpenRoot(entry.Name())
+		return dirFS, err == nil
 	}
 	if entry.Type()&os.ModeSymlink == 0 {
-		return false
+		return nil, false
 	}
-	info, err := os.Stat(filepath.Join(root, entry.Name()))
-	return err == nil && info.IsDir()
+	safeDir, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
+	if err != nil {
+		return nil, false
+	}
+	dirFS, err := os.OpenRoot(safeDir)
+	if err != nil {
+		return nil, false
+	}
+	info, err := dirFS.Stat(".")
+	if err != nil || !info.IsDir() {
+		_ = dirFS.Close()
+		return nil, false
+	}
+	return dirFS, true
 }
 
 // loadCandidate parses and validates one skill directory. On success it
 // returns the Skill with an empty warning; on failure it returns a zero
 // Skill and a non-empty warning string.
-func loadCandidate(dir, skillPath, dirName string) (Skill, string) {
-	data, err := os.ReadFile(skillPath)
+func loadCandidate(dir, skillPath, dirName string, root *os.Root) (Skill, string) {
+	data, err := readRootFile(root, "SKILL.md")
 	if err != nil {
 		return Skill{}, fmt.Sprintf("skill %s: %s", skillPath, err)
 	}
@@ -172,7 +205,16 @@ func validateSkillDescription(fields map[string]string) (string, error) {
 
 // Load reads s.Path and returns the Markdown body without the frontmatter.
 func Load(s Skill) (string, error) {
-	data, err := os.ReadFile(s.Path)
+	name, err := filepath.Rel(s.Dir, s.Path)
+	if err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(s.Dir)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	data, err := readRootFile(root, name)
 	if err != nil {
 		return "", err
 	}
@@ -189,11 +231,16 @@ func Load(s Skill) (string, error) {
 // nor descended), sorted, at most limit entries. total is the count before
 // applying limit.
 func ListFiles(dir string, limit int) (files []string, total int, err error) {
-	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer root.Close()
+	err = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if path == dir {
+		if path == "." {
 			return nil
 		}
 		name := d.Name()
@@ -212,11 +259,7 @@ func ListFiles(dir string, limit int) (files []string, total int, err error) {
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		rel, relErr := filepath.Rel(dir, path)
-		if relErr != nil {
-			return relErr
-		}
-		rel = filepath.ToSlash(rel)
+		rel := filepath.ToSlash(path)
 		if rel == "SKILL.md" {
 			return nil
 		}
@@ -232,4 +275,30 @@ func ListFiles(dir string, limit int) (files []string, total int, err error) {
 		files = files[:limit]
 	}
 	return files, total, nil
+}
+
+func readRootFile(root *os.Root, name string) ([]byte, error) {
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file: %s", name)
+	}
+	if info.Size() > maxSkillFileBytes {
+		return nil, fmt.Errorf("file is too large (%d bytes); maximum readable size is %d bytes", info.Size(), maxSkillFileBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxSkillFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxSkillFileBytes {
+		return nil, fmt.Errorf("file is too large (%d bytes); maximum readable size is %d bytes", len(data), maxSkillFileBytes)
+	}
+	return data, nil
 }

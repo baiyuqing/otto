@@ -344,6 +344,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	if err != nil {
 		return fail(stderr, "%v", redactStartupError(fmt.Errorf("create workspace: %w", err)))
 	}
+	defer workspace.Close()
 	sessionRoot := filepath.Join(home, ".otto", "sessions")
 
 	if options.archivePath != "" {

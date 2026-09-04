@@ -3,12 +3,14 @@ package subagent
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/baiyuqing/otto/internal/skill"
@@ -72,6 +74,7 @@ var agentNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 const maxAgentNameLength = 64
 const maxAgentDescriptionRunes = 1024
+const maxAgentFileBytes = 64 << 20
 
 var agentToolNamePattern = regexp.MustCompile(`^[a-z0-9_]+$`)
 
@@ -84,7 +87,7 @@ func Discover(roots []string) (Catalog, []string) {
 	byName := make(map[string]Definition)
 
 	for _, root := range roots {
-		entries, err := os.ReadDir(root)
+		rootDir, err := os.OpenRoot(root)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -92,24 +95,37 @@ func Discover(roots []string) (Catalog, []string) {
 			warnings = append(warnings, fmt.Sprintf("agents root %s: %s", root, err))
 			continue
 		}
+		entries, err := fs.ReadDir(rootDir.FS(), ".")
+		if err != nil {
+			_ = rootDir.Close()
+			warnings = append(warnings, fmt.Sprintf("agents root %s: %s", root, err))
+			continue
+		}
 		for _, entry := range entries {
-			if !entryIsDir(root, entry) {
+			dir := filepath.Join(root, entry.Name())
+			definitionDir, err := os.OpenRoot(dir)
+			if err != nil {
 				continue
 			}
-			dir := filepath.Join(root, entry.Name())
 			agentPath := filepath.Join(dir, "AGENT.md")
-			info, err := os.Stat(agentPath)
-			if err != nil || !info.Mode().IsRegular() {
+			data, regular, err := readAgentFile(definitionDir, "AGENT.md")
+			_ = definitionDir.Close()
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("%s: %s", agentPath, err))
+				continue
+			}
+			if !regular {
 				// A directory without AGENT.md is silently ignored.
 				continue
 			}
-			def, warning := loadCandidate(dir, agentPath, entry.Name())
+			def, warning := loadCandidate(data, dir, agentPath, entry.Name())
 			if warning != "" {
 				warnings = append(warnings, warning)
 				continue
 			}
 			byName[def.Name] = def
 		}
+		_ = rootDir.Close()
 	}
 
 	names := make([]string, 0, len(byName))
@@ -124,28 +140,11 @@ func Discover(roots []string) (Catalog, []string) {
 	return Catalog{definitions: defs}, warnings
 }
 
-// entryIsDir reports whether entry (or, if entry is a symlink, its target)
-// is a directory.
-func entryIsDir(root string, entry os.DirEntry) bool {
-	if entry.IsDir() {
-		return true
-	}
-	if entry.Type()&os.ModeSymlink == 0 {
-		return false
-	}
-	info, err := os.Stat(filepath.Join(root, entry.Name()))
-	return err == nil && info.IsDir()
-}
-
 // loadCandidate parses and validates one agent directory. On success it
 // returns the Definition with an empty warning; on failure it returns a
 // zero Definition and a non-empty warning string of the form "<path>:
 // <reason>".
-func loadCandidate(dir, agentPath, dirName string) (Definition, string) {
-	data, err := os.ReadFile(agentPath)
-	if err != nil {
-		return Definition{}, fmt.Sprintf("%s: %s", agentPath, err)
-	}
+func loadCandidate(data []byte, dir, agentPath, dirName string) (Definition, string) {
 	fields, body, err := skill.ParseFrontmatter(data)
 	if err != nil {
 		return Definition{}, fmt.Sprintf("%s: %s", agentPath, err)
@@ -178,6 +177,41 @@ func loadCandidate(dir, agentPath, dirName string) (Definition, string) {
 		Dir:         dir,
 		Path:        agentPath,
 	}, ""
+}
+
+func readAgentFile(root *os.Root, name string) ([]byte, bool, error) {
+	file, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		// An external symlink is outside this definition directory and is
+		// ignored just like a missing or non-regular AGENT.md.
+		if info, lstatErr := root.Lstat(name); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, false, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, nil
+	}
+	if info.Size() > maxAgentFileBytes {
+		return nil, true, fmt.Errorf("file is too large (%d bytes); maximum is %d bytes", info.Size(), maxAgentFileBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxAgentFileBytes+1))
+	if err != nil {
+		return nil, true, err
+	}
+	if int64(len(data)) > maxAgentFileBytes {
+		return nil, true, fmt.Errorf("file is too large; maximum is %d bytes", maxAgentFileBytes)
+	}
+	return data, true, nil
 }
 
 func validateAgentName(fields map[string]string, dirName string) (string, error) {

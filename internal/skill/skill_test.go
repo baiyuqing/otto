@@ -132,6 +132,26 @@ func TestDiscoverSymlinkedSkillDirFollowed(t *testing.T) {
 	}
 }
 
+func TestDiscoverRejectsSkillFileSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "escaped")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "SKILL.md")
+	if err := os.WriteFile(outside, []byte("---\nname: escaped\ndescription: outside\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, warnings := Discover([]string{root})
+	if catalog.Len() != 0 || len(warnings) != 1 {
+		t.Fatalf("catalog=%#v warnings=%v, want one rejected skill", catalog, warnings)
+	}
+}
+
 func TestDiscoverNameValidation(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -247,6 +267,33 @@ func TestLoadStripsFrontmatter(t *testing.T) {
 	}
 	if body != "# PDF handling\nBody text\n" {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestLoadHonorsPathWithinSkillDirectory(t *testing.T) {
+	dir := writeSkill(t, t.TempDir(), "sample", "", "default\n")
+	path := filepath.Join(dir, "alternate.md")
+	if err := os.WriteFile(path, []byte("---\nname: sample\n---\nalternate\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := Load(Skill{Dir: dir, Path: path})
+	if err != nil || strings.TrimSpace(body) != "alternate" {
+		t.Fatalf("Load() = %q, %v, want the selected file", body, err)
+	}
+	outside := writeSkill(t, t.TempDir(), "outside", "", "external\n")
+	if _, err := Load(Skill{Dir: dir, Path: filepath.Join(outside, "SKILL.md")}); err == nil {
+		t.Fatal("Load accepted a path outside the skill directory")
+	}
+}
+
+func TestLoadRejectsOversizedSkillFile(t *testing.T) {
+	root := t.TempDir()
+	dir := writeSkill(t, root, "pdf", "", "body\n")
+	if err := os.Truncate(filepath.Join(dir, "SKILL.md"), maxSkillFileBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(Skill{Dir: dir, Path: filepath.Join(dir, "SKILL.md")}); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("Load() error = %v, want size rejection", err)
 	}
 }
 

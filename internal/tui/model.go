@@ -629,8 +629,11 @@ func newRootView(m Model, content string) tea.View {
 }
 
 func newRootViewWithOverlay(m Model, content, overlay string) tea.View {
-	view := tea.NewView(fitToBounds(content, m.width, m.height))
-	view.Overlay = overlay
+	content = fitToBounds(content, m.width, m.height)
+	if overlay != "" {
+		content = lipgloss.NewCompositor(lipgloss.NewLayer(content), lipgloss.NewLayer(overlay).Z(1)).Render()
+	}
+	view := tea.NewView(content)
 	view.AltScreen = false
 	view.MouseMode = tea.MouseModeNone
 	view.KeyboardEnhancements.ReportEventTypes = false

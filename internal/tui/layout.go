@@ -9,6 +9,7 @@ import (
 
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/app"
 	otmodel "github.com/baiyuqing/otto/internal/model"
@@ -338,7 +339,25 @@ func renderOverlay(width, height int, content string) string {
 		MaxWidth(width).
 		MaxHeight(height).
 		Render(content)
-	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box), width, height)
+	return fitToBounds(lipgloss.Place(width, lipgloss.Height(box), lipgloss.Center, lipgloss.Top, box), width, height)
+}
+
+// overlayCursor places the cursor after the title on row 1 of a modal.
+//
+// Bubble Tea's inline renderer erases a shrinking frame by moving the cursor
+// up from its row in the previous frame, and it clamps that row to the new
+// frame height first (ultraviolet TerminalRenderer.move). Rows above the
+// clamped position are never erased. A hidden cursor stays on the last row
+// the renderer drew, so closing a 25-row modal into a 7-row frame would leave
+// 18 rows on screen. Row 1 is below every frame height that can follow.
+func overlayCursor(content string) *tea.Cursor {
+	lines := strings.SplitN(content, "\n", 3)
+	if len(lines) < 2 {
+		return tea.NewCursor(0, 0)
+	}
+	row := strings.TrimRight(ansi.Strip(lines[1]), " ")
+	row = strings.TrimRight(strings.TrimSuffix(row, "│"), " ")
+	return tea.NewCursor(ansi.StringWidth(row), 1)
 }
 
 func overlayContentBounds(width, height int) (int, int) {

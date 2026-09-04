@@ -49,6 +49,7 @@ func (m Model) handleModelCommand(argument string) (tea.Model, tea.Cmd) {
 	}
 	switcher, ok := profileSwitcherFromBackend(m.backend)
 	if !ok {
+		m.clearEditor()
 		m.statusText = app.ErrProfileSwitchUnavailable.Error()
 		return m, nil
 	}

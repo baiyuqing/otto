@@ -1778,6 +1778,36 @@ func TestToolEventsUpdateTranscript(t *testing.T) {
 	}
 }
 
+func TestNotificationEventAppendsSystemEntryAndUsage(t *testing.T) {
+	notificationText := "[task-notification] task t1 (explorer) succeeded · 42s · 7 tool calls · 12,310 tokens\nfinal report"
+	backend := &fakeBackend{prompt: func(ctx context.Context, text string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventNotification, TaskID: "t1", Text: notificationText, Usage: model.Usage{InputTokens: 5, OutputTokens: 7}})
+		return nil
+	}}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
+	m.editor.SetValue("question")
+
+	// dispatch, not Update: see TestToolEventsUpdateTranscript for why.
+	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	running := updated.(Model)
+	first := cmd()
+	afterEvent, next := running.dispatch(first)
+	result := afterEvent.(Model)
+
+	if len(result.entries) != 2 || result.entries[1].Kind != EntrySystem || result.entries[1].Raw != notificationText {
+		t.Fatalf("entries = %#v", result.entries)
+	}
+	if result.usage.InputTokens != 5 || result.usage.OutputTokens != 7 {
+		t.Fatalf("usage = %#v", result.usage)
+	}
+
+	afterDone, doneCmd := result.dispatch(next())
+	idle := afterDone.(Model)
+	if doneCmd != nil || idle.running || idle.cancel != nil {
+		t.Fatalf("idle running=%v cancel=%v cmd=%v", idle.running, idle.cancel != nil, doneCmd)
+	}
+}
+
 func TestDraftRemainsEditableWhileRunningAndEnterDoesNotQueue(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})

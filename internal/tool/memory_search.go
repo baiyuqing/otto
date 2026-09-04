@@ -49,7 +49,7 @@ func (t *memorySearchTool) Definition() model.ToolDefinition {
 
 func (t *memorySearchTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args memorySearchArgs
-	if err := decodeStrictJSON(arguments, &args); err != nil {
+	if err := DecodeStrictJSON(arguments, &args); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if err := ctx.Err(); err != nil {
@@ -76,7 +76,7 @@ func (t *memorySearchTool) Execute(ctx context.Context, arguments json.RawMessag
 		fmt.Fprintf(&content, "id=%s scope=%s/%s kind=%s key=%s revision=%d text=%s\n",
 			record.ID, record.Scope.Namespace, record.Scope.ID, record.Kind, record.Key, record.Revision, record.Text)
 	}
-	rendered := cappedTextResult(content.String(), t.maxOutputBytes)
+	rendered := CappedTextResult(content.String(), t.maxOutputBytes)
 	rendered.PersistedContent = fmt.Sprintf("%d records: %s", len(result.Records), strings.Join(ids, ", "))
 	return rendered
 }

@@ -1073,6 +1073,17 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 	case agent.EventProviderUsage:
 		m.usage = addUsageTotals(m.usage, &event.Usage)
 		return m, waitTurn(stream)
+	case agent.EventNotification:
+		m.finalizeStreamingRender()
+		m.activeAssistant = -1
+		m.entries = append(m.entries, Entry{
+			ID:   m.nextLiveEntryID("notification"),
+			Kind: EntrySystem,
+			Raw:  notificationEntryText(event.TaskID, event.Text),
+		})
+		m.usage = addUsageTotals(m.usage, &event.Usage)
+		m.refreshViewportContent()
+		return m, waitTurn(stream)
 	case agent.EventAgentError:
 		m.recordTurnError(event.Err)
 		return m, waitTurn(stream)

@@ -1,0 +1,241 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/provider"
+	"github.com/baiyuqing/otto/internal/session"
+	"github.com/baiyuqing/otto/internal/tool"
+)
+
+func finalResponse(text string) providerScript {
+	return providerScript{response: provider.Response{
+		Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: text}}},
+		FinishReason: model.FinishStop,
+		Usage:        model.Usage{InputTokens: 1, OutputTokens: 1},
+	}}
+}
+
+func TestRunDeliversPendingNotificationsAfterUserMessage(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{finalResponse("ok")}}
+	tasks := NewTasks()
+	tasks.Notifications().Push(Notification{TaskID: "t1", Kind: NotificationTaskFinished, Text: "[task-notification] task t1 succeeded\nreport", Usage: &model.Usage{InputTokens: 5}})
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs(), Tasks: tasks, Inbox: tasks.Notifications()})
+
+	var events []Event
+	if err := runner.Run(context.Background(), "hello", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+
+	messages := memory.Messages()
+	if len(messages) != 3 || messages[0].Role != model.RoleUser || messages[1].Role != model.RoleContext || messages[2].Role != model.RoleAssistant {
+		t.Fatalf("unexpected message sequence: %#v", messages)
+	}
+	notification := messages[1]
+	if notification.ContextType != "task_notification" || !notification.Display || notification.Text() != "[task-notification] task t1 succeeded\nreport" {
+		t.Fatalf("notification message = %#v", notification)
+	}
+	if notification.Usage == nil || notification.Usage.InputTokens != 5 {
+		t.Fatalf("notification usage = %#v", notification.Usage)
+	}
+	request := fakeProvider.requests[0]
+	if len(request.Messages) != 2 || request.Messages[1].Role != model.RoleContext {
+		t.Fatalf("request messages = %#v", request.Messages)
+	}
+	var seen []Event
+	for _, event := range events {
+		if event.Type == EventNotification {
+			seen = append(seen, event)
+		}
+	}
+	if len(seen) != 1 || seen[0].TaskID != "t1" || seen[0].Text != notification.Text() || seen[0].Usage.InputTokens != 5 {
+		t.Fatalf("notification events = %#v", seen)
+	}
+	if tasks.Pending() != 0 {
+		t.Fatalf("Pending() = %d after drain", tasks.Pending())
+	}
+}
+
+func TestRunDrainsInboxBeforeNextProviderRequest(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{
+			Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "start", Arguments: json.RawMessage(`{}`)},
+			}},
+			FinishReason: model.FinishToolCalls,
+		}},
+		finalResponse("done"),
+	}}
+	inbox := NewInbox(nil)
+	start := &recordingTool{name: "start", execute: func(context.Context, json.RawMessage) tool.Result {
+		inbox.Push(Notification{TaskID: "t1", Kind: NotificationTaskFinished, Text: "[task-notification] task t1 succeeded"})
+		return tool.Result{Content: "task t1 started"}
+	}}
+	registry, err := tool.NewRegistry(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, registry, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs(), Inbox: inbox})
+
+	if err := runner.Run(context.Background(), "delegate", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	second := fakeProvider.requests[1].Messages
+	if len(second) != 4 || second[2].Role != model.RoleTool || second[3].Role != model.RoleContext || second[3].ContextType != "task_notification" {
+		t.Fatalf("second request messages = %#v", second)
+	}
+	if got := memory.Messages(); len(got) != 5 || got[3].Role != model.RoleContext {
+		t.Fatalf("persisted messages = %#v", got)
+	}
+}
+
+func TestRunEmptyTextWithoutNotificationsFails(t *testing.T) {
+	fakeProvider := &scriptedProvider{}
+	tasks := NewTasks()
+	runner := New(fakeProvider, nil, session.NewMemory(testHeader(t)), Options{Model: "test", Tasks: tasks, Inbox: tasks.Notifications()})
+
+	err := runner.Run(context.Background(), "  ", nil)
+	if !errors.Is(err, ErrEmptyUserText) {
+		t.Fatalf("Run() error = %v, want ErrEmptyUserText", err)
+	}
+	if len(fakeProvider.requests) != 0 {
+		t.Fatal("provider was called")
+	}
+}
+
+func TestRunEmptyTextWithNotificationIsAWakeTurn(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{finalResponse("noted")}}
+	inbox := NewInbox(nil)
+	inbox.Push(Notification{TaskID: "t2", Kind: NotificationTaskFinished, Text: "[task-notification] task t2 failed"})
+	memory := session.NewMemory(testHeader(t))
+	runner := New(fakeProvider, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs(), Inbox: inbox})
+
+	var events []Event
+	if err := runner.Run(context.Background(), "", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+
+	messages := memory.Messages()
+	if len(messages) != 2 || messages[0].Role != model.RoleContext || messages[1].Role != model.RoleAssistant {
+		t.Fatalf("wake turn messages = %#v", messages)
+	}
+	if got := eventTypes(events); got[0] != EventAgentStarted || got[1] != EventNotification || got[len(got)-1] != EventAgentFinished {
+		t.Fatalf("event flow = %v", got)
+	}
+}
+
+func TestInboxPushDrainRemoveAndNotify(t *testing.T) {
+	changes := 0
+	inbox := NewInbox(func() { changes++ })
+	inbox.Push(Notification{TaskID: "t1", Kind: NotificationTaskFinished, Text: "one"})
+	inbox.Push(Notification{TaskID: "t1", Kind: NotificationTaskReport, Text: "two"})
+	inbox.Push(Notification{TaskID: "t2", Kind: NotificationTaskFinished, Text: "three"})
+	if inbox.Len() != 3 || changes != 3 {
+		t.Fatalf("Len() = %d, changes = %d", inbox.Len(), changes)
+	}
+	removed, ok := inbox.Remove("t1", NotificationTaskFinished)
+	if !ok || removed.Text != "one" {
+		t.Fatalf("Remove() = %#v, %v", removed, ok)
+	}
+	if _, ok := inbox.Remove("t9", NotificationTaskFinished); ok {
+		t.Fatal("Remove() found a missing notification")
+	}
+	drained := inbox.Drain()
+	if len(drained) != 2 || drained[0].Text != "two" || drained[1].Text != "three" || inbox.Len() != 0 {
+		t.Fatalf("Drain() = %#v", drained)
+	}
+}
+
+func TestTasksLifecycle(t *testing.T) {
+	tasks := NewTasks()
+	canceled := false
+	history := []model.Message{{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "child prompt"}}}}
+	task, err := tasks.Add(Task{Agent: "explorer", Prompt: "find sessions"}, func() { canceled = true }, func() []model.Message { return history })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.ID != "t1" || task.Status != TaskQueued {
+		t.Fatalf("Add() = %#v", task)
+	}
+	select {
+	case <-tasks.Updates():
+	default:
+		t.Fatal("Add() did not signal Updates()")
+	}
+	if got, ok := tasks.Get("t1"); !ok || got.Prompt != "find sessions" {
+		t.Fatalf("Get() = %#v, %v", got, ok)
+	}
+	if got, ok := tasks.History("t1"); !ok || len(got) != 1 || got[0].Text() != "child prompt" {
+		t.Fatalf("History() = %#v, %v", got, ok)
+	}
+	tasks.Update("t1", func(task *Task) { task.Status = TaskRunning; task.Steps = 2 })
+	waitErr := make(chan error, 1)
+	go func() {
+		_, err := tasks.Wait(context.Background(), "t1")
+		waitErr <- err
+	}()
+	select {
+	case <-waitErr:
+		t.Fatal("Wait() returned before the task finished")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := tasks.Cancel("t1"); err != nil || !canceled {
+		t.Fatalf("Cancel() err = %v, canceled = %v", err, canceled)
+	}
+	tasks.Update("t1", func(task *Task) { task.Status = TaskCanceled })
+	if err := <-waitErr; err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if got := tasks.List(); len(got) != 1 || got[0].Status != TaskCanceled || got[0].Steps != 2 {
+		t.Fatalf("List() = %#v", got)
+	}
+	if err := tasks.Cancel("t1"); err == nil {
+		t.Fatal("Cancel() of a finished task succeeded")
+	}
+	if err := tasks.Cancel("missing"); err == nil {
+		t.Fatal("Cancel() of an unknown task succeeded")
+	}
+
+	tasks.Notifications().Push(Notification{TaskID: "t1", Kind: NotificationTaskFinished, Text: "x"})
+	if tasks.Pending() != 1 {
+		t.Fatalf("Pending() = %d", tasks.Pending())
+	}
+	second, _ := tasks.Add(Task{Prompt: "second"}, func() { canceled = true }, nil)
+	if second.ID != "t2" {
+		t.Fatalf("second task id = %q", second.ID)
+	}
+	canceled = false
+	tasks.Close()
+	if !canceled {
+		t.Fatal("Close() did not cancel the running task")
+	}
+	if _, ok := <-tasks.Updates(); ok {
+		t.Fatal("Updates() still open after Close()")
+	}
+	if _, err := tasks.Add(Task{}, nil, nil); err == nil {
+		t.Fatal("Add() after Close() succeeded")
+	}
+}
+
+func TestTasksWaitHonorsContext(t *testing.T) {
+	tasks := NewTasks()
+	if _, err := tasks.Add(Task{}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := tasks.Wait(ctx, "t1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if _, err := tasks.Wait(context.Background(), "missing"); err == nil {
+		t.Fatal("Wait() on an unknown task succeeded")
+	}
+}

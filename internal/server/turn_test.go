@@ -56,6 +56,19 @@ func TestTurnEmitAccumulatesTextAndUsage(t *testing.T) {
 	}
 }
 
+func TestTurnEmitAccumulatesNotificationUsage(t *testing.T) {
+	tr := newTurn("t1", func() {})
+	emit := tr.emit(newMetrics())
+	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1, OutputTokens: 2, CachedInputTokens: 3}})
+	emit(agent.Event{Type: agent.EventNotification, TaskID: "t1", Text: "[task-notification] task t1 succeeded", Usage: model.Usage{InputTokens: 10, OutputTokens: 20, CachedInputTokens: 1}})
+
+	s := tr.summary()
+	want := model.Usage{InputTokens: 11, OutputTokens: 22, CachedInputTokens: 4}
+	if s.Usage != want {
+		t.Fatalf("summary usage = %+v, want %+v", s.Usage, want)
+	}
+}
+
 func TestTurnEmitRecordsToolCallMetrics(t *testing.T) {
 	m := newMetrics()
 	tr := newTurn("t1", func() {})

@@ -83,11 +83,32 @@ func (r *REPL) Run(ctx context.Context) error {
 
 	for {
 		_, _ = io.WriteString(r.stdout, "> ")
+		var tasks *agent.Tasks
+		if lister, ok := r.backend.(app.TaskLister); ok {
+			tasks = lister.Tasks()
+		}
+		var updates <-chan struct{}
+		if tasks != nil {
+			updates = tasks.Updates()
+		}
 		var result scanResult
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case result = <-lines:
+		case _, open := <-updates:
+			// updates is nil (never fires) when no TaskLister backend is
+			// wired up. A closed channel (open == false) means the session
+			// was replaced; just loop, the next iteration re-reads Tasks().
+			if !open {
+				continue
+			}
+			if tasks.Pending() > 0 {
+				if err := r.wake(ctx); err != nil {
+					return err
+				}
+			}
+			continue
 		}
 		if !result.ok {
 			return result.err
@@ -119,10 +140,55 @@ func (r *REPL) Run(ctx context.Context) error {
 	}
 }
 
+// wake runs an empty-text turn triggered by a pending sub-agent notification,
+// preceded by a newline so its output does not append to the "> " marker.
+func (r *REPL) wake(ctx context.Context) error {
+	_, _ = io.WriteString(r.stdout, "\n")
+	err := r.prompt(ctx, "")
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, session.ErrFatalPersistence) {
+		return err
+	}
+	return nil
+}
+
 // RunOnce executes a single prompt with the same rendering as Run and returns
 // the turn's error without the interactive banner, prompt marker, or loop.
+// After the prompt returns, it waits out any sub-agent tasks still running
+// and runs wake turns to drain their notifications, so a one-shot "-p"
+// invocation does not exit with children still in flight.
 func (r *REPL) RunOnce(ctx context.Context, prompt string) error {
-	return r.prompt(ctx, prompt)
+	if err := r.prompt(ctx, prompt); err != nil {
+		return err
+	}
+	return r.drainTasks(ctx)
+}
+
+// drainTasks waits for every non-final task to finish, then runs wake turns
+// until the notification inbox is empty and no task remains non-final. Each
+// wait and wake turn is bounded by ctx.
+func (r *REPL) drainTasks(ctx context.Context) error {
+	tasks, ok := r.taskLister()
+	if !ok {
+		return nil
+	}
+	for {
+		for _, task := range tasks.List() {
+			if !task.Final() {
+				if _, err := tasks.Wait(ctx, task.ID); err != nil {
+					return err
+				}
+			}
+		}
+		if tasks.Pending() == 0 {
+			return nil
+		}
+		if err := r.prompt(ctx, ""); err != nil {
+			return err
+		}
+	}
 }
 
 func (r *REPL) prompt(ctx context.Context, line string) error {
@@ -231,7 +297,7 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if args != "" {
 			break
 		}
-		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n")
+		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n")
 		return false, nil
 	case "exit":
 		if args != "" {
@@ -288,6 +354,13 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		return r.memoryCommand(ctx, args)
 	case "remember":
 		return r.rememberCommand(ctx, args)
+	case "tasks":
+		if args != "" {
+			break
+		}
+		return r.tasksCommand(ctx)
+	case "task":
+		return r.taskCommand(ctx, args)
 	case "login":
 		return r.loginCommand(ctx, args)
 	case "logout":
@@ -371,6 +444,8 @@ func (r *REPL) renderEvent(event agent.Event) bool {
 			_, _ = fmt.Fprintln(r.stderr, event.Err)
 			return true
 		}
+	case agent.EventNotification:
+		_, _ = fmt.Fprintf(r.stdout, "\n%s\n", event.Text)
 	}
 	return false
 }

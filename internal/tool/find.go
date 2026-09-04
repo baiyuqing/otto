@@ -53,7 +53,7 @@ func (t *findTool) Definition() model.ToolDefinition {
 
 func (t *findTool) Execute(ctx context.Context, arguments json.RawMessage) Result {
 	var args findArgs
-	if err := decodeStrictJSON(arguments, &args, "pattern"); err != nil {
+	if err := DecodeStrictJSON(arguments, &args, "pattern"); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if args.Pattern == "" {
@@ -144,7 +144,7 @@ func (t *findTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	if truncated {
 		output.WriteString("[truncated: result limit reached]\n")
 	}
-	return cappedTextResult(output.String(), t.maxOutputBytes)
+	return CappedTextResult(output.String(), t.maxOutputBytes)
 }
 
 var _ Tool = (*findTool)(nil)

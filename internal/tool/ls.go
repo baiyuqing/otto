@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/baiyuqing/otto/internal/model"
@@ -49,21 +50,27 @@ func (t *lsTool) Execute(ctx context.Context, arguments json.RawMessage) Result 
 	if requestedPath == "" {
 		requestedPath = "."
 	}
-	directory, err := t.workspace.ResolveExisting(requestedPath)
+	directory, err := t.workspace.existingRelative(requestedPath)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
-	info, err := os.Stat(directory)
+	file, err := t.workspace.openRelative(directory)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if !info.IsDir() {
 		return Result{Content: fmt.Sprintf("not a directory: %s", args.Path), IsError: true}
 	}
-	entries, err := os.ReadDir(directory)
+	entries, err := file.ReadDir(-1)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var output strings.Builder
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {

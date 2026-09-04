@@ -61,13 +61,17 @@ func (t *editTool) Execute(_ context.Context, arguments json.RawMessage) Result 
 		return Result{Content: "missing required argument: old_text", IsError: true}
 	}
 
-	path, err := t.workspace.ResolveExisting(args.Path)
+	file, err := t.workspace.Open(args.Path)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
-	text, err := readValidatedTextFile(path)
+	text, err := readValidatedTextFile(file, args.Path)
+	closeErr := file.Close()
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
+	}
+	if closeErr != nil {
+		return Result{Content: closeErr.Error(), IsError: true}
 	}
 
 	count := strings.Count(text, args.OldText)
@@ -79,7 +83,11 @@ func (t *editTool) Execute(_ context.Context, arguments json.RawMessage) Result 
 	}
 
 	replaced := strings.Replace(text, args.OldText, args.NewText, 1)
-	if err := writeFileAtomic(path, []byte(replaced)); err != nil {
+	path, err := t.workspace.writeRelative(args.Path)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
+	if err := writeFileAtomic(t.workspace, path, []byte(replaced)); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
 	return Result{Content: fmt.Sprintf("edited %s\n%s", args.Path, editDiff(text, replaced))}

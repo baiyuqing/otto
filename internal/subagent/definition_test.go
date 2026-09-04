@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeAgent(t *testing.T, root, name, frontmatterExtra, body string) string {
@@ -307,6 +309,133 @@ func TestDiscoverMissingRootSilent(t *testing.T) {
 	}
 	if catalog.Len() != 0 {
 		t.Fatalf("Len() = %d, want 0", catalog.Len())
+	}
+}
+
+func TestDiscoverRejectsExternalAgentFileSymlink(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "external")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "AGENT.md")
+	if err := os.WriteFile(outside, []byte("---\nname: external\ndescription: secret description\n---\nsecret body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "AGENT.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, warnings := Discover([]string{root})
+	if catalog.Len() != 0 || len(warnings) != 0 {
+		t.Fatalf("catalog=%#v warnings=%v, want external AGENT.md skipped", catalog, warnings)
+	}
+}
+
+func TestDiscoverSkipsFIFOAgentFileWithoutBlocking(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "fifo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(dir, "AGENT.md")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		catalog  Catalog
+		warnings []string
+	}
+	done := make(chan result, 1)
+	go func() {
+		catalog, warnings := Discover([]string{root})
+		done <- result{catalog: catalog, warnings: warnings}
+	}()
+
+	var got result
+	timedOut := false
+	select {
+	case got = <-done:
+	case <-time.After(2 * time.Second):
+		timedOut = true
+		writer, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			_ = writer.Close()
+		}
+		select {
+		case got = <-done:
+		case <-time.After(time.Second):
+			t.Fatal("Discover blocked opening FIFO AGENT.md")
+		}
+	}
+	if timedOut {
+		t.Fatal("Discover blocked opening FIFO AGENT.md")
+	}
+	if got.catalog.Len() != 0 || len(got.warnings) != 0 {
+		t.Fatalf("catalog=%#v warnings=%v, want FIFO skipped", got.catalog, got.warnings)
+	}
+}
+
+func TestDiscoverRejectsOversizedAgentFile(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "large")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "AGENT.md")
+	if err := os.WriteFile(path, []byte("---\nname: large\ndescription: d\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, maxAgentFileBytes+1); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, warnings := Discover([]string{root})
+	if catalog.Len() != 0 || len(warnings) != 1 || !strings.Contains(warnings[0], "too large") {
+		t.Fatalf("catalog=%#v warnings=%v, want oversized file warning", catalog, warnings)
+	}
+}
+
+func TestDiscoverInternalAgentFileSymlink(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "linked")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "definition.md")
+	if err := os.WriteFile(target, []byte("---\nname: linked\ndescription: internal\n---\ninternal body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(target), filepath.Join(dir, "AGENT.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, warnings := Discover([]string{root})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings=%v, want none", warnings)
+	}
+	def, ok := catalog.Lookup("linked")
+	if !ok || def.Description != "internal" || def.Body != "internal body" {
+		t.Fatalf("definition=%#v ok=%v, want internal symlink contents", def, ok)
+	}
+}
+
+func TestDiscoverSymlinkedDefinitionDirFollowed(t *testing.T) {
+	root := t.TempDir()
+	realRoot := t.TempDir()
+	realDir := writeAgent(t, realRoot, "linked", "", "linked body\n")
+	if err := os.Symlink(realDir, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	catalog, warnings := Discover([]string{root})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings=%v, want none", warnings)
+	}
+	def, ok := catalog.Lookup("linked")
+	if !ok || def.Body != "linked body" || def.Dir != filepath.Join(root, "linked") {
+		t.Fatalf("definition=%#v ok=%v, want symlinked definition dir", def, ok)
 	}
 }
 

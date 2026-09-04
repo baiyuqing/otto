@@ -3,6 +3,7 @@ package trace
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,20 +67,20 @@ func TestTracingCapturesRequestAndResponse(t *testing.T) {
 		t.Fatalf("got %d records, want 1", len(records))
 	}
 	rec := records[0]
-	if rec["req_body"] != reqBody {
-		t.Fatalf("req_body = %v, want %q", rec["req_body"], reqBody)
+	if rec["url"] != redactedValue {
+		t.Fatalf("url = %v, want omission marker", rec["url"])
 	}
-	if rec["resp_body"] != sse {
-		t.Fatalf("resp_body = %v, want the raw SSE", rec["resp_body"])
+	if rec["req_body"] != redactedValue {
+		t.Fatalf("req_body = %v, want payload omission marker", rec["req_body"])
+	}
+	if rec["resp_body"] != redactedValue {
+		t.Fatalf("resp_body = %v, want payload omission marker", rec["resp_body"])
 	}
 	if rec["status"].(float64) != 200 {
 		t.Fatalf("status = %v, want 200", rec["status"])
 	}
 	if rec["method"] != http.MethodPost {
 		t.Fatalf("method = %v, want POST", rec["method"])
-	}
-	if !strings.Contains(rec["url"].(string), "/chat/completions") {
-		t.Fatalf("url = %v, want it to contain the path", rec["url"])
 	}
 	if _, ok := rec["duration_ms"].(float64); !ok {
 		t.Fatalf("duration_ms missing or not numeric: %v", rec["duration_ms"])
@@ -117,8 +118,8 @@ func TestTracingCapturesErrorResponse(t *testing.T) {
 	if records[0]["status"].(float64) != http.StatusTooManyRequests {
 		t.Fatalf("status = %v, want 429", records[0]["status"])
 	}
-	if !strings.Contains(records[0]["resp_body"].(string), "rate limited") {
-		t.Fatalf("resp_body = %v, want the error body captured", records[0]["resp_body"])
+	if records[0]["resp_body"] != redactedValue {
+		t.Fatalf("resp_body = %v, want payload omission marker", records[0]["resp_body"])
 	}
 }
 
@@ -212,6 +213,7 @@ func TestRedactHeadersRedactsAccountID(t *testing.T) {
 	redacted := redactHeaders(http.Header{
 		"Authorization":      []string{"Bearer secret-token-value"},
 		"Chatgpt-Account-Id": []string{accountID},
+		"Cookie":             []string{"session=secret-cookie"},
 		"Content-Type":       []string{"application/json"},
 	})
 	if got := redacted.Get("Chatgpt-Account-Id"); got != "[redacted]" {
@@ -220,7 +222,91 @@ func TestRedactHeadersRedactsAccountID(t *testing.T) {
 	if got := redacted.Get("Authorization"); got != "[redacted]" {
 		t.Fatalf("Authorization = %q, want %q", got, "[redacted]")
 	}
+	if got := redacted.Get("Cookie"); got != "[redacted]" {
+		t.Fatalf("Cookie = %q, want %q", got, "[redacted]")
+	}
 	if got := redacted.Get("Content-Type"); got != "application/json" {
 		t.Fatalf("Content-Type = %q, want it left untouched", got)
 	}
+}
+
+func TestTracingRedactsResponseHeadersAndOmitsPayloads(t *testing.T) {
+	const secret = "secret-cookie"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session="+secret)
+		w.Header().Set("X-Echo", r.Header.Get("Cookie"))
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, "echo="+secret)
+	}))
+	defer srv.Close()
+
+	buf := &bytes.Buffer{}
+	client := &http.Client{Transport: NewRoundTripper(http.DefaultTransport, buf)}
+	req := mustRequest(t, srv.URL)
+	req.Header.Set("Cookie", "session="+secret)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if string(body) != "echo="+secret {
+		t.Fatalf("client body changed: %q", body)
+	}
+	if bytes.Contains(buf.Bytes(), []byte(secret)) {
+		t.Fatal("trace leaked a secret from headers or body")
+	}
+	records := decodeRecords(t, buf)
+	if got := records[0]["req_body"]; got != redactedValue {
+		t.Fatalf("req_body = %v, want omission marker", got)
+	}
+	if got := records[0]["resp_body"]; got != redactedValue {
+		t.Fatalf("resp_body = %v, want omission marker", got)
+	}
+	headers := records[0]["resp_headers"].(map[string]any)
+	if _, ok := headers["X-Echo"]; ok {
+		t.Fatalf("unknown response header was retained: %#v", headers["X-Echo"])
+	}
+	if got := headers["Set-Cookie"].([]any)[0]; got != redactedValue {
+		t.Fatalf("Set-Cookie = %v, want redacted", got)
+	}
+}
+
+func TestTracingOmitsUntrustedURLPartsAndErrorText(t *testing.T) {
+	const secret = "fresh-oauth-token"
+	buf := &bytes.Buffer{}
+	client := &http.Client{Transport: NewRoundTripper(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("transport failed with " + secret)
+	}), buf)}
+	req, err := http.NewRequest(http.MethodGet, "https://example.test/"+secret+"?token="+secret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	_, err = client.Do(req)
+	if err == nil || !strings.Contains(err.Error(), secret) {
+		t.Fatalf("client error = %v, want original transport error", err)
+	}
+	records := decodeRecords(t, buf)
+	if len(records) != 1 {
+		t.Fatalf("got %d records, want 1", len(records))
+	}
+	if records[0]["url"] != redactedValue {
+		t.Fatalf("url = %v, want omission marker for untrusted path", records[0]["url"])
+	}
+	if records[0]["error"] != redactedValue {
+		t.Fatalf("error = %v, want omission marker", records[0]["error"])
+	}
+	if bytes.Contains(buf.Bytes(), []byte(secret)) {
+		t.Fatal("trace leaked fresh bearer token")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

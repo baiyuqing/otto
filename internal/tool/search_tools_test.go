@@ -206,6 +206,32 @@ func TestSearchAllowsWorkspaceRootNamedGit(t *testing.T) {
 	}
 }
 
+func TestSearchNormalizesPathsAndSkipsGitAliases(t *testing.T) {
+	root := t.TempDir()
+	writeSearchFile(t, root, "dir/file.txt", "match\n")
+	writeSearchFile(t, root, ".git/config", "match secret\n")
+	if err := os.Symlink(".git", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	for _, tool := range []Tool{NewFindTool(workspace, 51200), NewGrepTool(workspace, 51200)} {
+		arguments := `{"pattern":"**","path":"./dir/"}`
+		if tool.Definition().Name == "grep" {
+			arguments = `{"pattern":"match","path":"./dir/"}`
+		}
+		if result := tool.Execute(context.Background(), json.RawMessage(arguments)); result.IsError {
+			t.Fatalf("%s ./dir/: %#v", tool.Definition().Name, result)
+		}
+		arguments = `{"pattern":"**","path":"alias"}`
+		if tool.Definition().Name == "grep" {
+			arguments = `{"pattern":"match","path":"alias"}`
+		}
+		if result := tool.Execute(context.Background(), json.RawMessage(arguments)); result.IsError || result.Content != "" {
+			t.Fatalf("%s alias: %#v, want no git content", tool.Definition().Name, result)
+		}
+	}
+}
+
 func TestFindCapsOutputWithValidTruncationMarker(t *testing.T) {
 	root := t.TempDir()
 	writeSearchFile(t, root, "long-file-name.go", "x")

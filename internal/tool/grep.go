@@ -95,7 +95,7 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	if searchPath == "" {
 		searchPath = "."
 	}
-	root, err := t.workspace.ResolveExisting(searchPath)
+	root, err := t.workspace.existingRelative(searchPath)
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
@@ -110,7 +110,7 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 	collector := newCappedByteCollector(t.maxOutputBytes)
 	matchCount := 0
 	truncationMarker := ""
-	err = filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(t.workspace.rootFS.FS(), root, func(filePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -143,7 +143,7 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		if globSegments != nil && !matchGlobSegments(globSegments, candidate) {
 			return nil
 		}
-		file, err := os.Open(filePath)
+		file, err := t.workspace.openRelative(filePath)
 		if err != nil {
 			return err
 		}
@@ -159,10 +159,7 @@ func (t *grepTool) Execute(ctx context.Context, arguments json.RawMessage) Resul
 		if !scan.textFile {
 			return nil
 		}
-		relative, err := workspaceRelativePath(t.workspace, filePath)
-		if err != nil {
-			return err
-		}
+		relative := filepath.ToSlash(filePath)
 		for _, match := range scan.matches {
 			_, _ = collector.Write([]byte(relative + ":" + strconv.Itoa(match.number) + ":" + match.text + "\n"))
 			matchCount++

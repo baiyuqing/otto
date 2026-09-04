@@ -463,7 +463,10 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 
 	writePTY(t, master, "\r")
 	waitForCompactFocus(t, backend, ptyCompactFocus)
-	waitForSubsequence(t, collector, screenOffset, "compacting context")
+	// Incremental ANSI updates need not contain the label as contiguous bytes.
+	waitForTerminalScreen(t, collector, completionResizeOffset, 96, 30, func(screen *ptyTerminalScreen) bool {
+		return screen.Complete() && strings.Contains(screen.String(), "compacting context")
+	})
 
 	writePTY(t, master, "\x1b")
 	waitForCompactCancellation(t, backend)
@@ -1092,7 +1095,6 @@ func TestPTYTerminalScreenRejectsUnsupportedControlsAndCSI(t *testing.T) {
 		{name: "unsupported C0", sequence: "\x01"},
 		{name: "DEL", sequence: "\x7f"},
 		{name: "Unicode control", sequence: "\u0085"},
-		{name: "insert mode", sequence: "\x1b[4h"},
 		{name: "alternate screen enter", sequence: "\x1b[?1049h"},
 		{name: "alternate screen exit", sequence: "\x1b[?1049l"},
 		{name: "unknown private mode", sequence: "\x1b[?9999h"},

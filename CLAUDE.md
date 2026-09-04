@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @AGENTS.md
 
-AGENTS.md is the canonical rulebook: Stage 1 scope (openai-compatible provider only), package boundaries, mandatory TDD workflow, offline-test requirements, and secrets rules. Follow it exactly. This file only adds what AGENTS.md does not cover.
+AGENTS.md is the canonical rulebook: supported scope (`openai-compatible` and `chatgpt` providers, macOS only), package boundaries, mandatory TDD workflow, offline-test requirements, and secrets rules. Follow it exactly. This file only adds what AGENTS.md does not cover.
 
 ## Commands
 
@@ -27,7 +27,7 @@ Otto is a macOS coding-agent CLI. The wiring, from process start to a rendered r
 
 3. **`internal/agent.Agent.Run`** — the turn loop: redact and append the user message, stream a provider completion, execute any tool calls through the registry, append results, loop until the provider finishes without tool calls. Progress is reported as a flat `agent.Event` stream (`text_delta`, `tool_call_started/finished`, `provider_usage`, …) that both frontends render; the Event stream is the only frontend-facing output contract.
 
-4. **`internal/provider`** — a one-method interface: `Complete(ctx, Request, streamCallback) (Response, error)`. `openaicompat` is the sole Stage 1 implementation and owns all HTTP/JSON/SSE wire structs; nothing provider-specific may leak out of that package. `internal/model` holds the provider-neutral message/block/tool types everything else speaks.
+4. **`internal/provider`** — a one-method interface: `Complete(ctx, Request, streamCallback) (Response, error)`. `openaicompat` (Chat Completions) and `openairesponses` (ChatGPT subscription, Responses API) are the two implementations and own all HTTP/JSON/SSE wire structs; nothing provider-specific may leak out of those packages. `internal/auth` owns the ChatGPT OAuth sign-in and credential file behind `otto login`/`otto logout`. `internal/model` holds the provider-neutral message/block/tool types everything else speaks.
 
 5. **`internal/session`** — append-only JSONL in the **Pi session format v3** (`pi_codec.go`/`pi_types.go`), stored under `~/.otto/sessions/<workspace-key>/`. Files are created lazily on the first user prompt (`prepared.go`); `memory.go` backs `--no-session`. `scripts/pi-session-interop.mjs` is an opt-in compatibility probe against a real Pi install — never invoked by default tests.
 

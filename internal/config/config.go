@@ -14,7 +14,7 @@ import (
 
 // Provider identifiers accepted in config, env, and flags.
 const (
-	// ProviderOpenAICompatible uses a base_url + API key (Stage 1).
+	// ProviderOpenAICompatible uses a base_url + API key.
 	ProviderOpenAICompatible = "openai-compatible"
 	// ProviderChatGPT uses a ChatGPT subscription via OAuth credentials.
 	ProviderChatGPT = "chatgpt"

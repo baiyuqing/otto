@@ -104,6 +104,7 @@ func TestToolArgumentPreviewExtractsHumanReadableSummary(t *testing.T) {
 		{"memory_search shows query", "memory_search", `{"query":"deployment config"}`, "deployment config"},
 		{"agent shows description when set", "agent", `{"prompt":"do the thing","description":"review the diff"}`, "review the diff"},
 		{"agent falls back to prompt", "agent", `{"prompt":"review the diff please"}`, "review the diff please"},
+		{"agent prefixes the name when set", "agent", `{"prompt":"do the thing","description":"review the diff","name":"lint-check"}`, "lint-check: review the diff"},
 		{"agent_wait shows task id", "agent_wait", `{"task_id":"t1"}`, "t1"},
 		{"agent_wait without task_id shows all", "agent_wait", `{}`, "all"},
 		{"agent_send shows task id", "agent_send", `{"task_id":"t2","text":"status?"}`, "t2"},

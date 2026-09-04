@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseFrontmatterPlainScalar(t *testing.T) {
-	fields, body, err := parseFrontmatter([]byte("---\nname: pdf\ndescription: Extract text from PDFs\n---\n# PDF\n"))
+	fields, body, err := ParseFrontmatter([]byte("---\nname: pdf\ndescription: Extract text from PDFs\n---\n# PDF\n"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestParseFrontmatterPlainScalar(t *testing.T) {
 
 func TestParseFrontmatterPlainScalarMultiLine(t *testing.T) {
 	data := "---\ndescription: Extract text\n  from PDFs\n  and merge them\nname: pdf\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -39,7 +39,7 @@ description: "Say \"hi\"\nnext line\tend\\done"
 ---
 body
 `
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -55,7 +55,7 @@ name: "a\qb"
 ---
 body
 `
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,7 +66,7 @@ body
 
 func TestParseFrontmatterSingleQuotedEscape(t *testing.T) {
 	data := "---\ndescription: 'it''s a test'\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestParseFrontmatterSingleQuotedEscape(t *testing.T) {
 
 func TestParseFrontmatterLiteralBlock(t *testing.T) {
 	data := "---\ndescription: |\n  line one\n  line two\nname: x\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestParseFrontmatterLiteralBlock(t *testing.T) {
 
 func TestParseFrontmatterLiteralBlockWithChompingIndicator(t *testing.T) {
 	data := "---\ndescription: |-\n  line one\n  line two\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestParseFrontmatterLiteralBlockWithChompingIndicator(t *testing.T) {
 
 func TestParseFrontmatterFoldedBlockWithBlankLine(t *testing.T) {
 	data := "---\ndescription: >\n  This is line one\n  continued.\n\n  Second paragraph.\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestParseFrontmatterFoldedBlockWithBlankLine(t *testing.T) {
 
 func TestParseFrontmatterNestedBlockSkipped(t *testing.T) {
 	data := "---\nname: pdf\nmetadata:\n  category: files\n  version: \"1.0\"\ndescription: d\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestParseFrontmatterCommentsIgnored(t *testing.T) {
 	// consumes continuation lines, so it is read as a standalone comment
 	// rather than folded into the previous scalar.
 	data := "---\n# a comment\nname: \"pdf\"\n  # indented comment between blocks\ndescription: d\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestParseFrontmatterCommentsIgnored(t *testing.T) {
 
 func TestParseFrontmatterDuplicateKeyLastWins(t *testing.T) {
 	data := "---\nname: first\nname: second\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,35 +152,35 @@ func TestParseFrontmatterDuplicateKeyLastWins(t *testing.T) {
 }
 
 func TestParseFrontmatterMissingFrontmatter(t *testing.T) {
-	_, _, err := parseFrontmatter([]byte("# just markdown\n"))
+	_, _, err := ParseFrontmatter([]byte("# just markdown\n"))
 	if err == nil || !strings.Contains(err.Error(), "missing frontmatter") {
 		t.Fatalf("err = %v, want missing frontmatter", err)
 	}
 }
 
 func TestParseFrontmatterUnterminated(t *testing.T) {
-	_, _, err := parseFrontmatter([]byte("---\nname: pdf\n"))
+	_, _, err := ParseFrontmatter([]byte("---\nname: pdf\n"))
 	if err == nil || !strings.Contains(err.Error(), "unterminated frontmatter") {
 		t.Fatalf("err = %v, want unterminated frontmatter", err)
 	}
 }
 
 func TestParseFrontmatterUnsupportedLine(t *testing.T) {
-	_, _, err := parseFrontmatter([]byte("---\nnot a key line\n---\nbody\n"))
+	_, _, err := ParseFrontmatter([]byte("---\nnot a key line\n---\nbody\n"))
 	if err == nil || !strings.Contains(err.Error(), "unsupported frontmatter line 2") {
 		t.Fatalf("err = %v, want unsupported frontmatter line 2", err)
 	}
 }
 
 func TestParseFrontmatterUnterminatedDoubleQuoted(t *testing.T) {
-	_, _, err := parseFrontmatter([]byte("---\nname: \"unterminated\n---\nbody\n"))
+	_, _, err := ParseFrontmatter([]byte("---\nname: \"unterminated\n---\nbody\n"))
 	if err == nil {
 		t.Fatalf("expected error for unterminated double-quoted value")
 	}
 }
 
 func TestParseFrontmatterUnterminatedSingleQuoted(t *testing.T) {
-	_, _, err := parseFrontmatter([]byte("---\nname: 'unterminated\n---\nbody\n"))
+	_, _, err := ParseFrontmatter([]byte("---\nname: 'unterminated\n---\nbody\n"))
 	if err == nil {
 		t.Fatalf("expected error for unterminated single-quoted value")
 	}
@@ -188,7 +188,7 @@ func TestParseFrontmatterUnterminatedSingleQuoted(t *testing.T) {
 
 func TestParseFrontmatterDelimiterToleratesCR(t *testing.T) {
 	data := "---\r\nname: pdf\r\n---\r\nbody\r\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestParseFrontmatterDelimiterToleratesCR(t *testing.T) {
 
 func TestParseFrontmatterEmptyValue(t *testing.T) {
 	data := "---\nname:\ndescription: d\n---\nbody\n"
-	fields, _, err := parseFrontmatter([]byte(data))
+	fields, _, err := ParseFrontmatter([]byte(data))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestParseFrontmatterEmptyValue(t *testing.T) {
 }
 
 func TestParseFrontmatterBodyLeadingNewlineRemovedOnce(t *testing.T) {
-	fields, body, err := parseFrontmatter([]byte("---\nname: pdf\n---\n\n\n# heading\n"))
+	fields, body, err := ParseFrontmatter([]byte("---\nname: pdf\n---\n\n\n# heading\n"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

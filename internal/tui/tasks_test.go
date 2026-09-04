@@ -346,6 +346,29 @@ func TestTaskCommandShowsDetail(t *testing.T) {
 	}
 }
 
+func TestTaskCommandByName(t *testing.T) {
+	tasks := agent.NewTasks()
+	canceled := false
+	added, err := tasks.Add(agent.Task{Name: "lint-check", Description: "review"}, func() { canceled = true }, nil)
+	if err != nil {
+		t.Fatalf("Add() = %v", err)
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{tasks: tasks}), 80, 24)
+
+	got, _ := submitCommand(t, m, "/task lint-check")
+	if text := lastEntryText(t, got); !strings.Contains(text, added.ID) {
+		t.Fatalf("entry = %q, want it to include the resolved id %q", text, added.ID)
+	}
+
+	got, _ = submitCommand(t, got, "/task cancel lint-check")
+	if !canceled {
+		t.Fatal("cancel func was not called")
+	}
+	if text := lastEntryText(t, got); text != "canceled lint-check" {
+		t.Fatalf("entry = %q", text)
+	}
+}
+
 func TestTaskCommandCancel(t *testing.T) {
 	tasks := agent.NewTasks()
 	canceled := false

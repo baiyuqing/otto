@@ -378,6 +378,9 @@ it apart from a user turn (`trigger: "user"`).
 | `GET /v1/sessions/{id}/tasks/{task_id}` | a `Task` plus `"history": [model.Message, …]` in the same wire form as `GET .../history`; 404 `not_found` for an unknown id |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | cancels the task; 200 with the `Task` re-read after cancel; 404 `not_found` for an unknown id; 409 `task_done` if the task already finished |
 
+`{task_id}` in each route accepts either a task id or a task name; the wire
+form carries a `name` field when the task has one.
+
 `Task` (`internal/server/tasks.go`, `taskWire`):
 
 ```json

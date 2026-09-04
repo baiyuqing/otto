@@ -45,6 +45,29 @@ func TestTaskLineDefaultAgentAndDescriptionLabel(t *testing.T) {
 	}
 }
 
+func TestTaskLabelPrefixesTheName(t *testing.T) {
+	task := agent.Task{Name: "lint-check", Description: "review the diff"}
+	got := TaskLabel(task)
+	want := "lint-check: review the diff"
+	if got != want {
+		t.Fatalf("TaskLabel() = %q, want %q", got, want)
+	}
+}
+
+func TestTaskLineIncludesTheName(t *testing.T) {
+	now := time.Now()
+	task := agent.Task{
+		ID:          "t1",
+		Name:        "lint-check",
+		Status:      agent.TaskQueued,
+		Description: "review the diff",
+	}
+	got := TaskLine(task, now)
+	if !strings.HasSuffix(got, "lint-check: review the diff") {
+		t.Fatalf("TaskLine() = %q, want suffix %q", got, "lint-check: review the diff")
+	}
+}
+
 func TestTaskStepsRendersToolCallsAndAssistantTextOnly(t *testing.T) {
 	history := []model.Message{
 		{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "review please"}}},

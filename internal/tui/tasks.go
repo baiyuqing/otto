@@ -128,7 +128,7 @@ func (m Model) handleTaskCommand(argument string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if len(fields) != 1 || fields[0] == "cancel" {
-		m.appendTaskEntry(EntrySystem, "usage: /task <id> | /task cancel <id>")
+		m.appendTaskEntry(EntrySystem, "usage: /task <id|name> | /task cancel <id|name>")
 		return m, nil
 	}
 	id := fields[0]

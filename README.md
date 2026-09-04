@@ -395,25 +395,26 @@ What's wired:
   <final report>
   ```
 
-  (A `failed` task shows its error instead of the report; a `canceled` task shows neither; both omit the token count.) The notification is appended to the session as a display context message and persisted as a Pi v3 `custom_message` entry, so `/resume` still shows it. A finished task with no active turn wakes the REPL and `otto serve` automatically and runs an empty-text turn to deliver it. In the TUI, the same notification renders only at the start of the next turn; the TUI does not start a turn on its own yet.
+  (A `failed` task shows its error instead of the report; a `canceled` task shows neither; both omit the token count.) The notification is appended to the session as a display context message and persisted as a Pi v3 `custom_message` entry, so `/resume` still shows it. A finished task with no active turn wakes the REPL, the TUI, or `otto serve` automatically and runs an empty-text turn to deliver it; the TUI truncates a notification body longer than 20 lines in the transcript, with a `… (N more lines; /task <id>)` trailer.
 - **`otto serve`**: each open session runs a goroutine that starts an empty-text turn (`trigger: "task"` in the turn summary and the session's `turn` field) whenever a task notification is pending and no turn is already running, so a client streaming the session's turns sees task results without polling. `GET /v1/sessions/{id}/tasks` lists the session's tasks, `GET /v1/sessions/{id}/tasks/{task_id}` returns one task plus its child session's history, and `POST /v1/sessions/{id}/tasks/{task_id}/cancel` cancels it. SSE clients also receive the notification directly as a `notification` event (`task_id`, `text`, `usage`). Metrics: `otto_tasks_started_total`, `otto_tasks_finished_total{status}`, `otto_tasks_running`. See `docs/specs/2026-09-03-agent-server-design.md` "Sub-agent tasks".
 - **Child tool set**: the parent's tools minus `agent`, `agent_wait`, `agent_status`, `remember`, `forget`, and `memory_search` — no memory recall, no nested delegation. `bash` runs under the same sandbox mode as the parent.
 - **Concurrency**: at most 4 children run at once per session, a fixed limit; further `agent` calls wait in the `queued` state and can still be canceled.
-- **REPL commands**: `/tasks` lists every task in the session; `/task <id>` shows one task's line, its recent steps, and its result or error once finished; `/task cancel <id>` cancels a queued or running task.
+- **REPL and TUI commands**: `/tasks` lists every task in the session; `/task <id>` shows one task's line, its recent steps, and its result or error once finished; `/task cancel <id>` cancels a queued or running task.
 
   ```
   > /tasks
   t1   (default)  succeeded    42s   7 tools  12,310 tokens            review the diff
   t2   (default)  running      12s   4 tools  grep "session"           find where sessions are written
   ```
+- **TUI task panel**: while at least one task is queued or running, the TUI shows a panel between the transcript and the input box: a header line, then up to 5 task rows in the same format as `/tasks`, then a `+N more` line when more tasks exist. The panel is absent when no task is queued or running.
+- **Session replacement**: `/new`, `/resume`, and `/model` close the current session's task registry, canceling every queued or running task; the TUI then appends a `canceled N running tasks` notice to the new transcript when `N` is greater than zero. Archiving the current session with `/archive` replaces it the same way and cancels tasks too; archiving another session does not.
 - **Cancellation**: Esc/Ctrl-C cancels the parent's turn only; canceling a task needs `/task cancel <id>`.
 
 Not yet implemented:
 
 - Named agent definitions, `[agents]` TOML configuration, and `context: inherit`.
 - Parent-to-child messages (`agent_send`, `agent_cancel`, `agent_report`).
-- A TUI task panel and automatic wake in the TUI.
-- Child transcript persistence: transcripts live in memory only and are lost on `/new`, `/resume`, `/model`, and exit, which also cancel any children still running.
+- Child transcript persistence: transcripts live in memory only and are lost on `/new`, `/resume`, `/model`, archiving the current session, and exit, which also cancel any children still running.
 - Child token usage in the session's overall usage total: `agent_status`, `/tasks`, and the notification show it, but it is not part of the session usage total and does not survive `/resume`.
 
 Design reference: [`docs/specs/2026-09-03-subagents-design.md`](docs/specs/2026-09-03-subagents-design.md).

@@ -20,6 +20,8 @@ const (
 	slashCommandLogin
 	slashCommandLogout
 	slashCommandExit
+	slashCommandTasks
+	slashCommandTask
 )
 
 type slashCommand struct {
@@ -41,6 +43,8 @@ var slashCommands = []slashCommand{
 	{Name: "/login", Description: "sign in to ChatGPT (add status to check)", Kind: slashCommandLogin},
 	{Name: "/logout", Description: "sign out of ChatGPT", Kind: slashCommandLogout},
 	{Name: "/exit", Description: "quit", Kind: slashCommandExit},
+	{Name: "/tasks", Description: "list sub-agent tasks", Kind: slashCommandTasks},
+	{Name: "/task", Description: "show or cancel a sub-agent task", Kind: slashCommandTask},
 }
 
 func matchingSlashCommands(value string) []slashCommand {

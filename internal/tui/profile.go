@@ -117,6 +117,7 @@ func (m Model) startProfileSwitch(switcher app.ProfileSwitcher, profile string) 
 	m.profilePicker = profilePickerState{}
 	m.profileSwitchGeneration++
 	m.profileSwitchPending = true
+	m.pendingCanceledTasks = m.countActiveTasks()
 	m.statusText = ""
 	return m, runProfileSwitchCommand(m.rootCtx, switcher, m.profileSwitchGeneration, profile)
 }
@@ -151,6 +152,7 @@ func (m Model) applyProfileSwitchResult(msg profileSwitchResultMsg) (tea.Model, 
 	info := m.backend.Info()
 	status := fmt.Sprintf("switched to profile %s (provider %s, model %s); set as default", info.Profile, info.Provider, info.Model)
 	m.resetSessionViewFromBackend(status)
+	m.noteCanceledTasks(m.pendingCanceledTasks)
 	return m, nil
 }
 

@@ -170,6 +170,9 @@ func TestModelCommandUnavailableWithoutSwitcher(t *testing.T) {
 	if !strings.Contains(got.statusText, app.ErrProfileSwitchUnavailable.Error()) {
 		t.Fatalf("statusText = %q", got.statusText)
 	}
+	if got.editor.Value() != "" {
+		t.Fatalf("editor = %q, want cleared after unavailable /model", got.editor.Value())
+	}
 }
 
 func TestModelCommandUnavailableWhenDynamicContentSuppressedWithoutBackendCallbacks(t *testing.T) {

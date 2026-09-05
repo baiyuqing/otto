@@ -773,6 +773,43 @@ func TestProfileEquivalentSemanticInputsRenderByteIdentically(t *testing.T) {
 	}
 }
 
+func TestProfileGrantsEtcSymlinkTraversalMetadata(t *testing.T) {
+	fixture := newProfileFixture(t)
+	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	const exactMetadataRule = `(allow file-read-metadata
+  (literal "/etc"))`
+	if !strings.Contains(profile, exactMetadataRule) {
+		t.Fatal("profile lacks the exact metadata-only /etc symlink traversal grant")
+	}
+	for _, parent := range []string{"/etc", "/private/etc"} {
+		if strings.Contains(profile, profileTestFilter("subpath", parent)) {
+			t.Fatalf("/etc traversal compatibility granted sensitive parent subtree %q", parent)
+		}
+	}
+	if strings.Contains(profile, "(allow file-read*\n  "+profileTestFilter("literal", "/etc")+")") {
+		t.Fatal("/etc symlink traversal grant is not metadata-only")
+	}
+}
+
+func TestProfileNetworkAllowGrantsCertificateTrustBroker(t *testing.T) {
+	fixture := newProfileFixture(t)
+	fixture.options.Network = sandbox.NetworkAllow
+	allow := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	const trustLookup = `(allow mach-lookup
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.trustd.agent"))`
+	allowNetwork := profileTestSection(t, allow, "NETWORK")
+	if strings.Count(allow, trustLookup) != 1 || !strings.Contains(allowNetwork, trustLookup) {
+		t.Fatal("NetworkAllow does not contain exactly one marker-scoped trustd broker lookup")
+	}
+
+	fixture.options.Network = sandbox.NetworkDeny
+	deny := renderProfileForTest(t, fixture.options, fixture.dependencies)
+	if strings.Contains(deny, "com.apple.trustd") {
+		t.Fatal("NetworkDeny emitted a trustd broker grant")
+	}
+}
+
 func TestProfileXcodeSelectorUsesOnlyExactReadAndTraversalMetadata(t *testing.T) {
 	fixture := newProfileFixture(t)
 	profile := renderProfileForTest(t, fixture.options, fixture.dependencies)

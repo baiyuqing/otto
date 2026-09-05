@@ -450,13 +450,17 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
 		t.Fatalf("SIGWINCH error = %v", err)
 	}
+	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
 	completedScreen, _ := waitForTerminalScreen(t, collector, completionResizeOffset, 96, 30, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
-		return screen.FullRedraws() > 0 && screen.Complete() &&
-			strings.Contains(content, "/compact "+ptyCompactFocus) &&
-			!strings.Contains(content, "compact context")
+		if screen.FullRedraws() == 0 || !screen.Complete() ||
+			!strings.Contains(content, "/compact "+ptyCompactFocus) ||
+			strings.Contains(content, "compact context") {
+			return false
+		}
+		x, y, visible := screen.Cursor()
+		return visible && x == expectedCursorX && y == 3
 	})
-	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
 	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 3 {
 		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,3) visible", x, y, visible, expectedCursorX)
 	}

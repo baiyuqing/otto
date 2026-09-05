@@ -31,7 +31,23 @@ import (
 
 const (
 	ptyTestTimeout = 5 * time.Second
-	ptyStepTimeout = 2 * time.Second
+	// ptyStepTimeout was 2s. bubbletea v2.0.9's WindowSizeMsg handling
+	// (charm.land/bubbletea/v2@v2.0.9/tea.go eventLoop) calls
+	// renderer.resize() and then, in the same goroutine, model.Update()
+	// followed by renderer.render() to publish the resized view. A second,
+	// independent goroutine (Program.startRenderer's ticker) can call
+	// renderer.flush() at any time in between, painting a view still sized
+	// for the old width onto a terminal whose column count has already
+	// changed. The result is exactly the transient artifact this test can
+	// hit: a stale, old-width frame fragment left on screen above the
+	// correctly redrawn one, until the next tick flushes the resized view.
+	// Under normal scheduling that window is sub-millisecond; under heavy
+	// CPU contention (verified locally with go test -race and 10 competing
+	// CPU-bound processes) it can stretch past 2s. This timeout bump is a
+	// test-side accommodation for that upstream race, not a fix for it —
+	// there is no otto-side hook into bubbletea's render ticker to close
+	// the window, and v2.0.9 is the latest available release.
+	ptyStepTimeout = 5 * time.Second
 	ptyQuietWindow = 50 * time.Millisecond
 	// cursorShowSeq marks the end of a completed render in inline mode; it
 	// appears after every frame, so it is used only to confirm the TUI has
@@ -172,18 +188,7 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		cancelRun()
-		_ = slave.Close()
-		_ = master.Close()
-		collector.Wait(t, ptyStepTimeout)
-		if runResult.Finished() {
-			return
-		}
-		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
-			t.Log("forced TUI cleanup timed out")
-		} else if err != nil && !isExpectedCleanupRunError(err) {
-			t.Logf("forced TUI cleanup error: %v", err)
-		}
+		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "forced TUI cleanup")
 	})
 
 	waitForSubsequence(t, collector, 0, "current transcript marker")
@@ -294,18 +299,7 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		cancelRun()
-		_ = slave.Close()
-		_ = master.Close()
-		collector.Wait(t, ptyStepTimeout)
-		if runResult.Finished() {
-			return
-		}
-		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
-			t.Log("forced TUI cleanup timed out")
-		} else if err != nil && !isExpectedCleanupRunError(err) {
-			t.Logf("forced TUI cleanup error: %v", err)
-		}
+		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "forced TUI cleanup")
 	})
 
 	waitForSubsequence(t, collector, 0, "current archive transcript")
@@ -425,18 +419,7 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
 
 	t.Cleanup(func() {
-		cancelRun()
-		_ = slave.Close()
-		_ = master.Close()
-		collector.Wait(t, ptyStepTimeout)
-		if runResult.Finished() {
-			return
-		}
-		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
-			t.Log("tui.Run cleanup timed out")
-		} else if err != nil && !isExpectedCleanupRunError(err) {
-			t.Logf("tui.Run cleanup error: %v", err)
-		}
+		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "tui.Run cleanup")
 	})
 
 	screenOffset := waitForSubsequence(t, collector, 0, wideFooterMarker)
@@ -592,18 +575,7 @@ func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		cancelRun()
-		_ = slave.Close()
-		_ = master.Close()
-		collector.Wait(t, ptyStepTimeout)
-		if runResult.Finished() {
-			return
-		}
-		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
-			t.Log("sandboxed Bash TUI cleanup timed out")
-		} else if err != nil && !isExpectedCleanupRunError(err) {
-			t.Logf("sandboxed Bash TUI cleanup error: %v", err)
-		}
+		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "sandboxed Bash TUI cleanup")
 	})
 
 	if _, err := collector.WaitForEvent(0, []byte(cursorShowSeq), ptyStepTimeout); err != nil {
@@ -655,18 +627,7 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
 
 	t.Cleanup(func() {
-		cancelRun()
-		_ = slave.Close()
-		_ = master.Close()
-		collector.Wait(t, ptyStepTimeout)
-		if runResult.Finished() {
-			return
-		}
-		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
-			t.Log("tui.Run cleanup timed out")
-		} else if err != nil && !isExpectedCleanupRunError(err) {
-			t.Logf("tui.Run cleanup error: %v", err)
-		}
+		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "tui.Run cleanup")
 	})
 
 	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
@@ -885,6 +846,22 @@ func startRunResult(run func() error) *runResult {
 		close(result.done)
 	}()
 	return result
+}
+
+// cleanupPTYRun cancels the run, waits for it to exit, and only then closes
+// the PTY ends. tui.Run's shutdown path (Bubble Tea restoring terminal state)
+// reads slave's fd, so closing slave before that finishes races with it.
+func cleanupPTYRun(t *testing.T, cancelRun context.CancelFunc, slave, master *os.File, collector *ptyOutputCollector, runResult *runResult, label string) {
+	t.Helper()
+	cancelRun()
+	if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+		t.Logf("%s timed out", label)
+	} else if err != nil && !isExpectedCleanupRunError(err) {
+		t.Logf("%s error: %v", label, err)
+	}
+	_ = slave.Close()
+	_ = master.Close()
+	collector.Wait(t, ptyStepTimeout)
 }
 
 func (r *runResult) Finished() bool {

@@ -612,6 +612,10 @@ no domain allowlist. Unix sockets stay blocked in both modes, except for the
 exact `/private/var/run/mDNSResponder` path, which `network = "allow"` permits
 because `getaddrinfo` connects it directly to resolve hostnames. Docker/Podman
 sockets, SSH agents, and similar host control sockets remain unavailable.
+`network = "allow"` also permits lookups of the `com.apple.trustd` and
+`com.apple.trustd.agent` services, which the Security framework uses to verify
+TLS server certificates; without them Go-based clients fail with
+`x509: OSStatus -26276`.
 
 The command environment is rebuilt from one captured process snapshot. Otto
 never restores provider API-key variables, `OTTO_API_KEY`, loader-injection

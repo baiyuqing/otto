@@ -580,6 +580,13 @@ func renderProfileNetworkRules(network sandbox.NetworkMode) (string, error) {
 			"(allow network-outbound",
 			"  (remote ip)",
 			"  (remote unix-socket (path \"/private/var/run/mDNSResponder\")))",
+			// Go's crypto/x509 verifier evaluates server certificates through
+			// the Security framework, which brokers to trustd. Without these
+			// exact services, every Go TLS client inside the sandbox fails with
+			// "x509: OSStatus -26276" even though the CA bundle is readable.
+			"(allow mach-lookup",
+			"  (global-name \"com.apple.trustd\")",
+			"  (global-name \"com.apple.trustd.agent\"))",
 			"(allow network-bind",
 			"  (local ip))",
 			"(allow network-inbound",

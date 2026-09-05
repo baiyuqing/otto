@@ -46,9 +46,7 @@ func newTestController(t *testing.T, id string, run func(context.Context, string
 	t.Helper()
 	hdr := session.Header{ID: id, Workspace: "/tmp/ws", Provider: "openai-compatible", Model: "test-model"}
 	sess := session.NewMemory(hdr)
-	create := func() (session.Session, error) { return session.NewMemory(hdr), nil }
-	build := func(session.Session) app.Runner { return runnerFunc(run) }
-	ctrl, err := app.New(sess, create, build,
+	ctrl, err := app.New(app.SessionReplacement{Session: sess, Runner: runnerFunc(run)},
 		app.WithRuntimeInfo(app.RuntimeInfo{Provider: "openai-compatible", Model: "test-model", ContextWindow: 128000, Sandbox: testSandbox}),
 	)
 	if err != nil {
@@ -421,7 +419,7 @@ func TestPostTurnStreamsSSE(t *testing.T) {
 		emit(agent.Event{Type: agent.EventTextDelta, Text: "lo"})
 		emit(agent.Event{Type: agent.EventToolCallStarted, ToolName: "bash", ToolCallID: "c1"})
 		emit(agent.Event{Type: agent.EventToolCallFinished, ToolName: "bash", ToolCallID: "c1", ToolResult: tool.Result{Content: "ok"}})
-		emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 5, OutputTokens: 7}})
+		emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 5, OutputTokens: 7}, UsagePresent: true})
 		emit(agent.Event{Type: agent.EventAgentFinished})
 		return nil
 	}

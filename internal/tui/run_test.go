@@ -132,9 +132,7 @@ func TestRunAbandonsBlockedTurnBeforeControllerClose(t *testing.T) {
 	completionAttempted := make(chan struct{})
 	runner := &fullCompletionRunner{completionAttempted: completionAttempted}
 	initial := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "tui-close", Workspace: t.TempDir()})
-	controller, err := app.New(initial, func() (session.Session, error) {
-		return session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "next", Workspace: t.TempDir()}), nil
-	}, func(session.Session) app.Runner { return runner })
+	controller, err := app.New(app.SessionReplacement{Session: initial, Runner: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,9 +201,7 @@ func assertProgramFailureReleasesController(t *testing.T, final func(Model) tea.
 	completionAttempted := make(chan struct{})
 	runner := &fullCompletionRunner{completionAttempted: completionAttempted}
 	initial := session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "tui-program-failure", Workspace: t.TempDir()})
-	controller, err := app.New(initial, func() (session.Session, error) {
-		return session.NewMemory(session.Header{Version: session.CurrentVersion, ID: "next", Workspace: t.TempDir()}), nil
-	}, func(session.Session) app.Runner { return runner })
+	controller, err := app.New(app.SessionReplacement{Session: initial, Runner: runner})
 	if err != nil {
 		t.Fatal(err)
 	}

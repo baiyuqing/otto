@@ -62,7 +62,7 @@ func TestRenderMemoryContextEmptyForNoRecords(t *testing.T) {
 
 func TestRunPrependsRenderedMemoryContextToProviderRequestWithoutPersisting(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	registry, err := tool.NewRegistry()
 	if err != nil {
@@ -97,8 +97,8 @@ func TestRunPrependsRenderedMemoryContextToProviderRequestWithoutPersisting(t *t
 
 func TestRunCallsRecallOnceAcrossToolLoop(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hi"}`)}}}, FinishReason: model.FinishToolCalls}},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hi"}`)}}}}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	registry, err := tool.NewRegistry(echoTool{})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestRunCallsRecallOnceAcrossToolLoop(t *testing.T) {
 
 func TestRunEmitsMemoryWarningAndContinuesWhenRecallFails(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	registry, err := tool.NewRegistry()
 	if err != nil {

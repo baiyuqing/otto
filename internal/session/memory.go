@@ -36,7 +36,7 @@ func (m *Memory) Header() Header {
 func (m *Memory) Messages() []model.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return cloneMessages(m.messages)
+	return cloneSessionMessages(m.messages)
 }
 
 func (m *Memory) AggregateUsage() (model.Usage, bool) {
@@ -73,7 +73,10 @@ func (m *Memory) Append(ctx context.Context, message model.Message) error {
 	if m.closed {
 		return errSessionClosed
 	}
-	cloned := cloneMessage(message)
+	if err := validateModelMessage(message); err != nil {
+		return err
+	}
+	cloned := model.CloneMessage(message)
 	if strings.TrimSpace(cloned.ID) == "" {
 		generated, err := newPiEntryID(m.seenIDs)
 		if err != nil {
@@ -89,9 +92,13 @@ func (m *Memory) Append(ctx context.Context, message model.Message) error {
 			return err
 		}
 	}
+	candidate := append(append([]model.Message(nil), m.messages...), cloned)
+	if _, err := pendingToolCalls(candidate); err != nil {
+		return err
+	}
 	m.messages = append(m.messages, cloned)
 	m.seenIDs[cloned.ID] = struct{}{}
-	if cloned.Role == model.RoleAssistant && hasMeaningfulUsage(cloned.Usage) {
+	if cloned.Role == model.RoleAssistant && hasUsage(cloned.Usage) {
 		m.aggregateUsage = addResolvedUsage(m.aggregateUsage, cloned.Usage)
 		m.usagePresent = true
 	}
@@ -111,10 +118,6 @@ func (m *Memory) validateFirstPostCheckpointMessage(message model.Message) error
 		return fmt.Errorf("%w: first post-checkpoint message must have a normal role", ErrInvalidSession)
 	}
 	if _, _, err := modelMessageToPiEntry(message, "00000000", nil, m.header); err != nil {
-		return err
-	}
-	candidate := append(cloneMessages(m.messages), message)
-	if _, err := pendingToolCalls(candidate); err != nil {
 		return err
 	}
 	return nil

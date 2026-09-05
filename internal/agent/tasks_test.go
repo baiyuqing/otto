@@ -16,9 +16,7 @@ import (
 
 func finalResponse(text string) providerScript {
 	return providerScript{response: provider.Response{
-		Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: text}}},
-		FinishReason: model.FinishStop,
-		Usage:        model.Usage{InputTokens: 1, OutputTokens: 1},
+		Message: model.Message{FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 1, OutputTokens: 1}, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: text}}},
 	}}
 }
 
@@ -42,6 +40,9 @@ func TestRunDeliversPendingNotificationsAfterUserMessage(t *testing.T) {
 	if notification.ContextType != "task_notification" || !notification.Display || notification.Text() != "[task-notification] task t1 succeeded\nreport" {
 		t.Fatalf("notification message = %#v", notification)
 	}
+	if notification.ContextMetadata == nil || notification.ContextMetadata.TaskID != "t1" {
+		t.Fatalf("notification metadata = %#v, want task id t1", notification.ContextMetadata)
+	}
 	if notification.Usage == nil || notification.Usage.InputTokens != 5 {
 		t.Fatalf("notification usage = %#v", notification.Usage)
 	}
@@ -55,7 +56,7 @@ func TestRunDeliversPendingNotificationsAfterUserMessage(t *testing.T) {
 			seen = append(seen, event)
 		}
 	}
-	if len(seen) != 1 || seen[0].TaskID != "t1" || seen[0].Text != notification.Text() || seen[0].Usage.InputTokens != 5 {
+	if len(seen) != 1 || seen[0].TaskID != "t1" || seen[0].Text != notification.Text() || seen[0].Usage.InputTokens != 5 || !seen[0].UsagePresent {
 		t.Fatalf("notification events = %#v", seen)
 	}
 	if tasks.Pending() != 0 {
@@ -66,10 +67,9 @@ func TestRunDeliversPendingNotificationsAfterUserMessage(t *testing.T) {
 func TestRunDrainsInboxBeforeNextProviderRequest(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{response: provider.Response{
-			Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+			Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 				{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "start", Arguments: json.RawMessage(`{}`)},
 			}},
-			FinishReason: model.FinishToolCalls,
 		}},
 		finalResponse("done"),
 	}}
@@ -177,7 +177,9 @@ func TestTasksLifecycle(t *testing.T) {
 	if got, ok := tasks.History("t1"); !ok || len(got) != 1 || got[0].Text() != "child prompt" {
 		t.Fatalf("History() = %#v, %v", got, ok)
 	}
-	tasks.Update("t1", func(task *Task) { task.Status = TaskRunning; task.Steps = 2 })
+	tasks.MarkRunning("t1", time.Unix(1, 0))
+	tasks.RecordProviderStep("t1", model.Usage{}, "", false)
+	tasks.RecordProviderStep("t1", model.Usage{}, "", true)
 	waitErr := make(chan error, 1)
 	go func() {
 		_, err := tasks.Wait(context.Background(), "t1")
@@ -191,12 +193,15 @@ func TestTasksLifecycle(t *testing.T) {
 	if err := tasks.Cancel("t1"); err != nil || !canceled {
 		t.Fatalf("Cancel() err = %v, canceled = %v", err, canceled)
 	}
-	tasks.Update("t1", func(task *Task) { task.Status = TaskCanceled })
+	tasks.Finish("t1", TaskCanceled, time.Unix(2, 0), "", "")
 	if err := <-waitErr; err != nil {
 		t.Fatalf("Wait() error = %v", err)
 	}
 	if got := tasks.List(); len(got) != 1 || got[0].Status != TaskCanceled || got[0].Steps != 2 {
 		t.Fatalf("List() = %#v", got)
+	}
+	if got := tasks.List()[0]; !got.UsagePresent || got.Usage != (model.Usage{}) {
+		t.Fatalf("usage presence = %v, usage=%+v", got.UsagePresent, got.Usage)
 	}
 	if err := tasks.Cancel("t1"); err == nil {
 		t.Fatal("Cancel() of a finished task succeeded")
@@ -223,6 +228,48 @@ func TestTasksLifecycle(t *testing.T) {
 	}
 	if _, err := tasks.Add(Task{}, nil, nil); err == nil {
 		t.Fatal("Add() after Close() succeeded")
+	}
+}
+
+func TestTasksExplicitTransitions(t *testing.T) {
+	tasks := NewTasks()
+	created, err := tasks.Add(Task{
+		Prompt:     "inspect",
+		Status:     TaskSucceeded,
+		StartedAt:  time.Unix(1, 0),
+		FinishedAt: time.Unix(2, 0),
+		Steps:      9,
+		ToolCalls:  8,
+		LastTool:   "stale",
+		LastText:   "stale",
+		Usage:      model.Usage{InputTokens: 10},
+		Result:     "stale",
+		Error:      "stale",
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != TaskQueued || !created.StartedAt.IsZero() || !created.FinishedAt.IsZero() || created.Steps != 0 || created.ToolCalls != 0 || created.LastTool != "" || created.LastText != "" || created.Usage != (model.Usage{}) || created.Result != "" || created.Error != "" {
+		t.Fatalf("Add() retained stale runtime fields: %#v", created)
+	}
+	startedAt := time.Unix(10, 0)
+	tasks.MarkRunning(created.ID, startedAt)
+	tasks.MarkRunning(created.ID, time.Unix(11, 0))
+	tasks.RecordToolCall(created.ID, "grep \"session\"")
+	tasks.RecordProviderStep(created.ID, model.Usage{InputTokens: 3, OutputTokens: 2}, "found it", true)
+
+	started, ok := tasks.Get(created.ID)
+	if !ok || started.Status != TaskRunning || !started.StartedAt.Equal(startedAt) || started.ToolCalls != 1 || started.Steps != 1 || started.LastTool != "grep \"session\"" || started.LastText != "found it" {
+		t.Fatalf("running snapshot = %#v, %v", started, ok)
+	}
+
+	tasks.Finish(created.ID, TaskSucceeded, time.Unix(20, 0), "done", "")
+	tasks.Finish(created.ID, TaskFailed, time.Unix(30, 0), "overwritten", "bad")
+	tasks.RecordToolCall(created.ID, "late")
+	tasks.RecordProviderStep(created.ID, model.Usage{InputTokens: 1}, "late", true)
+	finished, ok := tasks.Get(created.ID)
+	if !ok || finished.Status != TaskSucceeded || finished.Result != "done" || finished.Error != "" || !finished.FinishedAt.Equal(time.Unix(20, 0)) {
+		t.Fatalf("finished snapshot = %#v, %v", finished, ok)
 	}
 }
 
@@ -263,7 +310,7 @@ func TestTasksNames(t *testing.T) {
 		if err := tasks.Cancel("lint-check"); err != nil || !canceled {
 			t.Fatalf("Cancel(name) err = %v, canceled = %v", err, canceled)
 		}
-		tasks.Update("t1", func(task *Task) { task.Status = TaskCanceled })
+		tasks.Finish("t1", TaskCanceled, time.Unix(2, 0), "", "")
 		if err := <-waitErr; err != nil {
 			t.Fatalf("Wait(name) error = %v", err)
 		}

@@ -21,6 +21,16 @@ import (
 	"github.com/baiyuqing/otto/internal/sandbox/direct"
 )
 
+func TestBashDefinitionMatchesToolDefinition(t *testing.T) {
+	bash, err := NewBashTool(mustWorkspace(t, t.TempDir()), &fakeBashExecutor{}, "/bin/sh", []string{}, time.Second, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := bash.Definition(), BashDefinition(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("bash definition = %#v, want shared definition %#v", got, want)
+	}
+}
+
 func TestBashSandboxedDelegatesExactRequestAndClonesInputs(t *testing.T) {
 	workspace := mustWorkspace(t, t.TempDir())
 	fake := &fakeBashExecutor{

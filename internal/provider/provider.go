@@ -15,9 +15,8 @@ type Request struct {
 }
 
 type Response struct {
-	Message      model.Message
-	FinishReason model.FinishReason
-	Usage        model.Usage
+	// Message is the single source of response finish and usage metadata.
+	Message model.Message
 }
 
 type StreamEventType string
@@ -39,6 +38,11 @@ type RequestSizer interface {
 	SerializedRequestSize(Request) (int, error)
 }
 
+// Provider instances may be shared by parent and child agents. Complete must
+// be safe for concurrent calls. The request and stream-event payloads are
+// borrowed read-only; callbacks for one call are ordered, synchronous, and
+// finished before Complete returns. Implementations must not invoke a
+// callback after returning.
 type Provider interface {
 	Complete(context.Context, Request, func(StreamEvent)) (Response, error)
 }

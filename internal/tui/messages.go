@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/app"
 	otmodel "github.com/baiyuqing/otto/internal/model"
 )
 
@@ -61,6 +62,7 @@ type activeOperation struct {
 	stream     *turnStream
 	cancel     func()
 	cancelOnce sync.Once
+	wake       *app.WakeOperation
 }
 
 func (o *activeOperation) cancelContext() {
@@ -68,6 +70,9 @@ func (o *activeOperation) cancelContext() {
 		return
 	}
 	o.cancelOnce.Do(func() {
+		if o.wake != nil {
+			o.wake.Cancel()
+		}
 		if o.cancel != nil {
 			o.cancel()
 		}
@@ -92,8 +97,12 @@ func newOperationCleanup() *operationCleanup {
 	return &operationCleanup{}
 }
 
-func (c *operationCleanup) register(stream *turnStream, cancel func()) *activeOperation {
-	operation := &activeOperation{stream: stream, cancel: cancel}
+func (c *operationCleanup) register(stream *turnStream, cancel func(), wakes ...*app.WakeOperation) *activeOperation {
+	var wake *app.WakeOperation
+	if len(wakes) > 0 {
+		wake = wakes[0]
+	}
+	operation := &activeOperation{stream: stream, cancel: cancel, wake: wake}
 	if c == nil {
 		return operation
 	}

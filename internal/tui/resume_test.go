@@ -33,7 +33,10 @@ type resumeBackend struct {
 
 // Tasks implements app.TaskLister so tests can exercise the cancel-on-resume
 // notice with a populated task registry.
-func (b *resumeBackend) Tasks() *agent.Tasks {
+func (b *resumeBackend) Tasks() app.TaskView {
+	if b.tasks == nil {
+		return nil
+	}
 	return b.tasks
 }
 

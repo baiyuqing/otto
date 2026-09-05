@@ -83,7 +83,7 @@ func (r *REPL) Run(ctx context.Context) error {
 
 	for {
 		_, _ = io.WriteString(r.stdout, "> ")
-		var tasks *agent.Tasks
+		var tasks app.TaskView
 		if lister, ok := r.backend.(app.TaskLister); ok {
 			tasks = lister.Tasks()
 		}
@@ -103,8 +103,8 @@ func (r *REPL) Run(ctx context.Context) error {
 			if !open {
 				continue
 			}
-			if tasks.Pending() > 0 {
-				if err := r.wake(ctx); err != nil {
+			if _, err := r.wake(ctx); err != nil {
+				if ctx.Err() != nil || errors.Is(err, session.ErrFatalPersistence) {
 					return err
 				}
 			}
@@ -142,16 +142,32 @@ func (r *REPL) Run(ctx context.Context) error {
 
 // wake runs an empty-text turn triggered by a pending sub-agent notification,
 // preceded by a newline so its output does not append to the "> " marker.
-func (r *REPL) wake(ctx context.Context) error {
+func (r *REPL) wake(ctx context.Context) (bool, error) {
+	preparer, ok := r.backend.(app.WakePreparer)
+	if !ok {
+		return false, nil
+	}
+	wake, err := preparer.PrepareWake(ctx)
+	if err != nil || wake == nil {
+		return false, err
+	}
 	_, _ = io.WriteString(r.stdout, "\n")
-	err := r.prompt(ctx, "")
+	errorRendered := false
+	err = r.withActiveCancel(ctx, func(turnCtx context.Context) error {
+		return wake.Run(turnCtx, func(event agent.Event) {
+			if r.renderEvent(event) {
+				errorRendered = true
+			}
+		})
+	})
+	if err != nil && !errorRendered {
+		_, _ = fmt.Fprintln(r.stderr, err)
+	}
+	_, _ = fmt.Fprintln(r.stdout)
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return true, ctx.Err()
 	}
-	if errors.Is(err, session.ErrFatalPersistence) {
-		return err
-	}
-	return nil
+	return true, err
 }
 
 // RunOnce executes a single prompt with the same rendering as Run and returns
@@ -182,11 +198,12 @@ func (r *REPL) drainTasks(ctx context.Context) error {
 				}
 			}
 		}
-		if tasks.Pending() == 0 {
-			return nil
-		}
-		if err := r.prompt(ctx, ""); err != nil {
+		woke, err := r.wake(ctx)
+		if err != nil {
 			return err
+		}
+		if !woke {
+			return nil
 		}
 	}
 }

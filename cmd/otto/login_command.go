@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 
 	"github.com/baiyuqing/otto/internal/auth"
@@ -55,7 +54,7 @@ func runAuthCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 }
 
 func runLoginStatus(path string, stdout io.Writer) int {
-	line, signedIn := auth.StatusLine(path)
+	line, signedIn := auth.NewService(path).Status(context.Background())
 	_, _ = fmt.Fprintln(stdout, line)
 	if signedIn {
 		return 0
@@ -64,27 +63,29 @@ func runLoginStatus(path string, stdout io.Writer) int {
 }
 
 func runLogout(path string, stdout, stderr io.Writer) int {
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			_, _ = fmt.Fprintln(stdout, "Not signed in to ChatGPT.")
-			return 0
-		}
+	removed, err := auth.NewService(path).Logout(context.Background())
+	if err != nil {
 		return fail(stderr, "%v", errChatGPTLogoutFailed)
+	}
+	if !removed {
+		_, _ = fmt.Fprintln(stdout, "Not signed in to ChatGPT.")
+		return 0
 	}
 	_, _ = fmt.Fprintln(stdout, "Signed out of ChatGPT.")
 	return 0
 }
 
 func runLogin(ctx context.Context, path string, stdout, stderr io.Writer) int {
-	creds, err := authLogin(ctx, browserOpener(stdout))
+	service := auth.NewService(path, authLogin)
+	err := service.Login(ctx, browserOpener(stdout))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fail(stderr, "%v", ctxErr)
 		}
+		if errors.Is(err, auth.ErrCredentialsPersistence) {
+			return fail(stderr, "%v", auth.ErrCredentialsPersistence)
+		}
 		return fail(stderr, "login: %v", errChatGPTLoginFailed)
-	}
-	if err := creds.Save(path); err != nil {
-		return fail(stderr, "%v", auth.ErrCredentialsPersistence)
 	}
 	_, _ = fmt.Fprintln(stdout, "Signed in to ChatGPT.")
 	return 0

@@ -147,11 +147,11 @@ type runDependencies struct {
 	newSession           func(bool, string, string, config.Runtime) (session.Session, error)
 	detectTerminal       terminalDetector
 	runTUI               func(context.Context, io.Reader, io.Writer, app.Backend) error
-	newRunner            app.RunnerFactory
+	newRunner            func(session.Session) app.Runner
 	openSandbox          func(context.Context, sandboxOpenOptions) sandboxRuntime
 	openMemoryService    func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error)
 	workspaceMemoryScope func(config.MemoryRuntime, string) (memory.Scope, error)
-	newController        func(session.Session, app.SessionFactory, app.RunnerFactory, ...app.Option) (*app.Controller, error)
+	newController        func(app.SessionReplacement, ...app.Option) (*app.Controller, error)
 	resolveUserHome      func() (string, error)
 }
 
@@ -663,7 +663,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		closeInitialResources()
 		return 130
 	}
-	controller, err = builder.newController(initialSession, initialRunner, builder.runtimeInfo(resolvedRuntime), dynamicContent)
+	controller, err = builder.newController(app.SessionReplacement{Session: initialSession, Runner: initialRunner, RuntimeInfo: builder.runtimeInfo(resolvedRuntime)}, dynamicContent)
 	if err != nil {
 		closeInitialResources()
 		if processCtx.Err() != nil {
@@ -685,17 +685,16 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		return controller.Close()
 	}
 
-	frontendCtx := auth.ContextWithPath(processCtx, capturedAuth.path)
 	var runErr error
 	switch frontend {
 	case frontendTUI:
-		runErr = deps.runTUI(frontendCtx, stdin, stdout, controller)
+		runErr = deps.runTUI(processCtx, stdin, stdout, controller)
 	case frontendOnce:
 		console := repl.New(strings.NewReader(""), stdout, stderr, controller)
 		replMu.Lock()
 		currentREPL = console
 		replMu.Unlock()
-		runErr = console.RunOnce(frontendCtx, approvePrompt)
+		runErr = console.RunOnce(processCtx, approvePrompt)
 		replMu.Lock()
 		if currentREPL == console {
 			currentREPL = nil
@@ -708,7 +707,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		replMu.Lock()
 		currentREPL = console
 		replMu.Unlock()
-		runErr = console.Run(frontendCtx)
+		runErr = console.Run(processCtx)
 		replMu.Lock()
 		if currentREPL == console {
 			currentREPL = nil

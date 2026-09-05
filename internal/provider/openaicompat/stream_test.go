@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/baiyuqing/otto/internal/model"
@@ -55,7 +57,7 @@ func TestCompleteStreamsTextAndAssemblesToolCall(t *testing.T) {
 			deltas.WriteString(event.Text)
 		}
 	}
-	if deltas.String() != "I will read. " || response.FinishReason != model.FinishToolCalls {
+	if deltas.String() != "I will read. " || response.Message.FinishReason != model.FinishToolCalls {
 		t.Fatalf("unexpected response: deltas=%q response=%#v", deltas.String(), response)
 	}
 	if len(response.Message.Blocks) != 2 {
@@ -65,8 +67,8 @@ func TestCompleteStreamsTextAndAssemblesToolCall(t *testing.T) {
 	if call.ToolCallID != "call-1" || call.ToolName != "read" || string(call.Arguments) != `{"path":"README.md"}` {
 		t.Fatalf("bad tool call: %#v", call)
 	}
-	if response.Usage != (model.Usage{InputTokens: 11, OutputTokens: 7}) {
-		t.Fatalf("usage = %#v", response.Usage)
+	if response.Message.Usage == nil || *response.Message.Usage != (model.Usage{InputTokens: 11, OutputTokens: 7}) {
+		t.Fatalf("usage = %#v", response.Message.Usage)
 	}
 	if len(events) != 3 || events[1].Type != provider.StreamToolCallDelta || events[1].Arguments != `{"pa` || events[2].Arguments != `th":"README.md"}` {
 		t.Fatalf("stream events = %#v", events)
@@ -99,8 +101,8 @@ func TestCompleteHandlesSSEFramingAndMultipleIndexedCalls(t *testing.T) {
 	if got := response.Message.Blocks[2]; got.ToolCallID != "first" || got.ToolName != "read" || string(got.Arguments) != `{"path":"A"}` {
 		t.Fatalf("second call = %#v", got)
 	}
-	if response.Usage != (model.Usage{InputTokens: 5, OutputTokens: 9}) {
-		t.Fatalf("usage = %#v", response.Usage)
+	if response.Message.Usage == nil || *response.Message.Usage != (model.Usage{InputTokens: 5, OutputTokens: 9}) {
+		t.Fatalf("usage = %#v", response.Message.Usage)
 	}
 }
 
@@ -186,8 +188,8 @@ func TestCompleteMapsUnknownFinishReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.FinishReason != model.FinishUnknown || response.Message.FinishReason != model.FinishUnknown {
-		t.Fatalf("finish reasons = %q / %q", response.FinishReason, response.Message.FinishReason)
+	if response.Message.FinishReason != model.FinishUnknown {
+		t.Fatalf("finish reason = %q", response.Message.FinishReason)
 	}
 }
 
@@ -203,8 +205,8 @@ func TestCompleteParsesOpenAICachedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Usage != (model.Usage{InputTokens: 100, OutputTokens: 7, CachedInputTokens: 64}) {
-		t.Fatalf("usage = %#v", response.Usage)
+	if response.Message.Usage == nil || *response.Message.Usage != (model.Usage{InputTokens: 100, OutputTokens: 7, CachedInputTokens: 64}) {
+		t.Fatalf("usage = %#v", response.Message.Usage)
 	}
 }
 
@@ -220,8 +222,83 @@ func TestCompleteParsesDeepSeekCachedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Usage != (model.Usage{InputTokens: 100, OutputTokens: 7, CachedInputTokens: 80}) {
-		t.Fatalf("usage = %#v", response.Usage)
+	if response.Message.Usage == nil || *response.Message.Usage != (model.Usage{InputTokens: 100, OutputTokens: 7, CachedInputTokens: 80}) {
+		t.Fatalf("usage = %#v", response.Message.Usage)
+	}
+}
+
+func TestCompletePreservesUsagePresence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want *model.Usage
+	}{
+		{name: "missing", body: "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"},
+		{name: "explicit zero", body: "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\ndata: [DONE]\n\n", want: &model.Usage{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, test.body)
+			}))
+			defer server.Close()
+
+			response, err := New(server.URL, "key", server.Client()).Complete(context.Background(), provider.Request{Model: "model"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (response.Message.Usage == nil) != (test.want == nil) {
+				t.Fatalf("message usage presence = %v, want %v", response.Message.Usage != nil, test.want != nil)
+			}
+			if test.want != nil && *response.Message.Usage != *test.want {
+				t.Fatalf("message usage = %#v, want %#v", response.Message.Usage, test.want)
+			}
+		})
+	}
+}
+
+func TestCompleteConcurrentCallsKeepResponseStateIsolated(t *testing.T) {
+	var next atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		id := next.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"response-%d\"},\"finish_reason\":\"stop\"}]}\n\n", id)
+		fmt.Fprintf(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":0}}\n\n", id)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "key", server.Client())
+	responses := make(chan provider.Response, 2)
+	errors := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			response, err := client.Complete(context.Background(), provider.Request{Model: "model"}, nil)
+			if err != nil {
+				errors <- err
+				return
+			}
+			responses <- response
+		}()
+	}
+	wg.Wait()
+	close(responses)
+	close(errors)
+	for err := range errors {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool)
+	for response := range responses {
+		if response.Message.Usage == nil || response.Message.Text() == "" {
+			t.Fatalf("incomplete response: %#v", response)
+		}
+		seen[response.Message.Text()] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("responses shared state: %#v", seen)
 	}
 }
 

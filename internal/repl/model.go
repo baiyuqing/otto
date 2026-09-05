@@ -29,14 +29,16 @@ func (r *REPL) modelCommand(ctx context.Context, args string) (bool, error) {
 		}
 		return false, nil
 	}
-	if _, err := switcher.SwitchProfile(ctx, args); err != nil {
-		return false, &commandError{command: "/model", err: err}
-	}
-	if err := switcher.SetDefaultProfile(ctx, args); err != nil {
+	selection, err := app.SelectProfile(ctx, switcher, args)
+	if err != nil && !selection.Switched {
 		return false, &commandError{command: "/model", err: err}
 	}
 	info := r.backend.Info()
-	_, _ = fmt.Fprintf(r.stdout, "Switched to profile %s (provider %s, model %s). Set as default profile.\n", info.Profile, info.Provider, info.Model)
+	if err != nil {
+		_, _ = fmt.Fprintf(r.stdout, "Switched to profile %s (provider %s, model %s), but the default profile was not saved: %v\n", info.Profile, info.Provider, info.Model, err)
+	} else {
+		_, _ = fmt.Fprintf(r.stdout, "Switched to profile %s (provider %s, model %s). Set as default profile.\n", info.Profile, info.Provider, info.Model)
+	}
 	if info.SessionID != "" {
 		_, _ = fmt.Fprintf(r.stdout, "Session: %s\n", info.SessionID)
 	}

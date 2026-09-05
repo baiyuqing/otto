@@ -18,6 +18,7 @@ type fakeSwitchBackend struct {
 	switchProfile   func(context.Context, string) (app.ResumeResult, error)
 	switchCalls     []string
 	setDefaultCalls []string
+	setDefaultErr   error
 }
 
 type suppressedSwitchBackend struct {
@@ -38,7 +39,7 @@ func (f *fakeSwitchBackend) SwitchProfile(ctx context.Context, name string) (app
 
 func (f *fakeSwitchBackend) SetDefaultProfile(_ context.Context, name string) error {
 	f.setDefaultCalls = append(f.setDefaultCalls, name)
-	return nil
+	return f.setDefaultErr
 }
 
 func (s *suppressedSwitchBackend) DynamicContentAvailable() bool { return false }
@@ -116,6 +117,30 @@ func TestREPLModelSwitchErrorReported(t *testing.T) {
 	}
 	if !IsCommandError(err, "/model") {
 		t.Fatalf("Run() error = %v, want /model command error", err)
+	}
+}
+
+func TestREPLModelReportsDefaultSaveFailureAfterSwitch(t *testing.T) {
+	backend := &fakeSwitchBackend{
+		fakeBackend:   fakeBackend{info: app.Info{Profile: "default", Provider: "openai-compatible", Model: "gpt-4o"}},
+		profiles:      []string{"default", "chatgpt"},
+		setDefaultErr: errors.New("default save failed"),
+	}
+	backend.switchProfile = func(_ context.Context, name string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: name, Provider: "chatgpt", Model: "gpt-5", SessionID: "sess-2"}
+		return app.ResumeResult{}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	r := New(strings.NewReader("/model chatgpt\n/exit\n"), &stdout, &stderr, backend)
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Switched to profile chatgpt") || !strings.Contains(out, "default profile was not saved") || !strings.Contains(out, "gpt-5") {
+		t.Fatalf("stdout = %q", out)
+	}
+	if len(backend.setDefaultCalls) != 1 {
+		t.Fatalf("set default calls = %v", backend.setDefaultCalls)
 	}
 }
 

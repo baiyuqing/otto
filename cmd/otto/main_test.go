@@ -2305,7 +2305,7 @@ func TestRunControllerConstructionFailureClosesInitialRunnerAndBinding(t *testin
 			Provider: runtime.Provider, Profile: runtime.Profile, Model: runtime.Model, CreatedAt: time.Now().UTC(),
 		}), onClose: func() { appendOrder("session") }}, nil
 	}
-	deps.newController = func(session.Session, app.SessionFactory, app.RunnerFactory, ...app.Option) (*app.Controller, error) {
+	deps.newController = func(app.SessionReplacement, ...app.Option) (*app.Controller, error) {
 		return nil, errors.New("controller failed")
 	}
 

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/subagent"
 )
@@ -14,7 +13,7 @@ import (
 // taskLister returns the active runner's task registry and whether it is
 // available: the backend must implement app.TaskLister and its Tasks() must
 // be non-nil (absent when sub-agents are disabled or no runner is active).
-func (r *REPL) taskLister() (*agent.Tasks, bool) {
+func (r *REPL) taskLister() (app.TaskView, bool) {
 	lister, ok := r.backend.(app.TaskLister)
 	if !ok {
 		return nil, false

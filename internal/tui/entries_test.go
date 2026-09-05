@@ -126,6 +126,27 @@ func TestEntriesFromHistoryKeepsShortTaskNotificationIntact(t *testing.T) {
 	}
 }
 
+func TestEntriesFromHistoryUsesTaskMetadataForNotificationHint(t *testing.T) {
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	text := "changed notification wording\n" + strings.Join(lines, "\n")
+	history := []model.Message{{
+		ID: "note-typed", Role: model.RoleContext, ContextType: taskNotificationContextType, Display: true,
+		ContextMetadata: &model.ContextMetadata{TaskID: "t12"},
+		Blocks:          []model.Block{{Type: model.BlockText, Text: text}},
+	}}
+
+	entries, _ := EntriesFromHistory(history)
+	if len(entries) != 1 || !strings.Contains(entries[0].Raw, "/task t12") {
+		t.Fatalf("entries = %#v, want typed task hint", entries)
+	}
+	if strings.Contains(entries[0].Raw, "/task \n") {
+		t.Fatalf("entries = %q, must not use an empty legacy task id", entries[0].Raw)
+	}
+}
+
 func TestEntriesFromHistoryPairsToolResults(t *testing.T) {
 	history := []model.Message{
 		{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "inspect"}}},

@@ -146,6 +146,10 @@ func TestProfileNetworkRulesAreIPOnly(t *testing.T) {
 	if strings.Count(allow, mdnsLookup) != 1 || !strings.Contains(allowNetwork, mdnsLookup) {
 		t.Fatal("NetworkAllow does not contain exactly one marker-scoped mDNS broker lookup")
 	}
+	const resolverSocketGrant = `(remote unix-socket (path "/private/var/run/mDNSResponder"))`
+	if strings.Count(allow, resolverSocketGrant) != 1 || !strings.Contains(allowNetwork, resolverSocketGrant) {
+		t.Fatal("NetworkAllow does not contain exactly one marker-scoped mDNSResponder resolver socket grant")
+	}
 	for _, forbidden := range []string{
 		"(allow network-outbound)",
 		"(allow network-inbound)",

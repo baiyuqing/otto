@@ -608,8 +608,10 @@ environment variables over exposing a large home or cache subtree.
 
 `network = "allow"` is the default and permits ordinary IP networking and local
 IP binds. `network = "deny"` blocks IP networking and local binds. Phase 1 has
-no domain allowlist. Unix sockets stay blocked in both modes, so Docker/Podman
-sockets, SSH agents, and similar host control sockets are unavailable.
+no domain allowlist. Unix sockets stay blocked in both modes, except for the
+exact `/private/var/run/mDNSResponder` path, which `network = "allow"` permits
+because `getaddrinfo` connects it directly to resolve hostnames. Docker/Podman
+sockets, SSH agents, and similar host control sockets remain unavailable.
 
 The command environment is rebuilt from one captured process snapshot. Otto
 never restores provider API-key variables, `OTTO_API_KEY`, loader-injection

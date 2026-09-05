@@ -38,12 +38,35 @@ func (h *histogram) observe(v float64) {
 
 type httpKey struct{ route, method, status string }
 type toolKey struct{ tool, status string }
+type providerAPIKey struct{ provider, model, status string }
+type providerAPIDurationKey struct{ provider, model string }
+type sessionContextKey struct{ sessionID, provider, model string }
+
+type sessionContextMetrics struct {
+	SessionID                 string
+	Provider                  string
+	Model                     string
+	ContextWindow             int
+	ContextInputTokens        int
+	ContextInputTokensPresent bool
+	ContextInputTokensPending bool
+}
+
+type sessionContextValues struct {
+	contextWindow             int64
+	contextInputTokens        int64
+	contextInputTokensPresent bool
+	contextInputTokensPending int64
+}
 
 type metrics struct {
 	mu sync.Mutex
 
 	httpTotal    map[httpKey]uint64
 	httpDuration map[string]*histogram
+
+	providerAPITotal    map[providerAPIKey]uint64
+	providerAPIDuration map[providerAPIDurationKey]*histogram
 
 	sessionsOpenValue int64
 	turnsActiveValue  int64
@@ -56,6 +79,8 @@ type metrics struct {
 
 	tokensTotal map[string]uint64
 
+	sessionContext map[sessionContextKey]sessionContextValues
+
 	streamClientsValue int64
 
 	tasksStartedValue  uint64
@@ -65,14 +90,17 @@ type metrics struct {
 
 func newMetrics() *metrics {
 	return &metrics{
-		httpTotal:          make(map[httpKey]uint64),
-		httpDuration:       make(map[string]*histogram),
-		turnsTotal:         make(map[string]uint64),
-		turnDuration:       newHistogram(turnToolBuckets),
-		toolCallsTotal:     make(map[toolKey]uint64),
-		toolDuration:       make(map[string]*histogram),
-		tokensTotal:        make(map[string]uint64),
-		tasksFinishedTotal: make(map[string]uint64),
+		httpTotal:           make(map[httpKey]uint64),
+		httpDuration:        make(map[string]*histogram),
+		providerAPITotal:    make(map[providerAPIKey]uint64),
+		providerAPIDuration: make(map[providerAPIDurationKey]*histogram),
+		turnsTotal:          make(map[string]uint64),
+		turnDuration:        newHistogram(turnToolBuckets),
+		toolCallsTotal:      make(map[toolKey]uint64),
+		toolDuration:        make(map[string]*histogram),
+		tokensTotal:         make(map[string]uint64),
+		sessionContext:      make(map[sessionContextKey]sessionContextValues),
+		tasksFinishedTotal:  make(map[string]uint64),
 	}
 }
 
@@ -87,6 +115,58 @@ func (m *metrics) httpRequest(route, method string, status int, d time.Duration)
 		m.httpDuration[route] = h
 	}
 	h.observe(d.Seconds())
+}
+
+func (m *metrics) providerAPIRequest(providerName, modelName, status string, d time.Duration) {
+	key := providerAPIKey{provider: providerName, model: modelName, status: status}
+	durationKey := providerAPIDurationKey{provider: providerName, model: modelName}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.providerAPITotal[key]++
+	h, ok := m.providerAPIDuration[durationKey]
+	if !ok {
+		h = newHistogram(turnToolBuckets)
+		m.providerAPIDuration[durationKey] = h
+	}
+	h.observe(d.Seconds())
+}
+
+func (m *metrics) sessionContext(sample sessionContextMetrics) {
+	key := sessionContextKey{sessionID: sample.SessionID, provider: sample.Provider, model: sample.Model}
+	values := sessionContextValues{
+		contextWindow:             int64(sample.ContextWindow),
+		contextInputTokensPresent: sample.ContextInputTokensPresent,
+	}
+	if sample.ContextInputTokensPresent {
+		values.contextInputTokens = int64(sample.ContextInputTokens)
+	}
+	if sample.ContextInputTokensPending {
+		values.contextInputTokensPending = 1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionContext[key] = values
+}
+
+func (m *metrics) replaceSessionContexts(samples []sessionContextMetrics) {
+	next := make(map[sessionContextKey]sessionContextValues, len(samples))
+	for _, sample := range samples {
+		key := sessionContextKey{sessionID: sample.SessionID, provider: sample.Provider, model: sample.Model}
+		values := sessionContextValues{
+			contextWindow:             int64(sample.ContextWindow),
+			contextInputTokensPresent: sample.ContextInputTokensPresent,
+		}
+		if sample.ContextInputTokensPresent {
+			values.contextInputTokens = int64(sample.ContextInputTokens)
+		}
+		if sample.ContextInputTokensPending {
+			values.contextInputTokensPending = 1
+		}
+		next[key] = values
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionContext = next
 }
 
 func (m *metrics) sessionsOpen(delta int) {
@@ -200,7 +280,10 @@ func (m *metrics) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	writeCounterHTTPRequests(&b, m.httpTotal)
 	writeHistogramByLabel(&b, "otto_http_request_duration_seconds", "route", "HTTP request duration in seconds.", m.httpDuration)
+	writeCounterProviderAPIRequests(&b, m.providerAPITotal)
+	writeHistogramProviderAPIRequests(&b, m.providerAPIDuration)
 	writeGauge(&b, "otto_sessions_open", "Number of sessions currently open.", m.sessionsOpenValue)
+	writeSessionContextGauges(&b, m.sessionContext)
 	writeCounterByLabel(&b, "otto_turns_total", "status", "Total turns by terminal status.", m.turnsTotal)
 	writeGauge(&b, "otto_turns_active", "Number of turns currently active.", m.turnsActiveValue)
 	writeSingletonHistogram(&b, "otto_turn_duration_seconds", "Turn duration in seconds.", m.turnDuration)
@@ -279,6 +362,27 @@ func writeCounterHTTPRequests(b *strings.Builder, data map[httpKey]uint64) {
 	}
 }
 
+func writeCounterProviderAPIRequests(b *strings.Builder, data map[providerAPIKey]uint64) {
+	const name = "otto_provider_api_requests_total"
+	writeHelp(b, name, "counter", "Total provider API requests by provider, model, and status.")
+	keys := make([]providerAPIKey, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].provider != keys[j].provider {
+			return keys[i].provider < keys[j].provider
+		}
+		if keys[i].model != keys[j].model {
+			return keys[i].model < keys[j].model
+		}
+		return keys[i].status < keys[j].status
+	})
+	for _, k := range keys {
+		fmt.Fprintf(b, "%s{provider=%s,model=%s,status=%s} %d\n", name, quoteLabel(k.provider), quoteLabel(k.model), quoteLabel(k.status), data[k])
+	}
+}
+
 func writeCounterToolCalls(b *strings.Builder, data map[toolKey]uint64) {
 	const name = "otto_tool_calls_total"
 	writeHelp(b, name, "counter", "Total tool calls by tool and status.")
@@ -295,6 +399,47 @@ func writeCounterToolCalls(b *strings.Builder, data map[toolKey]uint64) {
 	for _, k := range keys {
 		fmt.Fprintf(b, "%s{tool=%s,status=%s} %d\n", name, quoteLabel(k.tool), quoteLabel(k.status), data[k])
 	}
+}
+
+func writeSessionContextGauges(b *strings.Builder, data map[sessionContextKey]sessionContextValues) {
+	keys := make([]sessionContextKey, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].sessionID != keys[j].sessionID {
+			return keys[i].sessionID < keys[j].sessionID
+		}
+		if keys[i].provider != keys[j].provider {
+			return keys[i].provider < keys[j].provider
+		}
+		return keys[i].model < keys[j].model
+	})
+
+	writeHelp(b, "otto_session_context_window_tokens", "gauge", "Configured context window tokens for each open session.")
+	for _, k := range keys {
+		labels := sessionContextLabels(k)
+		fmt.Fprintf(b, "otto_session_context_window_tokens{%s} %d\n", labels, data[k].contextWindow)
+	}
+
+	writeHelp(b, "otto_session_context_input_tokens", "gauge", "Current context input tokens for each open session when available.")
+	for _, k := range keys {
+		if !data[k].contextInputTokensPresent {
+			continue
+		}
+		labels := sessionContextLabels(k)
+		fmt.Fprintf(b, "otto_session_context_input_tokens{%s} %d\n", labels, data[k].contextInputTokens)
+	}
+
+	writeHelp(b, "otto_session_context_input_tokens_pending", "gauge", "Whether context input token computation is pending for each open session.")
+	for _, k := range keys {
+		labels := sessionContextLabels(k)
+		fmt.Fprintf(b, "otto_session_context_input_tokens_pending{%s} %d\n", labels, data[k].contextInputTokensPending)
+	}
+}
+
+func sessionContextLabels(k sessionContextKey) string {
+	return fmt.Sprintf("session_id=%s,provider=%s,model=%s", quoteLabel(k.sessionID), quoteLabel(k.provider), quoteLabel(k.model))
 }
 
 func writeHistogramSamples(b *strings.Builder, name, labels string, h *histogram) {
@@ -332,5 +477,24 @@ func writeHistogramByLabel(b *strings.Builder, name, labelName, help string, dat
 	sort.Strings(keys)
 	for _, k := range keys {
 		writeHistogramSamples(b, name, labelName+"="+quoteLabel(k)+",", data[k])
+	}
+}
+
+func writeHistogramProviderAPIRequests(b *strings.Builder, data map[providerAPIDurationKey]*histogram) {
+	const name = "otto_provider_api_request_duration_seconds"
+	writeHelp(b, name, "histogram", "Provider API request duration in seconds.")
+	keys := make([]providerAPIDurationKey, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].provider != keys[j].provider {
+			return keys[i].provider < keys[j].provider
+		}
+		return keys[i].model < keys[j].model
+	})
+	for _, k := range keys {
+		labels := fmt.Sprintf("provider=%s,model=%s,", quoteLabel(k.provider), quoteLabel(k.model))
+		writeHistogramSamples(b, name, labels, data[k])
 	}
 }

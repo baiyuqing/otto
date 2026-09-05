@@ -43,10 +43,10 @@ func TestAutomaticCompactionWaitsWithoutWarningForUnsafeRetainedTail(t *testing.
 	if _, err := runner.dispatchNormalProviderStep(context.Background(), func(event Event) { events = append(events, event) }, &state); err != nil {
 		t.Fatalf("automatic retained-tail wait returned an error: %v", err)
 	}
-	if fake.calls != 1 || wrapped.appendCalls != 0 || len(events) != 2 || events[0].Type != EventCompactionStarted || events[1].Type != EventCompactionCompleted {
+	if fake.calls != 1 || wrapped.appendCalls != 0 || countCompactEvents(events, EventCompactionStarted) != 1 || countCompactEvents(events, EventCompactionCompleted) != 1 {
 		t.Fatalf("provider calls=%d appends=%d events=%#v", fake.calls, wrapped.appendCalls, events)
 	}
-	started, completed := events[0].Compaction, events[1].Compaction
+	started, completed := compactionEventAt(events, EventCompactionStarted, 0), compactionEventAt(events, EventCompactionCompleted, 0)
 	if started == nil || started.Reason != CompactionThreshold || !started.Automatic || started.Noop ||
 		completed == nil || completed.Reason != CompactionThreshold || !completed.Automatic || !completed.Noop {
 		t.Fatalf("automatic no-op event sequence = %#v", events)
@@ -83,10 +83,10 @@ func TestReactiveCompactionReturnsOriginalOverflowWhenRetainedTailMustWait(t *te
 	if !errors.Is(err, provider.ErrContextOverflow) || errors.As(err, &generic) {
 		t.Fatalf("reactive wait error = %T %v; want original typed overflow", err, err)
 	}
-	if fake.calls != 1 || wrapped.appendCalls != 0 || len(events) != 2 || events[0].Type != EventCompactionStarted || events[1].Type != EventCompactionCompleted {
+	if fake.calls != 1 || wrapped.appendCalls != 0 || countCompactEvents(events, EventCompactionStarted) != 1 || countCompactEvents(events, EventCompactionCompleted) != 1 {
 		t.Fatalf("provider calls=%d appends=%d events=%#v", fake.calls, wrapped.appendCalls, events)
 	}
-	started, completed := events[0].Compaction, events[1].Compaction
+	started, completed := compactionEventAt(events, EventCompactionStarted, 0), compactionEventAt(events, EventCompactionCompleted, 0)
 	if started == nil || started.Reason != CompactionOverflow || !started.Automatic || started.Noop ||
 		completed == nil || completed.Reason != CompactionOverflow || !completed.Automatic || !completed.Noop {
 		t.Fatalf("reactive no-op event sequence = %#v", events)
@@ -746,7 +746,7 @@ func TestCompactCancellationImmediatelyAfterCommittedAppendReturnsCommittedResul
 	if wrapped.appendCalls != 1 || countCompactEvents(events, EventCompactionCompleted) != 1 || countCompactEvents(events, EventAgentError) != 1 {
 		t.Fatalf("appendCalls=%d events=%#v", wrapped.appendCalls, events)
 	}
-	completed := events[len(events)-2].Compaction
+	completed := compactionEventAt(events, EventCompactionCompleted, 0)
 	if completed == nil || completed.CheckpointID != result.CheckpointID {
 		t.Fatalf("committed completion=%#v result=%#v", completed, result)
 	}
@@ -937,6 +937,20 @@ func firstCompactionPlan(events []Event) *CompactionPlan {
 		if event.Type == EventCompactionPlanned {
 			return event.Plan
 		}
+	}
+	return nil
+}
+
+func compactionEventAt(events []Event, eventType EventType, index int) *CompactionEvent {
+	seen := 0
+	for i := range events {
+		if events[i].Type != eventType {
+			continue
+		}
+		if seen == index {
+			return events[i].Compaction
+		}
+		seen++
 	}
 	return nil
 }

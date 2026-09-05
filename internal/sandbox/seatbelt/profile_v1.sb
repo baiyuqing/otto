@@ -74,6 +74,13 @@
   (literal "/var/select/developer_dir")
   (literal "/private/var/select/developer_dir"))
 
+; Tools that hardcode the /etc spelling (libcurl's default CA bundle at
+; /etc/ssl/cert.pem, for example) need metadata on this exact root symlink to
+; reach its /private/etc target. Metadata permits traversal only; the target
+; subtree is granted separately by the reviewed read roots.
+(allow file-read-metadata
+  (literal "/etc"))
+
 ; Inherited streams and non-stateful character devices.
 (allow file-read*
   (literal "/dev/null")

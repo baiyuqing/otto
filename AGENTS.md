@@ -42,9 +42,9 @@ make check       # full macOS build/lint/all-tests/race/PTY/diff gate
 `make lint` uses pinned staticcheck v0.8.1. See the [development guide](docs/development.md)
 for the focused package set, test commands, and contract-specific checks.
 
-CI runs `make check` on pinned `macos-15` with Go 1.26.6 and pinned
-`actions/checkout`/`actions/setup-go` SHAs. This documents the workflow
-configuration; it does not claim that a remote run has passed.
+CI runs `make check` with the toolchain and action pins in
+[the workflow](.github/workflows/checks.yml). Full host validation requires
+macOS 26+ and standalone Command Line Tools; see the development guide.
 
 Keep README and user-facing docs limited to implemented, tested behavior. Do
 not describe `agent_send`, `agent_cancel`, `agent_report`, automatic memory

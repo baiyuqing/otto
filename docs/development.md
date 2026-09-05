@@ -96,6 +96,12 @@ confirmation; seek clarification only for material scope or contract changes.
 
 ## Go workflow
 
+Full host validation uses macOS 26+ with standalone Command Line Tools selected.
+The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
+require the third-party arm64e support introduced in macOS 26. CI selects
+`/Library/Developer/CommandLineTools` so Git and Clang use the existing reviewed
+developer read root. See [the workflow](../.github/workflows/checks.yml) for pins.
+
 The canonical Make targets are:
 
 ```bash

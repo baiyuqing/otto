@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     name: macOS acceptance
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 20
     env:
       GOTOOLCHAIN: local
@@ -27,4 +27,8 @@ jobs:
         with:
           go-version: '1.26.6'
           cache: true
+      - name: Select standalone command line tools
+        run: |
+          sudo xcode-select --switch /Library/Developer/CommandLineTools
+          xcode-select --print-path
       - run: make check

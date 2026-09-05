@@ -50,6 +50,20 @@ type Store struct {
 	closed              bool
 }
 
+func validateModelMessage(message model.Message) error {
+	if err := message.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidSession, err)
+	}
+	return nil
+}
+
+func cloneSessionMessages(messages []model.Message) []model.Message {
+	if messages == nil {
+		return []model.Message{}
+	}
+	return model.CloneMessages(messages)
+}
+
 func Create(root string, header Header) (*Store, error) {
 	store, err := newPendingStore(root, header)
 	if err != nil {
@@ -249,7 +263,7 @@ func (s *Store) Header() Header {
 func (s *Store) Messages() []model.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneMessages(s.messages)
+	return cloneSessionMessages(s.messages)
 }
 
 func (s *Store) AggregateUsage() (model.Usage, bool) {
@@ -332,6 +346,9 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := validateModelMessage(message); err != nil {
+		return err
+	}
 	if err := s.ensureFileLocked(); err != nil {
 		s.fatalErr = &fatalPersistenceError{cause: err}
 		return s.fatalErr
@@ -345,7 +362,7 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 	if err != nil {
 		return err
 	}
-	candidateMessages := append(cloneMessages(s.messages), persistedMessage)
+	candidateMessages := append(append([]model.Message(nil), s.messages...), persistedMessage)
 	if _, err := pendingToolCalls(candidateMessages); err != nil {
 		return err
 	}
@@ -366,8 +383,8 @@ func (s *Store) Append(ctx context.Context, message model.Message) error {
 	s.entryIDs[entryID] = struct{}{}
 	s.leafID = stringPointer(entryID)
 	s.fileBytes += recordBytes
-	s.messages = append(s.messages, cloneMessage(persistedMessage))
-	if persistedMessage.Role == model.RoleAssistant && hasMeaningfulUsage(persistedMessage.Usage) {
+	s.messages = append(s.messages, model.CloneMessage(persistedMessage))
+	if persistedMessage.Role == model.RoleAssistant && hasUsage(persistedMessage.Usage) {
 		s.aggregateUsage = addResolvedUsage(s.aggregateUsage, persistedMessage.Usage)
 		s.usagePresent = true
 	}
@@ -579,6 +596,13 @@ func modelMessageToPiEntry(message model.Message, entryID string, parentID *stri
 		if err != nil {
 			return piEntry{}, model.Message{}, err
 		}
+		if message.Usage != nil && *message.Usage == (model.Usage{}) {
+			details, err := encodePiOttoDetails(piOttoDetails{UsagePresent: true})
+			if err != nil {
+				return piEntry{}, model.Message{}, err
+			}
+			piMessage.Details = details
+		}
 		piMessage.API = "openai-completions"
 		piMessage.Provider = header.Provider
 		piMessage.Model = header.Model
@@ -613,7 +637,7 @@ func modelMessageToPiEntry(message model.Message, entryID string, parentID *stri
 		},
 		Message: piMessage,
 	}
-	persisted := cloneMessage(message)
+	persisted := model.CloneMessage(message)
 	persisted.ID = entryID
 	return entry, persisted, nil
 }
@@ -667,6 +691,13 @@ func modelContextMessageToPiEntry(message model.Message, entryID string, parentI
 			ContentText: &content,
 		},
 	}
+	if message.ContextMetadata != nil {
+		details, err := encodePiOttoDetails(piOttoDetails{TaskID: message.ContextMetadata.TaskID})
+		if err != nil {
+			return piEntry{}, model.Message{}, err
+		}
+		entry.CustomMessage.Details = details
+	}
 	// Usage is dropped: piCustomMessage has no usage field in the Pi v3
 	// format, so a notification's token cost is not persisted.
 	persisted := model.Message{
@@ -676,6 +707,10 @@ func modelContextMessageToPiEntry(message model.Message, entryID string, parentI
 		CreatedAt:   message.CreatedAt,
 		ContextType: message.ContextType,
 		Display:     message.Display,
+	}
+	if message.ContextMetadata != nil {
+		metadata := *message.ContextMetadata
+		persisted.ContextMetadata = &metadata
 	}
 	return entry, persisted, nil
 }
@@ -1092,32 +1127,6 @@ func canonicalWorkspace(path string) (string, error) {
 		return filepath.Clean(abs), nil
 	}
 	return "", fmt.Errorf("resolve workspace symlinks: %w", err)
-}
-
-func cloneMessages(messages []model.Message) []model.Message {
-	cloned := make([]model.Message, len(messages))
-	for i, message := range messages {
-		cloned[i] = cloneMessage(message)
-	}
-	return cloned
-}
-
-func cloneMessage(message model.Message) model.Message {
-	cloned := message
-	if message.Blocks != nil {
-		cloned.Blocks = make([]model.Block, len(message.Blocks))
-		for i, block := range message.Blocks {
-			cloned.Blocks[i] = block
-			if block.Arguments != nil {
-				cloned.Blocks[i].Arguments = append(json.RawMessage(nil), block.Arguments...)
-			}
-		}
-	}
-	if message.Usage != nil {
-		usage := *message.Usage
-		cloned.Usage = &usage
-	}
-	return cloned
 }
 
 func newPiEntryID(seen map[string]struct{}) (string, error) {

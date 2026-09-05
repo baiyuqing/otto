@@ -10,10 +10,10 @@ import (
 
 type Result struct {
 	Content string
-	// PersistedContent, when non-empty, replaces Content in the session
-	// transcript and provider history; Content still reaches the live
-	// EventToolCallFinished event unchanged.
-	PersistedContent string
+	// PersistedContent replaces Content in the durable session transcript when
+	// non-nil. A pointed-to empty string is an intentional empty override;
+	// Content still reaches the live EventToolCallFinished event unchanged.
+	PersistedContent *string
 	IsError          bool
 }
 

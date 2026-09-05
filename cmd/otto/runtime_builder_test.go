@@ -786,9 +786,7 @@ func TestRuntimeBuilderListedResumeRejectsWorkspaceDirectorySymlinkSwapAndKeepsC
 		oldRunnerCalls.Add(1)
 		return nil
 	})
-	controller, err := app.New(current, func() (session.Session, error) { return nil, errors.New("unused") }, func(session.Session) app.Runner {
-		return oldRunner
-	}, app.WithSessionBrowser(func(context.Context, int) (session.ListResult, error) {
+	controller, err := app.New(app.SessionReplacement{Session: current, Runner: oldRunner}, app.WithSessionBrowser(func(context.Context, int) (session.ListResult, error) {
 		return listed, nil
 	}, builder.openReplacement))
 	if err != nil {
@@ -2883,6 +2881,28 @@ func TestRuntimeBuilderServeFactoriesCreatePromptListAndOpen(t *testing.T) {
 
 	if _, err := factories.open(context.Background(), "does-not-exist"); !errors.Is(err, errSessionNotFound) {
 		t.Fatalf("open() unknown id error = %v, want errSessionNotFound", err)
+	}
+}
+
+func TestRuntimeBuilderWiresAuthenticationServiceAtCapturedPath(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.deps.newController = app.New
+	builder.authPath = filepath.Join(t.TempDir(), "chatgpt.json")
+	current := session.NewMemory(session.Header{
+		Version: session.CurrentVersion, ID: "auth-wiring", Workspace: builder.workspacePath,
+		Provider: "chatgpt", Profile: "default", Model: "m", CreatedAt: time.Now().UTC(),
+	})
+	controller, err := builder.newController(app.SessionReplacement{Session: current, Runner: commandRunnerFunc(func(context.Context, string, func(agent.Event)) error { return nil })}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	authentication, ok := interface{}(controller).(app.Authentication)
+	if !ok {
+		t.Fatal("controller does not expose app.Authentication")
+	}
+	if line, signedIn := authentication.Status(context.Background()); signedIn || !strings.Contains(line, "Not signed in") {
+		t.Fatalf("Status() = %q, %v", line, signedIn)
 	}
 }
 

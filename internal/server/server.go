@@ -65,9 +65,8 @@ type openSession struct {
 	// on this session finishes. startWakeLoop is the only reader; routing
 	// the end-of-turn wake check through it, instead of calling startTurn
 	// directly from the finishing turn's own goroutine, serializes every
-	// Pending()-then-startTurn decision through one goroutine so a stale
-	// read from one trigger can never race a fresh read from the other
-	// into starting two wake turns for the same pending notification.
+	// wake admission through one goroutine so stale triggers cannot race into
+	// starting two turns for the same pending notification.
 	turnFinished chan struct{}
 }
 
@@ -433,10 +432,8 @@ func (s *Server) startWakeLoop(os *openSession) {
 			case <-s.ctx.Done():
 				return
 			}
-			if tasks.Pending() > 0 {
-				if _, err := s.startTurn(os, "", triggerTask); err != nil && !errors.Is(err, errTurnActive) {
-					s.log.Error("wake_turn_error", "error", err)
-				}
+			if _, err := s.startTurn(os, "", triggerTask); err != nil && !errors.Is(err, errTurnActive) {
+				s.log.Error("wake_turn_error", "error", err)
 			}
 		}
 	}()
@@ -662,11 +659,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 var errTurnActive = errors.New("turn already active")
 
 // startTurn starts a turn on os with the given trigger ("user" or "task")
-// and returns it. The turn runs in its own goroutine; startTurn returns as
-// soon as it is recorded on os. Once the turn finishes, it signals
-// os.turnFinished so startWakeLoop can recheck Tasks().Pending(): a task can
-// finish after the parent's last provider request, with no further
-// Tasks().Updates() signal to catch it otherwise.
+// and returns it. Task turns prepare their controller wake operation before
+// publishing os.turn, so a no-op or busy admission cannot create a phantom
+// visible turn. The turn runs in its own goroutine; once it finishes, it
+// signals os.turnFinished so startWakeLoop can retry a late notification.
 func (s *Server) startTurn(os *openSession, text, trigger string) (*turn, error) {
 	os.mu.Lock()
 	if os.turn != nil && !os.turn.isDone() {
@@ -679,6 +675,23 @@ func (s *Server) startTurn(os *openSession, text, trigger string) (*turn, error)
 		return nil, err
 	}
 	turnCtx, cancel := context.WithCancel(s.ctx)
+	var wake *app.WakeOperation
+	if trigger == triggerTask {
+		wake, err = os.ctrl.PrepareWake(turnCtx)
+		if err != nil {
+			cancel()
+			os.mu.Unlock()
+			if errors.Is(err, app.ErrPromptActive) {
+				return nil, errTurnActive
+			}
+			return nil, err
+		}
+		if wake == nil {
+			cancel()
+			os.mu.Unlock()
+			return nil, nil
+		}
+	}
 	t := newTurn(turnID, cancel)
 	t.trigger = trigger
 	os.turn = t
@@ -688,7 +701,12 @@ func (s *Server) startTurn(os *openSession, text, trigger string) (*turn, error)
 	emit := t.emit(s.metrics)
 	go func() {
 		defer cancel()
-		err := os.ctrl.Prompt(turnCtx, text, emit)
+		var err error
+		if wake != nil {
+			err = wake.Run(turnCtx, emit)
+		} else {
+			err = os.ctrl.Prompt(turnCtx, text, emit)
+		}
 		t.finish(err)
 		s.metrics.turnFinished(t.summary().Status, t.duration())
 		if err != nil && !errors.Is(err, context.Canceled) {

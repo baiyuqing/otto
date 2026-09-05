@@ -78,8 +78,8 @@ func TestSkillToolLoadsBodyWithHeaderAndFileList(t *testing.T) {
 	if strings.Contains(result.Content, "---") {
 		t.Fatalf("content leaked frontmatter delimiter: %q", result.Content)
 	}
-	if result.PersistedContent != "" {
-		t.Fatalf("PersistedContent = %q, want empty so the body persists via Content", result.PersistedContent)
+	if result.PersistedContent != nil {
+		t.Fatalf("PersistedContent = %#v, want nil so the body persists via Content", result.PersistedContent)
 	}
 }
 

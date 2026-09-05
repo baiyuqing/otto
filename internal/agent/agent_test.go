@@ -24,19 +24,15 @@ func TestRunExecutesToolAndReturnsToProvider(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				Message: model.Message{FinishReason: model.FinishToolCalls, Usage: &model.Usage{InputTokens: 11, OutputTokens: 7}, Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockText, Text: "checking"},
 					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)},
 				}},
-				FinishReason: model.FinishToolCalls,
-				Usage:        model.Usage{InputTokens: 11, OutputTokens: 7},
 			},
 		},
 		{
 			response: provider.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}},
-				FinishReason: model.FinishStop,
-				Usage:        model.Usage{InputTokens: 3, OutputTokens: 2},
+				Message: model.Message{FinishReason: model.FinishStop, Usage: &model.Usage{InputTokens: 3, OutputTokens: 2}, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}},
 			},
 		},
 	}}
@@ -82,11 +78,10 @@ func TestRunExecutesToolAndReturnsToProvider(t *testing.T) {
 func TestRunForwardsTextDeltas(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{
 		response: provider.Response{
-			Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+			Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{
 				{Type: model.BlockText, Text: "hello"},
 				{Type: model.BlockText, Text: " world"},
 			}},
-			FinishReason: model.FinishStop,
 		},
 	}}}
 	registry, err := tool.NewRegistry()
@@ -108,11 +103,76 @@ func TestRunForwardsTextDeltas(t *testing.T) {
 	}
 }
 
+func TestRunPreservesProviderUsagePresence(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		usage *model.Usage
+	}{
+		{name: "missing"},
+		{name: "explicit zero", usage: &model.Usage{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeProvider := &scriptedProvider{scripts: []providerScript{{response: provider.Response{Message: model.Message{
+				Role: model.RoleAssistant, FinishReason: model.FinishStop,
+				Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}, Usage: test.usage,
+			}}}}}
+			memory := session.NewMemory(testHeader(t))
+			runner := New(fakeProvider, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()})
+			var usageEvent Event
+			if err := runner.Run(context.Background(), "inspect", func(event Event) {
+				if event.Type == EventProviderUsage {
+					usageEvent = event
+				}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			got := memory.Messages()[1].Usage
+			if (got == nil) != (test.usage == nil) || got != nil && *got != *test.usage {
+				t.Fatalf("stored usage = %#v, want %#v", got, test.usage)
+			}
+			if usageEvent.UsagePresent != (test.usage != nil) {
+				t.Fatalf("usage event presence = %v, want %v", usageEvent.UsagePresent, test.usage != nil)
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidProviderUsage(t *testing.T) {
+	for _, usage := range []model.Usage{
+		{InputTokens: -1},
+		{InputTokens: 1, CachedInputTokens: 2},
+	} {
+		t.Run(fmt.Sprintf("%+v", usage), func(t *testing.T) {
+			memory := session.NewMemory(testHeader(t))
+			runner := New(&scriptedProvider{scripts: []providerScript{{response: provider.Response{Message: model.Message{
+				Role: model.RoleAssistant, FinishReason: model.FinishStop,
+				Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}, Usage: &usage,
+			}}}}}, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()})
+			if err := runner.Run(context.Background(), "inspect", nil); err == nil || !strings.Contains(err.Error(), "token") {
+				t.Fatalf("Run() error = %v, want usage validation error", err)
+			}
+			if got := memory.Messages(); len(got) != 1 || got[0].Role != model.RoleUser {
+				t.Fatalf("unexpected persisted messages: %#v", got)
+			}
+		})
+	}
+}
+
+func TestRunRejectsNonAssistantProviderRole(t *testing.T) {
+	memory := session.NewMemory(testHeader(t))
+	runner := New(&scriptedProvider{scripts: []providerScript{{response: provider.Response{Message: model.Message{
+		Role: model.RoleUser, FinishReason: model.FinishStop,
+		Blocks: []model.Block{{Type: model.BlockText, Text: "wrong role"}},
+	}}}}}, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()})
+	if err := runner.Run(context.Background(), "inspect", nil); err == nil || !strings.Contains(err.Error(), "assistant role") {
+		t.Fatalf("Run() error = %v, want assistant-role validation error", err)
+	}
+}
+
 func TestRunSendsThinkingToProvider(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{
 		response: provider.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}},
-			FinishReason: model.FinishStop,
+			Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}},
 		},
 	}}}
 	runner := New(fakeProvider, nil, session.NewMemory(testHeader(t)), Options{Model: "test", Thinking: "high", Now: fixedClock, NewID: fixedIDs()})
@@ -128,11 +188,10 @@ func TestRunEmitsToolCallEvents(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
-				FinishReason: model.FinishToolCalls,
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	registry, err := tool.NewRegistry(echoTool{})
 	if err != nil {
@@ -163,11 +222,10 @@ func TestRunPersistsUnknownToolResults(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "missing", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
-				FinishReason: model.FinishToolCalls,
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "missing", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	registry, err := tool.NewRegistry()
 	if err != nil {
@@ -188,7 +246,7 @@ func TestRunPersistsUnknownToolResults(t *testing.T) {
 	}
 }
 
-func TestRunDelegatesInvalidArgumentsToTool(t *testing.T) {
+func TestRunRejectsInvalidProviderToolArguments(t *testing.T) {
 	recorder := &recordingTool{name: "echo"}
 	recorder.execute = func(_ context.Context, arguments json.RawMessage) tool.Result {
 		recorder.calls = append(recorder.calls, string(arguments))
@@ -207,23 +265,23 @@ func TestRunDelegatesInvalidArgumentsToTool(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{`)}}},
-				FinishReason: model.FinishToolCalls,
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{`)}}},
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	memory := session.NewMemory(testHeader(t))
 	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
-	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
-		t.Fatal(err)
+	err = runner.Run(context.Background(), "inspect", nil)
+	if err == nil || !strings.Contains(err.Error(), "tool-call block is malformed") {
+		t.Fatalf("Run() error = %v, want malformed tool-call error", err)
 	}
-	if got, want := len(recorder.calls), 1; got != want {
-		t.Fatalf("tool calls = %d, want %d", got, want)
+	if got := len(recorder.calls); got != 0 {
+		t.Fatalf("tool calls = %d, want no call", got)
 	}
-	if got := memory.Messages()[2].Blocks[0]; !got.IsError || got.Text == "" {
-		t.Fatalf("unexpected invalid-argument result: %#v", got)
+	if got := memory.Messages(); len(got) != 1 || got[0].Role != model.RoleUser {
+		t.Fatalf("unexpected persisted messages: %#v", got)
 	}
 }
 
@@ -246,14 +304,13 @@ func TestRunExecutesMultipleToolCallsSequentially(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"one"}`)},
 					{Type: model.BlockToolCall, ToolCallID: "call-2", ToolName: "echo", Arguments: json.RawMessage(`{"value":"two"}`)},
 				}},
-				FinishReason: model.FinishToolCalls,
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	memory := session.NewMemory(testHeader(t))
 	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
@@ -275,15 +332,14 @@ func TestRunMaxTurnsOptionIsIgnored(t *testing.T) {
 	for i := 0; i < turns; i++ {
 		scripts = append(scripts, providerScript{
 			response: provider.Response{
-				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockToolCall, ToolCallID: fmt.Sprintf("call-%d", i), ToolName: "echo", Arguments: json.RawMessage(`{"value":"x"}`)},
 				}},
-				FinishReason: model.FinishToolCalls,
 			},
 		})
 	}
 	scripts = append(scripts, providerScript{
-		response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop},
+		response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}},
 	})
 	fakeProvider := &scriptedProvider{scripts: scripts}
 	registry, err := tool.NewRegistry(echoTool{})
@@ -304,12 +360,11 @@ func TestRunContinuesWhileProviderRequestsTools(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
-				FinishReason: model.FinishToolCalls,
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
 			},
 		},
 		{
-			response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop},
+			response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}},
 		},
 	}}
 	registry, err := tool.NewRegistry(echoTool{})
@@ -377,11 +432,10 @@ func TestRunPersistsCanceledToolResultBeforeNextPrompt(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "wait", Arguments: json.RawMessage(`{}`)}}},
-				FinishReason: model.FinishToolCalls,
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "wait", Arguments: json.RawMessage(`{}`)}}},
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "recovered"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "recovered"}}}}},
 	}}
 	memory := session.NewMemory(testHeader(t))
 	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
@@ -439,11 +493,10 @@ func TestRunDoesNotExecuteLaterToolCallsAfterCancellation(t *testing.T) {
 	}
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{
 		response: provider.Response{
-			Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+			Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 				{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "wait", Arguments: json.RawMessage(`{}`)},
 				{Type: model.BlockToolCall, ToolCallID: "call-2", ToolName: "later", Arguments: json.RawMessage(`{}`)},
 			}},
-			FinishReason: model.FinishToolCalls,
 		},
 	}}}
 	memory := session.NewMemory(testHeader(t))
@@ -531,8 +584,8 @@ func TestRunBashCapCannotSynthesizeSecretAcrossAgentProviderAndPiSession(t *test
 	defer store.Close()
 
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"ignored"}`)}}}, FinishReason: model.FinishToolCalls}},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"ignored"}`)}}}}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactor(secrets))
 	var events []Event
@@ -587,11 +640,10 @@ func TestRunCanonicalizesInvalidConfiguredSecretsAcrossEventsFollowUpErrorsAndPi
 		{
 			stream: stream,
 			response: provider.Response{
-				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockText, Text: "assistant " + strings.Join(canonical, " | ")},
 					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
 				}},
-				FinishReason: model.FinishToolCalls,
 			},
 		},
 		{err: errors.New("provider " + strings.Join(canonical, " | "))},
@@ -683,14 +735,13 @@ func TestRunExpandsJSONStringEscapeSecretsAcrossEventsFollowUpAndRawPi(t *testin
 		{
 			stream: []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "event " + dynamic}},
 			response: provider.Response{
-				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockText, Text: "assistant " + dynamic},
 					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
 				}},
-				FinishReason: model.FinishToolCalls,
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "json-escape-session", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
 	if err != nil {
@@ -770,14 +821,13 @@ func TestRunUnrepresentableRedactorCallsNoProviderToolOrSessionBoundary(t *testi
 				{Type: provider.StreamTextDelta, Text: "right"},
 			},
 			response: provider.Response{
-				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockText, Text: "left" + deleted + "right"},
 					{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{}`)},
 				}},
-				FinishReason: model.FinishToolCalls,
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "deletion-session", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "test", CreatedAt: fixedClock()})
 	if err != nil {
@@ -830,12 +880,10 @@ func TestRunIncompleteRedactionSnapshotSuppressesRequestsEventsAndPi(t *testing.
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{
 		stream: []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "provider " + omitted}},
 		response: provider.Response{
-			Message: model.Message{ID: "response-" + omitted, Role: model.RoleAssistant, Blocks: []model.Block{
+			Message: model.Message{FinishReason: model.FinishToolCalls, Usage: &model.Usage{InputTokens: 424_242, OutputTokens: 313_131, CachedInputTokens: 212_121}, ID: "response-" + omitted, Role: model.RoleAssistant, Blocks: []model.Block{
 				{Type: model.BlockText, Text: "provider " + omitted},
 				{Type: model.BlockToolCall, ToolName: "echo", ToolCallID: "call-" + omitted, Arguments: json.RawMessage(`{"value":"` + omitted + `"}`)},
 			}},
-			FinishReason: model.FinishToolCalls,
-			Usage:        model.Usage{InputTokens: 424_242, OutputTokens: 313_131, CachedInputTokens: 212_121},
 		},
 	}}}
 	store, err := session.Create(t.TempDir(), session.Header{Version: 1, ID: "incomplete-redaction", Workspace: t.TempDir(), Provider: "openai-compatible", Model: "safe", CreatedAt: fixedClock()})
@@ -889,7 +937,7 @@ func TestRunIncompleteRedactionSnapshotSuppressesRequestsEventsAndPi(t *testing.
 func TestRunIncompleteRedactionPreservesCancellationWithoutProviderOrSessionMutation(t *testing.T) {
 	memory := session.NewMemory(testHeader(t))
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{response: provider.Response{
-		Message: model.Message{Role: model.RoleAssistant}, FinishReason: model.FinishStop,
+		Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant},
 	}}}}
 	runner := New(fakeProvider, nil, memory, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()}, NewRedactorWithCompleteness(nil, false))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -930,11 +978,12 @@ func TestRunIncompleteRedactionDoesNotObserveProviderError(t *testing.T) {
 
 func TestRunPersistsPlaceholderButShowsFullContentToProviderWithinTheSameTurn(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}, FinishReason: model.FinishToolCalls}},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	recorder := &recordingTool{name: "recorder", execute: func(context.Context, json.RawMessage) tool.Result {
-		return tool.Result{Content: "3 records: id1, id2, id3", PersistedContent: "3 records (ids omitted)"}
+		persisted := "3 records (ids omitted)"
+		return tool.Result{Content: "3 records: id1, id2, id3", PersistedContent: &persisted}
 	}}
 	registry, err := tool.NewRegistry(recorder)
 	if err != nil {
@@ -970,12 +1019,13 @@ func TestRunPersistsPlaceholderButShowsFullContentToProviderWithinTheSameTurn(t 
 
 func TestRunToolResultOverlayDoesNotPersistAcrossTurns(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}, FinishReason: model.FinishToolCalls}},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}}}},
 	}}
 	recorder := &recordingTool{name: "recorder", execute: func(context.Context, json.RawMessage) tool.Result {
-		return tool.Result{Content: "3 records: id1, id2, id3", PersistedContent: "3 records (ids omitted)"}
+		persisted := "3 records (ids omitted)"
+		return tool.Result{Content: "3 records: id1, id2, id3", PersistedContent: &persisted}
 	}}
 	registry, err := tool.NewRegistry(recorder)
 	if err != nil {
@@ -997,6 +1047,48 @@ func TestRunToolResultOverlayDoesNotPersistAcrossTurns(t *testing.T) {
 	// placeholder, same as what was actually persisted.
 	if got := fakeProvider.requests[2].Messages[2].Blocks[0].Text; got != "3 records (ids omitted)" {
 		t.Fatalf("second-turn provider history tool result = %q, want placeholder (overlay must not survive across turns)", got)
+	}
+}
+
+func TestRunPreservesEmptyPersistedOverrideAndSameTurnOverlay(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "recorder", Arguments: json.RawMessage(`{}`)}}}}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
+	}}
+	recorder := &recordingTool{name: "recorder", execute: func(context.Context, json.RawMessage) tool.Result {
+		persisted := ""
+		return tool.Result{Content: "full tool result", PersistedContent: &persisted}
+	}}
+	registry, err := tool.NewRegistry(recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	store, err := session.Create(root, testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	runner := New(fakeProvider, registry, store, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
+	if err := runner.Run(context.Background(), "inspect", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Messages()[2].Blocks[0].Text; got != "" {
+		t.Fatalf("persisted tool result = %q, want explicit empty override", got)
+	}
+	if got := fakeProvider.requests[1].Messages[2].Blocks[0].Text; got != "full tool result" {
+		t.Fatalf("same-turn provider history = %q, want full content", got)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _, err := session.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got := reopened.Messages()[2].Blocks[0].Text; got != "" {
+		t.Fatalf("reopened tool result = %q, want explicit empty override", got)
 	}
 }
 
@@ -1050,8 +1142,8 @@ func TestRunRedactsCredentialFromToolEventPersistenceAndProviderHistory(t *testi
 	defer store.Close()
 
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"cat .part-1 .part-2"}`)}}}, FinishReason: model.FinishToolCalls}},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "bash", Arguments: json.RawMessage(`{"command":"cat .part-1 .part-2"}`)}}}}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	runner := New(fakeProvider, registry, store, Options{Model: "test", Now: fixedClock, NewID: fixedIDs()})
 	var toolEvent Event
@@ -1091,7 +1183,8 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 	recorder := &recordingTool{name: "echo"}
 	recorder.execute = func(_ context.Context, arguments json.RawMessage) tool.Result {
 		recorder.calls = append(recorder.calls, string(arguments))
-		return tool.Result{Content: "tool returned " + credential}
+		persisted := "persisted " + credential
+		return tool.Result{Content: "tool returned " + credential, PersistedContent: &persisted}
 	}
 	registry, err := toolpkgNewRegistry(recorder)
 	if err != nil {
@@ -1107,14 +1200,13 @@ func TestRunRedactsProviderTextArgumentsAndToolResultsAtAgentBoundary(t *testing
 		{
 			stream: stream,
 			response: provider.Response{
-				Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{
 					{Type: model.BlockText, Text: "text " + credential + " done"},
 					{Type: model.BlockToolCall, ToolCallID: "call-" + credential, ToolName: "echo", Arguments: arguments},
 				}},
-				FinishReason: model.FinishToolCalls,
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "finished"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "finished"}}}}},
 	}}
 	memory := session.NewMemory(testHeader(t))
 	redactor := NewRedactor([]string{credential})
@@ -1182,8 +1274,8 @@ func TestRunClassifiesFatalPersistenceAtEveryDurableBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			fakeProvider := &scriptedProvider{scripts: []providerScript{
-				{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}}, FinishReason: model.FinishToolCalls}},
-				{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "must not run"}}}, FinishReason: model.FinishStop}},
+				{response: provider.Response{Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}}}},
+				{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "must not run"}}}}},
 			}}
 			runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
@@ -1253,8 +1345,7 @@ func TestRunPersistsAssistantBeforeExecutingTools(t *testing.T) {
 	}
 	fakeProvider := &scriptedProvider{scripts: []providerScript{{
 		response: provider.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
-			FinishReason: model.FinishToolCalls,
+			Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
 		},
 	}}}
 	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
@@ -1292,11 +1383,10 @@ func TestRunPersistsToolResultsBeforeNextProviderCall(t *testing.T) {
 	fakeProvider := &scriptedProvider{scripts: []providerScript{
 		{
 			response: provider.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
-				FinishReason: model.FinishToolCalls,
+				Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "echo", Arguments: json.RawMessage(`{"value":"hello"}`)}}},
 			},
 		},
-		{response: provider.Response{Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}, FinishReason: model.FinishStop}},
+		{response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}}},
 	}}
 	runner := New(fakeProvider, registry, memory, Options{Model: "test", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
 
@@ -1511,9 +1601,6 @@ func testCloneRequest(request provider.Request) provider.Request {
 func testCloneResponse(response provider.Response) provider.Response {
 	cloned := response
 	cloned.Message = testCloneMessage(response.Message)
-	if response.Usage != (model.Usage{}) {
-		cloned.Usage = response.Usage
-	}
 	return cloned
 }
 

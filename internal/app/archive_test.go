@@ -11,9 +11,10 @@ import (
 
 func newControllerWithArchiver(t *testing.T, initial session.Session, runner Runner, archive ArchiveFactory) *Controller {
 	t.Helper()
-	controller, err := New(initial, func() (session.Session, error) {
-		return &fakeSession{header: testHeader("next")}, nil
-	}, func(session.Session) Runner { return runner },
+	controller, err := New(SessionReplacement{Session: initial, Runner: runner},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{Session: &fakeSession{header: testHeader("next")}, Runner: runner}, nil
+		}),
 		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "old", Model: "old-model"}),
 		WithSessionArchiver(archive))
 	if err != nil {
@@ -144,9 +145,11 @@ func TestArchiveCurrentSessionBuildFailureRetainsCurrent(t *testing.T) {
 		return session.ArchiveResult{}, nil
 	}
 	current := &fakeSession{header: testHeader("initial"), path: "/sessions/initial.jsonl"}
-	controller, err := New(current, func() (session.Session, error) {
-		return nil, errors.New("create failed")
-	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithSessionArchiver(archive))
+	controller, err := New(SessionReplacement{Session: current, Runner: runnerFunc(noopRun)},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{}, errors.New("create failed")
+		}),
+		WithSessionArchiver(archive))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,11 +173,13 @@ func TestArchiveCurrentSessionArchiveFailureRetainsCurrentAndClosesCandidate(t *
 	candidate := &fakeSession{header: testHeader("next")}
 	candidate.onClose = func() { closeCalls++ }
 	runner := &archiveClosableRunner{}
-	controller, err := New(current, func() (session.Session, error) {
-		return candidate, nil
-	}, func(session.Session) Runner { return runner }, WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
-		return session.ArchiveResult{}, errors.New("archive failed")
-	}))
+	controller, err := New(SessionReplacement{Session: current, Runner: runnerFunc(noopRun)},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{Session: candidate, Runner: runner}, nil
+		}),
+		WithSessionArchiver(func(ctx context.Context, path string) (session.ArchiveResult, error) {
+			return session.ArchiveResult{}, errors.New("archive failed")
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}

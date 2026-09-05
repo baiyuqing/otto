@@ -34,7 +34,7 @@ func waitTaskUpdate(updates <-chan struct{}) tea.Cmd {
 
 // taskRegistry returns the backend's current sub-agent task registry, or
 // nil when sub-agents are not available in this session.
-func (m Model) taskRegistry() *agent.Tasks {
+func (m Model) taskRegistry() app.TaskView {
 	lister, ok := m.backend.(app.TaskLister)
 	if !ok {
 		return nil
@@ -160,7 +160,7 @@ func (m Model) handleTaskCommand(argument string) (tea.Model, tea.Cmd) {
 // activeTasksFromRegistry returns the queued/running tasks in a registry, in
 // creation order. A pure function of the registry so the panel-rendering
 // tests below do not need a Model.
-func activeTasksFromRegistry(tasks *agent.Tasks) []agent.Task {
+func activeTasksFromRegistry(tasks app.TaskView) []agent.Task {
 	if tasks == nil {
 		return nil
 	}
@@ -291,12 +291,17 @@ func (m Model) wakeBlockedByReservedState() bool {
 // turn-state setup as a user-submitted prompt, without appending an
 // EntryUser to the transcript.
 func (m Model) maybeWake() (Model, tea.Cmd) {
-	tasks := m.taskRegistry()
-	if tasks == nil || tasks.Pending() == 0 {
-		return m, nil
-	}
 	if m.wakeBlockedByReservedState() {
 		return m, nil
 	}
-	return m.startTurn("", false)
+	preparer, ok := m.backend.(app.WakePreparer)
+	if !ok {
+		return m, nil
+	}
+	wake, err := preparer.PrepareWake(rootContext(m.rootCtx))
+	if err != nil || wake == nil {
+		return m, nil
+	}
+	next, cmd := m.startWake(wake)
+	return next.(Model), cmd
 }

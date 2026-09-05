@@ -4,27 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/app"
-	"github.com/baiyuqing/otto/internal/auth"
-	"github.com/baiyuqing/otto/internal/config"
 )
 
-// Seam so tests can supply credentials without a browser or network.
-var (
-	authLoginFn    = auth.Login
-	tuiOpenBrowser = func(url string) {
-		_ = exec.Command("open", url).Start()
-	}
-	errTUILoginFailed  = errors.New("chatgpt sign-in failed")
-	errTUILogoutFailed = errors.New("stored chatgpt credentials could not be removed")
-)
+var tuiOpenBrowser = func(url string) {
+	_ = exec.Command("open", url).Start()
+}
 
-// loginResultMsg carries one step of the async login flow: an authorization URL
-// notice (done=false) or the final outcome (done=true).
 type loginResultMsg struct {
 	generation uint64
 	url        string
@@ -32,40 +21,28 @@ type loginResultMsg struct {
 	done       bool
 }
 
-// handleLoginCommand runs "/login" and "/login status". Login is asynchronous:
-// auth.Login blocks on the browser callback, so it runs in a worker goroutine
-// that streams the URL notice and the final result back as messages. On success
-// it only saves credentials; newly written ChatGPT credentials are outside the
-// immutable startup snapshot, so using them requires restarting Otto.
 func (m Model) handleLoginCommand(argument string) (tea.Model, tea.Cmd) {
+	if !app.BackendDynamicContentAvailable(m.backend) {
+		m.clearEditor()
+		m.statusText = ""
+		m.appendLoginEntry(EntrySystem, app.ErrAuthenticationUnavailable.Error())
+		return m, nil
+	}
+	authentication, ok := m.backend.(app.Authentication)
+	if !ok {
+		m.clearEditor()
+		m.statusText = ""
+		m.appendLoginEntry(EntrySystem, app.ErrAuthenticationUnavailable.Error())
+		return m, nil
+	}
 	switch argument {
 	case "status":
-		path, ok := m.authPath()
-		if !ok {
-			m.clearEditor()
-			m.statusText = ""
-			m.appendLoginEntry(EntrySystem, auth.ErrInteractiveUnavailable.Error())
-			return m, nil
-		}
-		line, _ := auth.StatusLine(path)
+		line, _ := authentication.Status(m.rootCtx)
 		m.clearEditor()
 		m.statusText = ""
 		m.appendLoginEntry(EntrySystem, line)
 		return m, nil
 	case "":
-		path, ok := m.authPath()
-		if !ok {
-			m.clearEditor()
-			m.statusText = ""
-			m.appendLoginEntry(EntrySystem, auth.ErrInteractiveUnavailable.Error())
-			return m, nil
-		}
-		if provider := m.backend.Info().Provider; provider != config.ProviderChatGPT {
-			m.clearEditor()
-			m.statusText = ""
-			m.appendLoginEntry(EntrySystem, fmt.Sprintf("The %s provider authenticates with an API key from the environment; there is nothing to sign in to.", provider))
-			return m, nil
-		}
 		if m.running || m.newSessionPending || m.loginPending {
 			m.statusText = app.ErrPromptActive.Error()
 			return m, nil
@@ -76,7 +53,7 @@ func (m Model) handleLoginCommand(argument string) (tea.Model, tea.Cmd) {
 		m.statusText = ""
 		channel := make(chan loginResultMsg, 2)
 		m.loginChannel = channel
-		return m, startLoginCommand(m.rootCtx, path, m.loginGeneration, channel)
+		return m, startLoginCommand(m.rootCtx, authentication, m.loginGeneration, channel)
 	default:
 		m.statusText = "usage: /login [status]"
 		return m, nil
@@ -84,60 +61,56 @@ func (m Model) handleLoginCommand(argument string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleLogoutCommand() (tea.Model, tea.Cmd) {
-	path, ok := m.authPath()
+	if !app.BackendDynamicContentAvailable(m.backend) {
+		m.clearEditor()
+		m.statusText = ""
+		m.appendLoginEntry(EntrySystem, app.ErrAuthenticationUnavailable.Error())
+		return m, nil
+	}
+	authentication, ok := m.backend.(app.Authentication)
 	if !ok {
 		m.clearEditor()
 		m.statusText = ""
-		m.appendLoginEntry(EntrySystem, auth.ErrInteractiveUnavailable.Error())
+		m.appendLoginEntry(EntrySystem, app.ErrAuthenticationUnavailable.Error())
 		return m, nil
 	}
 	m.clearEditor()
 	m.statusText = ""
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			m.appendLoginEntry(EntrySystem, "Not signed in to ChatGPT.")
-			return m, nil
-		}
-		m.statusText = errTUILogoutFailed.Error()
-		m.appendLoginEntry(EntryError, errTUILogoutFailed.Error())
+	removed, err := authentication.Logout(m.rootCtx)
+	if err != nil {
+		m.statusText = err.Error()
+		m.appendLoginEntry(EntryError, err.Error())
+		return m, nil
+	}
+	if !removed {
+		m.appendLoginEntry(EntrySystem, "Not signed in to ChatGPT.")
 		return m, nil
 	}
 	m.appendLoginEntry(EntrySystem, "Signed out of ChatGPT.")
 	return m, nil
 }
 
-func (m Model) authPath() (string, bool) {
-	if !app.BackendDynamicContentAvailable(m.backend) {
-		return "", false
-	}
-	return auth.PathFromContext(m.rootCtx)
-}
-
-func startLoginCommand(ctx context.Context, path string, generation uint64, channel chan loginResultMsg) tea.Cmd {
+func startLoginCommand(ctx context.Context, authentication app.Authentication, generation uint64, channel chan loginResultMsg) tea.Cmd {
 	return func() tea.Msg {
-		go runLoginWorker(ctx, path, generation, channel)
+		go runLoginWorker(ctx, authentication, generation, channel)
 		return waitLogin(generation, channel)()
 	}
 }
 
-func runLoginWorker(ctx context.Context, path string, generation uint64, channel chan loginResultMsg) {
+func runLoginWorker(ctx context.Context, authentication app.Authentication, generation uint64, channel chan loginResultMsg) {
 	defer close(channel)
 	opener := func(url string) error {
 		channel <- loginResultMsg{generation: generation, url: url}
 		tuiOpenBrowser(url)
 		return nil
 	}
-	creds, err := authLoginFn(rootContext(ctx), opener)
+	err := authentication.Login(rootContext(ctx), opener)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			channel <- loginResultMsg{generation: generation, err: ctxErr, done: true}
 			return
 		}
-		channel <- loginResultMsg{generation: generation, err: errTUILoginFailed, done: true}
-		return
-	}
-	if err := creds.Save(path); err != nil {
-		channel <- loginResultMsg{generation: generation, err: auth.ErrCredentialsPersistence, done: true}
+		channel <- loginResultMsg{generation: generation, err: err, done: true}
 		return
 	}
 	channel <- loginResultMsg{generation: generation, done: true}
@@ -157,13 +130,24 @@ func (m Model) applyLoginResult(msg loginResultMsg) (tea.Model, tea.Cmd) {
 	if !m.loginPending || msg.generation != m.loginGeneration {
 		return m, nil
 	}
+	m.loginPending = !msg.done
 	if !msg.done {
 		m.appendLoginEntry(EntrySystem, fmt.Sprintf("Open this URL to sign in:\n\n  %s", msg.url))
 		return m, waitLogin(m.loginGeneration, m.loginChannel)
 	}
-	m.loginPending = false
 	m.loginChannel = nil
 	if msg.err != nil {
+		if errors.Is(msg.err, app.ErrAuthenticationUnsupported) {
+			provider := m.backend.Info().Provider
+			m.statusText = ""
+			m.appendLoginEntry(EntrySystem, fmt.Sprintf("The %s provider authenticates with an API key from the environment; there is nothing to sign in to.", provider))
+			return m, nil
+		}
+		if errors.Is(msg.err, app.ErrAuthenticationUnavailable) {
+			m.statusText = ""
+			m.appendLoginEntry(EntrySystem, app.ErrAuthenticationUnavailable.Error())
+			return m, nil
+		}
 		m.statusText = msg.err.Error()
 		m.appendLoginEntry(EntryError, fmt.Sprintf("login failed: %v", msg.err))
 		return m, nil

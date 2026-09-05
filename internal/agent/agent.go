@@ -144,18 +144,18 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 		if assistant.CreatedAt.IsZero() {
 			assistant.CreatedAt = a.options.Now()
 		}
-		assistant.FinishReason = response.FinishReason
-		if response.Usage.InputTokens != 0 || response.Usage.OutputTokens != 0 {
-			usage := response.Usage
-			assistant.Usage = &usage
-		} else {
-			assistant.Usage = nil
+		if err := validateProviderResponseMessage(assistant); err != nil {
+			return a.fail(emit, err)
 		}
 
 		if err := a.session.Append(ctx, assistant); err != nil {
 			return a.fail(emit, fmt.Errorf("persist assistant message: %w", err))
 		}
-		a.emit(emit, Event{Type: EventProviderUsage, Usage: response.Usage})
+		var usage model.Usage
+		if assistant.Usage != nil {
+			usage = *assistant.Usage
+		}
+		a.emit(emit, Event{Type: EventProviderUsage, Usage: usage, UsagePresent: assistant.Usage != nil})
 
 		durabilityCtx := context.WithoutCancel(ctx)
 		hadToolCall := false
@@ -174,13 +174,14 @@ func (a *Agent) Run(ctx context.Context, userText string, emit func(Event)) erro
 				result = a.registry.Execute(ctx, block.ToolName, cloneArguments(block.Arguments))
 			}
 			result.Content = a.redactor.RedactString(result.Content)
-			if result.PersistedContent != "" {
-				result.PersistedContent = a.redactor.RedactString(result.PersistedContent)
+			if result.PersistedContent != nil {
+				persisted := a.redactor.RedactString(*result.PersistedContent)
+				result.PersistedContent = &persisted
 			}
 			a.emit(emit, Event{Type: EventToolCallFinished, ToolName: block.ToolName, ToolCallID: block.ToolCallID, ToolResult: result})
 			persistedText := result.Content
-			if result.PersistedContent != "" {
-				persistedText = result.PersistedContent
+			if result.PersistedContent != nil {
+				persistedText = *result.PersistedContent
 				if dispatchState.toolResultOverlay == nil {
 					dispatchState.toolResultOverlay = make(map[string]string)
 				}
@@ -222,13 +223,14 @@ func (a *Agent) deliverNotifications(ctx context.Context, emit func(Event)) erro
 	for _, notification := range a.options.Inbox.Drain() {
 		text := a.redactor.RedactString(notification.Text)
 		if err := a.session.Append(ctx, model.Message{
-			ID:          a.options.NewID(),
-			Role:        model.RoleContext,
-			ContextType: notification.ContextType(),
-			Display:     true,
-			CreatedAt:   a.options.Now(),
-			Usage:       notification.Usage,
-			Blocks:      []model.Block{{Type: model.BlockText, Text: text}},
+			ID:              a.options.NewID(),
+			Role:            model.RoleContext,
+			ContextType:     notification.ContextType(),
+			Display:         true,
+			CreatedAt:       a.options.Now(),
+			Usage:           notification.Usage,
+			ContextMetadata: &model.ContextMetadata{TaskID: notification.TaskID},
+			Blocks:          []model.Block{{Type: model.BlockText, Text: text}},
 		}); err != nil {
 			return fmt.Errorf("persist notification: %w", err)
 		}
@@ -236,7 +238,7 @@ func (a *Agent) deliverNotifications(ctx context.Context, emit func(Event)) erro
 		if notification.Usage != nil {
 			usage = *notification.Usage
 		}
-		a.emit(emit, Event{Type: EventNotification, TaskID: notification.TaskID, Text: text, Usage: usage})
+		a.emit(emit, Event{Type: EventNotification, TaskID: notification.TaskID, Text: text, Usage: usage, UsagePresent: notification.Usage != nil})
 	}
 	return nil
 }
@@ -486,30 +488,11 @@ func cloneTools(tools []model.ToolDefinition) []model.ToolDefinition {
 }
 
 func cloneMessages(messages []model.Message) []model.Message {
-	if messages == nil {
-		return nil
-	}
-	cloned := make([]model.Message, len(messages))
-	for i, message := range messages {
-		cloned[i] = cloneMessage(message)
-	}
-	return cloned
+	return model.CloneMessages(messages)
 }
 
 func cloneMessage(message model.Message) model.Message {
-	cloned := message
-	if message.Blocks != nil {
-		cloned.Blocks = make([]model.Block, len(message.Blocks))
-		for i, block := range message.Blocks {
-			cloned.Blocks[i] = block
-			cloned.Blocks[i].Arguments = cloneArguments(block.Arguments)
-		}
-	}
-	if message.Usage != nil {
-		usage := *message.Usage
-		cloned.Usage = &usage
-	}
-	return cloned
+	return model.CloneMessage(message)
 }
 
 func cloneArguments(arguments json.RawMessage) json.RawMessage {
@@ -517,6 +500,16 @@ func cloneArguments(arguments json.RawMessage) json.RawMessage {
 		return nil
 	}
 	return append(json.RawMessage(nil), arguments...)
+}
+
+func validateProviderResponseMessage(message model.Message) error {
+	if message.Role != model.RoleAssistant {
+		return errors.New("invalid provider response: assistant role is required")
+	}
+	if err := message.Validate(); err != nil {
+		return fmt.Errorf("invalid provider response: %w", err)
+	}
+	return nil
 }
 
 func trimSpace(text string) string {

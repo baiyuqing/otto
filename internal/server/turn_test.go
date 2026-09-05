@@ -20,8 +20,8 @@ func TestTurnEmitAccumulatesTextAndUsage(t *testing.T) {
 	emit(agent.Event{Type: agent.EventAgentStarted})
 	emit(agent.Event{Type: agent.EventTextDelta, Text: "hel"})
 	emit(agent.Event{Type: agent.EventTextDelta, Text: "lo"})
-	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1, OutputTokens: 2, CachedInputTokens: 3}})
-	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 10, OutputTokens: 20}})
+	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1, OutputTokens: 2, CachedInputTokens: 3}, UsagePresent: true})
+	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 10, OutputTokens: 20}, UsagePresent: true})
 
 	events, done, _ := tr.snapshot(0)
 	if done {
@@ -45,6 +45,9 @@ func TestTurnEmitAccumulatesTextAndUsage(t *testing.T) {
 	if s.Usage != want {
 		t.Fatalf("summary usage = %+v, want %+v", s.Usage, want)
 	}
+	if !s.UsagePresent {
+		t.Fatal("summary usage should be marked present")
+	}
 	if s.Status != turnRunning {
 		t.Fatalf("status = %q, want %q", s.Status, turnRunning)
 	}
@@ -59,13 +62,26 @@ func TestTurnEmitAccumulatesTextAndUsage(t *testing.T) {
 func TestTurnEmitAccumulatesNotificationUsage(t *testing.T) {
 	tr := newTurn("t1", func() {})
 	emit := tr.emit(newMetrics())
-	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1, OutputTokens: 2, CachedInputTokens: 3}})
-	emit(agent.Event{Type: agent.EventNotification, TaskID: "t1", Text: "[task-notification] task t1 succeeded", Usage: model.Usage{InputTokens: 10, OutputTokens: 20, CachedInputTokens: 1}})
+	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 1, OutputTokens: 2, CachedInputTokens: 3}, UsagePresent: true})
+	emit(agent.Event{Type: agent.EventNotification, TaskID: "t1", Text: "[task-notification] task t1 succeeded", Usage: model.Usage{InputTokens: 10, OutputTokens: 20, CachedInputTokens: 1}, UsagePresent: true})
 
 	s := tr.summary()
 	want := model.Usage{InputTokens: 11, OutputTokens: 22, CachedInputTokens: 4}
 	if s.Usage != want {
 		t.Fatalf("summary usage = %+v, want %+v", s.Usage, want)
+	}
+}
+
+func TestTurnUsagePresenceDistinguishesMissingAndExplicitZero(t *testing.T) {
+	tr := newTurn("t1", func() {})
+	emit := tr.emit(newMetrics())
+	emit(agent.Event{Type: agent.EventProviderUsage})
+	if got := tr.summary(); got.UsagePresent {
+		t.Fatal("missing usage marked present")
+	}
+	emit(agent.Event{Type: agent.EventProviderUsage, UsagePresent: true})
+	if got := tr.summary(); !got.UsagePresent || got.Usage != (model.Usage{}) {
+		t.Fatalf("explicit zero usage = %+v, present=%v", got.Usage, got.UsagePresent)
 	}
 }
 
@@ -87,7 +103,7 @@ func TestTurnEmitRecordsProviderTokenMetrics(t *testing.T) {
 	m := newMetrics()
 	tr := newTurn("t1", func() {})
 	emit := tr.emit(m)
-	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 5, OutputTokens: 7}})
+	emit(agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 5, OutputTokens: 7}, UsagePresent: true})
 
 	body := render(t, m)
 	if !strings.Contains(body, `otto_provider_tokens_total{kind="input"} 5`) {

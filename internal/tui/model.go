@@ -875,14 +875,18 @@ func (m *Model) clearEditor() {
 }
 
 func (m Model) startPrompt(text string) (tea.Model, tea.Cmd) {
-	return m.startTurn(text, true)
+	return m.startTurn(text, true, nil)
+}
+
+func (m Model) startWake(wake *app.WakeOperation) (tea.Model, tea.Cmd) {
+	return m.startTurn("", false, wake)
 }
 
 // startTurn sets up turn state and starts the provider call, shared by a
 // user-submitted prompt and a sub-agent wake turn. When appendUserEntry is
 // false (a wake turn), no EntryUser is appended and the editor is left
 // untouched, so text the user was composing survives the turn.
-func (m Model) startTurn(text string, appendUserEntry bool) (Model, tea.Cmd) {
+func (m Model) startTurn(text string, appendUserEntry bool, wake *app.WakeOperation) (Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(rootContext(m.rootCtx))
 	stream := newTurnStream()
 
@@ -903,7 +907,7 @@ func (m Model) startTurn(text string, appendUserEntry bool) (Model, tea.Cmd) {
 	stream.generation = m.turnGeneration
 	m.activeTurnStream = stream
 	m.activeTurnChannel = stream.channel
-	m.registerActiveOperation(stream, cancel)
+	m.registerActiveOperation(stream, cancel, wake)
 	m.turnHistoryBaseline = captureTurnHistoryBaseline(historyFromBackend(m.backend))
 	m.turnEntryStart = len(m.entries)
 	if appendUserEntry {
@@ -913,7 +917,7 @@ func (m Model) startTurn(text string, appendUserEntry bool) (Model, tea.Cmd) {
 	}
 	m.rerenderAndRefreshViewportContent()
 
-	return m, startTurnCommand(ctx, m.backend, text, stream)
+	return m, startTurnCommand(ctx, m.backend, text, stream, wake)
 }
 
 func newTurnStream() *turnStream {
@@ -924,24 +928,28 @@ func newTurnStream() *turnStream {
 	}
 }
 
-func startTurnCommand(ctx context.Context, backend app.Backend, text string, stream *turnStream) tea.Cmd {
+func startTurnCommand(ctx context.Context, backend app.Backend, text string, stream *turnStream, wake ...*app.WakeOperation) tea.Cmd {
 	return func() tea.Msg {
-		go runTurnWorker(ctx, backend, text, stream)
+		go runTurnWorker(ctx, backend, text, stream, wake...)
 		return waitTurn(stream)()
 	}
 }
 
-func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream *turnStream) {
+func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream *turnStream, wake ...*app.WakeOperation) {
 	defer close(stream.channel)
 
-	if backend == nil {
+	var wakeOperation *app.WakeOperation
+	if len(wake) > 0 {
+		wakeOperation = wake[0]
+	}
+	if backend == nil && wakeOperation == nil {
 		sendDurableTurnEnvelope(stream, turnEnvelope{err: errors.New("backend is required"), done: true})
 		return
 	}
 
 	var eventMu sync.Mutex
 	acceptingEvents := true
-	err := backend.Prompt(ctx, text, func(event agent.Event) {
+	emit := func(event agent.Event) {
 		eventMu.Lock()
 		defer eventMu.Unlock()
 		if !acceptingEvents {
@@ -953,7 +961,13 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 			envelope.aggregateUsage, envelope.aggregateUsagePresent = aggregateUsageSnapshot(backend)
 		}
 		sendTurnEvent(ctx, stream, envelope)
-	})
+	}
+	var err error
+	if wakeOperation != nil {
+		err = wakeOperation.Run(ctx, emit)
+	} else {
+		err = backend.Prompt(ctx, text, emit)
+	}
 	eventMu.Lock()
 	acceptingEvents = false
 	eventMu.Unlock()
@@ -962,6 +976,10 @@ func runTurnWorker(ctx context.Context, backend app.Backend, text string, stream
 
 func cloneAgentEvent(event agent.Event) agent.Event {
 	cloned := event
+	if event.ToolResult.PersistedContent != nil {
+		persisted := *event.ToolResult.PersistedContent
+		cloned.ToolResult.PersistedContent = &persisted
+	}
 	if event.Compaction != nil {
 		compaction := *event.Compaction
 		cloned.Compaction = &compaction
@@ -2010,11 +2028,11 @@ func (m *Model) nextLiveEntryID(kind string) string {
 	return liveEntryIDPrefix + "-" + id
 }
 
-func (m *Model) registerActiveOperation(stream *turnStream, cancel context.CancelFunc) {
+func (m *Model) registerActiveOperation(stream *turnStream, cancel context.CancelFunc, wake ...*app.WakeOperation) {
 	if m.operationCleanup == nil {
 		m.operationCleanup = newOperationCleanup()
 	}
-	m.activeOperation = m.operationCleanup.register(stream, cancel)
+	m.activeOperation = m.operationCleanup.register(stream, cancel, wake...)
 }
 
 func (m *Model) abandonActiveTurn() {

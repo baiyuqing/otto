@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -11,8 +12,42 @@ import (
 	"time"
 
 	"github.com/baiyuqing/otto/internal/agent"
+	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/session"
 )
+
+type taskWakeRunner struct {
+	tasks   *agent.Tasks
+	backend *fakeBackend
+}
+
+func (r taskWakeRunner) Tasks() *agent.Tasks { return r.tasks }
+
+func (r taskWakeRunner) Run(ctx context.Context, text string, emit func(agent.Event)) error {
+	if r.backend != nil && r.backend.prompt != nil {
+		return r.backend.prompt(ctx, text, emit)
+	}
+	r.tasks.Notifications().Drain()
+	return nil
+}
+
+func (r taskWakeRunner) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
+func taskBackendWithWake(t *testing.T, tasks *agent.Tasks) *fakeBackend {
+	t.Helper()
+	backend := &fakeBackend{tasks: tasks}
+	sess := session.NewMemory(session.Header{ID: "repl-wake", Workspace: t.TempDir()})
+	controller, err := app.New(app.SessionReplacement{Session: sess, Runner: taskWakeRunner{tasks: tasks, backend: backend}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.Close() })
+	backend.wake = controller
+	return backend
+}
 
 func TestREPLRendersNotificationEvent(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -37,7 +72,8 @@ func TestREPLWakesOnlyWhenNotificationIsPending(t *testing.T) {
 	var mu sync.Mutex
 	var promptCalls []string
 	woke := make(chan struct{}, 1)
-	backend := &fakeBackend{tasks: tasks, prompt: func(_ context.Context, prompt string, emit func(agent.Event)) error {
+	backend := taskBackendWithWake(t, tasks)
+	backend.prompt = func(_ context.Context, prompt string, emit func(agent.Event)) error {
 		mu.Lock()
 		promptCalls = append(promptCalls, prompt)
 		mu.Unlock()
@@ -46,7 +82,7 @@ func TestREPLWakesOnlyWhenNotificationIsPending(t *testing.T) {
 			woke <- struct{}{}
 		}
 		return nil
-	}}
+	}
 	r := New(reader, &stdout, &stderr, backend)
 	errCh := make(chan error, 1)
 	go func() { errCh <- r.Run(context.Background()) }()
@@ -112,13 +148,12 @@ func TestTasksCommandListsTasks(t *testing.T) {
 		t.Fatalf("Add() = %v", err)
 	}
 	started := time.Now().Add(-42 * time.Second)
-	tasks.Update(added.ID, func(task *agent.Task) {
-		task.Status = agent.TaskSucceeded
-		task.StartedAt = started
-		task.FinishedAt = started.Add(42 * time.Second)
-		task.ToolCalls = 7
-		task.Usage = model.Usage{InputTokens: 10000, OutputTokens: 2310}
-	})
+	tasks.MarkRunning(added.ID, started)
+	for i := 0; i < 7; i++ {
+		tasks.RecordToolCall(added.ID, "read")
+	}
+	tasks.RecordProviderStep(added.ID, model.Usage{InputTokens: 10000, OutputTokens: 2310}, "", true)
+	tasks.Finish(added.ID, agent.TaskSucceeded, started.Add(42*time.Second), "", "")
 	// A task canceled while still queued has a zero StartedAt and a non-zero
 	// FinishedAt; its elapsed column must read "0s", not the (meaningless)
 	// span from the zero time to FinishedAt.
@@ -126,10 +161,7 @@ func TestTasksCommandListsTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add() = %v", err)
 	}
-	tasks.Update(canceled.ID, func(task *agent.Task) {
-		task.Status = agent.TaskCanceled
-		task.FinishedAt = time.Now()
-	})
+	tasks.Finish(canceled.ID, agent.TaskCanceled, time.Now(), "", "")
 	var stdout, stderr bytes.Buffer
 	backend := &fakeBackend{tasks: tasks}
 	r := New(strings.NewReader("/tasks\n/exit\n"), &stdout, &stderr, backend)
@@ -170,15 +202,11 @@ func TestTaskCommandShowsStepsAndResult(t *testing.T) {
 		{Role: model.RoleTool, Blocks: []model.Block{{Type: model.BlockToolResult, Text: "package main"}}},
 		{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "looks fine"}}},
 	}
-	added, err := tasks.Add(agent.Task{Description: "review"}, nil, func() []model.Message { return history })
+	added, err := tasks.Add(agent.Task{Description: "review", Model: "gpt-test-model"}, nil, func() []model.Message { return history })
 	if err != nil {
 		t.Fatalf("Add() = %v", err)
 	}
-	tasks.Update(added.ID, func(task *agent.Task) {
-		task.Status = agent.TaskSucceeded
-		task.Result = "no issues found"
-		task.Model = "gpt-test-model"
-	})
+	tasks.Finish(added.ID, agent.TaskSucceeded, time.Now(), "no issues found", "")
 	var stdout, stderr bytes.Buffer
 	backend := &fakeBackend{tasks: tasks}
 	r := New(strings.NewReader("/task "+added.ID+"\n/exit\n"), &stdout, &stderr, backend)
@@ -294,7 +322,7 @@ func TestRunOnceWaitsForRunningTaskAndWakes(t *testing.T) {
 	tasks := agent.NewTasks()
 	taskID := ""
 	calls := 0
-	backend := &fakeBackend{tasks: tasks}
+	backend := taskBackendWithWake(t, tasks)
 	backend.prompt = func(_ context.Context, prompt string, emit func(agent.Event)) error {
 		calls++
 		if prompt != "" {
@@ -303,17 +331,14 @@ func TestRunOnceWaitsForRunningTaskAndWakes(t *testing.T) {
 				t.Fatalf("Add() = %v", err)
 			}
 			taskID = added.ID
-			tasks.Update(taskID, func(tk *agent.Task) { tk.Status = agent.TaskRunning })
+			tasks.MarkRunning(taskID, time.Now())
 			go func() {
 				time.Sleep(20 * time.Millisecond)
 				// Push before the final update, as Runner.finish does: Wait
 				// unblocks on the update, and drainTasks must then find the
 				// notification already pending.
 				tasks.Notifications().Push(agent.Notification{TaskID: taskID, Text: "[task-notification] task " + taskID + " succeeded\nchild done"})
-				tasks.Update(taskID, func(tk *agent.Task) {
-					tk.Status = agent.TaskSucceeded
-					tk.Result = "child done"
-				})
+				tasks.Finish(taskID, agent.TaskSucceeded, time.Now(), "child done", "")
 			}()
 			return nil
 		}
@@ -331,5 +356,24 @@ func TestRunOnceWaitsForRunningTaskAndWakes(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "reported") {
 		t.Fatalf("stdout = %q, want the wake turn's output", stdout.String())
+	}
+}
+
+func TestRunOnceReturnsWakeError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	providerErr := errors.New("wake provider failed")
+	tasks := agent.NewTasks()
+	tasks.Notifications().Push(agent.Notification{TaskID: "t1", Kind: agent.NotificationTaskReport, Text: "progress"})
+	backend := taskBackendWithWake(t, tasks)
+	backend.prompt = func(_ context.Context, prompt string, _ func(agent.Event)) error {
+		if prompt == "" {
+			return providerErr
+		}
+		return nil
+	}
+
+	r := New(strings.NewReader(""), &stdout, &stderr, backend)
+	if err := r.RunOnce(context.Background(), "inspect"); !errors.Is(err, providerErr) {
+		t.Fatalf("RunOnce() error = %v, want %v", err, providerErr)
 	}
 }

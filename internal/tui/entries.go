@@ -160,10 +160,9 @@ func notificationEntryText(taskID, text string) string {
 	return strings.Join(kept, "\n")
 }
 
-// notificationTaskID recovers the task id from a persisted notification's
-// header line ("[task-notification] task <id> ..."). model.Message carries
-// no separate TaskID field, so resumed history must parse it back out of the
-// text to reproduce the live EventNotification.TaskID rendering.
+// notificationTaskID recovers the task id from a legacy persisted
+// notification header ("[task-notification] task <id> ..."). New messages
+// carry the id in ContextMetadata and do not depend on notification wording.
 func notificationTaskID(text string) string {
 	header, _, _ := strings.Cut(text, "\n")
 	const prefix = "[task-notification] task "
@@ -184,7 +183,14 @@ func notificationEntryFromMessage(message model.Message, index int) (Entry, bool
 		id = messageEntryBaseID(message, index)
 	}
 	text := message.Text()
-	return Entry{ID: id, Kind: EntrySystem, Raw: notificationEntryText(notificationTaskID(text), text)}, true
+	taskID := ""
+	if message.ContextMetadata != nil {
+		taskID = message.ContextMetadata.TaskID
+	}
+	if taskID == "" {
+		taskID = notificationTaskID(text)
+	}
+	return Entry{ID: id, Kind: EntrySystem, Raw: notificationEntryText(taskID, text)}, true
 }
 
 func entryKindForRole(role model.Role) EntryKind {

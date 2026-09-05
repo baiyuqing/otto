@@ -31,6 +31,7 @@ func (p profilePickerState) currentSelection() (string, bool) {
 // profileSwitchResultMsg carries the outcome of an async /model profile switch.
 type profileSwitchResultMsg struct {
 	generation uint64
+	selection  app.ProfileSelectionResult
 	err        error
 }
 
@@ -129,12 +130,8 @@ func runProfileSwitchCommand(ctx context.Context, switcher app.ProfileSwitcher, 
 		if switcher == nil {
 			return profileSwitchResultMsg{generation: generation, err: errors.New("profile switcher is required")}
 		}
-		_, err := switcher.SwitchProfile(rootContext(ctx), name)
-		if err != nil {
-			return profileSwitchResultMsg{generation: generation, err: err}
-		}
-		err = switcher.SetDefaultProfile(rootContext(ctx), name)
-		return profileSwitchResultMsg{generation: generation, err: err}
+		selection, err := app.SelectProfile(rootContext(ctx), switcher, name)
+		return profileSwitchResultMsg{generation: generation, selection: selection, err: err}
 	}
 }
 
@@ -143,7 +140,7 @@ func (m Model) applyProfileSwitchResult(msg profileSwitchResultMsg) (tea.Model, 
 		return m, nil
 	}
 	m.profileSwitchPending = false
-	if msg.err != nil {
+	if msg.err != nil && !msg.selection.Switched {
 		m.statusText = msg.err.Error()
 		return m, nil
 	}
@@ -152,6 +149,9 @@ func (m Model) applyProfileSwitchResult(msg profileSwitchResultMsg) (tea.Model, 
 	}
 	info := m.backend.Info()
 	status := fmt.Sprintf("switched to profile %s (provider %s, model %s); set as default", info.Profile, info.Provider, info.Model)
+	if msg.err != nil {
+		status = fmt.Sprintf("switched to profile %s (provider %s, model %s), but the default profile was not saved: %v", info.Profile, info.Provider, info.Model, msg.err)
+	}
 	m.resetSessionViewFromBackend(status)
 	m.noteCanceledTasks(m.pendingCanceledTasks)
 	return m, nil

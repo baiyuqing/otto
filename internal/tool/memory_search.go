@@ -66,7 +66,8 @@ func (t *memorySearchTool) Execute(ctx context.Context, arguments json.RawMessag
 		return Result{Content: err.Error(), IsError: true}
 	}
 	if len(result.Records) == 0 {
-		return Result{Content: "no matching records", PersistedContent: "0 records"}
+		persisted := "0 records"
+		return Result{Content: "no matching records", PersistedContent: &persisted}
 	}
 
 	var content strings.Builder
@@ -77,7 +78,8 @@ func (t *memorySearchTool) Execute(ctx context.Context, arguments json.RawMessag
 			record.ID, record.Scope.Namespace, record.Scope.ID, record.Kind, record.Key, record.Revision, record.Text)
 	}
 	rendered := CappedTextResult(content.String(), t.maxOutputBytes)
-	rendered.PersistedContent = fmt.Sprintf("%d records: %s", len(result.Records), strings.Join(ids, ", "))
+	persisted := fmt.Sprintf("%d records: %s", len(result.Records), strings.Join(ids, ", "))
+	rendered.PersistedContent = &persisted
 	return rendered
 }
 

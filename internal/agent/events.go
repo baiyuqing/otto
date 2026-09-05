@@ -29,17 +29,18 @@ const (
 )
 
 type Event struct {
-	Type       EventType
-	Text       string
-	ToolName   string
-	ToolCallID string
-	ToolArgs   string
-	ToolResult tool.Result
-	Usage      model.Usage
-	Compaction *CompactionEvent
-	Plan       *CompactionPlan
-	Err        error
-	TaskID     string
+	Type         EventType
+	Text         string
+	ToolName     string
+	ToolCallID   string
+	ToolArgs     string
+	ToolResult   tool.Result
+	Usage        model.Usage
+	UsagePresent bool
+	Compaction   *CompactionEvent
+	Plan         *CompactionPlan
+	Err          error
+	TaskID       string
 }
 
 // CompactionReason identifies why a checkpoint was requested.
@@ -62,16 +63,8 @@ type CompactionResult struct {
 	Noop                 bool
 }
 
-type CompactionEvent struct {
-	CheckpointID         string
-	Reason               CompactionReason
-	TokensBefore         int
-	EstimatedTokensAfter int
-	Automatic            bool
-	Usage                model.Usage
-	UsagePresent         bool
-	Noop                 bool
-}
+// CompactionEvent is the emitted form of CompactionResult.
+type CompactionEvent = CompactionResult
 
 // CompactionMode names the summarization shape the selection resolved to. It is
 // deterministic and known before the provider summary call runs.

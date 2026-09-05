@@ -199,14 +199,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		return nil, errors.New("workspace is required")
 	}
 	redactionValues := b.secretValues(&runtime)
-	tools := []tool.Tool{
-		tool.NewReadTool(b.workspace, runtime.MaxOutputBytes),
-		tool.NewGrepTool(b.workspace, runtime.MaxOutputBytes),
-		tool.NewFindTool(b.workspace, runtime.MaxOutputBytes),
-		tool.NewLSTool(b.workspace, runtime.MaxOutputBytes),
-		tool.NewWriteTool(b.workspace),
-		tool.NewEditTool(b.workspace),
-	}
+	tools := b.builtinFileTools(runtime.MaxOutputBytes)
 	if b.bashConfigured() {
 		bash, err := tool.NewBashTool(
 			b.workspace,
@@ -224,12 +217,8 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 	}
 	var binding memory.Binding
 	if b.memoryUsable && b.boundaryAllowsDynamic(&runtime) {
+		tools = append(tools, b.memoryTools(runtime.MaxOutputBytes)...)
 		memoryScopes := []memory.Scope{b.memoryUserScope, b.memoryWorkspaceScope}
-		tools = append(tools,
-			tool.NewMemorySearchTool(b.memoryService, memoryScopes, runtime.MaxOutputBytes),
-			tool.NewRememberTool(b.memoryService, b.memoryWorkspaceScope),
-			tool.NewForgetTool(b.memoryService, memoryScopes),
-		)
 		bound, err := b.memoryService.Bind(ctx, memory.BindOptions{
 			Scopes:            memoryScopes,
 			DefaultWriteScope: b.memoryWorkspaceScope,
@@ -687,18 +676,15 @@ func updateSessionRuntime(ctx context.Context, current session.Session, runtime 
 // newController assembles a Controller from an already-built initial session
 // and runner, wiring the profile/new-session/browser/archiver/memory options
 // shared by every frontend and by the agent server's per-session factories.
-// The build/create closures given to app.New are dead paths once
-// WithNewSessionBuilder is set (app.New calls build exactly once; later
-// replacements route through buildNewReplacement), so they stay minimal.
-func (b runtimeBuilder) newController(initial session.Session, runner app.Runner, info app.RuntimeInfo, dynamicContent bool) (*app.Controller, error) {
-	build := func(session.Session) app.Runner { return runner }
-	create := func() (session.Session, error) { return nil, errSessionOperationUnavailable }
+func (b runtimeBuilder) newController(initial app.SessionReplacement, dynamicContent bool) (*app.Controller, error) {
 	options := []app.Option{
-		app.WithRuntimeInfo(info),
 		app.WithDynamicContent(dynamicContent),
 		app.WithProfileSwitcher(b.profileNames(), b.buildProfileReplacement),
 		app.WithDefaultProfileSetter(b.persistDefaultProfile),
 		app.WithNewSessionBuilder(b.buildNewReplacement),
+	}
+	if b.authPath != "" {
+		options = append(options, app.WithAuthentication(auth.NewService(b.authPath)))
 	}
 	if b.memoryService != nil {
 		options = append(options, app.WithMemory(b.memoryService, b.memoryUserScope, b.memoryWorkspaceScope))
@@ -713,7 +699,7 @@ func (b runtimeBuilder) newController(initial session.Session, runner app.Runner
 			}),
 		)
 	}
-	return b.deps.newController(initial, create, build, options...)
+	return b.deps.newController(initial, options...)
 }
 
 func closeRuntimeRunner(runner app.Runner) error {
@@ -1100,16 +1086,17 @@ func (b runtimeBuilder) boundaryToolDefinitions(runtime *config.Runtime) []model
 	if runtime != nil && runtime.MaxOutputBytes > 0 {
 		maxOutput = runtime.MaxOutputBytes
 	}
-	definitions := []model.ToolDefinition{
-		tool.NewReadTool(b.workspace, maxOutput).Definition(),
-		tool.NewGrepTool(b.workspace, maxOutput).Definition(),
-		tool.NewFindTool(b.workspace, maxOutput).Definition(),
-		tool.NewLSTool(b.workspace, maxOutput).Definition(),
-		tool.NewWriteTool(b.workspace).Definition(),
-		tool.NewEditTool(b.workspace).Definition(),
+	definitions := make([]model.ToolDefinition, 0, 6)
+	for _, builtin := range b.builtinFileTools(maxOutput) {
+		definitions = append(definitions, builtin.Definition())
+	}
+	if b.memoryUsable {
+		for _, memoryTool := range b.memoryTools(maxOutput) {
+			definitions = append(definitions, memoryTool.Definition())
+		}
 	}
 	if b.plannedBashAvailable() {
-		definitions = append(definitions, (&boundaryBashDefinition{}).Definition())
+		definitions = append(definitions, tool.BashDefinition())
 	}
 	if config.ResolveSkills(b.config, b.environment, b.workspacePath).Enabled {
 		definitions = append(definitions, tool.NewSkillTool(skill.Catalog{}, maxOutput).Definition())
@@ -1136,23 +1123,22 @@ func (b runtimeBuilder) boundaryToolDefinitions(runtime *config.Runtime) []model
 	return definitions
 }
 
-type boundaryBashDefinition struct{}
+func (b runtimeBuilder) builtinFileTools(maxOutput int) []tool.Tool {
+	return []tool.Tool{
+		tool.NewReadTool(b.workspace, maxOutput),
+		tool.NewGrepTool(b.workspace, maxOutput),
+		tool.NewFindTool(b.workspace, maxOutput),
+		tool.NewLSTool(b.workspace, maxOutput),
+		tool.NewWriteTool(b.workspace),
+		tool.NewEditTool(b.workspace),
+	}
+}
 
-func (*boundaryBashDefinition) Definition() model.ToolDefinition {
-	return model.ToolDefinition{
-		Name:        "bash",
-		Description: "Execute a shell command from the workspace",
-		Parameters: map[string]any{
-			"type":                 "object",
-			"additionalProperties": false,
-			"properties": map[string]any{
-				"command": map[string]any{
-					"type":        "string",
-					"description": "Shell command to execute",
-				},
-			},
-			"required": []string{"command"},
-		},
+func (b runtimeBuilder) memoryTools(maxOutput int) []tool.Tool {
+	return []tool.Tool{
+		tool.NewMemorySearchTool(b.memoryService, []memory.Scope{b.memoryUserScope, b.memoryWorkspaceScope}, maxOutput),
+		tool.NewRememberTool(b.memoryService, b.memoryWorkspaceScope),
+		tool.NewForgetTool(b.memoryService, []memory.Scope{b.memoryUserScope, b.memoryWorkspaceScope}),
 	}
 }
 

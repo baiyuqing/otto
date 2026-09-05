@@ -1,16 +1,14 @@
-# Otto build and CI targets.
-#
-# These mirror the gates documented in AGENTS.md ("Go workflow") and
-# README.md ("Build and test commands"). The default suite must stay
-# offline: it needs no provider credentials, network access, or an
-# interactive terminal.
+# Otto development and macOS acceptance checks. See docs/development.md.
+# Tests use no live provider credentials; tool/dependency setup may use network.
 
 BINARY := otto
 PKG    := ./cmd/otto
 
-STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@latest
+STATICCHECK_VERSION := v0.8.1
+STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+CORE_PACKAGES := ./internal/model ./internal/agent ./internal/app ./internal/provider/... ./internal/config ./internal/skill ./internal/subagent
 
-.PHONY: all build fmt fmt-fix vet lint test test-race test-tui check clean help
+.PHONY: all build fmt fmt-fix vet lint test test-core test-architecture test-race test-tui check-fast check clean help
 
 all: build
 
@@ -26,19 +24,28 @@ fmt-fix: ## rewrite Go files with gofmt -w (local only)
 vet: ## run go vet
 	go vet ./...
 
-lint: ## run staticcheck (pinned via @latest in go run form)
+lint: ## run the pinned staticcheck version
 	$(STATICCHECK) ./...
 
 test: ## run the offline unit test suite
 	go test ./...
 
+test-core: ## run focused core tests without host process/Seatbelt suites
+	go test $(CORE_PACKAGES)
+
+test-architecture: ## verify production package import boundaries
+	go test ./internal/architecture
+
 test-race: ## run the test suite with the race detector
-	go test -race ./...
+	go test -race -timeout=20m ./...
 
 test-tui: ## run the TUI PTY lifecycle smoke test
 	go test ./cmd/otto -run TestTUIPseudoTerminalLifecycle -count=1
 
-check: fmt vet lint test test-race ## run every CI gate (fmt, vet, lint, test, test-race, diff)
+check-fast: fmt vet test-architecture test-core ## quick feedback; run targeted package tests too
+	@git diff --check
+
+check: check-fast build lint test test-race test-tui ## full macOS acceptance, including host integration and PTY
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 clean: ## remove the built binary

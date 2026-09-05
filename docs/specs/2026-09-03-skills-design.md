@@ -1,6 +1,13 @@
 # Skills design
 
-Status: approved 2026-09-03. Branch `feat/skills`, worktree `/Users/baiyuqing/Work/code/otto-skills`.
+Status: approved 2026-09-03; historical and superseded for the current skills
+contract. The branch and worktree below are provenance only.
+Branch `feat/skills`, worktree `/Users/baiyuqing/Work/code/otto-skills`.
+Check [`internal/skill`](../../internal/skill),
+[`internal/tool/skill.go`](../../internal/tool/skill.go), the
+[user manual](../user-manual.md), and the
+[2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
+for current behavior and ownership rules.
 
 ## Goal
 

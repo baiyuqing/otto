@@ -1891,6 +1891,9 @@ func TestRunInjectedSignalCancelsOnlyActiveTurn(t *testing.T) {
 	subscribed := make(chan struct{})
 	var stopCalls atomic.Int32
 	deps := deterministicRunDependencies(t)
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return memory.NewNullService(memory.ErrDisabled), memory.Scope{}, false, nil
+	}
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -1954,6 +1957,9 @@ func TestRunInjectedSignalWhileIdleExits130AndCleansUp(t *testing.T) {
 	subscribed := make(chan struct{})
 	var stopCalls atomic.Int32
 	deps := deterministicRunDependencies(t)
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return memory.NewNullService(memory.ErrDisabled), memory.Scope{}, false, nil
+	}
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{
@@ -2031,6 +2037,9 @@ func TestRunInjectedSignalCancelsActiveTUITurnExits130AndClosesOnce(t *testing.T
 		Version: 1, ID: "signal-tui", Workspace: workspace, Provider: "openai-compatible", Model: "test-model", CreatedAt: time.Now().UTC(),
 	})}
 	deps := deterministicRunDependencies(t)
+	deps.openMemoryService = func(context.Context, config.MemoryRuntime, []string, io.Writer) (memory.Service, memory.Scope, bool, error) {
+		return memory.NewNullService(memory.ErrDisabled), memory.Scope{}, false, nil
+	}
 	deps.subscribeInterrupts = func() interruptSubscription {
 		close(subscribed)
 		return interruptSubscription{

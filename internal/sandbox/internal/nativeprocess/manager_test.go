@@ -472,6 +472,59 @@ func TestManagerCloseTerminatesActiveGroupsAndRejectsNewRuns(t *testing.T) {
 	}
 }
 
+func TestManagerDarwinCloseAcceptsRepeatedEPERMAfterGroupExited(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin-specific EPERM regression")
+	}
+
+	manager := New()
+	realKill := manager.kill
+	var killMu sync.Mutex
+	groupKills := 0
+	probes := 0
+	manager.kill = func(pid int, signal syscall.Signal) error {
+		killMu.Lock()
+		defer killMu.Unlock()
+		if signal == 0 {
+			probes++
+			return syscall.EPERM
+		}
+		groupKills++
+		if groupKills > 1 {
+			return syscall.EPERM
+		}
+		return realKill(pid, signal)
+	}
+
+	outcome, descendant := startBlockingDescendant(t, manager, context.Background())
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	completed := awaitRun(t, outcome, "Run terminated by Close")
+	if completed.err != nil {
+		t.Fatalf("active Run() error = %v", completed.err)
+	}
+	assertKilledResult(t, completed.result)
+	assertProcessExited(t, descendant)
+
+	killMu.Lock()
+	gotGroupKills := groupKills
+	gotProbes := probes
+	killMu.Unlock()
+	if gotGroupKills != 2 || gotProbes != 1 {
+		t.Fatalf("kill sequence = %d SIGKILL calls and %d signal-0 calls, want 2 and 1", gotGroupKills, gotProbes)
+	}
+}
+
+func TestDarwinProcessGroupTerminatedRejectsLiveGroup(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin-specific process-group observation")
+	}
+	if processGroupTerminated(syscall.Getpgrp()) {
+		t.Fatal("processGroupTerminated() accepted the live test process group")
+	}
+}
+
 func TestManagerConcurrentRunAndClose(t *testing.T) {
 	const runCount = 24
 	manager := New()

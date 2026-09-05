@@ -255,11 +255,18 @@ claims, callback close requests, idle closed-session snapshots, TUI wake Escape
 cancellation/compaction accounting, one-shot wake errors, canceled authentication,
 and profile replacement with failed default persistence.
 
-An earlier full ordinary test run failed in the unchanged nativeprocess test
+At the time of PR #70, a full ordinary test run failed in the unchanged nativeprocess test
 `TestManagerCloseTerminatesActiveGroupsAndRejectsNewRuns` with
 `sandbox child termination failed`. Focused repetition failed 7/20 times in this
 worktree and 2/20 times in the original main checkout. The nativeprocess package
 and its sandbox dependencies have no diff. The final isolated ordinary suite and
-full race suite passed; the existing intermittent nativeprocess failure remains
-unfixed. Its syscall-level cause was not established, and no termination/security
-check was weakened to obtain a pass.
+full race suite passed; the intermittent nativeprocess failure was not fixed in
+that change, and its syscall-level cause had not been established.
+
+The subsequent agent-friendly development change captured a successful group
+signal followed by repeated Darwin `EPERM` while signal delivery was still in
+flight. The current [native process manager](../../internal/sandbox/internal/nativeprocess/manager_unix.go)
+uses a bounded Darwin group-state observation before accepting that outcome.
+It requires an earlier successful group signal and no live members; query
+failures and live groups fail closed. The original live-descendant safety
+regression remains unchanged alongside the new repeated-EPERM regression.

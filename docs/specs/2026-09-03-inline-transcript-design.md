@@ -1,7 +1,13 @@
 # Inline transcript design
 
-Status: approved 2026-09-03. Branch `feat/inline-transcript`, worktree
+Status: approved 2026-09-03; historical and superseded for the current UI
+contract. The branch and worktree below are provenance only.
+Branch `feat/inline-transcript`, worktree
 `/Users/baiyuqing/Work/code/otto-inline-tui`.
+Check [`internal/tui`](../../internal/tui), the
+[user manual](../user-manual.md), and the
+[2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
+for current behavior and ownership rules.
 
 ## Problem
 

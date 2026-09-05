@@ -573,8 +573,13 @@ func renderProfileNetworkRules(network sandbox.NetworkMode) (string, error) {
 			"; OTTO-DYNAMIC-NETWORK-BEGIN",
 			"(allow mach-lookup",
 			"  (global-name \"com.apple.mDNSResponder\"))",
+			// getaddrinfo on current macOS connects this exact resolver socket
+			// directly (observed via sandbox-exec bisection on macOS 26), in
+			// addition to the mDNSResponder mach broker above; without this
+			// literal exception, network = "allow" cannot resolve hostnames.
 			"(allow network-outbound",
-			"  (remote ip))",
+			"  (remote ip)",
+			"  (remote unix-socket (path \"/private/var/run/mDNSResponder\")))",
 			"(allow network-bind",
 			"  (local ip))",
 			"(allow network-inbound",

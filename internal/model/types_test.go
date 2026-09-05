@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -52,6 +53,36 @@ func TestContextMessageJSONRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(original, decoded) {
 		t.Fatalf("round trip mismatch\nwant: %#v\n got: %#v", original, decoded)
+	}
+}
+
+func TestToolDefinitionParametersPreserveLargeIntegers(t *testing.T) {
+	raw := []byte(`{"name":"probe","description":"","parameters":{"type":"object","properties":{"id":{"minimum":9007199254740993}}}}`)
+	var decoded ToolDefinition
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	properties, ok := decoded.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("properties type = %T, want map[string]any", decoded.Parameters["properties"])
+	}
+	id, ok := properties["id"].(map[string]any)
+	if !ok {
+		t.Fatalf("id type = %T, want map[string]any", properties["id"])
+	}
+	number, ok := id["minimum"].(json.Number)
+	if !ok {
+		t.Fatalf("minimum type = %T, want json.Number", id["minimum"])
+	}
+	if got := number.String(); got != "9007199254740993" {
+		t.Fatalf("minimum = %s, want 9007199254740993", got)
+	}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"minimum":9007199254740993`)) {
+		t.Fatalf("encoded parameters changed JSON number: %s", encoded)
 	}
 }
 

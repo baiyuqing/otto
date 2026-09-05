@@ -15,6 +15,18 @@ workflow.
 Do not document or implement other providers, and do not list planned
 providers or roadmap stages in user-facing docs.
 
+## Agent-friendly architecture
+
+Apply these requirements to every feature, fix, and refactor:
+
+- Keep this file a short navigation map and rulebook. Put detailed contracts next to their owning code or in the development guide, and link to one canonical source instead of copying it across agent instructions.
+- Make changes easy to locate: use consistent domain names, cohesive packages, explicit entry points, and adjacent tests. Update the task map when responsibilities move or new packages are introduced.
+- Keep dependencies explicit and one-way. Put shared behavior in its owning layer and inject dependencies at the composition root; avoid hidden global state and frontend-specific copies of shared use cases.
+- Make contracts readable from types and focused documentation: define valid states, ownership and mutation, concurrency and cancellation, error behavior, and compatibility where relevant. Validate data at trust boundaries.
+- Extend existing patterns with the smallest cohesive change. Add interfaces only at real consumer boundaries; do not add speculative frameworks, registries, or configuration for future implementations.
+- Turn important invariants into executable checks. Update architecture guards and contract tests when boundaries change; failures should identify the violated rule and where to fix it. Keep focused checks fast, offline, and deterministic, and preserve full acceptance coverage.
+- Keep code, schemas, tests, and canonical docs consistent in the same change. Remove stale instructions or mark superseded designs as historical; record durable rationale in the repository rather than relying on chat history.
+
 ## Change rules
 
 - Use a dedicated Git worktree and development branch for every feature or bug fix; never implement directly on `main`.

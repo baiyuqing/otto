@@ -316,7 +316,7 @@ func validatePTYSGRParams(raw string) error {
 
 	// These are the exact SGR forms observed in both post-resize PTY slices.
 	switch raw {
-	case "", "0", "1", "22", "30", "37", "37;40", "38;5;240", "38;5;240;27", "38;5;252", "39", "39;7", "40", "48;5;236":
+	case "", "0", "1", "22", "30", "37", "37;40", "38;5;240", "38;5;240;27", "38;5;240;40", "38;5;252", "39", "39;7", "40", "48;5;236":
 		return nil
 	default:
 		return fmt.Errorf("unobserved SGR params %q", raw)
@@ -339,6 +339,7 @@ func TestValidatePTYSGRParams(t *testing.T) {
 		{name: "accept boxed background", raw: "48;5;236"},
 		{name: "accept accent foreground", raw: "38;5;240"},
 		{name: "accept accent foreground with alt", raw: "38;5;240;27"},
+		{name: "accept accent foreground with cursor line background", raw: "38;5;240;40"},
 		{name: "accept border foreground", raw: "38;5;252"},
 		{name: "accept reset foreground", raw: "39"},
 		{name: "accept reset with reverse video", raw: "39;7"},

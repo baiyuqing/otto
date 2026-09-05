@@ -155,6 +155,9 @@ persisted.
 - The local server has no TCP listener and relies on socket file permissions
   for access control.
 
+Configure shell permissions interactively with `otto sandbox setup`; see the
+[setup guide](docs/user-manual.md#interactive-sandbox-setup).
+
 Read [tools and safety](docs/user-manual.md#tools-and-safety) before granting
 access to a workspace.
 

@@ -248,7 +248,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		deps.newSession = newSession
 	}
 
-	if len(args) > 0 && (args[0] == "memory" || args[0] == "login" || args[0] == "logout") {
+	if len(args) > 0 && (args[0] == "sandbox" || args[0] == "memory" || args[0] == "login" || args[0] == "logout") {
 		hostEntries, err := captureEnvironment(enumerate)
 		if err != nil {
 			return fail(stderr, "%v", err)
@@ -256,6 +256,9 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		environmentLookup, err := newEnvironmentLookup(hostEntries)
 		if err != nil {
 			return fail(stderr, "%v", err)
+		}
+		if args[0] == "sandbox" {
+			return runSandboxSetup(ctx, args[1:], stdin, stdout, stderr, hostEntries, environmentLookup, deps.openSandbox)
 		}
 		if args[0] == "memory" {
 			return runMemoryCommand(ctx, args[1:], stdout, stderr, environmentLookup)
@@ -885,6 +888,7 @@ func printUsage(output io.Writer) {
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto memory status|forget <id>
+       otto sandbox setup [--config PATH] [--cwd PATH]
 
 Sandbox: on macOS, auto -> Seatbelt; if it cannot be established, bash is disabled.
 WARNING: off is explicitly unsafe; bash runs unsandboxed with anything accessible to your macOS user.

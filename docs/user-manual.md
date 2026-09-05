@@ -564,6 +564,31 @@ and rejects workspace escapes. Actual file operations use a directory handle
 so replacing a path during an operation cannot redirect them outside the
 initial workspace.
 
+### Interactive sandbox setup
+
+Run `otto sandbox setup` to choose network access and optionally add the built-in
+GitHub CLI recipe. Use `--config PATH` for another configuration file and `--cwd
+PATH` to select the workspace used by the check. No model or provider login is
+required.
+
+The wizard shows the proposed permissions before saving. It enables Seatbelt,
+preserves existing extra permissions and unrelated TOML content, and changes only
+the sandbox table. Cancel or end input to leave the file unchanged. Configuration
+uses a separate `[sandbox]` table; unsupported layouts are rejected without edits.
+Changes apply to future processes using that config file, not just the selected
+workspace.
+
+The GitHub CLI recipe exposes its configuration directory read-only and allows
+`GH_CONFIG_DIR`. This can expose saved GitHub credentials to shell commands. The
+wizard uses an existing absolute `GH_CONFIG_DIR`, or defaults to `~/.config/gh`,
+and prints a launch command setting that variable because Otto replaces `HOME`.
+Run `gh auth login` outside Otto first if the configuration directory is missing.
+
+Choose `check` to test sandbox startup and, when selected, GitHub CLI availability
+and directory access using the displayed launch environment. The check does not
+contact GitHub or verify authentication or network connectivity. Choose `save`
+to write the reviewed configuration, then restart Otto with the printed command.
+
 ### `bash` sandbox policy
 
 On macOS, the default is `--sandbox auto`, which means Seatbelt. The sandboxed

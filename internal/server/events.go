@@ -33,18 +33,19 @@ type wirePlan struct {
 }
 
 type wireEvent struct {
-	Type       string          `json:"type"`
-	TurnID     string          `json:"turn_id,omitempty"`
-	TaskID     string          `json:"task_id,omitempty"`
-	Text       string          `json:"text,omitempty"`
-	ToolName   string          `json:"tool_name,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	ToolArgs   json.RawMessage `json:"tool_args,omitempty"`
-	Result     *wireToolResult `json:"result,omitempty"`
-	Usage      *model.Usage    `json:"usage,omitempty"`
-	Compaction *wireCompaction `json:"compaction,omitempty"`
-	Plan       *wirePlan       `json:"plan,omitempty"`
-	Error      string          `json:"error,omitempty"`
+	Type         string          `json:"type"`
+	TurnID       string          `json:"turn_id,omitempty"`
+	TaskID       string          `json:"task_id,omitempty"`
+	Text         string          `json:"text,omitempty"`
+	ToolName     string          `json:"tool_name,omitempty"`
+	ToolCallID   string          `json:"tool_call_id,omitempty"`
+	ToolArgs     json.RawMessage `json:"tool_args,omitempty"`
+	Result       *wireToolResult `json:"result,omitempty"`
+	Usage        *model.Usage    `json:"usage,omitempty"`
+	UsagePresent *bool           `json:"usage_present,omitempty"`
+	Compaction   *wireCompaction `json:"compaction,omitempty"`
+	Plan         *wirePlan       `json:"plan,omitempty"`
+	Error        string          `json:"error,omitempty"`
 }
 
 // toWire converts an agent event to its wire form. It never copies pointers
@@ -66,11 +67,15 @@ func toWire(event agent.Event) wireEvent {
 	case agent.EventProviderUsage:
 		usage := event.Usage
 		wire.Usage = &usage
+		present := event.UsagePresent
+		wire.UsagePresent = &present
 	case agent.EventNotification:
 		wire.TaskID = event.TaskID
 		wire.Text = event.Text
 		usage := event.Usage
 		wire.Usage = &usage
+		present := event.UsagePresent
+		wire.UsagePresent = &present
 	case agent.EventCompactionStarted, agent.EventCompactionCompleted:
 		wire.Compaction = toWireCompaction(event.Compaction)
 	case agent.EventCompactionPlanned:

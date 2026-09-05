@@ -63,6 +63,36 @@ func TestAgentStartsTaskAndPushesMatchingNotification(t *testing.T) {
 	}
 }
 
+func TestTaskFinishedNotificationOmitsAbsentUsage(t *testing.T) {
+	fp := newFakeProvider()
+	fp.addRoute(matchAny, routeStep{resp: provider.Response{Message: model.Message{
+		Role: model.RoleAssistant, FinishReason: model.FinishStop,
+		Blocks: []model.Block{{Type: model.BlockText, Text: "done"}},
+	}}})
+	tasks := agent.NewTasks()
+	defer tasks.Close()
+	cfg := newTestConfig(fp, tasks)
+	runner, _, err := NewRunner(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Start(StartRequest{Prompt: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := tasks.Wait(ctx, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	notification, ok := tasks.Notifications().Remove("t1", agent.NotificationTaskFinished)
+	if !ok {
+		t.Fatal("expected task_finished notification")
+	}
+	if notification.Usage != nil {
+		t.Fatalf("notification usage = %#v, want nil", notification.Usage)
+	}
+}
+
 // Test 2: the child registry excludes every name in ExcludedChildTools,
 // preserving the order of the remaining tools.
 func TestChildRegistryExcludesControlAndMemoryTools(t *testing.T) {

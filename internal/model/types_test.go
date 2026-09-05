@@ -34,12 +34,13 @@ func TestMessageJSONRoundTrip(t *testing.T) {
 
 func TestContextMessageJSONRoundTrip(t *testing.T) {
 	original := Message{
-		ID:          "context-1",
-		Role:        RoleContext,
-		Blocks:      []Block{{Type: BlockText, Text: "[Custom context: fixture]\ntext"}},
-		CreatedAt:   time.Unix(20, 0).UTC(),
-		ContextType: "fixture",
-		Display:     true,
+		ID:              "context-1",
+		Role:            RoleContext,
+		Blocks:          []Block{{Type: BlockText, Text: "[Custom context: fixture]\ntext"}},
+		CreatedAt:       time.Unix(20, 0).UTC(),
+		ContextType:     "fixture",
+		Display:         true,
+		ContextMetadata: &ContextMetadata{TaskID: "t1"},
 	}
 	encoded, err := json.Marshal(original)
 	if err != nil {
@@ -100,5 +101,57 @@ func TestUsageValidate(t *testing.T) {
 				t.Fatalf("Validate() = %v, want nil", err)
 			}
 		})
+	}
+}
+
+func TestMessageValidateAllowsTransientMessagesAndRejectsInvalidShapes(t *testing.T) {
+	valid := Message{Role: RoleAssistant, Blocks: nil}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("empty assistant message Validate() = %v", err)
+	}
+
+	tests := []Message{
+		{Role: Role("future"), Blocks: []Block{{Type: BlockText, Text: "x"}}},
+		{Role: RoleUser, Blocks: []Block{{Type: BlockText, ToolName: "read"}}},
+		{Role: RoleAssistant, FinishReason: FinishToolCalls, Blocks: []Block{{Type: BlockText, Text: "x"}}},
+		{Role: RoleAssistant, Blocks: []Block{{Type: BlockToolCall, ToolCallID: "c1", ToolName: "read", Arguments: json.RawMessage(`[]`)}}},
+		{Role: RoleContext, ContextType: "task_notification", Blocks: []Block{{Type: BlockText, Text: "x"}}, ContextMetadata: &ContextMetadata{TaskID: "bad"}},
+	}
+	for i, message := range tests {
+		if err := message.Validate(); err == nil {
+			t.Fatalf("case %d Validate() = nil, want error", i)
+		}
+	}
+	largeNumber := Message{Role: RoleAssistant, FinishReason: FinishToolCalls, Blocks: []Block{{Type: BlockToolCall, ToolCallID: "c1", ToolName: "read", Arguments: json.RawMessage(`{"n":1e400}`)}}}
+	if err := largeNumber.Validate(); err != nil {
+		t.Fatalf("large JSON number was rejected: %v", err)
+	}
+}
+
+func TestMessageValidateAllowsContextUsageAndTransientIdentity(t *testing.T) {
+	message := Message{
+		Role:            RoleContext,
+		Blocks:          []Block{{Type: BlockText, Text: "notification"}},
+		Usage:           &Usage{},
+		ContextType:     "task_notification",
+		ContextMetadata: &ContextMetadata{TaskID: "t12"},
+	}
+	if err := message.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+}
+
+func TestCloneMessageDeepCopiesOwnedFields(t *testing.T) {
+	original := Message{
+		Blocks:          []Block{{Type: BlockToolCall, Arguments: json.RawMessage(`{"x":1}`)}},
+		Usage:           &Usage{InputTokens: 1},
+		ContextMetadata: &ContextMetadata{TaskID: "t1"},
+	}
+	cloned := CloneMessage(original)
+	cloned.Blocks[0].Arguments[0] = '['
+	cloned.Usage.InputTokens = 9
+	cloned.ContextMetadata.TaskID = "t2"
+	if string(original.Blocks[0].Arguments) != `{"x":1}` || original.Usage.InputTokens != 1 || original.ContextMetadata.TaskID != "t1" {
+		t.Fatalf("CloneMessage aliased owned fields: %#v", original)
 	}
 }

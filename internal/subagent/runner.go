@@ -302,10 +302,7 @@ func (r *Runner) runChild(taskCtx context.Context, cancel context.CancelFunc, ta
 		return
 	}
 
-	r.config.Tasks.Update(taskID, func(t *agent.Task) {
-		t.Status = agent.TaskRunning
-		t.StartedAt = r.now()
-	})
+	r.config.Tasks.MarkRunning(taskID, r.now())
 
 	progress := newChildProgress(r.config.Tasks, taskID, r.now)
 	runErr := child.Run(taskCtx, prompt, progress.handle)
@@ -345,20 +342,19 @@ func (r *Runner) finish(taskID string, status agent.TaskStatus, finishedAt time.
 	final.Result = result
 	final.Error = errText
 
-	usage := final.Usage
+	var usage *model.Usage
+	if final.UsagePresent {
+		value := final.Usage
+		usage = &value
+	}
 	r.config.Tasks.Notifications().Push(agent.Notification{
 		TaskID: taskID,
 		Kind:   agent.NotificationTaskFinished,
 		Text:   CompletionText(final, r.config.MaxOutputBytes),
-		Usage:  &usage,
+		Usage:  usage,
 	})
 
-	r.config.Tasks.Update(taskID, func(t *agent.Task) {
-		t.Status = status
-		t.FinishedAt = finishedAt
-		t.Result = result
-		t.Error = errText
-	})
+	r.config.Tasks.Finish(taskID, status, finishedAt, result, errText)
 }
 
 func (r *Runner) now() time.Time {
@@ -389,22 +385,13 @@ func (p *childProgress) handle(event agent.Event) {
 	case agent.EventProviderUsage:
 		text := capLastBytes(p.textBuf.String(), 500)
 		p.textBuf.Reset()
-		p.tasks.Update(p.taskID, func(t *agent.Task) {
-			t.Steps++
-			t.Usage.InputTokens += event.Usage.InputTokens
-			t.Usage.OutputTokens += event.Usage.OutputTokens
-			t.Usage.CachedInputTokens += event.Usage.CachedInputTokens
-			t.LastText = text
-		})
+		p.tasks.RecordProviderStep(p.taskID, event.Usage, text, event.UsagePresent)
 	case agent.EventToolCallStarted:
 		lastTool := event.ToolName
 		if preview := compactArgsPreview(event.ToolArgs, 60); preview != "" {
 			lastTool = event.ToolName + " " + preview
 		}
-		p.tasks.Update(p.taskID, func(t *agent.Task) {
-			t.ToolCalls++
-			t.LastTool = lastTool
-		})
+		p.tasks.RecordToolCall(p.taskID, lastTool)
 	}
 }
 

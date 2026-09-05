@@ -9,7 +9,14 @@ import (
 )
 
 type Tool interface {
+	// Definition returns the tool schema owned by the caller. Implementations
+	// must return independent mutable maps and slices and must not retain or
+	// mutate them after return.
 	Definition() model.ToolDefinition
+	// Execute may be called concurrently on a shared tool. arguments is borrowed
+	// read-only for the duration of the call and must not be retained or mutated.
+	// The returned Result, including PersistedContent when non-nil, belongs to
+	// the caller after Execute returns.
 	Execute(context.Context, json.RawMessage) Result
 }
 

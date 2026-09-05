@@ -12,22 +12,23 @@ import (
 // taskWire is the wire form of agent.Task, per
 // docs/specs/2026-09-03-agent-server-design.md "Sub-agent tasks".
 type taskWire struct {
-	ID          string      `json:"id"`
-	Name        string      `json:"name,omitempty"`
-	Agent       string      `json:"agent"`
-	Description string      `json:"description"`
-	Model       string      `json:"model,omitempty"`
-	Status      string      `json:"status"`
-	CreatedAt   time.Time   `json:"created_at"`
-	StartedAt   *time.Time  `json:"started_at,omitempty"`
-	FinishedAt  *time.Time  `json:"finished_at,omitempty"`
-	Steps       int         `json:"steps"`
-	ToolCalls   int         `json:"tool_calls"`
-	LastTool    string      `json:"last_tool,omitempty"`
-	LastText    string      `json:"last_text,omitempty"`
-	Usage       model.Usage `json:"usage"`
-	Result      string      `json:"result,omitempty"`
-	Error       string      `json:"error,omitempty"`
+	ID           string      `json:"id"`
+	Name         string      `json:"name,omitempty"`
+	Agent        string      `json:"agent"`
+	Description  string      `json:"description"`
+	Model        string      `json:"model,omitempty"`
+	Status       string      `json:"status"`
+	CreatedAt    time.Time   `json:"created_at"`
+	StartedAt    *time.Time  `json:"started_at,omitempty"`
+	FinishedAt   *time.Time  `json:"finished_at,omitempty"`
+	Steps        int         `json:"steps"`
+	ToolCalls    int         `json:"tool_calls"`
+	LastTool     string      `json:"last_tool,omitempty"`
+	LastText     string      `json:"last_text,omitempty"`
+	Usage        model.Usage `json:"usage"`
+	UsagePresent bool        `json:"usage_present"`
+	Result       string      `json:"result,omitempty"`
+	Error        string      `json:"error,omitempty"`
 }
 
 // optionalTime returns nil for a zero time.Time, else a pointer to it, so
@@ -42,22 +43,23 @@ func optionalTime(t time.Time) *time.Time {
 
 func toTaskWire(task agent.Task) taskWire {
 	return taskWire{
-		ID:          task.ID,
-		Name:        task.Name,
-		Agent:       task.Agent,
-		Description: task.Description,
-		Model:       task.Model,
-		Status:      string(task.Status),
-		CreatedAt:   task.CreatedAt,
-		StartedAt:   optionalTime(task.StartedAt),
-		FinishedAt:  optionalTime(task.FinishedAt),
-		Steps:       task.Steps,
-		ToolCalls:   task.ToolCalls,
-		LastTool:    task.LastTool,
-		LastText:    task.LastText,
-		Usage:       task.Usage,
-		Result:      task.Result,
-		Error:       task.Error,
+		ID:           task.ID,
+		Name:         task.Name,
+		Agent:        task.Agent,
+		Description:  task.Description,
+		Model:        task.Model,
+		Status:       string(task.Status),
+		CreatedAt:    task.CreatedAt,
+		StartedAt:    optionalTime(task.StartedAt),
+		FinishedAt:   optionalTime(task.FinishedAt),
+		Steps:        task.Steps,
+		ToolCalls:    task.ToolCalls,
+		LastTool:     task.LastTool,
+		LastText:     task.LastText,
+		Usage:        task.Usage,
+		UsagePresent: task.UsagePresent,
+		Result:       task.Result,
+		Error:        task.Error,
 	}
 }
 
@@ -67,7 +69,14 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "session not found")
 		return
 	}
-	list := os.ctrl.Tasks().List()
+	tasks := os.ctrl.Tasks()
+	if tasks == nil {
+		writeJSON(w, http.StatusOK, struct {
+			Tasks []taskWire `json:"tasks"`
+		}{Tasks: []taskWire{}})
+		return
+	}
+	list := tasks.List()
 	wire := make([]taskWire, len(list))
 	for i, task := range list {
 		wire[i] = toTaskWire(task)
@@ -84,12 +93,17 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.PathValue("task_id")
-	task, ok := os.ctrl.Tasks().Get(taskID)
+	tasks := os.ctrl.Tasks()
+	if tasks == nil {
+		writeError(w, http.StatusNotFound, "not_found", "task not found")
+		return
+	}
+	task, ok := tasks.Get(taskID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "task not found")
 		return
 	}
-	history, _ := os.ctrl.Tasks().History(taskID)
+	history, _ := tasks.History(taskID)
 	if history == nil {
 		history = []model.Message{} // JSON "[]", not "null"
 	}
@@ -106,7 +120,12 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.PathValue("task_id")
-	if err := os.ctrl.Tasks().Cancel(taskID); err != nil {
+	tasks := os.ctrl.Tasks()
+	if tasks == nil {
+		writeError(w, http.StatusNotFound, "not_found", "task not found")
+		return
+	}
+	if err := tasks.Cancel(taskID); err != nil {
 		if errors.Is(err, agent.ErrTaskFinished) {
 			writeError(w, http.StatusConflict, "task_done", "task already finished")
 			return
@@ -114,6 +133,6 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "task not found")
 		return
 	}
-	task, _ := os.ctrl.Tasks().Get(taskID)
+	task, _ := tasks.Get(taskID)
 	writeJSON(w, http.StatusOK, toTaskWire(task))
 }

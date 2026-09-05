@@ -50,7 +50,7 @@ func TestToWire(t *testing.T) {
 			name: "tool_call_finished uses Content not PersistedContent",
 			event: agent.Event{
 				Type: agent.EventToolCallFinished, ToolName: "read", ToolCallID: "call_1",
-				ToolResult: tool.Result{Content: "file contents", PersistedContent: "TRUNCATED", IsError: false},
+				ToolResult: tool.Result{Content: "file contents", PersistedContent: stringPointer("TRUNCATED"), IsError: false},
 			},
 			want: `{"type":"tool_call_finished","tool_name":"read","tool_call_id":"call_1","result":{"content":"file contents","is_error":false}}`,
 		},
@@ -64,18 +64,28 @@ func TestToWire(t *testing.T) {
 		},
 		{
 			name:  "provider_usage with cached tokens",
-			event: agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 12, OutputTokens: 34, CachedInputTokens: 5}},
-			want:  `{"type":"provider_usage","usage":{"input_tokens":12,"output_tokens":34,"cached_input_tokens":5}}`,
+			event: agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 12, OutputTokens: 34, CachedInputTokens: 5}, UsagePresent: true},
+			want:  `{"type":"provider_usage","usage":{"input_tokens":12,"output_tokens":34,"cached_input_tokens":5},"usage_present":true}`,
 		},
 		{
 			name:  "provider_usage without cached tokens",
-			event: agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 12, OutputTokens: 34}},
-			want:  `{"type":"provider_usage","usage":{"input_tokens":12,"output_tokens":34}}`,
+			event: agent.Event{Type: agent.EventProviderUsage, Usage: model.Usage{InputTokens: 12, OutputTokens: 34}, UsagePresent: true},
+			want:  `{"type":"provider_usage","usage":{"input_tokens":12,"output_tokens":34},"usage_present":true}`,
 		},
 		{
 			name:  "notification carries task id, text, and usage",
-			event: agent.Event{Type: agent.EventNotification, TaskID: "t1", Text: "[task-notification] task t1 succeeded\nreport", Usage: model.Usage{InputTokens: 5, OutputTokens: 6}},
-			want:  `{"type":"notification","task_id":"t1","text":"[task-notification] task t1 succeeded\nreport","usage":{"input_tokens":5,"output_tokens":6}}`,
+			event: agent.Event{Type: agent.EventNotification, TaskID: "t1", Text: "[task-notification] task t1 succeeded\nreport", Usage: model.Usage{InputTokens: 5, OutputTokens: 6}, UsagePresent: true},
+			want:  `{"type":"notification","task_id":"t1","text":"[task-notification] task t1 succeeded\nreport","usage":{"input_tokens":5,"output_tokens":6},"usage_present":true}`,
+		},
+		{
+			name:  "provider_usage missing",
+			event: agent.Event{Type: agent.EventProviderUsage},
+			want:  `{"type":"provider_usage","usage":{"input_tokens":0,"output_tokens":0},"usage_present":false}`,
+		},
+		{
+			name:  "provider_usage explicit zero",
+			event: agent.Event{Type: agent.EventProviderUsage, UsagePresent: true},
+			want:  `{"type":"provider_usage","usage":{"input_tokens":0,"output_tokens":0},"usage_present":true}`,
 		},
 		{
 			name: "compaction_started without usage",
@@ -141,6 +151,8 @@ func TestToWire(t *testing.T) {
 		})
 	}
 }
+
+func stringPointer(value string) *string { return &value }
 
 func TestToWireDoesNotAliasCompactionPointer(t *testing.T) {
 	src := &agent.CompactionEvent{Reason: agent.CompactionManual, TokensBefore: 10}

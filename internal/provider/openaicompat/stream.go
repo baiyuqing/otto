@@ -31,6 +31,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 	var calls []*assembledToolCall
 	byIndex := make(map[int]*assembledToolCall)
 	var usage model.Usage
+	usagePresent := false
 	finish := model.FinishUnknown
 	emitted := false
 	done := false
@@ -50,6 +51,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 			return fmt.Errorf("decode chat completion stream: %w", err)
 		}
 		if chunk.Usage != nil {
+			usagePresent = true
 			usage = model.Usage{InputTokens: chunk.Usage.PromptTokens, OutputTokens: chunk.Usage.CompletionTokens, CachedInputTokens: chunk.Usage.cachedTokens()}
 		}
 		for _, choice := range chunk.Choices {
@@ -143,15 +145,16 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 			Arguments:  json.RawMessage(call.arguments),
 		})
 	}
-	messageUsage := usage
+	var messageUsage *model.Usage
+	if usagePresent {
+		messageUsage = &usage
+	}
 	return provider.Response{
 		Message: model.Message{
 			Role:         model.RoleAssistant,
 			Blocks:       blocks,
 			FinishReason: finish,
-			Usage:        &messageUsage,
+			Usage:        messageUsage,
 		},
-		FinishReason: finish,
-		Usage:        usage,
 	}, emitted, nil
 }

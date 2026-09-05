@@ -682,17 +682,15 @@ func automaticRequestEstimate(memory session.Session, options Options, registry 
 
 func automaticTextResponse(text string, reason model.FinishReason) provider.Response {
 	return provider.Response{
-		Message:      model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: text}}},
-		FinishReason: reason,
+		Message: model.Message{FinishReason: reason, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: text}}},
 	}
 }
 
 func automaticToolResponse(callID, name string) provider.Response {
 	return provider.Response{
-		Message: model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{
+		Message: model.Message{FinishReason: model.FinishToolCalls, Role: model.RoleAssistant, Blocks: []model.Block{{
 			Type: model.BlockToolCall, ToolCallID: callID, ToolName: name, Arguments: json.RawMessage(`{"value":"hello"}`),
 		}}},
-		FinishReason: model.FinishToolCalls,
 	}
 }
 

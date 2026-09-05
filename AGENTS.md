@@ -11,18 +11,19 @@ Do not document or implement other providers, and do not list planned providers 
 
 Keep responsibilities split along the current Go package layout:
 
-- `cmd/otto`: CLI wiring, flags, process lifecycle, signal handling
+- `cmd/otto`: composition root, CLI wiring, flags, process lifecycle, signal handling, and concrete dependency injection
 - `internal/agent`: provider/tool orchestration and event emission
-- `internal/app`: shared frontend/backend lifecycle, prompt serialization, session replacement, and exported session info/history access
+- `internal/app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
 - `internal/config`: TOML loading and runtime resolution
-- `internal/model`: provider-neutral message/tool types
+- `internal/model`: provider-neutral message/tool types, message/block validation, and shared deep-copy helpers
 - `internal/memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation composing them with a `Store`/`Retriever`, a null service fallback, and the shared Store conformance harness
 - `internal/memory/sqlite`: secure local SQLite/FTS5 store and retriever implementing the memory contracts
 - `internal/provider`: neutral provider contract
 - `internal/provider/openaicompat`: all OpenAI-compatible Chat Completions HTTP/JSON/SSE wire code
 - `internal/provider/openairesponses`: all ChatGPT Responses API HTTP/JSON/SSE wire code
-- `internal/auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
+- `internal/auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, access-token refresh, and the credential service injected through `app.Authentication`
 - `internal/repl`: line-oriented REPL rendering and commands
+- `internal/server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, and metrics
 - `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
 - `internal/session`: in-memory and JSONL session storage
 - `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing; `ParseFrontmatter` is exported for `internal/subagent`'s AGENT.md parsing
@@ -40,14 +41,36 @@ Rules:
 - Keep `internal/skill` free of imports from other Otto packages; the skill tool's file reads stay confined to the skill directory via `tool.Workspace`. Do not document `/skills`, `/skill`, or `allowed-tools` enforcement as working features.
 - Keep `internal/subagent` behind `agent.New`: children are built only through `agent.New`; `internal/agent` knows tasks only through `agent.Tasks`/`agent.Inbox` and never imports `internal/subagent`; frontends reach tasks only through `app.TaskLister`; children never receive `agent*`, `remember`, `forget`, or `memory_search`; child transcripts are not persisted. Definitions cannot add tools outside the child tool set; `tools` only narrows it. `[agents]` is TOML only, same as `[skills]`. Do not document `agent_send`/`agent_cancel`/`agent_report` as working features.
 
+## Core contracts
+
+- Keep dependencies explicit and directed toward shared contracts. Reuse existing helpers and concrete types; add interfaces at real consumer boundaries, not for hypothetical implementations.
+- Use `model.Message.Validate`, `model.Block.Validate`, and `model.CloneMessage`/`CloneMessages`/`CloneUsage`. Both Session implementations enforce neutral validation and tool-call/result sequencing on append. Neutral validation permits transient messages without IDs/timestamps; Pi-specific encoding restrictions stay in `session`. When adding reference fields, update deep copies and ownership tests.
+- `provider.Response.Message` is the single source of finish reason and usage. `Usage == nil` means unavailable; a non-nil zero usage means explicitly reported zero. Preserve explicit presence through events, task progress, notifications, aggregates, and supported persistence metadata instead of inferring absence from zero counters. Keep legacy Pi normalization in the decoder.
+- Keep context associations in typed `ContextMetadata`. Prefer structured TaskID over notification wording; text parsing is only a legacy-history fallback. Preserve append-only Pi v3 compatibility and namespaced optional details, including the explicit-zero usage marker. Do not rewrite old records or invent missing historical metadata.
+- `tool.Result.PersistedContent == nil` selects `Content`; a non-nil pointer selects its value, including empty text. Preserve redaction and the current-turn full-result overlay. Reuse tool definitions and assembly helpers, including `tool.BashDefinition`; keep conservative preflight and final registry validation.
+- Provider and Tool instances may be shared concurrently. Respect borrowed read-only request/argument data and caller-owned returned data/schema. Per-call provider callbacks are ordered and finish before `Complete` returns; event consumers must copy reference fields before retaining mutable payloads.
+- Reuse the shared compaction result payload. Keep HTTP/SSE DTOs separate from internal structs; update `internal/server/openapi.yaml` alongside wire changes and preserve existing field meanings.
+
+## Lifecycle and frontend contracts
+
+- Construct `app.New` with a ready `SessionReplacement`; use `NewSessionBuilder` for new sessions. Do not restore placeholder factories or duplicate runtime construction paths.
+- Controller callbacks use nonblocking `RequestClose()`. External lifecycle owners cancel active work as appropriate and call synchronous `Close()` to complete cleanup. An idle close request alone does not release resources. Preserve exactly-once session/runner cleanup, cleanup errors, and post-close Info/History snapshots; do not inspect goroutine IDs or stack text to detect reentrancy.
+- Treat `agent.Task` as a query snapshot. Update existing task progress and completion through `MarkRunning`, `RecordProviderStep`, `RecordToolCall`, and `Finish`; preserve task identity, terminal states, and notification-before-Wait ordering. A cancellation request is not proof that execution has stopped.
+- Frontends use `app.TaskLister`/`TaskView`, never the mutable registry or raw Inbox. Call `PrepareWake` before publishing a wake turn, then run the claim once or cancel it. Release abandoned claims on cancellation/shutdown. `Updates` is a coalescing single-consumer signal, not a broadcast subscription; add no competing scheduler. Normal and wake turns share cancellation, event delivery, and compaction accounting; one-shot runs propagate wake failures.
+- Use `app.Authentication` and `app.SelectProfile` for shared use cases. Credential paths and concrete services belong in the composition root; OAuth and credential files stay in `auth`. Frontends own presentation, not credential persistence. Preserve the startup credential snapshot/restart requirement and refresh backend state after a profile switch even when saving the default fails.
+
+See [the architecture contract design](docs/specs/2026-09-05-architecture-contracts.md) for rationale and compatibility details.
+
 ## Working preferences
 
 - Consider cost and efficiency when choosing models: default to the cheapest adequate model for routine work and escalate to a more capable model only when the task requires it.
+- When delegating, the parent owns planning, interface decisions, integration review, and acceptance. Give subagents bounded implementation tasks with explicit file ownership; hand off overlapping files before another agent edits them. Preserve other agents' work.
 
 ## Development isolation
 
 - Use a dedicated Git worktree and development branch for every feature or bug fix. Never implement directly on `main`.
 - When work requires a design or spec, finish the discussion and get explicit approval before writing production code or tests.
+- Once the design is approved, carry the agreed work through implementation and verification without repeated confirmation; seek clarification only for material changes to scope or contracts.
 - If implementation changes are accidentally made on `main`, restore those changes before continuing in the worktree.
 
 ## Go workflow
@@ -86,6 +109,8 @@ Do not add production behavior without a failing test first unless the user expl
 - Preserve offline default tests; default `go test ./...` must not require network access, real provider credentials, or a real interactive terminal.
 - TTY-specific coverage must stay offline and automated, for example via the PTY smoke test in `cmd/otto/tui_pty_test.go`.
 - Live provider tests are opt-in only. Gate them behind explicit environment variables and exclude them from the default suite.
+- Contract changes need focused coverage for affected ownership, invalid states, cancellation, and history/wire compatibility. Verify both Session implementations where they share a contract; preserve unrelated behavioral assertions when migrating test fixtures.
+- Report failing gates and reruns accurately. If unchanged code fails, check the baseline before assigning causality; never weaken validation or safety checks merely to obtain a pass.
 
 ## Secrets and safety
 

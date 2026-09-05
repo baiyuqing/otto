@@ -28,7 +28,12 @@ type archiveBackend struct {
 }
 
 // Tasks implements app.TaskLister.
-func (b *archiveBackend) Tasks() *agent.Tasks { return b.tasks }
+func (b *archiveBackend) Tasks() app.TaskView {
+	if b.tasks == nil {
+		return nil
+	}
+	return b.tasks
+}
 
 func (b *archiveBackend) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {
 	if b.prompt == nil {

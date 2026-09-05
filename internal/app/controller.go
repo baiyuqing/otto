@@ -2,11 +2,9 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -28,10 +26,6 @@ type Runner interface {
 	Run(context.Context, string, func(agent.Event)) error
 	Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
 }
-
-type SessionFactory func() (session.Session, error)
-
-type RunnerFactory func(session.Session) Runner
 
 type SessionLister func(context.Context, int) (session.ListResult, error)
 
@@ -156,6 +150,13 @@ type ResumeResult struct {
 
 type Option func(*Controller)
 
+// WithAuthentication wires the optional interactive authentication capability.
+func WithAuthentication(authentication Authentication) Option {
+	return func(controller *Controller) {
+		controller.authentication = authentication
+	}
+}
+
 func WithRuntimeInfo(info RuntimeInfo) Option {
 	return func(controller *Controller) {
 		copy := info
@@ -250,8 +251,36 @@ type SessionArchiver interface {
 // TaskLister exposes the sub-agent task registry of the current runner.
 // Frontends use it through a type assertion, like SessionArchiver.
 type TaskLister interface {
-	Tasks() *agent.Tasks
+	Tasks() TaskView
 }
+
+// TaskView is the frontend-safe read/control view of a runner's tasks.
+type TaskView interface {
+	List() []agent.Task
+	Get(string) (agent.Task, bool)
+	History(string) ([]model.Message, bool)
+	Cancel(string) error
+	Wait(context.Context, string) (agent.Task, error)
+	Updates() <-chan struct{}
+}
+
+// WakePreparer admits a one-shot notification wake for a frontend.
+type WakePreparer interface {
+	PrepareWake(context.Context) (*WakeOperation, error)
+}
+
+type taskOwner interface{ Tasks() *agent.Tasks }
+
+type taskView struct{ tasks *agent.Tasks }
+
+func (v taskView) List() []agent.Task                         { return v.tasks.List() }
+func (v taskView) Get(ref string) (agent.Task, bool)          { return v.tasks.Get(ref) }
+func (v taskView) History(ref string) ([]model.Message, bool) { return v.tasks.History(ref) }
+func (v taskView) Cancel(ref string) error                    { return v.tasks.Cancel(ref) }
+func (v taskView) Wait(ctx context.Context, ref string) (agent.Task, error) {
+	return v.tasks.Wait(ctx, ref)
+}
+func (v taskView) Updates() <-chan struct{} { return v.tasks.Updates() }
 
 var _ TaskLister = (*Controller)(nil)
 
@@ -264,19 +293,7 @@ type ProfileSwitcher interface {
 	SetDefaultProfile(context.Context, string) error
 }
 
-type replacementPhase uint8
-
-const (
-	replacementPhaseBuilding replacementPhase = iota + 1
-	replacementPhaseClosingCurrent
-	replacementPhaseCleaning
-)
-
 type replacementState struct {
-	done              chan struct{}
-	owner             uint64
-	phase             replacementPhase
-	buildActive       bool
 	current           session.Session
 	currentWorkspace  string
 	runner            Runner
@@ -309,12 +326,12 @@ func joinCloseErrors(a, b error) error {
 }
 
 type activeOperation struct {
-	done           chan struct{}
-	owner          uint64
 	runner         Runner
 	current        session.Session
-	callbackDepth  int
 	closeRequested bool
+	wake           *WakeOperation
+	started        bool
+	released       bool
 }
 
 type Controller struct {
@@ -323,14 +340,13 @@ type Controller struct {
 	currentPath          string
 	currentWorkspace     string
 	runner               Runner
-	create               SessionFactory
-	build                RunnerFactory
 	listSessions         SessionLister
 	resumeSession        ResumeFactory
 	newSession           NewSessionBuilder
 	archiveSession       ArchiveFactory
 	switchProfile        ProfileSwitchFactory
 	setDefaultProfile    DefaultProfileSetter
+	authentication       Authentication
 	profiles             []string
 	memoryManager        memory.Manager
 	memoryUserScope      memory.Scope
@@ -340,40 +356,32 @@ type Controller struct {
 	closed               bool
 	closeDone            chan struct{}
 	closeComplete        bool
+	closeInProgress      bool
 	closeErr             error
-	reentrantCloseOwner  uint64
-	ownerIDSource        func() uint64
 	runtimeInfo          *RuntimeInfo
 	sandboxInfo          SandboxInfo
 	dynamicContent       bool
 }
 
-func New(initial session.Session, create SessionFactory, build RunnerFactory, options ...Option) (*Controller, error) {
-	if initial == nil {
+func New(initial SessionReplacement, options ...Option) (*Controller, error) {
+	if initial.Session == nil {
 		return nil, errors.New("initial session is required")
 	}
-	if create == nil {
-		return nil, errors.New("session factory is required")
-	}
-	if build == nil {
-		return nil, errors.New("runner factory is required")
-	}
-	runner := build(initial)
-	if runner == nil {
-		return nil, errors.New("runner factory returned nil runner")
+	if initial.Runner == nil {
+		return nil, errors.New("initial runner is required")
 	}
 
-	path := canonicalSessionPath(initial.Path())
-	workspace := canonicalSessionPath(initial.Header().Workspace)
+	path := canonicalSessionPath(initial.Session.Path())
+	workspace := canonicalSessionPath(initial.Session.Header().Workspace)
 	controller := &Controller{
-		current:          initial,
+		current:          initial.Session,
 		currentPath:      path,
 		currentWorkspace: workspace,
-		runner:           runner,
-		create:           create,
-		build:            build,
-		ownerIDSource:    currentGoroutineID,
+		runner:           initial.Runner,
 		dynamicContent:   true,
+	}
+	if initial.RuntimeInfo != (RuntimeInfo{}) {
+		WithRuntimeInfo(initial.RuntimeInfo)(controller)
 	}
 	for _, option := range options {
 		if option != nil {
@@ -389,7 +397,7 @@ func (c *Controller) Prompt(ctx context.Context, text string, emit func(agent.Ev
 		return err
 	}
 	defer c.endOperation(operation)
-	return operation.runner.Run(ctx, text, c.operationCallback(operation, emit))
+	return operation.runner.Run(ctx, text, emit)
 }
 
 func (c *Controller) Compact(ctx context.Context, focus string, emit func(agent.Event)) (agent.CompactionResult, error) {
@@ -398,11 +406,10 @@ func (c *Controller) Compact(ctx context.Context, focus string, emit func(agent.
 		return agent.CompactionResult{}, err
 	}
 	defer c.endOperation(operation)
-	return operation.runner.Compact(ctx, focus, c.operationCallback(operation, emit))
+	return operation.runner.Compact(ctx, focus, emit)
 }
 
 func (c *Controller) beginOperation() (*activeOperation, error) {
-	owner := c.ownerID()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -412,35 +419,11 @@ func (c *Controller) beginOperation() (*activeOperation, error) {
 		return nil, ErrPromptActive
 	}
 	operation := &activeOperation{
-		done:    make(chan struct{}),
-		owner:   owner,
 		runner:  c.runner,
 		current: c.current,
 	}
 	c.active = operation
 	return operation, nil
-}
-
-func (c *Controller) operationCallback(operation *activeOperation, emit func(agent.Event)) func(agent.Event) {
-	if emit == nil {
-		return nil
-	}
-	return func(event agent.Event) {
-		c.mu.Lock()
-		if c.active == operation {
-			operation.callbackDepth++
-		}
-		c.mu.Unlock()
-
-		defer func() {
-			c.mu.Lock()
-			if c.active == operation && operation.callbackDepth > 0 {
-				operation.callbackDepth--
-			}
-			c.mu.Unlock()
-		}()
-		emit(event)
-	}
 }
 
 func (c *Controller) endOperation(operation *activeOperation) {
@@ -451,7 +434,6 @@ func (c *Controller) endOperation(operation *activeOperation) {
 	}
 	if !operation.closeRequested {
 		c.active = nil
-		close(operation.done)
 		c.mu.Unlock()
 		return
 	}
@@ -468,14 +450,12 @@ func (c *Controller) endOperation(operation *activeOperation) {
 	c.mu.Lock()
 	if c.active == operation {
 		c.active = nil
-		close(operation.done)
 	}
 	c.mu.Unlock()
 	c.completeClose(closeDone, closeErr)
 }
 
 func (c *Controller) NewSession() error {
-	owner := c.ownerID()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -489,7 +469,7 @@ func (c *Controller) NewSession() error {
 		c.mu.Unlock()
 		return ErrPromptActive
 	}
-	state := c.beginReplacementLocked(owner)
+	state := c.beginReplacementLocked()
 	current := c.current
 	sandboxInfo := c.sandboxInfo
 	var runtimeInfo *RuntimeInfo
@@ -512,33 +492,10 @@ func (c *Controller) NewSession() error {
 }
 
 func (c *Controller) buildReplacement(ctx context.Context, runtimeInfo *RuntimeInfo) (SessionReplacement, error) {
-	builder := c.newSession
-	if builder != nil {
-		return builder(ctx, *runtimeInfo)
+	if c.newSession == nil {
+		return SessionReplacement{}, ErrPersistenceDisabled
 	}
-	replacement, createErr := c.create()
-	if createErr != nil {
-		return SessionReplacement{Session: replacement}, createErr
-	}
-	if replacement == nil {
-		return SessionReplacement{}, errors.New("session factory returned nil session")
-	}
-	runner := c.build(replacement)
-	if runner == nil {
-		return SessionReplacement{Session: replacement}, errors.New("runner factory returned nil runner")
-	}
-	header := replacement.Header()
-	return SessionReplacement{
-		Session: replacement,
-		Runner:  runner,
-		RuntimeInfo: RuntimeInfo{
-			Provider:      header.Provider,
-			Profile:       header.Profile,
-			Model:         header.Model,
-			ContextWindow: runtimeInfo.ContextWindow,
-			Sandbox:       runtimeInfo.Sandbox,
-		},
-	}, nil
+	return c.newSession(ctx, *runtimeInfo)
 }
 
 func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListResult, error) {
@@ -567,7 +524,6 @@ func (c *Controller) ListSessions(ctx context.Context, limit int) (session.ListR
 }
 
 func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResult, error) {
-	owner := c.ownerID()
 
 	c.mu.Lock()
 	if c.closed {
@@ -593,7 +549,7 @@ func (c *Controller) ResumeSession(ctx context.Context, path string) (ResumeResu
 		c.mu.Unlock()
 		return result, nil
 	}
-	state := c.beginReplacementLocked(owner)
+	state := c.beginReplacementLocked()
 	c.mu.Unlock()
 
 	return c.runReplacement(ctx, state, func() (SessionReplacement, error) {
@@ -634,7 +590,6 @@ func (c *Controller) SetDefaultProfile(ctx context.Context, profile string) erro
 // /new. Unlike /resume it does not validate the workspace, because the
 // replacement is a new session created in the current workspace.
 func (c *Controller) SwitchProfile(ctx context.Context, profile string) (ResumeResult, error) {
-	owner := c.ownerID()
 
 	c.mu.Lock()
 	if c.closed {
@@ -654,7 +609,7 @@ func (c *Controller) SwitchProfile(ctx context.Context, profile string) (ResumeR
 		c.mu.Unlock()
 		return ResumeResult{}, ErrProfileSwitchUnavailable
 	}
-	state := c.beginReplacementLocked(owner)
+	state := c.beginReplacementLocked()
 	c.mu.Unlock()
 
 	return c.runReplacement(ctx, state, func() (SessionReplacement, error) {
@@ -703,7 +658,6 @@ func (c *Controller) ArchiveSession(ctx context.Context, path string) (session.A
 // every failure path leaves the current session fully intact; the only committed
 // state change is the atomic file move, which happens last.
 func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.ArchiveResult, error) {
-	owner := c.ownerID()
 
 	c.mu.Lock()
 	if c.closed {
@@ -729,7 +683,7 @@ func (c *Controller) ArchiveCurrentSession(ctx context.Context) (session.Archive
 		c.mu.Unlock()
 		return session.ArchiveResult{}, ErrPersistenceDisabled
 	}
-	state := c.beginReplacementLocked(owner)
+	state := c.beginReplacementLocked()
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
@@ -866,11 +820,8 @@ func (c *Controller) GetMemory(ctx context.Context, ref memory.RecordRef) (memor
 	return manager.Get(ctx, ref)
 }
 
-func (c *Controller) beginReplacementLocked(owner uint64) *replacementState {
+func (c *Controller) beginReplacementLocked() *replacementState {
 	state := &replacementState{
-		done:             make(chan struct{}),
-		owner:            owner,
-		phase:            replacementPhaseBuilding,
 		current:          c.current,
 		currentWorkspace: c.currentWorkspace,
 		runner:           c.runner,
@@ -891,17 +842,7 @@ func (c *Controller) runReplacement(
 		return ResumeResult{}, err
 	}
 
-	c.mu.Lock()
-	if c.replace == state {
-		state.buildActive = true
-	}
-	c.mu.Unlock()
 	replacement, err := build()
-	c.mu.Lock()
-	if c.replace == state {
-		state.buildActive = false
-	}
-	c.mu.Unlock()
 	warnings := cloneWarnings(replacement.Warnings)
 	if err != nil {
 		c.abortReplacement(state, replacement)
@@ -954,7 +895,6 @@ func (c *Controller) runReplacement(
 		}
 		return ResumeResult{}, cancelErr
 	default:
-		state.phase = replacementPhaseClosingCurrent
 		c.mu.Unlock()
 	}
 
@@ -1003,7 +943,6 @@ func (c *Controller) runReplacement(
 	closeDone := c.closeDone
 	if deferredClose {
 		state.replacementClosed = true
-		state.phase = replacementPhaseCleaning
 	} else {
 		c.finishReplacingLocked(state)
 	}
@@ -1041,9 +980,6 @@ func (c *Controller) abortReplacement(state *replacementState, replacement Sessi
 	shouldClose := replacement.Session != nil && !state.replacementClosed
 	if shouldClose {
 		state.replacementClosed = true
-		if c.replace == state {
-			state.phase = replacementPhaseCleaning
-		}
 	}
 	c.mu.Unlock()
 
@@ -1062,7 +998,6 @@ func (c *Controller) abortReplacement(state *replacementState, replacement Sessi
 		c.mu.Unlock()
 		return
 	}
-	state.phase = replacementPhaseClosingCurrent
 	current := state.current
 	closeDone := c.closeDone
 	c.mu.Unlock()
@@ -1080,9 +1015,6 @@ func (c *Controller) releaseReplacementLocked(state *replacementState, replaceme
 	shouldClose := replacement != nil && !state.replacementClosed
 	if shouldClose {
 		state.replacementClosed = true
-		if c.replace == state {
-			state.phase = replacementPhaseCleaning
-		}
 		return true
 	}
 	c.finishReplacingLocked(state)
@@ -1138,17 +1070,21 @@ func (c *Controller) Info() Info {
 
 // Tasks returns the sub-agent task registry of the current runner, or nil
 // when the runner does not track tasks or the controller is closed.
-func (c *Controller) Tasks() *agent.Tasks {
+func (c *Controller) Tasks() TaskView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil
 	}
-	lister, ok := c.runner.(TaskLister)
+	lister, ok := c.runner.(taskOwner)
 	if !ok {
 		return nil
 	}
-	return lister.Tasks()
+	tasks := lister.Tasks()
+	if tasks == nil {
+		return nil
+	}
+	return taskView{tasks: tasks}
 }
 
 func (c *Controller) DynamicContentAvailable() bool {
@@ -1165,58 +1101,48 @@ func (c *Controller) History() []model.Message {
 	if !dynamicContent || current == nil {
 		return nil
 	}
-	return cloneMessages(current.Messages())
+	return model.CloneMessages(current.Messages())
 }
 
-func (c *Controller) Close() error {
-	caller := c.ownerID()
+// RequestClose rejects new work and asks the active lifecycle owner to clean
+// up. It never waits or invokes a closer, so callbacks may call it safely.
+func (c *Controller) RequestClose() {
 	c.mu.Lock()
-	if c.closeDone != nil {
-		done := c.closeDone
-		if c.closeComplete || c.activeCloseIsReentrantLocked(caller) || c.replacementCloseIsReentrantLocked(caller) || caller != 0 && c.reentrantCloseOwner == caller {
-			err := c.closeErr
-			c.mu.Unlock()
-			return err
-		}
-		c.mu.Unlock()
-		<-done
-		c.mu.Lock()
-		err := c.closeErr
-		c.mu.Unlock()
-		return err
+	if c.closeDone == nil {
+		c.closed = true
+		c.closeDone = make(chan struct{})
 	}
-
-	c.closed = true
-	done := make(chan struct{})
-	c.closeDone = done
-
 	if c.active != nil {
-		operation := c.active
-		operation.closeRequested = true
-		if c.activeCloseIsReentrantLocked(caller) {
-			err := c.closeErr
-			c.mu.Unlock()
-			return err
-		}
-		c.mu.Unlock()
-		<-done
-		c.mu.Lock()
-		err := c.closeErr
-		c.mu.Unlock()
-		return err
-	}
-
-	if c.replace != nil {
-		state := c.replace
-		state.closeRequested = true
-		if c.replacementCloseIsReentrantLocked(caller) {
-			if caller != 0 {
-				c.reentrantCloseOwner = caller
+		if c.active.wake != nil && !c.active.started {
+			operation := c.active
+			operation.released = true
+			c.active = nil
+			if operation.wake.stop != nil {
+				operation.wake.stop()
 			}
-			err := c.closeErr
-			c.mu.Unlock()
-			return err
+		} else {
+			c.active.closeRequested = true
 		}
+	}
+	if c.replace != nil {
+		c.replace.closeRequested = true
+	}
+	c.mu.Unlock()
+}
+
+// Close synchronously completes a close request. Callers in controller
+// callbacks must use RequestClose instead, because they own the work Close
+// would wait for.
+func (c *Controller) Close() error {
+	c.RequestClose()
+	c.mu.Lock()
+	done := c.closeDone
+	if c.closeComplete {
+		err := c.closeErr
+		c.mu.Unlock()
+		return err
+	}
+	if c.active != nil || c.replace != nil || c.closeInProgress {
 		c.mu.Unlock()
 		<-done
 		c.mu.Lock()
@@ -1224,13 +1150,7 @@ func (c *Controller) Close() error {
 		c.mu.Unlock()
 		return err
 	}
-
-	if c.current == nil && c.closeErr != nil {
-		err := c.closeErr
-		c.mu.Unlock()
-		c.completeClose(done, err)
-		return err
-	}
+	c.closeInProgress = true
 	current := c.current
 	runner := c.runner
 	c.mu.Unlock()
@@ -1267,6 +1187,7 @@ func (c *Controller) completeClose(done chan struct{}, err error) {
 	}
 	if c.closeDone == done && !c.closeComplete {
 		c.closeComplete = true
+		c.closeInProgress = false
 		close(done)
 	}
 	c.mu.Unlock()
@@ -1283,56 +1204,6 @@ func (c *Controller) finishReplacingLocked(state *replacementState) {
 		return
 	}
 	c.replace = nil
-	close(state.done)
-}
-
-func (c *Controller) activeCloseIsReentrantLocked(caller uint64) bool {
-	if c.active == nil {
-		return false
-	}
-	if caller != 0 {
-		return c.active.owner == caller
-	}
-	return c.active.owner == 0 && c.active.callbackDepth > 0
-}
-
-func (c *Controller) replacementCloseIsReentrantLocked(caller uint64) bool {
-	if c.replace == nil {
-		return false
-	}
-	if caller != 0 {
-		return c.replace.owner == caller
-	}
-	return c.replace.owner == 0 && c.replace.buildActive
-}
-
-func (c *Controller) ownerID() uint64 {
-	if c.ownerIDSource == nil {
-		return currentGoroutineID()
-	}
-	return c.ownerIDSource()
-}
-
-// currentGoroutineID supplies the execution identity needed to distinguish a
-// synchronous replacement callback from another controller's callback. Close
-// cannot accept an ownership token without breaking its public lifecycle API,
-// and the runtime does not expose a supported goroutine-local identity API.
-func currentGoroutineID() uint64 {
-	var stack [64]byte
-	n := runtime.Stack(stack[:], false)
-	const prefix = "goroutine "
-	if n <= len(prefix) || string(stack[:len(prefix)]) != prefix {
-		return 0
-	}
-
-	var id uint64
-	for _, character := range stack[len(prefix):n] {
-		if character < '0' || character > '9' {
-			break
-		}
-		id = id*10 + uint64(character-'0')
-	}
-	return id
 }
 
 func channelClosed(done <-chan struct{}) bool {
@@ -1374,38 +1245,4 @@ func cloneWarnings(warnings []session.Warning) []session.Warning {
 		return nil
 	}
 	return append([]session.Warning(nil), warnings...)
-}
-
-func cloneMessages(messages []model.Message) []model.Message {
-	if messages == nil {
-		return nil
-	}
-	cloned := make([]model.Message, len(messages))
-	for i, message := range messages {
-		cloned[i] = cloneMessage(message)
-	}
-	return cloned
-}
-
-func cloneMessage(message model.Message) model.Message {
-	cloned := message
-	if message.Blocks != nil {
-		cloned.Blocks = make([]model.Block, len(message.Blocks))
-		for i, block := range message.Blocks {
-			cloned.Blocks[i] = block
-			cloned.Blocks[i].Arguments = cloneArguments(block.Arguments)
-		}
-	}
-	if message.Usage != nil {
-		usage := *message.Usage
-		cloned.Usage = &usage
-	}
-	return cloned
-}
-
-func cloneArguments(arguments json.RawMessage) json.RawMessage {
-	if arguments == nil {
-		return nil
-	}
-	return append(json.RawMessage(nil), arguments...)
 }

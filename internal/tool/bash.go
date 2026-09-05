@@ -86,6 +86,11 @@ func NewBashTool(
 }
 
 func (t *bashTool) Definition() model.ToolDefinition {
+	return BashDefinition()
+}
+
+// BashDefinition returns the provider schema for the built-in bash tool.
+func BashDefinition() model.ToolDefinition {
 	return model.ToolDefinition{
 		Name:        "bash",
 		Description: "Execute a shell command from the workspace",

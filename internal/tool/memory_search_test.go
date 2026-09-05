@@ -55,8 +55,8 @@ func TestMemorySearchToolRendersRecordsAndPlaceholder(t *testing.T) {
 	if !strings.Contains(result.Content, "rec-2") || !strings.Contains(result.Content, "always run tests before commit") {
 		t.Fatalf("content missing second record detail: %q", result.Content)
 	}
-	if result.PersistedContent != "2 records: rec-1, rec-2" {
-		t.Fatalf("persisted content = %q, want bounded placeholder", result.PersistedContent)
+	if result.PersistedContent == nil || *result.PersistedContent != "2 records: rec-1, rec-2" {
+		t.Fatalf("persisted content = %#v, want bounded placeholder", result.PersistedContent)
 	}
 	if reader.got.Query != "editor" {
 		t.Fatalf("search request query = %q, want %q", reader.got.Query, "editor")
@@ -73,8 +73,8 @@ func TestMemorySearchToolHandlesNoMatches(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected error result: %+v", result)
 	}
-	if result.PersistedContent != "0 records" {
-		t.Fatalf("persisted content = %q, want %q", result.PersistedContent, "0 records")
+	if result.PersistedContent == nil || *result.PersistedContent != "0 records" {
+		t.Fatalf("persisted content = %#v, want %q", result.PersistedContent, "0 records")
 	}
 }
 

@@ -38,17 +38,18 @@ type turn struct {
 	cancel  context.CancelFunc
 	trigger string // set once before the turn is published; read-only after
 
-	mu         sync.Mutex
-	events     []wireEvent
-	changed    chan struct{}
-	done       bool
-	status     string
-	errText    string
-	text       strings.Builder
-	usage      model.Usage
-	toolStart  time.Time
-	startedAt  time.Time
-	finishedAt time.Time
+	mu           sync.Mutex
+	events       []wireEvent
+	changed      chan struct{}
+	done         bool
+	status       string
+	errText      string
+	text         strings.Builder
+	usage        model.Usage
+	usagePresent bool
+	toolStart    time.Time
+	startedAt    time.Time
+	finishedAt   time.Time
 }
 
 func newTurn(id string, cancel context.CancelFunc) *turn {
@@ -82,13 +83,19 @@ func (t *turn) emit(m *metrics) func(agent.Event) {
 		case agent.EventTextDelta:
 			t.text.WriteString(event.Text)
 		case agent.EventProviderUsage:
-			t.usage.InputTokens += event.Usage.InputTokens
-			t.usage.OutputTokens += event.Usage.OutputTokens
-			t.usage.CachedInputTokens += event.Usage.CachedInputTokens
+			if event.UsagePresent {
+				t.usagePresent = true
+				t.usage.InputTokens += event.Usage.InputTokens
+				t.usage.OutputTokens += event.Usage.OutputTokens
+				t.usage.CachedInputTokens += event.Usage.CachedInputTokens
+			}
 		case agent.EventNotification:
-			t.usage.InputTokens += event.Usage.InputTokens
-			t.usage.OutputTokens += event.Usage.OutputTokens
-			t.usage.CachedInputTokens += event.Usage.CachedInputTokens
+			if event.UsagePresent {
+				t.usagePresent = true
+				t.usage.InputTokens += event.Usage.InputTokens
+				t.usage.OutputTokens += event.Usage.OutputTokens
+				t.usage.CachedInputTokens += event.Usage.CachedInputTokens
+			}
 		case agent.EventToolCallStarted:
 			t.toolStart = time.Now()
 		case agent.EventToolCallFinished:
@@ -98,7 +105,7 @@ func (t *turn) emit(m *metrics) func(agent.Event) {
 		t.broadcastLocked()
 		t.mu.Unlock()
 
-		if event.Type == agent.EventProviderUsage {
+		if event.Type == agent.EventProviderUsage && event.UsagePresent {
 			m.tokens(event.Usage)
 		}
 	}
@@ -154,27 +161,29 @@ func (t *turn) snapshot(after int) (events []wireEvent, done bool, changed <-cha
 }
 
 type turnSummary struct {
-	ID         string      `json:"id"`
-	Trigger    string      `json:"trigger"`
-	Status     string      `json:"status"`
-	Error      string      `json:"error,omitempty"`
-	Text       string      `json:"text"`
-	Usage      model.Usage `json:"usage"`
-	StartedAt  time.Time   `json:"started_at"`
-	FinishedAt *time.Time  `json:"finished_at,omitempty"`
+	ID           string      `json:"id"`
+	Trigger      string      `json:"trigger"`
+	Status       string      `json:"status"`
+	Error        string      `json:"error,omitempty"`
+	Text         string      `json:"text"`
+	Usage        model.Usage `json:"usage"`
+	UsagePresent bool        `json:"usage_present"`
+	StartedAt    time.Time   `json:"started_at"`
+	FinishedAt   *time.Time  `json:"finished_at,omitempty"`
 }
 
 func (t *turn) summary() turnSummary {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	s := turnSummary{
-		ID:        t.id,
-		Trigger:   t.trigger,
-		Status:    t.status,
-		Error:     t.errText,
-		Text:      t.text.String(),
-		Usage:     t.usage,
-		StartedAt: t.startedAt,
+		ID:           t.id,
+		Trigger:      t.trigger,
+		Status:       t.status,
+		Error:        t.errText,
+		Text:         t.text.String(),
+		Usage:        t.usage,
+		UsagePresent: t.usagePresent,
+		StartedAt:    t.startedAt,
 	}
 	if t.done {
 		finishedAt := t.finishedAt

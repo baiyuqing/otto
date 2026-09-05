@@ -1431,6 +1431,145 @@ func TestStoreAppendRejectsInvalidRoleContext(t *testing.T) {
 	}
 }
 
+func TestAppendRejectsInvalidMessagesAndSequencesAcrossBackends(t *testing.T) {
+	factories := map[string]func(*testing.T) Session{
+		"memory": func(t *testing.T) Session { return NewMemory(testHeader(t)) },
+		"store": func(t *testing.T) Session {
+			store, err := Create(t.TempDir(), testHeader(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return store
+		},
+	}
+	for name, factory := range factories {
+		t.Run(name, func(t *testing.T) {
+			current := factory(t)
+			defer current.Close()
+			if err := current.Append(context.Background(), model.Message{Role: model.Role("future"), Blocks: []model.Block{{Type: model.BlockText, Text: "bad"}}}); !errors.Is(err, ErrInvalidSession) {
+				t.Fatalf("invalid role error = %v, want ErrInvalidSession", err)
+			}
+			if err := current.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "start"}}, CreatedAt: time.Unix(1, 0).UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			if err := current.Append(context.Background(), model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockToolCall, ToolCallID: "call-1", ToolName: "read", Arguments: json.RawMessage(`{}`)}}, FinishReason: model.FinishToolCalls, CreatedAt: time.Unix(2, 0).UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			if err := current.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "interleaved"}}, CreatedAt: time.Unix(3, 0).UTC()}); !errors.Is(err, ErrInvalidSession) {
+				t.Fatalf("interleaved tool sequence error = %v, want ErrInvalidSession", err)
+			}
+		})
+	}
+}
+
+func TestStoreRoundTripsContextMetadata(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := model.Message{
+		Role: model.RoleContext, ContextType: "task_notification", Display: true,
+		ContextMetadata: &model.ContextMetadata{TaskID: "t12"},
+		Blocks:          []model.Block{{Type: model.BlockText, Text: "report"}}, CreatedAt: time.Unix(2, 0).UTC(),
+	}
+	if err := store.Append(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Messages()[0].ContextMetadata; got == nil || got.TaskID != "t12" {
+		t.Fatalf("in-memory context metadata = %#v", got)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, warnings, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if len(warnings) != 0 || len(reopened.Messages()) != 1 {
+		t.Fatalf("reopened warnings/messages = %#v/%#v", warnings, reopened.Messages())
+	}
+	got := reopened.Messages()[0]
+	if got.ContextMetadata == nil || got.ContextMetadata.TaskID != "t12" {
+		t.Fatalf("context metadata = %#v", got.ContextMetadata)
+	}
+}
+
+func TestStorePreservesExplicitZeroAssistantUsagePresence(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), model.Message{Role: model.RoleUser, Blocks: []model.Block{{Type: model.BlockText, Text: "hello"}}, CreatedAt: time.Unix(1, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(context.Background(), model.Message{Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}, FinishReason: model.FinishStop, Usage: &model.Usage{}, CreatedAt: time.Unix(2, 0).UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, _, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	messages := reopened.Messages()
+	if messages[1].Usage == nil || *messages[1].Usage != (model.Usage{}) {
+		t.Fatalf("explicit zero usage = %#v, want nonnil zero", messages[1].Usage)
+	}
+	if usage, present := reopened.AggregateUsage(); !present || usage != (model.Usage{}) {
+		t.Fatalf("reopened aggregate usage = %#v, %v; want explicit zero present", usage, present)
+	}
+	if snapshot := reopened.Snapshot(); !snapshot.AggregateUsagePresent || snapshot.AggregateUsage != (model.Usage{}) {
+		t.Fatalf("reopened snapshot usage = %#v, present=%v; want explicit zero present", snapshot.AggregateUsage, snapshot.AggregateUsagePresent)
+	}
+}
+
+func TestSessionMessagesPreservesNonNilEmptyBoundary(t *testing.T) {
+	memory := NewMemory(testHeader(t))
+	if messages := memory.Messages(); messages == nil || len(messages) != 0 {
+		t.Fatalf("Memory.Messages() = %#v, want nonnil empty slice", messages)
+	}
+	memory.Close()
+
+	store, err := CreateLazy(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if messages := store.Messages(); messages == nil || len(messages) != 0 {
+		t.Fatalf("Store.Messages() = %#v, want nonnil empty slice", messages)
+	}
+}
+
+func TestMemoryAggregateUsagePreservesExplicitZeroPresence(t *testing.T) {
+	memory := NewMemory(testHeader(t))
+	defer memory.Close()
+	if err := memory.Append(context.Background(), model.Message{Role: model.RoleAssistant, FinishReason: model.FinishStop, Usage: &model.Usage{}, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if usage, present := memory.AggregateUsage(); !present || usage != (model.Usage{}) {
+		t.Fatalf("aggregate usage = %#v, %v; want explicit zero present", usage, present)
+	}
+	if snapshot := memory.Snapshot(); !snapshot.AggregateUsagePresent || snapshot.AggregateUsage != (model.Usage{}) {
+		t.Fatalf("snapshot usage = %#v, present=%v; want explicit zero present", snapshot.AggregateUsage, snapshot.AggregateUsagePresent)
+	}
+}
+
+func TestMemoryAggregateUsageLeavesMissingUsageAbsent(t *testing.T) {
+	memory := NewMemory(testHeader(t))
+	defer memory.Close()
+	if err := memory.Append(context.Background(), model.Message{Role: model.RoleAssistant, FinishReason: model.FinishStop, Blocks: []model.Block{{Type: model.BlockText, Text: "ok"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if usage, present := memory.AggregateUsage(); present || usage != (model.Usage{}) {
+		t.Fatalf("aggregate usage = %#v, %v; want missing usage", usage, present)
+	}
+}
+
 func createSessionWithDanglingCall(t *testing.T) string {
 	t.Helper()
 	store, err := Create(t.TempDir(), testHeader(t))

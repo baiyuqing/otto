@@ -391,6 +391,21 @@ func TestRuntimeBuilderBoundaryToolDefinitionsIncludesSkillWhenEnabled(t *testin
 	}
 }
 
+func TestRuntimeBuilderBoundaryToolDefinitionsIncludesEnabledMemoryTools(t *testing.T) {
+	builder := newRuntimeBuilderForTest(t, configWithProfiles("default"))
+	builder.memoryUsable = true
+	definitions := builder.boundaryToolDefinitions(nil)
+	names := make(map[string]bool, len(definitions))
+	for _, definition := range definitions {
+		names[definition.Name] = true
+	}
+	for _, want := range []string{"memory_search", "remember", "forget"} {
+		if !names[want] {
+			t.Fatalf("boundaryToolDefinitions() missing enabled memory tool %q: %v", want, names)
+		}
+	}
+}
+
 // TestRuntimeBuilderBoundaryToolDefinitionsIncludesAgentToolsWhenDynamicAllowed
 // covers T4: boundaryToolDefinitions predicts the same agent/agent_wait/
 // agent_status tools that buildRunner registers when a provider client will

@@ -141,7 +141,7 @@ func (b runtimeBuilder) serveFactories(runtime config.Runtime) serveFactories {
 // two self-clean their own candidate session/runner on error, so only a
 // failure here (which they never saw) needs to close them.
 func (b runtimeBuilder) controllerFromReplacement(replacement app.SessionReplacement) (*app.Controller, error) {
-	controller, err := b.newController(replacement.Session, replacement.Runner, replacement.RuntimeInfo, true)
+	controller, err := b.newController(replacement, true)
 	if err != nil {
 		_ = closeRuntimeRunner(replacement.Runner)
 		_ = replacement.Session.Close()

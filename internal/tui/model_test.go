@@ -29,13 +29,24 @@ type fakeBackend struct {
 	info       app.Info
 	history    []model.Message
 	tasks      *agent.Tasks
+	wake       *app.Controller
 }
 
 // Tasks implements app.TaskLister so tests can populate f.tasks with
-// agent.NewTasks() and Add/Update to exercise the TUI's task panel, wake
+// agent.NewTasks() and task transitions to exercise the TUI's task panel, wake
 // turns, and sub-agent commands.
-func (f *fakeBackend) Tasks() *agent.Tasks {
+func (f *fakeBackend) Tasks() app.TaskView {
+	if f.tasks == nil {
+		return nil
+	}
 	return f.tasks
+}
+
+func (f *fakeBackend) PrepareWake(ctx context.Context) (*app.WakeOperation, error) {
+	if f.wake == nil {
+		return nil, nil
+	}
+	return f.wake.PrepareWake(ctx)
 }
 
 func (f *fakeBackend) Prompt(ctx context.Context, text string, emit func(agent.Event)) error {

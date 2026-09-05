@@ -137,12 +137,10 @@ func matchAny(provider.Request) bool { return true }
 // block, no tool calls, and the given usage.
 func assistantText(text string, usage model.Usage) provider.Response {
 	return provider.Response{
-		Message: model.Message{
+		Message: model.Message{FinishReason: model.FinishStop, Usage: &usage,
 			Role:   model.RoleAssistant,
 			Blocks: []model.Block{{Type: model.BlockText, Text: text}},
 		},
-		FinishReason: model.FinishStop,
-		Usage:        usage,
 	}
 }
 
@@ -151,7 +149,7 @@ func assistantText(text string, usage model.Usage) provider.Response {
 // further provider request.
 func assistantToolCall(callID, toolName, arguments string, usage model.Usage) provider.Response {
 	return provider.Response{
-		Message: model.Message{
+		Message: model.Message{FinishReason: model.FinishToolCalls, Usage: &usage,
 			Role: model.RoleAssistant,
 			Blocks: []model.Block{{
 				Type:       model.BlockToolCall,
@@ -160,8 +158,6 @@ func assistantToolCall(callID, toolName, arguments string, usage model.Usage) pr
 				Arguments:  json.RawMessage(arguments),
 			}},
 		},
-		FinishReason: model.FinishToolCalls,
-		Usage:        usage,
 	}
 }
 

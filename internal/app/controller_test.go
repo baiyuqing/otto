@@ -22,41 +22,23 @@ import (
 func TestNewValidatesRequiredDependencies(t *testing.T) {
 	tests := []struct {
 		name    string
-		initial session.Session
-		create  SessionFactory
-		build   RunnerFactory
+		initial SessionReplacement
 		wantErr string
 	}{
 		{
 			name:    "nil initial session",
-			create:  func() (session.Session, error) { return &fakeSession{header: testHeader("next")}, nil },
-			build:   func(session.Session) Runner { return runnerFunc(noopRun) },
 			wantErr: "initial session is required",
 		},
 		{
-			name:    "nil session factory",
-			initial: &fakeSession{header: testHeader("initial")},
-			build:   func(session.Session) Runner { return runnerFunc(noopRun) },
-			wantErr: "session factory is required",
-		},
-		{
-			name:    "nil runner factory",
-			initial: &fakeSession{header: testHeader("initial")},
-			create:  func() (session.Session, error) { return &fakeSession{header: testHeader("next")}, nil },
-			wantErr: "runner factory is required",
-		},
-		{
 			name:    "nil initial runner",
-			initial: &fakeSession{header: testHeader("initial")},
-			create:  func() (session.Session, error) { return &fakeSession{header: testHeader("next")}, nil },
-			build:   func(session.Session) Runner { return nil },
-			wantErr: "runner factory returned nil runner",
+			initial: SessionReplacement{Session: &fakeSession{header: testHeader("initial")}},
+			wantErr: "initial runner is required",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			controller, err := New(tt.initial, tt.create, tt.build)
+			controller, err := New(tt.initial)
 			if controller != nil {
 				t.Fatalf("controller = %#v, want nil", controller)
 			}
@@ -64,6 +46,31 @@ func TestNewValidatesRequiredDependencies(t *testing.T) {
 				t.Fatalf("New() error = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestControllerRequestCloseFromPromptCallbackDoesNotWait(t *testing.T) {
+	current := &fakeSession{header: testHeader("request-close")}
+	controller := newTestController(t, &lifecycleRunner{run: func(_ context.Context, _ string, emit func(agent.Event)) error {
+		emit(agent.Event{Type: agent.EventAgentStarted})
+		return nil
+	}})
+	controller.current = current
+
+	done := make(chan error, 1)
+	go func() {
+		done <- controller.Prompt(context.Background(), "prompt", func(agent.Event) {
+			controller.RequestClose()
+		})
+	}()
+	if err := awaitError(t, done, "prompt after request close"); err != nil {
+		t.Fatal(err)
+	}
+	if current.CloseCalls() != 1 {
+		t.Fatalf("session close calls = %d, want 1", current.CloseCalls())
+	}
+	if err := controller.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -86,7 +93,7 @@ func TestControllerDynamicSuppressionHidesSessionStateAndRejectsBrowsingAndRepla
 	memoryManager := &fakeMemoryManager{}
 	var createCalls, newCalls, listCalls, resumeCalls, setDefaultCalls, switchCalls, archiveCalls int
 	sandboxInfo := SandboxInfo{Mode: SandboxUnavailable, BashAvailable: false, Reason: SandboxReasonEnvironmentRejected}
-	controller, err := New(initial, func() (session.Session, error) {
+	controller, err := newControllerFixture(initial, func() (session.Session, error) {
 		createCalls++
 		return &fakeSession{header: testHeader("created")}, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) },
@@ -229,7 +236,7 @@ func TestControllerNewSessionCallbacksMayInspectControllerState(t *testing.T) {
 	current.onClose = func() {
 		checkCurrent("close")
 	}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		checkCurrent("create")
 		return next, nil
 	}, func(s session.Session) Runner {
@@ -270,7 +277,7 @@ func TestControllerNewSessionCallbacksMayInspectControllerState(t *testing.T) {
 	}
 }
 
-func TestControllerRunnerFactoryMaySynchronouslyCloseController(t *testing.T) {
+func TestControllerReplacementBuilderMayRequestClose(t *testing.T) {
 	current := &fakeSession{header: testHeader("old")}
 	replacement := &fakeSession{header: testHeader("new")}
 	var controller *Controller
@@ -286,7 +293,7 @@ func TestControllerRunnerFactoryMaySynchronouslyCloseController(t *testing.T) {
 		}
 	}
 
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return replacement, nil
 	}, func(s session.Session) Runner {
 		buildCalls++
@@ -296,9 +303,7 @@ func TestControllerRunnerFactoryMaySynchronouslyCloseController(t *testing.T) {
 		if s != replacement {
 			recordCallbackErr(fmt.Errorf("replacement build session = %#v, want replacement", s))
 		}
-		if err := controller.Close(); err != nil {
-			recordCallbackErr(fmt.Errorf("Close() error = %v, want nil", err))
-		}
+		controller.RequestClose()
 		return runnerFunc(noopRun)
 	})
 	if err != nil {
@@ -314,7 +319,7 @@ func TestControllerRunnerFactoryMaySynchronouslyCloseController(t *testing.T) {
 			t.Fatalf("NewSession() error = %v, want ErrClosed", err)
 		}
 	case <-time.After(250 * time.Millisecond):
-		t.Fatal("NewSession() timed out; synchronous Close likely deadlocked")
+		t.Fatal("NewSession() timed out after RequestClose")
 	}
 
 	callbackMu.Lock()
@@ -353,7 +358,7 @@ func TestControllerInfoUsesActiveRuntimeUntilNewSessionRefreshesFromHeader(t *te
 	next := &fakeSession{header: session.Header{
 		Version: 1, ID: "new", Workspace: "/new-workspace", Provider: "openai-compatible", Profile: "header-next", Model: "header-next-model",
 	}}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return next, nil
 	}, func(session.Session) Runner {
 		return runnerFunc(noopRun)
@@ -393,7 +398,7 @@ func TestControllerNewSessionAfterResumeResetsRuntimeInfoAndRunnerFromNewHeader(
 	resumedRunner := &recordingRunner{}
 	freshRunner := &recordingRunner{}
 	buildCalls := 0
-	controller, err := New(initial, func() (session.Session, error) {
+	controller, err := newControllerFixture(initial, func() (session.Session, error) {
 		return fresh, nil
 	}, func(current session.Session) Runner {
 		buildCalls++
@@ -440,7 +445,7 @@ func TestControllerCreatesReplacementBeforeClosingCurrent(t *testing.T) {
 	var order []string
 	current := &fakeSession{header: testHeader("old"), onClose: func() { order = append(order, "close-old") }}
 	next := &fakeSession{header: testHeader("new")}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		order = append(order, "create-new")
 		return next, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) })
@@ -458,16 +463,17 @@ func TestControllerCreatesReplacementBeforeClosingCurrent(t *testing.T) {
 	}
 }
 
-func TestControllerNewSessionCreationFailureKeepsCurrent(t *testing.T) {
+func TestControllerNewSessionBuildFailureKeepsCurrent(t *testing.T) {
 	current := &fakeSession{header: testHeader("old")}
-	controller, err := New(current, func() (session.Session, error) {
-		return nil, errors.New("create failed")
-	}, func(session.Session) Runner { return runnerFunc(noopRun) })
+	controller, err := New(SessionReplacement{Session: current, Runner: runnerFunc(noopRun)},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{}, errors.New("build failed")
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.NewSession(); err == nil || err.Error() != "create failed" {
-		t.Fatalf("NewSession() error = %v, want create failed", err)
+	if err := controller.NewSession(); err == nil || err.Error() != "build failed" {
+		t.Fatalf("NewSession() error = %v, want build failed", err)
 	}
 	if current.CloseCalls() != 0 {
 		t.Fatalf("old close calls = %d, want 0", current.CloseCalls())
@@ -476,19 +482,20 @@ func TestControllerNewSessionCreationFailureKeepsCurrent(t *testing.T) {
 		t.Fatalf("info = %#v", info)
 	}
 	if err := controller.Prompt(context.Background(), "still-open", func(agent.Event) {}); err != nil {
-		t.Fatalf("Prompt() after create failure = %v", err)
+		t.Fatalf("Prompt() after build failure = %v", err)
 	}
 }
 
 func TestControllerNewSessionRejectsNilReplacementSessionAndKeepsCurrent(t *testing.T) {
 	current := &fakeSession{header: testHeader("old")}
-	controller, err := New(current, func() (session.Session, error) {
-		return nil, nil
-	}, func(session.Session) Runner { return runnerFunc(noopRun) })
+	controller, err := New(SessionReplacement{Session: current, Runner: runnerFunc(noopRun)},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{Runner: runnerFunc(noopRun)}, nil
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.NewSession(); err == nil || err.Error() != "session factory returned nil session" {
+	if err := controller.NewSession(); err == nil || err.Error() != "resume factory returned nil session" {
 		t.Fatalf("NewSession() error = %v, want nil session error", err)
 	}
 	if current.CloseCalls() != 0 {
@@ -505,20 +512,14 @@ func TestControllerNewSessionRejectsNilReplacementSessionAndKeepsCurrent(t *test
 func TestControllerNewSessionRejectsNilReplacementRunnerAndKeepsCurrent(t *testing.T) {
 	current := &fakeSession{header: testHeader("old")}
 	replacement := &fakeSession{header: testHeader("new")}
-	var buildCalls int
-	controller, err := New(current, func() (session.Session, error) {
-		return replacement, nil
-	}, func(session.Session) Runner {
-		buildCalls++
-		if buildCalls == 1 {
-			return runnerFunc(noopRun)
-		}
-		return nil
-	})
+	controller, err := New(SessionReplacement{Session: current, Runner: runnerFunc(noopRun)},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{Session: replacement}, nil
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.NewSession(); err == nil || err.Error() != "runner factory returned nil runner" {
+	if err := controller.NewSession(); err == nil || err.Error() != "resume factory returned nil runner" {
 		t.Fatalf("NewSession() error = %v, want nil runner error", err)
 	}
 	if current.CloseCalls() != 0 {
@@ -562,7 +563,7 @@ func TestControllerCloseWaitsForInProgressReplacement(t *testing.T) {
 	current := &fakeSession{header: testHeader("old")}
 	replacement := &fakeSession{header: testHeader("new")}
 	var buildCalls int
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		close(started)
 		<-release
 		return replacement, nil
@@ -630,7 +631,7 @@ func TestControllerInfoExposesOptionalAggregateUsageDefensively(t *testing.T) {
 		usage:   model.Usage{InputTokens: 20, OutputTokens: 6},
 		present: true,
 	}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return session.NewMemory(testHeader("next")), nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) })
 	if err != nil {
@@ -659,7 +660,7 @@ func TestControllerInfoIncludesContextWindowAndSnapshotUsage(t *testing.T) {
 			ContextInputTokensPresent: true,
 		},
 	}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return session.NewMemory(testHeader("next")), nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(runtime))
 	if err != nil {
@@ -677,23 +678,20 @@ func TestControllerInfoIncludesContextWindowAndSnapshotUsage(t *testing.T) {
 	}
 }
 
-func TestControllerNewSessionWithoutBuilderPreservesActiveContextWindow(t *testing.T) {
+func TestControllerNewSessionRequiresBuilder(t *testing.T) {
 	runtime := RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "active-model"}
 	setRuntimeContextWindow(t, &runtime, 32_768)
 	initial := &snapshotSession{Session: &fakeSession{header: testHeader("initial")}, snapshot: session.Snapshot{ContextInputTokensPending: true}}
-	next := &snapshotSession{Session: &fakeSession{header: testHeader("next")}, snapshot: session.Snapshot{ContextInputTokensPending: true}}
-	controller, err := New(initial, func() (session.Session, error) {
-		return next, nil
-	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(runtime))
+	controller, err := New(SessionReplacement{Session: initial, Runner: runnerFunc(noopRun)}, WithRuntimeInfo(runtime))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := controller.NewSession(); err != nil {
-		t.Fatal(err)
+	if err := controller.NewSession(); !errors.Is(err, ErrPersistenceDisabled) {
+		t.Fatalf("NewSession() error = %v, want ErrPersistenceDisabled", err)
 	}
 	got := controller.Info()
-	if got.SessionID != "next" {
+	if got.SessionID != "initial" {
 		t.Fatalf("Info() session = %#v", got)
 	}
 	assertInfoContext(t, got, 32_768, 0, false, true)
@@ -707,7 +705,7 @@ func TestControllerResumePublishesContextWindowOnlyAfterSuccessfulReplacement(t 
 	old := &snapshotSession{Session: &fakeSession{header: testHeader("old")}, snapshot: session.Snapshot{ContextInputTokens: 7, ContextInputTokensPresent: true}}
 	next := &snapshotSession{Session: &fakeSession{header: testHeader("next")}, snapshot: session.Snapshot{ContextInputTokensPending: true}}
 
-	controller, err := New(old, func() (session.Session, error) {
+	controller, err := newControllerFixture(old, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("unused")}, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(oldRuntime), WithSessionBrowser(nil,
 		func(context.Context, string) (SessionReplacement, error) {
@@ -727,7 +725,7 @@ func TestControllerResumePublishesContextWindowOnlyAfterSuccessfulReplacement(t 
 	}
 	assertInfoContext(t, got, 65_536, 0, false, true)
 
-	failing, err := New(old, func() (session.Session, error) {
+	failing, err := newControllerFixture(old, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("unused")}, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) }, WithRuntimeInfo(oldRuntime), WithSessionBrowser(nil,
 		func(context.Context, string) (SessionReplacement, error) {
@@ -760,7 +758,7 @@ func TestControllerHistoryReturnsDefensiveSnapshot(t *testing.T) {
 		}},
 		Usage: &model.Usage{InputTokens: 1, OutputTokens: 2},
 	}}}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) })
 	if err != nil {
@@ -794,7 +792,7 @@ func TestControllerHistoryReturnsDefensiveSnapshot(t *testing.T) {
 
 func TestControllerCloseIsIdempotent(t *testing.T) {
 	current := &fakeSession{header: testHeader("close")}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) })
 	if err != nil {
@@ -811,6 +809,31 @@ func TestControllerCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestControllerIdleRequestCloseDefersCleanupAndPreservesErrors(t *testing.T) {
+	sessionErr := errors.New("session close failed")
+	runnerErr := errors.New("runner close failed")
+	current := &fakeSession{header: testHeader("close"), closeErr: sessionErr}
+	runner := &lifecycleRunner{closeErr: runnerErr}
+	controller, err := New(SessionReplacement{Session: current, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controller.RequestClose()
+	if current.CloseCalls() != 0 || runner.CloseCalls() != 0 {
+		t.Fatalf("RequestClose invoked closers: session=%d runner=%d", current.CloseCalls(), runner.CloseCalls())
+	}
+	for range 2 {
+		err := controller.Close()
+		if !errors.Is(err, sessionErr) || !errors.Is(err, runnerErr) {
+			t.Fatalf("Close() error = %v, want both cleanup errors", err)
+		}
+	}
+	if current.CloseCalls() != 1 || runner.CloseCalls() != 1 {
+		t.Fatalf("close calls: session=%d runner=%d, want 1 each", current.CloseCalls(), runner.CloseCalls())
+	}
+}
+
 func TestControllerCloseWaitsForActivePrompt(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -820,7 +843,7 @@ func TestControllerCloseWaitsForActivePrompt(t *testing.T) {
 		return nil
 	})
 	current := &fakeSession{header: testHeader("close-wait")}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return runner })
 	if err != nil {
@@ -857,7 +880,7 @@ func TestControllerCloseWaitsForActivePrompt(t *testing.T) {
 func TestControllerCloseClosesRunnerDirectly(t *testing.T) {
 	current := &fakeSession{header: testHeader("close")}
 	runner := &recordingRunner{}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return runner })
 	if err != nil {
@@ -880,7 +903,7 @@ func TestControllerCloseWaitsForActivePromptThenClosesRunner(t *testing.T) {
 		return nil
 	}}
 	current := &fakeSession{header: testHeader("close-wait")}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return runner })
 	if err != nil {
@@ -929,7 +952,7 @@ func TestControllerCloseFailureClosesReplacementAndController(t *testing.T) {
 	closeErr := errors.New("close old failed")
 	current := &fakeSession{header: testHeader("old"), closeErr: closeErr}
 	replacement := &fakeSession{header: testHeader("new")}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return replacement, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) })
 	if err != nil {
@@ -960,7 +983,7 @@ func TestControllerCloseFailureClosesReplacementAndController(t *testing.T) {
 
 func TestControllerMethodsAfterClose(t *testing.T) {
 	current := &fakeSession{header: testHeader("closed"), messages: []model.Message{{ID: "m1", Role: model.RoleUser}}}
-	controller, err := New(current, func() (session.Session, error) {
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return runnerFunc(noopRun) })
 	if err != nil {
@@ -1065,7 +1088,7 @@ func TestControllerResumeBuildFailureKeepsCurrentUsable(t *testing.T) {
 
 func newControllerWithProfileSwitcher(t *testing.T, initial session.Session, runner Runner, profiles []string, switchProfile ProfileSwitchFactory) *Controller {
 	t.Helper()
-	controller, err := New(initial, func() (session.Session, error) {
+	controller, err := newControllerFixture(initial, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("new")}, nil
 	}, func(session.Session) Runner { return runner },
 		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "old", Model: "old-model"}),
@@ -1286,7 +1309,7 @@ func TestControllerMemoryFacadeDelegatesToManager(t *testing.T) {
 	}
 	userScope := memory.Scope{Namespace: "user", ID: "u1"}
 	workspaceScope := memory.Scope{Namespace: "workspace", ID: "w1"}
-	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
+	controller, err := newControllerFixture(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager, userScope, workspaceScope))
 	if err != nil {
@@ -1341,7 +1364,7 @@ func TestControllerMemoryScopesAndGetDelegateToManager(t *testing.T) {
 	manager := &fakeMemoryManager{getResult: memory.Record{ID: "rec-1", Revision: 3}}
 	userScope := memory.Scope{Namespace: "user", ID: "u1"}
 	workspaceScope := memory.Scope{Namespace: "workspace", ID: "w1"}
-	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
+	controller, err := newControllerFixture(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return &recordingRunner{} }, WithMemory(manager, userScope, workspaceScope))
 	if err != nil {
@@ -1522,7 +1545,7 @@ func TestControllerResumeIsMutuallyExclusiveWithPromptNewAndResume(t *testing.T)
 	t.Run("new active", func(t *testing.T) {
 		entered, release := make(chan struct{}), make(chan struct{})
 		old := &fakeSession{header: testHeader("old")}
-		controller, err := New(old, func() (session.Session, error) {
+		controller, err := newControllerFixture(old, func() (session.Session, error) {
 			close(entered)
 			<-release
 			return &fakeSession{header: testHeader("new")}, nil
@@ -1659,7 +1682,7 @@ func TestControllerResumeOldCloseFailureIsFatalAndClosesCandidateOnce(t *testing
 	}
 }
 
-func TestControllerResumeFactoryMaySynchronouslyCloseController(t *testing.T) {
+func TestControllerResumeFactoryMayRequestClose(t *testing.T) {
 	old := &fakeSession{header: testHeader("old"), messages: []model.Message{{ID: "m1", Role: model.RoleUser}}}
 	candidate := &fakeSession{header: testHeader("next")}
 	var controller *Controller
@@ -1673,9 +1696,7 @@ func TestControllerResumeFactoryMaySynchronouslyCloseController(t *testing.T) {
 			if _, err := controller.ListSessions(context.Background(), 20); err != nil {
 				callbackErr = err
 			}
-			if err := controller.Close(); err != nil {
-				callbackErr = err
-			}
+			controller.RequestClose()
 			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
 		})
 
@@ -1696,7 +1717,7 @@ func TestControllerResumeFactoryMaySynchronouslyCloseController(t *testing.T) {
 }
 
 func TestControllerExternalCloseWaitsForReentrantFactoryCloseAndCandidateCleanup(t *testing.T) {
-	factoryCloseDone := make(chan error, 1)
+	factoryCloseDone := make(chan struct{}, 1)
 	releaseFactory := make(chan struct{})
 	cleanupEntered := make(chan struct{})
 	releaseCleanup := make(chan struct{})
@@ -1709,7 +1730,8 @@ func TestControllerExternalCloseWaitsForReentrantFactoryCloseAndCandidateCleanup
 	var controller *Controller
 	controller = newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
 		func(context.Context, string) (SessionReplacement, error) {
-			factoryCloseDone <- controller.Close()
+			controller.RequestClose()
+			factoryCloseDone <- struct{}{}
 			<-releaseFactory
 			return SessionReplacement{Session: candidate, Runner: candidateRunner}, nil
 		})
@@ -1719,9 +1741,7 @@ func TestControllerExternalCloseWaitsForReentrantFactoryCloseAndCandidateCleanup
 		_, err := controller.ResumeSession(context.Background(), candidate.Path())
 		resumeDone <- err
 	}()
-	if err := awaitError(t, factoryCloseDone, "reentrant factory close"); err != nil {
-		t.Fatalf("reentrant factory Close() error = %v", err)
-	}
+	awaitSignal(t, factoryCloseDone, "factory close request")
 
 	externalCloseDone := make(chan error, 1)
 	go func() { externalCloseDone <- controller.Close() }()
@@ -1759,14 +1779,15 @@ func TestControllerExternalCloseWaitsForReentrantFactoryCloseAndCandidateCleanup
 
 func TestControllerExternalCloseWaitsForReentrantCandidateCleanupClose(t *testing.T) {
 	cleanupEntered := make(chan struct{})
-	cleanupCloseDone := make(chan error, 1)
+	cleanupCloseDone := make(chan struct{}, 1)
 	releaseCleanup := make(chan struct{})
 	old := &fakeSession{header: testHeader("old")}
 	candidate := &fakeSession{header: testHeader("next")}
 	var controller *Controller
 	candidate.onClose = func() {
 		close(cleanupEntered)
-		cleanupCloseDone <- controller.Close()
+		controller.RequestClose()
+		cleanupCloseDone <- struct{}{}
 		<-releaseCleanup
 	}
 	buildErr := errors.New("build failed after opening candidate")
@@ -1781,9 +1802,7 @@ func TestControllerExternalCloseWaitsForReentrantCandidateCleanupClose(t *testin
 		resumeDone <- err
 	}()
 	awaitSignal(t, cleanupEntered, "candidate cleanup callback start")
-	if err := awaitError(t, cleanupCloseDone, "reentrant candidate cleanup close"); err != nil {
-		t.Fatalf("reentrant candidate cleanup Close() error = %v", err)
-	}
+	awaitSignal(t, cleanupCloseDone, "candidate cleanup close request")
 
 	externalCloseDone := make(chan error, 1)
 	go func() { externalCloseDone <- controller.Close() }()
@@ -1881,46 +1900,6 @@ func TestControllerReplacementCallbackCloseIsScopedToReceiver(t *testing.T) {
 	}
 	if err := controllerA.Close(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestControllerResumeFactoryDeeplyWrappedCloseIsReentrant(t *testing.T) {
-	old := &fakeSession{header: testHeader("old")}
-	candidate := &fakeSession{header: testHeader("next")}
-	var controller *Controller
-	controller = newControllerWithRunnerAndBrowser(t, old, &recordingRunner{}, nil,
-		func(context.Context, string) (SessionReplacement, error) {
-			if err := closeControllerDeeply(controller, 128); err != nil {
-				return SessionReplacement{}, err
-			}
-			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
-		})
-
-	resumeDone := make(chan error, 1)
-	go func() {
-		_, err := controller.ResumeSession(context.Background(), candidate.Path())
-		resumeDone <- err
-	}()
-
-	var resumeErr error
-	timedOut := false
-	select {
-	case resumeErr = <-resumeDone:
-	case <-time.After(time.Second):
-		timedOut = true
-		controller.mu.Lock()
-		controller.finishReplacingLocked(controller.replace)
-		controller.mu.Unlock()
-		resumeErr = awaitError(t, resumeDone, "resume after deadlock cleanup")
-	}
-	if timedOut {
-		t.Fatal("ResumeSession() timed out; deeply wrapped synchronous Close deadlocked")
-	}
-	if !errors.Is(resumeErr, ErrClosed) {
-		t.Fatalf("ResumeSession() error = %v, want ErrClosed", resumeErr)
-	}
-	if old.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
-		t.Fatalf("close calls = old %d, candidate %d; want 1 each", old.CloseCalls(), candidate.CloseCalls())
 	}
 }
 
@@ -2125,7 +2104,7 @@ func TestControllerReplacementRejectsPromptCompactNewAndResume(t *testing.T) {
 			release := make(chan struct{})
 			current := &fakeSession{header: testHeader("current")}
 			candidate := &fakeSession{header: testHeader("candidate")}
-			controller, err := New(current, func() (session.Session, error) {
+			controller, err := newControllerFixture(current, func() (session.Session, error) {
 				if replacementKind != "new" {
 					return nil, errors.New("must not run")
 				}
@@ -2233,66 +2212,11 @@ func TestControllerOperationCancellationReleasesLifecycle(t *testing.T) {
 	}
 }
 
-func TestControllerZeroOwnerCloseFromPromptAndCompactCallbacksDoesNotDeadlock(t *testing.T) {
-	for _, operation := range []string{"prompt", "compact"} {
-		t.Run(operation, func(t *testing.T) {
-			current := &fakeSession{header: testHeader(operation)}
-			var controller *Controller
-			runner := &lifecycleRunner{
-				run: func(_ context.Context, _ string, emit func(agent.Event)) error {
-					emit(agent.Event{Type: agent.EventAgentStarted})
-					return nil
-				},
-				compact: func(_ context.Context, _ string, emit func(agent.Event)) (agent.CompactionResult, error) {
-					emit(agent.Event{Type: agent.EventCompactionStarted})
-					return agent.CompactionResult{CheckpointID: "checkpoint"}, nil
-				},
-			}
-			var err error
-			controller, err = New(current, func() (session.Session, error) {
-				return &fakeSession{header: testHeader("next")}, nil
-			}, func(session.Session) Runner { return runner })
-			if err != nil {
-				t.Fatal(err)
-			}
-			controller.ownerIDSource = func() uint64 { return 0 }
-
-			var callbackErr error
-			done := make(chan error, 1)
-			go func() {
-				emit := func(agent.Event) { callbackErr = controller.Close() }
-				if operation == "prompt" {
-					done <- controller.Prompt(context.Background(), "prompt", emit)
-					return
-				}
-				_, compactErr := controller.Compact(context.Background(), "focus", emit)
-				done <- compactErr
-			}()
-
-			if operationErr := awaitError(t, done, operation+" with zero owner IDs"); operationErr != nil {
-				t.Fatal(operationErr)
-			}
-			if callbackErr != nil {
-				t.Fatalf("callback Close() error = %v", callbackErr)
-			}
-			if current.CloseCalls() != 1 {
-				t.Fatalf("close calls = %d, want 1", current.CloseCalls())
-			}
-			if err := controller.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if current.CloseCalls() != 1 {
-				t.Fatalf("close calls after idempotent Close = %d, want 1", current.CloseCalls())
-			}
-		})
-	}
-}
-
-func TestControllerZeroOwnerCloseOutsideCallbackWaits(t *testing.T) {
+func TestControllerExternalCloseWaitsForActivePrompt(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	current := &fakeSession{header: testHeader("zero-owner-external")}
-	controller, err := New(current, func() (session.Session, error) {
+	current := &fakeSession{header: testHeader("external-close")}
+	controller, err := newControllerFixture(current, func() (session.Session, error) {
 		return nil, errors.New("unused")
 	}, func(session.Session) Runner {
 		return &lifecycleRunner{run: func(context.Context, string, func(agent.Event)) error {
@@ -2304,58 +2228,9 @@ func TestControllerZeroOwnerCloseOutsideCallbackWaits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller.ownerIDSource = func() uint64 { return 0 }
-
 	promptDone := make(chan error, 1)
 	go func() { promptDone <- controller.Prompt(context.Background(), "prompt", nil) }()
-	awaitSignal(t, entered, "zero-owner prompt")
-	closeDone := make(chan error, 1)
-	go func() { closeDone <- controller.Close() }()
-	select {
-	case closeErr := <-closeDone:
-		t.Fatalf("zero-owner Close() outside callback returned early: %v", closeErr)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(release)
-	if err := awaitError(t, promptDone, "zero-owner prompt"); err != nil {
-		t.Fatal(err)
-	}
-	if err := awaitError(t, closeDone, "zero-owner external close"); err != nil {
-		t.Fatal(err)
-	}
-	if current.CloseCalls() != 1 {
-		t.Fatalf("close calls = %d, want 1", current.CloseCalls())
-	}
-}
-
-func TestControllerExternalCloseWithDistinctOwnerIDWaits(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	current := &fakeSession{header: testHeader("normal-owner-external")}
-	controller, err := New(current, func() (session.Session, error) {
-		return nil, errors.New("unused")
-	}, func(session.Session) Runner {
-		return &lifecycleRunner{run: func(context.Context, string, func(agent.Event)) error {
-			close(entered)
-			<-release
-			return nil
-		}}
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var ownerCalls uint64
-	controller.ownerIDSource = func() uint64 {
-		ownerCalls++
-		if ownerCalls == 1 {
-			return 101
-		}
-		return 202
-	}
-
-	promptDone := make(chan error, 1)
-	go func() { promptDone <- controller.Prompt(context.Background(), "prompt", nil) }()
-	awaitSignal(t, entered, "normal-owner prompt")
+	awaitSignal(t, entered, "active prompt")
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- controller.Close() }()
 	select {
@@ -2364,10 +2239,10 @@ func TestControllerExternalCloseWithDistinctOwnerIDWaits(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(release)
-	if err := awaitError(t, promptDone, "normal-owner prompt"); err != nil {
+	if err := awaitError(t, promptDone, "active prompt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := awaitError(t, closeDone, "normal-owner external close"); err != nil {
+	if err := awaitError(t, closeDone, "external close"); err != nil {
 		t.Fatal(err)
 	}
 	if current.CloseCalls() != 1 {
@@ -2375,31 +2250,23 @@ func TestControllerExternalCloseWithDistinctOwnerIDWaits(t *testing.T) {
 	}
 }
 
-func TestControllerZeroOwnerCloseFromReplacementBuildDoesNotDeadlock(t *testing.T) {
+func TestControllerRequestCloseFromReplacementBuildDoesNotDeadlock(t *testing.T) {
 	current := &fakeSession{header: testHeader("current")}
 	candidate := &fakeSession{header: testHeader("candidate")}
 	var controller *Controller
-	var callbackErr error
 	var err error
-	controller, err = New(current, func() (session.Session, error) {
-		return nil, errors.New("legacy factory must not run")
-	}, func(session.Session) Runner { return &recordingRunner{} },
+	controller, err = New(SessionReplacement{Session: current, Runner: &recordingRunner{}},
 		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
-			callbackErr = controller.Close()
+			controller.RequestClose()
 			return SessionReplacement{Session: candidate, Runner: &recordingRunner{}}, nil
 		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller.ownerIDSource = func() uint64 { return 0 }
-
 	done := make(chan error, 1)
 	go func() { done <- controller.NewSession() }()
 	if replacementErr := awaitError(t, done, "zero-owner replacement build"); !errors.Is(replacementErr, ErrClosed) {
 		t.Fatalf("NewSession() error = %v, want ErrClosed", replacementErr)
-	}
-	if callbackErr != nil {
-		t.Fatalf("callback Close() error = %v", callbackErr)
 	}
 	if current.CloseCalls() != 1 || candidate.CloseCalls() != 1 {
 		t.Fatalf("close calls = current %d candidate %d, want 1 each", current.CloseCalls(), candidate.CloseCalls())
@@ -2412,7 +2279,7 @@ func TestControllerZeroOwnerCloseFromReplacementBuildDoesNotDeadlock(t *testing.
 	}
 }
 
-func TestControllerCloseFromPromptAndCompactionCallbacksDoesNotDeadlock(t *testing.T) {
+func TestControllerRequestCloseFromPromptAndCompactionCallbacksDoesNotDeadlock(t *testing.T) {
 	for _, operation := range []string{"prompt", "compact"} {
 		t.Run(operation, func(t *testing.T) {
 			current := &fakeSession{header: testHeader(operation)}
@@ -2428,15 +2295,18 @@ func TestControllerCloseFromPromptAndCompactionCallbacksDoesNotDeadlock(t *testi
 				},
 			}
 			var err error
-			controller, err = New(current, func() (session.Session, error) {
+			controller, err = newControllerFixture(current, func() (session.Session, error) {
 				return &fakeSession{header: testHeader("next")}, nil
 			}, func(session.Session) Runner { return runner })
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			done := make(chan error, 1)
-			emit := func(agent.Event) { done <- controller.Close() }
+			done := make(chan struct{}, 1)
+			emit := func(agent.Event) {
+				controller.RequestClose()
+				done <- struct{}{}
+			}
 			operationDone := make(chan error, 1)
 			go func() {
 				if operation == "prompt" {
@@ -2446,9 +2316,7 @@ func TestControllerCloseFromPromptAndCompactionCallbacksDoesNotDeadlock(t *testi
 				_, compactErr := controller.Compact(context.Background(), "focus", emit)
 				operationDone <- compactErr
 			}()
-			if closeErr := awaitError(t, done, "reentrant close"); closeErr != nil {
-				t.Fatal(closeErr)
-			}
+			awaitSignal(t, done, "close request")
 			if operationErr := awaitError(t, operationDone, operation); operationErr != nil {
 				t.Fatal(operationErr)
 			}
@@ -2462,10 +2330,10 @@ func TestControllerCloseFromPromptAndCompactionCallbacksDoesNotDeadlock(t *testi
 	}
 }
 
-func TestControllerExternalCloseWaitsForReentrantOperationClose(t *testing.T) {
+func TestControllerExternalCloseWaitsForOperationCloseRequest(t *testing.T) {
 	for _, operation := range []string{"prompt", "compact"} {
 		t.Run(operation, func(t *testing.T) {
-			reentrantDone := make(chan error, 1)
+			reentrantDone := make(chan struct{}, 1)
 			emitted := make(chan struct{})
 			release := make(chan struct{})
 			current := &fakeSession{header: testHeader(operation)}
@@ -2485,11 +2353,14 @@ func TestControllerExternalCloseWaitsForReentrantOperationClose(t *testing.T) {
 				},
 			}
 			var err error
-			controller, err = New(current, func() (session.Session, error) { return nil, errors.New("unused") }, func(session.Session) Runner { return runner })
+			controller, err = newControllerFixture(current, func() (session.Session, error) { return nil, errors.New("unused") }, func(session.Session) Runner { return runner })
 			if err != nil {
 				t.Fatal(err)
 			}
-			emit := func(agent.Event) { reentrantDone <- controller.Close() }
+			emit := func(agent.Event) {
+				controller.RequestClose()
+				reentrantDone <- struct{}{}
+			}
 			operationDone := make(chan error, 1)
 			go func() {
 				if operation == "prompt" {
@@ -2500,9 +2371,7 @@ func TestControllerExternalCloseWaitsForReentrantOperationClose(t *testing.T) {
 				}
 			}()
 			awaitSignal(t, emitted, operation+" event")
-			if closeErr := awaitError(t, reentrantDone, "reentrant close"); closeErr != nil {
-				t.Fatal(closeErr)
-			}
+			awaitSignal(t, reentrantDone, "close request")
 			externalDone := make(chan error, 1)
 			go func() { externalDone <- controller.Close() }()
 			select {
@@ -2556,15 +2425,8 @@ func TestControllerNewSessionBuilderUsesRuntimeAfterResumeAndCommitsReadyReplace
 	freshRunner := &recordingRunner{}
 	resumedRuntime := RuntimeInfo{Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model", ContextWindow: 65_536}
 	var gotRuntime RuntimeInfo
-	legacyCreateCalls := 0
-	legacyBuildCalls := 0
-	controller, err := New(initial, func() (session.Session, error) {
-		legacyCreateCalls++
-		return nil, errors.New("legacy create must not run")
-	}, func(session.Session) Runner {
-		legacyBuildCalls++
-		return initialRunner
-	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "startup", Model: "startup-model", ContextWindow: 128_000}),
+	controller, err := New(SessionReplacement{Session: initial, Runner: initialRunner},
+		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "startup", Model: "startup-model", ContextWindow: 128_000}),
 		WithSessionBrowser(nil, func(context.Context, string) (SessionReplacement, error) {
 			return SessionReplacement{Session: resumed, Runner: resumedRunner, RuntimeInfo: resumedRuntime}, nil
 		}),
@@ -2583,9 +2445,6 @@ func TestControllerNewSessionBuilderUsesRuntimeAfterResumeAndCommitsReadyReplace
 	}
 	if gotRuntime != resumedRuntime {
 		t.Fatalf("new-session runtime = %#v, want resumed %#v", gotRuntime, resumedRuntime)
-	}
-	if legacyCreateCalls != 0 || legacyBuildCalls != 1 {
-		t.Fatalf("legacy calls = create %d build %d, want 0 and initial build only", legacyCreateCalls, legacyBuildCalls)
 	}
 	if got := controller.Info(); got.SessionID != "fresh" || got.Profile != "resumed" || got.Model != "resumed-model" {
 		t.Fatalf("Info() after new = %#v", got)
@@ -2856,40 +2715,37 @@ func TestControllerSandboxInfoIsCopiedAndPreservedAcrossReplacementAndRollback(t
 	failed := &fakeSession{header: testHeader("sandbox-failed")}
 	var newInput RuntimeInfo
 
-	controller, err := New(initial, func() (session.Session, error) {
-		return nil, errors.New("legacy create must not run")
-	}, func(session.Session) Runner {
-		return &recordingRunner{}
-	}, WithRuntimeInfo(initialRuntime), WithNewSessionBuilder(func(_ context.Context, current RuntimeInfo) (SessionReplacement, error) {
-		newInput = current
-		return SessionReplacement{
-			Session: fresh,
-			Runner:  &recordingRunner{},
-			RuntimeInfo: RuntimeInfo{
-				Provider: "openai-compatible", Profile: "fresh", Model: "fresh-model", ContextWindow: 65_536,
-				Sandbox: replacementSandbox,
-			},
-		}, nil
-	}), WithSessionBrowser(nil, func(_ context.Context, path string) (SessionReplacement, error) {
-		if strings.Contains(path, "failed") {
+	controller, err := New(SessionReplacement{Session: initial, Runner: &recordingRunner{}},
+		WithRuntimeInfo(initialRuntime), WithNewSessionBuilder(func(_ context.Context, current RuntimeInfo) (SessionReplacement, error) {
+			newInput = current
 			return SessionReplacement{
-				Session: failed,
+				Session: fresh,
 				Runner:  &recordingRunner{},
 				RuntimeInfo: RuntimeInfo{
-					Provider: "openai-compatible", Profile: "failed", Model: "failed-model",
-					Sandbox: SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, Reason: SandboxReasonSelfTestFailed},
+					Provider: "openai-compatible", Profile: "fresh", Model: "fresh-model", ContextWindow: 65_536,
+					Sandbox: replacementSandbox,
 				},
-			}, errors.New("replacement failed")
-		}
-		return SessionReplacement{
-			Session: resumed,
-			Runner:  &recordingRunner{},
-			RuntimeInfo: RuntimeInfo{
-				Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model",
-				Sandbox: replacementSandbox,
-			},
-		}, nil
-	}))
+			}, nil
+		}), WithSessionBrowser(nil, func(_ context.Context, path string) (SessionReplacement, error) {
+			if strings.Contains(path, "failed") {
+				return SessionReplacement{
+					Session: failed,
+					Runner:  &recordingRunner{},
+					RuntimeInfo: RuntimeInfo{
+						Provider: "openai-compatible", Profile: "failed", Model: "failed-model",
+						Sandbox: SandboxInfo{Mode: SandboxUnavailable, Network: SandboxNetworkDenied, Reason: SandboxReasonSelfTestFailed},
+					},
+				}, errors.New("replacement failed")
+			}
+			return SessionReplacement{
+				Session: resumed,
+				Runner:  &recordingRunner{},
+				RuntimeInfo: RuntimeInfo{
+					Provider: "openai-compatible", Profile: "resumed", Model: "resumed-model",
+					Sandbox: replacementSandbox,
+				},
+			}, nil
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2937,11 +2793,8 @@ func TestControllerCanceledResumeKeepsProcessSandboxDespiteConflictingRuntime(t 
 	factoryEntered := make(chan struct{})
 	releaseFactory := make(chan struct{})
 
-	controller, err := New(old, func() (session.Session, error) {
-		return nil, errors.New("legacy create must not run")
-	}, func(session.Session) Runner {
-		return &recordingRunner{}
-	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "model", Sandbox: processSandbox}),
+	controller, err := New(SessionReplacement{Session: old, Runner: &recordingRunner{}},
+		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "model", Sandbox: processSandbox}),
 		WithSessionBrowser(nil, func(context.Context, string) (SessionReplacement, error) {
 			close(factoryEntered)
 			<-releaseFactory
@@ -2978,32 +2831,31 @@ func TestControllerCanceledResumeKeepsProcessSandboxDespiteConflictingRuntime(t 
 	}
 }
 
-func TestControllerSandboxInfoSurvivesLegacyNewSessionFallback(t *testing.T) {
+func TestControllerSandboxInfoSurvivesNewSessionBuilder(t *testing.T) {
 	processSandbox := SandboxInfo{Mode: SandboxOff, Network: SandboxNetworkUnconfined, BashAvailable: true, Reason: SandboxReasonNone}
-	controller, err := New(&fakeSession{header: testHeader("legacy-sandbox-old")}, func() (session.Session, error) {
-		return &fakeSession{header: testHeader("legacy-sandbox-new")}, nil
-	}, func(session.Session) Runner {
-		return &recordingRunner{}
-	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "model", Sandbox: processSandbox}))
+	controller, err := New(
+		SessionReplacement{Session: &fakeSession{header: testHeader("builder-sandbox-old")}, Runner: &recordingRunner{}},
+		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "active", Model: "model", Sandbox: processSandbox}),
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{Session: &fakeSession{header: testHeader("builder-sandbox-new")}, Runner: &recordingRunner{}}, nil
+		}),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := controller.NewSession(); err != nil {
 		t.Fatal(err)
 	}
-	if got := controller.Info(); got.SessionID != "legacy-sandbox-new" || got.Sandbox != processSandbox {
-		t.Fatalf("Info() after fallback /new = %#v", got)
+	if got := controller.Info(); got.SessionID != "builder-sandbox-new" || got.Sandbox != processSandbox {
+		t.Fatalf("Info() after /new = %#v", got)
 	}
 }
 
 func TestControllerSandboxInfoIsStableDuringConcurrentInfoAndReplacements(t *testing.T) {
 	processSandbox := SandboxInfo{Mode: SandboxSeatbelt, Network: SandboxNetworkAllowed, BashAvailable: true, Reason: SandboxReasonNone}
 	sequence := 0
-	controller, err := New(&fakeSession{header: testHeader("sandbox-race-initial")}, func() (session.Session, error) {
-		return nil, errors.New("legacy create must not run")
-	}, func(session.Session) Runner {
-		return &recordingRunner{}
-	}, WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "race", Model: "model", Sandbox: processSandbox}),
+	controller, err := New(SessionReplacement{Session: &fakeSession{header: testHeader("sandbox-race-initial")}, Runner: &recordingRunner{}},
+		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "race", Model: "model", Sandbox: processSandbox}),
 		WithNewSessionBuilder(func(_ context.Context, current RuntimeInfo) (SessionReplacement, error) {
 			if current.Sandbox != processSandbox {
 				return SessionReplacement{}, fmt.Errorf("builder observed Sandbox %#v", current.Sandbox)
@@ -3079,8 +2931,9 @@ func noopRun(context.Context, string, func(agent.Event)) error { return nil }
 // lifecycleRunner gives lifecycle tests independent blocking prompt and compact
 // entry points while remaining a complete app.Runner test double.
 type lifecycleRunner struct {
-	run     func(context.Context, string, func(agent.Event)) error
-	compact func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
+	run      func(context.Context, string, func(agent.Event)) error
+	compact  func(context.Context, string, func(agent.Event)) (agent.CompactionResult, error)
+	closeErr error
 
 	mu         sync.Mutex
 	closeCalls int
@@ -3104,7 +2957,7 @@ func (r *lifecycleRunner) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closeCalls++
-	return nil
+	return r.closeErr
 }
 
 func (r *lifecycleRunner) CloseCalls() int {
@@ -3230,7 +3083,7 @@ func (r taskRunner) Tasks() *agent.Tasks { return r.tasks }
 func TestControllerTasksReturnsRunnerTasksWhenSupported(t *testing.T) {
 	tasks := agent.NewTasks()
 	initial := &fakeSession{header: testHeader("initial")}
-	controller, err := New(initial, func() (session.Session, error) {
+	controller, err := newControllerFixture(initial, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner {
 		return taskRunner{runnerFunc: runnerFunc(noopRun), tasks: tasks}
@@ -3238,14 +3091,14 @@ func TestControllerTasksReturnsRunnerTasksWhenSupported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := controller.Tasks(); got != tasks {
-		t.Fatalf("Tasks() = %p, want %p", got, tasks)
+	if got, ok := controller.Tasks().(taskView); !ok || got.tasks != tasks {
+		t.Fatalf("Tasks() = %#v, want view of %p", got, tasks)
 	}
 }
 
 func TestControllerTasksNilWhenRunnerLacksTaskLister(t *testing.T) {
 	initial := &fakeSession{header: testHeader("initial")}
-	controller, err := New(initial, func() (session.Session, error) {
+	controller, err := newControllerFixture(initial, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner { return &recordingRunner{} })
 	if err != nil {
@@ -3261,7 +3114,7 @@ func TestControllerTasksReflectsRunnerAfterNewSession(t *testing.T) {
 	freshTasks := agent.NewTasks()
 	initial := &fakeSession{header: testHeader("initial")}
 	fresh := &fakeSession{header: testHeader("fresh")}
-	controller, err := New(initial, func() (session.Session, error) {
+	controller, err := newControllerFixture(initial, func() (session.Session, error) {
 		return fresh, nil
 	}, func(current session.Session) Runner {
 		switch current {
@@ -3276,21 +3129,21 @@ func TestControllerTasksReflectsRunnerAfterNewSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := controller.Tasks(); got != initialTasks {
-		t.Fatalf("Tasks() before NewSession = %p, want %p", got, initialTasks)
+	if got, ok := controller.Tasks().(taskView); !ok || got.tasks != initialTasks {
+		t.Fatalf("Tasks() before NewSession = %#v, want view of %p", got, initialTasks)
 	}
 	if err := controller.NewSession(); err != nil {
 		t.Fatal(err)
 	}
-	if got := controller.Tasks(); got != freshTasks {
-		t.Fatalf("Tasks() after NewSession = %p, want %p", got, freshTasks)
+	if got, ok := controller.Tasks().(taskView); !ok || got.tasks != freshTasks {
+		t.Fatalf("Tasks() after NewSession = %#v, want view of %p", got, freshTasks)
 	}
 }
 
 func TestControllerTasksNilAfterClose(t *testing.T) {
 	tasks := agent.NewTasks()
 	initial := &fakeSession{header: testHeader("initial")}
-	controller, err := New(initial, func() (session.Session, error) {
+	controller, err := newControllerFixture(initial, func() (session.Session, error) {
 		return &fakeSession{header: testHeader("next")}, nil
 	}, func(session.Session) Runner {
 		return taskRunner{runnerFunc: runnerFunc(noopRun), tasks: tasks}
@@ -3421,34 +3274,58 @@ func setRuntimeContextWindow(t *testing.T, runtime *RuntimeInfo, value int) {
 
 func newTestController(t *testing.T, runner Runner) *Controller {
 	t.Helper()
-	controller, err := New(&fakeSession{header: testHeader("initial")}, func() (session.Session, error) {
-		return &fakeSession{header: testHeader("next")}, nil
-	}, func(session.Session) Runner { return runner })
+	controller, err := New(SessionReplacement{Session: &fakeSession{header: testHeader("initial")}, Runner: runner},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{Session: &fakeSession{header: testHeader("next")}, Runner: runner}, nil
+		}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return controller
 }
 
+// newControllerFixture keeps older lifecycle tests focused on replacement
+// behavior while exercising the concrete SessionReplacement constructor.
+func newControllerFixture(initial session.Session, create func() (session.Session, error), build func(session.Session) Runner, options ...Option) (*Controller, error) {
+	initialRunner := build(initial)
+	replacementBuilder := WithNewSessionBuilder(func(_ context.Context, current RuntimeInfo) (SessionReplacement, error) {
+		replacement, err := create()
+		if err != nil {
+			return SessionReplacement{Session: replacement}, err
+		}
+		if replacement == nil {
+			return SessionReplacement{}, errors.New("replacement builder returned nil session")
+		}
+		runner := build(replacement)
+		if runner == nil {
+			return SessionReplacement{Session: replacement}, errors.New("replacement builder returned nil runner")
+		}
+		header := replacement.Header()
+		return SessionReplacement{
+			Session: replacement,
+			Runner:  runner,
+			RuntimeInfo: RuntimeInfo{
+				Provider: header.Provider, Profile: header.Profile, Model: header.Model,
+				ContextWindow: current.ContextWindow, Sandbox: current.Sandbox,
+			},
+		}, nil
+	})
+	options = append([]Option{replacementBuilder}, options...)
+	return New(SessionReplacement{Session: initial, Runner: initialRunner}, options...)
+}
+
 func newControllerWithRunnerAndBrowser(t *testing.T, initial session.Session, runner Runner, list SessionLister, resume ResumeFactory) *Controller {
 	t.Helper()
-	controller, err := New(initial, func() (session.Session, error) {
-		return &fakeSession{header: testHeader("new")}, nil
-	}, func(session.Session) Runner { return runner },
+	controller, err := New(SessionReplacement{Session: initial, Runner: runner},
+		WithNewSessionBuilder(func(context.Context, RuntimeInfo) (SessionReplacement, error) {
+			return SessionReplacement{Session: &fakeSession{header: testHeader("new")}, Runner: runner}, nil
+		}),
 		WithRuntimeInfo(RuntimeInfo{Provider: "openai-compatible", Profile: "old", Model: "old-model"}),
 		WithSessionBrowser(list, resume))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return controller
-}
-
-//go:noinline
-func closeControllerDeeply(controller *Controller, depth int) error {
-	if depth == 0 {
-		return controller.Close()
-	}
-	return closeControllerDeeply(controller, depth-1)
 }
 
 func pollError(result <-chan error) (error, bool) {

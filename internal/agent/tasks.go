@@ -27,24 +27,25 @@ const (
 // Task is one sub-agent task record, as shown by agent_status and the
 // frontends.
 type Task struct {
-	ID          string
-	Name        string
-	Agent       string
-	Description string
-	Prompt      string
-	Context     string
-	Model       string
-	Status      TaskStatus
-	CreatedAt   time.Time
-	StartedAt   time.Time
-	FinishedAt  time.Time
-	Steps       int
-	ToolCalls   int
-	LastTool    string
-	LastText    string
-	Usage       model.Usage
-	Result      string
-	Error       string
+	ID           string
+	Name         string
+	Agent        string
+	Description  string
+	Prompt       string
+	Context      string
+	Model        string
+	Status       TaskStatus
+	CreatedAt    time.Time
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	Steps        int
+	ToolCalls    int
+	LastTool     string
+	LastText     string
+	Usage        model.Usage
+	UsagePresent bool
+	Result       string
+	Error        string
 }
 
 // Final reports whether the task has reached a terminal status.
@@ -139,6 +140,16 @@ func (t *Tasks) Add(task Task, cancel func(), history func() []model.Message) (T
 	task.ID = fmt.Sprintf("t%d", t.counter)
 	task.Name = name
 	task.Status = TaskQueued
+	task.StartedAt = time.Time{}
+	task.FinishedAt = time.Time{}
+	task.Steps = 0
+	task.ToolCalls = 0
+	task.LastTool = ""
+	task.LastText = ""
+	task.Usage = model.Usage{}
+	task.UsagePresent = false
+	task.Result = ""
+	task.Error = ""
 	entry := &taskEntry{task: task, cancel: cancel, history: history, done: make(chan struct{})}
 	t.entries[task.ID] = entry
 	t.order = append(t.order, task.ID)
@@ -162,24 +173,84 @@ func (t *Tasks) entryLocked(ref string) (*taskEntry, bool) {
 	return nil, false
 }
 
-// Update applies fn to the task under the registry lock. When the task
-// becomes final for the first time, its Wait channel is closed. Unknown id
-// is a no-op.
-func (t *Tasks) Update(id string, fn func(*Task)) {
-	if t == nil || fn == nil {
+// MarkRunning moves a queued task to running. Invalid or repeated
+// transitions, including unknown IDs, are no-ops.
+func (t *Tasks) MarkRunning(id string, startedAt time.Time) {
+	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	entry, ok := t.entries[id]
-	if !ok {
+	if !ok || entry.task.Status != TaskQueued {
 		return
 	}
-	wasFinal := entry.task.Final()
-	fn(&entry.task)
-	if !wasFinal && entry.task.Final() {
-		close(entry.done)
+	entry.task.Status = TaskRunning
+	entry.task.StartedAt = startedAt
+	t.signalLocked()
+}
+
+// RecordProviderStep records one completed provider round trip. It only
+// applies while the task is running; invalid or unknown updates are no-ops.
+func (t *Tasks) RecordProviderStep(id string, usage model.Usage, text string, usagePresent bool) {
+	if t == nil {
+		return
 	}
+	if usage.Validate() != nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.entries[id]
+	if !ok || entry.task.Status != TaskRunning {
+		return
+	}
+	entry.task.Steps++
+	if usagePresent {
+		entry.task.UsagePresent = true
+		entry.task.Usage.InputTokens += usage.InputTokens
+		entry.task.Usage.OutputTokens += usage.OutputTokens
+		entry.task.Usage.CachedInputTokens += usage.CachedInputTokens
+	}
+	entry.task.LastText = text
+	t.signalLocked()
+}
+
+// RecordToolCall records the latest tool call while the task is running.
+// Invalid or unknown updates are no-ops.
+func (t *Tasks) RecordToolCall(id, lastTool string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.entries[id]
+	if !ok || entry.task.Status != TaskRunning {
+		return
+	}
+	entry.task.ToolCalls++
+	entry.task.LastTool = lastTool
+	t.signalLocked()
+}
+
+// Finish moves a queued or running task to a terminal status, records its
+// final fields, and releases Wait callers. Repeated or invalid transitions,
+// including unknown IDs, are no-ops.
+func (t *Tasks) Finish(id string, status TaskStatus, finishedAt time.Time, result, taskError string) {
+	if t == nil || !(Task{Status: status}).Final() {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry, ok := t.entries[id]
+	if !ok || entry.task.Final() {
+		return
+	}
+	entry.task.Status = status
+	entry.task.FinishedAt = finishedAt
+	entry.task.Result = result
+	entry.task.Error = taskError
+	close(entry.done)
 	t.signalLocked()
 }
 

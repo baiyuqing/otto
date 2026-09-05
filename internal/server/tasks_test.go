@@ -31,9 +31,7 @@ func newTaskTestController(t *testing.T, id string, tasks *agent.Tasks, run func
 	t.Helper()
 	hdr := session.Header{ID: id, Workspace: "/tmp/ws", Provider: "openai-compatible", Model: "test-model"}
 	sess := session.NewMemory(hdr)
-	create := func() (session.Session, error) { return session.NewMemory(hdr), nil }
-	build := func(session.Session) app.Runner { return taskRunnerFake{runnerFunc: runnerFunc(run), tasks: tasks} }
-	ctrl, err := app.New(sess, create, build,
+	ctrl, err := app.New(app.SessionReplacement{Session: sess, Runner: taskRunnerFake{runnerFunc: runnerFunc(run), tasks: tasks}},
 		app.WithRuntimeInfo(app.RuntimeInfo{Provider: "openai-compatible", Model: "test-model", ContextWindow: 128000, Sandbox: testSandbox}),
 	)
 	if err != nil {
@@ -79,7 +77,7 @@ func TestWakeTurnStartsOnPendingNotificationWhenIdle(t *testing.T) {
 	var calls promptLog
 	// run drains the inbox on every call, mirroring agent.Agent.Run, which
 	// drains pending notifications before each provider request; without
-	// this the wake loop's end-of-turn check would see Pending() > 0
+	// this the wake loop's end-of-turn check would see pending work
 	// forever and start a wake turn after every wake turn.
 	run := func(ctx context.Context, text string, emit func(agent.Event)) error {
 		tasks.Notifications().Drain()
@@ -308,7 +306,10 @@ func TestGetTaskRouteWithHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	tasks.Update(task.ID, func(tk *agent.Task) { tk.Status = agent.TaskRunning; tk.Steps = 3 })
+	tasks.MarkRunning(task.ID, time.Now())
+	for i := 0; i < 3; i++ {
+		tasks.RecordProviderStep(task.ID, model.Usage{}, "", false)
+	}
 	ts, sessID := newTasksTestServer(t, tasks)
 
 	resp := doJSON(t, ts, "GET", "/v1/sessions/"+sessID+"/tasks/"+task.ID, nil)
@@ -320,8 +321,29 @@ func TestGetTaskRouteWithHistory(t *testing.T) {
 	if got.ID != task.ID || got.Status != string(agent.TaskRunning) || got.Steps != 3 {
 		t.Fatalf("task = %+v, want id %q status running steps 3", got.taskWire, task.ID)
 	}
+	if got.UsagePresent {
+		t.Fatal("usage_present = true, want false for missing provider usage")
+	}
 	if len(got.History) != 2 || got.History[0].Blocks[0].ToolName != "read" || got.History[1].Text() != "done reading" {
 		t.Fatalf("history = %+v, want the 2 seeded messages", got.History)
+	}
+}
+
+func TestGetTaskRoutePreservesExplicitZeroUsagePresence(t *testing.T) {
+	tasks := agent.NewTasks()
+	task, err := tasks.Add(agent.Task{Agent: "reviewer"}, nil, nil)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	tasks.MarkRunning(task.ID, time.Now())
+	tasks.RecordProviderStep(task.ID, model.Usage{}, "", true)
+	ts, sessID := newTasksTestServer(t, tasks)
+
+	resp := doJSON(t, ts, "GET", "/v1/sessions/"+sessID+"/tasks/"+task.ID, nil)
+	var got struct{ taskWire }
+	decodeJSON(t, resp, &got)
+	if !got.UsagePresent || got.Usage != (model.Usage{}) {
+		t.Fatalf("usage = %+v, usage_present = %v, want explicit zero", got.Usage, got.UsagePresent)
 	}
 }
 
@@ -364,7 +386,7 @@ func TestCancelTaskRouteRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	tasks.Update(task.ID, func(tk *agent.Task) { tk.Status = agent.TaskRunning })
+	tasks.MarkRunning(task.ID, time.Now())
 	ts, sessID := newTasksTestServer(t, tasks)
 
 	resp := doJSON(t, ts, "POST", "/v1/sessions/"+sessID+"/tasks/"+task.ID+"/cancel", nil)
@@ -387,7 +409,7 @@ func TestCancelTaskRouteAlreadyFinished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	tasks.Update(task.ID, func(tk *agent.Task) { tk.Status = agent.TaskSucceeded })
+	tasks.Finish(task.ID, agent.TaskSucceeded, time.Now(), "", "")
 	ts, sessID := newTasksTestServer(t, tasks)
 
 	resp := doJSON(t, ts, "POST", "/v1/sessions/"+sessID+"/tasks/"+task.ID+"/cancel", nil)
@@ -408,7 +430,7 @@ func TestCancelTaskRouteUnknownID(t *testing.T) {
 
 // waitMetricsContain polls GET /metrics until the exposition text contains
 // substr, needed because the wake loop diffs task metrics asynchronously on
-// its own goroutine after Tasks.Update signals it.
+// its own goroutine after the task registry signals it.
 func waitMetricsContain(t *testing.T, ts *httptest.Server, substr string) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -432,10 +454,10 @@ func TestWakeLoopUpdatesTaskMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	tasks.Update(task.ID, func(tk *agent.Task) { tk.Status = agent.TaskRunning })
+	tasks.MarkRunning(task.ID, time.Now())
 	waitMetricsContain(t, ts, "otto_tasks_running 1")
 
-	tasks.Update(task.ID, func(tk *agent.Task) { tk.Status = agent.TaskSucceeded })
+	tasks.Finish(task.ID, agent.TaskSucceeded, time.Now(), "", "")
 	got := waitMetricsContain(t, ts, `otto_tasks_finished_total{status="succeeded"} 1`)
 
 	if !strings.Contains(got, "otto_tasks_started_total 1") {

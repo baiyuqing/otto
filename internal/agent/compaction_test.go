@@ -30,7 +30,7 @@ func TestAutomaticCompactionWaitsWithoutWarningForUnsafeRetainedTail(t *testing.
 	wrapped := &retainedTailMetadataSession{Session: memory, metadata: session.CompactionMetadata{
 		ID: "checkpoint", Summary: validStructuredSummary, RetainedTailOnly: true, FirstPostCheckpointMessageID: "repair-result",
 	}}
-	fake := &compactProvider{responses: []provider.Response{{Message: model.Message{Role: model.RoleAssistant}, FinishReason: model.FinishStop}}}
+	fake := &compactProvider{responses: []provider.Response{{Message: model.Message{Role: model.RoleAssistant, FinishReason: model.FinishStop}}}}
 	options := testCompactionOptions()
 	options.Compaction = CompactionSettings{Auto: true, WorkingWindow: 10, HardInputWindow: 10, ReserveTokens: 1, KeepRecentTokens: 1}
 	runner := New(fake, nil, wrapped, options)
@@ -358,9 +358,11 @@ func TestCompactSplitTurnMakesTwoCallsAndCombinesUsageSaturating(t *testing.T) {
 	memory := session.NewMemory(testHeader(t))
 	appendCompactionMessages(t, memory, messages...)
 	keep := estimateMessage(messages[4]) + estimateMessage(messages[5])
+	second := summaryMessage("retain the early turn context")
+	second.Usage = &model.Usage{InputTokens: 10, OutputTokens: math.MaxInt, CachedInputTokens: 6}
 	fake := &compactProvider{responses: []provider.Response{
 		validCompactionResponse(model.Usage{InputTokens: math.MaxInt - 2, OutputTokens: 7, CachedInputTokens: 4}),
-		{Message: summaryMessage("retain the early turn context"), Usage: model.Usage{InputTokens: 10, OutputTokens: math.MaxInt, CachedInputTokens: 6}},
+		{Message: second},
 	}}
 	options := testCompactionOptions()
 	options.Compaction.KeepRecentTokens = keep
@@ -528,21 +530,18 @@ func TestCompactEstimateAfterIgnoresRetainedAssistantUsageAnchor(t *testing.T) {
 	}
 }
 
-func TestCompactRejectsContradictorySummaryFinishReasons(t *testing.T) {
+func TestCompactRejectsInvalidSummaryUsage(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		message model.FinishReason
-		outer   model.FinishReason
+		name  string
+		usage model.Usage
 	}{
-		{name: "message stop outer tool calls", message: model.FinishStop, outer: model.FinishToolCalls},
-		{name: "message tool calls outer stop", message: model.FinishToolCalls, outer: model.FinishStop},
-		{name: "message stop outer length", message: model.FinishStop, outer: model.FinishLength},
+		{name: "negative input", usage: model.Usage{InputTokens: -1}},
+		{name: "negative output", usage: model.Usage{OutputTokens: -1}},
+		{name: "cached exceeds input", usage: model.Usage{InputTokens: 1, CachedInputTokens: 2}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			memory := populatedCompactionMemory(t)
-			response := validCompactionResponse(model.Usage{})
-			response.Message.FinishReason = test.message
-			response.FinishReason = test.outer
+			response := validCompactionResponse(test.usage)
 			runner := New(&compactProvider{responses: []provider.Response{response}}, nil, memory, testCompactionOptions())
 
 			if _, err := runner.Compact(context.Background(), "", nil); !errors.Is(err, ErrInvalidCompactionSummary) {
@@ -562,7 +561,10 @@ func TestCompactRejectsInvalidResponsesWithStableBoundedIdentity(t *testing.T) {
 	}{
 		{name: "malformed headings", response: provider.Response{Message: summaryMessage("## Goal\nmissing sections")}},
 		{name: "empty", response: provider.Response{Message: summaryMessage(" \n\t")}},
-		{name: "tool calling", response: provider.Response{Message: toolCalling, FinishReason: model.FinishToolCalls}},
+		{name: "tool calling", response: provider.Response{Message: func() model.Message {
+			toolCalling.FinishReason = model.FinishToolCalls
+			return toolCalling
+		}()}},
 		{name: "oversized", response: provider.Response{Message: summaryMessage(oversized)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -807,7 +809,10 @@ func compactionTextMessage(id string, role model.Role, text string) model.Messag
 }
 
 func validCompactionResponse(usage model.Usage) provider.Response {
-	return provider.Response{Message: summaryMessage(validStructuredSummary), FinishReason: model.FinishStop, Usage: usage}
+	message := summaryMessage(validStructuredSummary)
+	message.FinishReason = model.FinishStop
+	message.Usage = &usage
+	return provider.Response{Message: message}
 }
 
 type compactProvider struct {

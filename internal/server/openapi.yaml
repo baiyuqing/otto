@@ -121,13 +121,15 @@ components:
           type: string
         usage:
           $ref: "#/components/schemas/Usage"
+        usage_present:
+          type: boolean
         started_at:
           type: string
           format: date-time
         finished_at:
           type: [string, "null"]
           format: date-time
-      required: [id, trigger, status, text, usage, started_at]
+      required: [id, trigger, status, text, usage, usage_present, started_at]
     Task:
       type: object
       description: internal/agent.Task; see internal/agent/tasks.go for the full shape.
@@ -164,11 +166,13 @@ components:
           type: string
         usage:
           $ref: "#/components/schemas/Usage"
+        usage_present:
+          type: boolean
         result:
           type: string
         error:
           type: string
-      required: [id, agent, description, status, created_at, steps, tool_calls, usage]
+      required: [id, agent, description, status, created_at, steps, tool_calls, usage, usage_present]
     TaskList:
       type: object
       properties:
@@ -229,6 +233,8 @@ components:
               type: boolean
         usage:
           $ref: "#/components/schemas/Usage"
+        usage_present:
+          type: boolean
         compaction:
           type: object
         plan:

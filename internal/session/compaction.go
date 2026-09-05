@@ -50,7 +50,7 @@ func (m *Memory) AppendCompaction(ctx context.Context, checkpoint CompactionChec
 	if err != nil {
 		return CompactionMetadata{}, fmt.Errorf("generate compaction entry id: %w", err)
 	}
-	usage := cloneUsage(checkpoint.Usage)
+	usage := model.CloneUsage(checkpoint.Usage)
 	details := cloneCompactionDetails(checkpoint.Details)
 	contextMessage := newContextMessage(
 		checkpointID,
@@ -58,12 +58,12 @@ func (m *Memory) AppendCompaction(ctx context.Context, checkpoint CompactionChec
 		true,
 		"[Compaction summary]\n"+checkpoint.Summary,
 		checkpoint.CreatedAt,
-		cloneUsage(usage),
+		model.CloneUsage(usage),
 	)
 	contextMessage.ContextTokensBefore = checkpoint.TokensBefore
 	candidateMessages := make([]model.Message, 0, 1+len(m.messages)-firstKept)
 	candidateMessages = append(candidateMessages, contextMessage)
-	candidateMessages = append(candidateMessages, cloneMessages(m.messages[firstKept:])...)
+	candidateMessages = append(candidateMessages, model.CloneMessages(m.messages[firstKept:])...)
 	if _, err := pendingToolCalls(candidateMessages); err != nil {
 		return CompactionMetadata{}, err
 	}
@@ -181,7 +181,7 @@ func (s *Store) AppendCompaction(ctx context.Context, checkpoint CompactionCheck
 	s.entries = candidateEntries
 	s.entryIDs[entryID] = struct{}{}
 	s.leafID = stringPointer(entryID)
-	s.messages = cloneMessages(resolved.Messages)
+	s.messages = model.CloneMessages(resolved.Messages)
 	s.aggregateUsage = resolved.Usage
 	s.usagePresent = resolved.UsagePresent
 	s.fileBytes += recordBytes
@@ -568,7 +568,7 @@ func compactionDetailsPresent(details CompactionDetails) bool {
 }
 
 func cloneCompactionMetadata(metadata CompactionMetadata) CompactionMetadata {
-	metadata.Usage = cloneUsage(metadata.Usage)
+	metadata.Usage = model.CloneUsage(metadata.Usage)
 	metadata.Details = cloneCompactionDetails(metadata.Details)
 	return metadata
 }
@@ -577,12 +577,4 @@ func cloneCompactionDetails(details CompactionDetails) CompactionDetails {
 	details.ReadFiles = append([]string(nil), details.ReadFiles...)
 	details.ModifiedFiles = append([]string(nil), details.ModifiedFiles...)
 	return details
-}
-
-func cloneUsage(usage *model.Usage) *model.Usage {
-	if usage == nil {
-		return nil
-	}
-	cloned := *usage
-	return &cloned
 }

@@ -280,11 +280,8 @@ func (a *Agent) executeSummaryRequest(
 	}
 
 	message := response.Message
-	if message.FinishReason != "" && response.FinishReason != "" && message.FinishReason != response.FinishReason {
-		return "", model.Usage{}, false, invalidCompactionSummaryError(errors.New("response finish reasons contradict"))
-	}
-	if message.FinishReason == "" {
-		message.FinishReason = response.FinishReason
+	if err := validateProviderResponseMessage(message); err != nil {
+		return "", model.Usage{}, false, invalidCompactionSummaryError(err)
 	}
 	if err := validateRawSummaryResponseBound(message, maximumBytes); err != nil {
 		return "", model.Usage{}, false, invalidCompactionSummaryError(err)
@@ -303,13 +300,12 @@ func (a *Agent) executeSummaryRequest(
 		return "", model.Usage{}, false, invalidCompactionSummaryError(err)
 	}
 
-	usagePresent := compactionUsagePresent(response.Usage)
+	usagePresent := message.Usage != nil
+	var usage model.Usage
 	if usagePresent {
-		if err := response.Usage.Validate(); err != nil {
-			return "", model.Usage{}, false, invalidCompactionSummaryError(errors.New("response usage is invalid"))
-		}
+		usage = *message.Usage
 	}
-	return summary, response.Usage, usagePresent, nil
+	return summary, usage, usagePresent, nil
 }
 
 func validateRawSummaryResponseBound(message model.Message, maximumBytes int) error {
@@ -339,10 +335,6 @@ func invalidCompactionSummaryError(cause error) error {
 		return ErrInvalidCompactionSummary
 	}
 	return fmt.Errorf("%w: %v", ErrInvalidCompactionSummary, cause)
-}
-
-func compactionUsagePresent(usage model.Usage) bool {
-	return usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CachedInputTokens != 0
 }
 
 func combineCompactionUsage(left model.Usage, leftPresent bool, right model.Usage, rightPresent bool) (model.Usage, bool) {

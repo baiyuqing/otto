@@ -35,6 +35,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 	var calls []*assembledToolCall
 	byItem := make(map[string]*assembledToolCall)
 	var usage model.Usage
+	usagePresent := false
 	status := ""
 	incompleteReason := ""
 	emitted := false
@@ -88,6 +89,7 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 			if event.Response != nil {
 				status = event.Response.Status
 				if event.Response.Usage != nil {
+					usagePresent = true
 					usage = model.Usage{
 						InputTokens:       event.Response.Usage.InputTokens,
 						OutputTokens:      event.Response.Usage.OutputTokens,
@@ -157,16 +159,17 @@ func readStream(body io.Reader, emit func(provider.StreamEvent)) (provider.Respo
 	}
 
 	finish := finishReason(len(calls) > 0, status, incompleteReason)
-	messageUsage := usage
+	var messageUsage *model.Usage
+	if usagePresent {
+		messageUsage = &usage
+	}
 	return provider.Response{
 		Message: model.Message{
 			Role:         model.RoleAssistant,
 			Blocks:       blocks,
 			FinishReason: finish,
-			Usage:        &messageUsage,
+			Usage:        messageUsage,
 		},
-		FinishReason: finish,
-		Usage:        usage,
 	}, emitted, streamFailureNone, nil
 }
 

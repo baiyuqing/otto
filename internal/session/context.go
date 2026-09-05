@@ -69,7 +69,7 @@ func buildContext(entries []piEntry, leafID string) (ResolvedContext, []Warning,
 			}
 			if entry.Message.Role == "assistant" {
 				latestAssistant = &RuntimeMetadata{Provider: entry.Message.Provider, Model: entry.Message.Model}
-				usage, err := piUsageToModel(entry.Message.Usage)
+				usage, err := piAssistantUsageToModel(entry.Message)
 				if err != nil {
 					return ResolvedContext{}, collector.warnings, err
 				}
@@ -356,7 +356,15 @@ func piEntryToContextMessages(entry piEntry) ([]model.Message, error) {
 		if err != nil {
 			return nil, err
 		}
-		return []model.Message{newContextMessage(entry.ID, entry.CustomMessage.CustomType, entry.CustomMessage.Display, customContextText(entry.CustomMessage.CustomType, text), createdAt, nil)}, nil
+		message := newContextMessage(entry.ID, entry.CustomMessage.CustomType, entry.CustomMessage.Display, customContextText(entry.CustomMessage.CustomType, text), createdAt, nil)
+		details, err := decodePiOttoDetails(entry.CustomMessage.Details)
+		if err != nil {
+			return nil, err
+		}
+		if details != nil && details.TaskID != "" {
+			message.ContextMetadata = &model.ContextMetadata{TaskID: details.TaskID}
+		}
+		return []model.Message{message}, nil
 	default:
 		return nil, nil
 	}
@@ -387,7 +395,7 @@ func piMessageToContextMessage(wire *piMessage, id string, createdAt time.Time) 
 		if err := validateAssistantToolFinish(blocks, finishReason); err != nil {
 			return model.Message{}, err
 		}
-		usage, err := piUsageToModel(wire.Usage)
+		usage, err := piAssistantUsageToModel(wire)
 		if err != nil {
 			return model.Message{}, err
 		}
@@ -497,6 +505,27 @@ func optionalPiUsageToModel(usage *piUsage) (*model.Usage, error) {
 	return &model.Usage{}, nil
 }
 
+func piAssistantUsageToModel(wire *piMessage) (*model.Usage, error) {
+	if wire == nil {
+		return nil, fmt.Errorf("%w: assistant message is required", ErrInvalidSession)
+	}
+	usage, err := piUsageToModel(wire.Usage)
+	if err != nil {
+		return nil, err
+	}
+	if usage != nil {
+		return usage, nil
+	}
+	details, err := decodePiOttoDetails(wire.Details)
+	if err != nil {
+		return nil, err
+	}
+	if details != nil && details.UsagePresent {
+		return &model.Usage{}, nil
+	}
+	return nil, nil
+}
+
 func addResolvedUsage(total model.Usage, usage *model.Usage) model.Usage {
 	if usage == nil {
 		return total
@@ -507,8 +536,8 @@ func addResolvedUsage(total model.Usage, usage *model.Usage) model.Usage {
 	return total
 }
 
-func hasMeaningfulUsage(usage *model.Usage) bool {
-	return usage != nil && (usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CachedInputTokens != 0)
+func hasUsage(usage *model.Usage) bool {
+	return usage != nil
 }
 
 func saturatingUsageAdd(total, delta int) int {

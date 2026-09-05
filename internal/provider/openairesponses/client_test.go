@@ -104,15 +104,48 @@ func TestCompleteParsesTextAndToolCall(t *testing.T) {
 	if string(call.Arguments) != `{"tz":"utc"}` {
 		t.Errorf("arguments = %s, want {\"tz\":\"utc\"}", call.Arguments)
 	}
-	if resp.FinishReason != model.FinishToolCalls {
-		t.Errorf("finish = %q, want tool_calls", resp.FinishReason)
+	if resp.Message.FinishReason != model.FinishToolCalls {
+		t.Errorf("finish = %q, want tool_calls", resp.Message.FinishReason)
 	}
-	if resp.Usage != (model.Usage{InputTokens: 10, OutputTokens: 5, CachedInputTokens: 2}) {
-		t.Errorf("usage = %+v", resp.Usage)
+	if resp.Message.Usage == nil || *resp.Message.Usage != (model.Usage{InputTokens: 10, OutputTokens: 5, CachedInputTokens: 2}) {
+		t.Errorf("usage = %+v", resp.Message.Usage)
 	}
 
 	if len(events) == 0 {
 		t.Fatal("no stream events emitted")
+	}
+}
+
+func TestCompletePreservesUsagePresence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want *model.Usage
+	}{
+		{name: "missing", body: "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"},
+		{name: "explicit zero", body: "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\n", want: &model.Usage{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+
+			client := newWithBaseURL(server.URL,
+				oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "test-token"}),
+				"acct-1", server.Client())
+			response, err := client.Complete(context.Background(), provider.Request{Model: "model"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (response.Message.Usage == nil) != (test.want == nil) {
+				t.Fatalf("message usage presence = %v, want %v", response.Message.Usage != nil, test.want != nil)
+			}
+			if test.want != nil && *response.Message.Usage != *test.want {
+				t.Fatalf("message usage = %#v, want %#v", response.Message.Usage, test.want)
+			}
+		})
 	}
 }
 

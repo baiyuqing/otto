@@ -18,6 +18,7 @@ type switchBackend struct {
 	switchProfile   func(context.Context, string) (app.ResumeResult, error)
 	switchCalls     []string
 	setDefaultCalls []string
+	setDefaultErr   error
 }
 
 type suppressedModelBackend struct {
@@ -38,7 +39,7 @@ func (f *switchBackend) SwitchProfile(ctx context.Context, name string) (app.Res
 
 func (f *switchBackend) SetDefaultProfile(_ context.Context, name string) error {
 	f.setDefaultCalls = append(f.setDefaultCalls, name)
-	return nil
+	return f.setDefaultErr
 }
 
 func (s *suppressedModelBackend) DynamicContentAvailable() bool { return false }
@@ -129,6 +130,31 @@ func TestModelCommandSwitchErrorReported(t *testing.T) {
 	}
 	if !strings.Contains(got.statusText, "not found") {
 		t.Fatalf("statusText = %q, want not found error", got.statusText)
+	}
+}
+
+func TestModelCommandReportsDefaultSaveFailureAfterSwitch(t *testing.T) {
+	backend := &switchBackend{
+		fakeBackend:   fakeBackend{info: app.Info{Profile: "default", Provider: "openai-compatible", Model: "gpt-4o"}},
+		profiles:      []string{"default", "chatgpt"},
+		setDefaultErr: errors.New("default save failed"),
+	}
+	backend.switchProfile = func(_ context.Context, name string) (app.ResumeResult, error) {
+		backend.info = app.Info{Profile: name, Provider: "chatgpt", Model: "gpt-5", SessionID: "sess-2"}
+		return app.ResumeResult{}, nil
+	}
+	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 24)
+	pending, cmd := submitCommand(t, m, "/model chatgpt")
+	if cmd == nil {
+		t.Fatal("cmd = nil")
+	}
+	updated, _ := pending.Update(runCommandWithin(t, cmd, time.Second))
+	got := updated.(Model)
+	if got.profileSwitchPending || !strings.Contains(got.statusText, "default profile was not saved") || !strings.Contains(got.statusText, "gpt-5") {
+		t.Fatalf("pending=%v status=%q", got.profileSwitchPending, got.statusText)
+	}
+	if len(backend.setDefaultCalls) != 1 {
+		t.Fatalf("set default calls = %v", backend.setDefaultCalls)
 	}
 }
 

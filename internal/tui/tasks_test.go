@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -10,7 +11,38 @@ import (
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/baiyuqing/otto/internal/session"
 )
+
+type taskWakeRunner struct {
+	tasks *agent.Tasks
+	run   func(context.Context) error
+}
+
+func (r taskWakeRunner) Tasks() *agent.Tasks { return r.tasks }
+
+func (r taskWakeRunner) Run(ctx context.Context, _ string, _ func(agent.Event)) error {
+	if r.run != nil {
+		return r.run(ctx)
+	}
+	r.tasks.Notifications().Drain()
+	return nil
+}
+
+func (r taskWakeRunner) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
+func taskBackendWithWake(t *testing.T, tasks *agent.Tasks) *fakeBackend {
+	t.Helper()
+	sess := session.NewMemory(session.Header{ID: "tui-wake", Workspace: t.TempDir()})
+	controller, err := app.New(app.SessionReplacement{Session: sess, Runner: taskWakeRunner{tasks: tasks}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.Close() })
+	return &fakeBackend{tasks: tasks, wake: controller}
+}
 
 func addTask(t *testing.T, tasks *agent.Tasks, status agent.TaskStatus, agentName string) agent.Task {
 	t.Helper()
@@ -19,10 +51,10 @@ func addTask(t *testing.T, tasks *agent.Tasks, status agent.TaskStatus, agentNam
 		t.Fatalf("Add() = %v", err)
 	}
 	if status != agent.TaskQueued {
-		tasks.Update(task.ID, func(tk *agent.Task) {
-			tk.Status = status
-			tk.StartedAt = time.Now().Add(-2 * time.Second)
-		})
+		tasks.MarkRunning(task.ID, time.Now().Add(-2*time.Second))
+		if status != agent.TaskRunning {
+			tasks.Finish(task.ID, status, time.Now(), "", "")
+		}
 	}
 	task, _ = tasks.Get(task.ID)
 	return task
@@ -165,7 +197,7 @@ func TestMaybeWakeStartsEmptyTurnWhenPendingAndIdle(t *testing.T) {
 	taskID := addTask(t, tasks, agent.TaskRunning, "explorer").ID
 	tasks.Notifications().Push(agent.Notification{TaskID: taskID, Kind: agent.NotificationTaskReport, Text: "progress"})
 
-	m := newTestModelWithBackend(t, &fakeBackend{tasks: tasks})
+	m := newTestModelWithBackend(t, taskBackendWithWake(t, tasks))
 	entriesBefore := len(m.entries)
 
 	next, cmd := m.maybeWake()
@@ -180,10 +212,105 @@ func TestMaybeWakeStartsEmptyTurnWhenPendingAndIdle(t *testing.T) {
 	}
 }
 
+func TestWakeEscapeCancelsAdmittedWakeContext(t *testing.T) {
+	tasks := agent.NewTasks()
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	sess := session.NewMemory(session.Header{ID: "tui-wake-cancel", Workspace: t.TempDir()})
+	runner := taskWakeRunner{tasks: tasks, run: func(ctx context.Context) error {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		return ctx.Err()
+	}}
+	controller, err := app.New(app.SessionReplacement{Session: sess, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.Close() })
+	backend := &fakeBackend{tasks: tasks, wake: controller}
+	task, err := tasks.Add(agent.Task{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks.Notifications().Push(agent.Notification{TaskID: task.ID, Kind: agent.NotificationTaskReport, Text: "progress"})
+
+	m := newTestModelWithBackend(t, backend)
+	next, cmd := m.maybeWake()
+	if cmd == nil || !next.running {
+		t.Fatalf("maybeWake() = running %v, cmd %v; want an active wake", next.running, cmd)
+	}
+	cmdDone := make(chan tea.Msg, 1)
+	go func() { cmdDone <- cmd() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("wake runner did not start")
+	}
+	updated, _ := next.Update(keyPress(tea.KeyEscape))
+	if !updated.(Model).running {
+		t.Fatal("escape ended the turn before the canceled wake completed")
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("escape did not cancel the wake context")
+	}
+	select {
+	case <-cmdDone:
+	case <-time.After(time.Second):
+		t.Fatal("wake command did not complete after cancellation")
+	}
+}
+
+type wakeCompactionRunner struct {
+	tasks *agent.Tasks
+}
+
+func (r wakeCompactionRunner) Tasks() *agent.Tasks { return r.tasks }
+
+func (r wakeCompactionRunner) Run(_ context.Context, _ string, emit func(agent.Event)) error {
+	emit(agent.Event{Type: agent.EventCompactionCompleted, Compaction: &agent.CompactionEvent{CheckpointID: "wake-checkpoint"}})
+	return nil
+}
+
+func (r wakeCompactionRunner) Compact(context.Context, string, func(agent.Event)) (agent.CompactionResult, error) {
+	return agent.CompactionResult{Noop: true}, nil
+}
+
+func TestWakeWorkerPreservesCompactionAggregateUsage(t *testing.T) {
+	tasks := agent.NewTasks()
+	tasks.Notifications().Push(agent.Notification{TaskID: "t1", Kind: agent.NotificationTaskReport, Text: "progress"})
+	usage := model.Usage{InputTokens: 7, OutputTokens: 9}
+	backend := &fakeBackend{tasks: tasks, info: app.Info{Usage: usage, UsagePresent: true}}
+	sess := session.NewMemory(session.Header{ID: "tui-wake-compaction", Workspace: t.TempDir()})
+	controller, err := app.New(app.SessionReplacement{Session: sess, Runner: wakeCompactionRunner{tasks: tasks}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = controller.Close() })
+	wake, err := controller.PrepareWake(context.Background())
+	if err != nil || wake == nil {
+		t.Fatalf("PrepareWake() = %v, %v", wake, err)
+	}
+	stream := newTurnStream()
+	go runTurnWorker(context.Background(), backend, "", stream, wake)
+
+	envelope := <-stream.channel
+	if envelope.event == nil || envelope.aggregateUsage != usage || !envelope.aggregateUsagePresent {
+		t.Fatalf("compaction envelope = %#v, want aggregate usage %+v present", envelope, usage)
+	}
+	envelope.applicationAck.acknowledge()
+	done := <-stream.channel
+	if !done.done || done.err != nil {
+		t.Fatalf("wake completion = %#v, want successful completion", done)
+	}
+}
+
 func TestMaybeWakeNoOpWhenNoPendingNotification(t *testing.T) {
 	tasks := agent.NewTasks()
 	addTask(t, tasks, agent.TaskRunning, "explorer")
-	m := newTestModelWithBackend(t, &fakeBackend{tasks: tasks})
+	m := newTestModelWithBackend(t, taskBackendWithWake(t, tasks))
 
 	next, cmd := m.maybeWake()
 	if cmd != nil {
@@ -199,7 +326,7 @@ func TestMaybeWakeNoOpWhileTurnActive(t *testing.T) {
 	taskID := addTask(t, tasks, agent.TaskRunning, "explorer").ID
 	tasks.Notifications().Push(agent.Notification{TaskID: taskID, Kind: agent.NotificationTaskReport, Text: "progress"})
 
-	m := newTestModelWithBackend(t, &fakeBackend{tasks: tasks})
+	m := newTestModelWithBackend(t, taskBackendWithWake(t, tasks))
 	m.running = true
 
 	_, cmd := m.maybeWake()
@@ -213,7 +340,7 @@ func TestMaybeWakeNoOpWhileOverlayOpen(t *testing.T) {
 	taskID := addTask(t, tasks, agent.TaskRunning, "explorer").ID
 	tasks.Notifications().Push(agent.Notification{TaskID: taskID, Kind: agent.NotificationTaskReport, Text: "progress"})
 
-	m := newTestModelWithBackend(t, &fakeBackend{tasks: tasks})
+	m := newTestModelWithBackend(t, taskBackendWithWake(t, tasks))
 	m.overlay = overlayHelp
 
 	_, cmd := m.maybeWake()
@@ -227,7 +354,7 @@ func TestMaybeWakeNoOpDuringResumePicker(t *testing.T) {
 	taskID := addTask(t, tasks, agent.TaskRunning, "explorer").ID
 	tasks.Notifications().Push(agent.Notification{TaskID: taskID, Kind: agent.NotificationTaskReport, Text: "progress"})
 
-	m := newTestModelWithBackend(t, &fakeBackend{tasks: tasks})
+	m := newTestModelWithBackend(t, taskBackendWithWake(t, tasks))
 	m.resume.mode = resumeLoaded
 
 	_, cmd := m.maybeWake()
@@ -259,7 +386,7 @@ func TestHandleSubmitDuringWakeTurnKeepsEditorTextAndReportsBusy(t *testing.T) {
 
 func TestFinishTurnWakesWhenNotificationArrivedDuringTurn(t *testing.T) {
 	tasks := agent.NewTasks()
-	m := newTestModelWithBackend(t, &fakeBackend{tasks: tasks})
+	m := newTestModelWithBackend(t, taskBackendWithWake(t, tasks))
 	m.running = true
 	m.cancel = func() {}
 
@@ -326,15 +453,11 @@ func TestTaskCommandShowsDetail(t *testing.T) {
 			{Type: model.BlockToolCall, ToolName: "read", Arguments: json.RawMessage(`{"path":"main.go"}`)},
 		}},
 	}
-	added, err := tasks.Add(agent.Task{Description: "review"}, nil, func() []model.Message { return history })
+	added, err := tasks.Add(agent.Task{Description: "review", Model: "gpt-4o-mini"}, nil, func() []model.Message { return history })
 	if err != nil {
 		t.Fatalf("Add() = %v", err)
 	}
-	tasks.Update(added.ID, func(task *agent.Task) {
-		task.Status = agent.TaskSucceeded
-		task.Model = "gpt-4o-mini"
-		task.Result = "no issues found"
-	})
+	tasks.Finish(added.ID, agent.TaskSucceeded, time.Now(), "no issues found", "")
 
 	m := resizeModel(t, newTestModelWithBackend(t, &fakeBackend{tasks: tasks}), 80, 24)
 	got, _ := submitCommand(t, m, "/task "+added.ID)

@@ -1,9 +1,14 @@
 # Sub-agents design
 
-Status: draft, 2026-09-03, pending approval. This version replaces the
-synchronous draft of the same date: the parent model no longer blocks inside
-the `agent` tool call; sub-agents run as background tasks and report back
-through notifications.
+Status: draft, 2026-09-03, pending approval; historical and superseded for the
+current sub-agent API. It is retained for rationale. The proposal includes
+aspirational APIs; only the tool surface and behavior verified in the current
+[`internal/subagent`](../../internal/subagent) implementation and the
+[README](../../README.md#delegate-work-to-sub-agents) are current. In
+particular, `agent_send`, `agent_cancel`, and `agent_report` remain proposal
+items, not implemented features. Also consult the
+[2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
+for current ownership rules.
 
 ## Goal
 
@@ -609,7 +614,8 @@ Each phase is one PR on `feat/subagents`-derived branches; `make check` and
 
 ### Phase B: definitions, configuration, inherit
 
-Status: implemented.
+Status: implemented for the supported subset; this records proposal history.
+Consult the current implementation and README for the supported subset.
 
 1. `skill.ParseFrontmatter`; `subagent/definition.go` with the validation
    rules above; `prompt.go`.

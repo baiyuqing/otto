@@ -51,8 +51,10 @@ type process struct {
 	stderr  *ownedPipeReader
 	done    chan struct{}
 
-	mu         sync.Mutex
-	cleanupErr error
+	mu            sync.Mutex
+	cleanupErr    error
+	groupSignaled bool
+	terminated    bool
 }
 
 type commandFiles struct {
@@ -380,15 +382,29 @@ func copyInfrastructureError(err error) error {
 }
 
 func (m *Manager) terminate(proc *process) error {
+	proc.mu.Lock()
+	defer proc.mu.Unlock()
+	if proc.terminated {
+		return nil
+	}
+
 	pid := proc.command.Process.Pid
 	err := m.kill(-pid, syscall.SIGKILL)
-	if err == nil || errors.Is(err, syscall.ESRCH) {
+	if err == nil {
+		proc.groupSignaled = true
+		return nil
+	}
+	if errors.Is(err, syscall.ESRCH) {
+		proc.terminated = true
 		return nil
 	}
 	// Darwin can report EPERM after the leader was reaped. Accept it only when
-	// one deterministic postcondition check proves that the group is absent.
+	// a bounded postcondition observation proves that the group has no live members.
 	if runtime.GOOS == "darwin" && errors.Is(err, syscall.EPERM) {
-		if probeErr := m.kill(-pid, 0); errors.Is(probeErr, syscall.ESRCH) {
+		probeErr := m.kill(-pid, 0)
+		if errors.Is(probeErr, syscall.ESRCH) ||
+			(errors.Is(probeErr, syscall.EPERM) && proc.groupSignaled && processGroupTerminated(pid)) {
+			proc.terminated = true
 			return nil
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync/atomic"
+	"time"
 
 	"github.com/baiyuqing/otto/internal/model"
 	"github.com/baiyuqing/otto/internal/provider"
@@ -253,6 +254,7 @@ func (a *Agent) executeSummaryRequest(
 
 	var streamedBytes atomic.Int64
 	var invalidStream atomic.Bool
+	started := time.Now()
 	response, err := a.provider.Complete(childCtx, request, func(event provider.StreamEvent) {
 		if invalidStream.Load() {
 			return
@@ -269,6 +271,7 @@ func (a *Agent) executeSummaryRequest(
 			cancel()
 		}
 	})
+	a.emitProviderAPICall(emit, childCtx, time.Since(started), err)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", model.Usage{}, false, ctxErr
 	}

@@ -20,6 +20,49 @@ func render(t *testing.T, m *metrics) string {
 	return rec.Body.String()
 }
 
+func TestMetricsProviderAPIRequests(t *testing.T) {
+	m := newMetrics()
+	m.providerAPIRequest("openai-compatible", "test-model", "ok", 1500*time.Millisecond)
+	body := render(t, m)
+
+	wantLines := []string{
+		`otto_provider_api_requests_total{provider="openai-compatible",model="test-model",status="ok"} 1`,
+		`otto_provider_api_request_duration_seconds_bucket{provider="openai-compatible",model="test-model",le="2.5"} 1`,
+		`otto_provider_api_request_duration_seconds_bucket{provider="openai-compatible",model="test-model",le="+Inf"} 1`,
+		`otto_provider_api_request_duration_seconds_count{provider="openai-compatible",model="test-model"} 1`,
+	}
+	for _, want := range wantLines {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q in body:\n%s", want, body)
+		}
+	}
+}
+
+func TestMetricsSessionContext(t *testing.T) {
+	m := newMetrics()
+	m.sessionContext(sessionContextMetrics{
+		SessionID:                 "session-1",
+		Provider:                  "openai-compatible",
+		Model:                     "test-model",
+		ContextWindow:             128000,
+		ContextInputTokens:        42000,
+		ContextInputTokensPresent: true,
+		ContextInputTokensPending: true,
+	})
+	body := render(t, m)
+
+	wantLabels := `{session_id="session-1",provider="openai-compatible",model="test-model"}`
+	for _, want := range []string{
+		`otto_session_context_window_tokens` + wantLabels + ` 128000`,
+		`otto_session_context_input_tokens` + wantLabels + ` 42000`,
+		`otto_session_context_input_tokens_pending` + wantLabels + ` 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing line %q in body:\n%s", want, body)
+		}
+	}
+}
+
 func TestMetricsHTTPRequests(t *testing.T) {
 	m := newMetrics()
 	m.httpRequest("/v1/sessions", "POST", 201, 12*time.Millisecond)

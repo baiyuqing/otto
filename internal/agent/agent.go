@@ -61,6 +61,7 @@ func New(completionProvider provider.Provider, registry *tool.Registry, memory s
 		redactor.values = nil
 	}
 	if !redactor.complete {
+		options.Provider = ""
 		options.Model = ""
 		options.Thinking = ""
 	}
@@ -358,6 +359,7 @@ func applyToolResultOverlay(messages []model.Message, overlay map[string]string)
 func (a *Agent) completeNormalProviderAttempt(ctx context.Context, request provider.Request, emit func(Event)) (provider.Response, bool, error) {
 	stream := a.redactor.newStream()
 	visibleText := false
+	started := time.Now()
 	response, err := a.provider.Complete(ctx, request, func(event provider.StreamEvent) {
 		if event.Type != provider.StreamTextDelta {
 			return
@@ -367,6 +369,7 @@ func (a *Agent) completeNormalProviderAttempt(ctx context.Context, request provi
 			a.emit(emit, Event{Type: EventTextDelta, Text: text})
 		}
 	})
+	a.emitProviderAPICall(emit, ctx, time.Since(started), err)
 	if err != nil {
 		return provider.Response{}, visibleText, err
 	}
@@ -375,6 +378,19 @@ func (a *Agent) completeNormalProviderAttempt(ctx context.Context, request provi
 		a.emit(emit, Event{Type: EventTextDelta, Text: text})
 	}
 	return response, visibleText, nil
+}
+
+func (a *Agent) emitProviderAPICall(emit func(Event), ctx context.Context, duration time.Duration, err error) {
+	status := "ok"
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled), errors.Is(err, context.Canceled):
+		status = "canceled"
+	case err == nil:
+		status = "ok"
+	default:
+		status = "error"
+	}
+	a.emit(emit, Event{Type: EventProviderAPICall, ProviderName: a.options.Provider, Model: a.options.Model, APIDuration: duration, APIStatus: status})
 }
 
 func (a *Agent) emit(emit func(Event), event Event) {
@@ -425,7 +441,7 @@ func boundaryOptionsUnchanged(redactor *Redactor, definitions []model.ToolDefini
 	if redactor == nil || !redactor.complete {
 		return false
 	}
-	for _, value := range []string{options.Model, options.SystemPrompt, options.Thinking} {
+	for _, value := range []string{options.Provider, options.Model, options.SystemPrompt, options.Thinking} {
 		if redactor.RedactString(value) != value {
 			return false
 		}

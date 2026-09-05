@@ -85,6 +85,22 @@ func TestTurnUsagePresenceDistinguishesMissingAndExplicitZero(t *testing.T) {
 	}
 }
 
+func TestTurnEmitRecordsProviderAPIMetricsWithoutBufferingEvent(t *testing.T) {
+	m := newMetrics()
+	tr := newTurn("t1", func() {})
+	emit := tr.emit(m)
+	emit(agent.Event{Type: agent.EventProviderAPICall, ProviderName: "chatgpt", Model: "gpt-5", APIStatus: "ok", APIDuration: 1500 * time.Millisecond})
+
+	events, _, _ := tr.snapshot(0)
+	if len(events) != 0 {
+		t.Fatalf("provider API metric event should not be buffered: %#v", events)
+	}
+	body := render(t, m)
+	if !strings.Contains(body, `otto_provider_api_requests_total{provider="chatgpt",model="gpt-5",status="ok"} 1`) {
+		t.Fatalf("missing provider API metric:\n%s", body)
+	}
+}
+
 func TestTurnEmitRecordsToolCallMetrics(t *testing.T) {
 	m := newMetrics()
 	tr := newTurn("t1", func() {})

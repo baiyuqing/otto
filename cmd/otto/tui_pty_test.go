@@ -215,7 +215,11 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 			return false
 		}
 		content := screen.String()
-		return strings.Contains(content, selectedResumeSessionID) && !strings.Contains(content, "Resume Session")
+		if !strings.Contains(content, selectedResumeSessionID) || strings.Contains(content, "Resume Session") {
+			return false
+		}
+		x, y, visible := screen.Cursor()
+		return visible && x == 4 && y == 3
 	})
 	redrawOffset := bytes.Index(resizeRaw, []byte(fullRedrawSeq))
 	if redrawOffset < 0 {
@@ -493,10 +497,14 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	// re-checked here.
 	compactScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
-		return screen.FullRedraws() > 0 && screen.Complete() &&
-			strings.Contains(content, narrowFooterMarker) &&
-			strings.Contains(content, "[context] no-op") &&
-			!strings.Contains(content, "compact context")
+		if screen.FullRedraws() == 0 || !screen.Complete() ||
+			!strings.Contains(content, narrowFooterMarker) ||
+			!strings.Contains(content, "[context] no-op") ||
+			strings.Contains(content, "compact context") {
+			return false
+		}
+		x, y, visible := screen.Cursor()
+		return visible && x == 4 && y == 3
 	})
 	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 3 {
 		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,3) visible", x, y, visible)
@@ -680,9 +688,13 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	}
 	lifecycleScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
-		return screen.FullRedraws() > 0 && screen.Complete() &&
-			strings.Contains(content, narrowFooterMarker) &&
-			!strings.Contains(content, footerSessionMarker)
+		if screen.FullRedraws() == 0 || !screen.Complete() ||
+			!strings.Contains(content, narrowFooterMarker) ||
+			strings.Contains(content, footerSessionMarker) {
+			return false
+		}
+		x, y, visible := screen.Cursor()
+		return visible && x == 4 && y == 7
 	})
 	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 7 {
 		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,7) visible", x, y, visible)

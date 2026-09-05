@@ -1,8 +1,11 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -181,9 +184,53 @@ func (m Message) Text() string {
 }
 
 type ToolDefinition struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Parameters is provider-facing JSON Schema data. When decoded from JSON,
+	// numbers are kept as json.Number so large integer constraints are not
+	// rounded through float64 before being sent back to a provider.
+	Parameters map[string]any `json:"parameters"`
+}
+
+func (t *ToolDefinition) UnmarshalJSON(raw []byte) error {
+	type wire struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	}
+	var decoded wire
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*t = ToolDefinition{Name: decoded.Name, Description: decoded.Description}
+	if len(decoded.Parameters) == 0 || bytes.Equal(bytes.TrimSpace(decoded.Parameters), []byte("null")) {
+		return nil
+	}
+	parameters, err := decodeJSONObjectUseNumber(decoded.Parameters)
+	if err != nil {
+		return fmt.Errorf("decode tool parameters: %w", err)
+	}
+	t.Parameters = parameters
+	return nil
+}
+
+func decodeJSONObjectUseNumber(raw json.RawMessage) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil {
+		return nil, err
+	}
+	if object == nil {
+		return nil, errors.New("must be a JSON object")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		return nil, errors.New("multiple JSON values")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return object, nil
 }
 
 type FinishReason string

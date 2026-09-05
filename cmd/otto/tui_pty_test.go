@@ -203,19 +203,12 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	// assertion after resize below.
 	waitForSubsequence(t, collector, selectedOffset, selectedResumeSessionID)
 
-	resizeOffset := collector.Len()
-	if err := pty.Setsize(slave, &pty.Winsize{Cols: 140, Rows: 34}); err != nil {
-		t.Fatalf("pty.Ptysize(140x34) error = %v", err)
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
-		t.Fatalf("SIGWINCH error = %v", err)
-	}
 	// The finished transcript (selectedAssistantTranscript) was already
 	// flushed to native scrollback via tea.Println before this resize, so it
 	// is outside the emulator's tracked screen window in inline mode; only
 	// the footer's session ID and the absence of the Resume picker remain
 	// checkable here.
-	resumeScreen, resizeRaw := waitForTerminalScreen(t, collector, resizeOffset, 140, 34, func(screen *ptyTerminalScreen) bool {
+	resumeScreen, resizeRaw := resizePTYAndWaitForScreen(t, slave, collector, 140, 34, func(screen *ptyTerminalScreen) bool {
 		if screen.FullRedraws() == 0 || !screen.Complete() {
 			return false
 		}
@@ -431,14 +424,8 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	writePTY(t, master, " "+ptyCompactFocus)
 
 	completionResizeOffset := collector.Len()
-	if err := pty.Setsize(slave, &pty.Winsize{Cols: 96, Rows: 30}); err != nil {
-		t.Fatalf("pty.Setsize(96x30) error = %v", err)
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
-		t.Fatalf("SIGWINCH error = %v", err)
-	}
 	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
-	completedScreen, _ := waitForTerminalScreen(t, collector, completionResizeOffset, 96, 30, func(screen *ptyTerminalScreen) bool {
+	completedScreen, _ := resizePTYAndWaitForScreen(t, slave, collector, 96, 30, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
 		if screen.FullRedraws() == 0 || !screen.Complete() ||
 			!strings.Contains(content, "/compact "+ptyCompactFocus) ||
@@ -467,18 +454,11 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	waitForCompactFocus(t, backend, ptyCompactFocus)
 	waitForSubsequence(t, collector, screenOffset, "[context] no-op")
 
-	resizeOffset := collector.Len()
-	if err := pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}); err != nil {
-		t.Fatalf("pty.Setsize(80x24) error = %v", err)
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
-		t.Fatalf("SIGWINCH error = %v", err)
-	}
 	// contextCanceledText was already confirmed above (waitForSubsequence at
 	// screenOffset); by this point later turns have pushed it into native
 	// scrollback, outside the emulator's tracked screen window, so it is not
 	// re-checked here.
-	compactScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
+	compactScreen, _ := resizePTYAndWaitForScreen(t, slave, collector, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
 		if screen.FullRedraws() == 0 || !screen.Complete() ||
 			!strings.Contains(content, narrowFooterMarker) ||
@@ -640,14 +620,7 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	waitForPrompt(t, backend, "lifecycle prompt")
 	streamOffset := waitForSubsequence(t, collector, 0, assistantStreamText)
 
-	resizeOffset := collector.Len()
-	if err := pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}); err != nil {
-		t.Fatalf("pty.Setsize(80x24) error = %v", err)
-	}
-	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
-		t.Fatalf("SIGWINCH error = %v", err)
-	}
-	lifecycleScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
+	lifecycleScreen, _ := resizePTYAndWaitForScreen(t, slave, collector, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
 		if screen.FullRedraws() == 0 || !screen.Complete() ||
 			!strings.Contains(content, narrowFooterMarker) ||
@@ -828,6 +801,35 @@ func waitForTerminalScreen(t *testing.T, collector *ptyOutputCollector, after, w
 		t.Fatal(err)
 	}
 	return screen, raw
+}
+
+// resizePTYAndWaitForScreen sends a PTY resize (Setsize + SIGWINCH) and waits
+// for the matching screen. bubbletea's resize-render race (see ptyStepTimeout
+// above) makes a single attempt occasionally miss its deadline under load;
+// SIGWINCH's handler re-queries the current size and resends a WindowSizeMsg
+// unconditionally, so resending the same target size reliably re-triggers a
+// fresh redraw to retry against.
+func resizePTYAndWaitForScreen(t *testing.T, slave *os.File, collector *ptyOutputCollector, cols, rows int, accept func(*ptyTerminalScreen) bool) (*ptyTerminalScreen, []byte) {
+	t.Helper()
+	const maxResizeAttempts = 3
+	for attempt := 1; attempt <= maxResizeAttempts; attempt++ {
+		after := collector.Len()
+		if err := pty.Setsize(slave, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
+			t.Fatalf("pty.Setsize(%dx%d) error = %v", cols, rows, err)
+		}
+		if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+			t.Fatalf("SIGWINCH error = %v", err)
+		}
+		screen, raw, err := collector.WaitForTerminalScreen(after, cols, rows, accept, ptyQuietWindow, ptyStepTimeout)
+		if err == nil {
+			return screen, raw
+		}
+		if attempt == maxResizeAttempts {
+			t.Fatal(err)
+		}
+		t.Logf("resize to %dx%d attempt %d/%d did not converge, retrying: %v", cols, rows, attempt, maxResizeAttempts, err)
+	}
+	return nil, nil
 }
 
 type runResult struct {

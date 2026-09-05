@@ -37,7 +37,7 @@ test-architecture: ## verify production package import boundaries
 	go test ./internal/architecture
 
 test-race: ## run the test suite with the race detector
-	go test -race ./...
+	go test -race -timeout=20m ./...
 
 test-tui: ## run the TUI PTY lifecycle smoke test
 	go test ./cmd/otto -run TestTUIPseudoTerminalLifecycle -count=1

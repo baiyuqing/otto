@@ -110,7 +110,7 @@ make check       # full macOS gate: check-fast, build, lint, all tests, race, PT
 make build
 make lint        # pinned staticcheck v0.8.1
 make test        # go test ./... (offline)
-make test-race   # go test -race ./...
+make test-race   # go test -race -timeout=20m ./...
 make test-tui    # offline PTY lifecycle smoke test
 ```
 
@@ -119,6 +119,10 @@ set is `internal/model`, `internal/agent`, `internal/app`,
 `internal/provider/...` (including both adapters), `internal/config`, `internal/skill`, and
 `internal/subagent`. `check` adds the trimmed macOS build, `make lint`, all
 tests, race tests, the PTY test, and `git diff --check`.
+
+The complete race suite has a 20-minute per-package budget: the SQLite suite
+can exceed Go's default 10-minute package timeout on hosted runners. Individual
+behavioral assertions and their deadlines remain unchanged.
 
 Use `make lint` as the canonical staticcheck invocation. The pinned v0.8.1
 module supports Go 1.26. Keep the default test suite offline: it must not need

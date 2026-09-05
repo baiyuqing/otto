@@ -1940,7 +1940,7 @@ func TestDriverCopiedEscapeBrokersCannotBypassOperations(t *testing.T) {
 			name:   "Launch Services operation",
 			source: "/usr/bin/open",
 			readiness: func(copy string) ([]string, string) {
-				return []string{"/bin/sh", "-c", `"$1" -h >/dev/null 2>&1; code=$?; test "$code" -eq 1 && printf copied-open-ready`, "probe", copy}, "copied-open-ready"
+				return []string{"/bin/sh", "-c", `"$1" -h >/dev/null; code=$?; test "$code" -eq 1 && printf copied-open-ready`, "probe", copy}, "copied-open-ready"
 			},
 			argv: func(copy, _ string) []string {
 				return []string{copy, "-Ra", "Finder"}
@@ -1960,7 +1960,7 @@ func TestDriverCopiedEscapeBrokersCannotBypassOperations(t *testing.T) {
 			name:   "nested permissive sandbox",
 			source: sandboxExecPath,
 			readiness: func(copy string) ([]string, string) {
-				return []string{"/bin/sh", "-c", `"$1" -h >/dev/null 2>&1; code=$?; test "$code" -eq 64 && printf copied-sandbox-ready`, "probe", copy}, "copied-sandbox-ready"
+				return []string{"/bin/sh", "-c", `"$1" -h >/dev/null; code=$?; test "$code" -eq 64 && printf copied-sandbox-ready`, "probe", copy}, "copied-sandbox-ready"
 			},
 			argv: func(copy, outside string) []string {
 				return []string{copy, "-p", "(version 1)\n(allow default)", "--", "/bin/cat", outside}
@@ -1980,10 +1980,10 @@ func TestDriverCopiedEscapeBrokersCannotBypassOperations(t *testing.T) {
 			}
 			adHocSignDriverTestExecutable(t, copyPath)
 			readyArgv, readyMarker := test.readiness(copyPath)
-			var readiness bytes.Buffer
-			readyStatus, readyErr := driver.Execute(context.Background(), basicDriverRequest(driver, readyArgv), sandbox.Streams{Stdout: &readiness, Stderr: io.Discard})
+			var readiness, readinessErrors bytes.Buffer
+			readyStatus, readyErr := driver.Execute(context.Background(), basicDriverRequest(driver, readyArgv), sandbox.Streams{Stdout: &readiness, Stderr: &readinessErrors})
 			if readyErr != nil || readyStatus.Code != 0 || readiness.String() != readyMarker {
-				t.Fatalf("copied broker readiness = (%+v, %v, %q), want marker %q", readyStatus, readyErr, readiness.String(), readyMarker)
+				t.Fatalf("copied broker readiness = (%+v, %v, stdout %q, stderr %q), want marker %q", readyStatus, readyErr, readiness.String(), readinessErrors.String(), readyMarker)
 			}
 
 			outside := filepath.Join(filepath.Dir(driver.workspace), "copied-broker-outside")

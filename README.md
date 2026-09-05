@@ -163,12 +163,14 @@ access to a workspace.
 
 ## Contributing
 
-See [AGENTS.md](AGENTS.md) for repository conventions and development checks.
+See [AGENTS.md](AGENTS.md) for the task map and the
+[development guide](docs/development.md) for contracts and validation.
 Design documents live in [docs/specs](docs/specs/).
 
 ```bash
 make build
-make check
+make check-fast  # quick core feedback; also run tests for the package you change
+make check       # full macOS acceptance, including race and PTY tests
 ```
 
 ## License

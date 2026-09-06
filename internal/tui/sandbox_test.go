@@ -37,7 +37,7 @@ func TestSandboxCommandShowsCurrentStateWithoutReloading(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("cmd = %v, want nil", cmd)
 	}
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "network allowed") {
+	if content := got.View().Content; !strings.Contains(content, "network allowed") {
 		t.Fatalf("transcript = %q, want the current sandbox summary", content)
 	}
 	if backend.reloadCalls != 0 {
@@ -55,7 +55,7 @@ func TestSandboxReloadCommandReportsNewState(t *testing.T) {
 	if backend.reloadCalls != 1 {
 		t.Fatalf("reload calls = %d, want 1", backend.reloadCalls)
 	}
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "network denied") {
+	if content := got.View().Content; !strings.Contains(content, "network denied") {
 		t.Fatalf("transcript = %q, want the reloaded sandbox summary", content)
 	}
 }
@@ -89,7 +89,7 @@ func TestSandboxReloadCommandRejectedWhileRunning(t *testing.T) {
 func TestSandboxReloadCommandWithoutCapabilityIsReported(t *testing.T) {
 	backend := &fakeBackend{info: app.Info{Sandbox: seatbeltTUIInfo(app.SandboxNetworkAllowed)}}
 	got, _ := submitCommand(t, newAuthModel(t, backend), "/sandbox reload")
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, app.ErrSandboxReloadUnavailable.Error()) {
+	if content := got.View().Content; !strings.Contains(content, app.ErrSandboxReloadUnavailable.Error()) {
 		t.Fatalf("transcript = %q, want the unavailable report", content)
 	}
 }

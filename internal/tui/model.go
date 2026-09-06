@@ -92,6 +92,7 @@ type Model struct {
 	running                 bool
 	expandedDetails         bool
 	overlay                 overlayKind
+	autoFollow              bool
 	renderer                MarkdownRenderer
 	rendererInjected        bool
 	darkBackground          bool
@@ -136,11 +137,6 @@ type Model struct {
 	promptDraft             string
 	turnStartedAt           time.Time
 	turnDuration            time.Duration
-	committed               int
-	committedAssistantTurn  bool
-	pendingPrints           []string
-	printInFlight           bool
-	bannerShown             bool
 }
 
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
@@ -159,12 +155,13 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	_ = editor.Focus()
 
 	vp := viewport.New()
+	vp.MouseWheelEnabled = true
 	vp.SoftWrap = true
-	// The transcript viewport now renders only the live region (the
-	// in-progress turn); it must never consume typing keys. Its default
+	// The transcript viewport must never consume typing keys. Its default
 	// keymap binds space (and f/j/k/u/d/b/h/l) to scrolling, which would fire
-	// while the composer is focused because unhandled key presses are
-	// forwarded to the viewport before the editor.
+	// while the composer is focused because unhandled key presses are forwarded
+	// to the viewport before the editor. Scrolling is handled explicitly by the
+	// TUI keymap (PgUp/PgDn/Home/End) and the mouse wheel.
 	vp.KeyMap = viewport.KeyMap{}
 
 	model := Model{
@@ -177,6 +174,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 		keymap:             DefaultKeyMap(),
 		usage:              usage,
 		expandedDetails:    false,
+		autoFollow:         true,
 		darkBackground:     true,
 		renderer:           newGlamourRenderer(true),
 		clock:              realClock{},
@@ -187,11 +185,7 @@ func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model
 	for _, option := range options {
 		option(&model)
 	}
-	// commitFinalEntries (inside rerenderAndRefreshViewportContent) is gated
-	// on m.width > 0, so at construction time (before the first
-	// tea.WindowSizeMsg) this call is a no-op for committing; it only sizes
-	// the initial viewport content.
-	model.rerenderAndRefreshViewportContent()
+	model.rerenderAndRefreshViewportContent(false)
 	return model
 }
 
@@ -199,30 +193,18 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(tea.RequestBackgroundColor, m.spinner.Tick, m.armTaskUpdates())
 }
 
-// Update dispatches msg and then, regardless of which branch handled it,
-// gives the print-ordering state machine a chance to send the next queued
-// scrollback chunk. Bubble Tea dispatches each returned tea.Cmd on its own
-// goroutine, so a tea.Println queued by one Update call is not guaranteed to
-// reach the terminal before a later one; centralizing the flush here means
-// every internal helper that appends to entries can stay a plain void method
-// and this is the only place that has to remember to drain pendingPrints.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	next, cmd := m.dispatch(msg)
-	updated, ok := next.(Model)
-	if !ok {
-		return next, cmd
-	}
-	return updated, tea.Batch(cmd, updated.flushNextPrintCmd())
-}
+	previousYOffset := m.viewport.YOffset()
+	previousEditorHeight := m.editor.Height()
+	viewportBefore := m.viewport
 
-func (m Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.BackgroundColorMsg:
 		m.darkBackground = msg.IsDark()
 		if !m.rendererInjected {
 			m.renderer = newGlamourRenderer(m.darkBackground)
 			m.invalidateMarkdownRenders()
-			m.rerenderAndRefreshViewportContent()
+			m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		}
 		return m, nil
 	case spinner.TickMsg:
@@ -247,8 +229,7 @@ func (m Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.profilePicker.selected = clamp(m.profilePicker.selected, 0, len(m.profilePicker.profiles)-1)
 		}
-		m.queueBannerIfEmpty()
-		m.rerenderAndRefreshViewportContent()
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil
 	case tea.KeyboardEnhancementsMsg:
 		m.supportsModifiedEnter = msg.SupportsKeyDisambiguation()
@@ -266,10 +247,10 @@ func (m Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case toggleDetailsMsg:
 		m.expandedDetails = !m.expandedDetails
-		m.refreshViewportContent()
+		m.refreshViewportContent(!m.autoFollow)
 		return m, nil
-	case commitFlushedMsg:
-		m.printInFlight = false
+	case scrollViewportMsg:
+		m.scrollViewport(msg.Delta)
 		return m, nil
 	case newSessionResultMsg:
 		return m.applyNewSessionResult(msg)
@@ -316,11 +297,11 @@ func (m Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderTickActive = false
 		if m.dirtyStreaming && m.renderActiveAssistantEntry() {
 			m.dirtyStreaming = false
-			m.refreshViewportContent()
+			m.refreshViewportContent(!m.autoFollow)
 		}
 		return m, nil
 	case tea.KeyPressMsg:
-		return m.handleKeyPress(msg)
+		return m.handleKeyPress(msg, previousYOffset, previousEditorHeight, viewportBefore)
 	case tea.PasteMsg:
 		if m.resume.active() || m.archive.active() || m.overlay != overlayNone {
 			return m, nil
@@ -331,13 +312,12 @@ func (m Model) dispatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m.updateComponents(msg)
+	return m.updateComponents(msg, previousYOffset, previousEditorHeight, viewportBefore)
 }
 
-func (m Model) updateComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) updateComponents(msg tea.Msg, previousYOffset, previousEditorHeight int, viewportBefore viewport.Model) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	previousEditorValue := m.editor.Value()
-	previousEditorHeight := m.editor.Height()
 	previousSuggestionCount := len(m.commandSuggestions())
 	m.viewport, _ = m.viewport.Update(msg)
 	m.editor, cmd = m.editor.Update(msg)
@@ -345,9 +325,14 @@ func (m Model) updateComponents(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commandSuggestionIndex = 0
 	}
 	m.spinner, _ = m.spinner.Update(msg)
+	m.syncAutoFollow(viewportBefore)
 
 	if m.editor.Height() != previousEditorHeight || len(m.commandSuggestions()) != previousSuggestionCount {
-		m.rerenderAndRefreshViewportContent()
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
+	} else if m.viewport.YOffset() != previousYOffset && !m.viewport.AtBottom() {
+		m.autoFollow = false
+	} else if m.viewport.AtBottom() {
+		m.autoFollow = true
 	}
 
 	return m, cmd
@@ -357,7 +342,7 @@ func (m Model) View() tea.View {
 	_ = m.reservedStateActive()
 
 	suggestions := m.commandSuggestions()
-	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions), m.liveLines(), m.taskPanelLines())
+	layout := calculateLayout(m.width, m.height, m.editor, len(suggestions), m.taskPanelLines())
 	if layout.tooSmall {
 		return newRootView(m, smallTerminalView(m.width, m.height))
 	}
@@ -377,6 +362,9 @@ func (m Model) View() tea.View {
 	if layout.taskLines > 0 {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Render(taskPanelContent(m.activeTasks(), m.now(), m.spinner.View(), m.width)))
 	}
+	if layout.suggestionHeight > 0 {
+		parts = append(parts, renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, layout.suggestionHeight))
+	}
 	if layout.editorSpacing > 0 {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorSpacing).MaxHeight(layout.editorSpacing).Render(""))
 	}
@@ -384,11 +372,6 @@ func (m Model) View() tea.View {
 		parts = append(parts, boxedInput(m.width, layout.editorHeight, m.editor.View()))
 	} else {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View()))
-	}
-	// Suggestions sit below the input box so the editor row does not move
-	// when they open or close; see overlayCursor for the renderer rule.
-	if layout.suggestionHeight > 0 {
-		parts = append(parts, renderCommandSuggestions(m.width, suggestions, m.commandSuggestionIndex, layout.suggestionHeight))
 	}
 	parts = append(parts, footer)
 	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -448,8 +431,7 @@ func (m Model) overlayContent() string {
 	}
 }
 
-func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	previousEditorHeight := m.editor.Height()
+func (m Model) handleKeyPress(msg tea.KeyPressMsg, previousYOffset, previousEditorHeight int, viewportBefore viewport.Model) (tea.Model, tea.Cmd) {
 	if isCtrlCKey(msg) {
 		return m.handleCtrlC(previousEditorHeight)
 	}
@@ -470,20 +452,30 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if isEscapeKey(msg) {
-		switch {
-		case m.running:
-			if m.cancel != nil {
-				m.cancel()
-			}
-		case strings.HasPrefix(m.editor.Value(), "/"):
-			m.clearEditor()
+		if m.running && m.cancel != nil {
+			m.cancel()
 		}
 		return m, nil
 	}
 	if key.Matches(msg, m.keymap.ToggleDetails) {
 		m.expandedDetails = !m.expandedDetails
-		m.refreshViewportContent()
+		m.refreshViewportContent(!m.autoFollow)
 		return m, nil
+	}
+	if key.Matches(msg, m.keymap.PageUp) {
+		m.viewport.PageUp()
+		if !m.viewport.AtBottom() {
+			m.autoFollow = false
+		}
+		return m, nil
+	}
+	if key.Matches(msg, m.keymap.PageDown) {
+		m.viewport.PageDown()
+		m.autoFollow = m.viewport.AtBottom()
+		return m, nil
+	}
+	if key.Matches(msg, m.keymap.Home) || key.Matches(msg, m.keymap.End) {
+		return m.handleHomeOrEnd(msg, previousEditorHeight)
 	}
 	if updated, cmd, handled := m.handleCommandSuggestionKey(msg); handled {
 		return updated, cmd
@@ -502,7 +494,7 @@ func (m Model) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, m.keymap.Submit) {
 		return m.handleSubmit()
 	}
-	return m.updateComponents(msg)
+	return m.updateComponents(msg, previousYOffset, previousEditorHeight, viewportBefore)
 }
 
 func (m Model) commandSuggestions() []slashCommand {
@@ -528,7 +520,7 @@ func (m Model) handleCommandSuggestionKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 	case key.Matches(msg, m.keymap.Complete):
 		m.editor.SetValue(suggestions[selected].Name)
 		m.commandSuggestionIndex = 0
-		m.rerenderAndRefreshViewportContent()
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		return m, nil, true
 	default:
 		return m, nil, false
@@ -575,7 +567,7 @@ func (m *Model) setPromptHistoryEditorValue(value string) {
 	m.editor.SetValue(value)
 	m.commandSuggestionIndex = 0
 	if m.editor.Height() != previousEditorHeight || hadSuggestions {
-		m.rerenderAndRefreshViewportContent()
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 	}
 }
 
@@ -593,6 +585,30 @@ func (m *Model) addPromptHistory(trimmed string) {
 	m.promptDraft = ""
 }
 
+func (m Model) handleHomeOrEnd(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd) {
+	beforeLine, beforeColumn := m.editor.Line(), m.editor.Column()
+	beforeScroll := m.editor.ScrollYOffset()
+	beforeStart, beforeEnd, beforeSelection := m.editor.Selection()
+	updatedEditor, cmd := m.editor.Update(msg)
+	afterStart, afterEnd, afterSelection := updatedEditor.Selection()
+	consumed := updatedEditor.Line() != beforeLine || updatedEditor.Column() != beforeColumn || updatedEditor.ScrollYOffset() != beforeScroll || afterSelection != beforeSelection || afterStart != beforeStart || afterEnd != beforeEnd
+	if consumed {
+		m.editor = updatedEditor
+		if m.editor.Height() != previousEditorHeight {
+			m.rerenderAndRefreshViewportContent(!m.autoFollow)
+		}
+		return m, cmd
+	}
+	if key.Matches(msg, m.keymap.Home) {
+		m.viewport.GotoTop()
+		m.autoFollow = false
+		return m, nil
+	}
+	m.viewport.GotoBottom()
+	m.autoFollow = true
+	return m, nil
+}
+
 func (m Model) updateEditorWithKey(msg tea.KeyPressMsg, previousEditorHeight int) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	previousEditorValue := m.editor.Value()
@@ -602,7 +618,7 @@ func (m Model) updateEditorWithKey(msg tea.KeyPressMsg, previousEditorHeight int
 		m.commandSuggestionIndex = 0
 	}
 	if m.editor.Height() != previousEditorHeight || len(m.commandSuggestions()) != previousSuggestionCount {
-		m.rerenderAndRefreshViewportContent()
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 	}
 	return m, cmd
 }
@@ -636,26 +652,21 @@ func isShiftEnterKey(msg tea.KeyPressMsg) bool {
 
 func newRootView(m Model, content string) tea.View {
 	view := tea.NewView(fitToBounds(content, m.width, m.height))
-	view.AltScreen = false
-	view.MouseMode = tea.MouseModeNone
+	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
 	view.KeyboardEnhancements.ReportEventTypes = false
 	view.KeyboardEnhancements.ReportAlternateKeys = true
-	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), m.liveLines(), m.taskPanelLines())
-	if layout.tooSmall {
-		return view
-	}
-	if m.resume.active() || m.archive.active() || m.profilePicker.active() || m.overlay != overlayNone {
-		view.Cursor = overlayCursor(content)
-		return view
-	}
-	if cursor := m.editor.Cursor(); cursor != nil {
-		cursor.Y += 1 + layout.transcriptHeight + layout.taskLines + layout.editorSpacing
-		if layout.inputBoxed {
-			// The textarea sits below the top border and the label row.
-			cursor.Y += 1 + inputBoxLabel
-			cursor.X += 1 + inputBoxPadding
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), m.taskPanelLines())
+	if !layout.tooSmall && !m.resume.active() && !m.archive.active() && !m.profilePicker.active() && m.overlay == overlayNone {
+		if cursor := m.editor.Cursor(); cursor != nil {
+			cursor.Y += layout.transcriptHeight + layout.taskLines + layout.suggestionHeight + layout.editorSpacing
+			if layout.inputBoxed {
+				// The textarea sits below the top border and the label row.
+				cursor.Y += 1 + inputBoxLabel
+				cursor.X += 1 + inputBoxPadding
+			}
+			view.Cursor = cursor
 		}
-		view.Cursor = cursor
 	}
 	return view
 }
@@ -798,13 +809,10 @@ func (m *Model) resetSessionViewFromBackend(status string) {
 	m.liveEntrySequence = 0
 	m.turnStartedAt = time.Time{}
 	m.turnDuration = 0
+	m.autoFollow = true
 	m.editor.SetValue("")
 	m.commandSuggestionIndex = 0
-	m.committed = 0
-	m.committedAssistantTurn = false
-	m.bannerShown = false
-	m.queueBannerIfEmpty()
-	m.rerenderAndRefreshViewportContent()
+	m.rerenderAndRefreshViewportContent(false)
 }
 
 func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
@@ -827,7 +835,7 @@ func (m Model) handleCtrlC(previousEditorHeight int) (tea.Model, tea.Cmd) {
 		m.editor.SetValue("")
 		m.commandSuggestionIndex = 0
 		if m.editor.Height() != previousEditorHeight || hadSuggestions {
-			m.rerenderAndRefreshViewportContent()
+			m.rerenderAndRefreshViewportContent(!m.autoFollow)
 		}
 	}
 	return m.armCtrlC(now)
@@ -872,7 +880,7 @@ func (m *Model) clearEditor() {
 	m.editor.SetValue("")
 	m.commandSuggestionIndex = 0
 	if m.editor.Height() != previousEditorHeight || hadSuggestions {
-		m.rerenderAndRefreshViewportContent()
+		m.rerenderAndRefreshViewportContent(!m.autoFollow)
 	}
 }
 
@@ -917,7 +925,7 @@ func (m Model) startTurn(text string, appendUserEntry bool, wake *app.WakeOperat
 		m.editor.SetValue("")
 		m.commandSuggestionIndex = 0
 	}
-	m.rerenderAndRefreshViewportContent()
+	m.rerenderAndRefreshViewportContent(!m.autoFollow)
 
 	return m, startTurnCommand(ctx, m.backend, text, stream, wake)
 }
@@ -1100,7 +1108,7 @@ func (m Model) updateTurn(msg turnMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.value.done {
 		if m.reconcilePersistedToolResults() {
-			m.refreshViewportContent()
+			m.refreshViewportContent(!m.autoFollow)
 		}
 		return m.finishTurn(msg.value)
 	}
@@ -1127,13 +1135,13 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 			ToolName:   event.ToolName,
 			ToolArgs:   event.ToolArgs,
 		})
-		m.refreshViewportContent()
+		m.refreshViewportContent(!m.autoFollow)
 		return m, waitTurn(stream)
 	case agent.EventToolCallFinished:
 		m.finalizeStreamingRender()
 		m.activeAssistant = -1
 		m.finishToolEntry(event)
-		m.refreshViewportContent()
+		m.refreshViewportContent(!m.autoFollow)
 		return m, waitTurn(stream)
 	case agent.EventProviderUsage:
 		m.usage = addUsageTotals(m.usage, &event.Usage)
@@ -1147,14 +1155,14 @@ func (m Model) applyTurnEvent(stream *turnStream, envelope turnEnvelope) (tea.Mo
 			Raw:  notificationEntryText(event.TaskID, event.Text),
 		})
 		m.usage = addUsageTotals(m.usage, &event.Usage)
-		m.refreshViewportContent()
+		m.refreshViewportContent(!m.autoFollow)
 		return m, waitTurn(stream)
 	case agent.EventAgentError:
 		m.recordTurnError(event.Err)
 		return m, waitTurn(stream)
 	case agent.EventCompactionStarted, agent.EventCompactionPlanned, agent.EventCompactionCompleted, agent.EventCompactionWarning:
 		if m.applyCompactionEvent(event, envelope.aggregateUsage, envelope.aggregateUsagePresent) {
-			m.refreshViewportContent()
+			m.refreshViewportContent(!m.autoFollow)
 		}
 		return m, waitTurn(stream)
 	case agent.EventMemoryWarning:
@@ -1442,19 +1450,24 @@ func (m Model) findTurnToolEntry(toolCallID string, used map[int]struct{}) int {
 
 func (m Model) finishTurn(envelope turnEnvelope) (tea.Model, tea.Cmd) {
 	err := envelope.err
+	changed := false
 	if m.operationKind == operationCompact && !m.compactionCompleted && envelope.compactionResult != nil && (envelope.compactionResult.Noop || envelope.compactionResult.CheckpointID != "" || err == nil) {
-		m.applyCompactionResult(*envelope.compactionResult, envelope.aggregateUsage, envelope.aggregateUsagePresent)
+		changed = m.applyCompactionResult(*envelope.compactionResult, envelope.aggregateUsage, envelope.aggregateUsagePresent) || changed
 	}
 	if err == nil {
 		err = m.turnEventErr
 	}
 	m.finalizeStreamingRender()
-	m.reconcilePendingTools(err)
+	if m.reconcilePendingTools(err) {
+		changed = true
+	}
+	if changed {
+		m.refreshViewportContent(!m.autoFollow)
+	}
 	if err != nil && !m.turnErrorSeen {
 		m.recordTurnError(err)
 	}
 	m.completeTurnState()
-	m.refreshViewportContent()
 	if errors.Is(err, session.ErrFatalPersistence) {
 		m.fatalErr = err
 		return m.quit()
@@ -1490,7 +1503,7 @@ func (m *Model) recordTurnError(err error) {
 	m.turnErrorSeen = true
 	m.turnEventErr = err
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("error"), Kind: EntryError, Raw: err.Error()})
-	m.rerenderAndRefreshViewportContent()
+	m.rerenderAndRefreshViewportContent(!m.autoFollow)
 }
 
 func (m *Model) finalizeStreamingRender() {
@@ -1502,7 +1515,7 @@ func (m *Model) finalizeStreamingRender() {
 		return
 	}
 	m.dirtyStreaming = false
-	m.refreshViewportContent()
+	m.refreshViewportContent(!m.autoFollow)
 }
 
 func (m *Model) renderActiveAssistantEntry() bool {
@@ -1546,20 +1559,18 @@ func (m *Model) scheduleRenderTick() tea.Cmd {
 	})
 }
 
-func (m *Model) rerenderAndRefreshViewportContent() {
+func (m *Model) rerenderAndRefreshViewportContent(preserveOffset bool) {
 	m.renderEntries(m.transcriptWidth())
-	m.refreshViewportContent()
+	m.refreshViewportContent(preserveOffset)
 }
 
 func (m Model) transcriptWidth() int {
-	return max(1, calculateLayout(m.width, m.height, m.editor, 0, 0, 0).transcriptWidth)
+	return max(1, calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), 0).transcriptWidth)
 }
 
-func (m *Model) refreshViewportContent() {
-	width := m.transcriptWidth()
-	m.commitFinalEntries(width)
-	content, _ := renderTranscript(m.entries[m.committed:], m.committedAssistantTurn, width, m.expandedDetails, m.darkBackground)
-	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), lineCount(content), m.taskPanelLines())
+func (m *Model) refreshViewportContent(preserveOffset bool) {
+	previousYOffset := m.viewport.YOffset()
+	layout := calculateLayout(m.width, m.height, m.editor, len(m.commandSuggestions()), m.taskPanelLines())
 	editorWidth := m.width
 	if layout.inputBoxed {
 		editorWidth = max(1, m.width-inputBoxPadding*2-inputBoxBorder)
@@ -1568,91 +1579,19 @@ func (m *Model) refreshViewportContent() {
 	m.editor.SetHeight(layout.editorHeight)
 	m.viewport.SetWidth(layout.transcriptWidth)
 	m.viewport.SetHeight(max(1, layout.transcriptHeight))
+
+	transcriptWidth := max(1, layout.transcriptWidth)
+	content := m.transcriptContent(transcriptWidth)
 	m.viewport.SetContent(content)
-	m.viewport.GotoBottom()
-}
-
-// commitFinalEntries advances m.committed past every entry that has become
-// final since the last commit, queuing the newly-final block for printing to
-// the terminal's native scrollback via the print-ordering state machine, then
-// always attempts to flush pendingPrints (so an externally queued item, like
-// the empty-session banner, is not stranded).
-//
-// ponytail: gated on m.width > 0 so a commit can never fire before the first
-// WindowSizeMsg sets a usable width; upgrade only if Otto ever needs to print
-// before terminal size is known.
-func (m *Model) commitFinalEntries(width int) {
-	if m.width > 0 {
-		end := m.committed
-		for end < len(m.entries) && isEntryFinal(m.entries, end, m.activeAssistant, m.running) {
-			end++
-		}
-		if end != m.committed {
-			chunk, nextAssistantTurn := renderTranscript(m.entries[m.committed:end], m.committedAssistantTurn, width, m.expandedDetails, m.darkBackground)
-			m.committed = end
-			m.committedAssistantTurn = nextAssistantTurn
-			m.queuePrint(chunk)
-		}
+	if m.autoFollow && !preserveOffset {
+		m.viewport.GotoBottom()
+		return
 	}
-}
-
-// queuePrint appends chunk to pendingPrints with a trailing newline so
-// tea.Println leaves one blank line after it, matching the "\n\n" block
-// separator used inside a chunk.
-func (m *Model) queuePrint(chunk string) {
-	if chunk != "" {
-		m.pendingPrints = append(m.pendingPrints, chunk+"\n")
-	}
-}
-
-// flushNextPrintCmd sends the next queued scrollback chunk, if one is queued
-// and none is currently in flight. Called unconditionally by Update after
-// every dispatch, so every internal helper that appends to pendingPrints can
-// stay a plain void method.
-func (m *Model) flushNextPrintCmd() tea.Cmd {
-	chunk, ok := m.takeNextPrintChunk()
-	if !ok {
-		return nil
-	}
-	m.printInFlight = true
-	return tea.Sequence(tea.Println(chunk), func() tea.Msg { return commitFlushedMsg{} })
-}
-
-// takeNextPrintChunk removes the next chunk to print from the queue, splitting
-// the head chunk when it is taller than the rows the live frame leaves free.
-//
-// ultraviolet's TerminalRenderer.PrependString (terminal_renderer.go) scrolls
-// the terminal down by the chunk's row count, then moves the cursor back up by
-// that count plus the live frame's height before inserting the rows. The
-// upward move is clamped at row 0, so once the sum exceeds the terminal height
-// the insert lands inside the live frame and overwrites the input box and the
-// footer. Splitting keeps every prepend within the free rows above the frame.
-func (m *Model) takeNextPrintChunk() (string, bool) {
-	if m.printInFlight || len(m.pendingPrints) == 0 {
-		return "", false
-	}
-	chunk := m.pendingPrints[0]
-	limit := m.printLineLimit()
-	if lines := strings.Split(chunk, "\n"); limit > 0 && len(lines) > limit {
-		m.pendingPrints[0] = strings.Join(lines[limit:], "\n")
-		return strings.Join(lines[:limit], "\n"), true
-	}
-	m.pendingPrints = m.pendingPrints[1:]
-	return chunk, true
-}
-
-// printLineLimit reports how many terminal rows are free above the live frame.
-// It is zero or negative when the frame fills the screen, which no split can
-// fix; the chunk is then printed whole.
-func (m Model) printLineLimit() int {
-	if m.height <= 0 {
-		return 0
-	}
-	return m.height - lipgloss.Height(m.View().Content)
+	m.viewport.SetYOffset(previousYOffset)
 }
 
 func (m *Model) renderEntries(width int) {
-	for i := m.committed; i < len(m.entries); i++ {
+	for i := range m.entries {
 		m.renderEntryAt(i, width)
 	}
 }
@@ -1694,27 +1633,16 @@ func (m *Model) renderEntryAt(index int, width int) {
 	}
 }
 
-// transcriptContent renders the full entry list at once; kept for tests that
-// exercise rendering independent of the commit/live split.
 func (m Model) transcriptContent(width int) string {
 	if len(m.entries) == 0 && !m.running {
 		return emptyTranscriptHint(width)
 	}
-	content, _ := renderTranscript(m.entries, false, width, m.expandedDetails, m.darkBackground)
-	return content
-}
-
-// renderTranscript renders a slice of entries into the block-joined
-// transcript text shared by the committed (printed to scrollback) and live
-// (viewport) regions. assistantTurn carries the "Otto" header grouping state
-// across a commit boundary; the returned bool is that state after processing
-// entries.
-func renderTranscript(entries []Entry, assistantTurn bool, width int, expandedDetails, darkBackground bool) (string, bool) {
-	blocks := make([]string, 0, len(entries))
-	for _, entry := range entries {
+	blocks := make([]string, 0, len(m.entries))
+	assistantTurn := false
+	for _, entry := range m.entries {
 		if entry.Kind == EntryUser {
 			assistantTurn = false
-			blocks = append(blocks, renderUserBlock(entry.Rendered, width, darkBackground))
+			blocks = append(blocks, renderUserBlock(entry.Rendered, width, m.darkBackground))
 			continue
 		}
 		if entry.Kind == EntryAssistant || entry.Kind == EntryTool {
@@ -1727,66 +1655,16 @@ func renderTranscript(entries []Entry, assistantTurn bool, width int, expandedDe
 				blocks = append(blocks, renderMessageBlock("Otto", ""))
 			}
 			if entry.Kind == EntryTool {
-				blocks = append(blocks, indentToolBlock(renderToolBlock(entry, width, expandedDetails, darkBackground), width))
+				blocks = append(blocks, indentToolBlock(renderToolBlock(entry, width, m.expandedDetails, m.darkBackground), width))
 			} else {
 				blocks = append(blocks, entry.Rendered)
 			}
 			continue
 		}
 		assistantTurn = false
-		blocks = append(blocks, renderEntry(entry, width, expandedDetails, darkBackground))
+		blocks = append(blocks, m.renderEntry(entry, width))
 	}
-	return strings.Join(blocks, "\n\n"), assistantTurn
-}
-
-// isEntryFinal reports whether entries[index] is done changing and may be
-// committed (printed to scrollback): User/System/Error entries always are;
-// Tool entries once ToolDone; Assistant entries once no longer the streaming
-// entry; Compaction entries once the turn has stopped running.
-func isEntryFinal(entries []Entry, index int, activeAssistant int, running bool) bool {
-	entry := entries[index]
-	switch entry.Kind {
-	case EntryUser, EntrySystem, EntryError:
-		return true
-	case EntryTool:
-		return entry.ToolDone
-	case EntryAssistant:
-		return index != activeAssistant
-	case EntryCompaction:
-		return !running
-	default:
-		return true
-	}
-}
-
-func lineCount(s string) int {
-	if s == "" {
-		return 0
-	}
-	return strings.Count(s, "\n") + 1
-}
-
-// liveLines reports the rendered line count of the not-yet-committed tail of
-// m.entries, i.e. how tall the live region needs to be. Idle or fully
-// committed sessions have no live region.
-func (m Model) liveLines() int {
-	if m.committed >= len(m.entries) {
-		return 0
-	}
-	content, _ := renderTranscript(m.entries[m.committed:], m.committedAssistantTurn, m.transcriptWidth(), m.expandedDetails, m.darkBackground)
-	return lineCount(content)
-}
-
-// queueBannerIfEmpty queues the empty-session logo/hint text directly into
-// pendingPrints (bypassing the live region) the first time the transcript is
-// observed empty. bannerShown latches so the banner is only queued once per
-// session; resetSessionViewFromBackend clears the latch so /new re-shows it.
-func (m *Model) queueBannerIfEmpty() {
-	if m.bannerShown || len(m.entries) != 0 {
-		return
-	}
-	m.bannerShown = true
-	m.queuePrint(emptyTranscriptHint(m.transcriptWidth()))
+	return strings.Join(blocks, "\n\n")
 }
 
 const logo = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/"
@@ -1802,16 +1680,16 @@ func emptyTranscriptHint(width int) string {
 	return sb.String()
 }
 
-func renderEntry(entry Entry, width int, expandedDetails, darkBackground bool) string {
+func (m Model) renderEntry(entry Entry, width int) string {
 	switch entry.Kind {
 	case EntryUser:
 		return renderMessageBlock("You", entry.Rendered)
 	case EntryAssistant:
 		return renderMessageBlock("Otto", entry.Rendered)
 	case EntryTool:
-		return renderToolBlock(entry, width, expandedDetails, darkBackground)
+		return renderToolBlock(entry, width, m.expandedDetails, m.darkBackground)
 	case EntryCompaction:
-		return renderCompactionBlock(entry, width, expandedDetails)
+		return renderCompactionBlock(entry, width, m.expandedDetails)
 	case EntryError:
 		return renderMessageBlock("Error", entry.Rendered)
 	default:
@@ -2023,6 +1901,30 @@ func renderToolSummary(name, args, status string, width int, dark bool) string {
 		lineStyle = lineStyle.Faint(true)
 	}
 	return lineStyle.Width(width).MaxWidth(width).MaxHeight(1).Render(base)
+}
+
+func (m *Model) scrollViewport(delta int) {
+	if delta < 0 {
+		m.viewport.ScrollUp(-delta)
+		if !m.viewport.AtBottom() {
+			m.autoFollow = false
+		}
+		return
+	}
+	if delta > 0 {
+		m.viewport.ScrollDown(delta)
+	}
+	m.autoFollow = m.viewport.AtBottom()
+}
+
+func (m *Model) syncAutoFollow(before viewport.Model) {
+	if m.viewport.AtBottom() {
+		m.autoFollow = true
+		return
+	}
+	if m.viewport.YOffset() < before.YOffset() {
+		m.autoFollow = false
+	}
 }
 
 func entriesAndUsageFromBackend(backend app.Backend) ([]Entry, otmodel.Usage) {

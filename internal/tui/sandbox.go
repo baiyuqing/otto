@@ -52,5 +52,5 @@ func sandboxSummaryText(info app.SandboxInfo) string {
 
 func (m *Model) appendSandboxEntry(kind EntryKind, text string) {
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("sandbox"), Kind: kind, Raw: text})
-	m.rerenderAndRefreshViewportContent()
+	m.rerenderAndRefreshViewportContent(!m.autoFollow)
 }

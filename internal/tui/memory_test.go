@@ -176,20 +176,20 @@ func TestMemorySearchCommandRendersRecords(t *testing.T) {
 	}
 	m := resizeModel(t, newTestMemoryModel(t, backend), 80, 20)
 	m.editor.SetValue("/memory search vim")
-	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	pending := updated.(Model)
 	if cmd == nil {
 		t.Fatal("/memory search cmd = nil")
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, _ = pending.dispatch(result)
+	updated, _ = pending.Update(result)
 	got := updated.(Model)
 	if got.statusText != "" {
 		t.Fatalf("status = %q", got.statusText)
 	}
-	content := strings.Join(got.pendingPrints, "\n")
+	content := got.View().Content
 	if !strings.Contains(content, "id=rec-1") || !strings.Contains(content, "uses vim") {
-		t.Fatalf("committed transcript = %q", content)
+		t.Fatalf("view = %q", content)
 	}
 }
 
@@ -215,16 +215,16 @@ func TestMemoryForgetCommandResolvesRevisionAcrossScopes(t *testing.T) {
 	}
 	m := resizeModel(t, newTestMemoryModel(t, backend), 80, 20)
 	m.editor.SetValue("/memory forget rec-1")
-	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	pending := updated.(Model)
 	if cmd == nil {
 		t.Fatal("/memory forget cmd = nil")
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, _ = pending.dispatch(result)
+	updated, _ = pending.Update(result)
 	got := updated.(Model)
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "forgot rec-1") {
-		t.Fatalf("committed transcript = %q", content)
+	if !strings.Contains(got.View().Content, "forgot rec-1") {
+		t.Fatalf("view = %q", got.View().Content)
 	}
 }
 
@@ -267,16 +267,16 @@ func TestMemoryReviewCommandTriesScopesAndAppliesDecision(t *testing.T) {
 	}
 	m := resizeModel(t, newTestMemoryModel(t, backend), 80, 20)
 	m.editor.SetValue("/memory review cand-1 accept")
-	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	pending := updated.(Model)
 	if cmd == nil {
 		t.Fatal("/memory review cmd = nil")
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, _ = pending.dispatch(result)
+	updated, _ = pending.Update(result)
 	got := updated.(Model)
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "reviewed cand-1") {
-		t.Fatalf("committed transcript = %q", content)
+	if !strings.Contains(got.View().Content, "reviewed cand-1") {
+		t.Fatalf("view = %q", got.View().Content)
 	}
 }
 
@@ -308,16 +308,16 @@ func TestRememberCommandDefaultsToWorkspaceScopeAndNoteKind(t *testing.T) {
 	}
 	m := resizeModel(t, newTestMemoryModel(t, backend), 80, 20)
 	m.editor.SetValue("/remember prefers dark mode")
-	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	pending := updated.(Model)
 	if cmd == nil {
 		t.Fatal("/remember cmd = nil")
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, _ = pending.dispatch(result)
+	updated, _ = pending.Update(result)
 	got := updated.(Model)
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "remembered rec-9") {
-		t.Fatalf("committed transcript = %q", content)
+	if !strings.Contains(got.View().Content, "remembered rec-9") {
+		t.Fatalf("view = %q", got.View().Content)
 	}
 }
 
@@ -334,16 +334,16 @@ func TestRememberCommandParsesScopeKindKeyFlags(t *testing.T) {
 	}
 	m := resizeModel(t, newTestMemoryModel(t, backend), 80, 20)
 	m.editor.SetValue("/remember --scope user --kind preference --key editor vim")
-	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	pending := updated.(Model)
 	if cmd == nil {
 		t.Fatal("/remember cmd = nil")
 	}
 	result := runCommandWithin(t, cmd, time.Second)
-	updated, _ = pending.dispatch(result)
+	updated, _ = pending.Update(result)
 	got := updated.(Model)
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "remembered rec-2") {
-		t.Fatalf("committed transcript = %q", content)
+	if !strings.Contains(got.View().Content, "remembered rec-2") {
+		t.Fatalf("view = %q", got.View().Content)
 	}
 }
 
@@ -371,13 +371,7 @@ func TestMemoryWarningEventSetsStatusDuringPrompt(t *testing.T) {
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	// dispatch, not Update: submitting "question" commits a final User
-	// entry within this same call, which Update's auto-flush wrapper would
-	// batch with the real turn-start command. runCommandWithin below
-	// invokes cmd() and expects the real turn message back; a batched cmd
-	// would instead yield a tea.BatchMsg that dispatch below silently
-	// ignores, dropping the memory-warning event.
-	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	state := updated.(Model)
 
 	updated, _ = state.Update(runCommandWithin(t, cmd, time.Second))

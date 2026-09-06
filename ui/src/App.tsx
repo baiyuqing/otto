@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, events, loadToken, setToken } from './api'
+import { parseWebCommand } from './commands'
 import { fromHistory, reduce, type Item } from './transcript'
 import type { Info, Session, SessionListRow, Usage } from './types'
 import { SessionPicker } from './SessionPicker'
@@ -111,8 +112,24 @@ export function App() {
   const send = async (text: string) => {
     if (!session) return
     setError('')
+    const command = parseWebCommand(text)
+    if (command.kind === 'error') {
+      setError(command.message)
+      return
+    }
+    if (command.kind === 'rename') {
+      try {
+        const renamed = await api.renameSession(session.id, command.name)
+        setSession(renamed)
+        setItems((prev) => [...prev, { kind: 'notice', text: `Renamed session to ${command.name}` }])
+        void refreshSessions()
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
     try {
-      const res = await api.startTurn(session.id, text)
+      const res = await api.startTurn(session.id, command.text)
       // The stream carries no turn id; the session does.
       const s = await api.getSession(session.id)
       setSession(s)

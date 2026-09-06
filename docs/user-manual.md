@@ -747,6 +747,8 @@ the transcript, and a composer:
 - Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
   renders its history. The session id is kept in the URL fragment, so a reload
   reopens the same session.
+- Typing `/` in the composer shows local suggestions for supported Web slash
+  commands; Tab or click completes the highlighted command.
 - Enter sends the composer text as a turn; Shift+Enter inserts a newline.
   `/rename <name>` renames the current session instead of starting a turn.
   Assistant text renders as Markdown; each tool call is a collapsible block

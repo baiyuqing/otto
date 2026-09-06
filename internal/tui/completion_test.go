@@ -8,7 +8,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/baiyuqing/otto/internal/agent"
-	"github.com/charmbracelet/x/ansi"
 )
 
 func typeEditorText(t *testing.T, model Model, text string) Model {
@@ -25,7 +24,7 @@ func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 	// Seed the transcript so the empty-state hint (which legitimately mentions
 	// /help and /resume) does not interfere with the suggestion scan below.
 	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: "context", Rendered: "context", RenderWidth: 80}}
-	m.rerenderAndRefreshViewportContent()
+	m.rerenderAndRefreshViewportContent(false)
 	m = typeEditorText(t, m, "/s")
 
 	content := m.View().Content
@@ -36,86 +35,6 @@ func TestSlashCommandSuggestionsFilterByPrefix(t *testing.T) {
 		if strings.Contains(content, command) {
 			t.Fatalf("view = %q, contains nonmatching suggestion %q", content, command)
 		}
-	}
-}
-
-func TestSlashCommandSuggestionsKeepIdleViewportHeight(t *testing.T) {
-	m := resizeModel(t, newTestModel(t), 80, 16)
-	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: "stable transcript", Rendered: "stable transcript", RenderWidth: 80}}
-	m.rerenderAndRefreshViewportContent()
-	viewportHeight := m.viewport.Height()
-	m = typeEditorText(t, m, "/s")
-
-	if m.viewport.Height() != viewportHeight {
-		t.Fatalf("viewport height = %d, want unchanged %d", m.viewport.Height(), viewportHeight)
-	}
-	content := m.View().Content
-	if !strings.Contains(content, "show session details") || !strings.Contains(content, "> /session") {
-		t.Fatalf("view = %q, want /session suggestion", content)
-	}
-}
-
-// Inline mode: when a frame shrinks, the renderer moves the cursor up from
-// its row in the previous frame, clamped to the new height. Suggestions
-// therefore render below the input box so the editor row does not move.
-func TestSlashCommandSuggestionsRenderBelowInputBox(t *testing.T) {
-	m := resizeModel(t, newTestModel(t), 80, 16)
-	m = typeEditorText(t, m, "/")
-
-	view := m.View()
-	assertRenderedBounds(t, view.Content, 80, 16)
-	lines := strings.Split(view.Content, "\n")
-	suggestionRow := indexOfLineContaining(lines, "show help")
-	editorRow := indexOfLineContaining(lines, "│ > /")
-	footerRow := indexOfLineContaining(lines, "profile/model")
-	if suggestionRow < 0 || editorRow < 0 || footerRow < 0 {
-		t.Fatalf("view = %q, want suggestion panel, visible editor text, and footer", view.Content)
-	}
-	if suggestionRow <= editorRow || suggestionRow >= footerRow {
-		t.Fatalf("suggestion row %d is not between editor row %d and footer row %d:\n%s", suggestionRow, editorRow, footerRow, view.Content)
-	}
-	if footerRow != len(lines)-1 {
-		t.Fatalf("footer row = %d, want last row %d", footerRow, len(lines)-1)
-	}
-	if view.Cursor == nil || view.Cursor.Y != editorRow {
-		t.Fatalf("cursor = %+v, want row %d", view.Cursor, editorRow)
-	}
-}
-
-func indexOfLineContaining(lines []string, text string) int {
-	for i, line := range lines {
-		if strings.Contains(ansi.Strip(line), text) {
-			return i
-		}
-	}
-	return -1
-}
-
-func TestEscapeClearsSlashCommandInput(t *testing.T) {
-	m := resizeModel(t, newTestModel(t), 80, 16)
-	m = typeEditorText(t, m, "/s")
-	updated, _ := m.Update(keyPress(tea.KeyEscape))
-	m = updated.(Model)
-	if m.editor.Value() != "" || len(m.commandSuggestions()) != 0 {
-		t.Fatalf("escape with suggestions: editor=%q suggestions=%d", m.editor.Value(), len(m.commandSuggestions()))
-	}
-
-	m = typeEditorText(t, m, "/wat")
-	updated, _ = m.Update(keyPress(tea.KeyEnter))
-	m = updated.(Model)
-	if m.statusText != "unknown command: /wat" || m.editor.Value() != "/wat" {
-		t.Fatalf("unknown command: status=%q editor=%q", m.statusText, m.editor.Value())
-	}
-	updated, _ = m.Update(keyPress(tea.KeyEscape))
-	m = updated.(Model)
-	if m.editor.Value() != "" {
-		t.Fatalf("escape after unknown command left editor=%q", m.editor.Value())
-	}
-
-	m = typeEditorText(t, m, "hello")
-	updated, _ = m.Update(keyPress(tea.KeyEscape))
-	if got := updated.(Model).editor.Value(); got != "hello" {
-		t.Fatalf("escape cleared prompt draft: editor=%q", got)
 	}
 }
 
@@ -167,16 +86,6 @@ func TestSlashCommandKeysPassThroughOutsideSuggestionMode(t *testing.T) {
 	}
 }
 
-func TestSlashCommandSuggestionsKeepEditorVisibleAtMinimumHeight(t *testing.T) {
-	m := resizeModel(t, newTestModel(t), 40, 8)
-	m = typeEditorText(t, m, "/s")
-
-	content := m.View().Content
-	if !strings.Contains(content, "> /s") {
-		t.Fatalf("view = %q, want visible editor text", content)
-	}
-}
-
 func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 40, 8)
 	m = typeEditorText(t, m, "/")
@@ -189,9 +98,9 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 		}
 	}
 
-	m = resizeModel(t, m, 60, 21)
+	m = resizeModel(t, m, 60, 22)
 	content = m.View().Content
-	assertRenderedBounds(t, content, 60, 21)
+	assertRenderedBounds(t, content, 60, 22)
 	for _, text := range []string{"/resume", "resume a session", "/compact", "compact context", "/tasks", "/task", "/exit", "quit"} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("suggestion panel = %q, want %q", content, text)
@@ -200,7 +109,7 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 
 	m.overlay = overlayHelp
 	help := m.View().Content
-	assertRenderedBounds(t, help, 60, 20)
+	assertRenderedBounds(t, help, 60, 22)
 	for _, command := range []string{"/help", "/session", "/new", "/resume", "/compact", "/tasks", "/task", "/exit"} {
 		if !strings.Contains(help, command) {
 			t.Fatalf("help = %q, want registry command %q", help, command)
@@ -246,14 +155,6 @@ func TestSlashCommandCompletionClampsStaleSelection(t *testing.T) {
 
 func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
-	// Seed a live (uncommitted) assistant entry tall enough to fill the
-	// available transcript space; with no live content the transcript
-	// height floors at 1 regardless of the suggestion panel, so the height
-	// transitions this test exercises need real live content to observe.
-	m.running = true
-	m.activeAssistant = 0
-	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: strings.Repeat("line\n", 40)}}
-	m.rerenderAndRefreshViewportContent()
 	if got := m.viewport.Height(); got != 6 {
 		t.Fatalf("initial viewport height = %d, want 6", got)
 	}
@@ -319,33 +220,60 @@ func TestSlashCommandMultilineArrowsAndOverlayTransitionsUseUpdate(t *testing.T)
 	}
 }
 
-// TestSlashCommandResizeStaysConsistent replaces the old scroll/autoFollow
-// test: PageUp/PageDown/Home/End no longer route to the viewport (native
-// terminal scrollback replaces them), so this only checks that resizing a
-// live (uncommitted) multi-line entry keeps the live region within bounds
-// and that suggestions still work afterward.
-func TestSlashCommandResizeStaysConsistent(t *testing.T) {
+func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
-	m.running = true
-	m.activeAssistant = 0
 	m.entries = []Entry{{ID: "assistant", Kind: EntryAssistant, Raw: strings.Repeat("line\n", 40)}}
-	m.rerenderAndRefreshViewportContent()
-	if m.viewport.Height() < 1 {
-		t.Fatalf("viewport height = %d, want at least 1", m.viewport.Height())
+	m.rerenderAndRefreshViewportContent(false)
+	m.autoFollow = false
+	m.viewport.SetYOffset(3)
+	m = typeEditorText(t, m, "/")
+	if m.viewport.YOffset() != 3 || m.autoFollow || m.viewport.Height() != 1 {
+		t.Fatalf("suggestion scroll state: offset=%d follow=%v height=%d", m.viewport.YOffset(), m.autoFollow, m.viewport.Height())
 	}
-	assertRenderedBounds(t, m.View().Content, 80, 12)
+
+	beforePageUp := m.viewport.YOffset()
+	updated, _ := m.Update(keyPress(tea.KeyPgUp))
+	m = updated.(Model)
+	if m.viewport.YOffset() >= beforePageUp {
+		t.Fatalf("page up offset = %d, want less than %d", m.viewport.YOffset(), beforePageUp)
+	}
+	updated, _ = m.Update(keyPress(tea.KeyPgDown))
+	m = updated.(Model)
+	if m.viewport.YOffset() <= 0 {
+		t.Fatalf("page down offset = %d, want positive", m.viewport.YOffset())
+	}
+	m.editor.CursorStart()
+	updated, _ = m.Update(keyPress(tea.KeyHome))
+	m = updated.(Model)
+	if m.viewport.YOffset() != 0 {
+		t.Fatalf("home offset = %d, want 0", m.viewport.YOffset())
+	}
+	m.editor.CursorEnd()
+	updated, _ = m.Update(keyPress(tea.KeyEnd))
+	m = updated.(Model)
+	if !m.viewport.AtBottom() || !m.autoFollow {
+		t.Fatalf("end state: bottom=%v follow=%v", m.viewport.AtBottom(), m.autoFollow)
+	}
 
 	m = resizeModel(t, m, 40, 8)
+	if m.viewport.Height() != 1 {
+		t.Fatalf("minimum viewport height = %d, want 1", m.viewport.Height())
+	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
-	m = resizeModel(t, m, 100, 20)
-	assertRenderedBounds(t, m.View().Content, 100, 20)
+	m = resizeModel(t, m, 100, 24)
+	if m.viewport.Height() != 3 {
+		t.Fatalf("expanded viewport height = %d, want 3", m.viewport.Height())
+	}
+	assertRenderedBounds(t, m.View().Content, 100, 24)
 
 	m.editor.SetValue("")
 	m.commandSuggestionIndex = 0
-	m.rerenderAndRefreshViewportContent()
+	m.rerenderAndRefreshViewportContent(false)
+	m.autoFollow = true
+	m.viewport.GotoBottom()
 	m = typeEditorText(t, m, "/")
-	if len(m.commandSuggestions()) == 0 {
-		t.Fatalf("expected slash suggestions after typing /")
+	if !m.autoFollow || !m.viewport.AtBottom() {
+		t.Fatalf("bottom transition: follow=%v bottom=%v", m.autoFollow, m.viewport.AtBottom())
 	}
 }
 
@@ -375,12 +303,7 @@ func TestSlashCommandSuggestionsDoNotOverrideRunningCancellation(t *testing.T) {
 	}}
 	m := resizeModel(t, newTestModelWithBackend(t, backend), 80, 12)
 	m.editor.SetValue("question")
-	// dispatch, not Update: submitting "question" commits a final User
-	// entry within this same call, which Update's auto-flush wrapper would
-	// batch with the real turn-start command. tea.Batch doesn't invoke its
-	// sub-commands when called, so start() below would never start the
-	// backend goroutine and <-started would hang forever.
-	updated, start := m.dispatch(keyPress(tea.KeyEnter))
+	updated, start := m.Update(keyPress(tea.KeyEnter))
 	m = updated.(Model)
 	done := make(chan tea.Msg, 1)
 	go func() { done <- start() }()
@@ -391,11 +314,7 @@ func TestSlashCommandSuggestionsDoNotOverrideRunningCancellation(t *testing.T) {
 	}
 
 	m = typeEditorText(t, m, "/")
-	// dispatch, not Update: the "question" submission above left
-	// pendingPrints undrained (it also used dispatch, for the same reason
-	// noted there). An Update call here would auto-flush that leftover
-	// chunk and return a non-nil cmd unrelated to escape handling.
-	updated, cmd := m.dispatch(keyPress(tea.KeyEscape))
+	updated, cmd := m.Update(keyPress(tea.KeyEscape))
 	m = updated.(Model)
 	if cmd != nil || !m.running {
 		t.Fatalf("escape state: cmd=%v running=%v", cmd, m.running)

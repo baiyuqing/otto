@@ -244,7 +244,7 @@ func modalEditorModel(t *testing.T) Model {
 	return m
 }
 
-func TestResumePickerModalInputsPreserveCompleteEditorStateAndKeepCursorOnTitleRow(t *testing.T) {
+func TestResumePickerModalInputsPreserveCompleteEditorStateAndHideCursor(t *testing.T) {
 	inputs := []struct {
 		name string
 		msg  tea.Msg
@@ -272,8 +272,8 @@ func TestResumePickerModalInputsPreserveCompleteEditorStateAndKeepCursorOnTitleR
 			if cmd != nil || got.resume.mode != resumeLoaded || got.resume.selected != 0 {
 				t.Fatalf("cmd=%v resume=%#v", cmd, got.resume)
 			}
-			if cursor := got.View().Cursor; cursor == nil || cursor.Y != 1 {
-				t.Fatalf("modal view cursor = %#v, want row 1", cursor)
+			if cursor := got.View().Cursor; cursor != nil {
+				t.Fatalf("modal view cursor = %#v, want nil", cursor)
 			}
 		})
 	}
@@ -525,22 +525,14 @@ func TestResumeCommandIsRejectedWhileTurnOrNewSessionIsActive(t *testing.T) {
 		}
 		m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
 		m.editor.SetValue("question")
-		// dispatch, not Update: submitting "question" commits the User
-		// entry to pendingPrints within this same dispatch, which Update's
-		// auto-flush wrapper would batch alongside the real start-turn cmd,
-		// so cmd() would return an uninvoked tea.BatchMsg instead of the
-		// real turnMsg and the backend prompt goroutine would never start.
-		updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+		updated, cmd := m.Update(keyPress(tea.KeyEnter))
 		running := updated.(Model)
 		turnDone := make(chan tea.Msg, 1)
 		go func() { turnDone <- cmd() }()
 		<-started
 
 		running.editor.SetValue("/resume")
-		// dispatch, not Update: running.pendingPrints still holds the
-		// "question" chunk queued above (undrained), so Update's auto-flush
-		// wrapper would turn the expected-nil rejectCmd non-nil.
-		updated, rejectCmd := running.dispatch(keyPress(tea.KeyEnter))
+		updated, rejectCmd := running.Update(keyPress(tea.KeyEnter))
 		got := updated.(Model)
 		if rejectCmd != nil || got.resume.mode != resumeClosed || got.statusText != app.ErrPromptActive.Error() || listCalls != 0 {
 			t.Fatalf("cmd=%v resume=%#v status=%q listCalls=%d", rejectCmd, got.resume, got.statusText, listCalls)
@@ -572,10 +564,7 @@ func TestResumeCommandIsRejectedWhileTurnOrNewSessionIsActive(t *testing.T) {
 		}
 		m := resizeModel(t, newTestResumeModel(t, backend), 80, 12)
 		m.editor.SetValue("/new")
-		// dispatch, not Update: cmd() is invoked directly below and must be
-		// the real /new cmd, not a batch corrupted by an auto-flush wrapper
-		// (see the "turn active" subtest above for the full reasoning).
-		updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+		updated, cmd := m.Update(keyPress(tea.KeyEnter))
 		pending := updated.(Model)
 		if cmd == nil || !pending.newSessionPending {
 			t.Fatalf("/new cmd=%v pending=%v", cmd, pending.newSessionPending)
@@ -585,9 +574,7 @@ func TestResumeCommandIsRejectedWhileTurnOrNewSessionIsActive(t *testing.T) {
 		<-started
 
 		pending.editor.SetValue("/resume")
-		// dispatch, not Update: same undrained-pendingPrints reasoning as
-		// the "turn active" subtest's rejection check above.
-		updated, rejectCmd := pending.dispatch(keyPress(tea.KeyEnter))
+		updated, rejectCmd := pending.Update(keyPress(tea.KeyEnter))
 		got := updated.(Model)
 		if rejectCmd != nil || got.resume.mode != resumeClosed || got.statusText != app.ErrPromptActive.Error() || listCalls != 0 {
 			t.Fatalf("cmd=%v resume=%#v status=%q listCalls=%d", rejectCmd, got.resume, got.statusText, listCalls)
@@ -734,15 +721,13 @@ func TestResumeSuccessNotesCanceledTasks(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("resume cmd = nil")
 	}
-	// dispatch (not Update): Update batches in the pending-print flush cmd,
-	// which is unrelated to the assertion below.
-	updated, resultCmd := resuming.dispatch(runCommandWithin(t, cmd, time.Second))
+	updated, resultCmd := resuming.Update(runCommandWithin(t, cmd, time.Second))
 	got := updated.(Model)
 	if text := lastEntryText(t, got); text != "canceled 1 running tasks" {
 		t.Fatalf("entry = %q", text)
 	}
 	if resultCmd != nil {
-		t.Fatal("applySessionResumeResult() cmd = non-nil, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)")
+		t.Fatal("applySessionResumeResult() cmd = non-nil, want nil (Update's taskUpdateMsg case is the sole re-arm point)")
 	}
 }
 
@@ -803,29 +788,20 @@ func TestResumeSuccessReplacesHistoryAndClearsStaleState(t *testing.T) {
 	resuming.turnHistoryBaseline = turnHistoryBaseline{idsJSON: `["before"]`, valid: true}
 	resuming.turnEntryStart = 3
 	resuming.liveEntrySequence = 11
+	resuming.autoFollow = false
 
-	// Use dispatch (not the Update wrapper) so pendingPrints still holds the
-	// committed-history chunk for inspection below, instead of it having
-	// already been popped by the wrapper's flushNextPrintCmd.
-	updated, next := resuming.dispatch(result)
+	updated, next := resuming.Update(result)
 	got := updated.(Model)
 	if next != nil {
 		t.Fatalf("resume success scheduled unexpected cmd %v", next)
 	}
-	if got.resume.mode != resumeClosed || got.editor.Value() != "" || got.overlay != overlayNone || got.running || got.dirtyStreaming || got.renderTickActive || got.cancel != nil || got.ctrlCArmed || got.activeTurnChannel != nil || got.activeAssistant != -1 || got.turnErrorSeen || got.turnEventErr != nil || got.fatalErr != nil || got.turnHistoryBaseline != (turnHistoryBaseline{}) || got.turnEntryStart != 0 || got.liveEntrySequence != 0 {
+	if got.resume.mode != resumeClosed || got.editor.Value() != "" || got.overlay != overlayNone || got.running || got.dirtyStreaming || got.renderTickActive || got.cancel != nil || got.ctrlCArmed || got.activeTurnChannel != nil || got.activeAssistant != -1 || got.turnErrorSeen || got.turnEventErr != nil || got.fatalErr != nil || got.turnHistoryBaseline != (turnHistoryBaseline{}) || got.turnEntryStart != 0 || got.liveEntrySequence != 0 || !got.autoFollow {
 		t.Fatalf("reset state = %#v", got)
 	}
 	if got.usage.InputTokens != 20 || got.usage.OutputTokens != 6 {
 		t.Fatalf("usage = %#v", got.usage)
 	}
-	// The resumed history is fully final (no active turn), so
-	// resetSessionViewFromBackend's refresh committed it straight to
-	// pendingPrints (scrollback) rather than leaving it in the live view.
-	printed := strings.Join(got.pendingPrints, "\n")
-	if strings.Contains(printed, "old transcript") || !strings.Contains(printed, "fresh transcript") {
-		t.Fatalf("printed = %q", printed)
-	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") || !strings.Contains(content, "12.5%") || strings.Contains(content, "50.0%") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") || !strings.Contains(content, "12.5%") || strings.Contains(content, "50.0%") {
 		t.Fatalf("view = %q", content)
 	}
 	if !strings.Contains(got.statusText, "warning: repaired trailing newline") {
@@ -867,18 +843,9 @@ func TestResumeFailureKeepsPickerAndOldUI(t *testing.T) {
 	if content := got.View().Content; !strings.Contains(content, "resume failed") || strings.Contains(content, "keep transcript") {
 		t.Fatalf("error modal = %q", content)
 	}
-	// "keep transcript" was already committed to scrollback (and popped by
-	// Update's flush wrapper) during the initial resizeModel in
-	// loadResumePicker, so it can no longer reappear in the live view or be
-	// inspected via pendingPrints here; closing the picker should just
-	// restore the ordinary (non-modal) footer for the original session
-	// without re-queuing any scrollback output.
 	restored := got
 	restored.closeResumePicker()
-	if len(restored.pendingPrints) != 0 {
-		t.Fatalf("closing picker after failed resume re-queued scrollback output: %q", restored.pendingPrints)
-	}
-	if content := restored.View().Content; !strings.Contains(content, "old-profile/old-model") || !strings.Contains(content, "session-old") {
+	if content := restored.View().Content; !strings.Contains(content, "keep transcript") || !strings.Contains(content, "old-profile/old-model") || !strings.Contains(content, "session-old") {
 		t.Fatalf("restored view = %q", content)
 	}
 	if got.statusText != "resume failed" {
@@ -951,19 +918,12 @@ func TestResumeResultReconcilesCommittedSuccessWithStaleGeneration(t *testing.T)
 	result := runCommandWithin(t, cmd, time.Second)
 	resuming.closeResumePicker()
 	resuming.resume.generation++
-	// dispatch (not Update) so pendingPrints still holds the newly-committed
-	// "fresh transcript" chunk for inspection; see
-	// TestResumeSuccessReplacesHistoryAndClearsStaleState for why.
-	updated, next := resuming.dispatch(result)
+	updated, next := resuming.Update(result)
 	got := updated.(Model)
 	if next != nil || got.resume.mode != resumeClosed {
 		t.Fatalf("cmd=%v resume=%#v", next, got.resume)
 	}
-	printed := strings.Join(got.pendingPrints, "\n")
-	if strings.Contains(printed, "old transcript") || !strings.Contains(printed, "fresh transcript") {
-		t.Fatalf("printed = %q", printed)
-	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || strings.Contains(content, "fresh transcript") || !strings.Contains(content, "new-profile/new-model") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "fresh transcript") {
 		t.Fatalf("view = %q", content)
 	}
 	if got.statusText != "resumed session" || strings.Contains(got.statusText, "stale payload warning") {
@@ -992,10 +952,10 @@ func TestResumeResultReconcileStaleNotesCanceledTasksAndDoesNotArm(t *testing.T)
 	result := runCommandWithin(t, cmd, time.Second)
 	resuming.closeResumePicker()
 	resuming.resume.generation++
-	updated, next := resuming.dispatch(result)
+	updated, next := resuming.Update(result)
 	got := updated.(Model)
 	if next != nil {
-		t.Fatalf("reconcileCommittedStaleResume() cmd = %v, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)", next)
+		t.Fatalf("reconcileCommittedStaleResume() cmd = %v, want nil (Update's taskUpdateMsg case is the sole re-arm point)", next)
 	}
 	if text := lastEntryText(t, got); text != "canceled 1 running tasks" {
 		t.Fatalf("entry = %q", text)
@@ -1036,16 +996,12 @@ func TestResumeResultReconcilesAliasRequestUsingCanonicalCommittedPath(t *testin
 
 	resuming.closeResumePicker()
 	resuming.resume.generation++
-	updated, next := resuming.dispatch(result)
+	updated, next := resuming.Update(result)
 	got := updated.(Model)
 	if next != nil || got.resume.mode != resumeClosed || got.statusText != "resumed session" {
 		t.Fatalf("cmd=%v resume=%#v status=%q", next, got.resume, got.statusText)
 	}
-	printed := strings.Join(got.pendingPrints, "\n")
-	if strings.Contains(printed, "old transcript") || !strings.Contains(printed, "canonical transcript") {
-		t.Fatalf("printed = %q", printed)
-	}
-	if content := got.View().Content; strings.Contains(content, "old transcript") || strings.Contains(content, "canonical transcript") || !strings.Contains(content, "new-profile/new-model") {
+	if content := got.View().Content; strings.Contains(content, "old transcript") || !strings.Contains(content, "canonical transcript") {
 		t.Fatalf("view = %q", content)
 	}
 }
@@ -1071,16 +1027,12 @@ func TestResumeResultStaleSuccessSupersededByNewerBackendDoesNotRollbackUI(t *te
 	resuming.closeResumePicker()
 	resuming.resume.generation++
 
-	updated, next := resuming.dispatch(staleResult)
+	updated, next := resuming.Update(staleResult)
 	got := updated.(Model)
 	if next != nil || got.statusText != "newest status" {
 		t.Fatalf("cmd=%v status=%q", next, got.statusText)
 	}
-	printed := strings.Join(got.pendingPrints, "\n")
-	if strings.Contains(printed, "middle transcript") || !strings.Contains(printed, "newest transcript") {
-		t.Fatalf("printed = %q", printed)
-	}
-	if content := got.View().Content; strings.Contains(content, "middle transcript") || strings.Contains(content, "newest transcript") || !strings.Contains(content, "newest-profile/newest-model") {
+	if content := got.View().Content; strings.Contains(content, "middle transcript") || !strings.Contains(content, "newest transcript") {
 		t.Fatalf("view = %q", content)
 	}
 }
@@ -1122,21 +1074,10 @@ func TestResumeResultCommittedStaleSuccessFailsClosedDuringSamePathNewerResume(t
 	if content := got.View().Content; strings.Contains(content, "middle transcript") || strings.Contains(content, "old transcript") || !strings.Contains(content, "Resuming") {
 		t.Fatalf("modal before quit = %q", content)
 	}
-	// "old transcript" was already committed to scrollback (and popped by
-	// Update's flush wrapper) during the initial resizeModel in
-	// loadResumePicker, so it can no longer reappear in the live view or the
-	// footer (the fail-closed status text is long enough to push profile info
-	// out of the width-80 footer entirely). Check the entry data directly
-	// instead, confirming the fail-closed resume never actually replaced
-	// session state.
 	restored := got
 	restored.closeResumePicker()
-	var raw strings.Builder
-	for _, entry := range restored.entries {
-		raw.WriteString(entry.Raw)
-	}
-	if strings.Contains(raw.String(), "middle transcript") || !strings.Contains(raw.String(), "old transcript") {
-		t.Fatalf("entries before quit = %q", raw.String())
+	if content := restored.View().Content; strings.Contains(content, "middle transcript") || !strings.Contains(content, "old transcript") {
+		t.Fatalf("underlying view before quit = %q", content)
 	}
 }
 

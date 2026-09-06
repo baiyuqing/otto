@@ -12,7 +12,7 @@ Connect through an OpenAI-compatible API endpoint or sign in with `otto login`
 for the ChatGPT provider. Model requests go to the selected provider; local-first
 refers to the runtime, session history, and memory storage.
 
-- **Work in your terminal.** An inline TUI for interactive work, a REPL for pipes,
+- **Work in your terminal.** A full-screen TUI for interactive work, a REPL for pipes,
   and headless mode for scripts.
 - **Keep access bounded.** Workspace-confined file tools and macOS Seatbelt
   sandboxing for shell commands by default.

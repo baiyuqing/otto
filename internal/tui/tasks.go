@@ -71,7 +71,7 @@ func (m Model) countActiveTasks() int {
 // /task command and refreshes the transcript.
 func (m *Model) appendTaskEntry(kind EntryKind, text string) {
 	m.entries = append(m.entries, Entry{ID: m.nextLiveEntryID("task"), Kind: kind, Raw: text})
-	m.rerenderAndRefreshViewportContent()
+	m.rerenderAndRefreshViewportContent(!m.autoFollow)
 }
 
 // noteCanceledTasks appends a system entry reporting that a session

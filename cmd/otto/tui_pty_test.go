@@ -701,7 +701,13 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	waitForSubsequence(t, collector, streamOffset, contextCanceledText)
 
 	writePTY(t, master, "\x03")
-	waitForSubsequence(t, collector, 0, ctrlCExitStatusText)
+	// The renderer diffs the footer line against the previous frame and may
+	// split the status text with insert/delete/repeat sequences, so check the
+	// parsed screen rather than the raw byte stream.
+	ctrlCScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
+		return strings.Contains(screen.String(), ctrlCExitStatusText)
+	})
+	t.Logf("PTY Ctrl+C accepted sequences=%q", ctrlCScreen.AcceptedCSI())
 
 	writePTY(t, master, "\x03")
 	waitForRunReturn(t, runResult)

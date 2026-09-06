@@ -23,6 +23,7 @@ type ptyTerminalScreen struct {
 	pending       []byte
 	cursorVisible bool
 	insertMode    bool
+	lastRune      rune
 	fullRedraws   int
 	acceptedCSI   map[string]struct{}
 }
@@ -42,6 +43,29 @@ func blankPTYRow(width int) []rune {
 		row[column] = ' '
 	}
 	return row
+}
+
+func TestPTYTerminalScreenLineEdits(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "insert character shifts the tail right", input: "abcdef\x1b[6D\x1b[2@XY", want: "XYabcdef"},
+		{name: "delete character shifts the tail left", input: "abcdef\x1b[6D\x1b[2P", want: "cdef"},
+		{name: "repeat previous character", input: "ab\x1b[3b", want: "abbbb"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			screen := newPTYTerminalScreen(20, 1)
+			if _, err := screen.Write([]byte(test.input)); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(screen.String()); got != test.want {
+				t.Fatalf("screen = %q, want %q", got, test.want)
+			}
+		})
+	}
 }
 
 func TestPTYTerminalScreenInsertMode(t *testing.T) {
@@ -262,6 +286,33 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 		}
 		count := min(ptyCSIParam(params, 0, 1), max(s.height-s.y, 0))
 		s.insertLines(count)
+	case '@', 'P':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		count := min(ptyCSIParam(params, 0, 1), max(s.width-s.x, 0))
+		if count > 0 && s.y < s.height {
+			row := s.cells[s.y]
+			if final == '@' {
+				copy(row[s.x+count:], row[s.x:])
+				s.eraseRow(s.y, s.x, s.x+count-1)
+			} else {
+				copy(row[s.x:], row[s.x+count:])
+				s.eraseRow(s.y, s.width-count, s.width-1)
+			}
+		}
+	case 'b':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		if s.lastRune == 0 {
+			return fmt.Errorf("repeat with no previous character")
+		}
+		for count := ptyCSIParam(params, 0, 1); count > 0; count-- {
+			s.putRune(s.lastRune)
+		}
 	default:
 		return fmt.Errorf("unsupported terminal CSI final %q", final)
 	}
@@ -403,6 +454,7 @@ func (s *ptyTerminalScreen) putRune(r rune) {
 		s.cells[s.y][s.x+offset] = ' '
 	}
 	s.x += width
+	s.lastRune = r
 }
 
 func (s *ptyTerminalScreen) lineFeed() {

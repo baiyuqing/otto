@@ -142,6 +142,7 @@ type Model struct {
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
 	entries, usage := entriesAndUsageFromBackend(backend)
 	editor := textarea.New()
+	editor.SetStyles(quietEditorStyles(true))
 	editor.ShowLineNumbers = false
 	editor.Prompt = ""
 	editor.Placeholder = "Ask Otto"
@@ -201,6 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.BackgroundColorMsg:
 		m.darkBackground = msg.IsDark()
+		m.editor.SetStyles(quietEditorStyles(m.darkBackground))
 		if !m.rendererInjected {
 			m.renderer = newGlamourRenderer(m.darkBackground)
 			m.invalidateMarkdownRenders()
@@ -369,7 +371,7 @@ func (m Model) View() tea.View {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorSpacing).MaxHeight(layout.editorSpacing).Render(""))
 	}
 	if layout.inputBoxed {
-		parts = append(parts, boxedInput(m.width, layout.editorHeight, m.editor.View()), inputHint(m.width, m.editor.Value() == ""))
+		parts = append(parts, boxedInput(m.width, layout.editorHeight, m.editor.View(), m.darkBackground), inputHint(m.width, m.editor.Value() == ""))
 	} else {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View()))
 	}
@@ -1991,13 +1993,27 @@ func (m Model) reservedStateActive() bool {
 // boxedInput renders the composer as a bordered panel that anchors the screen
 // as its primary area. The rounded border distinguishes the input from the
 // transcript; the hint row rendered below it names the active keys.
-func boxedInput(width, editorHeight int, editorView string) string {
+func boxedInput(width, editorHeight int, editorView string, dark bool) string {
+	border := lipgloss.Color("250")
+	if dark {
+		border = lipgloss.Color("240")
+	}
 	return lipgloss.NewStyle().
 		Width(width).
 		Height(editorHeight+inputBoxBorder).
 		Border(lipgloss.RoundedBorder()).
+		BorderForeground(border).
 		Padding(0, inputBoxPadding).
 		Render(editorView)
+}
+
+// quietEditorStyles drops the textarea default cursor-line background. Inside
+// the bordered composer that background paints a full-width band whenever the
+// terminal background is not the exact ANSI default color.
+func quietEditorStyles(dark bool) textarea.Styles {
+	styles := textarea.DefaultStyles(dark)
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	return styles
 }
 
 // inputHint is the row below the boxed input. "?" opens help only while the

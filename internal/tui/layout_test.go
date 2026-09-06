@@ -9,6 +9,7 @@ import (
 
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestResponsiveHelpOverlayDescribesDetailToggle(t *testing.T) {
@@ -245,7 +246,7 @@ func TestRenderFooterKeepsSandboxBadgeAcrossSupportedWidths(t *testing.T) {
 				}
 				footer := renderFooter(width, info, model.Usage{InputTokens: 123_456, OutputTokens: 78_901, CachedInputTokens: 100_000}, "working")
 				assertRenderedBounds(t, footer, width, 1)
-				fields := strings.Split(strings.TrimSpace(footer), " | ")
+				fields := strings.Split(strings.TrimSpace(ansi.Strip(footer)), " | ")
 				found := false
 				for _, field := range fields {
 					if field == state.badge {

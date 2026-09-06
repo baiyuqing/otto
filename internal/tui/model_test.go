@@ -2827,3 +2827,19 @@ func TestInputBoxHasNoPromptAndSingleEmptyRow(t *testing.T) {
 		t.Fatalf("line below the input box must be the shortcut hint:\n%s", content)
 	}
 }
+
+func TestInputAreaIsQuiet(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 20)
+	m.rerenderAndRefreshViewportContent(false)
+	content := m.View().Content
+	if !strings.Contains(content, "\x1b[38;5;240m╭") {
+		t.Fatalf("input box border must be grey (240) on a dark background:\n%q", content)
+	}
+	if strings.Contains(content, "\x1b[40m") {
+		t.Fatalf("textarea cursor line must not paint a background band:\n%q", content)
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	if footer := lines[len(lines)-1]; !strings.Contains(footer, "\x1b[2m") {
+		t.Fatalf("footer must render faint, got %q", footer)
+	}
+}

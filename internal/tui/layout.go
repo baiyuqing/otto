@@ -164,7 +164,7 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 	if lipgloss.Width(footer) > width {
 		footer = renderFooterCore(width, status, profileModel, badge)
 	}
-	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
+	return lipgloss.NewStyle().Faint(true).Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
 }
 
 func renderFooterCore(width int, status, profileModel, badge string) string {

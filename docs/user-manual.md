@@ -748,6 +748,7 @@ the transcript, and a composer:
   renders its history. The session id is kept in the URL fragment, so a reload
   reopens the same session.
 - Enter sends the composer text as a turn; Shift+Enter inserts a newline.
+  `/rename <name>` renames the current session instead of starting a turn.
   Assistant text renders as Markdown; each tool call is a collapsible block
   with its arguments and result.
 - While a turn runs the composer is disabled and a **Cancel** button calls

@@ -1,7 +1,22 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useId, useRef, useState, type ComponentPropsWithoutRef } from 'react'
 import Markdown from 'react-markdown'
+import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import 'katex/dist/katex.min.css'
 import type { Item } from './transcript'
+
+type MermaidAPI = typeof import('mermaid').default
+
+let mermaidPromise: Promise<MermaidAPI> | null = null
+
+function loadMermaid(): Promise<MermaidAPI> {
+  mermaidPromise ??= import('mermaid').then(({ default: mermaid }) => {
+    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'default' })
+    return mermaid
+  })
+  return mermaidPromise
+}
 
 export function TranscriptView(props: { items: Item[]; activeSession: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -30,6 +45,65 @@ export function TranscriptView(props: { items: Item[]; activeSession: boolean })
   )
 }
 
+type CodeProps = ComponentPropsWithoutRef<'code'> & { inline?: boolean }
+
+function MarkdownView({ text }: { text: string }) {
+  return (
+    <Markdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      components={{
+        code({ inline, className, children, ...props }: CodeProps) {
+          const match = /language-(\w+)/.exec(className ?? '')
+          const code = String(children).replace(/\n$/, '')
+          if (!inline && match?.[1] === 'mermaid') return <MermaidDiagram code={code} />
+          return (
+            <code className={className} {...props}>
+              {children}
+            </code>
+          )
+        },
+      }}
+    >
+      {text}
+    </Markdown>
+  )
+}
+
+function MermaidDiagram({ code }: { code: string }) {
+  const reactId = useId()
+  const id = `mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, '')}`
+  const [svg, setSVG] = useState('')
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let canceled = false
+    setSVG('')
+    setError('')
+    loadMermaid()
+      .then((mermaid) => mermaid.render(id, code))
+      .then(({ svg }) => {
+        if (!canceled) setSVG(svg)
+      })
+      .catch((e: unknown) => {
+        if (!canceled) setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => {
+      canceled = true
+    }
+  }, [code, id])
+
+  if (error) {
+    return (
+      <pre className="mermaid-error">
+        <code>{code}</code>
+      </pre>
+    )
+  }
+  if (!svg) return <div className="mermaid-diagram pending">Rendering diagram…</div>
+  return <div className="mermaid-diagram" dangerouslySetInnerHTML={{ __html: svg }} />
+}
+
 function ItemView({ item }: { item: Item }) {
   switch (item.kind) {
     case 'user':
@@ -37,7 +111,7 @@ function ItemView({ item }: { item: Item }) {
     case 'assistant':
       return (
         <div className="item assistant">
-          <Markdown remarkPlugins={[remarkGfm]}>{item.text}</Markdown>
+          <MarkdownView text={item.text} />
         </div>
       )
     case 'tool':

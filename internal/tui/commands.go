@@ -14,6 +14,7 @@ const (
 	slashCommandModel
 	slashCommandResume
 	slashCommandArchive
+	slashCommandRename
 	slashCommandCompact
 	slashCommandMemory
 	slashCommandRemember
@@ -38,6 +39,7 @@ var slashCommands = []slashCommand{
 	{Name: "/model", Description: "show current model, or switch profiles (fresh session)", Kind: slashCommandModel},
 	{Name: "/resume", Description: "resume a session", Kind: slashCommandResume},
 	{Name: "/archive", Description: "archive a session", Kind: slashCommandArchive},
+	{Name: "/rename", Description: "rename the current session", Kind: slashCommandRename},
 	{Name: "/compact", Description: "compact context", Kind: slashCommandCompact},
 	{Name: "/sandbox", Description: "show sandbox state, or reload the [sandbox] configuration", Kind: slashCommandSandbox},
 	{Name: "/memory", Description: "search, forget, or review remembered records", Kind: slashCommandMemory},

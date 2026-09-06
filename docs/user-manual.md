@@ -404,6 +404,9 @@ Shared commands:
 - `/help` shows command help.
 - `/session` shows session details (ID, path, provider, profile, model).
 - `/new` closes the current session and starts a fresh one in the same process.
+- `/rename <name>` renames the current session. The new name is written as
+  append-only session metadata and is shown in session lists. It is rejected
+  while a turn is in flight.
 - `/compact [focus]` creates a manual context checkpoint, or reports
   `[context] no-op` when nothing can be compacted.
 - `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads
@@ -774,6 +777,7 @@ are served at the root. Request and error bodies are JSON.
 | `POST /v1/sessions` | Create a session (`{}`) or attach to one already open in this process (`{"resume":"<id>"}`). `201` for a new session, `200` for an already-open one. Returns the session object. |
 | `GET /v1/sessions` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. |
 | `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
+| `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
 | `GET /v1/sessions/{id}/history` | Return the session's message history. |
 | `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
@@ -798,6 +802,7 @@ only way to stop it.
 ```json
 {
   "id": "...",
+  "name": "dev",
   "workspace": "...",
   "provider": "...",
   "profile": "...",

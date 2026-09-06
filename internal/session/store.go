@@ -39,6 +39,8 @@ type Store struct {
 	usagePresent        bool
 	latestCompaction    CompactionMetadata
 	hasLatestCompaction bool
+	sessionName         string
+	hasSessionName      bool
 	entries             []piEntry
 	entryIDs            map[string]struct{}
 	leafID              *string
@@ -235,6 +237,8 @@ func openStoreFromFile(file *os.File, path string) (*Store, []Warning, error) {
 		usagePresent:        state.usagePresent,
 		latestCompaction:    cloneCompactionMetadata(state.latestCompaction),
 		hasLatestCompaction: state.hasLatestCompaction,
+		sessionName:         state.sessionName,
+		hasSessionName:      state.hasSessionName,
 		entries:             append([]piEntry(nil), decoded.Entries...),
 		entryIDs:            state.entryIDs,
 		leafID:              cloneStringPointer(state.leafID),
@@ -331,6 +335,71 @@ func (s *Store) UpdateRuntime(ctx context.Context, runtime RuntimeMetadata) erro
 	s.header.Profile = runtime.Profile
 	s.header.Provider = runtime.Provider
 	s.header.Model = runtime.Model
+	return nil
+}
+
+func (s *Store) Name() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hasSessionName {
+		return s.sessionName
+	}
+	return ""
+}
+
+func (s *Store) Rename(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("%w: session name is required", ErrInvalidSession)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errSessionClosed
+	}
+	if s.fatalErr != nil {
+		return s.fatalErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.ensureFileLocked(); err != nil {
+		s.fatalErr = &fatalPersistenceError{cause: err}
+		return s.fatalErr
+	}
+
+	timestamp, err := formatPersistedTimestamp(time.Now().UTC(), "session rename")
+	if err != nil {
+		return err
+	}
+	entryID, err := newPiEntryID(s.entryIDs)
+	if err != nil {
+		return fmt.Errorf("generate session rename entry id: %w", err)
+	}
+	entry := piEntry{
+		piEntryBase: piEntryBase{Type: "session_info", ID: entryID, ParentID: cloneStringPointer(s.leafID), Timestamp: timestamp},
+		SessionInfo: &piSessionInfo{Name: stringPointer(name)},
+	}
+	encoded, err := encodePiRecord(entry)
+	if err != nil {
+		return err
+	}
+	recordBytes := int64(len(encoded) + 1)
+	if recordBytes > int64(maxSessionFileBytes)-s.fileBytes {
+		return sizeError(ErrSessionFileTooLarge, maxSessionFileBytes)
+	}
+	if _, err := writeEncodedPiRecord(s.writer, encoded); err != nil {
+		s.fatalErr = &fatalPersistenceError{cause: err}
+		return s.fatalErr
+	}
+
+	s.entries = append(s.entries, entry)
+	s.entryIDs[entryID] = struct{}{}
+	s.leafID = stringPointer(entryID)
+	s.fileBytes += recordBytes
+	s.sessionName = name
+	s.hasSessionName = true
 	return nil
 }
 
@@ -447,6 +516,8 @@ type resolvedPiStoreState struct {
 	usagePresent        bool
 	latestCompaction    CompactionMetadata
 	hasLatestCompaction bool
+	sessionName         string
+	hasSessionName      bool
 	entryIDs            map[string]struct{}
 	leafID              *string
 	warnings            []Warning
@@ -487,6 +558,8 @@ func resolvePiStoreState(decoded piFile) (resolvedPiStoreState, error) {
 		usagePresent:        resolved.UsagePresent,
 		latestCompaction:    latestCompaction,
 		hasLatestCompaction: hasLatestCompaction,
+		sessionName:         resolved.SessionName,
+		hasSessionName:      resolved.SessionName != "",
 		entryIDs:            entryIDs,
 		leafID:              leafID,
 		warnings:            warnings,

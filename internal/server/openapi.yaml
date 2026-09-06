@@ -87,6 +87,8 @@ components:
       properties:
         id:
           type: string
+        name:
+          type: string
         workspace:
           type: string
         provider:
@@ -110,6 +112,8 @@ components:
       type: object
       properties:
         id:
+          type: string
+        name:
           type: string
         path:
           type: string
@@ -387,6 +391,43 @@ paths:
                 $ref: "#/components/schemas/Session"
         "404":
           description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    patch:
+      summary: Rename an open session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+              required: [name]
+      responses:
+        "200":
+          description: Renamed session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          description: Invalid or missing name
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A turn is active
           content:
             application/json:
               schema:

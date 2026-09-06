@@ -18,6 +18,8 @@ type Memory struct {
 	usagePresent        bool
 	latestCompaction    CompactionMetadata
 	hasLatestCompaction bool
+	sessionName         string
+	hasSessionName      bool
 	seenIDs             map[string]struct{}
 	closed              bool
 }
@@ -60,6 +62,33 @@ func (m *Memory) UpdateRuntime(ctx context.Context, runtime RuntimeMetadata) err
 	m.header.Profile = runtime.Profile
 	m.header.Provider = runtime.Provider
 	m.header.Model = runtime.Model
+	return nil
+}
+
+func (m *Memory) Name() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hasSessionName {
+		return m.sessionName
+	}
+	return ""
+}
+
+func (m *Memory) Rename(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("%w: session name is required", ErrInvalidSession)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return errSessionClosed
+	}
+	m.sessionName = name
+	m.hasSessionName = true
 	return nil
 }
 

@@ -692,7 +692,7 @@ func (m Model) handleSubmit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 	command, argument, ok := parseSlashCommand(value)
-	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember || command.Kind == slashCommandLogin || command.Kind == slashCommandModel || command.Kind == slashCommandTask || command.Kind == slashCommandSandbox
+	argumentAllowed := command.Kind == slashCommandCompact || command.Kind == slashCommandRename || command.Kind == slashCommandMemory || command.Kind == slashCommandRemember || command.Kind == slashCommandLogin || command.Kind == slashCommandModel || command.Kind == slashCommandTask || command.Kind == slashCommandSandbox
 	if !ok || (argument != "" && !argumentAllowed) {
 		m.statusText = fmt.Sprintf("unknown command: %s", value)
 		return m, nil
@@ -729,6 +729,9 @@ func (m Model) handleCommand(value string) (tea.Model, tea.Cmd) {
 		return m.handleResumeCommand()
 	case slashCommandArchive:
 		return m.handleArchiveCommand()
+	case slashCommandRename:
+		updated, _ := m.handleRenameCommand(argument)
+		return updated, nil
 	case slashCommandCompact:
 		if m.running || m.newSessionPending {
 			m.statusText = app.ErrPromptActive.Error()

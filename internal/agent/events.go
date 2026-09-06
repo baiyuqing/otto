@@ -19,6 +19,7 @@ const (
 	EventToolCallStarted     EventType = "tool_call_started"
 	EventToolCallFinished    EventType = "tool_call_finished"
 	EventProviderUsage       EventType = "provider_usage"
+	EventProviderAPICall     EventType = "provider_api_call"
 	EventCompactionStarted   EventType = "compaction_started"
 	EventCompactionPlanned   EventType = "compaction_planned"
 	EventCompactionCompleted EventType = "compaction_completed"
@@ -37,6 +38,10 @@ type Event struct {
 	ToolResult   tool.Result
 	Usage        model.Usage
 	UsagePresent bool
+	ProviderName string
+	Model        string
+	APIDuration  time.Duration
+	APIStatus    string
 	Compaction   *CompactionEvent
 	Plan         *CompactionPlan
 	Err          error
@@ -101,6 +106,7 @@ type CompactionSettings struct {
 
 type Options struct {
 	Model                   string
+	Provider                string
 	SystemPrompt            string
 	Thinking                string
 	RequestSizer            provider.RequestSizer

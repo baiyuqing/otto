@@ -781,7 +781,12 @@ Status codes:
 ### Observability
 
 `GET /metrics` exposes `otto_http_requests_total{route,method,status}`,
-`otto_http_request_duration_seconds{route}`, `otto_sessions_open`,
+`otto_http_request_duration_seconds{route}`,
+`otto_provider_api_requests_total{provider,model,status}`,
+`otto_provider_api_request_duration_seconds{provider,model}`,
+`otto_sessions_open`, `otto_session_context_window_tokens{session_id,provider,model}`,
+`otto_session_context_input_tokens{session_id,provider,model}`,
+`otto_session_context_input_tokens_pending{session_id,provider,model}`,
 `otto_turns_total{status}`, `otto_turns_active`, `otto_turn_duration_seconds`,
 `otto_tool_calls_total{tool,status}`, `otto_tool_call_duration_seconds{tool}`,
 `otto_provider_tokens_total{kind}`, and `otto_event_stream_clients`.

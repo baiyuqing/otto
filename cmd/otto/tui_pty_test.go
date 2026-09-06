@@ -221,8 +221,8 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if resumeScreen.width != 140 || resumeScreen.height != 34 {
 		t.Fatalf("post-resize terminal screen = %dx%d, want 140x34", resumeScreen.width, resumeScreen.height)
 	}
-	if x, y, visible := resumeScreen.Cursor(); !visible || x != 4 || y != 30 {
-		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (4,30) visible", x, y, visible)
+	if x, y, visible := resumeScreen.Cursor(); !visible || x != 2 || y != 30 {
+		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (2,30) visible", x, y, visible)
 	}
 	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains transcript+session ID and no Resume modal; accepted sequences=%q", bubbleTeaFullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
 
@@ -468,7 +468,7 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 			strings.Contains(content, "/compact "+ptyCompactFocus) &&
 			!strings.Contains(content, "compact context")
 	})
-	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
+	expectedCursorX := len([]rune("/compact "+ptyCompactFocus)) + 2
 	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 26 {
 		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,26) visible", x, y, visible, expectedCursorX)
 	}
@@ -500,8 +500,8 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 			strings.Contains(content, contextCanceledText) &&
 			!strings.Contains(content, "compact context")
 	})
-	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 20 {
-		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,20) visible", x, y, visible)
+	if x, y, visible := compactScreen.Cursor(); !visible || x != 2 || y != 20 {
+		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (2,20) visible", x, y, visible)
 	}
 	if sequences := compactScreen.AcceptedCSI(); len(sequences) == 0 {
 		t.Fatal("compaction screen accepted no CSI sequences")
@@ -692,8 +692,8 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 			strings.Contains(content, narrowFooterMarker) &&
 			!strings.Contains(content, footerSessionMarker)
 	})
-	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 20 {
-		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,20) visible", x, y, visible)
+	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 2 || y != 20 {
+		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (2,20) visible", x, y, visible)
 	}
 	t.Logf("PTY lifecycle accepted sequences=%q", lifecycleScreen.AcceptedCSI())
 

@@ -9,6 +9,15 @@ info:
 servers:
   - url: http://otto
 components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: >
+        Required on every /v1/ path when otto serve listens on TCP
+        (--listen): the per-process token printed at startup, sent as
+        "Authorization: Bearer <token>". Missing or wrong tokens get 401 with
+        WWW-Authenticate: Bearer. The Unix-socket listener has no token.
   schemas:
     Error:
       type: object
@@ -42,6 +51,26 @@ components:
           type: boolean
         summary:
           type: string
+    Compaction:
+      type: object
+      description: The compaction_completed event payload, also returned by POST /v1/sessions/{id}/compact.
+      properties:
+        checkpoint_id:
+          type: string
+        reason:
+          type: string
+          enum: [manual, threshold, overflow]
+        tokens_before:
+          type: integer
+        estimated_tokens_after:
+          type: integer
+        automatic:
+          type: boolean
+        usage:
+          $ref: "#/components/schemas/Usage"
+        noop:
+          type: boolean
+      required: [reason, tokens_before, estimated_tokens_after, automatic, noop]
     SessionTurn:
       type: [object, "null"]
       properties:
@@ -236,7 +265,7 @@ components:
         usage_present:
           type: boolean
         compaction:
-          type: object
+          $ref: "#/components/schemas/Compaction"
         plan:
           type: object
         error:
@@ -555,6 +584,51 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: Task already finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/compact:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    post:
+      summary: Compact the session's context now
+      description: >
+        Runs one manual compaction and returns its result once it finishes;
+        no events are streamed. Refused while a turn is running, and turns
+        are refused while the compaction runs. Closing the request cancels
+        the compaction.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                focus:
+                  type: string
+                  description: Optional guidance for what the summary should preserve
+      responses:
+        "200":
+          description: Compaction finished (noop:true when there was nothing to compact)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Compaction"
+        "400":
+          description: Invalid JSON body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: turn_active (a turn or compaction is running) or compaction_failed (the previous context is still in effect)
           content:
             application/json:
               schema:

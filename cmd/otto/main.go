@@ -206,6 +206,8 @@ type cliOptions struct {
 	serve          bool
 	socket         string
 	socketSet      bool
+	listen         string
+	listenSet      bool
 }
 
 func main() {
@@ -587,18 +589,17 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 	builder.memoryRecallTokenBudget = memoryCfg.RecallTokens
 
 	if options.serve {
-		serverRuntime, err := config.ResolveServer(configFile, environment, options.socket)
+		serverRuntime, err := config.ResolveServer(configFile, environment, options.socket, options.listen)
 		if err != nil {
 			return fail(stderr, "%v", builder.redactError(err, nil))
 		}
-		socketPath := serverRuntime.Socket
-		if !filepath.IsAbs(socketPath) {
-			socketPath, err = filepath.Abs(socketPath)
+		if serverRuntime.Listen == "" && !filepath.IsAbs(serverRuntime.Socket) {
+			serverRuntime.Socket, err = filepath.Abs(serverRuntime.Socket)
 			if err != nil {
 				return fail(stderr, "%v", builder.redactError(err, nil))
 			}
 		}
-		return builder.runServe(processCtx, resolvedRuntime, socketPath, deps.subscribeTerminate, stderr)
+		return builder.runServe(processCtx, resolvedRuntime, serverRuntime, deps.subscribeTerminate, stdout, stderr)
 	}
 
 	var (
@@ -769,6 +770,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	flags.StringVar(&options.resumePath, "resume", "", "resume a session file")
 	flags.StringVar(&options.archivePath, "archive", "", "archive an active session file")
 	flags.StringVar(&options.socket, "socket", "", "unix socket path for the serve subcommand")
+	flags.StringVar(&options.listen, "listen", "", "loopback HOST:PORT for the serve subcommand (TCP instead of the socket)")
 	flags.Usage = func() {}
 	if err := flags.Parse(args); err != nil {
 		return options, false, errUnsafeFlagParse
@@ -789,6 +791,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 	options.approveSet = visited["approve"]
 	options.sandboxSet = visited["sandbox"]
 	options.socketSet = visited["socket"]
+	options.listenSet = visited["listen"]
 	if options.sandboxSet {
 		switch options.sandbox {
 		case string(sandbox.DriverAuto), string(sandbox.DriverSeatbelt), string(sandbox.DriverOff):
@@ -847,6 +850,14 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 		_, _ = fmt.Fprintln(stderr, "otto: --socket requires the serve subcommand")
 		return options, false, errors.New("socket requires serve")
 	}
+	if options.listenSet && !options.serve {
+		_, _ = fmt.Fprintln(stderr, "otto: --listen requires the serve subcommand")
+		return options, false, errors.New("listen requires serve")
+	}
+	if options.socketSet && options.listenSet {
+		_, _ = fmt.Fprintln(stderr, "otto: --socket and --listen cannot be used together")
+		return options, false, errors.New("conflicting listener flags")
+	}
 	if options.shellTimeSet && options.shellTimeout <= 0 {
 		_, _ = fmt.Fprintln(stderr, "otto: --shell-timeout must be greater than zero")
 		return options, false, errors.New("invalid shell timeout")
@@ -874,7 +885,7 @@ func parseFlags(args []string, stdout, stderr io.Writer) (cliOptions, bool, erro
 
 func printUsage(output io.Writer) {
 	_, _ = io.WriteString(output, `Usage: otto [options]
-       otto serve [options] [--socket PATH]
+       otto serve [options] [--socket PATH | --listen HOST:PORT]
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto memory status|forget <id>
@@ -903,6 +914,7 @@ Options:
   --resume PATH          resume a session file
   --archive PATH         archive an active session file
   --socket PATH          unix socket path for the serve subcommand
+  --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
 `)
 }
 

@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -34,10 +36,29 @@ func subscribeOSTerminate() interruptSubscription {
 	}
 }
 
-func (b runtimeBuilder) runServe(ctx context.Context, runtime config.Runtime, socketPath string, subscribeTerminate func() interruptSubscription, stderr io.Writer) int {
-	listener, err := server.Listen(socketPath)
-	if err != nil {
-		return fail(stderr, "serve: %v", b.redactError(err, &runtime))
+func (b runtimeBuilder) runServe(ctx context.Context, runtime config.Runtime, listen config.ServerRuntime, subscribeTerminate func() interruptSubscription, stdout, stderr io.Writer) int {
+	var listener net.Listener
+	var token string
+	var err error
+	if listen.Listen != "" {
+		listener, err = server.ListenTCP(listen.Listen)
+		if err != nil {
+			return fail(stderr, "serve: %v", b.redactError(err, &runtime))
+		}
+		// A TCP port is reachable by every local user and every page open
+		// in a browser, so the API is gated by a per-process token. The
+		// token is printed once, here, and never logged.
+		token, err = randomID()
+		if err != nil {
+			_ = listener.Close()
+			return fail(stderr, "serve: %v", err)
+		}
+		_, _ = fmt.Fprintf(stdout, "otto serve: http://%s/?token=%s\n", listener.Addr(), token)
+	} else {
+		listener, err = server.Listen(listen.Socket)
+		if err != nil {
+			return fail(stderr, "serve: %v", b.redactError(err, &runtime))
+		}
 	}
 	defer listener.Close()
 
@@ -73,6 +94,7 @@ func (b runtimeBuilder) runServe(ctx context.Context, runtime config.Runtime, so
 			Profiles:  b.profileNames(),
 		},
 		ReloadSandbox: b.sandboxReload(),
+		Token:         token,
 		Logger:        slog.New(slog.NewTextHandler(stderr, nil)),
 	})
 	serveErr := server.Serve(serveCtx, listener, srv)

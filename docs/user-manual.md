@@ -160,7 +160,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
 | `otto logout` | Remove stored ChatGPT credentials. |
 | `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
-| `otto serve [--socket PATH]` | Run Otto as an HTTP+JSON+SSE agent server over a Unix domain socket instead of an interactive frontend. See [Agent server](#agent-server). |
+| `otto serve [--socket PATH \| --listen HOST:PORT]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
 
 | Flag | Description |
 | --- | --- |
@@ -181,7 +181,8 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
 | `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`. |
-| `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. |
+| `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. Cannot be combined with `--listen`. |
+| `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. Cannot be combined with `--socket`. |
 
 ## Environment variables
 
@@ -233,6 +234,7 @@ paths = ["~/.otto/skills", ".otto/skills"]
 
 [server]
 socket = "~/.otto/otto.sock"
+# listen = "127.0.0.1:8787"  # loopback TCP instead of the socket
 
 [profiles.example]
 provider = "openai-compatible"
@@ -275,9 +277,10 @@ Key points:
   TOML-only, no CLI flags or environment variables.
 - `[agent.compaction]` configures automatic context compaction (see
   [Context compaction](#context-compaction)).
-- `[server].socket` sets the Unix domain socket path for `otto serve` (see
-  [Agent server](#agent-server)). TOML-only aside from the `--socket` flag; no
-  environment variable.
+- `[server].socket` sets the Unix domain socket path for `otto serve`, and
+  `[server].listen` a loopback `HOST:PORT` to use instead (see
+  [Agent server](#agent-server)). TOML-only aside from the `--socket` and
+  `--listen` flags; no environment variable.
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
   `api_key_env`. Optional `context_window` and `compaction_window` size
   proactive compaction for private or unknown model IDs.
@@ -312,9 +315,10 @@ Startup resolution is field-specific:
 - **Thinking effort:** `--thinking` is sent as `reasoning_effort` on
   OpenAI-compatible requests. It has no environment variable or TOML key and is
   omitted when unset. It stays in effect across `/resume` and `/new`.
-- **Agent server socket:** `--socket` overrides `[server].socket`, which
-  overrides the built-in default `~/.otto/otto.sock`. There is no environment
-  variable. This applies only to `otto serve`.
+- **Agent server listener:** `--listen` > `--socket` > `[server].listen` >
+  `[server].socket` > the built-in default `~/.otto/otto.sock`. A `listen`
+  value at any level selects TCP and no socket is created. There is no
+  environment variable. This applies only to `otto serve`.
 
 Startup `--continue` / `--resume` restore session provider/model only as
 defaults; direct flags and `OTTO_*` variables can override them. An in-process
@@ -679,34 +683,91 @@ read the prompt from a file (bounded to 1 MiB).
 
 ## Agent server
 
-`otto serve` runs Otto as a long-lived HTTP+JSON+SSE frontend over a Unix
-domain socket, instead of the TUI or REPL. One process serves one workspace
-and manages any number of sessions; turns in different sessions run
-concurrently, and starting a second turn on a session that already has one
-active returns `409`. Otto listens on a Unix domain socket only; there is no
-TCP listener.
+`otto serve` runs Otto as a long-lived HTTP+JSON+SSE frontend, instead of the
+TUI or REPL. One process serves one workspace and manages any number of
+sessions; turns in different sessions run concurrently, and starting a second
+turn on a session that already has one active returns `409`. It listens on
+either a Unix domain socket (the default) or a loopback TCP port.
 
 ```bash
-otto serve [--socket PATH]
+otto serve [--socket PATH | --listen HOST:PORT]
 ```
 
 `serve` accepts the same startup flags as the interactive frontends
 (`--config`, `--cwd`, `--profile`, `--provider`, `--base-url`, `--model`,
 `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
-`--socket`. It rejects `--ui`, `--approve`, `--resume`, `--continue`,
-`--archive`, and `--no-session`.
+`--socket` or `--listen`. It rejects `--ui`, `--approve`, `--resume`,
+`--continue`, `--archive`, and `--no-session`.
 
-### Socket
+### Listener
 
-The socket path resolves in this order: `--socket` > `[server].socket` (TOML)
-> the built-in default `~/.otto/otto.sock`. Otto creates a missing parent
-directory with mode `0700`, creates the socket file with mode `0600`, and
-refuses to start if a live server already owns that path.
+The listener resolves in this order: `--listen` > `--socket` >
+`[server].listen` > `[server].socket` > the built-in default
+`~/.otto/otto.sock`. Exactly one listener is opened.
+
+**Unix socket.** Otto creates a missing parent directory with mode `0700`,
+creates the socket file with mode `0600`, and refuses to start if a live
+server already owns that path. File permissions are the only access control;
+requests carry no token.
+
+**Loopback TCP.** `--listen HOST:PORT` accepts only loopback hosts:
+`127.0.0.1`, `::1`, or the literal `localhost` (mapped to `127.0.0.1` without a
+DNS lookup). Any other host is rejected at startup. Port `0` picks a free
+port. Otto generates a random access token for the process and prints one
+line to stdout before serving:
+
+```
+otto serve: http://127.0.0.1:PORT/?token=<token>
+```
+
+Every `/v1/` request must then carry `Authorization: Bearer <token>`; a
+missing or wrong token returns `401` with `WWW-Authenticate: Bearer`. The
+token is accepted from that header only, never from a query parameter. `/`,
+`/assets/`, `/healthz`, and `/metrics` need no token. The token is never
+logged and is not persisted; restarting the process issues a new one. There
+is no TLS and no CORS: the port is meant for a browser or client on the same
+machine.
+
+### Web UI
+
+`GET /` serves the browser UI built by `make ui` and embedded into the
+binary, and `GET /assets/` its static files. A binary built without running
+`make ui` answers `/` with the plain-text line `Web UI not built; run make ui`.
+Open the URL printed at startup in a browser. The page moves the token from
+the query string into the tab's `sessionStorage`, removes it from the address
+bar, and sends it as the `Authorization` header on every API call. Closing the
+tab discards it; open the printed URL again to get back in.
+
+The page has a session picker (`GET /v1/sessions`), a **New session** button,
+the transcript, and a composer:
+
+- Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
+  renders its history. The session id is kept in the URL fragment, so a reload
+  reopens the same session.
+- Enter sends the composer text as a turn; Shift+Enter inserts a newline.
+  Assistant text renders as Markdown; each tool call is a collapsible block
+  with its arguments and result.
+- While a turn runs the composer is disabled and a **Cancel** button calls
+  `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
+- Reloading the page during a turn re-attaches to the running turn's event
+  stream and continues rendering it; if the stream drops, the page re-reads
+  it from the last sequence number it saw.
+
+- **Compact** calls `POST /v1/sessions/{id}/compact`; any text in the
+  composer is sent as the `focus`. The result appears as a notice in the
+  transcript (`Nothing to compact` when the server reports a no-op).
+- A **Tasks** panel appears above the composer when the session has sub-agent
+  tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
+  and at turn end, polls every 3 seconds while a task is queued or running,
+  and offers **Cancel** for those.
+- The footer shows `GET /v1/info` (provider, model, sandbox) and the session's
+  context size and cumulative usage from `GET /v1/sessions/{id}`; during a
+  turn it also totals that turn's `provider_usage` events.
 
 ### HTTP API
 
-API endpoints are under `/v1/`; `/healthz` and `/metrics` are served at the
-root. Request and error bodies are JSON.
+API endpoints are under `/v1/`; `/`, `/assets/`, `/healthz`, and `/metrics`
+are served at the root. Request and error bodies are JSON.
 
 | Method and path | Behavior |
 | --- | --- |
@@ -719,10 +780,14 @@ root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |
+| `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
+| `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
+| `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
+| `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
 | `GET /v1/openapi.yaml` | The OpenAPI 3.1 document for this API. |
-| `GET /healthz` | `{"status":"ok","sessions_open":N,"turns_active":N,"uptime_seconds":N}`. |
+| `GET /healthz` | `{"status":"ok","sessions_open":N}`. |
 | `GET /metrics` | Prometheus text-format metrics. |
 
 A turn keeps running after its client disconnects; `POST .../cancel` is the
@@ -750,11 +815,13 @@ only way to stop it.
     "bash_available": true,
     "summary": "..."
   },
-  "turn": { "id": "...", "status": "..." }
+  "turn": { "id": "...", "trigger": "user", "status": "..." }
 }
 ```
 
-`turn` is `null` when no turn has run yet on this session. The session object
+`turn` is `null` when no turn has run yet on this session. `trigger` is
+`user` for a turn started by `POST .../turns` and `task` for one the server
+started to deliver a finished sub-agent task. The session object
 never includes the session's file path; the session ID is the handle used by
 every endpoint.
 
@@ -763,17 +830,19 @@ every endpoint.
 ```json
 {
   "id": "...",
+  "trigger": "user",
   "status": "ok",
   "error": "",
   "text": "...",
   "usage": { "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0 },
+  "usage_present": true,
   "started_at": "...",
   "finished_at": "..."
 }
 ```
 
-`status` is one of `ok`, `error`, or `canceled`. `error` is empty unless
-`status` is `error`.
+`status` is one of `running`, `ok`, `error`, or `canceled`. `error` is omitted
+unless `status` is `error`; `finished_at` is omitted while the turn runs.
 
 ### Events
 
@@ -781,7 +850,8 @@ Each SSE frame carries `id: <sequence>`, `event: <name>`, and a JSON `data:`
 payload. Event names are the `agent.Event` type names: `agent_started`,
 `text_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
 `compaction_planned`, `compaction_started`, `compaction_completed`,
-`compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`.
+`compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`,
+plus `notification` when a sub-agent task finishes.
 
 ### Errors
 
@@ -790,9 +860,10 @@ Status codes:
 
 | Status | Meaning |
 | --- | --- |
-| `400` | Empty or missing turn text. |
-| `404` | Session or turn not found. |
-| `409` | A turn is already active on this session. |
+| `400` | Empty or missing turn text, or an invalid JSON body. |
+| `401` | Missing or invalid bearer token (TCP listener only). |
+| `404` | Session, turn, or task not found. |
+| `409` | `turn_active`: a turn or compaction is already active on this session. `compaction_failed`, `sandbox_reload_failed`, and `task_done` name the other conflicts. |
 | `500` | Internal error. The response body is a fixed `internal error` message; details go to the server log only. |
 
 ### Observability
@@ -816,8 +887,8 @@ logged.
 ### Shutdown
 
 `otto serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new
-requests, cancels every active turn, closes every session, removes the socket
-file, and exits `0`.
+requests, cancels every active turn and compaction, closes every session,
+removes the socket file (socket mode), and exits `0`.
 
 ### Examples
 
@@ -825,15 +896,20 @@ file, and exits `0`.
 curl -s --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions -d '{}'
 curl -N --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/turns -d '{"text":"list files"}'
 curl -s --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/turns/<turn_id>/cancel
+
+# TCP listener; TOKEN is the value printed at startup
+curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessions -d '{}'
+curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessions/<id>/compact -d '{}'
 ```
 
 ### Not supported
 
-- TCP listeners; only a Unix domain socket is supported.
-- Authentication beyond socket file permissions (owner-only directory and
-  socket modes); there is no token or peer-uid check.
-- A `compact` endpoint; compaction still only runs automatically or through
-  the TUI/REPL `/compact` command in those frontends.
+- Non-loopback TCP binds, TLS, and CORS; the TCP listener is for clients on
+  the same machine.
+- Authentication on the Unix socket beyond file permissions (owner-only
+  directory and socket modes); there is no peer-uid check. Token persistence
+  or rotation on the TCP listener.
+- Streaming compaction progress; `POST .../compact` returns only the result.
 - Event replay across turns; only the most recent turn per session is
   readable.
 - Idle session eviction or a limit on how many sessions can stay open.

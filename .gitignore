@@ -2,6 +2,10 @@
 .superpowers/
 /otto
 /dist/
+# Built web UI: `make ui` writes here; only the placeholder is tracked.
+internal/server/ui/dist/*
+!internal/server/ui/dist/.gitkeep
+ui/node_modules/
 .DS_Store
 .otto/
 *.test

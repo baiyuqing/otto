@@ -30,7 +30,7 @@ Keep responsibilities split along the current Go package layout:
 - `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing; `ParseFrontmatter` is exported for `internal/subagent`'s AGENT.md parsing
 - `internal/subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status` tools, shared task-formatting helpers (`format.go`) used by both the REPL and the TUI, AGENT.md definition discovery (`definition.go`, may import `internal/skill` for `ParseFrontmatter`), the `## Agents` prompt section (`prompt.go`), and the `context: inherit` snapshot (`inherit.go`)
 - `internal/tool`: workspace validation plus `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`
-- `internal/tui`: inline Bubble Tea frontend, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
+- `internal/tui`: Bubble Tea frontend on the terminal alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
 
 Keep provider-specific wire structs inside the two provider implementation
 packages. Keep file-tool workspace enforcement inside `internal/tool`, session

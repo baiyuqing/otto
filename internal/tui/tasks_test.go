@@ -156,27 +156,27 @@ func TestWaitTaskUpdateReportsOpen(t *testing.T) {
 }
 
 // TestDispatchTaskUpdateMsgRearmsOnNewRegistry exercises the taskUpdateMsg
-// case: after a closed signal, dispatch re-reads the backend's current task
+// case: after a closed signal, Update re-reads the backend's current task
 // registry and arms a new wait when one is present.
 func TestDispatchTaskUpdateMsgRearmsOnNewRegistry(t *testing.T) {
 	tasks := agent.NewTasks()
 	backend := &fakeBackend{tasks: tasks}
 	m := newTestModelWithBackend(t, backend)
 
-	next, cmd := m.dispatch(taskUpdateMsg{closed: true})
+	next, cmd := m.Update(taskUpdateMsg{closed: true})
 	if _, ok := next.(Model); !ok {
-		t.Fatalf("dispatch returned %T, want Model", next)
+		t.Fatalf("Update returned %T, want Model", next)
 	}
 	if cmd == nil {
-		t.Fatal("dispatch(taskUpdateMsg{closed:true}) cmd = nil, want a re-armed wait when a registry is active")
+		t.Fatal("Update(taskUpdateMsg{closed:true}) cmd = nil, want a re-armed wait when a registry is active")
 	}
 }
 
 func TestDispatchTaskUpdateMsgNoRearmWithoutRegistry(t *testing.T) {
 	m := newTestModel(t)
-	_, cmd := m.dispatch(taskUpdateMsg{closed: true})
+	_, cmd := m.Update(taskUpdateMsg{closed: true})
 	if cmd != nil {
-		t.Fatal("dispatch(taskUpdateMsg{closed:true}) cmd = non-nil, want nil without a task registry")
+		t.Fatal("Update(taskUpdateMsg{closed:true}) cmd = non-nil, want nil without a task registry")
 	}
 }
 
@@ -546,7 +546,7 @@ func TestApplyNewSessionResultNotesCanceledTasks(t *testing.T) {
 		t.Fatalf("entry = %q", text)
 	}
 	if cmd != nil {
-		t.Fatal("applyNewSessionResult() cmd = non-nil, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)")
+		t.Fatal("applyNewSessionResult() cmd = non-nil, want nil (Update's taskUpdateMsg case is the sole re-arm point)")
 	}
 }
 

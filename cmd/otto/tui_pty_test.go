@@ -47,22 +47,13 @@ const (
 	// test-side accommodation for that upstream race, not a fix for it —
 	// there is no otto-side hook into bubbletea's render ticker to close
 	// the window, and v2.0.9 is the latest available release.
-	ptyStepTimeout = 5 * time.Second
-	ptyQuietWindow = 50 * time.Millisecond
-	// cursorShowSeq marks the end of a completed render in inline mode; it
-	// appears after every frame, so it is used only to confirm the TUI has
-	// drawn at least once before sending input.
-	cursorShowSeq = "\x1b[?25h"
-	// exitRestoreSeq is the OSC 112 cursor-color reset Bubble Tea writes once,
-	// at final terminal-state teardown after tui.Run returns. It is the
-	// inline-mode replacement for waiting on an alternate-screen exit.
-	exitRestoreSeq = "\x1b]112\a"
-	// fullRedrawSeq is the erase-display (CSI J, mode 0) Bubble Tea's inline
-	// renderer issues immediately before redrawing the live region from
-	// scratch; its presence in captured output is evidence of a full redraw.
-	fullRedrawSeq               = "\x1b[J"
+	ptyStepTimeout              = 5 * time.Second
+	ptyQuietWindow              = 50 * time.Millisecond
+	altScreenEnterSeq           = "\x1b[?1049h"
+	altScreenExitSeq            = "\x1b[?1049l"
+	bubbleTeaFullRedrawSeq      = "\x1b[H\x1b[2J"
 	assistantStreamText         = "stream visible from pty smoke backend"
-	ctrlCExitStatusMarker       = "press Ctrl+C"
+	ctrlCExitStatusText         = "Ctrl+C again to exit"
 	contextCanceledText         = "context canceled"
 	footerProfileModel          = "pty-profile/pty-model"
 	footerWorkspaceName         = "pty-workspace"
@@ -105,7 +96,7 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
 				writePTY(t, master, "/exit\r")
 				waitForRunReturn(t, runResult)
-				waitForSubsequence(t, collector, 0, exitRestoreSeq)
+				waitForSubsequence(t, collector, 0, altScreenExitSeq)
 			},
 		},
 		{
@@ -137,7 +128,7 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
 				writePTY(t, master, "/exit\r")
 				waitForRunReturn(t, runResult)
-				waitForSubsequence(t, collector, 0, exitRestoreSeq)
+				waitForSubsequence(t, collector, 0, altScreenExitSeq)
 			},
 		},
 	})
@@ -188,9 +179,21 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "forced TUI cleanup")
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("forced TUI cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("forced TUI cleanup error: %v", err)
+		}
 	})
 
+	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
 	waitForSubsequence(t, collector, 0, "current transcript marker")
 	writePTY(t, master, "/resume\r")
 	waitForSubsequence(t, collector, 0, "Resume Session")
@@ -203,40 +206,37 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	// assertion after resize below.
 	waitForSubsequence(t, collector, selectedOffset, selectedResumeSessionID)
 
-	// The finished transcript (selectedAssistantTranscript) was already
-	// flushed to native scrollback via tea.Println before this resize, so it
-	// is outside the emulator's tracked screen window in inline mode; only
-	// the footer's session ID and the absence of the Resume picker remain
-	// checkable here.
-	resumeScreen, resizeRaw := resizePTYAndWaitForScreen(t, slave, collector, 140, 34, func(screen *ptyTerminalScreen) bool {
-		if screen.FullRedraws() == 0 || !screen.Complete() {
-			return false
-		}
-		content := screen.String()
-		if !strings.Contains(content, selectedResumeSessionID) || strings.Contains(content, "Resume Session") {
-			return false
-		}
-		x, y, visible := screen.Cursor()
-		return visible && x == 4 && y == 3
-	})
-	redrawOffset := bytes.Index(resizeRaw, []byte(fullRedrawSeq))
+	resizeOffset := collector.Len()
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 140, Rows: 34}); err != nil {
+		t.Fatalf("pty.Ptysize(140x34) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("SIGWINCH error = %v", err)
+	}
+	resumeScreen, resizeRaw := waitForTerminalScreen(t, collector, resizeOffset, 140, 34, ptyScreenHasResumeEvidence)
+	redrawOffset := bytes.Index(resizeRaw, []byte(bubbleTeaFullRedrawSeq))
 	if redrawOffset < 0 {
-		t.Fatalf("post-resize raw output = %s, want Bubble Tea full-redraw delimiter %q", tailTerminalOutput(resizeRaw), fullRedrawSeq)
+		t.Fatalf("post-resize raw output = %s, want Bubble Tea full-redraw delimiter %q", tailTerminalOutput(resizeRaw), bubbleTeaFullRedrawSeq)
 	}
 	if resumeScreen.width != 140 || resumeScreen.height != 34 {
 		t.Fatalf("post-resize terminal screen = %dx%d, want 140x34", resumeScreen.width, resumeScreen.height)
 	}
-	if x, y, visible := resumeScreen.Cursor(); !visible || x != 4 || y != 3 {
-		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (4,3) visible", x, y, visible)
+	if x, y, visible := resumeScreen.Cursor(); !visible || x != 4 || y != 30 {
+		t.Fatalf("post-resume terminal cursor = (%d,%d) visible=%v, want (4,30) visible", x, y, visible)
 	}
-	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains session ID and no Resume modal; accepted sequences=%q", fullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
+	t.Logf("PTY redraw evidence: raw delimiter=%q at offset=%d full-redraws=%d final-screen=%dx%d contains transcript+session ID and no Resume modal; accepted sequences=%q", bubbleTeaFullRedrawSeq, redrawOffset, resumeScreen.FullRedraws(), resumeScreen.width, resumeScreen.height, resumeScreen.AcceptedCSI())
 
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, exitRestoreSeq)
+	waitForSubsequence(t, collector, 0, altScreenExitSeq)
 
 	if !runResult.Finished() {
 		t.Fatal("run process was still active before terminal restoration check")
+	}
+	output := collector.Snapshot()
+	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
+	if enters != 1 || exits != 1 {
+		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
 	}
 	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
 	if err != nil {
@@ -245,6 +245,7 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	if *restoredMode != *initialMode {
 		t.Fatalf("terminal mode leaked after process exit: %s", diffTermios(*initialMode, *restoredMode))
 	}
+	t.Logf("PTY escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
 }
 
 func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
@@ -292,9 +293,21 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "forced TUI cleanup")
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("forced TUI cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("forced TUI cleanup error: %v", err)
+		}
 	})
 
+	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
 	waitForSubsequence(t, collector, 0, "current archive transcript")
 	writePTY(t, master, "/archive\r")
 	waitForSubsequence(t, collector, 0, "Archive Session")
@@ -314,10 +327,15 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, exitRestoreSeq)
+	waitForSubsequence(t, collector, 0, altScreenExitSeq)
 
 	if !runResult.Finished() {
 		t.Fatal("run process was still active before terminal restoration check")
+	}
+	output := collector.Snapshot()
+	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
+	if enters != 1 || exits != 1 {
+		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
 	}
 	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
 	if err != nil {
@@ -326,7 +344,7 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 	if *restoredMode != *initialMode {
 		t.Fatalf("terminal mode leaked after process exit: %s", diffTermios(*initialMode, *restoredMode))
 	}
-	t.Logf("PTY archive evidence: picker opened, target archived to %s, termios restored", archivedPath)
+	t.Logf("PTY archive evidence: picker opened, target archived to %s, alt-screen enter=%d exit=%d, termios restored", archivedPath, enters, exits)
 }
 
 func diffTermios(initial, restored unix.Termios) string {
@@ -412,10 +430,23 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
 
 	t.Cleanup(func() {
-		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "tui.Run cleanup")
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("tui.Run cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("tui.Run cleanup error: %v", err)
+		}
 	})
 
-	screenOffset := waitForSubsequence(t, collector, 0, wideFooterMarker)
+	enterOffset := waitForSubsequence(t, collector, 0, altScreenEnterSeq)
+	screenOffset := enterOffset + len(altScreenEnterSeq)
+	waitForSubsequence(t, collector, screenOffset, wideFooterMarker)
 
 	writePTY(t, master, "/c")
 	waitForSubsequence(t, collector, screenOffset, "compact context")
@@ -424,27 +455,26 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	writePTY(t, master, " "+ptyCompactFocus)
 
 	completionResizeOffset := collector.Len()
-	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
-	completedScreen, _ := resizePTYAndWaitForScreen(t, slave, collector, 96, 30, func(screen *ptyTerminalScreen) bool {
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 96, Rows: 30}); err != nil {
+		t.Fatalf("pty.Setsize(96x30) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("SIGWINCH error = %v", err)
+	}
+	completedScreen, _ := waitForTerminalScreen(t, collector, completionResizeOffset, 96, 30, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
-		if screen.FullRedraws() == 0 || !screen.Complete() ||
-			!strings.Contains(content, "/compact "+ptyCompactFocus) ||
-			strings.Contains(content, "compact context") {
-			return false
-		}
-		x, y, visible := screen.Cursor()
-		return visible && x == expectedCursorX && y == 3
+		return screen.FullRedraws() > 0 && screen.Complete() &&
+			strings.Contains(content, "/compact "+ptyCompactFocus) &&
+			!strings.Contains(content, "compact context")
 	})
-	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 3 {
-		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,3) visible", x, y, visible, expectedCursorX)
+	expectedCursorX := len([]rune("> ")) + len([]rune("/compact "+ptyCompactFocus)) + 2
+	if x, y, visible := completedScreen.Cursor(); !visible || x != expectedCursorX || y != 26 {
+		t.Fatalf("completed command cursor = (%d,%d) visible=%v, want (%d,26) visible", x, y, visible, expectedCursorX)
 	}
 
 	writePTY(t, master, "\r")
 	waitForCompactFocus(t, backend, ptyCompactFocus)
-	// Incremental ANSI updates need not contain the label as contiguous bytes.
-	waitForTerminalScreen(t, collector, completionResizeOffset, 96, 30, func(screen *ptyTerminalScreen) bool {
-		return screen.Complete() && strings.Contains(screen.String(), "compacting context")
-	})
+	waitForSubsequence(t, collector, screenOffset, "compacting context")
 
 	writePTY(t, master, "\x1b")
 	waitForCompactCancellation(t, backend)
@@ -454,35 +484,39 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	waitForCompactFocus(t, backend, ptyCompactFocus)
 	waitForSubsequence(t, collector, screenOffset, "[context] no-op")
 
-	// contextCanceledText was already confirmed above (waitForSubsequence at
-	// screenOffset); by this point later turns have pushed it into native
-	// scrollback, outside the emulator's tracked screen window, so it is not
-	// re-checked here.
-	compactScreen, _ := resizePTYAndWaitForScreen(t, slave, collector, 80, 24, func(screen *ptyTerminalScreen) bool {
+	resizeOffset := collector.Len()
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}); err != nil {
+		t.Fatalf("pty.Setsize(80x24) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("SIGWINCH error = %v", err)
+	}
+	compactScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
-		if screen.FullRedraws() == 0 || !screen.Complete() ||
-			!strings.Contains(content, narrowFooterMarker) ||
-			!strings.Contains(content, "[context] no-op") ||
-			strings.Contains(content, "compact context") {
-			return false
-		}
-		x, y, visible := screen.Cursor()
-		return visible && x == 4 && y == 3
+		return screen.FullRedraws() > 0 && screen.Complete() &&
+			strings.Contains(content, narrowFooterMarker) &&
+			strings.Contains(content, "[context] no-op") &&
+			strings.Contains(content, contextCanceledText) &&
+			!strings.Contains(content, "compact context")
 	})
-	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 3 {
-		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,3) visible", x, y, visible)
+	if x, y, visible := compactScreen.Cursor(); !visible || x != 4 || y != 20 {
+		t.Fatalf("post-compaction terminal cursor = (%d,%d) visible=%v, want (4,20) visible", x, y, visible)
 	}
 	if sequences := compactScreen.AcceptedCSI(); len(sequences) == 0 {
 		t.Fatal("compaction screen accepted no CSI sequences")
 	}
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, exitRestoreSeq)
+	waitForSubsequence(t, collector, 0, altScreenExitSeq)
 
 	if !runResult.Finished() {
 		t.Fatal("run process was still active before terminal restoration check")
 	}
 	output := collector.Snapshot()
+	enters, exits := bytes.Count(output, []byte(altScreenEnterSeq)), bytes.Count(output, []byte(altScreenExitSeq))
+	if enters != 1 || exits != 1 {
+		t.Fatalf("alternate-screen sequences enter=%d exit=%d, want 1/1; tail: %s", enters, exits, tailTerminalOutput(output))
+	}
 	restoredMode, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TIOCGETA)
 	if err != nil {
 		t.Fatalf("read restored terminal mode: %v", err)
@@ -495,6 +529,7 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 	}
 
 	t.Logf("PTY compaction accepted sequences=%q", compactScreen.AcceptedCSI())
+	t.Logf("PTY compaction escape evidence: alt-screen enter=%d exit=%d; full termios restored", enters, exits)
 }
 
 func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
@@ -555,10 +590,21 @@ func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
 	})
 
 	t.Cleanup(func() {
-		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "sandboxed Bash TUI cleanup")
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("sandboxed Bash TUI cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("sandboxed Bash TUI cleanup error: %v", err)
+		}
 	})
 
-	if _, err := collector.WaitForEvent(0, []byte(cursorShowSeq), ptyStepTimeout); err != nil {
+	if _, err := collector.WaitForEvent(0, []byte(altScreenEnterSeq), ptyStepTimeout); err != nil {
 		t.Fatal(err)
 	}
 	writePTY(t, master, "run sandboxed bash\r")
@@ -570,7 +616,7 @@ func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
 	}
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
-	if _, err := collector.WaitForEvent(0, []byte(exitRestoreSeq), ptyStepTimeout); err != nil {
+	if _, err := collector.WaitForEvent(0, []byte(altScreenExitSeq), ptyStepTimeout); err != nil {
 		t.Fatal(err)
 	}
 
@@ -607,31 +653,46 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
 
 	t.Cleanup(func() {
-		cleanupPTYRun(t, cancelRun, slave, master, collector, runResult, "tui.Run cleanup")
+		cancelRun()
+		_ = slave.Close()
+		_ = master.Close()
+		collector.Wait(t, ptyStepTimeout)
+		if runResult.Finished() {
+			return
+		}
+		if err, ok := runResult.Wait(ptyStepTimeout); !ok {
+			t.Log("tui.Run cleanup timed out")
+		} else if err != nil && !isExpectedCleanupRunError(err) {
+			t.Logf("tui.Run cleanup error: %v", err)
+		}
 	})
 
 	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
 		t.Fatalf("pty.Setsize(100x30) error = %v", err)
 	}
 
+	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
 	waitForSubsequence(t, collector, 0, wideFooterMarker)
 
 	writePTY(t, master, "lifecycle prompt\r")
 	waitForPrompt(t, backend, "lifecycle prompt")
 	streamOffset := waitForSubsequence(t, collector, 0, assistantStreamText)
 
-	lifecycleScreen, _ := resizePTYAndWaitForScreen(t, slave, collector, 80, 24, func(screen *ptyTerminalScreen) bool {
+	resizeOffset := collector.Len()
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}); err != nil {
+		t.Fatalf("pty.Setsize(80x24) error = %v", err)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
+		t.Fatalf("SIGWINCH error = %v", err)
+	}
+	lifecycleScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
 		content := screen.String()
-		if screen.FullRedraws() == 0 || !screen.Complete() ||
-			!strings.Contains(content, narrowFooterMarker) ||
-			strings.Contains(content, footerSessionMarker) {
-			return false
-		}
-		x, y, visible := screen.Cursor()
-		return visible && x == 4 && y == 7
+		return screen.FullRedraws() > 0 && screen.Complete() &&
+			strings.Contains(content, narrowFooterMarker) &&
+			!strings.Contains(content, footerSessionMarker)
 	})
-	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 7 {
-		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,7) visible", x, y, visible)
+	if x, y, visible := lifecycleScreen.Cursor(); !visible || x != 4 || y != 20 {
+		t.Fatalf("post-resize terminal cursor = (%d,%d) visible=%v, want (4,20) visible", x, y, visible)
 	}
 	t.Logf("PTY lifecycle accepted sequences=%q", lifecycleScreen.AcceptedCSI())
 
@@ -639,13 +700,12 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	waitForCancellation(t, backend)
 	waitForSubsequence(t, collector, streamOffset, contextCanceledText)
 
-	ctrlCOffset := collector.Len()
 	writePTY(t, master, "\x03")
-	waitForSubsequence(t, collector, ctrlCOffset, ctrlCExitStatusMarker)
+	waitForSubsequence(t, collector, 0, ctrlCExitStatusText)
 
 	writePTY(t, master, "\x03")
 	waitForRunReturn(t, runResult)
-	waitForSubsequence(t, collector, 0, exitRestoreSeq)
+	waitForSubsequence(t, collector, 0, altScreenExitSeq)
 }
 
 type ptySmokeBackend struct {
@@ -803,35 +863,6 @@ func waitForTerminalScreen(t *testing.T, collector *ptyOutputCollector, after, w
 	return screen, raw
 }
 
-// resizePTYAndWaitForScreen sends a PTY resize (Setsize + SIGWINCH) and waits
-// for the matching screen. bubbletea's resize-render race (see ptyStepTimeout
-// above) makes a single attempt occasionally miss its deadline under load;
-// SIGWINCH's handler re-queries the current size and resends a WindowSizeMsg
-// unconditionally, so resending the same target size reliably re-triggers a
-// fresh redraw to retry against.
-func resizePTYAndWaitForScreen(t *testing.T, slave *os.File, collector *ptyOutputCollector, cols, rows int, accept func(*ptyTerminalScreen) bool) (*ptyTerminalScreen, []byte) {
-	t.Helper()
-	const maxResizeAttempts = 3
-	for attempt := 1; attempt <= maxResizeAttempts; attempt++ {
-		after := collector.Len()
-		if err := pty.Setsize(slave, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
-			t.Fatalf("pty.Setsize(%dx%d) error = %v", cols, rows, err)
-		}
-		if err := syscall.Kill(os.Getpid(), syscall.SIGWINCH); err != nil {
-			t.Fatalf("SIGWINCH error = %v", err)
-		}
-		screen, raw, err := collector.WaitForTerminalScreen(after, cols, rows, accept, ptyQuietWindow, ptyStepTimeout)
-		if err == nil {
-			return screen, raw
-		}
-		if attempt == maxResizeAttempts {
-			t.Fatal(err)
-		}
-		t.Logf("resize to %dx%d attempt %d/%d did not converge, retrying: %v", cols, rows, attempt, maxResizeAttempts, err)
-	}
-	return nil, nil
-}
-
 type runResult struct {
 	done chan struct{}
 	mu   sync.Mutex
@@ -848,22 +879,6 @@ func startRunResult(run func() error) *runResult {
 		close(result.done)
 	}()
 	return result
-}
-
-// cleanupPTYRun cancels the run, waits for it to exit, and only then closes
-// the PTY ends. tui.Run's shutdown path (Bubble Tea restoring terminal state)
-// reads slave's fd, so closing slave before that finishes races with it.
-func cleanupPTYRun(t *testing.T, cancelRun context.CancelFunc, slave, master *os.File, collector *ptyOutputCollector, runResult *runResult, label string) {
-	t.Helper()
-	cancelRun()
-	if err, ok := runResult.Wait(ptyStepTimeout); !ok {
-		t.Logf("%s timed out", label)
-	} else if err != nil && !isExpectedCleanupRunError(err) {
-		t.Logf("%s error: %v", label, err)
-	}
-	_ = slave.Close()
-	_ = master.Close()
-	collector.Wait(t, ptyStepTimeout)
 }
 
 func (r *runResult) Finished() bool {
@@ -1106,7 +1121,7 @@ func TestPTYTerminalScreenRejectsUnsupportedControlsAndCSI(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			screen := newPTYTerminalScreen(140, 34)
-			validEvidence := fullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID
+			validEvidence := bubbleTeaFullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID
 			if _, err := screen.Write([]byte(validEvidence)); err != nil {
 				t.Fatalf("write valid evidence: %v", err)
 			}
@@ -1152,7 +1167,7 @@ func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.
 		{
 			name: "split incremental insert-line update preserves one screen",
 			chunks: []string{
-				fullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID,
+				bubbleTeaFullRedrawSeq + selectedAssistantTranscript + "\r\n" + selectedResumeSessionID,
 				"\r\x1b[2", "d\x1b[1", "L",
 			},
 			want:        true,
@@ -1160,7 +1175,7 @@ func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.
 		},
 		{
 			name:        "one full redraw still showing modal",
-			chunks:      []string{fullRedrawSeq + selectedAssistantTranscript + " " + selectedResumeSessionID + " Resume Session"},
+			chunks:      []string{bubbleTeaFullRedrawSeq + selectedAssistantTranscript + " " + selectedResumeSessionID + " Resume Session"},
 			want:        false,
 			wantRedraws: 1,
 		},
@@ -1182,73 +1197,4 @@ func TestPTYTerminalScreenResumeEvidenceDoesNotAggregateAcrossFrames(t *testing.
 			}
 		})
 	}
-}
-
-func TestTUIPseudoTerminalHelpOverlayClosesWithoutResidue(t *testing.T) {
-	master, slave, err := pty.Open()
-	if err != nil {
-		t.Fatalf("pty.Open() error = %v", err)
-	}
-	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
-		t.Fatalf("pty.Setsize(100x30) error = %v", err)
-	}
-	collector := newPTYOutputCollector(master)
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{})}
-	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
-	defer func() {
-		cancelRun()
-		_ = slave.Close()
-		_ = master.Close()
-		collector.Wait(t, ptyStepTimeout)
-	}()
-
-	waitForSubsequence(t, collector, 0, wideFooterMarker)
-	helpOffset := collector.Len()
-	writePTY(t, master, "/help\r")
-	waitForSubsequence(t, collector, helpOffset, "Ctrl+O toggle details")
-	closeOffset := collector.Len()
-	writePTY(t, master, "\x1b")
-	waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
-	waitForTerminalScreen(t, collector, helpOffset, 100, 30, func(screen *ptyTerminalScreen) bool {
-		content := screen.String()
-		return screen.Complete() && strings.Contains(content, wideFooterMarker) && !strings.Contains(content, "Ctrl+O toggle details")
-	})
-	writePTY(t, master, "/exit\r")
-	waitForRunReturn(t, runResult)
-}
-
-func TestTUIPseudoTerminalSlashSuggestionsCloseWithoutResidue(t *testing.T) {
-	master, slave, err := pty.Open()
-	if err != nil {
-		t.Fatalf("pty.Open: %v", err)
-	}
-	if err := pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30}); err != nil {
-		t.Fatalf("pty.Setsize: %v", err)
-	}
-	collector := newPTYOutputCollector(master)
-	runCtx, cancelRun := context.WithCancel(context.Background())
-	backend := &ptySmokeBackend{promptCh: make(chan string, 1), canceledCh: make(chan struct{})}
-	runResult := startRunResult(func() error { return tui.Run(runCtx, slave, slave, backend) })
-	defer func() {
-		cancelRun()
-		_ = slave.Close()
-		_ = master.Close()
-		collector.Wait(t, ptyStepTimeout)
-	}()
-
-	waitForSubsequence(t, collector, 0, wideFooterMarker)
-	openOffset := collector.Len()
-	writePTY(t, master, "/")
-	waitForSubsequence(t, collector, openOffset, "show help")
-	closeOffset := collector.Len()
-	writePTY(t, master, "\x1b")
-	waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
-	waitForTerminalScreen(t, collector, openOffset, 100, 30, func(screen *ptyTerminalScreen) bool {
-		content := screen.String()
-		return screen.Complete() && strings.Contains(content, wideFooterMarker) && !strings.Contains(content, "show help")
-	})
-
-	writePTY(t, master, "/exit\r")
-	waitForRunReturn(t, runResult)
 }

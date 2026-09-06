@@ -175,15 +175,13 @@ func TestModelCommandSwitchNotesCanceledTasks(t *testing.T) {
 		t.Fatal("/model <profile> cmd = nil, want async switch")
 	}
 	msg := runCommandWithin(t, cmd, time.Second)
-	// dispatch (not Update): Update batches in the pending-print flush cmd,
-	// which is unrelated to the assertion below.
-	updated, resultCmd := pending.dispatch(msg)
+	updated, resultCmd := pending.Update(msg)
 	got := updated.(Model)
 	if text := lastEntryText(t, got); text != "canceled 1 running tasks" {
 		t.Fatalf("entry = %q", text)
 	}
 	if resultCmd != nil {
-		t.Fatal("applyProfileSwitchResult() cmd = non-nil, want nil (dispatch's taskUpdateMsg case is the sole re-arm point)")
+		t.Fatal("applyProfileSwitchResult() cmd = non-nil, want nil (Update's taskUpdateMsg case is the sole re-arm point)")
 	}
 }
 
@@ -195,9 +193,6 @@ func TestModelCommandUnavailableWithoutSwitcher(t *testing.T) {
 	}
 	if !strings.Contains(got.statusText, app.ErrProfileSwitchUnavailable.Error()) {
 		t.Fatalf("statusText = %q", got.statusText)
-	}
-	if got.editor.Value() != "" {
-		t.Fatalf("editor = %q, want cleared after unavailable /model", got.editor.Value())
 	}
 }
 

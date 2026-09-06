@@ -733,8 +733,28 @@ machine.
 `GET /` serves the browser UI built by `make ui` and embedded into the
 binary, and `GET /assets/` its static files. A binary built without running
 `make ui` answers `/` with the plain-text line `Web UI not built; run make ui`.
-Open the URL printed at startup in a browser; the page reads the token from
-the query string and uses it for every API call.
+Open the URL printed at startup in a browser. The page moves the token from
+the query string into the tab's `sessionStorage`, removes it from the address
+bar, and sends it as the `Authorization` header on every API call. Closing the
+tab discards it; open the printed URL again to get back in.
+
+The page has a session picker (`GET /v1/sessions`), a **New session** button,
+the transcript, and a composer:
+
+- Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
+  renders its history. The session id is kept in the URL fragment, so a reload
+  reopens the same session.
+- Enter sends the composer text as a turn; Shift+Enter inserts a newline.
+  Assistant text renders as Markdown; each tool call is a collapsible block
+  with its arguments and result.
+- While a turn runs the composer is disabled and a **Cancel** button calls
+  `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
+- Reloading the page during a turn re-attaches to the running turn's event
+  stream and continues rendering it; if the stream drops, the page re-reads
+  it from the last sequence number it saw.
+
+The topbar shows the session's provider, model, and workspace. Token usage,
+sub-agent tasks, and manual compaction are not yet in the page; use the API.
 
 ### HTTP API
 

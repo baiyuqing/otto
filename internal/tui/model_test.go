@@ -14,6 +14,7 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/agent"
 	"github.com/baiyuqing/otto/internal/app"
 	"github.com/baiyuqing/otto/internal/model"
@@ -3049,5 +3050,47 @@ func TestQueuedPrintsEndWithBlankLine(t *testing.T) {
 	model.refreshViewportContent()
 	if len(model.pendingPrints) != 1 || !strings.HasSuffix(model.pendingPrints[0], "\n") {
 		t.Fatalf("committed chunk = %q, want trailing newline", model.pendingPrints)
+	}
+}
+
+// A scrollback chunk taller than the free rows above the live frame corrupts
+// the frame: ultraviolet's TerminalRenderer.PrependString scrolls by the
+// chunk's row count and then clamps the cursor move back up at row 0, so the
+// inserted rows land on top of the input box and footer. Every flushed chunk
+// must therefore fit in the rows the frame leaves free.
+func TestQueuedPrintsSplitToFitAboveLiveFrame(t *testing.T) {
+	const width, height = 80, 20
+	m := resizeModel(t, newTestModel(t), width, height)
+	frameHeight := lipgloss.Height(m.View().Content)
+	limit := height - frameHeight
+	if limit < 2 {
+		t.Fatalf("free rows above frame = %d, want at least 2 for this test", limit)
+	}
+
+	lines := make([]string, 0, limit*3)
+	for i := 0; i < cap(lines); i++ {
+		lines = append(lines, fmt.Sprintf("scrollback line %02d", i))
+	}
+	m.queuePrint(strings.Join(lines, "\n"))
+
+	flushed := make([]string, 0, 4)
+	for step := 0; len(m.pendingPrints) > 0; step++ {
+		if step > 16 {
+			t.Fatalf("flush did not drain pendingPrints: %q", m.pendingPrints)
+		}
+		m.printInFlight = false
+		chunk, ok := m.takeNextPrintChunk()
+		if !ok {
+			t.Fatalf("takeNextPrintChunk returned no chunk with %d queued", len(m.pendingPrints))
+		}
+		if got := lipgloss.Height(chunk); got > limit {
+			t.Fatalf("flushed chunk height = %d, want <= %d free rows", got, limit)
+		}
+		flushed = append(flushed, chunk)
+	}
+
+	want := strings.Join(lines, "\n") + "\n"
+	if got := strings.Join(flushed, "\n"); got != want {
+		t.Fatalf("rejoined chunks = %q, want %q", got, want)
 	}
 }

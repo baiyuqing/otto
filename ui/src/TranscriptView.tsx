@@ -3,7 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { Item } from './transcript'
 
-export function TranscriptView(props: { items: Item[] }) {
+export function TranscriptView(props: { items: Item[]; activeSession: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
   // Follow the stream: keep the newest item in view as it grows.
   useEffect(() => {
@@ -13,9 +13,19 @@ export function TranscriptView(props: { items: Item[] }) {
 
   return (
     <div className="transcript" ref={ref}>
-      {props.items.map((it, i) => (
-        <ItemView key={i} item={it} />
-      ))}
+      {props.items.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-orb">✦</div>
+          <h1>{props.activeSession ? 'Ready when you are.' : 'Open a session to start.'}</h1>
+          <p>
+            {props.activeSession
+              ? 'Ask Otto to explore the codebase, make a focused edit, or run verification.'
+              : 'Create a new session or resume an existing one from the top bar.'}
+          </p>
+        </div>
+      ) : (
+        props.items.map((it, i) => <ItemView key={i} item={it} />)
+      )}
     </div>
   )
 }
@@ -34,7 +44,8 @@ function ItemView({ item }: { item: Item }) {
       return (
         <details className={`item tool${item.isError ? ' error' : ''}`}>
           <summary>
-            {item.name} {item.result === undefined ? '…' : item.isError ? '✗' : '✓'}
+            <span>{item.name}</span>
+            <span>{item.result === undefined ? 'Running…' : item.isError ? 'Failed' : 'Done'}</span>
           </summary>
           {item.args && <pre>{item.args}</pre>}
           {item.result !== undefined && <pre>{item.result}</pre>}

@@ -1,4 +1,5 @@
 import type { SessionListRow } from './types'
+import { sessionLabel } from './uiText'
 
 export function SessionPicker(props: {
   sessions: SessionListRow[]
@@ -7,22 +8,23 @@ export function SessionPicker(props: {
   onOpen: (id?: string) => void
 }) {
   return (
-    <>
+    <div className="session-picker">
       <select
+        aria-label="Open session"
         value={props.current}
         disabled={props.disabled}
         onChange={(e) => e.target.value && props.onOpen(e.target.value)}
       >
-        <option value="">Select a session…</option>
+        <option value="">Select session…</option>
         {props.sessions.map((s) => (
           <option key={s.id} value={s.id}>
-            {s.id.slice(0, 8)} {s.open ? '●' : ''} {s.model ?? ''}
+            {sessionLabel(s.id)} {s.open ? '●' : ''} {s.model ?? ''}
           </option>
         ))}
       </select>
-      <button disabled={props.disabled} onClick={() => props.onOpen()}>
+      <button className="primary" disabled={props.disabled} onClick={() => props.onOpen()}>
         New session
       </button>
-    </>
+    </div>
   )
 }

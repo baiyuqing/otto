@@ -7,6 +7,7 @@ import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
 import { Footer } from './Footer'
 import { Tasks } from './Tasks'
+import { sessionLabel, workspaceName } from './uiText'
 
 setToken(loadToken())
 
@@ -157,15 +158,38 @@ export function App() {
     }
   }
 
+  const busy = turnId !== null || compacting
+
   return (
     <div className="app">
-      <div className="topbar">
-        <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={turnId !== null || compacting} onOpen={open} />
+      <header className="topbar">
+        <div className="brand" aria-label="Otto Web UI">
+          <span className="brand-mark">O</span>
+          <div>
+            <div className="brand-name">Otto</div>
+            <div className="brand-subtitle">AI coding agent</div>
+          </div>
+        </div>
+        <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
         <span className="spacer" />
-        {session && <span className="meta">{session.workspace}</span>}
-      </div>
-      {error && <div className="banner">{error}</div>}
-      <TranscriptView items={items} />
+        {session && (
+          <div className="session-chip" title={session.id}>
+            <span>{sessionLabel(session.id)}</span>
+            <strong>{workspaceName(session.workspace)}</strong>
+          </div>
+        )}
+      </header>
+      {error && (
+        <div className="banner" role="alert">
+          <span>{error}</span>
+          <button aria-label="Dismiss error" onClick={() => setError('')}>
+            ×
+          </button>
+        </div>
+      )}
+      <main className="workspace-shell">
+        <TranscriptView items={items} activeSession={session !== null} />
+      </main>
       {session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
       <Composer
         disabled={!session}

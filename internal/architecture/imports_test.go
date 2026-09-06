@@ -160,7 +160,7 @@ func checkRepository(root string) ([]importViolation, error) {
 			if path != "." && strings.HasPrefix(entry.Name(), ".") {
 				return fs.SkipDir
 			}
-			if entry.Name() == "testdata" {
+			if entry.Name() == "testdata" || entry.Name() == "node_modules" {
 				return fs.SkipDir
 			}
 			return nil

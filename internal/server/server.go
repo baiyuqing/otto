@@ -54,7 +54,11 @@ type Options struct {
 	// running process, returning the state now in effect. nil disables
 	// POST /v1/sandbox/reload.
 	ReloadSandbox func(ctx context.Context) (app.SandboxInfo, error)
-	Logger        *slog.Logger // nil -> TextHandler to stderr
+	// Token, when non-empty, is required as "Authorization: Bearer <Token>"
+	// on every /v1/ route. See requireToken for why. Empty means no check,
+	// which is only safe behind a Unix socket with private file modes.
+	Token  string
+	Logger *slog.Logger // nil -> TextHandler to stderr
 }
 
 // openSession is one entry in the session registry: an open controller and
@@ -64,6 +68,12 @@ type openSession struct {
 
 	mu   sync.Mutex
 	turn *turn
+	// compactCancel is non-nil while POST .../compact runs. startTurn and
+	// handleCompact both check it under mu, so a turn and a compaction are
+	// never admitted together; Controller.beginOperation would also refuse
+	// the second one, but only after the first has been published as
+	// os.turn.
+	compactCancel context.CancelFunc
 
 	// turnFinished is signaled (non-blocking, capacity 1) after every turn
 	// on this session finishes. startWakeLoop is the only reader; routing
@@ -76,6 +86,19 @@ type openSession struct {
 
 func newOpenSession(ctrl *app.Controller) *openSession {
 	return &openSession{ctrl: ctrl, turnFinished: make(chan struct{}, 1)}
+}
+
+// cancelWork cancels the running turn or compaction, if any, so a following
+// ctrl.Close does not wait on a provider call.
+func (os *openSession) cancelWork() {
+	os.mu.Lock()
+	defer os.mu.Unlock()
+	if os.turn != nil {
+		os.turn.cancel()
+	}
+	if os.compactCancel != nil {
+		os.compactCancel()
+	}
 }
 
 // Server is otto serve's HTTP handler plus the session registry and turn
@@ -138,11 +161,7 @@ func (s *Server) Close() error {
 	s.mu.Unlock()
 
 	for _, os := range sessions {
-		os.mu.Lock()
-		if os.turn != nil {
-			os.turn.cancel()
-		}
-		os.mu.Unlock()
+		os.cancelWork()
 	}
 
 	var errs []error
@@ -223,6 +242,7 @@ func (s *Server) routeTable() []routeEntry {
 		{"GET /v1/sessions/{id}/turns/{turn_id}", s.handleGetTurn},
 		{"GET /v1/sessions/{id}/turns/{turn_id}/events", s.handleTurnEvents},
 		{"POST /v1/sessions/{id}/turns/{turn_id}/cancel", s.handleCancelTurn},
+		{"POST /v1/sessions/{id}/compact", s.handleCompact},
 		{"GET /v1/sessions/{id}/tasks", s.handleListTasks},
 		{"GET /v1/sessions/{id}/tasks/{task_id}", s.handleGetTask},
 		{"POST /v1/sessions/{id}/tasks/{task_id}/cancel", s.handleCancelTask},
@@ -237,8 +257,20 @@ func (s *Server) routeTable() []routeEntry {
 func (s *Server) buildMux() http.Handler {
 	mux := http.NewServeMux()
 	for _, e := range s.routeTable() {
-		mux.HandleFunc(e.pattern, e.handler)
+		h := e.handler
+		if s.opts.Token != "" && strings.Contains(e.pattern, " /v1/") {
+			// Wrapped per route rather than in instrument so a 401 is still
+			// logged and measured under its real r.Pattern.
+			h = requireToken(s.opts.Token, h)
+		}
+		mux.HandleFunc(e.pattern, h)
 	}
+	// The embedded web UI is not part of the API: no token, not in
+	// routeTable, not in openapi.yaml. "/{$}" is an exact match so unknown
+	// paths still 404 instead of falling through to index.html.
+	index, assets := uiHandlers(uiDist)
+	mux.Handle("GET /{$}", index)
+	mux.Handle("GET /assets/", assets)
 	return s.instrument(mux)
 }
 
@@ -628,11 +660,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	os.mu.Lock()
-	if os.turn != nil {
-		os.turn.cancel()
-	}
-	os.mu.Unlock()
+	os.cancelWork()
 
 	if err := os.ctrl.Close(); err != nil {
 		s.log.Error("session_close_error", "session_id", r.PathValue("id"), "error", err)
@@ -665,7 +693,7 @@ var errTurnActive = errors.New("turn already active")
 // signals os.turnFinished so startWakeLoop can retry a late notification.
 func (s *Server) startTurn(os *openSession, text, trigger string) (*turn, error) {
 	os.mu.Lock()
-	if os.turn != nil && !os.turn.isDone() {
+	if (os.turn != nil && !os.turn.isDone()) || os.compactCancel != nil {
 		os.mu.Unlock()
 		return nil, errTurnActive
 	}

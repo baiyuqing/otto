@@ -23,7 +23,8 @@ Keep responsibilities split along the current Go package layout:
 - `internal/provider/openairesponses`: all ChatGPT Responses API HTTP/JSON/SSE wire code
 - `internal/auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, access-token refresh, and the credential service injected through `app.Authentication`
 - `internal/repl`: line-oriented REPL rendering and commands
-- `internal/server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, and metrics
+- `internal/server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI build (`internal/server/ui/dist`, written by `make ui`)
+- `ui/`: the TypeScript browser frontend; a client of `internal/server`'s HTTP API only, with no Go code and no part in `make check`
 - `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
 - `internal/session`: in-memory and JSONL session storage
 - `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing; `ParseFrontmatter` is exported for `internal/subagent`'s AGENT.md parsing
@@ -127,6 +128,28 @@ behavioral assertions and their deadlines remain unchanged.
 Use `make lint` as the canonical staticcheck invocation. The pinned v0.8.1
 module supports Go 1.26. Keep the default test suite offline: it must not need
 network access, provider credentials, or a real interactive terminal.
+
+## Web UI workflow
+
+`ui/` is a Vite + React + TypeScript project with `react-markdown` and
+`remark-gfm` as its only runtime dependencies. It needs Node 24+ and is not
+part of `make check`; CI stays Go-only.
+
+```bash
+make ui       # npm ci && npm run build → internal/server/ui/dist, then go build embeds it
+make ui-test  # vitest: the SSE frame parser and the transcript reducer
+```
+
+`internal/server/ui/dist` is a build output: only `.gitkeep` is tracked, and a
+`go build` without a prior `make ui` embeds the placeholder page. Do not commit
+built assets.
+
+For development, run `otto serve --listen 127.0.0.1:8787` in one terminal and
+`cd ui && OTTO_URL=http://127.0.0.1:8787 npm run dev` in another, then open the
+Vite URL with the `?token=` query from the `otto serve` startup line. Vite
+proxies `/v1` to the Go server, so the page stays same-origin and no CORS is
+involved. Wire types in `ui/src/types.ts` mirror
+[openapi.yaml](../internal/server/openapi.yaml); update both together.
 
 ## Test-driven development
 

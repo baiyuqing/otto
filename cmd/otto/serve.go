@@ -72,7 +72,8 @@ func (b runtimeBuilder) runServe(ctx context.Context, runtime config.Runtime, so
 			Sandbox:   runtimeInfo.Sandbox.Summary(),
 			Profiles:  b.profileNames(),
 		},
-		Logger: slog.New(slog.NewTextHandler(stderr, nil)),
+		ReloadSandbox: b.sandboxReload(),
+		Logger:        slog.New(slog.NewTextHandler(stderr, nil)),
 	})
 	serveErr := server.Serve(serveCtx, listener, srv)
 	cancel()

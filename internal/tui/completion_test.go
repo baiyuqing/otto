@@ -189,9 +189,9 @@ func TestSlashCommandSuggestionPanelUsesRegistryAndStaysWithinBounds(t *testing.
 		}
 	}
 
-	m = resizeModel(t, m, 60, 20)
+	m = resizeModel(t, m, 60, 21)
 	content = m.View().Content
-	assertRenderedBounds(t, content, 60, 20)
+	assertRenderedBounds(t, content, 60, 21)
 	for _, text := range []string{"/resume", "resume a session", "/compact", "compact context", "/tasks", "/task", "/exit", "quit"} {
 		if !strings.Contains(content, text) {
 			t.Fatalf("suggestion panel = %q, want %q", content, text)
@@ -260,13 +260,13 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 
 	updated, _ := m.Update(tea.PasteMsg{Content: "/s"})
 	m = updated.(Model)
-	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 1 || m.viewport.Height() != 5 {
+	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 2 || m.viewport.Height() != 4 {
 		t.Fatalf("paste state: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 14 || m.viewport.Height() != 1 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 15 || m.viewport.Height() != 1 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))
@@ -314,7 +314,7 @@ func TestSlashCommandMultilineArrowsAndOverlayTransitionsUseUpdate(t *testing.T)
 	}
 	updated, _ = m.Update(hideOverlayMsg{})
 	m = updated.(Model)
-	if m.overlay != overlayNone || len(m.commandSuggestions()) != 1 || !strings.Contains(m.View().Content, "> /session") {
+	if m.overlay != overlayNone || len(m.commandSuggestions()) != 2 || !strings.Contains(m.View().Content, "> /session") {
 		t.Fatalf("hide transition: overlay=%v suggestions=%d view=%q", m.overlay, len(m.commandSuggestions()), m.View().Content)
 	}
 }

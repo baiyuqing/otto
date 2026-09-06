@@ -263,6 +263,25 @@ func openDirectSandboxRuntime(ctx context.Context, options sandboxOpenOptions, h
 	}
 }
 
+// normalizeSandboxRuntime fails a runtime closed when it reports bash as
+// available but cannot actually run it: incomplete redactions would leak
+// secrets into command output, and a missing executor or environment leaves
+// nothing to run. Startup and every later reload classify runtimes here so
+// they agree on what "usable" means.
+func normalizeSandboxRuntime(runtime sandboxRuntime) sandboxRuntime {
+	switch {
+	case !runtime.RedactionsComplete:
+		runtime.Info = app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonEnvironmentRejected}
+	case runtime.Info.BashAvailable && (isNilSandboxRuntimeValue(runtime.Executor) || runtime.Environment == nil):
+		runtime.Info = app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonRuntimeFailure}
+	default:
+		return runtime
+	}
+	runtime.Executor = nil
+	runtime.Environment = nil
+	return runtime
+}
+
 func (r sandboxRuntime) Close() error {
 	if r.close == nil {
 		return nil

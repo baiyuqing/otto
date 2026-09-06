@@ -18,7 +18,7 @@ import (
 const (
 	minTerminalWidth  = 40
 	minTerminalHeight = 8
-	minEditorHeight   = 2
+	minEditorHeight   = 1
 	maxEditorHeight   = 6
 	footerHeight      = 1
 	editorSpacing     = 1
@@ -27,8 +27,9 @@ const (
 	// room for the transcript and the command-suggestion panel.
 	inputBoxThreshold = 12
 	inputBoxBorder    = 2
-	inputBoxLabel     = 1
-	inputBoxPadding   = 1
+	// inputBoxHint is the shortcut hint row rendered directly below the box.
+	inputBoxHint    = 1
+	inputBoxPadding = 1
 )
 
 type layoutState struct {
@@ -56,7 +57,7 @@ func calculateLayout(width, height int, editor textarea.Model, requestedSuggesti
 		// The box's top border separates it from the transcript, so the extra
 		// blank row is not needed and would waste space.
 		layout.editorSpacing = 0
-		layout.inputBoxHeight = layout.editorHeight + inputBoxBorder + inputBoxLabel
+		layout.inputBoxHeight = layout.editorHeight + inputBoxBorder + inputBoxHint
 	} else {
 		layout.inputBoxHeight = layout.editorHeight
 	}
@@ -163,7 +164,7 @@ func renderFooter(width int, info app.Info, usage otmodel.Usage, status string) 
 	if lipgloss.Width(footer) > width {
 		footer = renderFooterCore(width, status, profileModel, badge)
 	}
-	return lipgloss.NewStyle().Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
+	return lipgloss.NewStyle().Faint(true).Width(width).MaxWidth(width).MaxHeight(1).Render(footer)
 }
 
 func renderFooterCore(width int, status, profileModel, badge string) string {

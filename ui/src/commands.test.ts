@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseWebCommand } from './commands'
+import { parseWebCommand, webCommandSuggestions } from './commands'
 
 describe('web slash commands', () => {
   it('parses rename commands with a trimmed name', () => {
@@ -15,5 +15,14 @@ describe('web slash commands', () => {
   it('leaves non-commands and unknown commands as prompts', () => {
     expect(parseWebCommand('hello')).toEqual({ kind: 'prompt', text: 'hello' })
     expect(parseWebCommand('/renam dev')).toEqual({ kind: 'prompt', text: '/renam dev' })
+  })
+
+  it('suggests matching commands for slash prefixes', () => {
+    expect(webCommandSuggestions('/')).toEqual([
+      { name: '/rename', description: 'rename the current session' },
+      { name: '/compact', description: 'compact context with optional focus' },
+    ])
+    expect(webCommandSuggestions('/r')).toEqual([{ name: '/rename', description: 'rename the current session' }])
+    expect(webCommandSuggestions('hello')).toEqual([])
   })
 })

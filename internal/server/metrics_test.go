@@ -40,7 +40,7 @@ func TestMetricsProviderAPIRequests(t *testing.T) {
 
 func TestMetricsSessionContext(t *testing.T) {
 	m := newMetrics()
-	m.sessionContext(sessionContextMetrics{
+	m.recordSessionContext(sessionContextMetrics{
 		SessionID:                 "session-1",
 		Provider:                  "openai-compatible",
 		Model:                     "test-model",

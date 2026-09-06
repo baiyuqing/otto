@@ -131,7 +131,7 @@ func (m *metrics) providerAPIRequest(providerName, modelName, status string, d t
 	h.observe(d.Seconds())
 }
 
-func (m *metrics) sessionContext(sample sessionContextMetrics) {
+func (m *metrics) recordSessionContext(sample sessionContextMetrics) {
 	key := sessionContextKey{sessionID: sample.SessionID, provider: sample.Provider, model: sample.Model}
 	values := sessionContextValues{
 		contextWindow:             int64(sample.ContextWindow),

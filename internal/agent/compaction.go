@@ -108,7 +108,7 @@ func (a *Agent) compact(ctx context.Context, reason CompactionReason, focus stri
 		Mode:                 planMode,
 	})
 
-	generated, generatedUsage, generatedUsagePresent, err := a.executeSummaryRequest(ctx, prepared.Request, firstMaximumBytes, structured)
+	generated, generatedUsage, generatedUsagePresent, err := a.executeSummaryRequest(ctx, prepared.Request, firstMaximumBytes, structured, emit)
 	if err != nil {
 		return CompactionResult{}, err
 	}
@@ -124,7 +124,7 @@ func (a *Agent) compact(ctx context.Context, reason CompactionReason, focus stri
 	details := prepared.Details
 
 	if hasTurn {
-		turn, turnUsage, turnUsagePresent, err := a.executeSummaryRequest(ctx, turnPrepared.Request, turnSummaryMaximumBytes, false)
+		turn, turnUsage, turnUsagePresent, err := a.executeSummaryRequest(ctx, turnPrepared.Request, turnSummaryMaximumBytes, false, emit)
 		if err != nil {
 			return CompactionResult{}, err
 		}
@@ -245,6 +245,7 @@ func (a *Agent) executeSummaryRequest(
 	request provider.Request,
 	maximumBytes int,
 	structured bool,
+	emit func(Event),
 ) (string, model.Usage, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return "", model.Usage{}, false, err

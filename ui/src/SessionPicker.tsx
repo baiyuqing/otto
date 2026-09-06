@@ -18,7 +18,7 @@ export function SessionPicker(props: {
         <option value="">Select session…</option>
         {props.sessions.map((s) => (
           <option key={s.id} value={s.id}>
-            {sessionLabel(s.id)} {s.open ? '●' : ''} {s.model ?? ''}
+            {s.name ?? sessionLabel(s.id)} {s.open ? '●' : ''} {s.model ?? ''}
           </option>
         ))}
       </select>

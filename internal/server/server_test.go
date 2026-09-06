@@ -175,6 +175,48 @@ func readAllSSEFrames(t *testing.T, r io.Reader) []sseFrame {
 	}
 }
 
+func TestRenameSession(t *testing.T) {
+	srv, ts := newServerForTest(t, Options{Create: func(context.Context) (*app.Controller, error) {
+		return newTestController(t, "rename-session", noopRun), nil
+	}})
+	_ = srv
+	var created sessionWire
+	decodeJSON(t, doJSON(t, ts, "POST", "/v1/sessions", nil), &created)
+
+	resp := doJSON(t, ts, "PATCH", "/v1/sessions/"+created.ID, map[string]string{"name": "dev"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("rename status = %d, want 200", resp.StatusCode)
+	}
+	var renamed sessionWire
+	decodeJSON(t, resp, &renamed)
+	if renamed.Name != "dev" {
+		t.Fatalf("renamed session = %#v", renamed)
+	}
+
+	listResp := doJSON(t, ts, "GET", "/v1/sessions", nil)
+	var list sessionListResponse
+	decodeJSON(t, listResp, &list)
+	if len(list.Sessions) != 1 || list.Sessions[0].Name != "dev" {
+		t.Fatalf("session list = %#v", list)
+	}
+}
+
+func TestRenameSessionRejectsBadRequests(t *testing.T) {
+	_, ts := newServerForTest(t, Options{Create: func(context.Context) (*app.Controller, error) {
+		return newTestController(t, "rename-session", noopRun), nil
+	}})
+	resp := doJSON(t, ts, "PATCH", "/v1/sessions/missing", map[string]string{"name": "dev"})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing status = %d, want 404", resp.StatusCode)
+	}
+	var created sessionWire
+	decodeJSON(t, doJSON(t, ts, "POST", "/v1/sessions", nil), &created)
+	resp = doJSON(t, ts, "PATCH", "/v1/sessions/"+created.ID, map[string]string{"name": " \t"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("blank status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestCreateSession(t *testing.T) {
 	var createCalls int32
 	opts := Options{

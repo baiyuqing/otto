@@ -158,6 +158,21 @@ export function App() {
     }
   }
 
+  const renameSession = async () => {
+    if (!session) return
+    const current = session.name ?? ''
+    const name = window.prompt('Rename session', current)?.trim()
+    if (!name) return
+    setError('')
+    try {
+      const renamed = await api.renameSession(session.id, name)
+      setSession(renamed)
+      void refreshSessions()
+    } catch (e) {
+      fail(e)
+    }
+  }
+
   const busy = turnId !== null || compacting
 
   return (
@@ -174,8 +189,11 @@ export function App() {
         <span className="spacer" />
         {session && (
           <div className="session-chip" title={session.id}>
-            <span>{sessionLabel(session.id)}</span>
+            <span>{session.name ?? sessionLabel(session.id)}</span>
             <strong>{workspaceName(session.workspace)}</strong>
+            <button type="button" disabled={busy} onClick={renameSession}>
+              Rename
+            </button>
           </div>
         )}
       </header>

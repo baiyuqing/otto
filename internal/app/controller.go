@@ -216,6 +216,7 @@ func WithDynamicContent(enabled bool) Option {
 
 type Info struct {
 	SessionID                 string
+	SessionName               string
 	SessionPath               string
 	Workspace                 string
 	Provider                  string
@@ -1049,6 +1050,9 @@ func (c *Controller) Info() Info {
 		Profile:     header.Profile,
 		Model:       header.Model,
 		Sandbox:     sandboxInfo,
+	}
+	if nameSource, ok := current.(session.NameProvider); ok {
+		info.SessionName = nameSource.Name()
 	}
 	if runtimeInfo != nil {
 		info.Provider = runtimeInfo.Provider

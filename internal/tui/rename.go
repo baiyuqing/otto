@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/baiyuqing/otto/internal/app"
@@ -33,7 +34,7 @@ func (m Model) handleRenameCommand(argument string) (Model, bool) {
 		return m, true
 	}
 	if err := renamer.RenameSession(rootContext(m.rootCtx), name); err != nil {
-		if err == session.ErrInvalidSession {
+		if errors.Is(err, session.ErrInvalidSession) {
 			m.statusText = err.Error()
 		} else {
 			m.statusText = boundedResumeError(err)

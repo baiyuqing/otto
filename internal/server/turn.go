@@ -96,6 +96,10 @@ func (t *turn) emit(m *metrics) func(agent.Event) {
 				t.usage.OutputTokens += event.Usage.OutputTokens
 				t.usage.CachedInputTokens += event.Usage.CachedInputTokens
 			}
+		case agent.EventProviderAPICall:
+			m.providerAPIRequest(event.ProviderName, event.Model, event.APIStatus, event.APIDuration)
+			t.mu.Unlock()
+			return
 		case agent.EventToolCallStarted:
 			t.toolStart = time.Now()
 		case agent.EventToolCallFinished:

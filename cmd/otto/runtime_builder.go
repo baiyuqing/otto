@@ -299,7 +299,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 		tasks = agent.NewTasks()
 		subagentRunner, runnerWarnings, subagentErr := subagent.NewRunner(subagent.Config{
 			Provider: client, Tools: tools, Redactor: redactor,
-			Options: agent.Options{Model: runtime.Model, Thinking: runtime.Thinking, Compaction: compaction},
+			Options: agent.Options{Provider: runtime.Provider, Model: runtime.Model, Thinking: runtime.Thinking, Compaction: compaction},
 			PromptFor: func(defs []model.ToolDefinition) string {
 				return systemPromptFor(defs, b.effectiveSandboxInfo(), runtime.Provider, endpointHost, runtime.Model) + promptTail
 			},
@@ -334,7 +334,7 @@ func (b runtimeBuilder) buildRunner(ctx context.Context, current session.Session
 	}
 	systemPrompt := systemPromptFor(registry.Definitions(), b.effectiveSandboxInfo(), runtime.Provider, endpointHost, runtime.Model) + promptTail + parentAgentSection
 	return agent.New(client, registry, current, agent.Options{
-		Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
+		Provider: runtime.Provider, Model: runtime.Model, SystemPrompt: systemPrompt, Thinking: runtime.Thinking,
 		Compaction:              compaction,
 		Memory:                  binding,
 		MemoryRecallLimit:       b.memoryRecallLimit,

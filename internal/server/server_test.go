@@ -213,6 +213,49 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
+func TestMetricsExposeSessionContext(t *testing.T) {
+	const id = "ctx-session"
+	opts := Options{Create: func(context.Context) (*app.Controller, error) {
+		hdr := session.Header{ID: id, Workspace: "/tmp/ws", Provider: "openai-compatible", Model: "test-model"}
+		sess := &snapshotMemory{
+			Memory: session.NewMemory(hdr),
+			snapshot: session.Snapshot{
+				ContextInputTokens:        42000,
+				ContextInputTokensPresent: true,
+			},
+		}
+		return app.New(app.SessionReplacement{Session: sess, Runner: runnerFunc(noopRun)},
+			app.WithRuntimeInfo(app.RuntimeInfo{Provider: "openai-compatible", Model: "test-model", ContextWindow: 128000, Sandbox: testSandbox}),
+		)
+	}}
+	_, ts := newServerForTest(t, opts)
+
+	resp := doJSON(t, ts, http.MethodPost, "/v1/sessions", nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	metricsBody := getBody(t, ts, "/metrics")
+	labels := `{session_id="ctx-session",provider="openai-compatible",model="test-model"}`
+	for _, want := range []string{
+		`otto_session_context_window_tokens` + labels + ` 128000`,
+		`otto_session_context_input_tokens` + labels + ` 42000`,
+		`otto_session_context_input_tokens_pending` + labels + ` 0`,
+	} {
+		if !strings.Contains(metricsBody, want) {
+			t.Fatalf("missing metric %q:\n%s", want, metricsBody)
+		}
+	}
+}
+
+type snapshotMemory struct {
+	*session.Memory
+	snapshot session.Snapshot
+}
+
+func (s *snapshotMemory) Snapshot() session.Snapshot { return s.snapshot }
+
 func TestResumeUnknownSession(t *testing.T) {
 	opts := Options{
 		Open: func(ctx context.Context, id string) (*app.Controller, error) {

@@ -103,6 +103,72 @@ func TestRunForwardsTextDeltas(t *testing.T) {
 	}
 }
 
+func TestRunEmitsProviderAPICallMetricsEvent(t *testing.T) {
+	fakeProvider := &scriptedProvider{scripts: []providerScript{{
+		response: provider.Response{Message: model.Message{FinishReason: model.FinishStop, Role: model.RoleAssistant, Blocks: []model.Block{{Type: model.BlockText, Text: "done"}}}},
+	}}}
+	registry, err := tool.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := New(fakeProvider, registry, session.NewMemory(testHeader(t)), Options{Provider: "openai-compatible", Model: "test-model", SystemPrompt: "system", Now: fixedClock, NewID: fixedIDs()})
+
+	var events []Event
+	if err := runner.Run(context.Background(), "inspect", func(event Event) { events = append(events, event) }); err != nil {
+		t.Fatal(err)
+	}
+
+	var got *Event
+	for i := range events {
+		if events[i].Type == EventProviderAPICall {
+			got = &events[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("missing %s event in %#v", EventProviderAPICall, eventTypes(events))
+	}
+	if got.ProviderName != "openai-compatible" || got.Model != "test-model" || got.APIStatus != "ok" {
+		t.Fatalf("provider API event = %#v", *got)
+	}
+	if got.APIDuration < 0 {
+		t.Fatalf("provider API duration = %s, want nonnegative", got.APIDuration)
+	}
+}
+
+func TestProviderAPICallStatus(t *testing.T) {
+	runner := &Agent{options: Options{Provider: "chatgpt", Model: "gpt-5"}}
+
+	for _, test := range []struct {
+		name   string
+		ctx    context.Context
+		err    error
+		status string
+	}{
+		{name: "ok", ctx: context.Background(), status: "ok"},
+		{name: "error", ctx: context.Background(), err: errors.New("boom"), status: "error"},
+		{name: "canceled error", ctx: context.Background(), err: context.Canceled, status: "canceled"},
+		{name: "canceled context", ctx: canceledContext(), status: "canceled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got Event
+			runner.emitProviderAPICall(func(event Event) { got = event }, test.ctx, time.Second, test.err)
+			if got.Type != EventProviderAPICall || got.APIStatus != test.status {
+				t.Fatalf("event = %#v, want status %q", got, test.status)
+			}
+			if got.ProviderName != "chatgpt" || got.Model != "gpt-5" || got.APIDuration != time.Second {
+				t.Fatalf("event metadata = %#v", got)
+			}
+		})
+	}
+}
+
+func canceledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
 func TestRunPreservesProviderUsagePresence(t *testing.T) {
 	for _, test := range []struct {
 		name  string

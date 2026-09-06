@@ -20,6 +20,7 @@ var (
 	ErrPersistenceDisabled      = errors.New("session persistence is disabled")
 	ErrMemoryUnavailable        = errors.New("memory is not available")
 	ErrProfileSwitchUnavailable = errors.New("profile switching is not available")
+	ErrSandboxReloadUnavailable = errors.New("sandbox reload is not available")
 )
 
 type Runner interface {
@@ -360,6 +361,8 @@ type Controller struct {
 	closeErr             error
 	runtimeInfo          *RuntimeInfo
 	sandboxInfo          SandboxInfo
+	sandboxSource        func() SandboxInfo
+	reloadSandbox        SandboxReload
 	dynamicContent       bool
 }
 
@@ -471,7 +474,7 @@ func (c *Controller) NewSession() error {
 	}
 	state := c.beginReplacementLocked()
 	current := c.current
-	sandboxInfo := c.sandboxInfo
+	sandboxInfo := c.currentSandboxInfoLocked()
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {
 		copy := *c.runtimeInfo
@@ -935,7 +938,7 @@ func (c *Controller) runReplacement(
 	c.runner = replacement.Runner
 	if replaceRuntime {
 		runtimeInfo := replacement.RuntimeInfo
-		runtimeInfo.Sandbox = c.sandboxInfo
+		runtimeInfo.Sandbox = c.currentSandboxInfoLocked()
 		c.runtimeInfo = &runtimeInfo
 	}
 	closed := c.closed
@@ -1025,7 +1028,7 @@ func (c *Controller) Info() Info {
 	c.mu.Lock()
 	current := c.current
 	currentPath := strings.Clone(c.currentPath)
-	sandboxInfo := c.sandboxInfo
+	sandboxInfo := c.currentSandboxInfoLocked()
 	dynamicContent := c.dynamicContent
 	var runtimeInfo *RuntimeInfo
 	if c.runtimeInfo != nil {

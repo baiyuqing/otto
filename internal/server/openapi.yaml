@@ -559,6 +559,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/sandbox/reload:
+    post:
+      summary: Re-read the sandbox configuration and apply it to the running process
+      description: >
+        Applies the current [sandbox] configuration to the running process
+        without restarting otto. read_paths, network, and driver take effect;
+        allow_env changes and a sandbox that was unavailable at startup still
+        require a restart and are reported as a failure. One sandbox serves
+        every session, so the reload is refused while any session has a turn in
+        flight.
+      responses:
+        "200":
+          description: The sandbox state now in effect
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "409":
+          description: A turn is active, or the reload failed and the previous sandbox is still in effect
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: Sandbox reload is not available in this process
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/info:
     get:
       summary: Process-level static info

@@ -50,7 +50,11 @@ type Options struct {
 	Open   func(ctx context.Context, id string) (*app.Controller, error)
 	List   func(ctx context.Context) (session.ListResult, error)
 	Info   Info
-	Logger *slog.Logger // nil -> TextHandler to stderr
+	// ReloadSandbox re-reads the sandbox configuration and applies it to the
+	// running process, returning the state now in effect. nil disables
+	// POST /v1/sandbox/reload.
+	ReloadSandbox func(ctx context.Context) (app.SandboxInfo, error)
+	Logger        *slog.Logger // nil -> TextHandler to stderr
 }
 
 // openSession is one entry in the session registry: an open controller and
@@ -222,6 +226,7 @@ func (s *Server) routeTable() []routeEntry {
 		{"GET /v1/sessions/{id}/tasks", s.handleListTasks},
 		{"GET /v1/sessions/{id}/tasks/{task_id}", s.handleGetTask},
 		{"POST /v1/sessions/{id}/tasks/{task_id}/cancel", s.handleCancelTask},
+		{"POST /v1/sandbox/reload", s.handleSandboxReload},
 		{"GET /v1/info", s.handleInfo},
 		{"GET /v1/openapi.yaml", s.handleOpenAPI},
 		{"GET /healthz", s.handleHealthz},
@@ -505,13 +510,8 @@ func (s *Server) sessionWire(os *openSession) sessionWire {
 		ContextWindow:      info.ContextWindow,
 		Usage:              info.Usage,
 		ContextInputTokens: info.ContextInputTokens,
-		Sandbox: sandboxWire{
-			Mode:          string(info.Sandbox.Mode),
-			Network:       string(info.Sandbox.Network),
-			BashAvailable: info.Sandbox.BashAvailable,
-			Summary:       info.Sandbox.Summary(),
-		},
-		Turn: turnWire,
+		Sandbox:            sandboxInfoWire(info.Sandbox),
+		Turn:               turnWire,
 	}
 }
 

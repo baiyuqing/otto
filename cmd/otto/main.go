@@ -406,23 +406,7 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		driver := strings.Clone(options.sandbox)
 		sandboxDriverOverride = &driver
 	}
-	sandboxConfig := configFile.Sandbox
-	sandboxConfig.ReadPaths = append([]string(nil), sandboxConfig.ReadPaths...)
-	for _, root := range config.ResolveSkills(configFile, environment, workspacePath).Roots {
-		if info, err := os.Stat(root); err == nil && info.IsDir() {
-			sandboxConfig.ReadPaths = append(sandboxConfig.ReadPaths, root)
-		}
-	}
-	agentsRuntime, err := config.ResolveAgents(configFile, environment, workspacePath)
-	if err != nil {
-		return fail(stderr, "%v", builder.redactError(err, nil))
-	}
-	for _, root := range agentsRuntime.Roots {
-		if info, err := os.Stat(root); err == nil && info.IsDir() {
-			sandboxConfig.ReadPaths = append(sandboxConfig.ReadPaths, root)
-		}
-	}
-	sandboxSettings, err := config.ResolveSandbox(sandboxConfig, sandboxDriverOverride)
+	sandboxSettings, err := resolveSandboxSettings(configFile, environment, workspacePath, sandboxDriverOverride)
 	if err != nil {
 		return fail(stderr, "%v", builder.redactError(err, nil))
 	}
@@ -495,21 +479,25 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		close(signalDone)
 		<-signalStopped
 	}()
-	processSandbox := deps.openSandbox(processCtx, sandboxOpenOptions{
+	processSandbox := normalizeSandboxRuntime(deps.openSandbox(processCtx, sandboxOpenOptions{
 		Settings:      sandboxSettings,
 		Workspace:     workspacePath,
 		Shell:         shell,
 		Home:          home,
 		HostEntries:   hostEntries,
 		ProviderNames: sandboxProviderEnvironmentNames(configFile, resolvedRuntime.APIKeyEnv),
-	})
+	}))
+	// The bash tool captures its executor when a runner is built, so the
+	// process sandbox lives behind a switch that /sandbox reload can replace
+	// without rebuilding the session or the runner.
+	sandboxControl := newSandboxSwitch(processSandbox)
 	sandboxClosed := false
 	closeSandbox := func() error {
 		if sandboxClosed {
 			return nil
 		}
 		sandboxClosed = true
-		return processSandbox.Close()
+		return sandboxControl.Close()
 	}
 	var (
 		controller          *app.Controller
@@ -542,21 +530,24 @@ func runWithDependencies(ctx context.Context, args []string, stdin io.Reader, st
 		_ = closeSandbox()
 		return 130
 	}
-	if !processSandbox.RedactionsComplete {
-		processSandbox.Executor = nil
-		processSandbox.Environment = nil
-		processSandbox.Info = app.SandboxInfo{
-			Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonEnvironmentRejected,
-		}
-	} else if processSandbox.Info.BashAvailable && (isNilSandboxRuntimeValue(processSandbox.Executor) || processSandbox.Environment == nil) {
-		processSandbox.Executor = nil
-		processSandbox.Environment = nil
-		processSandbox.Info = app.SandboxInfo{
-			Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonRuntimeFailure,
+	if !isNilSandboxRuntimeValue(processSandbox.Executor) {
+		builder.commandExecutor = sandboxControl
+		builder.sandboxReloader = &sandboxReloader{
+			control: sandboxControl,
+			loadConfig: func() (config.File, error) {
+				_, file, err := loadConfig(options, home)
+				return file, err
+			},
+			openSandbox:    deps.openSandbox,
+			driverOverride: sandboxDriverOverride,
+			environment:    environment,
+			workspace:      workspacePath,
+			shell:          shell,
+			home:           home,
+			hostEntries:    hostEntries,
+			apiKeyEnv:      resolvedRuntime.APIKeyEnv,
 		}
 	}
-
-	builder.commandExecutor = processSandbox.Executor
 	builder.sandboxEnvironment = cloneSandboxRuntimeStrings(processSandbox.Environment)
 	builder.sandboxInfo = processSandbox.Info
 	builder.sandboxSecrets, mergedComplete = mergeSandboxRuntimeRedactions(builder.sandboxSecrets, processSandbox.RedactionValues)

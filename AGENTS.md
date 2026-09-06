@@ -8,7 +8,7 @@ workflow.
 
 - Otto supports only the `openai-compatible` and `chatgpt` providers and runs on macOS.
 - `cmd/otto` owns composition and process lifecycle; `internal/app` owns shared lifecycle and frontend capabilities; `internal/agent` owns provider/tool turns; `internal/provider` owns the neutral provider contract and its two implementation packages own wire formats.
-- `internal/model`, `internal/session`, `internal/memory`, `internal/tool`, `internal/sandbox`, `internal/skill`, `internal/subagent`, `internal/repl`, `internal/tui`, and `internal/server` keep the responsibilities described in the [development guide](docs/development.md).
+- `internal/model`, `internal/session`, `internal/memory`, `internal/tool`, `internal/sandbox`, `internal/skill`, `internal/subagent`, `internal/repl`, `internal/tui`, and `internal/server` keep the responsibilities described in the [development guide](docs/development.md). `internal/server` also serves the embedded web UI; `ui/` (TypeScript) owns the browser frontend.
 - The [architecture contract design](docs/specs/2026-09-05-architecture-contracts.md) records compatibility and ownership rationale. The [architecture import policy](internal/architecture/imports_test.go) enforces package direction.
 - Current user behavior belongs in the [README](README.md) and [user manual](docs/user-manual.md). Design documents are historical rationale unless they explicitly say otherwise.
 

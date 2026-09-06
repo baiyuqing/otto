@@ -23,7 +23,8 @@ Keep responsibilities split along the current Go package layout:
 - `internal/provider/openairesponses`: all ChatGPT Responses API HTTP/JSON/SSE wire code
 - `internal/auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, access-token refresh, and the credential service injected through `app.Authentication`
 - `internal/repl`: line-oriented REPL rendering and commands
-- `internal/server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, and metrics
+- `internal/server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI build (`internal/server/ui/dist`, written by `make ui`)
+- `ui/`: the TypeScript browser frontend; a client of `internal/server`'s HTTP API only, with no Go code and no part in `make check`
 - `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
 - `internal/session`: in-memory and JSONL session storage
 - `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing; `ParseFrontmatter` is exported for `internal/subagent`'s AGENT.md parsing

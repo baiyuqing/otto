@@ -93,7 +93,8 @@ archiving. See [sessions](docs/user-manual.md#sessions) and
 
 - [Local memory](docs/user-manual.md#memory): search, remember, review, and forget.
 - [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
-- [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix socket.
+- [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
+  socket or a loopback TCP port, with an embedded browser UI.
 - [Configuration](docs/user-manual.md#configuration),
   [CLI reference](docs/user-manual.md#command-line-reference), and
   [troubleshooting](docs/user-manual.md#troubleshooting).
@@ -152,8 +153,9 @@ persisted.
 - No user-facing `/skills` or `/skill` commands or per-skill `allowed-tools`
   enforcement.
 - No nested sub-agent delegation; child transcripts are not persisted.
-- The local server has no TCP listener and relies on socket file permissions
-  for access control.
+- The local server binds loopback addresses only; there is no TLS, CORS, or
+  token persistence. The Unix socket relies on file permissions for access
+  control.
 
 Configure shell permissions interactively with `otto sandbox setup`; see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup).

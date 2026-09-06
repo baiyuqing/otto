@@ -44,9 +44,14 @@ var testSandbox = app.SandboxInfo{Mode: app.SandboxSeatbelt, Network: app.Sandbo
 
 func newTestController(t *testing.T, id string, run func(context.Context, string, func(agent.Event)) error) *app.Controller {
 	t.Helper()
+	return newTestControllerRunner(t, id, runnerFunc(run))
+}
+
+func newTestControllerRunner(t *testing.T, id string, runner app.Runner) *app.Controller {
+	t.Helper()
 	hdr := session.Header{ID: id, Workspace: "/tmp/ws", Provider: "openai-compatible", Model: "test-model"}
 	sess := session.NewMemory(hdr)
-	ctrl, err := app.New(app.SessionReplacement{Session: sess, Runner: runnerFunc(run)},
+	ctrl, err := app.New(app.SessionReplacement{Session: sess, Runner: runner},
 		app.WithRuntimeInfo(app.RuntimeInfo{Provider: "openai-compatible", Model: "test-model", ContextWindow: 128000, Sandbox: testSandbox}),
 	)
 	if err != nil {

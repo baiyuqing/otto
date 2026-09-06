@@ -22,6 +22,7 @@ const (
 	slashCommandExit
 	slashCommandTasks
 	slashCommandTask
+	slashCommandSandbox
 )
 
 type slashCommand struct {
@@ -38,6 +39,7 @@ var slashCommands = []slashCommand{
 	{Name: "/resume", Description: "resume a session", Kind: slashCommandResume},
 	{Name: "/archive", Description: "archive a session", Kind: slashCommandArchive},
 	{Name: "/compact", Description: "compact context", Kind: slashCommandCompact},
+	{Name: "/sandbox", Description: "show sandbox state, or reload the [sandbox] configuration", Kind: slashCommandSandbox},
 	{Name: "/memory", Description: "search, forget, or review remembered records", Kind: slashCommandMemory},
 	{Name: "/remember", Description: "remember a fact for later", Kind: slashCommandRemember},
 	{Name: "/login", Description: "sign in to ChatGPT (add status to check)", Kind: slashCommandLogin},

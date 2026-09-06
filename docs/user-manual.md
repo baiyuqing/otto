@@ -263,6 +263,12 @@ Key points:
   auto-falls back to Docker. If Seatbelt cannot be established, Otto fails
   closed by disabling `bash` while keeping `read`, `grep`, `find`, `ls`,
   `write`, and `edit` available.
+
+  `/sandbox reload` applies edits to `driver`, `network`, and `read_paths` to
+  the running process (see [Slash commands](#slash-commands)). Two changes
+  still need a restart: `allow_env`, because the shell environment is fixed
+  when the `bash` tool is built, and any change made when the sandbox was
+  already unavailable at startup, because there is no `bash` tool to re-point.
 - `[skills]` discovers reusable instruction sets from configured roots and
   registers the `skill` tool when at least one skill is found. Config keys are
   `enabled` (default true) and `paths` (default `["~/.otto/skills", ".otto/skills"]`);
@@ -396,6 +402,11 @@ Shared commands:
 - `/new` closes the current session and starts a fresh one in the same process.
 - `/compact [focus]` creates a manual context checkpoint, or reports
   `[context] no-op` when nothing can be compacted.
+- `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads
+  `[sandbox]` from the config file and applies it to the running process,
+  printing the new state. It is rejected while a turn is in flight, and a
+  failed reload keeps the previous sandbox in place. `allow_env` changes and a
+  sandbox that was unavailable at startup still need a restart.
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
@@ -703,6 +714,7 @@ root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |
+| `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
 | `GET /v1/openapi.yaml` | The OpenAPI 3.1 document for this API. |
 | `GET /healthz` | `{"status":"ok","sessions_open":N,"turns_active":N,"uptime_seconds":N}`. |

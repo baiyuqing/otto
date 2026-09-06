@@ -108,7 +108,7 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
 .item.user {
   width: fit-content;
   max-width: min(76rem, 88%);
-  margin-left: auto;
+  margin-left: max(calc((100% - 76rem) / 2), 0px);
   white-space: pre-wrap;
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 26%, var(--panel)), color-mix(in srgb, var(--accent) 12%, var(--panel)));
   border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
@@ -237,6 +237,25 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
   padding: 13px 14px 8px;
 }
 .composer textarea::placeholder { color: color-mix(in srgb, var(--muted) 80%, transparent); }
+.command-suggestions {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.command-suggestions button {
+  display: flex;
+  justify-content: flex-start;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+}
+.command-suggestions button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.command-suggestions code { min-width: 5.5rem; color: var(--accent); }
+.command-suggestions span { color: var(--muted); font-size: 12px; }
 .composer-actions {
   display: flex;
   gap: 8px;

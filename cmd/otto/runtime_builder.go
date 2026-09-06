@@ -89,6 +89,7 @@ type runtimeBuilder struct {
 	commandExecutor         sandbox.CommandExecutor
 	sandboxEnvironment      []string
 	sandboxInfo             app.SandboxInfo
+	sandboxReloader         *sandboxReloader
 	sandboxSecrets          []string
 	sandboxSecretsComplete  bool
 	authPath                string
@@ -364,6 +365,16 @@ func (b runtimeBuilder) effectiveSandboxInfo() app.SandboxInfo {
 		return app.SandboxInfo{Mode: app.SandboxUnavailable, BashAvailable: false, Reason: app.SandboxReasonEnvironmentRejected}
 	}
 	return b.plannedSandboxInfo()
+}
+
+// sandboxReload returns the process-wide sandbox reload behind /sandbox reload
+// and POST /v1/sandbox/reload, or nil when there is no usable sandbox to
+// replace: without a bash tool holding the switch there is nothing to re-point.
+func (b runtimeBuilder) sandboxReload() app.SandboxReload {
+	if b.sandboxReloader == nil || !b.effectiveSandboxInfo().BashAvailable {
+		return nil
+	}
+	return b.sandboxReloader.Reload
 }
 
 func (b runtimeBuilder) runtimeInfo(runtime config.Runtime) app.RuntimeInfo {
@@ -685,6 +696,11 @@ func (b runtimeBuilder) newController(initial app.SessionReplacement, dynamicCon
 	}
 	if b.authPath != "" {
 		options = append(options, app.WithAuthentication(auth.NewService(b.authPath)))
+	}
+	// One process sandbox serves every controller, so each one reports the
+	// live state rather than the value captured when it was built.
+	if reload := b.sandboxReload(); reload != nil {
+		options = append(options, app.WithSandboxControl(b.sandboxReloader.control.Info, reload))
 	}
 	if b.memoryService != nil {
 		options = append(options, app.WithMemory(b.memoryService, b.memoryUserScope, b.memoryWorkspaceScope))

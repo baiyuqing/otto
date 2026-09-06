@@ -133,6 +133,17 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
 }
 .item.assistant pre code { background: transparent; padding: 0; }
+.item.assistant .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0; }
+.mermaid-diagram {
+  overflow-x: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-strong) 86%, transparent);
+}
+.mermaid-diagram svg { max-width: 100%; height: auto; }
+.mermaid-diagram.pending { color: var(--muted); font-size: 12px; }
+.mermaid-error { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
 .item.tool {
   overflow: hidden;
   border: 1px solid var(--line);

@@ -756,8 +756,10 @@ the transcript, and a composer:
   you to choose a session from the picker; `/exit` asks you to close the
   browser tab because a page cannot reliably close a tab it did not open.
 - Enter sends the composer text as a turn or Web command; Shift+Enter inserts
-  a newline. Assistant text renders as Markdown; each tool call is a
-  collapsible block with its arguments and result.
+  a newline. Assistant text renders as GitHub-Flavored Markdown, with KaTeX
+  math for `$...$` and `$$...$$`, plus Mermaid diagrams in fenced
+  `mermaid` code blocks. Each tool call is a collapsible block with its
+  arguments and result.
 - While a turn runs the composer is disabled and a **Cancel** button calls
   `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
 - Reloading the page during a turn re-attaches to the running turn's event

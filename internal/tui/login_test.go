@@ -51,7 +51,7 @@ func (b *authTUIBackend) DynamicContentAvailable() bool { return b.dynamic }
 func submitLoginCommand(t *testing.T, m Model, value string) (Model, tea.Cmd) {
 	t.Helper()
 	m.editor.SetValue(value)
-	updated, cmd := m.dispatch(keyPress(tea.KeyEnter))
+	updated, cmd := m.Update(keyPress(tea.KeyEnter))
 	return updated.(Model), cmd
 }
 
@@ -92,17 +92,17 @@ func TestLoginStatusCommandRendersStatus(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("cmd = %v, want nil", cmd)
 	}
-	content := strings.Join(got.pendingPrints, "\n")
+	content := got.View().Content
 	if strings.Contains(content, "acct-42") || !strings.Contains(content, "Signed in to ChatGPT") {
-		t.Fatalf("committed transcript = %q", content)
+		t.Fatalf("view = %q", content)
 	}
 }
 
 func TestLoginStatusReportsNotSignedIn(t *testing.T) {
 	backend, _ := newAuthTUIBackend(t, "openai-compatible", nil)
 	got, _ := submitLoginCommand(t, newAuthModel(t, backend), "/login status")
-	if content := strings.Join(got.pendingPrints, "\n"); !strings.Contains(content, "Not signed in") {
-		t.Fatalf("committed transcript = %q", content)
+	if content := got.View().Content; !strings.Contains(content, "Not signed in") {
+		t.Fatalf("view = %q", content)
 	}
 }
 
@@ -120,15 +120,19 @@ func TestLoginCommandSavesCredentialsAndReports(t *testing.T) {
 		t.Fatalf("login command = %v pending=%v", cmd, pending.loginPending)
 	}
 	urlMsg := runCommandWithin(t, cmd, time.Second)
-	updated, cmd := pending.dispatch(urlMsg)
+	updated, cmd := pending.Update(urlMsg)
 	pending = updated.(Model)
-	if cmd == nil || !strings.Contains(strings.Join(pending.pendingPrints, "\n"), "auth.example") {
-		t.Fatalf("url result cmd=%v transcript=%q", cmd, strings.Join(pending.pendingPrints, "\n"))
+	if cmd == nil || !strings.Contains(pending.View().Content, "auth.example") {
+		t.Fatalf("url result cmd=%v transcript=%q", cmd, pending.View().Content)
 	}
+	if !strings.Contains(pending.View().Content, "auth.example") {
+		t.Fatalf("view missing URL: %q", pending.View().Content)
+	}
+
 	doneMsg := runCommandWithin(t, cmd, time.Second)
-	updated, _ = pending.dispatch(doneMsg)
+	updated, _ = pending.Update(doneMsg)
 	got := updated.(Model)
-	content := strings.Join(got.pendingPrints, "\n")
+	content := got.View().Content
 	if got.loginPending || strings.Contains(content, "acct-7") || !strings.Contains(content, "Restart Otto") || strings.Contains(content, "secret-token") {
 		t.Fatalf("pending=%v transcript=%q", got.loginPending, content)
 	}
@@ -148,10 +152,10 @@ func TestLoginNonChatGPTProviderExplainsAPIKey(t *testing.T) {
 	if cmd == nil || !got.loginPending {
 		t.Fatalf("cmd=%v pending=%v", cmd, got.loginPending)
 	}
-	updated, _ := got.dispatch(runCommandWithin(t, cmd, time.Second))
+	updated, _ := got.Update(runCommandWithin(t, cmd, time.Second))
 	got = updated.(Model)
-	if !strings.Contains(strings.Join(got.pendingPrints, "\n"), "API key") {
-		t.Fatalf("transcript=%q", strings.Join(got.pendingPrints, "\n"))
+	if !strings.Contains(got.View().Content, "API key") {
+		t.Fatalf("transcript=%q", got.View().Content)
 	}
 }
 
@@ -161,8 +165,8 @@ func TestLogoutCommandRemovesCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := submitLoginCommand(t, newAuthModel(t, backend), "/logout")
-	if !strings.Contains(strings.Join(got.pendingPrints, "\n"), "Signed out") {
-		t.Fatalf("transcript = %q", strings.Join(got.pendingPrints, "\n"))
+	if !strings.Contains(got.View().Content, "Signed out") {
+		t.Fatalf("transcript = %q", got.View().Content)
 	}
 	if _, err := auth.Load(path); err != auth.ErrNoCredentials {
 		t.Fatalf("credentials still present: %v", err)
@@ -183,8 +187,8 @@ func TestLoginCommandFailureIsBounded(t *testing.T) {
 func TestLogoutCommandWhenNotSignedIn(t *testing.T) {
 	backend, _ := newAuthTUIBackend(t, "openai-compatible", nil)
 	got, _ := submitLoginCommand(t, newAuthModel(t, backend), "/logout")
-	if !strings.Contains(strings.Join(got.pendingPrints, "\n"), "Not signed in") {
-		t.Fatalf("transcript = %q", strings.Join(got.pendingPrints, "\n"))
+	if !strings.Contains(got.View().Content, "Not signed in") {
+		t.Fatalf("transcript = %q", got.View().Content)
 	}
 }
 
@@ -205,8 +209,8 @@ func TestLoginCommandsUnavailableWhenDynamicContentIsSuppressed(t *testing.T) {
 			t.Fatalf("%s scheduled cmd %v", command, cmd)
 		}
 		m = updated
-		if !strings.Contains(strings.Join(m.pendingPrints, "\n"), app.ErrAuthenticationUnavailable.Error()) {
-			t.Fatalf("%s transcript=%q", command, strings.Join(m.pendingPrints, "\n"))
+		if !strings.Contains(m.View().Content, app.ErrAuthenticationUnavailable.Error()) {
+			t.Fatalf("%s transcript=%q", command, m.View().Content)
 		}
 	}
 	if loginCalls != 0 {

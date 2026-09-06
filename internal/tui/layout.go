@@ -9,7 +9,6 @@ import (
 
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/textarea"
-	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/baiyuqing/otto/internal/app"
 	otmodel "github.com/baiyuqing/otto/internal/model"
@@ -45,7 +44,7 @@ type layoutState struct {
 	inputBoxHeight   int
 }
 
-func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight, liveLines, taskLines int) layoutState {
+func calculateLayout(width, height int, editor textarea.Model, requestedSuggestionHeight, taskLines int) layoutState {
 	layout := layoutState{
 		transcriptWidth: max(0, width),
 		editorHeight:    clamp(editorHeight(editor), minEditorHeight, maxEditorHeight),
@@ -68,8 +67,14 @@ func calculateLayout(width, height int, editor textarea.Model, requestedSuggesti
 	}
 	availableHeight := height - layout.inputBoxHeight - layout.footerHeight - layout.editorSpacing
 	layout.suggestionHeight = min(max(0, requestedSuggestionHeight), max(0, availableHeight-1))
-	layout.taskLines = min(max(0, taskLines), max(0, availableHeight-layout.suggestionHeight))
-	layout.transcriptHeight = min(max(0, liveLines), max(0, availableHeight-layout.suggestionHeight-layout.taskLines))
+	layout.taskLines = min(max(0, taskLines), max(0, availableHeight-layout.suggestionHeight-1))
+	transcriptHeight := availableHeight - layout.suggestionHeight - layout.taskLines
+	if transcriptHeight <= 0 {
+		layout.tooSmall = true
+		layout.transcriptHeight = max(0, height)
+		return layout
+	}
+	layout.transcriptHeight = transcriptHeight
 	return layout
 }
 
@@ -339,25 +344,7 @@ func renderOverlay(width, height int, content string) string {
 		MaxWidth(width).
 		MaxHeight(height).
 		Render(content)
-	return fitToBounds(lipgloss.Place(width, lipgloss.Height(box), lipgloss.Center, lipgloss.Top, box), width, height)
-}
-
-// overlayCursor places the cursor after the title on row 1 of a modal.
-//
-// Bubble Tea's inline renderer erases a shrinking frame by moving the cursor
-// up from its row in the previous frame, and it clamps that row to the new
-// frame height first (ultraviolet TerminalRenderer.move). Rows above the
-// clamped position are never erased. A hidden cursor stays on the last row
-// the renderer drew, so closing a 25-row modal into a 7-row frame would leave
-// 18 rows on screen. Row 1 is below every frame height that can follow.
-func overlayCursor(content string) *tea.Cursor {
-	lines := strings.SplitN(content, "\n", 3)
-	if len(lines) < 2 {
-		return tea.NewCursor(0, 0)
-	}
-	row := strings.TrimRight(ansi.Strip(lines[1]), " ")
-	row = strings.TrimRight(strings.TrimSuffix(row, "│"), " ")
-	return tea.NewCursor(ansi.StringWidth(row), 1)
+	return fitToBounds(lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box), width, height)
 }
 
 func overlayContentBounds(width, height int) (int, int) {
@@ -388,7 +375,9 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 		"Enter submit",
 		"Shift+Enter or Alt+Enter newline",
 		"Ctrl+O toggle details",
-		"Drag to select, scroll to scroll (handled by your terminal)",
+		"Shift+drag select terminal text",
+		"PgUp/PgDn scroll",
+		"Home/End transcript top/bottom",
 		"Esc cancel or close overlay",
 		"Ctrl+C cancel, clear, then quit",
 	)
@@ -402,7 +391,7 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 		compact := []string{
 			"Help ? /help Enter Esc",
 			"Shift+Enter Alt+Enter",
-			"Ctrl+O toggle details, Ctrl+C cancel/quit",
+			"Ctrl+O PgUp/PgDn Home/End Ctrl+C",
 			"/session /new /exit",
 		}
 		compact = append(compact, sandboxLines...)
@@ -413,7 +402,7 @@ func helpOverlayContent(width, height int, info app.SandboxInfo) string {
 		"Help (?/help) · Enter · Esc",
 		"Shift+Enter/Alt+Enter newline",
 		"Ctrl+O toggle details",
-		"Ctrl+C cancel, clear, then quit",
+		"PgUp/PgDn · Home/End · Ctrl+C",
 	}
 	if remaining := innerHeight - len(compact); remaining > len(sandboxLines) {
 		compact = append(compact, sandboxLines...)

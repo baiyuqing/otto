@@ -1,61 +1,85 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, events, loadToken, setToken } from './api'
 import { fromHistory, reduce, type Item } from './transcript'
-import type { Session, SessionListRow } from './types'
+import type { Info, Session, SessionListRow, Usage } from './types'
 import { SessionPicker } from './SessionPicker'
 import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
+import { Footer } from './Footer'
+import { Tasks } from './Tasks'
 
 setToken(loadToken())
 
 const describe = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 export function App() {
+  const [info, setInfo] = useState<Info | null>(null)
   const [sessions, setSessions] = useState<SessionListRow[]>([])
   const [session, setSession] = useState<Session | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [turnId, setTurnId] = useState<string | null>(null)
+  const [turnUsage, setTurnUsage] = useState<Usage | null>(null)
+  const [compacting, setCompacting] = useState(false)
+  const [tasksKey, setTasksKey] = useState(0)
   const [error, setError] = useState('')
+  const compactAbort = useRef<AbortController | null>(null)
+
+  const fail = useCallback((e: unknown) => setError(describe(e)), [])
 
   const refreshSessions = useCallback(
     () =>
       api
         .listSessions()
         .then((r) => setSessions(r.sessions))
-        .catch((e) => setError(describe(e))),
-    [],
+        .catch(fail),
+    [fail],
   )
 
   // consume reads a turn's stream to the end. The stream closes when the
   // turn is done, but also when the connection drops, so it then asks the
   // server for the session's turn state and re-attaches after the last
   // sequence number it saw.
-  const consume = useCallback(async (sessionId: string, res: Response) => {
-    let last = -1
-    try {
-      for (;;) {
-        for await (const { seq, event } of events(res)) {
-          last = seq
-          setItems((prev) => reduce(prev, event))
+  const consume = useCallback(
+    async (sessionId: string, res: Response) => {
+      let last = -1
+      try {
+        for (;;) {
+          for await (const { seq, event } of events(res)) {
+            last = seq
+            if (event.type === 'provider_usage' && event.usage) {
+              const u = event.usage
+              setTurnUsage((prev) => ({
+                input_tokens: (prev?.input_tokens ?? 0) + u.input_tokens,
+                output_tokens: (prev?.output_tokens ?? 0) + u.output_tokens,
+                cached_input_tokens: (prev?.cached_input_tokens ?? 0) + (u.cached_input_tokens ?? 0),
+              }))
+            }
+            if (event.type === 'notification') setTasksKey((k) => k + 1)
+            setItems((prev) => reduce(prev, event))
+          }
+          const s = await api.getSession(sessionId)
+          setSession(s)
+          if (!s.turn || s.turn.status !== 'running') {
+            if (s.turn?.status === 'canceled') setItems((prev) => [...prev, { kind: 'notice', text: 'Turn canceled' }])
+            return
+          }
+          res = await api.attach(sessionId, s.turn.id, last >= 0 ? last : undefined)
         }
-        const s = await api.getSession(sessionId)
-        setSession(s)
-        if (!s.turn || s.turn.status !== 'running') {
-          if (s.turn?.status === 'canceled') setItems((prev) => [...prev, { kind: 'notice', text: 'Turn canceled' }])
-          return
-        }
-        res = await api.attach(sessionId, s.turn.id, last >= 0 ? last : undefined)
+      } catch (e) {
+        fail(e)
+      } finally {
+        setTurnId(null)
+        setTurnUsage(null)
+        setTasksKey((k) => k + 1)
       }
-    } catch (e) {
-      setError(describe(e))
-    } finally {
-      setTurnId(null)
-    }
-  }, [])
+    },
+    [fail],
+  )
 
   const open = useCallback(
     async (id?: string) => {
       setError('')
+      compactAbort.current?.abort()
       try {
         const s = await api.createSession(id)
         location.hash = s.id
@@ -67,13 +91,14 @@ export function App() {
           void consume(s.id, await api.attach(s.id, s.turn.id))
         }
       } catch (e) {
-        setError(describe(e))
+        fail(e)
       }
     },
-    [consume, refreshSessions],
+    [consume, refreshSessions, fail],
   )
 
   useEffect(() => {
+    api.info().then(setInfo).catch(fail)
     void refreshSessions()
     const id = location.hash.slice(1)
     if (id) void open(id)
@@ -94,7 +119,7 @@ export function App() {
       setItems((prev) => [...prev, { kind: 'user', text }])
       await consume(session.id, res)
     } catch (e) {
-      setError(describe(e))
+      fail(e)
       if (e instanceof ApiError && e.status === 409) {
         // Another client started a turn; follow it.
         const s = await api.getSession(session.id).catch(() => null)
@@ -108,23 +133,49 @@ export function App() {
   }
 
   const cancel = () => {
-    if (session && turnId) api.cancelTurn(session.id, turnId).catch((e) => setError(describe(e)))
+    if (session && turnId) api.cancelTurn(session.id, turnId).catch(fail)
+  }
+
+  const compact = async (focus: string) => {
+    if (!session) return
+    setError('')
+    setCompacting(true)
+    const ac = new AbortController()
+    compactAbort.current = ac
+    try {
+      const c = await api.compact(session.id, focus, ac.signal)
+      const text = c.noop
+        ? 'Nothing to compact'
+        : `Context compacted: ${c.tokens_before} → ~${c.estimated_tokens_after} tokens (${c.reason})`
+      setItems((prev) => [...prev, { kind: 'notice', text }])
+      setSession(await api.getSession(session.id))
+    } catch (e) {
+      if (!ac.signal.aborted) fail(e)
+    } finally {
+      if (compactAbort.current === ac) compactAbort.current = null
+      setCompacting(false)
+    }
   }
 
   return (
     <div className="app">
       <div className="topbar">
-        <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={turnId !== null} onOpen={open} />
+        <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={turnId !== null || compacting} onOpen={open} />
         <span className="spacer" />
-        {session && (
-          <span className="meta">
-            {session.provider} · {session.model} · {session.workspace}
-          </span>
-        )}
+        {session && <span className="meta">{session.workspace}</span>}
       </div>
       {error && <div className="banner">{error}</div>}
       <TranscriptView items={items} />
-      <Composer disabled={!session} running={turnId !== null} onSend={send} onCancel={cancel} />
+      {session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
+      <Composer
+        disabled={!session}
+        running={turnId !== null}
+        compacting={compacting}
+        onSend={send}
+        onCancel={cancel}
+        onCompact={compact}
+      />
+      <Footer info={info} session={session} turnUsage={turnUsage} />
     </div>
   )
 }

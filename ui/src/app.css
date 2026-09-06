@@ -21,3 +21,11 @@ body { margin: 0; }
 .composer textarea { flex: 1; min-height: 3.5em; max-height: 40vh; resize: vertical; font: inherit; padding: 8px; }
 .composer button { align-self: flex-end; }
 .banner { padding: 6px 12px; background: #c0392b; color: white; }
+.footer { display: flex; gap: 16px; flex-wrap: wrap; padding: 4px 12px; font-size: 12px; opacity: 0.7; border-top: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+.tasks { padding: 4px 12px; font-size: 12px; border-top: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+.tasks summary { cursor: pointer; }
+.tasks ul { margin: 4px 0; padding-left: 16px; }
+.tasks li { margin: 2px 0; }
+.tasks li.failed { color: #c0392b; }
+.tasks li button { margin-left: 8px; font-size: 11px; }
+.tasks pre { font-size: 11px; max-height: 8em; overflow: auto; margin: 2px 0; white-space: pre-wrap; }

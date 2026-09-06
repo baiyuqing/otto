@@ -3,7 +3,7 @@
 export interface Usage {
   input_tokens: number
   output_tokens: number
-  cached_input_tokens: number
+  cached_input_tokens?: number // omitted by the server when zero
 }
 
 export type TurnStatus = 'running' | 'ok' | 'error' | 'canceled'
@@ -101,6 +101,26 @@ export interface WireEvent {
   usage?: Usage
   usage_present?: boolean
   compaction?: Compaction
+  error?: string
+}
+
+export interface Task {
+  id: string
+  name?: string
+  agent: string
+  description: string
+  model?: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+  created_at: string
+  started_at?: string
+  finished_at?: string
+  steps: number
+  tool_calls: number
+  last_tool?: string
+  last_text?: string
+  usage: Usage
+  usage_present: boolean
+  result?: string
   error?: string
 }
 

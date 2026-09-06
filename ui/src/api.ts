@@ -1,4 +1,4 @@
-import type { Compaction, Info, Message, Session, SessionListRow, TurnSummary, WireEvent } from './types'
+import type { Compaction, Info, Message, Session, SessionListRow, Task, TurnSummary, WireEvent } from './types'
 import { readSSE, type Frame } from './sse'
 
 const TOKEN_KEY = 'otto.token'
@@ -64,6 +64,8 @@ export const api = {
   history: (id: string) => json<Message[]>(`/v1/sessions/${id}/history`),
   getTurn: (id: string, turnId: string) => json<TurnSummary>(`/v1/sessions/${id}/turns/${turnId}`),
   cancelTurn: (id: string, turnId: string) => request(`/v1/sessions/${id}/turns/${turnId}/cancel`, { method: 'POST' }),
+  listTasks: (id: string) => json<{ tasks: Task[] }>(`/v1/sessions/${id}/tasks`),
+  cancelTask: (id: string, taskId: string) => request(`/v1/sessions/${id}/tasks/${taskId}/cancel`, { method: 'POST' }),
   compact: (id: string, focus: string, signal?: AbortSignal) =>
     json<Compaction>(`/v1/sessions/${id}/compact`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
 

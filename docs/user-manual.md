@@ -753,8 +753,16 @@ the transcript, and a composer:
   stream and continues rendering it; if the stream drops, the page re-reads
   it from the last sequence number it saw.
 
-The topbar shows the session's provider, model, and workspace. Token usage,
-sub-agent tasks, and manual compaction are not yet in the page; use the API.
+- **Compact** calls `POST /v1/sessions/{id}/compact`; any text in the
+  composer is sent as the `focus`. The result appears as a notice in the
+  transcript (`Nothing to compact` when the server reports a no-op).
+- A **Tasks** panel appears above the composer when the session has sub-agent
+  tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
+  and at turn end, polls every 3 seconds while a task is queued or running,
+  and offers **Cancel** for those.
+- The footer shows `GET /v1/info` (provider, model, sandbox) and the session's
+  context size and cumulative usage from `GET /v1/sessions/{id}`; during a
+  turn it also totals that turn's `provider_usage` events.
 
 ### HTTP API
 

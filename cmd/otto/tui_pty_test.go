@@ -88,12 +88,12 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 					collector.Wait(t, ptyStepTimeout)
 				}()
 
-				waitForSubsequence(t, collector, 0, wideFooterMarker)
+				base := waitForFullRedraw(t, collector, 0)
+				waitForScreenText(t, collector, base, 120, 30, wideFooterMarker)
 				writePTY(t, master, "?")
-				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
-				closeOffset := collector.Len()
+				waitForScreenText(t, collector, base, 120, 30, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
 				writePTY(t, master, "\x1b")
-				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+				waitForScreenText(t, collector, base, 120, 30, wideFooterMarker, "Sandbox: sandbox off")
 				writePTY(t, master, "/exit\r")
 				waitForRunReturn(t, runResult)
 				waitForSubsequence(t, collector, 0, altScreenExitSeq)
@@ -120,12 +120,12 @@ func TestTUIPseudoTerminalSandboxChecklist(t *testing.T) {
 					collector.Wait(t, ptyStepTimeout)
 				}()
 
-				waitForSubsequence(t, collector, 0, wideFooterMarker)
+				base := waitForFullRedraw(t, collector, 0)
+				waitForScreenText(t, collector, base, 120, 30, wideFooterMarker)
 				writePTY(t, master, "/session\r")
-				waitForSubsequence(t, collector, 0, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
-				closeOffset := collector.Len()
+				waitForScreenText(t, collector, base, 120, 30, "Sandbox: sandbox off · WARNING: bash is unsandboxed")
 				writePTY(t, master, "\x1b")
-				waitForSubsequence(t, collector, closeOffset, wideFooterMarker)
+				waitForScreenText(t, collector, base, 120, 30, wideFooterMarker, "Sandbox: sandbox off")
 				writePTY(t, master, "/exit\r")
 				waitForRunReturn(t, runResult)
 				waitForSubsequence(t, collector, 0, altScreenExitSeq)
@@ -194,17 +194,17 @@ func TestTUIPseudoTerminalResumeLifecycle(t *testing.T) {
 	})
 
 	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
-	waitForSubsequence(t, collector, 0, "current transcript marker")
+	base := waitForFullRedraw(t, collector, 0)
+	waitForScreenText(t, collector, base, 120, 30, "current transcript marker")
 	writePTY(t, master, "/resume\r")
-	waitForSubsequence(t, collector, 0, "Resume Session")
-	waitForSubsequence(t, collector, 0, "selected picker label")
+	waitForScreenText(t, collector, base, 120, 30, "Resume Session")
+	waitForScreenText(t, collector, base, 120, 30, "selected picker label")
 
-	selectedOffset := collector.Len()
 	writePTY(t, master, "\x1b[B\r")
-	// The selected ID is not rendered in the picker, so this synchronizes on
-	// the replacement commit. Display evidence comes from the terminal-screen
-	// assertion after resize below.
-	waitForSubsequence(t, collector, selectedOffset, selectedResumeSessionID)
+	// The selected ID is not rendered in the picker; it reaches the footer
+	// when the replacement commits. Display evidence comes from the
+	// terminal-screen assertion after resize below.
+	waitForScreenText(t, collector, base, 120, 30, selectedResumeSessionID, "Resume Session")
 
 	resizeOffset := collector.Len()
 	if err := pty.Setsize(slave, &pty.Winsize{Cols: 140, Rows: 34}); err != nil {
@@ -308,14 +308,15 @@ func TestTUIPseudoTerminalArchiveLifecycle(t *testing.T) {
 	})
 
 	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
-	waitForSubsequence(t, collector, 0, "current archive transcript")
+	base := waitForFullRedraw(t, collector, 0)
+	waitForScreenText(t, collector, base, 120, 30, "current archive transcript")
 	writePTY(t, master, "/archive\r")
-	waitForSubsequence(t, collector, 0, "Archive Session")
-	waitForSubsequence(t, collector, 0, "archive target label")
+	waitForScreenText(t, collector, base, 120, 30, "Archive Session")
+	waitForScreenText(t, collector, base, 120, 30, "archive target label")
 	// The archive target is the newest session and therefore the first row;
 	// Enter archives it without touching the current session.
 	writePTY(t, master, "\r")
-	waitForSubsequence(t, collector, 0, "archived session pty-archive-target")
+	waitForScreenText(t, collector, base, 120, 30, "archived session pty-archive-target")
 
 	archivedPath := filepath.Join(filepath.Dir(archiveTargetPath), "archive", "pty-archive-target.jsonl")
 	if _, err := os.Stat(archivedPath); err != nil {
@@ -444,12 +445,12 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 		}
 	})
 
-	enterOffset := waitForSubsequence(t, collector, 0, altScreenEnterSeq)
-	screenOffset := enterOffset + len(altScreenEnterSeq)
-	waitForSubsequence(t, collector, screenOffset, wideFooterMarker)
+	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
+	base := waitForFullRedraw(t, collector, 0)
+	waitForScreenText(t, collector, base, 100, 30, wideFooterMarker)
 
 	writePTY(t, master, "/c")
-	waitForSubsequence(t, collector, screenOffset, "compact context")
+	waitForScreenText(t, collector, base, 100, 30, "compact context")
 
 	writePTY(t, master, "\t")
 	writePTY(t, master, " "+ptyCompactFocus)
@@ -474,15 +475,15 @@ func TestTUICompactCommandCompletionCancelAndTerminalRestore(t *testing.T) {
 
 	writePTY(t, master, "\r")
 	waitForCompactFocus(t, backend, ptyCompactFocus)
-	waitForSubsequence(t, collector, screenOffset, "compacting context")
+	waitForScreenText(t, collector, completionResizeOffset, 96, 30, "compacting context")
 
 	writePTY(t, master, "\x1b")
 	waitForCompactCancellation(t, backend)
-	waitForSubsequence(t, collector, screenOffset, contextCanceledText)
+	waitForScreenText(t, collector, completionResizeOffset, 96, 30, contextCanceledText)
 
 	writePTY(t, master, "/compact "+ptyCompactFocus+"\r")
 	waitForCompactFocus(t, backend, ptyCompactFocus)
-	waitForSubsequence(t, collector, screenOffset, "[context] no-op")
+	waitForScreenText(t, collector, completionResizeOffset, 96, 30, "[context] no-op")
 
 	resizeOffset := collector.Len()
 	if err := pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}); err != nil {
@@ -607,13 +608,12 @@ func TestTUIPseudoTerminalCancelsSandboxedBash(t *testing.T) {
 	if _, err := collector.WaitForEvent(0, []byte(altScreenEnterSeq), ptyStepTimeout); err != nil {
 		t.Fatal(err)
 	}
+	base := waitForFullRedraw(t, collector, 0)
 	writePTY(t, master, "run sandboxed bash\r")
 	awaitPTYEvent(t, started, "sandbox Executor start")
 	writePTY(t, master, "\x03")
 	awaitPTYEvent(t, canceled, "sandbox Executor cancellation")
-	if _, err := collector.WaitForEvent(0, []byte(contextCanceledText), ptyStepTimeout); err != nil {
-		t.Fatal(err)
-	}
+	waitForScreenText(t, collector, base, 100, 30, contextCanceledText)
 	writePTY(t, master, "/exit\r")
 	waitForRunReturn(t, runResult)
 	if _, err := collector.WaitForEvent(0, []byte(altScreenExitSeq), ptyStepTimeout); err != nil {
@@ -672,11 +672,12 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 	}
 
 	waitForSubsequence(t, collector, 0, altScreenEnterSeq)
-	waitForSubsequence(t, collector, 0, wideFooterMarker)
+	base := waitForFullRedraw(t, collector, 0)
+	waitForScreenText(t, collector, base, 100, 30, wideFooterMarker)
 
 	writePTY(t, master, "lifecycle prompt\r")
 	waitForPrompt(t, backend, "lifecycle prompt")
-	streamOffset := waitForSubsequence(t, collector, 0, assistantStreamText)
+	waitForScreenText(t, collector, base, 100, 30, assistantStreamText)
 
 	resizeOffset := collector.Len()
 	if err := pty.Setsize(slave, &pty.Winsize{Cols: 80, Rows: 24}); err != nil {
@@ -698,15 +699,10 @@ func TestTUIPseudoTerminalLifecycle(t *testing.T) {
 
 	writePTY(t, master, "\x1b")
 	waitForCancellation(t, backend)
-	waitForSubsequence(t, collector, streamOffset, contextCanceledText)
+	waitForScreenText(t, collector, resizeOffset, 80, 24, contextCanceledText)
 
 	writePTY(t, master, "\x03")
-	// The renderer diffs the footer line against the previous frame and may
-	// split the status text with insert/delete/repeat sequences, so check the
-	// parsed screen rather than the raw byte stream.
-	ctrlCScreen, _ := waitForTerminalScreen(t, collector, resizeOffset, 80, 24, func(screen *ptyTerminalScreen) bool {
-		return strings.Contains(screen.String(), ctrlCExitStatusText)
-	})
+	ctrlCScreen := waitForScreenText(t, collector, resizeOffset, 80, 24, ctrlCExitStatusText)
 	t.Logf("PTY Ctrl+C accepted sequences=%q", ctrlCScreen.AcceptedCSI())
 
 	writePTY(t, master, "\x03")
@@ -858,6 +854,36 @@ func waitForSubsequence(t *testing.T, collector *ptyOutputCollector, after int, 
 		t.Fatal(err)
 	}
 	return offset
+}
+
+// waitForFullRedraw returns the offset of the first Bubble Tea full redraw at
+// or after `after`. Parsed-screen checks must start there: the mode queries and
+// mode sets emitted before it are rejected by ptyTerminalScreen.
+func waitForFullRedraw(t *testing.T, collector *ptyOutputCollector, after int) int {
+	t.Helper()
+	return waitForSubsequence(t, collector, after, bubbleTeaFullRedrawSeq)
+}
+
+// waitForScreenText replays the output from `after` onto a width x height
+// screen and waits until the rendered content contains want and none of the
+// absent strings. Rendered text is checked on the parsed screen rather than in
+// the raw stream because the renderer diffs each line against the previous
+// frame and may split the text with insert, delete, or repeat sequences.
+func waitForScreenText(t *testing.T, collector *ptyOutputCollector, after, width, height int, want string, absent ...string) *ptyTerminalScreen {
+	t.Helper()
+	screen, _ := waitForTerminalScreen(t, collector, after, width, height, func(screen *ptyTerminalScreen) bool {
+		content := screen.String()
+		if !strings.Contains(content, want) {
+			return false
+		}
+		for _, text := range absent {
+			if strings.Contains(content, text) {
+				return false
+			}
+		}
+		return true
+	})
+	return screen
 }
 
 func waitForTerminalScreen(t *testing.T, collector *ptyOutputCollector, after, width, height int, accept func(*ptyTerminalScreen) bool) (*ptyTerminalScreen, []byte) {
@@ -1116,7 +1142,11 @@ func TestPTYTerminalScreenRejectsUnsupportedControlsAndCSI(t *testing.T) {
 		{name: "unknown private mode", sequence: "\x1b[?9999h"},
 		{name: "unobserved synchronized-output mode", sequence: "\x1b[?2026l"},
 		{name: "unknown public mode", sequence: "\x1b[20l"},
-		{name: "unobserved SGR", sequence: "\x1b[8m"},
+		{name: "unknown SGR attribute", sequence: "\x1b[999m"},
+		{name: "soft reset intermediate", sequence: "\x1b[!p"},
+		{name: "inverted scrolling region", sequence: "\x1b[5;2r"},
+		{name: "cursor shape with other final", sequence: "\x1b[1 r"},
+		{name: "unterminated OSC", sequence: "\x1b]12;#c0c0c0\x1b[m"},
 		{name: "malformed params", sequence: "\x1b[1,2m"},
 		{name: "overflow param", sequence: "\x1b[999999999999999999999999L"},
 		{name: "negative param", sequence: "\x1b[-1L"},

@@ -15,10 +15,11 @@ import (
 )
 
 // ptyTerminalScreen is a test-only interpreter for the ANSI operations Bubble
-// Tea emits in the resize PTY tests. Unknown operations fail closed.
+// Tea emits in the PTY tests. Unknown operations fail closed.
 type ptyTerminalScreen struct {
 	width, height int
 	x, y          int
+	top, bottom   int // scrolling region rows, inclusive
 	cells         [][]rune
 	pending       []byte
 	cursorVisible bool
@@ -29,7 +30,7 @@ type ptyTerminalScreen struct {
 }
 
 func newPTYTerminalScreen(width, height int) *ptyTerminalScreen {
-	screen := &ptyTerminalScreen{width: width, height: height, acceptedCSI: make(map[string]struct{})}
+	screen := &ptyTerminalScreen{width: width, height: height, bottom: height - 1, acceptedCSI: make(map[string]struct{})}
 	screen.cells = make([][]rune, height)
 	for row := range screen.cells {
 		screen.cells[row] = blankPTYRow(width)
@@ -68,6 +69,35 @@ func TestPTYTerminalScreenLineEdits(t *testing.T) {
 	}
 }
 
+func TestPTYTerminalScreenScrollRegion(t *testing.T) {
+	steps := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "fill", input: "a\r\nb\r\nc\r\nd", want: "a|b|c|d"},
+		{name: "line feed at region bottom scrolls the region", input: "\x1b[2;3r\x1b[3;1H\n", want: "a|c||d"},
+		{name: "reverse index at region top scrolls the region down", input: "\x1b[2;1H\x1bM", want: "a||c|d"},
+		{name: "delete line inside full region", input: "\x1b[1;4r\x1b[2;1H\x1b[M", want: "a|c|d|"},
+		{name: "insert line inside full region", input: "\x1b[2;1H\x1b[L", want: "a||c|d"},
+		{name: "scroll up", input: "\x1b[S", want: "|c|d|"},
+		{name: "scroll down", input: "\x1b[T", want: "||c|d"},
+	}
+	screen := newPTYTerminalScreen(4, 4)
+	for _, step := range steps {
+		if _, err := screen.Write([]byte(step.input)); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		rows := strings.Split(screen.String(), "\n")
+		for i := range rows {
+			rows[i] = strings.TrimSpace(rows[i])
+		}
+		if got := strings.Join(rows, "|"); got != step.want {
+			t.Fatalf("%s: screen = %q, want %q", step.name, got, step.want)
+		}
+	}
+}
+
 func TestPTYTerminalScreenInsertMode(t *testing.T) {
 	screen := newPTYTerminalScreen(20, 1)
 	if _, err := screen.Write([]byte("conTAIL\x1b[4D\x1b[4htext\x1b[4l.")); err != nil {
@@ -98,9 +128,12 @@ func (s *ptyTerminalScreen) consume() (int, bool, error) {
 		if len(s.pending) < 2 {
 			return 0, false, nil
 		}
-		if s.pending[1] == 'M' {
+		switch s.pending[1] {
+		case 'M':
 			s.reverseIndex()
 			return 2, true, nil
+		case ']':
+			return s.consumeOSC()
 		}
 		return s.consumeCSI()
 	}
@@ -146,7 +179,27 @@ const (
 	maxPTYCSISequence = 128
 	maxPTYCSIParams   = 16
 	maxPTYCSIParam    = 1_000_000
+	maxPTYOSCSequence = 4096
 )
+
+// consumeOSC skips an operating-system command (title, hyperlink, cursor
+// color) terminated by BEL or ST. OSC never changes cell content.
+func (s *ptyTerminalScreen) consumeOSC() (int, bool, error) {
+	for i := 2; i < len(s.pending); i++ {
+		switch {
+		case s.pending[i] == '\a':
+			return i + 1, true, nil
+		case s.pending[i] == '\x1b' && i+1 < len(s.pending) && s.pending[i+1] == '\\':
+			return i + 2, true, nil
+		case s.pending[i] == '\x1b':
+			return 0, false, fmt.Errorf("unterminated OSC before escape in %q", s.pending[:i+1])
+		}
+	}
+	if len(s.pending) > maxPTYOSCSequence {
+		return 0, false, fmt.Errorf("OSC sequence exceeds %d bytes", maxPTYOSCSequence)
+	}
+	return 0, false, nil
+}
 
 func (s *ptyTerminalScreen) consumeCSI() (int, bool, error) {
 	if len(s.pending) < 2 {
@@ -166,6 +219,20 @@ func (s *ptyTerminalScreen) consumeCSI() (int, bool, error) {
 				return 0, false, fmt.Errorf("%w in %q", err, sequence)
 			}
 			return index + 1, true, nil
+		case current == ' ':
+			// DECSCUSR (CSI Ps SP q) sets the cursor shape and never changes cells.
+			if index+1 >= len(s.pending) {
+				return 0, false, nil
+			}
+			if s.pending[index+1] != 'q' {
+				return 0, false, fmt.Errorf("unsupported CSI intermediate 0x20 before 0x%02x", s.pending[index+1])
+			}
+			sequence := string(s.pending[:index+2])
+			if _, err := parsePTYCSIParams(string(s.pending[2:index]), 1, true); err != nil {
+				return 0, false, fmt.Errorf("%w in %q", err, sequence)
+			}
+			s.acceptedCSI[fmt.Sprintf("CSI %s q", string(s.pending[2:index]))] = struct{}{}
+			return index + 2, true, nil
 		case current >= 0x20 && current <= 0x2f:
 			return 0, false, fmt.Errorf("unsupported CSI intermediate 0x%02x", current)
 		default:
@@ -263,15 +330,17 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 		if err != nil {
 			return err
 		}
-		mode := ptyCSIParam(params, 0, 0)
-		if mode != 0 && mode != 2 {
-			return fmt.Errorf("unsupported erase-line mode %d", mode)
-		}
-		from := s.x
-		if mode == 2 {
+		from, to := s.x, s.width-1
+		switch ptyCSIParam(params, 0, 0) {
+		case 0:
+		case 1:
+			from, to = 0, s.x
+		case 2:
 			from = 0
+		default:
+			return fmt.Errorf("unsupported erase-line mode %s", rawParams)
 		}
-		s.eraseRow(s.y, from, s.width-1)
+		s.eraseRow(s.y, from, to)
 	case 'X':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
@@ -279,13 +348,39 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 		}
 		count := min(ptyCSIParam(params, 0, 1), max(s.width-s.x, 0))
 		s.eraseRow(s.y, s.x, s.x+count-1)
-	case 'L':
+	case 'L', 'M':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
 			return err
 		}
-		count := min(ptyCSIParam(params, 0, 1), max(s.height-s.y, 0))
-		s.insertLines(count)
+		if s.y >= s.top && s.y <= s.bottom {
+			count := ptyCSIParam(params, 0, 1)
+			if final == 'L' {
+				count = -count
+			}
+			s.scrollRows(s.y, s.bottom, count)
+		}
+	case 'S', 'T':
+		params, err := parsePTYCSIParams(rawParams, 1, true)
+		if err != nil {
+			return err
+		}
+		count := ptyCSIParam(params, 0, 1)
+		if final == 'T' {
+			count = -count
+		}
+		s.scrollRows(s.top, s.bottom, count)
+	case 'r':
+		params, err := parsePTYCSIParams(rawParams, 2, true)
+		if err != nil {
+			return err
+		}
+		top, bottom := ptyCSIParam(params, 0, 1)-1, ptyCSIParam(params, 1, s.height)-1
+		if top < 0 || bottom >= s.height || top >= bottom {
+			return fmt.Errorf("invalid scrolling region %d-%d for height %d", top+1, bottom+1, s.height)
+		}
+		s.top, s.bottom = top, bottom
+		s.moveTo(0, 0)
 	case '@', 'P':
 		params, err := parsePTYCSIParams(rawParams, 1, true)
 		if err != nil {
@@ -320,24 +415,37 @@ func (s *ptyTerminalScreen) applyCSI(rawParams string, final byte) error {
 	return nil
 }
 
+// validatePTYSGRParams accepts well-formed SGR parameter lists: attributes
+// 0-9 and 21-29, colors 30-37, 39, 40-47, 49, 90-97, and 100-107, and the
+// 38/48 extended forms `5;n` (n <= 255) and `2;r;g;b`. SGR never changes cell
+// content, so only the shape is checked.
 func validatePTYSGRParams(raw string) error {
-	if raw != "" {
-		params, err := parsePTYCSIParams(raw, maxPTYCSIParams, false)
-		if err != nil {
-			return fmt.Errorf("invalid SGR params: %w", err)
-		}
-		if len(params) == 0 {
-			return fmt.Errorf("invalid empty SGR params")
-		}
-	}
-
-	// These are the exact SGR forms observed in both post-resize PTY slices.
-	switch raw {
-	case "", "0", "1", "22", "30", "37", "37;40", "38;5;240", "38;5;240;27", "38;5;240;40", "38;5;252", "39", "39;7", "40", "48;5;236":
+	if raw == "" {
 		return nil
-	default:
-		return fmt.Errorf("unobserved SGR params %q", raw)
 	}
+	params, err := parsePTYCSIParams(raw, maxPTYCSIParams, false)
+	if err != nil {
+		return fmt.Errorf("invalid SGR params: %w", err)
+	}
+	for i := 0; i < len(params); i++ {
+		p := params[i]
+		switch {
+		case p == 38 || p == 48:
+			rest := params[i+1:]
+			switch {
+			case len(rest) >= 2 && rest[0] == 5 && rest[1] <= 255:
+				i += 2
+			case len(rest) >= 4 && rest[0] == 2 && rest[1] <= 255 && rest[2] <= 255 && rest[3] <= 255:
+				i += 4
+			default:
+				return fmt.Errorf("malformed extended color in SGR params %q", raw)
+			}
+		case p <= 9, p >= 21 && p <= 29, p >= 30 && p <= 37, p == 39, p >= 40 && p <= 47, p == 49, p >= 90 && p <= 97, p >= 100 && p <= 107:
+		default:
+			return fmt.Errorf("unsupported SGR attribute %d in %q", p, raw)
+		}
+	}
+	return nil
 }
 
 func TestValidatePTYSGRParams(t *testing.T) {
@@ -361,13 +469,16 @@ func TestValidatePTYSGRParams(t *testing.T) {
 		{name: "accept reset foreground", raw: "39"},
 		{name: "accept reset with reverse video", raw: "39;7"},
 		{name: "accept background", raw: "40"},
-		{name: "reject generalized background", raw: "48;5;235", wantErr: true},
-		{name: "reject broadened background", raw: "48;5;236;1", wantErr: true},
-		{name: "reject generalized foreground", raw: "38;5;241", wantErr: true},
-		{name: "reject reordered form", raw: "40;37", wantErr: true},
-		{name: "reject RGB syntax", raw: "38;2;1;2;3", wantErr: true},
+		{name: "accept any indexed color", raw: "48;5;237"},
+		{name: "accept extended color followed by attribute", raw: "48;5;236;1"},
+		{name: "accept reordered form", raw: "40;37"},
+		{name: "accept RGB syntax", raw: "38;2;1;2;3"},
+		{name: "accept bright colors", raw: "97;107"},
 		{name: "reject malformed separator", raw: "37;", wantErr: true},
-		{name: "reject unobserved color", raw: "31", wantErr: true},
+		{name: "reject truncated extended color", raw: "38;5", wantErr: true},
+		{name: "reject out-of-range indexed color", raw: "48;5;256", wantErr: true},
+		{name: "reject unknown extended color mode", raw: "38;7;1", wantErr: true},
+		{name: "reject unknown attribute", raw: "999", wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -458,15 +569,12 @@ func (s *ptyTerminalScreen) putRune(r rune) {
 }
 
 func (s *ptyTerminalScreen) lineFeed() {
-	if s.height == 0 {
-		return
-	}
-	if s.y < s.height-1 {
+	switch {
+	case s.y == s.bottom:
+		s.scrollRows(s.top, s.bottom, 1)
+	case s.y < s.height-1:
 		s.y++
-		return
 	}
-	copy(s.cells, s.cells[1:])
-	s.cells[s.height-1] = blankPTYRow(s.width)
 }
 
 func (s *ptyTerminalScreen) clear() {
@@ -475,29 +583,34 @@ func (s *ptyTerminalScreen) clear() {
 	}
 }
 
-func (s *ptyTerminalScreen) insertLines(count int) {
-	if s.height == 0 {
-		return
-	}
-	count = min(count, s.height-s.y)
-	for row := s.height - 1; row >= s.y+count; row-- {
-		copy(s.cells[row], s.cells[row-count])
-	}
-	for row := s.y; row < s.y+count; row++ {
-		s.cells[row] = blankPTYRow(s.width)
+func (s *ptyTerminalScreen) reverseIndex() {
+	switch {
+	case s.y == s.top:
+		s.scrollRows(s.top, s.bottom, -1)
+	case s.y > 0:
+		s.y--
 	}
 }
 
-func (s *ptyTerminalScreen) reverseIndex() {
-	if s.y > 0 {
-		s.y--
+// scrollRows shifts rows from..to (inclusive) up by n (n > 0) or down by -n
+// (n < 0) and blanks the vacated rows. IL, DL, SU, SD, LF at the region
+// bottom, and RI at the region top all reduce to this.
+func (s *ptyTerminalScreen) scrollRows(from, to, n int) {
+	if from < 0 || to >= s.height || from > to || n == 0 {
 		return
 	}
-	for row := s.height - 1; row > 0; row-- {
-		copy(s.cells[row], s.cells[row-1])
+	rows := s.cells[from : to+1]
+	count := min(max(n, -n), len(rows))
+	if n > 0 {
+		copy(rows, rows[count:])
+		for row := len(rows) - count; row < len(rows); row++ {
+			rows[row] = blankPTYRow(s.width)
+		}
+		return
 	}
-	if s.height > 0 {
-		s.cells[0] = blankPTYRow(s.width)
+	copy(rows[count:], rows)
+	for row := 0; row < count; row++ {
+		rows[row] = blankPTYRow(s.width)
 	}
 }
 

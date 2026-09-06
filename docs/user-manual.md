@@ -748,11 +748,16 @@ the transcript, and a composer:
   renders its history. The session id is kept in the URL fragment, so a reload
   reopens the same session.
 - Typing `/` in the composer shows local suggestions for supported Web slash
-  commands; Tab or click completes the highlighted command.
-- Enter sends the composer text as a turn; Shift+Enter inserts a newline.
-  `/rename <name>` renames the current session instead of starting a turn.
-  Assistant text renders as Markdown; each tool call is a collapsible block
-  with its arguments and result.
+  commands; Tab or click completes the highlighted command. Web commands backed
+  by existing server APIs run locally instead of starting a provider turn:
+  `/help`, `/session`, `/new`, `/resume`, `/model`, `/rename <name>`,
+  `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/tasks`,
+  `/task <id|name>`, `/task cancel <id|name>`, and `/exit`. `/resume` asks
+  you to choose a session from the picker; `/exit` asks you to close the
+  browser tab because a page cannot reliably close a tab it did not open.
+- Enter sends the composer text as a turn or Web command; Shift+Enter inserts
+  a newline. Assistant text renders as Markdown; each tool call is a
+  collapsible block with its arguments and result.
 - While a turn runs the composer is disabled and a **Cancel** button calls
   `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
 - Reloading the page during a turn re-attaches to the running turn's event

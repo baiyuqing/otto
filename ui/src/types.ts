@@ -126,6 +126,10 @@ export interface Task {
   error?: string
 }
 
+export interface TaskDetail extends Task {
+  history: Message[]
+}
+
 export interface Info {
   workspace: string
   provider: string

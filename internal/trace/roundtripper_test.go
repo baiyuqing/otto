@@ -29,7 +29,25 @@ func decodeRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	return records
 }
 
-func TestTracingCapturesRequestAndResponse(t *testing.T) {
+// recordOfKind returns the single record with the given kind.
+func recordOfKind(t *testing.T, records []map[string]any, kind string) map[string]any {
+	t.Helper()
+	var found map[string]any
+	for _, rec := range records {
+		if rec["kind"] == kind {
+			if found != nil {
+				t.Fatalf("got more than one %q record", kind)
+			}
+			found = rec
+		}
+	}
+	if found == nil {
+		t.Fatalf("no %q record in %v", kind, records)
+	}
+	return found
+}
+
+func TestTracingCapturesRequestAndResponseBodies(t *testing.T) {
 	const sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -63,18 +81,16 @@ func TestTracingCapturesRequestAndResponse(t *testing.T) {
 	}
 
 	records := decodeRecords(t, buf)
-	if len(records) != 1 {
-		t.Fatalf("got %d records, want 1", len(records))
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2 (request + response body)", len(records))
 	}
-	rec := records[0]
-	if rec["url"] != redactedValue {
-		t.Fatalf("url = %v, want omission marker", rec["url"])
+
+	rec := recordOfKind(t, records, kindRequest)
+	if want := srv.URL + "/chat/completions"; rec["url"] != want {
+		t.Fatalf("url = %v, want %q", rec["url"], want)
 	}
-	if rec["req_body"] != redactedValue {
-		t.Fatalf("req_body = %v, want payload omission marker", rec["req_body"])
-	}
-	if rec["resp_body"] != redactedValue {
-		t.Fatalf("resp_body = %v, want payload omission marker", rec["resp_body"])
+	if rec["req_body"] != reqBody {
+		t.Fatalf("req_body = %v, want the request payload", rec["req_body"])
 	}
 	if rec["status"].(float64) != 200 {
 		t.Fatalf("status = %v, want 200", rec["status"])
@@ -90,15 +106,30 @@ func TestTracingCapturesRequestAndResponse(t *testing.T) {
 		t.Fatalf("req_headers not an object: %v", rec["req_headers"])
 	}
 	auth, _ := headers["Authorization"].([]any)
-	if len(auth) != 1 || auth[0] != "[redacted]" {
+	if len(auth) != 1 || auth[0] != redactedValue {
 		t.Fatalf("Authorization header = %v, want redacted", headers["Authorization"])
+	}
+	if _, ok := rec["resp_body"]; ok {
+		t.Fatalf("request record carries resp_body = %v, want it only in the body record", rec["resp_body"])
+	}
+
+	bodyRec := recordOfKind(t, records, kindResponseBody)
+	if bodyRec["seq"] != rec["seq"] {
+		t.Fatalf("body record seq = %v, want %v to join with the request", bodyRec["seq"], rec["seq"])
+	}
+	if bodyRec["resp_body"] != sse {
+		t.Fatalf("resp_body = %v, want the streamed payload", bodyRec["resp_body"])
+	}
+	if got := bodyRec["resp_bytes"].(float64); int(got) != len(sse) {
+		t.Fatalf("resp_bytes = %v, want %d", got, len(sse))
 	}
 }
 
-func TestTracingCapturesErrorResponse(t *testing.T) {
+func TestTracingCapturesErrorResponseBody(t *testing.T) {
+	const errBody = `{"error":"rate limited"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
-		io.WriteString(w, `{"error":"rate limited"}`)
+		io.WriteString(w, errBody)
 	}))
 	defer srv.Close()
 
@@ -112,14 +143,37 @@ func TestTracingCapturesErrorResponse(t *testing.T) {
 	resp.Body.Close()
 
 	records := decodeRecords(t, buf)
-	if len(records) != 1 {
-		t.Fatalf("got %d records, want 1", len(records))
+	if got := recordOfKind(t, records, kindRequest)["status"].(float64); got != http.StatusTooManyRequests {
+		t.Fatalf("status = %v, want 429", got)
 	}
-	if records[0]["status"].(float64) != http.StatusTooManyRequests {
-		t.Fatalf("status = %v, want 429", records[0]["status"])
+	if got := recordOfKind(t, records, kindResponseBody)["resp_body"]; got != errBody {
+		t.Fatalf("resp_body = %v, want the error payload", got)
 	}
-	if records[0]["resp_body"] != redactedValue {
-		t.Fatalf("resp_body = %v, want payload omission marker", records[0]["resp_body"])
+}
+
+// TestTracingRecordsBodyWhenClosedEarly covers a caller that abandons a stream
+// without reading it to EOF: the partial body must still reach the trace.
+func TestTracingRecordsBodyWhenClosedEarly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, strings.Repeat("x", 4096))
+	}))
+	defer srv.Close()
+
+	buf := &bytes.Buffer{}
+	client := &http.Client{Transport: NewRoundTripper(http.DefaultTransport, buf)}
+	resp, err := client.Do(mustRequest(t, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(resp.Body, make([]byte, 16)); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	bodyRec := recordOfKind(t, decodeRecords(t, buf), kindResponseBody)
+	got, _ := bodyRec["resp_body"].(string)
+	if len(got) == 0 || !strings.HasPrefix(got, "xxxx") {
+		t.Fatalf("resp_body = %q, want the bytes read before Close", got)
 	}
 }
 
@@ -179,8 +233,8 @@ func TestConcurrentRoundTrippersWriteRecordsAtomically(t *testing.T) {
 	calls := rec.calls
 	rec.mu.Unlock()
 
-	if len(calls) != 2*n {
-		t.Fatalf("got %d Write calls, want %d (one per record)", len(calls), 2*n)
+	if len(calls) != 2*2*n {
+		t.Fatalf("got %d Write calls, want %d (two records per exchange)", len(calls), 2*2*n)
 	}
 	for i, call := range calls {
 		if len(call) == 0 || call[len(call)-1] != '\n' {
@@ -205,38 +259,38 @@ func mustRequest(t *testing.T, url string) *http.Request {
 	return req
 }
 
-// chatgpt-account-id identifies the account behind a ChatGPT subscription
-// request. It is not a credential, but trace files sit in the working tree
-// where they are easy to commit by accident, so it is redacted too.
-func TestRedactHeadersRedactsAccountID(t *testing.T) {
+// Credential headers stay redacted even though payloads are recorded in full:
+// trace files sit in the working tree where they are easy to commit by
+// accident. chatgpt-account-id is not a credential but identifies the account.
+func TestRedactHeadersKeepsPayloadHeadersAndRedactsCredentials(t *testing.T) {
 	const accountID = "df8db0e8-0000-0000-0000-000000000000"
 	redacted := redactHeaders(http.Header{
 		"Authorization":      []string{"Bearer secret-token-value"},
 		"Chatgpt-Account-Id": []string{accountID},
 		"Cookie":             []string{"session=secret-cookie"},
 		"Content-Type":       []string{"application/json"},
+		"X-Request-Id":       []string{"req-123"},
 	})
-	if got := redacted.Get("Chatgpt-Account-Id"); got != "[redacted]" {
-		t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "[redacted]")
-	}
-	if got := redacted.Get("Authorization"); got != "[redacted]" {
-		t.Fatalf("Authorization = %q, want %q", got, "[redacted]")
-	}
-	if got := redacted.Get("Cookie"); got != "[redacted]" {
-		t.Fatalf("Cookie = %q, want %q", got, "[redacted]")
+	for _, name := range []string{"Authorization", "Chatgpt-Account-Id", "Cookie"} {
+		if got := redacted.Get(name); got != redactedValue {
+			t.Fatalf("%s = %q, want %q", name, got, redactedValue)
+		}
 	}
 	if got := redacted.Get("Content-Type"); got != "application/json" {
 		t.Fatalf("Content-Type = %q, want it left untouched", got)
 	}
+	if got := redacted.Get("X-Request-Id"); got != "req-123" {
+		t.Fatalf("X-Request-Id = %q, want it retained for debugging", got)
+	}
 }
 
-func TestTracingRedactsResponseHeadersAndOmitsPayloads(t *testing.T) {
+func TestTracingRecordsResponseHeadersAndBody(t *testing.T) {
 	const secret = "secret-cookie"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Set-Cookie", "session="+secret)
-		w.Header().Set("X-Echo", r.Header.Get("Cookie"))
+		w.Header().Set("X-Echo", "echoed")
 		w.WriteHeader(http.StatusBadGateway)
-		_, _ = io.WriteString(w, "echo="+secret)
+		_, _ = io.WriteString(w, `{"error":"upstream"}`)
 	}))
 	defer srv.Close()
 
@@ -253,55 +307,53 @@ func TestTracingRedactsResponseHeadersAndOmitsPayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = resp.Body.Close()
-	if string(body) != "echo="+secret {
+	if string(body) != `{"error":"upstream"}` {
 		t.Fatalf("client body changed: %q", body)
 	}
 	if bytes.Contains(buf.Bytes(), []byte(secret)) {
-		t.Fatal("trace leaked a secret from headers or body")
+		t.Fatal("trace leaked a credential header value")
 	}
 	records := decodeRecords(t, buf)
-	if got := records[0]["req_body"]; got != redactedValue {
-		t.Fatalf("req_body = %v, want omission marker", got)
-	}
-	if got := records[0]["resp_body"]; got != redactedValue {
-		t.Fatalf("resp_body = %v, want omission marker", got)
-	}
-	headers := records[0]["resp_headers"].(map[string]any)
-	if _, ok := headers["X-Echo"]; ok {
-		t.Fatalf("unknown response header was retained: %#v", headers["X-Echo"])
+	reqRec := recordOfKind(t, records, kindRequest)
+	headers := reqRec["resp_headers"].(map[string]any)
+	if got := headers["X-Echo"].([]any)[0]; got != "echoed" {
+		t.Fatalf("X-Echo = %v, want it retained for debugging", got)
 	}
 	if got := headers["Set-Cookie"].([]any)[0]; got != redactedValue {
 		t.Fatalf("Set-Cookie = %v, want redacted", got)
 	}
+	if got := recordOfKind(t, records, kindResponseBody)["resp_body"]; got != `{"error":"upstream"}` {
+		t.Fatalf("resp_body = %v, want the error payload", got)
+	}
 }
 
-func TestTracingOmitsUntrustedURLPartsAndErrorText(t *testing.T) {
-	const secret = "fresh-oauth-token"
+func TestTracingRecordsTransportErrorAndURL(t *testing.T) {
+	const token = "fresh-oauth-token"
 	buf := &bytes.Buffer{}
 	client := &http.Client{Transport: NewRoundTripper(roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return nil, errors.New("transport failed with " + secret)
+		return nil, errors.New("transport failed: connection refused")
 	}), buf)}
-	req, err := http.NewRequest(http.MethodGet, "https://example.test/"+secret+"?token="+secret, nil)
+	req, err := http.NewRequest(http.MethodGet, "https://example.test/v1/responses", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Authorization", "Bearer "+token)
 	_, err = client.Do(req)
-	if err == nil || !strings.Contains(err.Error(), secret) {
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("client error = %v, want original transport error", err)
 	}
 	records := decodeRecords(t, buf)
 	if len(records) != 1 {
 		t.Fatalf("got %d records, want 1", len(records))
 	}
-	if records[0]["url"] != redactedValue {
-		t.Fatalf("url = %v, want omission marker for untrusted path", records[0]["url"])
+	if records[0]["url"] != "https://example.test/v1/responses" {
+		t.Fatalf("url = %v, want the full request URL", records[0]["url"])
 	}
-	if records[0]["error"] != redactedValue {
-		t.Fatalf("error = %v, want omission marker", records[0]["error"])
+	if got, _ := records[0]["error"].(string); !strings.Contains(got, "connection refused") {
+		t.Fatalf("error = %v, want the transport error text", records[0]["error"])
 	}
-	if bytes.Contains(buf.Bytes(), []byte(secret)) {
-		t.Fatal("trace leaked fresh bearer token")
+	if bytes.Contains(buf.Bytes(), []byte(token)) {
+		t.Fatal("trace leaked the bearer token")
 	}
 }
 

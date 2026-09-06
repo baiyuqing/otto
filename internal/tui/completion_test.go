@@ -155,13 +155,13 @@ func TestSlashCommandCompletionClampsStaleSelection(t *testing.T) {
 
 func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T) {
 	m := resizeModel(t, newTestModel(t), 80, 12)
-	if got := m.viewport.Height(); got != 6 {
-		t.Fatalf("initial viewport height = %d, want 6", got)
+	if got := m.viewport.Height(); got != 7 {
+		t.Fatalf("initial viewport height = %d, want 7", got)
 	}
 
 	updated, _ := m.Update(tea.PasteMsg{Content: "/s"})
 	m = updated.(Model)
-	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 2 || m.viewport.Height() != 4 {
+	if m.editor.Value() != "/s" || len(m.commandSuggestions()) != 2 || m.viewport.Height() != 5 {
 		t.Fatalf("paste state: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 
@@ -184,7 +184,7 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	updated, _ = updated.(Model).Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "" || len(m.commandSuggestions()) != 0 || m.viewport.Height() != 6 {
+	if m.editor.Value() != "" || len(m.commandSuggestions()) != 0 || m.viewport.Height() != 7 {
 		t.Fatalf("closed suggestions: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 }
@@ -261,8 +261,8 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
 	m = resizeModel(t, m, 100, 24)
-	if m.viewport.Height() != 3 {
-		t.Fatalf("expanded viewport height = %d, want 3", m.viewport.Height())
+	if m.viewport.Height() != 4 {
+		t.Fatalf("expanded viewport height = %d, want 4", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 100, 24)
 

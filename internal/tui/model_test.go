@@ -306,8 +306,8 @@ func TestViewPositionsRealCursorAtEditorLocation(t *testing.T) {
 	if cursor == nil {
 		t.Fatal("view cursor = nil, want a real terminal cursor for IME positioning")
 	}
-	if cursor.X != 9 || cursor.Y != 8 {
-		t.Fatalf("view cursor = (%d,%d), want (9,8) at the visible editor", cursor.X, cursor.Y)
+	if cursor.X != 7 || cursor.Y != 8 {
+		t.Fatalf("view cursor = (%d,%d), want (7,8) at the visible editor", cursor.X, cursor.Y)
 	}
 }
 
@@ -321,8 +321,8 @@ func TestViewKeepsRealCursorAtEditorWhenSuggestionsAreVisible(t *testing.T) {
 	}
 
 	cursor := m.View().Cursor
-	if cursor == nil || cursor.X != 5 || cursor.Y != 8 {
-		t.Fatalf("suggestion view cursor = %#v, want (5,8) at the editor", cursor)
+	if cursor == nil || cursor.X != 3 || cursor.Y != 8 {
+		t.Fatalf("suggestion view cursor = %#v, want (3,8) at the editor", cursor)
 	}
 }
 
@@ -334,15 +334,15 @@ func TestViewTracksRealCursorAcrossMultilineEditorRows(t *testing.T) {
 	m.editor.CursorUp()
 	m.editor.CursorStart()
 	first := m.View().Cursor
-	if first == nil || first.Y != 8 {
-		t.Fatalf("first-line cursor = %#v, want row 8", first)
+	if first == nil || first.Y != 7 {
+		t.Fatalf("first-line cursor = %#v, want row 7", first)
 	}
 
 	m.editor.CursorDown()
 	m.editor.CursorEnd()
 	last := m.View().Cursor
-	if last == nil || last.Y != 9 {
-		t.Fatalf("last-line cursor = %#v, want row 9", last)
+	if last == nil || last.Y != 8 {
+		t.Fatalf("last-line cursor = %#v, want row 8", last)
 	}
 }
 
@@ -2755,8 +2755,8 @@ func TestInputBoxAppearsAsBorderedPanelOnStandardTerminal(t *testing.T) {
 	m.rerenderAndRefreshViewportContent(false)
 	content := m.View().Content
 	assertRenderedBounds(t, content, 80, 20)
-	if !strings.Contains(content, "Ask Otto") {
-		t.Fatalf("boxed input = %q, want Ask Otto label", content)
+	if !strings.Contains(content, "Enter to send") {
+		t.Fatalf("boxed input = %q, want shortcut hint below the box", content)
 	}
 	if !strings.Contains(content, "╭") || !strings.Contains(content, "╰") {
 		t.Fatalf("boxed input = %q, want rounded border", content)
@@ -2786,7 +2786,7 @@ func TestInputBoxGrowsWithMultilineEditorInsideFrame(t *testing.T) {
 		if strings.Contains(line, "╭") {
 			sawOpen = true
 		}
-		if strings.Contains(line, "Ask Otto") {
+		if strings.Contains(line, "Enter to send") {
 			sawLabel = true
 		}
 		if strings.Contains(line, "╰") {
@@ -2795,5 +2795,51 @@ func TestInputBoxGrowsWithMultilineEditorInsideFrame(t *testing.T) {
 	}
 	if !sawOpen || !sawLabel || !sawClose {
 		t.Fatalf("bordered input frame missing: open=%v label=%v close=%v\n%s", sawOpen, sawLabel, sawClose, content)
+	}
+}
+
+func TestInputBoxHasNoPromptAndSingleEmptyRow(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 20)
+	m.rerenderAndRefreshViewportContent(false)
+	content := m.View().Content
+	assertRenderedBounds(t, content, 80, 20)
+	if strings.Contains(ansi.Strip(content), "│ >") {
+		t.Fatalf("boxed input must not render a > prompt:\n%s", content)
+	}
+	top, bottom := -1, -1
+	for i, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, "╭") {
+			top = i
+		}
+		if strings.Contains(line, "╰") {
+			bottom = i
+		}
+	}
+	if top < 0 || bottom < 0 {
+		t.Fatalf("bordered input frame missing:\n%s", content)
+	}
+	// Top border, one editor row, bottom border.
+	if got := bottom - top + 1; got != 3 {
+		t.Fatalf("empty input box spans %d rows, want 3:\n%s", got, content)
+	}
+	lines := strings.Split(ansi.Strip(content), "\n")
+	if len(lines) <= bottom+1 || !strings.Contains(lines[bottom+1], "? for shortcuts") {
+		t.Fatalf("line below the input box must be the shortcut hint:\n%s", content)
+	}
+}
+
+func TestInputAreaIsQuiet(t *testing.T) {
+	m := resizeModel(t, newTestModel(t), 80, 20)
+	m.rerenderAndRefreshViewportContent(false)
+	content := m.View().Content
+	if !strings.Contains(content, "\x1b[38;5;240m╭") {
+		t.Fatalf("input box border must be grey (240) on a dark background:\n%q", content)
+	}
+	if strings.Contains(content, "\x1b[40m") {
+		t.Fatalf("textarea cursor line must not paint a background band:\n%q", content)
+	}
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	if footer := lines[len(lines)-1]; !strings.Contains(footer, "\x1b[2m") {
+		t.Fatalf("footer must render faint, got %q", footer)
 	}
 }

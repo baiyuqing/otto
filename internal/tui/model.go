@@ -142,8 +142,9 @@ type Model struct {
 func NewModel(ctx context.Context, backend app.Backend, options ...Option) Model {
 	entries, usage := entriesAndUsageFromBackend(backend)
 	editor := textarea.New()
+	editor.SetStyles(quietEditorStyles(true))
 	editor.ShowLineNumbers = false
-	editor.Prompt = "> "
+	editor.Prompt = ""
 	editor.Placeholder = "Ask Otto"
 	editor.MinHeight = minEditorHeight
 	editor.MaxHeight = maxEditorHeight
@@ -201,6 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.BackgroundColorMsg:
 		m.darkBackground = msg.IsDark()
+		m.editor.SetStyles(quietEditorStyles(m.darkBackground))
 		if !m.rendererInjected {
 			m.renderer = newGlamourRenderer(m.darkBackground)
 			m.invalidateMarkdownRenders()
@@ -369,7 +371,7 @@ func (m Model) View() tea.View {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorSpacing).MaxHeight(layout.editorSpacing).Render(""))
 	}
 	if layout.inputBoxed {
-		parts = append(parts, boxedInput(m.width, layout.editorHeight, m.editor.View()))
+		parts = append(parts, boxedInput(m.width, layout.editorHeight, m.editor.View(), m.darkBackground), inputHint(m.width, m.editor.Value() == ""))
 	} else {
 		parts = append(parts, lipgloss.NewStyle().Width(m.width).Height(layout.editorHeight).Render(m.editor.View()))
 	}
@@ -661,8 +663,8 @@ func newRootView(m Model, content string) tea.View {
 		if cursor := m.editor.Cursor(); cursor != nil {
 			cursor.Y += layout.transcriptHeight + layout.taskLines + layout.suggestionHeight + layout.editorSpacing
 			if layout.inputBoxed {
-				// The textarea sits below the top border and the label row.
-				cursor.Y += 1 + inputBoxLabel
+				// The textarea sits below the top border.
+				cursor.Y += 1
 				cursor.X += 1 + inputBoxPadding
 			}
 			view.Cursor = cursor
@@ -1989,15 +1991,38 @@ func (m Model) reservedStateActive() bool {
 }
 
 // boxedInput renders the composer as a bordered panel that anchors the screen
-// as its primary area. The bold label row and rounded border distinguish the
-// input from the transcript and the footer below it.
-func boxedInput(width, editorHeight int, editorView string) string {
-	label := lipgloss.NewStyle().Bold(true).Render("Ask Otto")
-	body := label + "\n" + editorView
+// as its primary area. The rounded border distinguishes the input from the
+// transcript; the hint row rendered below it names the active keys.
+func boxedInput(width, editorHeight int, editorView string, dark bool) string {
+	border := lipgloss.Color("250")
+	if dark {
+		border = lipgloss.Color("240")
+	}
 	return lipgloss.NewStyle().
 		Width(width).
-		Height(editorHeight+inputBoxBorder+inputBoxLabel).
+		Height(editorHeight+inputBoxBorder).
 		Border(lipgloss.RoundedBorder()).
+		BorderForeground(border).
 		Padding(0, inputBoxPadding).
-		Render(body)
+		Render(editorView)
+}
+
+// quietEditorStyles drops the textarea default cursor-line background. Inside
+// the bordered composer that background paints a full-width band whenever the
+// terminal background is not the exact ANSI default color.
+func quietEditorStyles(dark bool) textarea.Styles {
+	styles := textarea.DefaultStyles(dark)
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	return styles
+}
+
+// inputHint is the row below the boxed input. "?" opens help only while the
+// editor is empty; with text present it types a character, so the hint
+// switches to the send/newline keys.
+func inputHint(width int, editorEmpty bool) string {
+	hint := "Enter to send · Shift+Enter for newline"
+	if editorEmpty {
+		hint = "? for shortcuts"
+	}
+	return lipgloss.NewStyle().Faint(true).Width(width).MaxWidth(width).MaxHeight(1).Render("  " + hint)
 }

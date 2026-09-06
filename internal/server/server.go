@@ -236,6 +236,7 @@ func (s *Server) routeTable() []routeEntry {
 		{"POST /v1/sessions", s.handleCreateSession},
 		{"GET /v1/sessions", s.handleListSessions},
 		{"GET /v1/sessions/{id}", s.handleGetSession},
+		{"PATCH /v1/sessions/{id}", s.handleRenameSession},
 		{"DELETE /v1/sessions/{id}", s.handleDeleteSession},
 		{"GET /v1/sessions/{id}/history", s.handleHistory},
 		{"POST /v1/sessions/{id}/turns", s.handleStartTurn},
@@ -510,6 +511,7 @@ type sessionTurnWire struct {
 
 type sessionWire struct {
 	ID                 string           `json:"id"`
+	Name               string           `json:"name,omitempty"`
 	Workspace          string           `json:"workspace"`
 	Provider           string           `json:"provider"`
 	Profile            string           `json:"profile"`
@@ -535,6 +537,7 @@ func (s *Server) sessionWire(os *openSession) sessionWire {
 
 	return sessionWire{
 		ID:                 info.SessionID,
+		Name:               info.SessionName,
 		Workspace:          info.Workspace,
 		Provider:           info.Provider,
 		Profile:            info.Profile,
@@ -549,6 +552,7 @@ func (s *Server) sessionWire(os *openSession) sessionWire {
 
 type sessionListRow struct {
 	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
 	Path      string `json:"path,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
 	Provider  string `json:"provider,omitempty"`
@@ -620,6 +624,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		_, open := openIDs[info.ID]
 		rows = append(rows, sessionListRow{
 			ID:        info.ID,
+			Name:      info.Name,
 			Path:      info.Path,
 			Workspace: info.CWD,
 			Provider:  info.Provider,
@@ -634,6 +639,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		info := os.ctrl.Info()
 		rows = append(rows, sessionListRow{
 			ID:        id,
+			Name:      info.SessionName,
 			Workspace: info.Workspace,
 			Provider:  info.Provider,
 			Model:     info.Model,
@@ -648,6 +654,37 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	os, ok := s.lookup(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.sessionWire(os))
+}
+
+func (s *Server) handleRenameSession(w http.ResponseWriter, r *http.Request) {
+	os, ok := s.lookup(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "session not found")
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "session name is required")
+		return
+	}
+	if err := os.ctrl.RenameSession(r.Context(), body.Name); err != nil {
+		switch {
+		case errors.Is(err, app.ErrPromptActive):
+			writeError(w, http.StatusConflict, "turn_active", "a turn is active")
+		case errors.Is(err, session.ErrInvalidSession):
+			writeError(w, http.StatusBadRequest, "bad_request", "session name is invalid")
+		default:
+			internalError(w, s.log, err)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, s.sessionWire(os))

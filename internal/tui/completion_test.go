@@ -167,7 +167,7 @@ func TestSlashCommandPasteBackspaceAndSelectionTransitionsUseUpdate(t *testing.T
 
 	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
 	m = updated.(Model)
-	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 15 || m.viewport.Height() != 1 {
+	if m.editor.Value() != "/" || len(m.commandSuggestions()) != 16 || m.viewport.Height() != 1 {
 		t.Fatalf("first backspace: editor=%q suggestions=%d viewport=%d", m.editor.Value(), len(m.commandSuggestions()), m.viewport.Height())
 	}
 	updated, _ = m.Update(keyPress(tea.KeyDown))
@@ -261,8 +261,8 @@ func TestSlashCommandResizeAndScrollStateStayConsistent(t *testing.T) {
 	}
 	assertRenderedBounds(t, m.View().Content, 40, 8)
 	m = resizeModel(t, m, 100, 24)
-	if m.viewport.Height() != 4 {
-		t.Fatalf("expanded viewport height = %d, want 4", m.viewport.Height())
+	if m.viewport.Height() != 3 {
+		t.Fatalf("expanded viewport height = %d, want 3", m.viewport.Height())
 	}
 	assertRenderedBounds(t, m.View().Content, 100, 24)
 

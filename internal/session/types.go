@@ -115,6 +115,14 @@ type RuntimeUpdater interface {
 	UpdateRuntime(context.Context, RuntimeMetadata) error
 }
 
+type Renamer interface {
+	Rename(context.Context, string) error
+}
+
+type NameProvider interface {
+	Name() string
+}
+
 type Session interface {
 	Header() Header
 	Messages() []model.Message

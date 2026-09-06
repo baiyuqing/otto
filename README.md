@@ -148,7 +148,7 @@ persisted.
 - Session files may contain source code, prompts, and tool results. Treat them
   as sensitive project data.
 - No plugins, automatic project-local config discovery, session trees/forks,
-  session naming, deletion, or search.
+  deletion, or search.
 - No automatic memory extraction or memory backup/restore/verify commands.
 - No user-facing `/skills` or `/skill` commands or per-skill `allowed-tools`
   enforcement.

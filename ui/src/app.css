@@ -101,6 +101,7 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
   color: var(--muted);
 }
 .session-chip strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.session-chip button { padding: 3px 8px; font-size: 11px; }
 .workspace-shell { min-height: 0; flex: 1; display: flex; }
 .transcript { flex: 1; overflow-y: auto; padding: 26px 18px 18px; scroll-behavior: smooth; }
 .item { max-width: 76rem; margin: 0 auto 16px; }

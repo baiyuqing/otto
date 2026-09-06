@@ -16,6 +16,7 @@ export interface SessionTurn {
 
 export interface Session {
   id: string
+  name?: string
   workspace: string
   provider: string
   profile: string
@@ -29,6 +30,7 @@ export interface Session {
 
 export interface SessionListRow {
   id: string
+  name?: string
   path?: string
   workspace?: string
   provider?: string

@@ -225,7 +225,7 @@ func (s *Server) routeTable() []routeEntry {
 		{"GET /v1/info", s.handleInfo},
 		{"GET /v1/openapi.yaml", s.handleOpenAPI},
 		{"GET /healthz", s.handleHealthz},
-		{"GET /metrics", s.metrics.ServeHTTP},
+		{"GET /metrics", s.handleMetrics},
 	}
 }
 
@@ -844,6 +844,35 @@ func (s *Server) handleCancelTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	t.cancel()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	s.metrics.replaceSessionContexts(s.sessionContextMetrics())
+	s.metrics.ServeHTTP(w, r)
+}
+
+func (s *Server) sessionContextMetrics() []sessionContextMetrics {
+	s.mu.Lock()
+	sessions := make([]*openSession, 0, len(s.sessions))
+	for _, os := range s.sessions {
+		sessions = append(sessions, os)
+	}
+	s.mu.Unlock()
+
+	samples := make([]sessionContextMetrics, 0, len(sessions))
+	for _, os := range sessions {
+		info := os.ctrl.Info()
+		samples = append(samples, sessionContextMetrics{
+			SessionID:                 info.SessionID,
+			Provider:                  info.Provider,
+			Model:                     info.Model,
+			ContextWindow:             info.ContextWindow,
+			ContextInputTokens:        info.ContextInputTokens,
+			ContextInputTokensPresent: info.ContextInputTokensPresent,
+			ContextInputTokensPending: info.ContextInputTokensPending,
+		})
+	}
+	return samples
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {

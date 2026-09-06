@@ -1608,13 +1608,45 @@ func (m *Model) queuePrint(chunk string) {
 // every dispatch, so every internal helper that appends to pendingPrints can
 // stay a plain void method.
 func (m *Model) flushNextPrintCmd() tea.Cmd {
-	if m.printInFlight || len(m.pendingPrints) == 0 {
+	chunk, ok := m.takeNextPrintChunk()
+	if !ok {
 		return nil
 	}
-	chunk := m.pendingPrints[0]
-	m.pendingPrints = m.pendingPrints[1:]
 	m.printInFlight = true
 	return tea.Sequence(tea.Println(chunk), func() tea.Msg { return commitFlushedMsg{} })
+}
+
+// takeNextPrintChunk removes the next chunk to print from the queue, splitting
+// the head chunk when it is taller than the rows the live frame leaves free.
+//
+// ultraviolet's TerminalRenderer.PrependString (terminal_renderer.go) scrolls
+// the terminal down by the chunk's row count, then moves the cursor back up by
+// that count plus the live frame's height before inserting the rows. The
+// upward move is clamped at row 0, so once the sum exceeds the terminal height
+// the insert lands inside the live frame and overwrites the input box and the
+// footer. Splitting keeps every prepend within the free rows above the frame.
+func (m *Model) takeNextPrintChunk() (string, bool) {
+	if m.printInFlight || len(m.pendingPrints) == 0 {
+		return "", false
+	}
+	chunk := m.pendingPrints[0]
+	limit := m.printLineLimit()
+	if lines := strings.Split(chunk, "\n"); limit > 0 && len(lines) > limit {
+		m.pendingPrints[0] = strings.Join(lines[limit:], "\n")
+		return strings.Join(lines[:limit], "\n"), true
+	}
+	m.pendingPrints = m.pendingPrints[1:]
+	return chunk, true
+}
+
+// printLineLimit reports how many terminal rows are free above the live frame.
+// It is zero or negative when the frame fills the screen, which no split can
+// fix; the chunk is then printed whole.
+func (m Model) printLineLimit() int {
+	if m.height <= 0 {
+		return 0
+	}
+	return m.height - lipgloss.Height(m.View().Content)
 }
 
 func (m *Model) renderEntries(width int) {

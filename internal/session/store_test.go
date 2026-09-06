@@ -20,6 +20,61 @@ import (
 	"github.com/baiyuqing/otto/internal/model"
 )
 
+func TestStoreRenameSessionAppendsSessionInfo(t *testing.T) {
+	header := testHeader(t)
+	store, err := Create(t.TempDir(), header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if err := store.Rename(context.Background(), "dev"); err != nil {
+		t.Fatal(err)
+	}
+
+	lines := readJSONLines(t, store.Path())
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3", len(lines))
+	}
+	var entry struct {
+		Type      string  `json:"type"`
+		ID        string  `json:"id"`
+		ParentID  *string `json:"parentId"`
+		Timestamp string  `json:"timestamp"`
+		Name      string  `json:"name"`
+	}
+	if err := json.Unmarshal(lines[2], &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Type != "session_info" || !validTestEntryID(entry.ID) || entry.ParentID == nil || entry.Name != "dev" {
+		t.Fatalf("session_info entry = %#v", entry)
+	}
+
+	info, warnings, err := Inspect(context.Background(), store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || info.Name != "dev" {
+		t.Fatalf("info = %#v warnings = %#v", info, warnings)
+	}
+}
+
+func TestStoreRenameSessionRejectsBlankName(t *testing.T) {
+	store, err := Create(t.TempDir(), testHeader(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	before := readFile(t, store.Path())
+
+	if err := store.Rename(context.Background(), " \t\n "); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("Rename() error = %v, want ErrInvalidSession", err)
+	}
+	if after := readFile(t, store.Path()); !bytes.Equal(after, before) {
+		t.Fatal("blank rename mutated session file")
+	}
+}
+
 func TestCreateWritesPiV3HeaderAndOttoRuntimeEntry(t *testing.T) {
 	header := testHeader(t)
 	store, err := Create(t.TempDir(), header)

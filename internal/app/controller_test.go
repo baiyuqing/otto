@@ -3183,6 +3183,7 @@ type fakeSession struct {
 	header     session.Header
 	messages   []model.Message
 	path       string
+	name       string
 	closeErr   error
 	closed     bool
 	closeCalls int
@@ -3199,6 +3200,13 @@ func (f *fakeSession) Messages() []model.Message {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]model.Message(nil), f.messages...)
+}
+
+func (f *fakeSession) Rename(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.name = name
+	return nil
 }
 
 func (f *fakeSession) Append(context.Context, model.Message) error { return nil }

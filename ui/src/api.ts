@@ -60,6 +60,8 @@ export const api = {
   listSessions: () => json<{ sessions: SessionListRow[] }>('/v1/sessions'),
   createSession: (resume?: string) =>
     json<Session>('/v1/sessions', { method: 'POST', body: JSON.stringify(resume ? { resume } : {}) }),
+  renameSession: (id: string, name: string) =>
+    json<Session>(`/v1/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   getSession: (id: string) => json<Session>(`/v1/sessions/${id}`),
   history: (id: string) => json<Message[]>(`/v1/sessions/${id}/history`),
   getTurn: (id: string, turnId: string) => json<TurnSummary>(`/v1/sessions/${id}/turns/${turnId}`),

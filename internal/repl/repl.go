@@ -314,7 +314,7 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		if args != "" {
 			break
 		}
-		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n")
+		_, _ = io.WriteString(r.stdout, "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n")
 		return false, nil
 	case "exit":
 		if args != "" {
@@ -355,9 +355,28 @@ func (r *REPL) command(ctx context.Context, command string) (bool, error) {
 		}
 		info := r.backend.Info()
 		_, _ = fmt.Fprintf(r.stdout, "ID: %s\nPath: %s\nProvider: %s\nModel: %s\nSandbox: %s\n", info.SessionID, info.SessionPath, info.Provider, info.Model, info.Sandbox.Summary())
+		if info.SessionName != "" {
+			_, _ = fmt.Fprintf(r.stdout, "Name: %s\n", info.SessionName)
+		}
 		if reason := info.Sandbox.ReasonCode(); reason != "" {
 			_, _ = fmt.Fprintf(r.stdout, "Sandbox reason: %s\n", reason)
 		}
+		return false, nil
+	case "rename":
+		name := strings.TrimSpace(args)
+		if name == "" {
+			break
+		}
+		renamer, ok := r.backend.(interface {
+			RenameSession(context.Context, string) error
+		})
+		if !ok {
+			return false, &commandError{command: command, err: app.ErrPersistenceDisabled}
+		}
+		if err := renamer.RenameSession(ctx, name); err != nil {
+			return false, &commandError{command: command, err: err}
+		}
+		_, _ = fmt.Fprintf(r.stdout, "Renamed session: %s\n", name)
 		return false, nil
 	case "compact":
 		focus := strings.TrimSpace(args)

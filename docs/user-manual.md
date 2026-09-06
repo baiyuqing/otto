@@ -545,10 +545,15 @@ executor with fsmonitor disabled; unavailable executors produce no Git status.
 definition directory. Configured external roots and linked definition
 directories remain supported.
 
-When enabled, `OTTO_TRACE` records HTTP metadata only, including status and
-time to response headers. It omits URLs, request/response bodies, raw errors,
-and unknown headers; credential and cookie headers contain a redaction marker.
-It does not buffer or alter the model response stream.
+When enabled, `OTTO_TRACE` records each provider HTTP exchange as two JSONL
+records sharing one `seq`: a `request` record (method, URL, headers, request
+body, status, response headers, time to response headers) written when the
+response headers arrive, and a `response_body` record written when the response
+body is closed or drained. Bodies and error text are recorded verbatim, so a
+trace file contains conversation content; credential, cookie, and
+`chatgpt-account-id` headers contain a redaction marker instead of their value.
+The response stream reaches the caller unchanged, but a copy of it is held in
+memory until the body is closed.
 
 ### File tools
 

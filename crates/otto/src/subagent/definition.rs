@@ -1,0 +1,640 @@
+//! `AGENT.md` discovery. Port of `internal/subagent/definition.go`.
+//!
+//! A named sub-agent is a directory holding an `AGENT.md` file with the same
+//! YAML frontmatter dialect skills use. Definitions are discovered under
+//! `~/.otto/agents` and `<workspace>/.otto/agents`; the workspace root wins on
+//! a name collision.
+//!
+//! Ownership: a [`Catalog`] owns plain data and performs no I/O after
+//! [`Catalog::discover`] returns. Concurrency: nothing here holds shared
+//! mutable state.
+//!
+//! Security: every read goes through [`crate::tool::root::Root`], so an
+//! `AGENT.md` symbolic link pointing outside its definition directory is
+//! skipped rather than followed. A definition is untrusted text; its `tools`
+//! list can only narrow the child tool set the runner already built, never
+//! widen it.
+
+use std::collections::BTreeMap;
+use std::io;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use crate::skill::frontmatter::{self, Fields};
+use crate::tool::root::{self, Root};
+
+/// The largest `AGENT.md` this loader will read.
+pub const MAX_AGENT_FILE_BYTES: u64 = 64 << 20;
+const MAX_AGENT_NAME_LENGTH: usize = 64;
+const MAX_AGENT_DESCRIPTION_CHARS: usize = 1024;
+
+/// One discovered named sub-agent definition.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Definition {
+    /// The frontmatter name, equal to the directory base name.
+    pub name: String,
+    /// The frontmatter description, trimmed.
+    pub description: String,
+    /// The frontmatter tools allowlist, or `None` when the frontmatter has no
+    /// `tools` key, which means "every child tool".
+    pub tools: Option<Vec<String>>,
+    /// The frontmatter model id, or empty to use the caller's or session model.
+    pub model: String,
+    /// `"fresh"` (the default) or `"inherit"`.
+    pub context: String,
+    /// The Markdown after the frontmatter, trimmed. May be empty.
+    pub body: String,
+    /// The absolute directory holding `AGENT.md`.
+    pub directory: PathBuf,
+    /// The absolute path of `AGENT.md`.
+    pub path: PathBuf,
+}
+
+/// The set of agent definitions discovered for one runner, sorted by name.
+/// The default value is empty and usable.
+#[derive(Clone, Debug, Default)]
+pub struct Catalog {
+    definitions: Vec<Definition>,
+}
+
+impl Catalog {
+    /// Scans `roots` in order; a later root overrides an earlier one on the
+    /// same name. Roots are absolute directories. A missing root is skipped
+    /// silently. An unreadable root, or a directory whose `AGENT.md` fails to
+    /// parse or validate, produces one warning string and is skipped.
+    /// Discovery never fails.
+    pub fn discover(roots: &[PathBuf]) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+        let mut by_name: BTreeMap<String, Definition> = BTreeMap::new();
+
+        for root_path in roots {
+            let root_fs = match Root::open(root_path) {
+                Ok(root_fs) => root_fs,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    warnings.push(format!("agents root {}: {error}", root_path.display()));
+                    continue;
+                }
+            };
+            let entries = match root_fs.read_dir(Path::new(".")) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    warnings.push(format!("agents root {}: {error}", root_path.display()));
+                    continue;
+                }
+            };
+            for entry in entries {
+                let directory = root_path.join(&entry.name);
+                // Go opens the candidate with os.OpenRoot, which follows a
+                // symbolic link to a directory and fails on anything else.
+                let Ok(directory_fs) = Root::open(&directory) else {
+                    continue;
+                };
+                let agent_path = directory.join("AGENT.md");
+                let data = match read_agent_file(&directory_fs, Path::new("AGENT.md")) {
+                    Ok(Some(data)) => data,
+                    // A directory without a readable regular AGENT.md is
+                    // silently ignored, as is one reached by an escaping link.
+                    Ok(None) => continue,
+                    Err(error) => {
+                        warnings.push(format!("{}: {error}", agent_path.display()));
+                        continue;
+                    }
+                };
+                match load_candidate(
+                    &data,
+                    &directory,
+                    &agent_path,
+                    &entry.name.to_string_lossy(),
+                ) {
+                    Ok(definition) => {
+                        by_name.insert(definition.name.clone(), definition);
+                    }
+                    Err(warning) => warnings.push(warning),
+                }
+            }
+        }
+
+        (
+            Self {
+                definitions: by_name.into_values().collect(),
+            },
+            warnings,
+        )
+    }
+
+    /// The catalog's definitions, sorted by name.
+    pub fn definitions(&self) -> &[Definition] {
+        &self.definitions
+    }
+
+    /// A catalog holding exactly `definitions`. Tests build one directly; Go's
+    /// tests use the unexported field for the same purpose.
+    #[cfg(test)]
+    pub(crate) fn from_definitions(definitions: Vec<Definition>) -> Self {
+        Self { definitions }
+    }
+
+    /// The definition with this name, if any.
+    pub fn lookup(&self, name: &str) -> Option<&Definition> {
+        self.definitions
+            .iter()
+            .find(|definition| definition.name == name)
+    }
+
+    /// The number of definitions in the catalog.
+    pub fn len(&self) -> usize {
+        self.definitions.len()
+    }
+
+    /// Whether the catalog holds no definitions.
+    pub fn is_empty(&self) -> bool {
+        self.definitions.is_empty()
+    }
+}
+
+/// The directories agent definitions are discovered in, in Go's precedence
+/// order: the user's home directory first, then the workspace.
+pub fn roots(home: Option<&Path>, workspace: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::with_capacity(2);
+    if let Some(home) = home {
+        roots.push(home.join(".otto").join("agents"));
+    }
+    roots.push(workspace.join(".otto").join("agents"));
+    roots
+}
+
+/// Reads `AGENT.md` below `root_fs`.
+///
+/// `Ok(None)` means "not a definition": the file is missing, is not regular,
+/// or is a symbolic link that leaves the definition directory. `Err` is a
+/// reportable failure, such as an oversized file.
+fn read_agent_file(root_fs: &Root, name: &Path) -> io::Result<Option<Vec<u8>>> {
+    let file = match root_fs.open_file(
+        name,
+        nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NONBLOCK,
+        nix::sys::stat::Mode::empty(),
+    ) {
+        Ok(file) => file,
+        Err(error) => {
+            // An external symbolic link leaves this definition directory and
+            // is ignored just like a missing or non-regular AGENT.md.
+            if is_symlink(root_fs, name) || error.kind() == io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    if metadata.len() > MAX_AGENT_FILE_BYTES {
+        return Err(io::Error::other(format!(
+            "file is too large ({} bytes); maximum is {MAX_AGENT_FILE_BYTES} bytes",
+            metadata.len()
+        )));
+    }
+    let mut data = Vec::new();
+    file.take(MAX_AGENT_FILE_BYTES + 1).read_to_end(&mut data)?;
+    if data.len() as u64 > MAX_AGENT_FILE_BYTES {
+        return Err(io::Error::other(format!(
+            "file is too large; maximum is {MAX_AGENT_FILE_BYTES} bytes"
+        )));
+    }
+    Ok(Some(data))
+}
+
+fn is_symlink(root_fs: &Root, name: &Path) -> bool {
+    root_fs.lstat(name).as_ref().is_ok_and(root::is_symlink)
+}
+
+/// Parses and validates one agent directory, returning the warning string Go
+/// would have produced when it is not a usable definition.
+fn load_candidate(
+    data: &[u8],
+    directory: &Path,
+    agent_path: &Path,
+    directory_name: &str,
+) -> Result<Definition, String> {
+    let describe = |error: String| format!("{}: {error}", agent_path.display());
+    let (fields, body) = frontmatter::parse(data).map_err(describe)?;
+    let name = validate_agent_name(&fields, directory_name).map_err(describe)?;
+    let description = validate_agent_description(&fields).map_err(describe)?;
+    let tools = parse_agent_tools(&fields).map_err(describe)?;
+    let context = validate_agent_context(&fields).map_err(describe)?;
+    Ok(Definition {
+        name,
+        description,
+        tools,
+        model: fields
+            .get("model")
+            .map_or("", String::as_str)
+            .trim()
+            .to_string(),
+        context,
+        body: body.trim().to_string(),
+        directory: directory.to_path_buf(),
+        path: agent_path.to_path_buf(),
+    })
+}
+
+fn validate_agent_name(fields: &Fields, directory_name: &str) -> Result<String, String> {
+    let raw = fields.get("name").map_or("", String::as_str);
+    if raw.is_empty() {
+        return Err("missing name".to_string());
+    }
+    if raw.len() > MAX_AGENT_NAME_LENGTH || !is_valid_agent_name(raw) {
+        return Err(format!("name {raw:?} is invalid"));
+    }
+    if raw != directory_name {
+        return Err(format!(
+            "name {raw:?} does not match directory {directory_name:?}"
+        ));
+    }
+    Ok(raw.to_string())
+}
+
+/// Go's `^[a-z0-9]+(-[a-z0-9]+)*$`, spelled out to avoid a regex for one rule.
+fn is_valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+fn validate_agent_description(fields: &Fields) -> Result<String, String> {
+    let trimmed = fields.get("description").map_or("", String::as_str).trim();
+    if trimmed.is_empty() {
+        return Err("missing description".to_string());
+    }
+    if trimmed.chars().count() > MAX_AGENT_DESCRIPTION_CHARS {
+        return Err(format!(
+            "description exceeds {MAX_AGENT_DESCRIPTION_CHARS} characters"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Parses the optional `tools` frontmatter key. An absent key means every
+/// child tool. A key that yields no item after splitting, or any item that is
+/// not `^[a-z0-9_]+$`, is an error.
+fn parse_agent_tools(fields: &Fields) -> Result<Option<Vec<String>>, String> {
+    let Some(raw) = fields.get("tools") else {
+        return Ok(None);
+    };
+    let mut tools = Vec::new();
+    for item in raw.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if !item
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(format!("tools item {item:?} is invalid"));
+        }
+        tools.push(item.to_string());
+    }
+    if tools.is_empty() {
+        return Err("tools must be a comma-separated list".to_string());
+    }
+    Ok(Some(tools))
+}
+
+fn validate_agent_context(fields: &Fields) -> Result<String, String> {
+    let trimmed = fields.get("context").map_or("", String::as_str).trim();
+    if trimmed.is_empty() {
+        return Ok("fresh".to_string());
+    }
+    if trimmed != "fresh" && trimmed != "inherit" {
+        return Err(r#"context must be "fresh" or "inherit""#.to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Go's `writeAgent`.
+    fn write_agent(root: &Path, name: &str, frontmatter_extra: &str, body: &str) -> PathBuf {
+        let directory = root.join(name);
+        std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
+        let content = format!(
+            "---\nname: {name}\ndescription: desc for {name}\n{frontmatter_extra}---\n{body}"
+        );
+        std::fs::write(directory.join("AGENT.md"), content).expect("AGENT.md is writable");
+        directory
+    }
+
+    fn write_raw_agent(root: &Path, directory_name: &str, content: &str) -> PathBuf {
+        let directory = root.join(directory_name);
+        std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
+        std::fs::write(directory.join("AGENT.md"), content).expect("AGENT.md is writable");
+        directory
+    }
+
+    /// Go's `TestDiscoverValidDefinitionAllFields`.
+    #[test]
+    fn every_frontmatter_field_reaches_the_definition() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let directory = write_agent(
+            root.path(),
+            "reviewer",
+            "tools: read, grep ,bash\nmodel: gpt-4o-mini\ncontext: inherit\n",
+            "Review the diff.\n",
+        );
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        assert_eq!(catalog.len(), 1);
+        let definition = catalog.lookup("reviewer").expect("the reviewer definition");
+        assert_eq!(definition.name, "reviewer");
+        assert_eq!(definition.description, "desc for reviewer");
+        assert_eq!(
+            definition.tools.as_deref(),
+            Some(["read".to_string(), "grep".to_string(), "bash".to_string()].as_slice())
+        );
+        assert_eq!(definition.model, "gpt-4o-mini");
+        assert_eq!(definition.context, "inherit");
+        assert_eq!(definition.body, "Review the diff.");
+        assert_eq!(definition.directory, directory);
+        assert_eq!(definition.path, directory.join("AGENT.md"));
+    }
+
+    /// Go's `TestDiscoverMissingName`, `TestDiscoverNameDirMismatch`,
+    /// `TestDiscoverInvalidNameChars`, `TestDiscoverMissingDescription`,
+    /// `TestDiscoverDescriptionTooLong`, `TestDiscoverToolsEmptyValueWarnsAndSkips`,
+    /// `TestDiscoverToolsOnlyCommasWarnsAndSkips`,
+    /// `TestDiscoverToolsInvalidItemSkipsWithWarning` and
+    /// `TestDiscoverContextInvalidWarnsAndSkips`, folded into one table: each
+    /// case is the same "skip the directory and emit one warning" contract.
+    #[test]
+    fn an_invalid_definition_is_skipped_with_one_warning() {
+        let long_description = "a".repeat(1025);
+        let cases: &[(&str, &str, &str)] = &[
+            ("noname", "---\ndescription: d\n---\nbody\n", "missing name"),
+            (
+                "actualdir",
+                "---\nname: otherdir\ndescription: d\n---\nbody\n",
+                "does not match directory",
+            ),
+            (
+                "Upper",
+                "---\nname: Upper\ndescription: d\n---\nbody\n",
+                "invalid",
+            ),
+            ("x", "---\nname: x\n---\nbody\n", "missing description"),
+            (
+                "x",
+                &format!("---\nname: x\ndescription: {long_description}\n---\nbody\n"),
+                "exceeds 1024",
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\ntools: \n---\nbody\n",
+                "tools must be a comma-separated list",
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\ntools: \" , , \"\n---\nbody\n",
+                "tools must be a comma-separated list",
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\ntools: Read, bash\n---\nbody\n",
+                "tools item \"Read\" is invalid",
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\ncontext: foo\n---\nbody\n",
+                r#"context must be "fresh" or "inherit""#,
+            ),
+        ];
+
+        for (directory_name, content, want) in cases {
+            let root = tempfile::tempdir().expect("a temporary directory");
+            write_raw_agent(root.path(), directory_name, content);
+
+            let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+            assert_eq!(catalog.len(), 0, "{content}");
+            assert_eq!(warnings.len(), 1, "{content}: {warnings:?}");
+            assert!(warnings[0].contains(want), "{content}: {warnings:?}");
+        }
+    }
+
+    /// Go's `TestDiscoverToolsParsedWithSpaces`,
+    /// `TestDiscoverContextInheritAccepted`,
+    /// `TestDiscoverContextAbsentDefaultsToFresh`,
+    /// `TestDiscoverModelAbsentIsEmpty` and `TestDiscoverBodyTrimmed`: the
+    /// optional keys and their defaults.
+    #[test]
+    fn optional_frontmatter_keys_take_their_defaults() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        write_agent(root.path(), "plain", "", "\n\n  Body text.  \n\n");
+        write_agent(root.path(), "spaced", "tools: read, grep ,bash\n", "body\n");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        let plain = catalog.lookup("plain").expect("the plain definition");
+        assert_eq!(plain.tools, None);
+        assert_eq!(plain.model, "");
+        assert_eq!(plain.context, "fresh");
+        assert_eq!(plain.body, "Body text.");
+        let spaced = catalog.lookup("spaced").expect("the spaced definition");
+        assert_eq!(
+            spaced.tools.as_deref(),
+            Some(["read".to_string(), "grep".to_string(), "bash".to_string()].as_slice())
+        );
+    }
+
+    /// Go's `TestDiscoverLaterRootWins` and `TestDiscoverMissingRootSilent`.
+    #[test]
+    fn a_later_root_wins_and_a_missing_root_is_silent() {
+        let user = tempfile::tempdir().expect("a temporary directory");
+        let workspace = tempfile::tempdir().expect("a temporary directory");
+        write_agent(user.path(), "shared", "", "from a\n");
+        write_agent(workspace.path(), "shared", "", "from b\n");
+
+        let (catalog, warnings) = Catalog::discover(&[
+            user.path().to_path_buf(),
+            workspace.path().to_path_buf(),
+            workspace.path().join("does-not-exist"),
+        ]);
+
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.lookup("shared").expect("shared").body, "from b");
+    }
+
+    /// Go's `TestDiscoverRejectsExternalAgentFileSymlink`: an AGENT.md link
+    /// pointing outside its definition directory is skipped, not followed.
+    #[test]
+    fn an_agent_file_symlink_out_of_the_directory_is_skipped() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let outside_root = tempfile::tempdir().expect("a temporary directory");
+        let directory = root.path().join("external");
+        std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
+        let outside = outside_root.path().join("AGENT.md");
+        std::fs::write(
+            &outside,
+            "---\nname: external\ndescription: outside description\n---\noutside body\n",
+        )
+        .expect("the outside file is writable");
+        std::os::unix::fs::symlink(&outside, directory.join("AGENT.md"))
+            .expect("the symbolic link is creatable");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert_eq!(catalog.len(), 0);
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+    }
+
+    /// Go's `TestDiscoverInternalAgentFileSymlink`: a relative link that stays
+    /// inside the definition directory is followed.
+    #[test]
+    fn an_agent_file_symlink_inside_the_directory_is_followed() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let directory = root.path().join("linked");
+        std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
+        std::fs::write(
+            directory.join("definition.md"),
+            "---\nname: linked\ndescription: internal\n---\ninternal body\n",
+        )
+        .expect("the target file is writable");
+        std::os::unix::fs::symlink("definition.md", directory.join("AGENT.md"))
+            .expect("the symbolic link is creatable");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        let definition = catalog.lookup("linked").expect("the linked definition");
+        assert_eq!(definition.description, "internal");
+        assert_eq!(definition.body, "internal body");
+    }
+
+    /// Go's `TestDiscoverSymlinkedDefinitionDirFollowed`: the definition
+    /// directory itself may be a link, and `directory` keeps the link path.
+    #[test]
+    fn a_symlinked_definition_directory_is_followed() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let real_root = tempfile::tempdir().expect("a temporary directory");
+        let real_directory = write_agent(real_root.path(), "linked", "", "linked body\n");
+        std::os::unix::fs::symlink(&real_directory, root.path().join("linked"))
+            .expect("the symbolic link is creatable");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        let definition = catalog.lookup("linked").expect("the linked definition");
+        assert_eq!(definition.body, "linked body");
+        assert_eq!(definition.directory, root.path().join("linked"));
+    }
+
+    /// Go's `TestDiscoverSkipsFIFOAgentFileWithoutBlocking`: the open must use
+    /// `O_NONBLOCK`, or a FIFO with no writer would hang discovery.
+    #[test]
+    fn a_fifo_agent_file_is_skipped_without_blocking() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let directory = root.path().join("fifo");
+        std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
+        nix::unistd::mkfifo(
+            &directory.join("AGENT.md"),
+            nix::sys::stat::Mode::from_bits_truncate(0o644),
+        )
+        .expect("the FIFO is creatable");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert_eq!(catalog.len(), 0);
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+    }
+
+    /// Go's `TestDiscoverRejectsOversizedAgentFile`.
+    #[test]
+    fn an_oversized_agent_file_is_rejected() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let directory = write_raw_agent(
+            root.path(),
+            "large",
+            "---\nname: large\ndescription: d\n---\nbody\n",
+        );
+        // A sparse file: the bytes are never written, only the length is set.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(directory.join("AGENT.md"))
+            .expect("AGENT.md is writable")
+            .set_len(MAX_AGENT_FILE_BYTES + 1)
+            .expect("the file is extendable");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert_eq!(catalog.len(), 0);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("too large"), "{warnings:?}");
+    }
+
+    /// Go's `TestDiscoverDirWithoutAgentMDIgnored` and
+    /// `TestDiscoverInvalidFrontmatterWarnsWithPath`.
+    #[test]
+    fn a_directory_without_agent_md_is_ignored_and_bad_frontmatter_names_its_path() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        std::fs::create_dir_all(root.path().join("notanagent"))
+            .expect("the directory is creatable");
+        let bad = write_raw_agent(root.path(), "bad", "no frontmatter here");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert_eq!(catalog.len(), 0);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains(&bad.join("AGENT.md").display().to_string()),
+            "{warnings:?}"
+        );
+    }
+
+    /// Go's `TestDefinitionsSorted` and `TestCatalogLookupHitAndMiss`.
+    #[test]
+    fn definitions_are_sorted_and_lookup_misses_an_unknown_name() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        write_agent(root.path(), "zebra", "", "body\n");
+        write_agent(root.path(), "alpha", "", "body\n");
+        write_agent(root.path(), "mid", "", "body\n");
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        let names: Vec<&str> = catalog
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert_eq!(names, ["alpha", "mid", "zebra"]);
+        assert!(catalog.lookup("alpha").is_some());
+        assert!(catalog.lookup("missing").is_none());
+    }
+
+    /// The discovery roots, in the precedence order the runner relies on.
+    #[test]
+    fn roots_put_the_home_directory_before_the_workspace() {
+        assert_eq!(
+            roots(Some(Path::new("/home/u")), Path::new("/w")),
+            vec![
+                PathBuf::from("/home/u/.otto/agents"),
+                PathBuf::from("/w/.otto/agents"),
+            ]
+        );
+        assert_eq!(
+            roots(None, Path::new("/w")),
+            vec![PathBuf::from("/w/.otto/agents")]
+        );
+    }
+}

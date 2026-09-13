@@ -6,7 +6,7 @@
 
 [简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md)
 
-**Otto is a local-first AI coding assistant for your terminal, built in Go.**
+**Otto is a local-first AI coding assistant for your terminal, built in Rust.**
 Read an unfamiliar codebase, make focused edits, and run checks in one session.
 Connect through an OpenAI-compatible API endpoint or sign in with `otto login`
 for the ChatGPT provider. Model requests go to the selected provider; local-first
@@ -21,14 +21,20 @@ refers to the runtime, session history, and memory storage.
 
 ## Install from source
 
-Requires **macOS and Go 1.26 or newer**, plus access to one of the two providers.
+Requires **macOS**, the pinned **Rust 1.98** toolchain (`rustup toolchain
+install` picks it up from `rust-toolchain.toml`), and access to one of the two
+providers.
 
 ```bash
 git clone https://github.com/baiyuqing/otto.git
 cd otto
-go build -trimpath -o ./otto ./cmd/otto
+make build
 ./otto --help
 ```
+
+`make build` embeds whatever is already in `ui/dist`. Run `make ui` first
+(needs Node 24+ and `wasm-pack` 0.15) to embed the real web UI; otherwise
+`otto serve` serves a one-line placeholder page at `/` instead of the UI.
 
 The examples below run `./otto` from this directory. Put the binary on your
 `PATH` to use `otto` from other directories.
@@ -165,14 +171,26 @@ access to a workspace.
 
 ## Contributing
 
+The code is a Cargo workspace of three crates:
+
+- `crates/otto-core` holds the provider contract, wire codecs, session codec,
+  agent loop, and config. It builds for `wasm32-unknown-unknown`.
+- `crates/otto` is the macOS binary: CLI, REPL, TUI, tools, sandbox, memory,
+  skills, sub-agents, and the `otto serve` server.
+- `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
+  `ui/`, so the web frontend and the binary share one implementation.
+
 See [AGENTS.md](AGENTS.md) for the task map and the
 [development guide](docs/development.md) for contracts and validation.
-Design documents live in [docs/specs](docs/specs/).
+Design documents live in [docs/specs](docs/specs/); the
+[Rust rewrite plan](docs/specs/2026-09-13-rust-rewrite-plan.md) records why the
+Go implementation (tagged `go-final`) was replaced.
 
 ```bash
 make build
-make check-fast  # quick core feedback; also run tests for the package you change
-make check       # full macOS acceptance, including race and PTY tests
+make check-fast  # rustfmt, clippy, focused otto-core tests
+make check       # full macOS acceptance: all tests, wasm, PTY, and web UI
+                 # (needs wasm-pack 0.15 and Node 24+)
 ```
 
 ## License

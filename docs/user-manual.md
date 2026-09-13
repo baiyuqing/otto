@@ -1,6 +1,6 @@
 # Otto User Manual
 
-Otto is a minimal macOS coding agent written in Go. It turns a natural-language
+Otto is a minimal macOS coding agent written in Rust. It turns a natural-language
 prompt into a loop of model completions, optional tool calls, and — when needed —
 context compaction, all in a full-screen TUI or a line-oriented REPL.
 
@@ -32,7 +32,8 @@ what the CLI actually does today.
 ## Prerequisites
 
 - macOS.
-- Go 1.26+ to build from source.
+- The pinned Rust 1.98 toolchain and Node 24+ to build from source (see
+  [Install from source](../README.md#install-from-source)).
 - One of:
   - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming, plus an API key exposed through an environment variable, or
   - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription)).
@@ -42,7 +43,7 @@ what the CLI actually does today.
 Build the binary:
 
 ```bash
-go build -trimpath -o ./otto ./cmd/otto
+make build
 ```
 
 Create `~/.config/otto/config.toml`:
@@ -271,6 +272,7 @@ Key points:
   still need a restart: `allow_env`, because the shell environment is fixed
   when the `bash` tool is built, and any change made when the sandbox was
   already unavailable at startup, because there is no `bash` tool to re-point.
+
 - `[skills]` discovers reusable instruction sets from configured roots and
   registers the `skill` tool when at least one skill is found. Config keys are
   `enabled` (default true) and `paths` (default `["~/.otto/skills", ".otto/skills"]`);
@@ -569,7 +571,7 @@ canonical workspace, even when `--sandbox off` is selected:
 
 - `read` reads UTF-8 text with optional line offsets and limits; files larger
   than 64 MiB are rejected before being read into memory.
-- `grep` searches file contents with Go RE2 regular expressions
+- `grep` searches file contents with RE2-style regular expressions
   (case-insensitive matching, optional `**` glob filtering, up to 100 matches by
   default, 1000 maximum).
 - `find` returns sorted regular-file paths matching `**` globs (up to 1000 by
@@ -936,7 +938,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessi
 ## Memory
 
 Otto has a local, per-workspace/per-user memory store backed by SQLite/FTS5
-(`internal/memory`, `internal/memory/sqlite`). It is enabled by default.
+(`crates/otto`'s `memory` module). It is enabled by default.
 
 Config (`[memory]` in TOML; all keys optional):
 

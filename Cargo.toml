@@ -62,4 +62,7 @@ serde-wasm-bindgen = "=0.6.5"
 # Dev-only: `ServiceExt::oneshot` drives the router in-process, so the route
 # contract tests need no listening socket.
 tower = { version = "=0.5.3", features = ["util"] }
+# Native-only. FTS5 must be compiled in, so the `bundled` feature builds the
+# amalgamation instead of linking the system libsqlite3.
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
 otto-core = { path = "crates/otto-core" }

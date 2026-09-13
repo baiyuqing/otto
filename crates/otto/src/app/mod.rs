@@ -325,6 +325,18 @@ impl Controller {
         &self.builder.auth_path
     }
 
+    /// The process-wide memory service and its scopes. `/memory` and
+    /// `/remember` read them through `Controller::memory_manager`.
+    pub(crate) fn memory_wiring(&self) -> &crate::cli::wiring::MemoryWiring {
+        &self.builder.memory
+    }
+
+    /// The runner currently in force. `/tasks` and `/task` read its sub-agent
+    /// task registry, Go's `taskOwner`.
+    pub(crate) fn current_runner(&self) -> Option<Arc<Runner>> {
+        self.runner().ok()
+    }
+
     pub fn config_path(&self) -> &PathBuf {
         &self.builder.config_path
     }

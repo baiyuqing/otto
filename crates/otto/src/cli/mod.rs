@@ -11,12 +11,15 @@ pub use crate::app as controller;
 pub mod flags;
 pub mod info;
 pub mod login;
+pub mod memory_command;
 pub mod prompt;
 pub mod repl;
+pub mod repl_commands;
 pub mod run;
 pub mod runtime_builder;
 pub mod sandbox_runtime;
 pub mod serve;
 #[cfg(test)]
 pub mod testutil;
+pub mod wiring;
 pub mod workspace_context;

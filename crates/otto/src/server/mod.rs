@@ -39,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::{self, Controller};
 use crate::cli::info::SandboxInfo;
 use metrics::{Metrics, SessionContext};
-use turn::{TRIGGER_USER, Turn};
+use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 
 /// Go's `server.ErrSessionNotFound`. A [`Factory::open`] that answers with
 /// exactly this text produces 404 `not_found` instead of 500.
@@ -184,6 +184,17 @@ fn quote(value: &str) -> String {
 pub struct OpenSession {
     ctrl: Arc<Controller>,
     state: Mutex<SessionState>,
+    /// Signaled after every turn on this session finishes. The wake loop is
+    /// the only waiter. Port of `openSession.turnFinished`, a capacity-1
+    /// channel: `Notify::notify_one` stores exactly one permit the same way,
+    /// so an end-of-turn signal raised while the loop is busy is not lost.
+    turn_finished: tokio::sync::Notify,
+    /// Cancelled by [`OpenSession::cancel_work`], which every close path
+    /// calls before closing the controller. Go's wake loop instead ends when
+    /// `Tasks().Updates()` closes; the Rust registry's `watch` sender is
+    /// owned by the registry and outlives the controller, so the loop needs
+    /// its own stop signal.
+    closed: CancellationToken,
 }
 
 #[derive(Default)]
@@ -200,6 +211,8 @@ impl OpenSession {
         Arc::new(Self {
             ctrl: Arc::new(ctrl),
             state: Mutex::new(SessionState::default()),
+            turn_finished: tokio::sync::Notify::new(),
+            closed: CancellationToken::new(),
         })
     }
 
@@ -214,8 +227,10 @@ impl OpenSession {
     }
 
     /// Cancels the running turn or compaction so a following close does not
-    /// wait on a provider call. Port of `openSession.cancelWork`.
+    /// wait on a provider call, and stops the wake loop. Port of
+    /// `openSession.cancelWork`.
     fn cancel_work(&self) {
+        self.closed.cancel();
         let state = self.lock();
         if let Some(turn) = state.turn.as_ref() {
             turn.cancel();
@@ -241,6 +256,9 @@ pub struct Server {
     /// ponytail: one gate for every id instead of Go's per-id placeholder.
     /// Resuming is an admin-rate path; make it per-id if it ever contends.
     open_gate: tokio::sync::Mutex<()>,
+    /// One handle per running wake loop, awaited by [`Server::close`]. Port
+    /// of `Server.wakeWG`.
+    wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
 }
 
@@ -254,6 +272,7 @@ impl Server {
             metrics: Arc::new(Metrics::new()),
             sessions: Mutex::new(HashMap::new()),
             open_gate: tokio::sync::Mutex::new(()),
+            wake_loops: Mutex::new(Vec::new()),
             cancel: CancellationToken::new(),
         })
     }
@@ -297,6 +316,17 @@ impl Server {
             }
         }
         self.metrics.sessions_open(-(sessions.len() as i64));
+        // Go's `s.wakeWG.Wait()`: every loop was told to stop by
+        // `cancel_work` above, so this only waits out an in-flight wake turn.
+        let loops: Vec<_> = std::mem::take(
+            &mut *self
+                .wake_loops
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+        );
+        for handle in loops {
+            let _ = handle.await;
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -376,7 +406,7 @@ impl Server {
             .collect()
     }
 
-    fn register(&self, ctrl: Controller) -> Arc<OpenSession> {
+    fn register(self: &Arc<Self>, ctrl: Controller) -> Arc<OpenSession> {
         let id = ctrl.info().session_id;
         let session = OpenSession::new(ctrl);
         self.sessions
@@ -384,12 +414,16 @@ impl Server {
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(id, Arc::clone(&session));
         self.metrics.sessions_open(1);
+        self.start_wake_loop(&session);
         session
     }
 
     /// Port of `Server.resumeOrCreate`. A hit in the registry returns the
     /// existing session without calling `open` again.
-    async fn resume_or_create(&self, id: &str) -> Result<(Arc<OpenSession>, bool), String> {
+    async fn resume_or_create(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> Result<(Arc<OpenSession>, bool), String> {
         if id.is_empty() {
             let ctrl = self.factory.create().await?;
             return Ok((self.register(ctrl), true));
@@ -464,11 +498,143 @@ impl Server {
 
     // ---- turns ----
 
-    /// Starts a user turn on `session`. Port of `Server.startTurn` with the
-    /// `trigger == triggerTask` branch omitted, together with Go's
-    /// `startWakeLoop`: the server does not yet drive its own wake turns from
-    /// the task registry. The REPL does, through
-    /// [`crate::app::Controller::prepare_wake`].
+    /// Drains `session`'s pending sub-agent notifications for as long as it
+    /// is open. Port of `Server.startWakeLoop`.
+    ///
+    /// It is the sole caller of [`Server::wake_turn`]: both a registry update
+    /// signal and the end of any turn on `session` route through this one
+    /// task, so every "is a notification pending and no turn active" check
+    /// happens one at a time and no two wake turns can start for the same
+    /// notification. On every update signal it also diffs the task list into
+    /// the task metrics. It does nothing when the runner tracks no tasks.
+    ///
+    /// Divergence from Go, which starts the wake turn in its own goroutine
+    /// and re-checks through `turnFinished`: the turn is awaited here
+    /// instead. A notification pushed while it runs bumps the registry's
+    /// `watch` version, so the next `changed()` returns at once and the
+    /// re-check happens anyway, with one fewer moving part.
+    fn start_wake_loop(self: &Arc<Self>, session: &Arc<OpenSession>) {
+        let Some(tasks) = session.ctrl.subagent_tasks() else {
+            return;
+        };
+        let server = Arc::clone(self);
+        let session = Arc::clone(session);
+        let handle = tokio::spawn(async move {
+            let mut seen = std::collections::BTreeMap::new();
+            let mut updates = tasks.updates();
+            loop {
+                tokio::select! {
+                    changed = updates.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        if let Some(view) = session.ctrl.tasks() {
+                            server.metrics.diff_tasks(&mut seen, &view.list());
+                        }
+                    }
+                    () = session.turn_finished.notified() => {}
+                    () = session.closed.cancelled() => return,
+                    () = server.cancel.cancelled() => return,
+                }
+                server.wake_turn(&session).await;
+            }
+        });
+        let mut loops = self
+            .wake_loops
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        // A deleted session's loop has already returned; Go's WaitGroup
+        // counter drops on its own, this list does not.
+        loops.retain(|running| !running.is_finished());
+        loops.push(handle);
+    }
+
+    /// Runs one task-triggered turn on `session` when a notification is
+    /// pending and nothing else holds the session. Port of the `trigger ==
+    /// triggerTask` branch of `Server.startTurn`.
+    ///
+    /// The wake is prepared before the turn is published, so a no-op or busy
+    /// admission cannot leave a phantom turn visible on `GET /v1/sessions`.
+    /// A busy session is Go's `errTurnActive`, which its wake loop ignores.
+    async fn wake_turn(self: &Arc<Self>, session: &Arc<OpenSession>) {
+        let prepared = {
+            let mut state = session.lock();
+            let busy = state.turn.as_ref().is_some_and(|turn| !turn.is_done());
+            if busy || state.compacting.is_some() {
+                None
+            } else {
+                match session.ctrl.prepare_wake() {
+                    Ok(None) => None,
+                    Ok(Some(wake)) => match new_id() {
+                        Ok(id) => {
+                            let turn =
+                                Arc::new(Turn::new(id, TRIGGER_TASK, self.cancel.child_token()));
+                            state.turn = Some(Arc::clone(&turn));
+                            Some(Ok((turn, wake)))
+                        }
+                        Err(error) => Some(Err(error)),
+                    },
+                    // A prompt or a close raced us; both are Go's ignored
+                    // `errTurnActive` and `ErrClosed` shutdown path.
+                    Err(message) if message == app::PROMPT_ACTIVE || message == app::CLOSED => None,
+                    Err(message) => Some(Err(message)),
+                }
+            }
+        };
+        let (turn, wake) = match prepared {
+            None => return,
+            Some(Err(message)) => {
+                self.log.error("wake_turn_error", &[("error", message)]);
+                return;
+            }
+            Some(Ok(prepared)) => prepared,
+        };
+
+        self.metrics.turn_started();
+        self.log.info(
+            "turn_started",
+            &[
+                ("turn_id", turn.id.clone()),
+                ("trigger", TRIGGER_TASK.to_string()),
+            ],
+        );
+        let cancel = turn.cancel_token();
+        let result = {
+            let mut emit = turn.emitter(&self.metrics);
+            wake.run(&mut emit, &cancel).await
+        };
+        let (error, canceled) = match &result {
+            Ok(()) => (None, false),
+            Err(error) => (Some(error.to_string()), error.is_cancelled()),
+        };
+        turn.finish(error.clone(), canceled);
+        let summary = turn.summary();
+        self.metrics.turn_finished(&summary.status, turn.elapsed());
+        if let Some(message) = error.filter(|_| !canceled) {
+            self.log.error(
+                "turn_error",
+                &[
+                    ("turn_id", turn.id.clone()),
+                    ("trigger", TRIGGER_TASK.to_string()),
+                    ("error", message),
+                ],
+            );
+        }
+        self.log.info(
+            "turn_finished",
+            &[
+                ("turn_id", turn.id.clone()),
+                ("trigger", TRIGGER_TASK.to_string()),
+                ("status", summary.status.clone()),
+                ("duration_ms", turn.elapsed().as_millis().to_string()),
+            ],
+        );
+    }
+
+    /// Starts a user turn on `session`. Port of `Server.startTurn`; the
+    /// `trigger == triggerTask` branch lives in [`Server::wake_turn`],
+    /// because a wake turn needs no HTTP reply and is awaited by the wake
+    /// loop that admitted it.
     fn start_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
@@ -525,10 +691,10 @@ impl Server {
                     ("duration_ms", spawned.elapsed().as_millis().to_string()),
                 ],
             );
-            // ponytail: Go also signals openSession.turnFinished so the wake
-            // loop can retry a late task notification. `Server.startWakeLoop`
-            // and the `triggerTask` branch of `startTurn` are not ported, so
-            // there is nothing to signal.
+            // Go's `os.turnFinished <- struct{}{}`: a notification that
+            // landed too late for this turn's own drain is caught by the
+            // wake loop's end-of-turn check.
+            session.turn_finished.notify_one();
         });
 
         self.log.info(
@@ -1237,11 +1403,20 @@ mod tests {
         /// Held after the deltas until cancelled, so the turn stays running.
         /// Cancelling the turn wins the race and yields `Cancelled`.
         gate: Option<CancellationToken>,
+        /// Runs at the top of every call with the 1-based call index, the way
+        /// Go's fake runner body does. The wake tests push a notification
+        /// from it.
+        on_call: Option<Box<dyn Fn(usize) + Send + Sync>>,
     }
 
     struct ScriptedProvider {
         script: Script,
         started: watch::Sender<usize>,
+        /// The role of each call's last request message, in call order. A
+        /// prompt turn ends in [`Role::User`]; a wake turn ends in the
+        /// delivered notification's [`Role::Context`]. Go asserts on the
+        /// `Prompt` text instead, which a provider-level double never sees.
+        roles: Mutex<Vec<Role>>,
     }
 
     impl ScriptedProvider {
@@ -1249,7 +1424,15 @@ mod tests {
             Arc::new(Self {
                 script,
                 started: watch::channel(0).0,
+                roles: Mutex::new(Vec::new()),
             })
+        }
+
+        fn roles(&self) -> Vec<Role> {
+            self.roles
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clone()
         }
 
         /// Resolves once `count` calls have reached the gate.
@@ -1267,6 +1450,22 @@ mod tests {
             emit: StreamSink<'_>,
             cancel: &CancellationToken,
         ) -> Result<ProviderResponse, ProviderError> {
+            let call = {
+                let mut roles = self
+                    .roles
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                roles.push(
+                    request
+                        .messages
+                        .last()
+                        .map_or(Role::User, |last| last.role.clone()),
+                );
+                roles.len()
+            };
+            if let Some(hook) = &self.script.on_call {
+                hook(call);
+            }
             let deltas: Vec<String> = if self.script.echo {
                 vec![
                     request
@@ -1323,6 +1522,9 @@ mod tests {
         /// Held before `open` returns, so a test can pile up concurrent
         /// resumes of one id.
         open_gate: Option<CancellationToken>,
+        /// Every controller shares this registry, the way Go's wake tests
+        /// share one `agent.Tasks`. `None` gives each its own.
+        tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
         list: Option<ListResult>,
         create_calls: AtomicUsize,
         open_calls: AtomicUsize,
@@ -1342,7 +1544,9 @@ mod tests {
             let runner = Runner::scripted(
                 session.clone(),
                 Arc::clone(&self.provider) as Arc<dyn Provider + Send + Sync>,
-                Arc::new(crate::subagent::tasks::Tasks::new()),
+                self.tasks
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(crate::subagent::tasks::Tasks::new())),
             );
             Controller::with_builder(
                 Arc::clone(&self.builder),
@@ -1417,6 +1621,7 @@ mod tests {
         open_error: Option<String>,
         open_gate: Option<CancellationToken>,
         list: Option<ListResult>,
+        tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
         token: String,
         info: Info,
     }
@@ -1449,6 +1654,7 @@ mod tests {
                 open_error: options.open_error,
                 open_gate: options.open_gate,
                 list: options.list,
+                tasks: options.tasks,
                 create_calls: AtomicUsize::new(0),
                 open_calls: AtomicUsize::new(0),
             });
@@ -2591,6 +2797,144 @@ mod tests {
             .await;
         assert_eq!(repeat.status, StatusCode::CONFLICT);
         assert_eq!(repeat.json()["error"]["code"], "task_done");
+    }
+
+    // ---- wake turns ----
+
+    /// A harness whose every controller shares `tasks`, plus the registry.
+    /// Port of `newTaskTestController`'s shared `agent.Tasks`.
+    fn wake_harness(script: Script) -> (Harness, Arc<crate::subagent::tasks::Tasks>) {
+        let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+        let harness = Harness::with(HarnessOptions {
+            script,
+            tasks: Some(Arc::clone(&tasks)),
+            ..HarnessOptions::default()
+        });
+        (harness, tasks)
+    }
+
+    fn notification() -> otto_core::agent::inbox::Notification {
+        otto_core::agent::inbox::Notification {
+            task_id: "t1".to_string(),
+            kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
+            text: "done".to_string(),
+            usage: None,
+        }
+    }
+
+    /// Port of `TestWakeTurnStartsOnPendingNotificationWhenIdle`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pending_notification_starts_a_wake_turn_while_idle() {
+        let (harness, tasks) = wake_harness(Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        });
+        let id = harness.create().await;
+
+        tasks.notifications().push(notification());
+
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+            .await
+            .expect("the pending notification did not start a wake turn");
+        assert_eq!(harness.provider.roles(), vec![Role::Context]);
+
+        let session = harness
+            .send("GET", &format!("/v1/sessions/{id}"), None)
+            .await;
+        let turn = session.json()["turn"].clone();
+        assert_eq!(turn["trigger"], turn::TRIGGER_TASK, "{}", session.body);
+        let turn_id = turn["id"].as_str().expect("turn id").to_string();
+
+        let done = harness.wait_turn_done(&id, &turn_id).await;
+        assert_eq!(done["trigger"], turn::TRIGGER_TASK);
+    }
+
+    /// Port of `TestWakeTurnSkippedWhileUserTurnActive`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_notification_during_a_user_turn_waits_for_it_to_finish() {
+        let gate = CancellationToken::new();
+        let (harness, tasks) = wake_harness(Script {
+            deltas: vec!["ok".to_string()],
+            gate: Some(gate.clone()),
+            ..Script::default()
+        });
+        let id = harness.create().await;
+        let (_stream, _turn_id) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+
+        // A notification while the user turn is active must not start a
+        // second turn: the active turn's own inbox drain handles it.
+        tasks.notifications().push(notification());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(harness.provider.roles(), vec![Role::User]);
+
+        gate.cancel();
+
+        // The user turn's end-of-turn check finds the notification still
+        // pending and starts exactly one wake turn.
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(2))
+            .await
+            .expect("the finished user turn did not start a wake turn");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(harness.provider.roles(), vec![Role::User, Role::Context]);
+    }
+
+    /// Port of `TestWakeTurnFollowsUserTurnFinishingWithPendingNotification`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_notification_landing_as_a_user_turn_ends_starts_one_wake_turn() {
+        let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+        let pusher = Arc::clone(&tasks);
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                deltas: vec!["ok".to_string()],
+                // The notification lands during the parent's last provider
+                // call, so the turn's own drain never sees it.
+                on_call: Some(Box::new(move |call| {
+                    if call == 1 {
+                        pusher
+                            .notifications()
+                            .push(otto_core::agent::inbox::Notification {
+                                task_id: "t1".to_string(),
+                                kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
+                                text: "done".to_string(),
+                                usage: None,
+                            });
+                    }
+                })),
+                ..Script::default()
+            },
+            tasks: Some(Arc::clone(&tasks)),
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(r#"{"text":"hi","stream":false}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(2))
+            .await
+            .expect("the late notification did not start a wake turn");
+        // Give an incorrect extra wake turn a chance to start.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(harness.provider.roles(), vec![Role::User, Role::Context]);
+    }
+
+    /// Port of `TestServerCloseEndsWakeLoop`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn closing_the_server_ends_the_wake_loop() {
+        let (harness, _tasks) = wake_harness(Script::default());
+        harness.create().await;
+
+        tokio::time::timeout(Duration::from_secs(2), harness.server.close())
+            .await
+            .expect("close did not return; the wake loop leaked")
+            .expect("close");
     }
 
     // ---- the web UI ----

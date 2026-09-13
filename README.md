@@ -33,8 +33,8 @@ make build
 ```
 
 `make build` embeds whatever is already in `ui/dist`. Run `make ui` first
-(needs Node 24+) to embed the real web UI; otherwise `otto serve` serves a
-one-line placeholder page at `/` instead of the UI.
+(needs Node 24+ and `wasm-pack` 0.15) to embed the real web UI; otherwise
+`otto serve` serves a one-line placeholder page at `/` instead of the UI.
 
 The examples below run `./otto` from this directory. Put the binary on your
 `PATH` to use `otto` from other directories.
@@ -171,14 +171,26 @@ access to a workspace.
 
 ## Contributing
 
+The code is a Cargo workspace of three crates:
+
+- `crates/otto-core` holds the provider contract, wire codecs, session codec,
+  agent loop, and config. It builds for `wasm32-unknown-unknown`.
+- `crates/otto` is the macOS binary: CLI, REPL, TUI, tools, sandbox, memory,
+  skills, sub-agents, and the `otto serve` server.
+- `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
+  `ui/`, so the web frontend and the binary share one implementation.
+
 See [AGENTS.md](AGENTS.md) for the task map and the
 [development guide](docs/development.md) for contracts and validation.
-Design documents live in [docs/specs](docs/specs/).
+Design documents live in [docs/specs](docs/specs/); the
+[Rust rewrite plan](docs/specs/2026-09-13-rust-rewrite-plan.md) records why the
+Go implementation (tagged `go-final`) was replaced.
 
 ```bash
 make build
-make check-fast  # quick core feedback; also run tests for the package you change
-make check       # full macOS acceptance, including wasm and PTY tests
+make check-fast  # rustfmt, clippy, focused otto-core tests
+make check       # full macOS acceptance: all tests, wasm, PTY, and web UI
+                 # (needs wasm-pack 0.15 and Node 24+)
 ```
 
 ## License

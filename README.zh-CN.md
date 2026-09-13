@@ -28,7 +28,8 @@ make build
 ```
 
 `make build` 会把 `ui/dist` 中已有的内容嵌入二进制。若要嵌入完整的 Web UI，
-需先运行 `make ui`（需要 Node 24+）；否则 `otto serve` 的 `/` 只会返回一行占位文本。
+需先运行 `make ui`（需要 Node 24+ 和 `wasm-pack` 0.15）；否则 `otto serve` 的 `/`
+只会返回一行占位文本。
 
 以下命令在该目录中运行。将二进制文件放入 `PATH` 后，可以在其他目录直接使用 `otto`。
 
@@ -103,7 +104,15 @@ Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏�
 
 ## 参与贡献
 
-开发约定和检查命令见 [AGENTS.md](AGENTS.md)。
+代码是一个包含三个 crate 的 Cargo workspace：
+
+- `crates/otto-core`：provider 契约、wire 编解码、会话编解码、agent 循环和配置，可编译到 `wasm32-unknown-unknown`。
+- `crates/otto`：macOS 二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理和 `otto serve`。
+- `crates/otto-web`：把 `otto-core` 编译为 WebAssembly 供 `ui/` 中的浏览器前端使用，前端与二进制共用同一份实现。
+
+开发约定和检查命令见 [AGENTS.md](AGENTS.md)，包契约见[开发指南（英文）](docs/development.md)。
+`make check` 需要 `wasm-pack` 0.15 和 Node 24+。Go 实现的替换原因见
+[Rust 重写计划](docs/specs/2026-09-13-rust-rewrite-plan.md)，最后一个 Go 版本的 tag 为 `go-final`。
 
 ## 许可证
 

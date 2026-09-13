@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/otto-core", "crates/otto", "crates/otto-web"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Exact versions. otto-core must stay buildable for wasm32-unknown-unknown, so
+# every dependency it takes is default-features = false unless a feature is
+# required by name.
+[workspace.dependencies]
+async-trait = "=0.1.92"
+chrono = { version = "=0.4.45", default-features = false, features = ["serde"] }
+serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std", "raw_value"] }
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.1", default-features = false }
+tokio-util = { version = "=0.7.19", default-features = false }
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-test = "=0.3.78"
+otto-core = { path = "crates/otto-core" }

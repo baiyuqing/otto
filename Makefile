@@ -8,7 +8,7 @@ STATICCHECK_VERSION := v0.8.1
 STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
 CORE_PACKAGES := ./internal/model ./internal/agent ./internal/app ./internal/provider/... ./internal/config ./internal/skill ./internal/subagent
 
-.PHONY: all build fmt fmt-fix vet lint test test-core test-architecture test-race test-tui check-fast check ui ui-test clean help
+.PHONY: all build fmt fmt-fix vet lint test test-core test-architecture test-race test-tui check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test rust-check clean help
 
 all: build
 
@@ -51,6 +51,28 @@ ui: ## build the web UI into internal/server/ui/dist (needs Node 24+)
 ui-test: ## run the web UI unit tests (needs Node 24+)
 	cd ui && npm ci && npm test
 
+# Rust rewrite gates (docs/specs/2026-09-13-rust-rewrite-plan.md). They are
+# deliberately not part of check/check-fast: the Go binary is the shipped
+# binary until the parity switch.
+rust-fmt: ## fail if any Rust file is not rustfmt-formatted
+	cargo fmt --all -- --check
+
+rust-lint: ## run clippy across the Rust workspace with warnings as errors
+	cargo clippy --workspace --all-targets -- -D warnings
+
+rust-test: ## run the native Rust test suite
+	cargo test --workspace
+
+rust-wasm-check: ## verify otto-core and otto-web still build for wasm32
+	cargo check -p otto-core --target wasm32-unknown-unknown
+	cargo check -p otto-web --target wasm32-unknown-unknown
+
+rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
+	wasm-pack test --node crates/otto-core
+	wasm-pack test --node crates/otto-web
+
+rust-check: rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test ## all Rust gates
+
 check-fast: fmt vet test-architecture test-core ## quick feedback; run targeted package tests too
 	@git diff --check
 
@@ -61,4 +83,4 @@ clean: ## remove the built binary
 	rm -f ./$(BINARY)
 
 help: ## list targets
-	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make [target]\n\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make [target]\n\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

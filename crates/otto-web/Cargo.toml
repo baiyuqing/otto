@@ -1,0 +1,20 @@
+[package]
+name = "otto-web"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+otto-core.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

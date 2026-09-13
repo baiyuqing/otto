@@ -577,8 +577,8 @@ canonical workspace, even when `--sandbox off` is selected:
 - `ls` lists one directory level in sorted order; directories end in `/` and
   symlinks in `@`.
 - `write` writes a complete file atomically.
-- `edit` requires exactly one exact text match and shares the 64 MiB size limit
-  with `read`.
+- `edit` replaces one or more unique text matches and shares the 64 MiB size
+  limit with `read`.
 
 Recursive `grep` and `find` skip `.git` and discovered symlinks but include
 other dotfiles. Binary files, invalid UTF-8 files, and files with lines larger

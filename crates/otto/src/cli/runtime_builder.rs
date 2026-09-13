@@ -26,7 +26,7 @@ use otto_core::model::{Message, ToolDefinition};
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, MemorySession,
-    RuntimeMetadata, Session, SessionError,
+    RuntimeMetadata, Session, SessionError, Snapshot,
 };
 use otto_core::tool::ToolExecutor;
 use tokio_util::sync::CancellationToken;
@@ -68,6 +68,13 @@ pub trait SessionHandle: Session + Send + Sync {
     fn rename(&self, name: &str) -> Result<(), String>;
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String>;
     fn close(&self) -> Result<(), String>;
+
+    /// The usage and context-window counters a frontend displays. A
+    /// transcript that keeps no counters reports zeroes, which is what Go's
+    /// `session.SnapshotProvider` type assertion yields when it fails.
+    fn snapshot(&self) -> Snapshot {
+        Snapshot::default()
+    }
 }
 
 impl SessionHandle for Store {
@@ -93,6 +100,10 @@ impl SessionHandle for Store {
 
     fn close(&self) -> Result<(), String> {
         Store::close(self).map_err(|error| error.to_string())
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Store::snapshot(self)
     }
 }
 
@@ -231,6 +242,10 @@ impl SharedSession {
     pub fn close(&self) -> Result<(), String> {
         self.0.close()
     }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.0.snapshot()
+    }
 }
 
 #[async_trait::async_trait]
@@ -265,6 +280,10 @@ pub enum ProviderClient {
     Compat(Arc<Client>),
     ChatGpt(Arc<crate::provider::chatgpt::Client>),
     Unavailable,
+    /// Test seam. Go's server tests inject an `app.Runner` double; `Runner`
+    /// is a concrete struct here, so the seam sits one layer down.
+    #[cfg(test)]
+    Scripted(Arc<dyn Provider + Send + Sync>),
 }
 
 #[async_trait::async_trait]
@@ -281,6 +300,8 @@ impl Provider for ProviderClient {
             Self::Unavailable => Err(ProviderError::Other(
                 "provider is unavailable: redaction is incomplete".to_string(),
             )),
+            #[cfg(test)]
+            Self::Scripted(provider) => provider.complete(request, emit, cancel).await,
         }
     }
 }
@@ -333,6 +354,29 @@ impl Runner {
     /// by whoever owns it.
     pub fn close(&self) {
         let _ = self.agent.close();
+    }
+
+    /// A runner with no tools whose provider the test supplies. See
+    /// [`ProviderClient::Scripted`].
+    #[cfg(test)]
+    pub fn scripted(session: SharedSession, provider: Arc<dyn Provider + Send + Sync>) -> Self {
+        let registry = Registry::new(Vec::new()).expect("empty registry");
+        let definitions = registry.definitions();
+        Self {
+            agent: Agent::new(
+                ProviderClient::Scripted(provider),
+                registry,
+                session,
+                Options {
+                    model: "test-model".to_string(),
+                    provider_name: "openai-compatible".to_string(),
+                    now: Box::new(Utc::now),
+                    ..Options::default()
+                },
+            ),
+            system_prompt: String::new(),
+            definitions,
+        }
     }
 }
 
@@ -583,6 +627,8 @@ impl Builder {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
             ProviderClient::Unavailable => None,
+            #[cfg(test)]
+            ProviderClient::Scripted(_) => None,
         };
         let options = Options {
             model: runtime.model.clone(),
@@ -718,7 +764,7 @@ pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<Stri
 }
 
 /// 16 random bytes from `/dev/urandom`, hex encoded. Port of `randomID`.
-fn random_id() -> std::io::Result<String> {
+pub(super) fn random_id() -> std::io::Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;

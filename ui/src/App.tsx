@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, events, loadToken, setToken } from './api'
 import { parseWebCommand, supportedCommands } from './commands'
-import { fromHistory, reduce, type Item } from './transcript'
-import type { Info, Session, SessionListRow, Usage } from './types'
+import { fromHistory, reduce, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
 import { SessionPicker } from './SessionPicker'
 import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
@@ -94,7 +93,7 @@ export function App() {
       let last = -1
       try {
         for (;;) {
-          for await (const { seq, event } of events(res)) {
+          for await (const { seq, event, raw } of events(res)) {
             last = seq
             if (event.type === 'provider_usage' && event.usage) {
               const u = event.usage
@@ -105,7 +104,7 @@ export function App() {
               }))
             }
             if (event.type === 'notification') setTasksKey((k) => k + 1)
-            setItems((prev) => reduce(prev, event))
+            setItems((prev) => reduce(prev, raw))
           }
           const s = await api.getSession(sessionId)
           setSession(s)

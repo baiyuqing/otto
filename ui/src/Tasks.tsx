@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
-import type { Task } from './types'
+import type { Task } from './wire'
 
 const active = (t: Task) => t.status === 'queued' || t.status === 'running'
 

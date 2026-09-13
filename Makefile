@@ -44,11 +44,15 @@ test-tui: ## run the TUI PTY lifecycle smoke test
 
 # The web UI needs Node and is not part of check/check-fast; `go build`
 # embeds whatever internal/server/ui/dist holds (a placeholder when unbuilt).
-ui: ## build the web UI into internal/server/ui/dist (needs Node 24+)
+# ui/src imports the SSE reader, the transcript reducer and the wire types
+# from crates/otto-web, so the wasm package has to exist before vite runs.
+ui: ## build the web UI into internal/server/ui/dist (needs Node 24+ and wasm-pack)
 	rm -rf internal/server/ui/dist/assets internal/server/ui/dist/index.html
+	wasm-pack build --target web crates/otto-web
 	cd ui && npm ci && npm run build
 
-ui-test: ## run the web UI unit tests (needs Node 24+)
+ui-test: ## run the web UI unit tests (needs Node 24+ and wasm-pack)
+	wasm-pack build --target web crates/otto-web
 	cd ui && npm ci && npm test
 
 # Rust rewrite gates (docs/specs/2026-09-13-rust-rewrite-plan.md). They are

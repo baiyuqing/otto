@@ -13,7 +13,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 otto-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde-wasm-bindgen.workspace = true
 wasm-bindgen.workspace = true
 
 [dev-dependencies]

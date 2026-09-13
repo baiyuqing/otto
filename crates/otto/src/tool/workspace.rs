@@ -29,9 +29,11 @@
 //! Errors: all failures are `std::io::Error`; escapes use
 //! [`std::io::ErrorKind::InvalidInput`] with the Go message text.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
@@ -49,6 +51,10 @@ pub struct Workspace {
     root: PathBuf,
     lexical_root: PathBuf,
     root_fs: Root,
+    /// One mutex per root-relative path so that `write` and `edit`, which
+    /// subagents share with the parent agent, never interleave a
+    /// read-modify-write on the same file. Port of `Workspace.mutations`.
+    mutations: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Workspace {
@@ -68,7 +74,25 @@ impl Workspace {
             root: resolved,
             lexical_root,
             root_fs,
+            mutations: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Waits until no other `write` or `edit` holds `key`, then returns the
+    /// guard that releases it. `key` is the root-relative name returned by
+    /// [`Workspace::write_relative`], so both tools lock the same entry for the
+    /// same file. Port of `Workspace.lockPath`.
+    // ponytail: entries live for the workspace lifetime; add ref-counted
+    // cleanup if path churn matters.
+    pub(crate) async fn lock_path(&self, key: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut mutations = self
+                .mutations
+                .lock()
+                .expect("the lock table is never poisoned");
+            Arc::clone(mutations.entry(key.to_path_buf()).or_default())
+        };
+        lock.lock_owned().await
     }
 
     /// The canonical absolute root directory. Every resolved path is inside it.

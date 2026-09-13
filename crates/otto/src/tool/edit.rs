@@ -3,25 +3,27 @@
 //! Replaces one uniquely matching fragment per edit in a workspace file. A
 //! match is tried exactly first and then over a whitespace- and
 //! punctuation-normalized view of both sides, so text copied through a
-//! terminal or a chat client still applies. An ambiguous or missing match is
-//! an error rather than a guess.
+//! terminal or a chat client still applies. An inexact match rewrites only the
+//! span of `old_text` that `new_text` changes, so the file keeps the bytes the
+//! normalization folded away. An ambiguous or missing match is an error rather
+//! than a guess.
 //!
-//! Ownership: the tool borrows its workspace. Concurrency: edits to one
-//! resolved path are serialized through a process-wide queue keyed by the
-//! canonical path, so two concurrent edits cannot interleave read and write.
+//! Ownership: the tool borrows its workspace. Concurrency: mutations of one
+//! path are serialized through the workspace's per-path lock, which `write`
+//! shares, so two concurrent mutations cannot interleave read and write.
 //! Errors: every failure is returned in band as an error [`ToolResult`].
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::path::Path;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
+use serde::Deserialize;
+use serde_json::json;
 use serde_json::value::RawValue;
-use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::read::read_validated_text_file;
+use super::result::decode_strict_json;
 use super::workspace::Workspace;
 use super::write::write_file_atomic;
 use super::{Tool, definition, error_result, text_result};
@@ -31,10 +33,31 @@ const DIFF_CONTEXT_LINES: usize = 3;
 /// The largest diff returned to the model before it is cut on a line boundary.
 const MAX_DIFF_BYTES: usize = 4096;
 
-#[derive(Debug, Default)]
-struct EditArgs {
+/// The wire shape of edit arguments. Port of `editRequest`: optional fields
+/// distinguish an absent key from an empty string so that `"new_text": ""`
+/// stays a valid deletion. Exactly one of `old_text`/`new_text` or `edits`
+/// must be present.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditRequest {
+    #[serde(default)]
     path: String,
-    edits: Vec<EditReplacement>,
+    #[serde(default)]
+    old_text: Option<String>,
+    #[serde(default)]
+    new_text: Option<String>,
+    #[serde(default)]
+    edits: Option<Vec<EditRequestItem>>,
+}
+
+/// One entry of the `edits` array. Port of `editRequestItem`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditRequestItem {
+    #[serde(default)]
+    old_text: Option<String>,
+    #[serde(default)]
+    new_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,11 +66,54 @@ struct EditReplacement {
     new_text: String,
 }
 
+/// A replacement located in the LF-normalized file content. `text` uses LF
+/// line endings; the file's own newline style is restored on write. Port of
+/// `resolvedEdit`.
 #[derive(Debug)]
 struct ResolvedEdit {
     start: usize,
     end: usize,
     text: String,
+}
+
+impl EditRequest {
+    /// Port of `editRequest.replacements`.
+    fn replacements(&self) -> Result<Vec<EditReplacement>, String> {
+        if self.edits.is_some() && (self.old_text.is_some() || self.new_text.is_some()) {
+            return Err(
+                "invalid arguments: pass either old_text and new_text or edits, not both"
+                    .to_owned(),
+            );
+        }
+        let Some(edits) = &self.edits else {
+            return Ok(vec![replacement(
+                self.old_text.as_deref(),
+                self.new_text.as_deref(),
+            )?]);
+        };
+        if edits.is_empty() {
+            return Err("invalid argument edits: must contain at least one replacement".to_owned());
+        }
+        edits
+            .iter()
+            .map(|item| replacement(item.old_text.as_deref(), item.new_text.as_deref()))
+            .collect()
+    }
+}
+
+/// Port of `editRequestItem.replacement`.
+fn replacement(old_text: Option<&str>, new_text: Option<&str>) -> Result<EditReplacement, String> {
+    let old_text = match old_text {
+        Some(text) if !text.is_empty() => text.to_owned(),
+        _ => return Err("missing required argument: old_text".to_owned()),
+    };
+    let Some(new_text) = new_text else {
+        return Err("missing required argument: new_text".to_owned());
+    };
+    Ok(EditReplacement {
+        old_text,
+        new_text: new_text.to_owned(),
+    })
 }
 
 /// Replaces text in a workspace file.
@@ -60,19 +126,19 @@ impl<'a> EditTool<'a> {
         Self { workspace }
     }
 
-    fn execute_locked(&self, args: &EditArgs) -> ToolResult {
-        let path = Path::new(&args.path);
+    fn execute_locked(&self, rel_path: &str, edits: &[EditReplacement]) -> ToolResult {
+        let path = Path::new(rel_path);
         let file = match self.workspace.open(path) {
             Ok(file) => file,
             Err(error) => return error_result(error),
         };
-        let text = match read_validated_text_file(file, &args.path) {
+        let text = match read_validated_text_file(file, rel_path) {
             Ok(text) => text,
             Err(message) => return error_result(message),
         };
 
-        let replaced = match apply_text_edits(&text, &args.path, &args.edits) {
-            Ok(replaced) => replaced,
+        let (replaced, diff) = match apply_text_edits(&text, rel_path, edits) {
+            Ok(applied) => applied,
             Err(message) => return error_result(message),
         };
 
@@ -83,19 +149,28 @@ impl<'a> EditTool<'a> {
         if let Err(message) = write_file_atomic(self.workspace, &relative, replaced.as_bytes()) {
             return error_result(message);
         }
-        text_result(format!(
-            "edited {}\n{}",
-            args.path,
-            edit_diff(&display_edit_text(&text), &display_edit_text(&replaced))
-        ))
+        text_result(format!("edited {rel_path}\n{diff}"))
     }
 }
 
 /// The schema advertised for `edit`.
 pub fn edit_definition() -> ToolDefinition {
+    let old_text = json!({
+        "type": "string",
+        "description": "Existing text to replace; it must occur exactly once in the file"
+    });
+    let new_text = json!({
+        "type": "string",
+        "description": "Replacement text"
+    });
     definition(
         "edit",
-        "Replace exactly one matching text fragment in a workspace file",
+        concat!(
+            "Replace unique text fragments in a workspace file. Pass old_text and new_text for one ",
+            "replacement, or edits for several applied together against the original file. When old_text has ",
+            "no exact match, a match that ignores trailing whitespace and treats curly quotes, dashes, and ",
+            "non-breaking spaces as ASCII is used, and only the part of old_text that new_text changes is rewritten.",
+        ),
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -104,24 +179,17 @@ pub fn edit_definition() -> ToolDefinition {
                     "type": "string",
                     "description": "Workspace-relative file path to edit"
                 },
-                "old_text": {
-                    "type": "string",
-                    "description": "Exact existing text to replace"
-                },
-                "new_text": {
-                    "type": "string",
-                    "description": "Replacement text, kept for compatibility"
-                },
-                "oldText": {
-                    "type": "string",
-                    "description": "Exact existing text to replace, kept for compatibility"
-                },
-                "newText": {
-                    "type": "string",
-                    "description": "Replacement text, kept for compatibility"
-                },
+                "old_text": old_text,
+                "new_text": new_text,
                 "edits": {
-                    "description": "One edit object, an array of edit objects, or a JSON string containing either shape"
+                    "type": "array",
+                    "description": "Non-overlapping replacements, each matched against the original file",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {"old_text": old_text, "new_text": new_text},
+                        "required": ["old_text", "new_text"]
+                    }
                 }
             },
             "required": ["path"]
@@ -136,158 +204,54 @@ impl Tool for EditTool<'_> {
     }
 
     async fn execute(&self, arguments: &RawValue, _cancel: &CancellationToken) -> ToolResult {
-        let args = match prepare_edit_arguments(arguments.get()) {
-            Ok(args) => args,
+        let request: EditRequest = match decode_strict_json(arguments.get(), &["path"]) {
+            Ok(request) => request,
             Err(message) => return error_result(message),
         };
-        let key = match self.workspace.resolve_existing(Path::new(&args.path)) {
+        if request.path.is_empty() {
+            return error_result("missing required argument: path");
+        }
+        let edits = match request.replacements() {
+            Ok(edits) => edits,
+            Err(message) => return error_result(message),
+        };
+        let key = match self.workspace.write_relative(Path::new(&request.path)) {
             Ok(key) => key,
             Err(error) => return error_result(error),
         };
-        let queue = file_mutation_queue(&key);
-        let _guard = queue.lock().await;
-        self.execute_locked(&args)
+        let _guard = self.workspace.lock_path(&key).await;
+        self.execute_locked(&request.path, &edits)
     }
 }
 
-/// Decodes the argument object. Port of `prepareEditArguments`: the schema
-/// accepts a single replacement at the top level, one edit object, an array of
-/// them, or a JSON string holding either shape.
-fn prepare_edit_arguments(arguments: &str) -> Result<EditArgs, String> {
-    let raw: Map<String, Value> =
-        serde_json::from_str(arguments).map_err(|error| format!("invalid JSON: {error}"))?;
-
-    const ALLOWED: [&str; 6] = [
-        "path", "old_text", "new_text", "oldText", "newText", "edits",
-    ];
-    for key in raw.keys() {
-        if !ALLOWED.contains(&key.as_str()) {
-            return Err(format!("json: unknown field {key:?}"));
-        }
-    }
-
-    let path = read_string_field(&raw, &["path"])?;
-    let path = match path {
-        Some(path) if !path.is_empty() => path,
-        _ => return Err("missing required argument: path".to_owned()),
-    };
-
-    if let Some(edits) = raw.get("edits") {
-        return Ok(EditArgs {
-            path,
-            edits: parse_edit_list(edits)?,
-        });
-    }
-    Ok(EditArgs {
-        path,
-        edits: vec![parse_edit_object(&raw, true)?],
-    })
-}
-
-/// Port of `parseEditList`.
-fn parse_edit_list(raw: &Value) -> Result<Vec<EditReplacement>, String> {
-    let decoded;
-    let value = if let Value::String(encoded) = raw {
-        decoded = serde_json::from_str::<Value>(encoded.trim())
-            .map_err(|error| format!("invalid JSON: {error}"))?;
-        &decoded
-    } else {
-        raw
-    };
-
-    match value {
-        Value::Null => Err("missing required argument: edits".to_owned()),
-        Value::Object(object) => Ok(vec![parse_edit_object(object, false)?]),
-        Value::Array(items) => {
-            if items.is_empty() {
-                return Err("missing required argument: edits".to_owned());
-            }
-            items
-                .iter()
-                .map(|item| match item {
-                    Value::Object(object) => parse_edit_object(object, false),
-                    other => Err(format!(
-                        "invalid JSON: json: cannot unmarshal {} into Go value of type map[string]json.RawMessage",
-                        json_kind(other)
-                    )),
-                })
-                .collect()
-        }
-        other => Err(format!(
-            "invalid JSON: json: cannot unmarshal {} into Go value of type []map[string]json.RawMessage",
-            json_kind(other)
-        )),
-    }
-}
-
-fn json_kind(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-/// Port of `parseEditObject`. `top_level` also allows `path`, which the
-/// surrounding object carries.
-fn parse_edit_object(raw: &Map<String, Value>, top_level: bool) -> Result<EditReplacement, String> {
-    for key in raw.keys() {
-        let allowed = matches!(
-            key.as_str(),
-            "old_text" | "new_text" | "oldText" | "newText"
-        ) || (top_level && key == "path");
-        if !allowed {
-            return Err(format!("json: unknown field {key:?}"));
-        }
-    }
-
-    let old_text = read_string_field(raw, &["old_text", "oldText"])?;
-    let old_text = match old_text {
-        Some(text) if !text.is_empty() => text,
-        _ => return Err("missing required argument: old_text".to_owned()),
-    };
-    let Some(new_text) = read_string_field(raw, &["new_text", "newText"])? else {
-        return Err("missing required argument: new_text".to_owned());
-    };
-    Ok(EditReplacement { old_text, new_text })
-}
-
-/// Returns the first present field among `names`. Port of `readStringField`.
-fn read_string_field(raw: &Map<String, Value>, names: &[&str]) -> Result<Option<String>, String> {
-    for name in names {
-        let Some(value) = raw.get(*name) else {
-            continue;
-        };
-        let Value::String(text) = value else {
-            return Err(format!("invalid argument {name}: must be a string"));
-        };
-        return Ok(Some(text.clone()));
-    }
-    Ok(None)
-}
-
-/// Applies every replacement to `text`. Port of `applyTextEdits`: a leading
-/// byte-order mark and the file's newline style are preserved, matching runs
-/// over a `\n`-normalized view, and overlapping edits are refused.
-fn apply_text_edits(text: &str, path: &str, edits: &[EditReplacement]) -> Result<String, String> {
+/// Applies every replacement to `text` and renders the diff. Port of
+/// `applyTextEdits`: every `old_text` is matched against the original content,
+/// a leading byte-order mark and the file's newline style are preserved, and
+/// overlapping edits are refused.
+fn apply_text_edits(
+    text: &str,
+    path: &str,
+    edits: &[EditReplacement],
+) -> Result<(String, String), String> {
     let body = text.strip_prefix('\u{feff}').unwrap_or(text);
     let has_bom = body.len() != text.len();
     let (content, content_to_body) = normalize_line_endings_with_map(body);
     let newline = detect_newline(body);
 
+    let mut matcher = EditMatcher::new(&content);
     let mut resolved = Vec::with_capacity(edits.len());
     for (index, edit) in edits.iter().enumerate() {
-        let old_text = normalize_line_endings(&edit.old_text);
-        let new_text = restore_line_endings(&normalize_line_endings(&edit.new_text), newline);
-        let (start, end) = find_unique_edit_match(&content, &old_text, path, index, edits.len())?;
-        resolved.push(ResolvedEdit {
-            start: content_to_body[start],
-            end: content_to_body[end],
-            text: new_text,
-        });
+        let mut old_text = normalize_line_endings(&edit.old_text);
+        let mut new_text = normalize_line_endings(&edit.new_text);
+        if let Some(stripped) = old_text.strip_prefix('\u{feff}') {
+            // read reports the BOM as part of line 1, so models copy it into old_text.
+            old_text = stripped.to_owned();
+            new_text = new_text
+                .strip_prefix('\u{feff}')
+                .unwrap_or(&new_text)
+                .to_owned();
+        }
+        resolved.push(matcher.resolve(&old_text, &new_text, path, index, edits.len())?);
     }
 
     resolved.sort_by_key(|edit| edit.start);
@@ -299,52 +263,128 @@ fn apply_text_edits(text: &str, path: &str, edits: &[EditReplacement]) -> Result
         }
     }
 
-    let replaced = apply_resolved_edits(body, &resolved);
-    Ok(if has_bom {
-        format!("\u{feff}{replaced}")
-    } else {
-        replaced
-    })
+    let replaced = splice_edits(body, &resolved, content_to_body.as_deref(), newline);
+    let diff = edit_diff(&content, &resolved);
+    Ok((
+        if has_bom {
+            format!("\u{feff}{replaced}")
+        } else {
+            replaced
+        },
+        diff,
+    ))
 }
 
-/// Locates the one place `old_text` occurs. Port of `findUniqueEditMatch`:
-/// exact matching first, then a fuzzy view that folds typographic quotes,
-/// dashes, and Unicode spaces and drops trailing whitespace on every line.
-fn find_unique_edit_match(
-    content: &str,
-    old_text: &str,
-    path: &str,
-    index: usize,
-    total: usize,
-) -> Result<(usize, usize), String> {
-    let count = content.matches(old_text).count();
-    if count == 1 {
-        let start = content.find(old_text).expect("one match exists");
-        return Ok((start, start + old_text.len()));
-    }
-    if count > 1 {
-        return Err(match_error(path, index, total, &ambiguous(count, path)));
+/// Locates `old_text` in LF-normalized content. Port of `editMatcher`: the
+/// fuzzy view of the content is built on the first inexact lookup and reused
+/// for later edits.
+struct EditMatcher<'a> {
+    content: &'a str,
+    fuzzy: Option<(String, Vec<usize>)>,
+}
+
+impl<'a> EditMatcher<'a> {
+    fn new(content: &'a str) -> Self {
+        Self {
+            content,
+            fuzzy: None,
+        }
     }
 
-    let (fuzzy_content, fuzzy_to_content) = normalize_for_fuzzy_match_with_map(content);
-    let (fuzzy_old_text, _) = normalize_for_fuzzy_match_with_map(old_text);
-    if fuzzy_old_text.is_empty() {
-        return Err(match_error(path, index, total, &not_found(path)));
+    /// Port of `editMatcher.resolve`.
+    fn resolve(
+        &mut self,
+        old_text: &str,
+        new_text: &str,
+        path: &str,
+        index: usize,
+        total: usize,
+    ) -> Result<ResolvedEdit, String> {
+        let content = self.content;
+        let count = content.matches(old_text).count();
+        if count == 1 {
+            let start = content.find(old_text).expect("one match exists");
+            return Ok(ResolvedEdit {
+                start,
+                end: start + old_text.len(),
+                text: new_text.to_owned(),
+            });
+        }
+        if count > 1 {
+            return Err(match_error(index, total, &ambiguous(count, path)));
+        }
+
+        let (fuzzy, fuzzy_offsets) = self
+            .fuzzy
+            .get_or_insert_with(|| normalize_for_fuzzy_match_with_map(content));
+        let (fuzzy_old, mut old_offsets) = normalize_for_fuzzy_match_with_map(old_text);
+        if fuzzy_old.trim().is_empty() {
+            return Err(match_error(index, total, &not_found(path)));
+        }
+        let count = fuzzy.matches(&fuzzy_old).count();
+        if count == 0 {
+            return Err(match_error(index, total, &not_found(path)));
+        }
+        if count > 1 {
+            return Err(match_error(index, total, &ambiguous(count, path)));
+        }
+        let start = fuzzy.find(&fuzzy_old).expect("one match exists");
+
+        // The file's bytes differ from old_text inside the match (quotes,
+        // dashes, trailing whitespace). Keep them wherever new_text leaves
+        // old_text unchanged and rewrite only the span between the common
+        // prefix and suffix.
+        let (prefix, suffix) = common_affixes(old_text, new_text);
+        old_offsets.truncate(fuzzy_old.len());
+        let first = start + search_ints(&old_offsets, prefix);
+        let last = start + search_ints(&old_offsets, old_text.len() - suffix);
+        let content_start = fuzzy_offsets[first];
+        let mut content_end = content_start;
+        if last > first {
+            let last_rune = fuzzy_offsets[last - 1];
+            content_end = last_rune + rune_len(content, last_rune);
+        }
+        Ok(ResolvedEdit {
+            start: content_start,
+            end: content_end,
+            text: new_text[prefix..new_text.len() - suffix].to_owned(),
+        })
     }
-    let count = fuzzy_content.matches(&fuzzy_old_text).count();
-    if count == 0 {
-        return Err(match_error(path, index, total, &not_found(path)));
+}
+
+/// The byte length of the rune starting at `offset`. Mirrors Go's
+/// `utf8.DecodeRuneInString`, which reports one byte for an invalid sequence.
+fn rune_len(text: &str, offset: usize) -> usize {
+    text[offset..].chars().next().map_or(1, char::len_utf8)
+}
+
+/// The smallest index whose value is at least `target`. Port of
+/// `sort.SearchInts` over a non-decreasing slice.
+fn search_ints(values: &[usize], target: usize) -> usize {
+    values.partition_point(|value| *value < target)
+}
+
+/// The byte lengths of the longest common prefix and suffix of `a` and `b`,
+/// cut at rune boundaries and never overlapping. Port of `commonAffixes`.
+fn common_affixes(a: &str, b: &str) -> (usize, usize) {
+    let (left, right) = (a.as_bytes(), b.as_bytes());
+    let limit = left.len().min(right.len());
+    let mut prefix = 0;
+    while prefix < limit && left[prefix] == right[prefix] {
+        prefix += 1;
     }
-    if count > 1 {
-        return Err(match_error(path, index, total, &ambiguous(count, path)));
+    while prefix > 0 && !a.is_char_boundary(prefix) {
+        prefix -= 1;
     }
-    let start = fuzzy_content
-        .find(&fuzzy_old_text)
-        .expect("one match exists");
-    Ok((
-        fuzzy_to_content[start],
-        fuzzy_to_content[start + fuzzy_old_text.len()],
-    ))
+    let limit = limit - prefix;
+    let mut suffix = 0;
+    while suffix < limit && left[left.len() - 1 - suffix] == right[right.len() - 1 - suffix] {
+        suffix += 1;
+    }
+    while suffix > 0 && !a.is_char_boundary(left.len() - suffix) {
+        suffix -= 1;
+    }
+    (prefix, suffix)
 }
 
 fn not_found(path: &str) -> String {
@@ -358,7 +398,7 @@ fn ambiguous(count: usize, path: &str) -> String {
 }
 
 /// Prefixes `message` with the edit position. Port of `editMatchError`.
-fn match_error(_path: &str, index: usize, total: usize, message: &str) -> String {
+fn match_error(index: usize, total: usize, message: &str) -> String {
     if total == 1 {
         format!("edit failed: {message}")
     } else {
@@ -366,16 +406,24 @@ fn match_error(_path: &str, index: usize, total: usize, message: &str) -> String
     }
 }
 
-/// Splices every replacement in from the end so earlier offsets stay valid.
-fn apply_resolved_edits(text: &str, edits: &[ResolvedEdit]) -> String {
+/// Applies sorted, non-overlapping edits in one pass. Port of `spliceEdits`:
+/// edit offsets are in normalized content, `offsets` maps them to positions in
+/// `text` and is `None` when the two coincide.
+fn splice_edits(
+    text: &str,
+    edits: &[ResolvedEdit],
+    offsets: Option<&[usize]>,
+    newline: &str,
+) -> String {
+    let map = |index: usize| offsets.map_or(index, |offsets| offsets[index]);
     let mut out = String::with_capacity(text.len());
-    let mut cursor = 0;
+    let mut last = 0;
     for edit in edits {
-        out.push_str(&text[cursor..edit.start]);
-        out.push_str(&edit.text);
-        cursor = edit.end;
+        out.push_str(&text[last..map(edit.start)]);
+        out.push_str(&restore_line_endings(&edit.text, newline));
+        last = map(edit.end);
     }
-    out.push_str(&text[cursor..]);
+    out.push_str(&text[last..]);
     out
 }
 
@@ -383,9 +431,13 @@ fn normalize_line_endings(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// Normalizes newlines and records, for every normalized byte, the offset it
-/// came from. Port of `normalizeLineEndingsWithMap`.
-fn normalize_line_endings_with_map(text: &str) -> (String, Vec<usize>) {
+/// Converts CRLF and CR to LF and records, for every normalized byte, the
+/// offset it came from. Port of `normalizeLineEndingsWithMap`: the map is
+/// `None` when `text` needs no change, meaning offsets are identical.
+fn normalize_line_endings_with_map(text: &str) -> (String, Option<Vec<usize>>) {
+    if !text.contains('\r') {
+        return (text.to_owned(), None);
+    }
     let raw = text.as_bytes();
     let mut out = Vec::with_capacity(raw.len());
     let mut offsets = Vec::with_capacity(raw.len() + 1);
@@ -407,13 +459,18 @@ fn normalize_line_endings_with_map(text: &str) -> (String, Vec<usize>) {
     offsets.push(raw.len());
     (
         String::from_utf8(out).expect("replacing CR with LF keeps UTF-8 valid"),
-        offsets,
+        Some(offsets),
     )
 }
 
+/// The file's line terminator. Port of `detectNewline`: a lone CR only counts
+/// when the file has no LF at all, so a stray CR inside a line does not change
+/// it.
 fn detect_newline(text: &str) -> &'static str {
     if text.contains("\r\n") {
         "\r\n"
+    } else if text.contains('\n') {
+        "\n"
     } else if text.contains('\r') {
         "\r"
     } else {
@@ -429,21 +486,15 @@ fn restore_line_endings(text: &str, newline: &str) -> String {
     }
 }
 
-fn display_edit_text(text: &str) -> String {
-    normalize_line_endings(text.strip_prefix('\u{feff}').unwrap_or(text))
-}
-
 /// Folds the characters a copy-paste round trip tends to change and drops
 /// trailing whitespace per line, recording the source offset of every output
-/// byte. Port of `normalizeForFuzzyMatchWithMap`.
+/// byte with one extra entry for the input length. Port of
+/// `normalizeForFuzzyMatchWithMap`.
 fn normalize_for_fuzzy_match_with_map(text: &str) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(text.len());
     let mut offsets = Vec::with_capacity(text.len() + 1);
     let mut pos = 0;
-    loop {
-        if pos >= text.len() {
-            break;
-        }
+    while pos < text.len() {
         let line_end = text[pos..].find('\n').map(|index| pos + index);
         let end = line_end.unwrap_or(text.len());
         let trimmed_end = trim_trailing_fuzzy_whitespace(text, pos, end);
@@ -504,79 +555,161 @@ fn fuzzy_char(character: char) -> Option<&'static str> {
     })
 }
 
-/// The per-path queue that serializes mutations. Port of
-/// `withFileMutationQueue`.
-// ponytail: locks live for the process lifetime; add ref-count cleanup if edit
-// churn matters.
-fn file_mutation_queue(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    static QUEUES: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
-    let queues = QUEUES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut queues = queues.lock().expect("the queue table is never poisoned");
-    Arc::clone(
-        queues
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    )
+/// One changed line range: `old_lines[old_start..old_end]` becomes
+/// `new_lines`. Port of `diffHunk`.
+struct DiffHunk {
+    old_start: usize,
+    old_end: usize,
+    new_lines: Vec<String>,
 }
 
-/// Renders a unified-style hunk for the changed region. Port of `editDiff`:
-/// the edits form one contiguous range, so trimming the common prefix and
-/// suffix lines yields exactly the changed lines.
-fn edit_diff(before: &str, after: &str) -> String {
-    if before == after {
+/// Renders unified-style hunks for sorted, non-overlapping edits in
+/// LF-normalized content. Port of `editDiff`: edits touching the same lines
+/// form one hunk, and hunks whose context lines meet are printed together.
+fn edit_diff(content: &str, edits: &[ResolvedEdit]) -> String {
+    let old_lines: Vec<&str> = content.split('\n').collect();
+    let mut line_starts = vec![0usize];
+    line_starts.extend(
+        content
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(index, _)| index + 1),
+    );
+    let line_of = |offset: usize| search_ints(&line_starts, offset + 1) - 1;
+    let last_line_of = |edit: &ResolvedEdit| {
+        if edit.end == edit.start {
+            return line_of(edit.start);
+        }
+        let line = line_of(edit.end - 1);
+        if content.as_bytes()[edit.end - 1] == b'\n' {
+            // Removing or keeping this newline decides whether the next line joins.
+            line + 1
+        } else {
+            line
+        }
+    };
+
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    let mut i = 0;
+    while i < edits.len() {
+        let first = line_of(edits[i].start);
+        let mut last = last_line_of(&edits[i]);
+        let mut j = i + 1;
+        while j < edits.len() && line_of(edits[j].start) <= last {
+            last = last.max(last_line_of(&edits[j]));
+            j += 1;
+        }
+        let region_start = line_starts[first];
+        let region_end = if last + 1 < line_starts.len() {
+            line_starts[last + 1] - 1
+        } else {
+            content.len()
+        };
+        let region: Vec<ResolvedEdit> = edits[i..j]
+            .iter()
+            .map(|edit| ResolvedEdit {
+                start: edit.start - region_start,
+                end: edit.end - region_start,
+                text: edit.text.clone(),
+            })
+            .collect();
+        let before = &old_lines[first..=last];
+        let spliced = splice_edits(&content[region_start..region_end], &region, None, "\n");
+        let after: Vec<&str> = spliced.split('\n').collect();
+        let (prefix, suffix) = common_lines(before, &after);
+        if prefix + suffix < before.len() || prefix + suffix < after.len() {
+            hunks.push(DiffHunk {
+                old_start: first + prefix,
+                old_end: last + 1 - suffix,
+                new_lines: after[prefix..after.len() - suffix]
+                    .iter()
+                    .map(|line| (*line).to_owned())
+                    .collect(),
+            });
+        }
+        i = j;
+    }
+    if hunks.is_empty() {
         return "(no textual changes)".to_owned();
     }
-    let old_lines: Vec<&str> = before.split('\n').collect();
-    let new_lines: Vec<&str> = after.split('\n').collect();
 
-    let mut prefix = 0;
-    while prefix < old_lines.len()
-        && prefix < new_lines.len()
-        && old_lines[prefix] == new_lines[prefix]
-    {
-        prefix += 1;
-    }
-    let mut suffix = 0;
-    while suffix < old_lines.len() - prefix
-        && suffix < new_lines.len() - prefix
-        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-
-    let context_start = prefix.saturating_sub(DIFF_CONTEXT_LINES);
-    let context_end = (old_lines.len() - suffix + DIFF_CONTEXT_LINES).min(old_lines.len());
-
-    let old_count = context_end - context_start;
-    let new_count =
-        old_count + (new_lines.len() - suffix - prefix) - (old_lines.len() - suffix - prefix);
-
-    let mut out = format!(
-        "@@ -{},{} +{},{} @@\n",
-        context_start + 1,
-        old_count,
-        context_start + 1,
-        new_count
-    );
-    for line in &old_lines[context_start..prefix] {
-        out.push_str(&format!(" {line}\n"));
-    }
-    for line in &old_lines[prefix..old_lines.len() - suffix] {
-        out.push_str(&format!("-{line}\n"));
-    }
-    for line in &new_lines[prefix..new_lines.len() - suffix] {
-        out.push_str(&format!("+{line}\n"));
-    }
-    for line in &old_lines[old_lines.len() - suffix..context_end] {
-        out.push_str(&format!(" {line}\n"));
+    let mut out = String::new();
+    let mut delta: isize = 0;
+    let mut g = 0;
+    while g < hunks.len() {
+        let context_start = hunks[g].old_start.saturating_sub(DIFF_CONTEXT_LINES);
+        let mut context_end = (hunks[g].old_end + DIFF_CONTEXT_LINES).min(old_lines.len());
+        let mut h = g + 1;
+        while h < hunks.len()
+            && hunks[h].old_start.saturating_sub(DIFF_CONTEXT_LINES) <= context_end
+        {
+            context_end = (hunks[h].old_end + DIFF_CONTEXT_LINES).min(old_lines.len());
+            h += 1;
+        }
+        let old_count = context_end - context_start;
+        let new_count = hunks[g..h].iter().fold(old_count as isize, |count, hunk| {
+            count + hunk.new_lines.len() as isize - (hunk.old_end - hunk.old_start) as isize
+        });
+        out.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            context_start + 1,
+            old_count,
+            context_start as isize + 1 + delta,
+            new_count
+        ));
+        let mut cursor = context_start;
+        for hunk in &hunks[g..h] {
+            write_diff_lines(&mut out, ' ', &old_lines[cursor..hunk.old_start]);
+            write_diff_lines(&mut out, '-', &old_lines[hunk.old_start..hunk.old_end]);
+            write_diff_lines(&mut out, '+', &hunk.new_lines);
+            cursor = hunk.old_end;
+        }
+        write_diff_lines(&mut out, ' ', &old_lines[cursor..context_end]);
+        delta += new_count - old_count as isize;
+        g = h;
     }
 
     let diff = out.trim_end_matches('\n');
     if diff.len() <= MAX_DIFF_BYTES {
         return diff.to_owned();
     }
-    let cut = diff[..MAX_DIFF_BYTES].rfind('\n').unwrap_or(MAX_DIFF_BYTES);
+    // Go slices raw bytes here; cutting on a rune boundary keeps the fallback
+    // valid UTF-8 when the budget lands mid-rune and no newline precedes it.
+    let cut = diff.as_bytes()[..MAX_DIFF_BYTES]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .unwrap_or_else(|| {
+            (0..=MAX_DIFF_BYTES)
+                .rev()
+                .find(|index| diff.is_char_boundary(*index))
+                .expect("zero is a boundary")
+        });
     format!("{}\n... (diff truncated)", &diff[..cut])
+}
+
+fn write_diff_lines<S: AsRef<str>>(out: &mut String, marker: char, lines: &[S]) {
+    for line in lines {
+        out.push(marker);
+        out.push_str(line.as_ref());
+        out.push('\n');
+    }
+}
+
+/// The counts of equal leading and trailing lines, never overlapping. Port of
+/// `commonLines`.
+fn common_lines(a: &[&str], b: &[&str]) -> (usize, usize) {
+    let limit = a.len().min(b.len());
+    let mut prefix = 0;
+    while prefix < limit && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    let limit = limit - prefix;
+    let mut suffix = 0;
+    while suffix < limit && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix] {
+        suffix += 1;
+    }
+    (prefix, suffix)
 }
 
 #[cfg(test)]
@@ -736,33 +869,61 @@ mod tests {
         let workspace = workspace(root.path());
         let result = run(
             &EditTool::new(&workspace),
-            r#"{"path":"sample.txt","edits":[{"oldText":"one","newText":"ONE"},{"oldText":"three","newText":"THREE"}]}"#,
+            r#"{"path":"sample.txt","edits":[{"old_text":"one","new_text":"ONE"},{"old_text":"three","new_text":"THREE"}]}"#,
         )
         .await;
         assert!(!result.is_error, "{result:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\nTHREE\n");
     }
 
+    /// Port of `TestEditRejectsUntypedEditShapes`.
     #[tokio::test]
-    async fn edits_may_be_a_json_string_or_a_single_object() {
-        let (root, path) = sample("alpha\nbeta\n");
+    async fn untyped_edit_shapes_are_rejected() {
+        let (root, path) = sample("a b c\n");
         let workspace = workspace(root.path());
         let tool = EditTool::new(&workspace);
 
-        let encoded = run(
-            &tool,
-            r#"{"path":"sample.txt","edits":"{\"oldText\":\"alpha\",\"newText\":\"ALPHA\"}"}"#,
-        )
-        .await;
-        assert!(!encoded.is_error, "{encoded:?}");
+        for (name, arguments) in [
+            (
+                "camel case keys",
+                r#"{"path":"sample.txt","oldText":"a","newText":"A"}"#,
+            ),
+            (
+                "string encoded edits",
+                r#"{"path":"sample.txt","edits":"[{\"old_text\":\"a\",\"new_text\":\"A\"}]"}"#,
+            ),
+            (
+                "object edits",
+                r#"{"path":"sample.txt","edits":{"old_text":"a","new_text":"A"}}"#,
+            ),
+            (
+                "single and list edits",
+                r#"{"path":"sample.txt","old_text":"a","new_text":"A","edits":[{"old_text":"c","new_text":"C"}]}"#,
+            ),
+            ("empty edits", r#"{"path":"sample.txt","edits":[]}"#),
+            (
+                "edit without new_text",
+                r#"{"path":"sample.txt","edits":[{"old_text":"a"}]}"#,
+            ),
+        ] {
+            let result = run(&tool, arguments).await;
+            assert!(result.is_error, "{name}: expected an error, got {result:?}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a b c\n");
+    }
 
-        let object = run(
-            &tool,
-            r#"{"path":"sample.txt","edits":{"old_text":"beta","new_text":"BETA"}}"#,
+    /// Port of `TestEditAllowsNullEditsWithSingleReplacement`.
+    #[tokio::test]
+    async fn a_null_edits_key_allows_a_single_replacement() {
+        let (root, path) = sample("a\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"a","new_text":"A","edits":null}"#,
         )
         .await;
-        assert!(!object.is_error, "{object:?}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ALPHA\nBETA\n");
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\n");
     }
 
     #[tokio::test]
@@ -772,14 +933,201 @@ mod tests {
         let workspace = workspace(root.path());
         let result = run(
             &EditTool::new(&workspace),
-            r#"{"path":"sample.txt","oldText":"const msg = \"hello\"\nconst dash = \"a-b\"","newText":"const msg = \"hi\"\nconst dash = \"a-b\""}"#,
+            r#"{"path":"sample.txt","old_text":"const msg = \"hello\"\nconst dash = \"a-b\"","new_text":"const msg = \"hi\"\nconst dash = \"a-b\""}"#,
         )
         .await;
         assert!(!result.is_error, "{result:?}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "const msg = \"hi\"\nconst dash = \"a-b\"\n"
+            "const msg = \u{201c}hi\u{201d}  \nconst dash = \"a\u{2014}b\"\n"
         );
+    }
+
+    /// Port of `TestEditFuzzyMatchOnlyRewritesChangedSpan`.
+    #[tokio::test]
+    async fn a_fuzzy_match_rewrites_only_the_changed_span() {
+        for (name, file, old_text, new_text, want) in [
+            (
+                "keeps markdown hard break",
+                "line one  \nline two\n",
+                "line one\nline two",
+                "line one\nline 2",
+                "line one  \nline 2\n",
+            ),
+            (
+                "keeps curly quotes and em dash",
+                "x = \u{201c}a\u{201d} \u{2014} b\n",
+                "x = \"a\" - b",
+                "x = \"a\" - c",
+                "x = \u{201c}a\u{201d} \u{2014} c\n",
+            ),
+            (
+                "keeps trailing whitespace after changed word",
+                "foo  \nbar\n",
+                "foo\nbar",
+                "baz\nbar",
+                "baz  \nbar\n",
+            ),
+            (
+                "keeps next line indentation",
+                "foo  \n    bar\n",
+                "foo\n    ",
+                "FOO\n    ",
+                "FOO  \n    bar\n",
+            ),
+            (
+                "inserts between fuzzy lines",
+                "a  \nb\n",
+                "a\nb",
+                "a\nX\nb",
+                "a  \nX\nb\n",
+            ),
+        ] {
+            let (root, path) = sample(file);
+            let workspace = workspace(root.path());
+            let arguments = serde_json::json!({
+                "path": "sample.txt",
+                "old_text": old_text,
+                "new_text": new_text,
+            })
+            .to_string();
+            let result = run(&EditTool::new(&workspace), &arguments).await;
+            assert!(!result.is_error, "{name}: {result:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), want, "{name}");
+        }
+    }
+
+    /// Port of `TestEditRejectsWhitespaceOnlyFuzzyOldText`.
+    #[tokio::test]
+    async fn whitespace_only_old_text_is_rejected() {
+        let (root, path) = sample("abc  \n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"\t\n","new_text":"X"}"#,
+        )
+        .await;
+        assert!(
+            result.is_error && result.content.contains("old_text was not found"),
+            "{result:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc  \n");
+    }
+
+    /// Port of `TestEditMatchesBOMPrefixedOldText`.
+    #[tokio::test]
+    async fn a_bom_prefixed_old_text_matches() {
+        for new_text in ["bye", "\u{feff}bye"] {
+            let (root, path) = sample("\u{feff}hello\nworld\n");
+            let workspace = workspace(root.path());
+            let arguments = serde_json::json!({
+                "path": "sample.txt",
+                "old_text": "\u{feff}hello",
+                "new_text": new_text,
+            })
+            .to_string();
+            let result = run(&EditTool::new(&workspace), &arguments).await;
+            assert!(!result.is_error, "new_text {new_text:?}: {result:?}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "\u{feff}bye\nworld\n",
+                "new_text {new_text:?}"
+            );
+        }
+    }
+
+    /// Port of `TestEditKeepsLFWhenFileContainsStrayCR`.
+    #[tokio::test]
+    async fn a_stray_cr_does_not_change_the_detected_newline() {
+        let (root, path) = sample("a\rb\nc\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"c","new_text":"x\ny"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\rb\nx\ny\n");
+    }
+
+    /// Port of `TestEditDiffRendersOneHunkPerEdit`.
+    #[tokio::test]
+    async fn the_diff_renders_one_hunk_per_edit() {
+        let lines: Vec<String> = (1..=200).map(|index| format!("line {index}")).collect();
+        let (root, _) = sample(&format!("{}\n", lines.join("\n")));
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","edits":[{"old_text":"line 5\n","new_text":"line 5\nextra\n"},{"old_text":"line 200\n","new_text":"LAST\n"}]}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+        for want in [
+            "@@ -3,6 +3,7 @@",
+            "+extra",
+            "@@ -197,5 +198,5 @@",
+            "-line 200",
+            "+LAST",
+        ] {
+            assert!(
+                result.content.contains(want),
+                "diff missing {want:?}: {result:?}"
+            );
+        }
+        for absent in ["line 100", "truncated", "-line 6"] {
+            assert!(
+                !result.content.contains(absent),
+                "diff includes {absent:?}: {result:?}"
+            );
+        }
+    }
+
+    /// Port of `TestEditDiffMergesEditsOnOneLine`.
+    #[tokio::test]
+    async fn the_diff_merges_edits_on_one_line() {
+        let (root, _) = sample("a b c\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","edits":[{"old_text":"a","new_text":"A"},{"old_text":"c","new_text":"C"}]}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(result.content.matches("-a b c").count(), 1, "{result:?}");
+        assert_eq!(result.content.matches("+A b C").count(), 1, "{result:?}");
+        assert_eq!(result.content.matches("@@").count(), 2, "{result:?}");
+    }
+
+    /// Port of `TestWriteAndEditShareFileLock`.
+    #[tokio::test]
+    async fn write_and_edit_share_the_file_lock() {
+        let (root, path) = sample("a\n");
+        let workspace = workspace(root.path());
+        let key = workspace.write_relative(Path::new("sample.txt")).unwrap();
+        let edit = EditTool::new(&workspace);
+        let write = crate::tool::write::WriteTool::new(&workspace);
+        let calls: [(&str, &dyn Tool, &str); 2] = [
+            ("write", &write, r#"{"path":"sample.txt","content":"b\n"}"#),
+            (
+                "edit",
+                &edit,
+                r#"{"path":"sample.txt","old_text":"a","new_text":"b"}"#,
+            ),
+        ];
+        for (name, tool, arguments) in calls {
+            let guard = workspace.lock_path(&key).await;
+            let mut call = Box::pin(run(tool, arguments));
+            let blocked =
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut call).await;
+            assert!(
+                blocked.is_err(),
+                "{name} completed while the file lock was held: {blocked:?}"
+            );
+            drop(guard);
+            let result = call.await;
+            assert!(!result.is_error, "{name}: {result:?}");
+            std::fs::write(&path, "a\n").unwrap();
+        }
     }
 
     #[tokio::test]
@@ -788,7 +1136,7 @@ mod tests {
         let workspace = workspace(root.path());
         let result = run(
             &EditTool::new(&workspace),
-            r#"{"path":"sample.txt","oldText":"a\nb\n","newText":"x\ny\n"}"#,
+            r#"{"path":"sample.txt","old_text":"a\nb\n","new_text":"x\ny\n"}"#,
         )
         .await;
         assert!(!result.is_error, "{result:?}");
@@ -804,7 +1152,7 @@ mod tests {
         let workspace = workspace(root.path());
         let result = run(
             &EditTool::new(&workspace),
-            r#"{"path":"sample.txt","edits":[{"oldText":"abc","newText":"ABC"},{"oldText":"bcd","newText":"BCD"}]}"#,
+            r#"{"path":"sample.txt","edits":[{"old_text":"abc","new_text":"ABC"},{"old_text":"bcd","new_text":"BCD"}]}"#,
         )
         .await;
         assert!(
@@ -820,7 +1168,7 @@ mod tests {
         let workspace = workspace(root.path());
         let result = run(
             &EditTool::new(&workspace),
-            r#"{"path":"sample.txt","edits":[{"oldText":"a","newText":"b"},{"oldText":"b","newText":"c"}]}"#,
+            r#"{"path":"sample.txt","edits":[{"old_text":"a","new_text":"b"},{"old_text":"b","new_text":"c"}]}"#,
         )
         .await;
         assert!(

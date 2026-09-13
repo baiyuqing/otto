@@ -86,6 +86,7 @@ impl Tool for WriteTool<'_> {
             Ok(relative) => relative,
             Err(error) => return error_result(error),
         };
+        let _guard = self.workspace.lock_path(&relative).await;
         if let Err(message) = write_file_atomic(self.workspace, &relative, args.content.as_bytes())
         {
             return error_result(message);

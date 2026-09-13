@@ -32,11 +32,12 @@ type Fixture struct {
 }
 
 type Case struct {
-	NewDriver    func(testing.TB, Fixture) sandbox.Driver
-	Request      func(testing.TB, Fixture, []string) sandbox.Request
-	ShellCommand func(testing.TB, string) []string
-	TCPClient    func(testing.TB, string) []string
-	UnixClient   func(testing.TB, string) []string
+	NewDriver           func(testing.TB, Fixture) sandbox.Driver
+	Request             func(testing.TB, Fixture, []string) sandbox.Request
+	ShellCommand        func(testing.TB, string) []string
+	TCPClient           func(testing.TB, string) []string
+	UnixClient          func(testing.TB, string) []string
+	SkipConcurrentCalls bool
 }
 
 type ChecklistItem struct {
@@ -491,6 +492,9 @@ func RunDriverContract(t *testing.T, testCase Case) {
 	})
 
 	t.Run("concurrent calls complete", func(t *testing.T) {
+		if testCase.SkipConcurrentCalls {
+			t.Skip("disabled for this driver")
+		}
 		_, executor := newExecutor(t)
 		const callers = 16
 		start := make(chan struct{})

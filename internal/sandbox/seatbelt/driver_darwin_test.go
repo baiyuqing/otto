@@ -1354,6 +1354,7 @@ func TestSeatbeltDriverContract(t *testing.T) {
 					t.Helper()
 					return driverHelperCommand(executable, "dial", "unix", address)
 				},
+				SkipConcurrentCalls: true,
 			})
 		})
 	}

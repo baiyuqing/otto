@@ -16,6 +16,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio-util.workspace = true
+toml = { workspace = true, features = ["display"] }
+url.workspace = true
 
 # tokio is the native test runtime only. Keeping it off the wasm dev graph
 # means no tokio runtime is ever compiled for wasm32, not even for tests.

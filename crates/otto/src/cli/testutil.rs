@@ -76,6 +76,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         },
         sandbox_secrets: Vec::new(),
         sandbox_secrets_complete: true,
+        memory: Default::default(),
     }
 }
 

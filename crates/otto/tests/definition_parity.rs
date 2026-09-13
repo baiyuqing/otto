@@ -9,11 +9,13 @@
 
 use std::collections::BTreeMap;
 
+use otto::subagent::tools::tool_definitions as agent_tool_definitions;
 use otto::tool::bash::bash_definition;
 use otto::tool::edit::edit_definition;
 use otto::tool::find::find_definition;
 use otto::tool::grep::grep_definition;
 use otto::tool::ls::ls_definition;
+use otto::tool::memory::{forget_definition, memory_search_definition, remember_definition};
 use otto::tool::read::read_definition;
 use otto::tool::skill::skill_definition;
 use otto::tool::write::write_definition;
@@ -46,7 +48,7 @@ fn rust_definition(definition: &ToolDefinition) -> serde_json::Value {
 #[test]
 fn every_rust_tool_schema_matches_the_go_schema() {
     let go = go_definitions();
-    let rust = [
+    let mut rust = vec![
         read_definition(),
         write_definition(),
         edit_definition(),
@@ -55,7 +57,11 @@ fn every_rust_tool_schema_matches_the_go_schema() {
         grep_definition(),
         skill_definition(),
         bash_definition(),
+        memory_search_definition(),
+        remember_definition(),
+        forget_definition(),
     ];
+    rust.extend(agent_tool_definitions());
     for definition in &rust {
         let expected = go
             .get(&definition.name)

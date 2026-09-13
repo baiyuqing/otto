@@ -4,8 +4,8 @@
 //! The order of operations, the exact stderr text and the exit codes match
 //! Go, because `cmd/otto/main_test.go` pins them. What is deliberately absent
 //! is named by a "not yet ported" message rather than silently skipped: the
-//! `login`, `logout`, `memory` and `sandbox` subcommands, `serve`, the TUI,
-//! memory wiring, skills, sub-agents and `/sandbox reload`.
+//! `login`, `logout` and `sandbox` subcommands, `serve`, the TUI and
+//! `/sandbox reload`.
 //!
 //! Safety: every diagnostic that could carry a host path, an environment name
 //! or a provider URL goes through the redaction boundary before it is
@@ -69,7 +69,7 @@ pub enum Frontend {
 type EnvironmentLookup = HashMap<String, String>;
 
 /// Writes `otto: {message}\n` and returns Go's exit code 1.
-fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
+pub(crate) fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     let _ = writeln!(stderr, "otto: {message}");
     1
 }
@@ -94,6 +94,15 @@ pub async fn run(
     if let Some(first) = args.first()
         && matches!(first.as_str(), "sandbox" | "memory" | "login" | "logout")
     {
+        if first == "memory" {
+            let lookup = match capture_environment(environment_entries)
+                .and_then(|entries| environment_lookup(&entries))
+            {
+                Ok(lookup) => lookup,
+                Err(message) => return fail(stderr, &message),
+            };
+            return super::memory_command::run(&args[1..], stdout, stderr, &lookup);
+        }
         return fail(stderr, &format!("{first} is not yet ported"));
     }
 
@@ -277,10 +286,10 @@ pub async fn run(
         Ok(settings) => settings,
         Err(message) => return fail(stderr, &startup.redact(&message)),
     };
-    // Resolved for its validation only: the memory service arrives in phase 6.
-    if let Err(error) = resolve_memory(&config_file, &environment) {
-        return fail(stderr, &error.to_string());
-    }
+    let memory_config = match resolve_memory(&config_file, &environment) {
+        Ok(config) => config,
+        Err(error) => return fail(stderr, &error.to_string()),
+    };
 
     let mut builder = Builder {
         config_path: PathBuf::from(&config_path),
@@ -297,6 +306,7 @@ pub async fn run(
         sandbox_info: super::info::SandboxInfo::default(),
         sandbox_secrets: startup.sandbox_secrets.clone(),
         sandbox_secrets_complete: startup.complete,
+        memory: Default::default(),
     };
 
     let mut prepared_initial = None;
@@ -381,6 +391,30 @@ pub async fn run(
         let _ = sandbox.close();
         return fail(stderr, SESSION_OPERATION_UNAVAILABLE);
     }
+    if dynamic_content {
+        let secrets = builder.secret_values(Some(&resolved));
+        match super::wiring::open_memory_service(&memory_config, &secrets, stderr) {
+            Ok((service, user_scope, usable)) => {
+                builder.memory.service = service;
+                builder.memory.user_scope = user_scope;
+                builder.memory.usable = usable;
+            }
+            Err(error) => {
+                let _ = sandbox.close();
+                return fail(stderr, &builder.redact_error(&error, Some(&resolved)));
+            }
+        }
+        match super::wiring::workspace_memory_scope(&memory_config, &workspace_path) {
+            Ok(scope) => builder.memory.workspace_scope = scope,
+            Err(error) => {
+                let _ = sandbox.close();
+                return fail(stderr, &error);
+            }
+        }
+    }
+    builder.memory.recall_limit = memory_config.max_results;
+    builder.memory.recall_token_budget = memory_config.recall_tokens;
+    let memory_service = Arc::clone(&builder.memory.service);
     if cancel.is_cancelled() {
         let _ = sandbox.close();
         return 130;
@@ -449,6 +483,7 @@ pub async fn run(
     cancel.cancel();
     let controller_error = controller.close();
     let sandbox_error = sandbox.close();
+    let _ = memory_service.close();
     if let Err(message) = controller_error {
         return fail(
             stderr,
@@ -664,6 +699,34 @@ fn valid_environment_name(name: &str) -> bool {
 }
 
 /// Port of `resolveHome`: `$HOME`, else the passwd entry, made absolute.
+pub(crate) fn resolve_home_for(lookup: &EnvironmentLookup) -> Result<String, String> {
+    resolve_home(lookup)
+}
+
+/// The `otto memory` flag grammar names its own config path, so it cannot
+/// build a [`CliOptions`].
+pub(crate) fn load_config_for(
+    config_path: &str,
+    explicit: bool,
+    home: &str,
+) -> Result<(String, File), ()> {
+    load_config(
+        &CliOptions {
+            config_path: config_path.to_string(),
+            explicit_config: explicit,
+            ..CliOptions::default()
+        },
+        home,
+    )
+}
+
+pub(crate) fn config_environment_for(
+    file: &File,
+    lookup: &EnvironmentLookup,
+) -> HashMap<String, String> {
+    config_environment(file, lookup)
+}
+
 fn resolve_home(lookup: &EnvironmentLookup) -> Result<String, String> {
     const FAILED: &str = "resolve home directory";
     let mut home = lookup.get("HOME").cloned().unwrap_or_default();
@@ -757,7 +820,7 @@ fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<String
 
 /// Port of `resolveSandboxSettings`: existing skill and agent roots become
 /// read paths so discovery can reach them from inside the sandbox.
-fn resolve_sandbox_settings(
+pub(super) fn resolve_sandbox_settings(
     file: &File,
     environment: &HashMap<String, String>,
     workspace_path: &str,
@@ -937,7 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn unported_subcommands_exit_non_zero() {
-        for command in ["login", "logout", "memory", "sandbox"] {
+        for command in ["login", "logout", "sandbox"] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let code = run(

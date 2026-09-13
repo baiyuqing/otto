@@ -49,4 +49,7 @@ futures-util = { version = "=0.3.34", default-features = false }
 toml = { version = "=1.1.6", default-features = false, features = ["parse", "serde", "std"] }
 # WHATWG URL parsing for base_url validation, mirroring net/url's checks.
 url = "=2.5.8"
+# Native-only. FTS5 must be compiled in, so the `bundled` feature builds the
+# amalgamation instead of linking the system libsqlite3.
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
 otto-core = { path = "crates/otto-core" }

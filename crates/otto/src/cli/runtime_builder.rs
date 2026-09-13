@@ -288,6 +288,9 @@ pub struct Runner {
     agent: Agent<ProviderClient, Registry, SharedSession>,
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
+    /// The sub-agent task registry, absent when sub-agents are off. Port of
+    /// Go's `taskOwner`: `/tasks` and `/task` read the active runner's.
+    pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
 }
 
 impl Runner {
@@ -356,6 +359,9 @@ pub struct Builder {
     pub sandbox_info: SandboxInfo,
     pub sandbox_secrets: Vec<String>,
     pub sandbox_secrets_complete: bool,
+    /// The process-wide memory service and its two scopes. Default is Go's
+    /// zero value: a null service reporting memory as disabled.
+    pub memory: super::wiring::MemoryWiring,
 }
 
 impl Builder {
@@ -371,9 +377,9 @@ impl Builder {
 
     /// The definitions the boundary check must leave unchanged.
     ///
-    /// Port of `boundaryToolDefinitions`. The skill and sub-agent definitions
-    /// Go also lists are phases 6 and 7; until those tools exist the set is
-    /// the built-ins plus bash.
+    /// Port of `boundaryToolDefinitions`: the built-ins, bash when it is
+    /// planned, the memory tools when memory is usable, and the skill and
+    /// sub-agent definitions `build_catalogs` would register.
     fn boundary_tool_definitions(&self, runtime: Option<&Runtime>) -> Vec<ToolDefinition> {
         let max_output = match runtime {
             Some(runtime) if runtime.max_output_bytes > 0 => output_cap(runtime.max_output_bytes),
@@ -384,9 +390,13 @@ impl Builder {
             .iter()
             .map(|tool| tool.definition())
             .collect();
+        definitions.extend(self.boundary_memory_definitions(max_output));
         if self.planned_bash_available() {
             definitions.push(bash::bash_definition());
         }
+        let dynamic =
+            boundary::secret_redactor(&self.boundary_inputs(), runtime).allows_dynamic_content();
+        definitions.extend(self.boundary_catalog_definitions(max_output, dynamic));
         definitions
     }
 
@@ -485,7 +495,7 @@ impl Builder {
         info
     }
 
-    fn builtin_file_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
+    pub(crate) fn builtin_file_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
         vec![
             Box::new(read::ReadTool::new(self.workspace, max_output)),
             Box::new(grep::GrepTool::new(self.workspace, max_output)),
@@ -522,6 +532,11 @@ impl Builder {
             .map_err(|error| format!("create bash tool: {error}"))?;
             tools.push(Box::new(tool));
         }
+        let mut warnings = std::io::stderr();
+        if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
+            tools.extend(self.memory_tools(max_output));
+        }
+        let catalogs = self.build_catalogs(&mut tools, max_output, &mut warnings)?;
 
         let redactor = self.boundary_redactor(Some(runtime));
         let client = if self.boundary_allows_dynamic(Some(runtime)) {
@@ -539,27 +554,42 @@ impl Builder {
             None
         };
         let prompt_tail = redactor.redact_string(
-            &workspace_context_for(
+            &(workspace_context_for(
                 &self.workspace_path,
                 Utc::now(),
                 context_executor,
                 self.sandbox_environment.as_deref(),
                 self.workspace,
             )
-            .await,
+            .await
+                + &catalogs.skill_section),
         );
+        let parent_agent_section = redactor.redact_string(&catalogs.agent_section);
+        let endpoint_host = boundary::endpoint_host_for(&runtime.base_url);
+        let subagents = self.build_subagents(
+            &mut tools,
+            &catalogs,
+            &client,
+            &redaction_values,
+            &redactor,
+            runtime,
+            session,
+            self.child_prompt_for(runtime, &endpoint_host, &prompt_tail),
+            self.child_tools(runtime, max_output, &redaction_values, &catalogs.skills)?,
+            &mut warnings,
+        )?;
 
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
         let definitions = registry.definitions();
-        let endpoint_host = boundary::endpoint_host_for(&runtime.base_url);
         let system_prompt = system_prompt_for(
             &definitions,
             self.effective_sandbox_info(),
             &runtime.provider,
             &endpoint_host,
             &runtime.model,
-        ) + &prompt_tail;
+        ) + &prompt_tail
+            + &parent_agent_section;
 
         let request_sizer = match &client {
             ProviderClient::Compat(client) => {
@@ -581,12 +611,24 @@ impl Builder {
                 reserve_tokens: runtime.compaction.reserve_tokens,
                 keep_recent_tokens: runtime.compaction.keep_recent_tokens,
             },
+            memory: match self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
+                true => Some(Arc::new(self.bind_memory()?)),
+                false => None,
+            },
+            memory_recall_limit: self.memory.recall_limit,
+            memory_recall_token_budget: self.memory.recall_token_budget,
+            tasks: subagents
+                .tasks
+                .clone()
+                .map(|tasks| tasks as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
+            inbox: subagents.inbox.unwrap_or_default(),
             ..Options::default()
         };
         Ok(Runner {
             agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
             system_prompt,
             definitions,
+            tasks: subagents.tasks,
         })
     }
 
@@ -727,7 +769,7 @@ fn output_cap(max_output_bytes: i64) -> usize {
 
 /// `BashTool::new` rejects a zero timeout; Go's `config.Resolve` never
 /// produces one, and a negative `Duration` cannot exist in Rust.
-fn shell_timeout(timeout: Duration) -> Duration {
+pub(crate) fn shell_timeout(timeout: Duration) -> Duration {
     timeout
 }
 
@@ -819,6 +861,7 @@ mod tests {
             sandbox_info: SandboxInfo::unavailable(SandboxReason::SeatbeltMissing),
             sandbox_secrets: Vec::new(),
             sandbox_secrets_complete: true,
+            memory: Default::default(),
         }
     }
 
@@ -875,7 +918,17 @@ mod tests {
             .expect("runner");
         assert_eq!(
             tool_names(&runner),
-            vec!["read", "grep", "find", "ls", "write", "edit"]
+            vec![
+                "read",
+                "grep",
+                "find",
+                "ls",
+                "write",
+                "edit",
+                "agent",
+                "agent_wait",
+                "agent_status"
+            ]
         );
     }
 
@@ -890,7 +943,8 @@ mod tests {
             .build_runner(&session, &runtime())
             .await
             .expect("runner");
-        assert_eq!(tool_names(&runner).last().map(String::as_str), Some("bash"));
+        let names = tool_names(&runner);
+        assert_eq!(names.iter().position(|name| name == "bash"), Some(6));
     }
 
     #[test]
@@ -940,7 +994,9 @@ mod tests {
             .expect("runner");
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("You are Otto, a concise coding agent."));
-        assert!(prompt.contains("Usable tools: read, grep, find, ls, write, edit."));
+        assert!(prompt.contains(
+            "Usable tools: read, grep, find, ls, write, edit, agent, agent_wait, agent_status."
+        ));
         assert!(prompt.contains("<workspace-instructions"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");
         assert!(!prompt.contains("sk-secret-value"), "{prompt}");

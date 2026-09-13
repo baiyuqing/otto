@@ -4,10 +4,10 @@
 //! event rendering are byte-identical to the Go REPL's for the same inputs.
 //!
 //! Not ported in this phase, and answered with a "not yet ported" line on
-//! stderr: `/memory`, `/remember`, `/tasks`, `/task`, `/login`, `/logout`.
-//! Sub-agent wake turns and the task drain in `RunOnce` go with them. Go's
-//! `/sandbox reload` needs the sandbox reloader, which is also a later phase,
-//! so it reports Go's `ErrSandboxReloadUnavailable` text.
+//! stderr: `/login` and `/logout`. Sub-agent wake turns and the task drain in
+//! `RunOnce` go with them. Go's `/sandbox reload` needs the sandbox reloader,
+//! which is also a later phase, so it reports Go's
+//! `ErrSandboxReloadUnavailable` text.
 //!
 //! Input: one blocking reader task feeds a bounded channel, so a parent
 //! cancellation is observed while the loop is idle waiting for a line. A line
@@ -26,10 +26,10 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n";
+const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n";
 
 /// Commands `internal/repl` has that this phase does not.
-const UNPORTED: [&str; 6] = ["memory", "remember", "tasks", "task", "login", "logout"];
+const UNPORTED: [&str; 2] = ["login", "logout"];
 
 /// Why the loop stopped. Port of the error values `Run` returns.
 #[derive(Debug)]
@@ -64,9 +64,9 @@ pub fn is_command_error(error: &Error, command: &str) -> bool {
 }
 
 pub struct Repl<'a> {
-    controller: &'a Controller,
-    stdout: Box<dyn Write + Send + 'a>,
-    stderr: Box<dyn Write + Send + 'a>,
+    pub(super) controller: &'a Controller,
+    pub(super) stdout: Box<dyn Write + Send + 'a>,
+    pub(super) stderr: Box<dyn Write + Send + 'a>,
 }
 
 impl<'a> Repl<'a> {
@@ -263,6 +263,22 @@ impl<'a> Repl<'a> {
                     Some(false)
                 }
                 "sandbox" => self.sandbox(args)?.then_some(false),
+                "memory" => {
+                    self.memory_command(args)?;
+                    Some(false)
+                }
+                "remember" => {
+                    self.remember_command(args)?;
+                    Some(false)
+                }
+                "tasks" => {
+                    self.tasks_command();
+                    Some(false)
+                }
+                "task" => {
+                    self.task_command(args);
+                    Some(false)
+                }
                 _ if UNPORTED.contains(&name) => {
                     let _ = writeln!(self.stderr, "/{name} is not yet ported");
                     Some(false)
@@ -844,21 +860,10 @@ mod tests {
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = controller(workspace.path(), sessions.path()).await;
 
-        let (_, stderr, result) = session(
-            "/memory search x\n/remember note\n/tasks\n/task 1\n/login\n/logout\n/exit\n",
-            &controller,
-        )
-        .await;
+        let (_, stderr, result) = session("/login\n/logout\n/exit\n", &controller).await;
 
         assert!(result.is_ok(), "{result:?}");
-        for command in [
-            "/memory",
-            "/remember",
-            "/tasks",
-            "/task",
-            "/login",
-            "/logout",
-        ] {
+        for command in ["/login", "/logout"] {
             assert!(
                 stderr.contains(&format!("{command} is not yet ported\n")),
                 "{command} missing from {stderr}"

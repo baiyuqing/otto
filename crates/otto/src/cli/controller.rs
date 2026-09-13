@@ -102,6 +102,18 @@ impl Controller {
         self.builder.effective_sandbox_info()
     }
 
+    /// The process-wide memory service and its scopes. `/memory` and
+    /// `/remember` read them through `Controller::memory_manager`.
+    pub(super) fn memory_wiring(&self) -> &super::wiring::MemoryWiring {
+        &self.builder.memory
+    }
+
+    /// The runner currently in force. `/tasks` and `/task` read its sub-agent
+    /// task registry, Go's `taskOwner`.
+    pub(super) fn current_runner(&self) -> Arc<Runner> {
+        Arc::clone(&self.current().runner)
+    }
+
     pub fn dynamic_content(&self) -> bool {
         self.dynamic_content
     }

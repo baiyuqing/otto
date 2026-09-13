@@ -267,10 +267,12 @@ Key points:
   closed by disabling `bash` while keeping `read`, `grep`, `find`, `ls`,
   `write`, and `edit` available.
 
-  `otto serve` can apply edits to `driver`, `network`, and `read_paths` to the
-  running process through `POST /v1/sandbox/reload`; the interactive REPL and
-  TUI have no live reload, so restart Otto to pick up a `[sandbox]` change
-  there (see [Slash commands](#slash-commands)).
+  `/sandbox reload` applies edits to `driver`, `network`, and `read_paths` to
+  the running process (see [Slash commands](#slash-commands)). Two changes
+  still need a restart: `allow_env`, because the shell environment is fixed
+  when the `bash` tool is built, and any change made when the sandbox was
+  already unavailable at startup, because there is no `bash` tool to re-point.
+
 - `[skills]` discovers reusable instruction sets from configured roots and
   registers the `skill` tool when at least one skill is found. Config keys are
   `enabled` (default true) and `paths` (default `["~/.otto/skills", ".otto/skills"]`);
@@ -409,10 +411,11 @@ Shared commands:
   while a turn is in flight.
 - `/compact [focus]` creates a manual context checkpoint, or reports
   `[context] no-op` when nothing can be compacted.
-- `/sandbox` shows the sandbox state now in effect. `/sandbox reload` reports
-  `sandbox reload is not available` in the interactive REPL and TUI; only
-  `otto serve` wires a live reload, through `POST /v1/sandbox/reload`. To pick
-  up a `[sandbox]` change in an interactive session, restart Otto.
+- `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads
+  `[sandbox]` from the config file and applies it to the running process,
+  printing the new state. It is rejected while a turn is in flight, and a
+  failed reload keeps the previous sandbox in place. `allow_env` changes and a
+  sandbox that was unavailable at startup still need a restart.
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
@@ -588,21 +591,28 @@ initial workspace.
 
 ### Interactive sandbox setup
 
-The `otto sandbox setup` wizard is not yet ported in this build; running
-`otto sandbox` exits with `otto: sandbox is not yet ported`. Configure the
-sandbox manually instead, by editing the `[sandbox]` table in your config file
-(see [Configuration](#configuration)):
+Run `otto sandbox setup` to choose network access and optionally add the built-in
+GitHub CLI recipe. Use `--config PATH` for another configuration file and `--cwd
+PATH` to select the workspace used by the check. No model or provider login is
+required.
 
-```toml
-[sandbox]
-driver = "auto"
-network = "allow"
-read_paths = []
-allow_env = []
-```
+The wizard shows the proposed permissions before saving. It enables Seatbelt,
+preserves existing extra permissions and unrelated TOML content, and changes only
+the sandbox table. Cancel or end input to leave the file unchanged. Configuration
+uses a separate `[sandbox]` table; unsupported layouts are rejected without edits.
+Changes apply to future processes using that config file, not just the selected
+workspace.
 
-Restart Otto after editing `[sandbox]`; the interactive REPL and TUI have no
-live reload (see [Slash commands](#slash-commands)).
+The GitHub CLI recipe exposes its configuration directory read-only and allows
+`GH_CONFIG_DIR`. This can expose saved GitHub credentials to shell commands. The
+wizard uses an existing absolute `GH_CONFIG_DIR`, or defaults to `~/.config/gh`,
+and prints a launch command setting that variable because Otto replaces `HOME`.
+Run `gh auth login` outside Otto first if the configuration directory is missing.
+
+Choose `check` to test sandbox startup and, when selected, GitHub CLI availability
+and directory access using the displayed launch environment. The check does not
+contact GitHub or verify authentication or network connectivity. Choose `save`
+to write the reviewed configuration, then restart Otto with the printed command.
 
 ### `bash` sandbox policy
 

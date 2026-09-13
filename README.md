@@ -163,8 +163,7 @@ persisted.
   token persistence. The Unix socket relies on file permissions for access
   control.
 
-The `otto sandbox setup` wizard is not yet ported; configure shell permissions
-by hand in the `[sandbox]` TOML table, see the
+Configure shell permissions interactively with `otto sandbox setup`; see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup).
 
 Read [tools and safety](docs/user-manual.md#tools-and-safety) before granting

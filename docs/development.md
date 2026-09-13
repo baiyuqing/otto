@@ -51,10 +51,10 @@ and explicit management (`memory_search`/`remember`/`forget` tools,
 `/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
 end to end via `[memory]` TOML config. Model- and human-originated writes
 always land as pending candidates requiring review. Automatic extraction and
-durability (backup/restore/verify) remain unwired. `/memory` and `/remember`
-are not yet wired into the TUI; `crates/otto/src/tui/app.rs`'s `UNPORTED`
-table names them and the dispatcher answers with a "not yet ported" line
-until they land.
+durability (backup/restore/verify) remain unwired. `/memory review` names a
+candidate reviewer that automatic extraction would feed and falls through to
+the usage line. The TUI dispatches `/memory` and `/remember` to the same
+functions the REPL uses (`crates/otto/src/cli/repl_commands.rs`).
 
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules
 besides `otto-core`. The skill tool's file reads stay confined to the skill

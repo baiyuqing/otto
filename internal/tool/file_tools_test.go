@@ -358,6 +358,158 @@ func TestEditSucceedsWithExactSingleMatch(t *testing.T) {
 	}
 }
 
+func TestEditAcceptsMultiEditArguments(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{
+		"path":"sample.txt",
+		"edits":[
+			{"oldText":"one","newText":"ONE"},
+			{"oldText":"three","newText":"THREE"}
+		]
+	}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %#v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "ONE\ntwo\nTHREE\n"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestEditAcceptsStringAndObjectEdits(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{
+		"path":"sample.txt",
+		"edits":"{\"oldText\":\"alpha\",\"newText\":\"ALPHA\"}"
+	}`))
+	if result.IsError {
+		t.Fatalf("unexpected string-edits error: %#v", result)
+	}
+	result = NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{
+		"path":"sample.txt",
+		"edits":{"old_text":"beta","new_text":"BETA"}
+	}`))
+	if result.IsError {
+		t.Fatalf("unexpected object-edits error: %#v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "ALPHA\nBETA\n"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestEditFuzzyMatchesWhitespaceQuotesAndDashes(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("const msg = “hello”  \nconst dash = \"a—b\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{
+		"path":"sample.txt",
+		"oldText":"const msg = \"hello\"\nconst dash = \"a-b\"",
+		"newText":"const msg = \"hi\"\nconst dash = \"a-b\""
+	}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %#v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "const msg = \"hi\"\nconst dash = \"a-b\"\n"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestEditPreservesBOMAndCRLF(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("\xef\xbb\xbfa\r\nb\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{"path":"sample.txt","oldText":"a\nb\n","newText":"x\ny\n"}`))
+	if result.IsError {
+		t.Fatalf("unexpected error: %#v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "\xef\xbb\xbfx\r\ny\r\n"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestEditRejectsOverlappingMultiEdits(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("abcdef\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{
+		"path":"sample.txt",
+		"edits":[
+			{"oldText":"abc","newText":"ABC"},
+			{"oldText":"bcd","newText":"BCD"}
+		]
+	}`))
+	if !result.IsError || !strings.Contains(result.Content, "overlap") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "abcdef\n"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestEditMatchesAllEditsAgainstOriginalContent(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	if err := os.WriteFile(path, []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := mustWorkspace(t, root)
+	result := NewEditTool(workspace).Execute(context.Background(), json.RawMessage(`{
+		"path":"sample.txt",
+		"edits":[
+			{"oldText":"a","newText":"b"},
+			{"oldText":"b","newText":"c"}
+		]
+	}`))
+	if !result.IsError || !strings.Contains(result.Content, "old_text was not found") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "a\n"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
 func TestEditResultDiffIsCompactWithContext(t *testing.T) {
 	root := t.TempDir()
 	var lines []string

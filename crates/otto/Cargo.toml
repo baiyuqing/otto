@@ -15,7 +15,16 @@ async-trait.workspace = true
 # filesystem times, neither of which otto-core's wasm-safe chrono can do.
 chrono = { workspace = true, features = ["clock", "std"] }
 libc.workspace = true
+nix.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs"] }
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# `start_paused` drives the bash timeout deterministically without real waits.
+tokio = { workspace = true, features = ["test-util"] }

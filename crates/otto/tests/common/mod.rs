@@ -3,6 +3,9 @@
 //! It is a plain HTTP/1.1 listener on 127.0.0.1, so the tests that drive the
 //! built binary need no credentials and reach no external network.
 
+// Each test binary compiles its own copy, so some helpers are unused in some.
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;

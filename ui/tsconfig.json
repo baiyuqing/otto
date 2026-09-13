@@ -9,7 +9,11 @@
     "noEmit": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "otto-web": ["../crates/otto-web/pkg/otto_web.d.ts"]
+    }
   },
   "include": ["src"]
 }

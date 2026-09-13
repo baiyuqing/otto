@@ -5,7 +5,9 @@
 //! without spawning a process.
 
 pub mod boundary;
-pub mod controller;
+/// The phase-4c seam is gone: `otto::app` is the real controller and every
+/// `cli::controller::…` path keeps resolving to it.
+pub use crate::app as controller;
 pub mod flags;
 pub mod info;
 pub mod prompt;
@@ -13,6 +15,7 @@ pub mod repl;
 pub mod run;
 pub mod runtime_builder;
 pub mod sandbox_runtime;
+pub mod serve;
 #[cfg(test)]
 pub mod testutil;
 pub mod workspace_context;

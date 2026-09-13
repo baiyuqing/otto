@@ -1,4 +1,4 @@
-import type { SessionListRow } from './types'
+import type { SessionListRow } from './wire'
 import { sessionLabel } from './uiText'
 
 export function SessionPicker(props: {

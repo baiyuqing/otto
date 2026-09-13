@@ -16,6 +16,17 @@ pub enum SandboxMode {
     Unavailable,
 }
 
+impl SandboxMode {
+    /// The wire string, matching Go's `SandboxMode` constants.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Seatbelt => "seatbelt",
+            Self::Off => "off",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 /// What the confined child may reach on the network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxNetwork {
@@ -24,6 +35,17 @@ pub enum SandboxNetwork {
     /// No confinement, so nothing is restricted.
     #[default]
     Unconfined,
+}
+
+impl SandboxNetwork {
+    /// The wire string, matching Go's `SandboxNetwork` constants.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Denied => "denied",
+            Self::Unconfined => "unconfined",
+        }
+    }
 }
 
 /// Why no sandbox could be established. `None` is the only valid value when

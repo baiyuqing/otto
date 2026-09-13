@@ -1,4 +1,4 @@
-import type { Info, Session, Usage } from './types'
+import type { Info, Session, Usage } from './wire'
 
 const n = (v: number | undefined) => (v ?? 0).toLocaleString()
 

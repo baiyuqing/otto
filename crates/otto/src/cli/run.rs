@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use otto_core::config::resolve::{Overrides, Runtime};
 use otto_core::config::{
-    File, SandboxSettings, UiMode, resolve_agents, resolve_memory, resolve_sandbox, resolve_skills,
-    resolve_ui_mode,
+    File, SandboxSettings, UiMode, resolve_agents, resolve_memory, resolve_sandbox, resolve_server,
+    resolve_skills, resolve_ui_mode,
 };
 use otto_core::session::{CURRENT_VERSION, Header, RuntimeMetadata};
 use tokio_util::sync::CancellationToken;
@@ -39,6 +39,7 @@ use super::sandbox_runtime::{
     OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
     open_sandbox_runtime, sandbox_runtime_warning, settings_from_config,
 };
+use super::serve;
 
 /// Go's `maxApprovePromptBytes`.
 const MAX_APPROVE_PROMPT_BYTES: usize = 1 << 20;
@@ -109,10 +110,6 @@ pub async fn run(
             return 2;
         }
     };
-    if options.serve {
-        return fail(stderr, "serve is not yet ported");
-    }
-
     let host_entries = match capture_environment(environment_entries) {
         Ok(entries) => entries,
         Err(message) => return fail(stderr, &message),
@@ -337,23 +334,15 @@ pub async fn run(
         Err(error) => return fail(stderr, &builder.redact_error(&error.to_string(), None)),
     };
 
-    let sandbox = normalize_sandbox_runtime(
-        open_sandbox_runtime(
-            &OpenOptions {
-                settings: settings_from_config(&sandbox_settings),
-                workspace: workspace_path.clone(),
-                shell: shell.clone(),
-                home: home.clone(),
-                host_entries: host_entries.clone(),
-                provider_names: sandbox_provider_environment_names(
-                    &config_file,
-                    &resolved.api_key_env,
-                ),
-            },
-            cancel,
-        )
-        .await,
-    );
+    let open_options = OpenOptions {
+        settings: settings_from_config(&sandbox_settings),
+        workspace: workspace_path.clone(),
+        shell: shell.clone(),
+        home: home.clone(),
+        host_entries: host_entries.clone(),
+        provider_names: sandbox_provider_environment_names(&config_file, &resolved.api_key_env),
+    };
+    let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
     if cancel.is_cancelled() {
         let _ = sandbox.close();
         return 130;
@@ -377,13 +366,43 @@ pub async fn run(
     }
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
-    if prepared_initial.is_some() && !dynamic_content {
+    if (prepared_initial.is_some() || options.serve) && !dynamic_content {
         let _ = sandbox.close();
         return fail(stderr, SESSION_OPERATION_UNAVAILABLE);
     }
     if cancel.is_cancelled() {
         let _ = sandbox.close();
         return 130;
+    }
+
+    if options.serve {
+        let listen =
+            match resolve_server(&config_file, &environment, &options.socket, &options.listen) {
+                Ok(listen) => listen,
+                Err(error) => {
+                    let _ = sandbox.close();
+                    return fail(stderr, &builder.redact_error(&error.to_string(), None));
+                }
+            };
+        let api_key_env = resolved.api_key_env.clone();
+        return serve::run(
+            serve::ServeOptions {
+                builder,
+                runtime: resolved,
+                listen,
+                sandbox,
+                reopen: open_options,
+                config_path: PathBuf::from(&config_path),
+                explicit_config: options.explicit_config,
+                driver_override: sandbox_driver_override,
+                environment,
+                api_key_env,
+            },
+            stdout,
+            stderr,
+            cancel,
+        )
+        .await;
     }
 
     let (initial_session, warnings) =
@@ -741,7 +760,7 @@ fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String
 
 /// Port of `sandboxProviderEnvironmentNames`: `OTTO_API_KEY`, the selected
 /// key name and every configured one, deduplicated and sorted.
-fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<String> {
+pub(super) fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<String> {
     let mut names: BTreeSet<String> = BTreeSet::new();
     names.insert("OTTO_API_KEY".to_string());
     if !selected.is_empty() {
@@ -757,7 +776,7 @@ fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<String
 
 /// Port of `resolveSandboxSettings`: existing skill and agent roots become
 /// read paths so discovery can reach them from inside the sandbox.
-fn resolve_sandbox_settings(
+pub(super) fn resolve_sandbox_settings(
     file: &File,
     environment: &HashMap<String, String>,
     workspace_path: &str,
@@ -996,26 +1015,5 @@ mod tests {
         assert_eq!(code, 0);
         assert!(String::from_utf8_lossy(&stdout).starts_with("Usage: otto [options]"));
         assert!(stderr.is_empty());
-    }
-
-    #[tokio::test]
-    async fn serve_reports_that_it_is_not_yet_ported() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let code = run(
-            &["serve".to_string()],
-            Box::new(Cursor::new(Vec::new())),
-            &mut stdout,
-            &mut stderr,
-            Vec::new(),
-            false,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
-        assert_eq!(code, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&stderr),
-            "otto: serve is not yet ported\n"
-        );
     }
 }

@@ -14,3 +14,4 @@ pub mod provider;
 pub mod safetext;
 pub mod session;
 pub mod tool;
+pub mod wire;

@@ -3,9 +3,10 @@
 //! Port of `internal/repl`. The banner, prompt marker, command output and
 //! event rendering are byte-identical to the Go REPL's for the same inputs.
 //!
-//! Not ported in this phase, and answered with a "not yet ported" line on
-//! stderr: none. Go's `/sandbox reload` needs the sandbox reloader, which is
-//! a later phase, so it reports Go's `ErrSandboxReloadUnavailable` text.
+//! `/sandbox reload` goes through [`Controller::reload_sandbox`], which the
+//! composition root in [`super::run`] wires to the process sandbox switch, so
+//! it re-points bash without restarting. Nothing is left unported: the
+//! `UNPORTED` list that answers with a "not yet ported" line is empty.
 //!
 //! Input: one blocking reader task feeds a bounded channel, so a parent
 //! cancellation is observed while the loop is idle waiting for a line. A line
@@ -25,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::subagent::tasks::{TaskError, Tasks};
 
-use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE, SANDBOX_RELOAD_UNAVAILABLE};
+use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE};
 
 /// The longest line the REPL accepts, matching Go's `maxInputBytes`.
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
@@ -381,7 +382,7 @@ impl<'a> Repl<'a> {
                     self.model(args).await?;
                     Some(false)
                 }
-                "sandbox" => self.sandbox(args)?.then_some(false),
+                "sandbox" => self.sandbox(args).await?.then_some(false),
                 "login" => {
                     super::login::repl_login(
                         self.controller,
@@ -488,25 +489,37 @@ impl<'a> Repl<'a> {
     }
 
     /// Port of `sandboxCommand`. False means "unknown command".
-    fn sandbox(&mut self, args: &str) -> Result<bool, Error> {
+    async fn sandbox(&mut self, args: &str) -> Result<bool, Error> {
         match args {
             "" => {
-                let info = self.controller.sandbox_info();
-                let _ = writeln!(self.stdout, "Sandbox: {}", info.summary());
-                let reason = info.reason_code();
-                if !reason.is_empty() {
-                    let _ = writeln!(self.stdout, "Sandbox reason: {reason}");
-                }
+                self.print_sandbox(self.controller.sandbox_info());
                 Ok(true)
             }
-            "reload" => Err(Error::Command {
-                command: "/sandbox".to_string(),
-                message: SANDBOX_RELOAD_UNAVAILABLE.to_string(),
-            }),
+            "reload" => {
+                let info =
+                    self.controller
+                        .reload_sandbox()
+                        .await
+                        .map_err(|message| Error::Command {
+                            command: "/sandbox".to_string(),
+                            message,
+                        })?;
+                self.print_sandbox(info);
+                Ok(true)
+            }
             _ => {
                 let _ = writeln!(self.stderr, "unknown command: /sandbox {args}");
                 Ok(true)
             }
+        }
+    }
+
+    /// Port of `REPL.printSandbox`.
+    fn print_sandbox(&mut self, info: crate::cli::info::SandboxInfo) {
+        let _ = writeln!(self.stdout, "Sandbox: {}", info.summary());
+        let reason = info.reason_code();
+        if !reason.is_empty() {
+            let _ = writeln!(self.stdout, "Sandbox reason: {reason}");
         }
     }
 
@@ -721,6 +734,8 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cli::controller::SANDBOX_RELOAD_UNAVAILABLE;
+    use crate::cli::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
     use crate::cli::runtime_builder::Runner;
     use crate::cli::testutil::{controller, user};
     use crate::subagent::tasks::Tasks;
@@ -986,8 +1001,114 @@ mod tests {
         assert_eq!(stderr, "unknown command: /sandbox bogus\n");
     }
 
+    /// Go's `seatbeltInfo`.
+    fn seatbelt(network: SandboxNetwork) -> SandboxInfo {
+        SandboxInfo {
+            mode: SandboxMode::Seatbelt,
+            network,
+            bash_available: true,
+            reason: SandboxReason::None,
+        }
+    }
+
+    /// Go's `fakeSandboxBackend`: the reload capability without a sandbox.
+    struct FakeSandbox {
+        info: SandboxInfo,
+        reloaded: SandboxInfo,
+        failure: Option<String>,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::app::SandboxControl for FakeSandbox {
+        fn info(&self) -> SandboxInfo {
+            self.info
+        }
+
+        async fn reload(&self) -> Result<SandboxInfo, String> {
+            *self.calls.lock().expect("calls") += 1;
+            match &self.failure {
+                Some(message) => Err(message.clone()),
+                None => Ok(self.reloaded),
+            }
+        }
+    }
+
+    async fn reloading_controller(
+        workspace: &Path,
+        sessions: &Path,
+        failure: Option<&str>,
+    ) -> (Controller, Arc<Mutex<usize>>) {
+        let calls = Arc::new(Mutex::new(0));
+        let control = FakeSandbox {
+            info: seatbelt(SandboxNetwork::Allowed),
+            reloaded: seatbelt(SandboxNetwork::Denied),
+            failure: failure.map(str::to_string),
+            calls: Arc::clone(&calls),
+        };
+        let controller = controller(workspace, sessions)
+            .await
+            .with_sandbox_control(Arc::new(control));
+        (controller, calls)
+    }
+
+    /// Port of `TestREPLSandboxShowsCurrentStateWithoutReloading`.
     #[tokio::test]
-    async fn sandbox_reload_reports_that_it_is_unavailable() {
+    async fn sandbox_shows_the_current_state_without_reloading() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, calls) =
+            reloading_controller(workspace.path(), sessions.path(), None).await;
+
+        let (stdout, stderr, result) = session("/sandbox\n/exit\n", &controller).await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            stdout.contains("Sandbox: seatbelt · workspace-write · network allowed\n"),
+            "{stdout}"
+        );
+        assert_eq!(stderr, "");
+        assert_eq!(*calls.lock().expect("calls"), 0);
+    }
+
+    /// Port of `TestREPLSandboxReloadReportsNewState`.
+    #[tokio::test]
+    async fn sandbox_reload_reports_the_new_state() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, calls) =
+            reloading_controller(workspace.path(), sessions.path(), None).await;
+
+        let (stdout, _, result) = session("/sandbox reload\n/exit\n", &controller).await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*calls.lock().expect("calls"), 1);
+        assert!(stdout.contains("network denied"), "{stdout}");
+    }
+
+    /// Port of `TestREPLSandboxReloadReportsFailure`.
+    #[tokio::test]
+    async fn sandbox_reload_reports_a_failure() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, _) = reloading_controller(
+            workspace.path(),
+            sessions.path(),
+            Some("sandbox reload failed: self-test-failed"),
+        )
+        .await;
+
+        let (_, _, result) = session("/sandbox reload\n", &controller).await;
+
+        let error = result.expect_err("reload");
+        assert!(is_command_error(&error, "/sandbox"), "{error:?}");
+        assert_eq!(error.to_string(), "sandbox reload failed: self-test-failed");
+    }
+
+    /// Port of `TestREPLSandboxReloadWithoutCapabilityIsReported`: the CLI
+    /// builds no control when bash never came up.
+    #[tokio::test]
+    async fn sandbox_reload_without_a_control_is_reported() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = controller(workspace.path(), sessions.path()).await;

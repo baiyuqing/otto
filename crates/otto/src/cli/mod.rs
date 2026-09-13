@@ -18,6 +18,8 @@ pub mod repl_commands;
 pub mod run;
 pub mod runtime_builder;
 pub mod sandbox_runtime;
+pub mod sandbox_setup;
+pub mod sandbox_switch;
 pub mod serve;
 #[cfg(test)]
 pub mod testutil;

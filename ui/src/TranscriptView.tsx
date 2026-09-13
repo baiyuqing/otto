@@ -4,7 +4,7 @@ import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
-import type { Item } from './transcript'
+import type { Item } from './wire'
 
 type MermaidAPI = typeof import('mermaid').default
 

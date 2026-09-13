@@ -1,0 +1,68 @@
+[workspace]
+resolver = "3"
+members = ["crates/otto-core", "crates/otto", "crates/otto-web"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Exact versions. otto-core must stay buildable for wasm32-unknown-unknown, so
+# every dependency it takes is default-features = false unless a feature is
+# required by name.
+[workspace.dependencies]
+async-trait = "=0.1.92"
+chrono = { version = "=0.4.45", default-features = false, features = ["alloc", "serde"] }
+serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std", "raw_value"] }
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.1", default-features = false }
+tokio-util = { version = "=0.7.19", default-features = false }
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-test = "=0.3.78"
+regex = "=1.13.1"
+# Native-only. macOS has no safe-wrapper crate for renamex_np(RENAME_EXCL),
+# openat/mkdirat/fstatat with O_NOFOLLOW, so the store calls them through libc.
+libc = "=0.2.189"
+# SHA-256 for the workspace directory key. No hash lives in std.
+sha2 = { version = "=0.10.9", default-features = false }
+# base64url for the OAuth PKCE challenge, the state parameter and the JWT
+# payload in `otto::auth`. Already in the lock file as a transitive dependency.
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
+# Native-only. nix gives the openat/readlinkat walk the workspace boundary needs
+# and the setpgid/killpg process-group control the sandbox drivers need.
+nix = { version = "=0.31.3", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }
+tempfile = "=3.27.0"
+# Native-only HTTP transport for the provider client. rustls only: the Go
+# client uses the macOS trust store, so `rustls-tls-native-roots` keeps the
+# same set of trusted roots without linking Security.framework through
+# native-tls. `stream` gives the chunked body reader the SSE assembler needs.
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+# `TryStreamExt::try_next` over the reqwest byte stream.
+futures-util = { version = "=0.3.34", default-features = false }
+# otto-core only parses TOML (config loading is resolution-only there); the
+# native crate adds "display" for Save's serialization.
+toml = { version = "=1.1.6", default-features = false, features = ["parse", "serde", "std"] }
+# WHATWG URL parsing for base_url validation, mirroring net/url's checks.
+url = "=2.5.8"
+# HTTP routing for `otto serve`. hyper and tower arrive transitively at the
+# versions axum pins; nothing depends on them by name.
+axum = "=0.8.9"
+# Embeds ui/dist into the binary at build time.
+include_dir = "=0.7.4"
+# Serde bridge for the wasm-bindgen exports the browser UI calls.
+serde-wasm-bindgen = "=0.6.5"
+# Dev-only: `ServiceExt::oneshot` drives the router in-process, so the route
+# contract tests need no listening socket.
+tower = { version = "=0.5.3", features = ["util"] }
+# Native-only. FTS5 must be compiled in, so the `bundled` feature builds the
+# amalgamation instead of linking the system libsqlite3.
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+otto-core = { path = "crates/otto-core" }

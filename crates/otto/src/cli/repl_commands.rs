@@ -10,6 +10,12 @@
 //! to the usage line instead of reaching a reviewer. The usage text still
 //! names it, because it is Go's and the frontend output is pinned byte for
 //! byte.
+//!
+//! [`repl_memory_command`] and [`repl_remember_command`] are free functions,
+//! not [`Repl`] methods, so `tui::app`'s `/memory`/`/remember` dispatch can
+//! call them directly against its own captured-output buffers; [`Repl`]'s
+//! own `memory_command`/`remember_command` are thin wrappers over the same
+//! two functions.
 
 use std::fmt::Write as _;
 use std::io::Write;
@@ -31,13 +37,16 @@ const SEARCH_LIMIT: usize = 20;
 const SEARCH_TOKEN_BUDGET: usize = 4000;
 /// Go's `app.MemoryDefaultKind`.
 const DEFAULT_KIND: &str = "note";
-/// Go's `app.MemoryUsage` and `app.RememberUsage`.
-const MEMORY_USAGE: &str =
+/// Go's `app.MemoryUsage` and `app.RememberUsage`. `pub(crate)` so the TUI's
+/// `tui::app` dispatch can assert on the exact usage text it reuses via
+/// [`repl_memory_command`]/[`repl_remember_command`] instead of duplicating
+/// the literal.
+pub(crate) const MEMORY_USAGE: &str =
     "usage: /memory search <query> | /memory forget <id> | /memory review <id> accept|reject";
-const REMEMBER_USAGE: &str =
+pub(crate) const REMEMBER_USAGE: &str =
     "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>";
 /// Go's `app.ErrMemoryUnavailable`.
-const MEMORY_UNAVAILABLE: &str = "memory is not available";
+pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
 /// Go's `repl.tasksCommand` message when no runner carries a registry.
 const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
 
@@ -119,121 +128,142 @@ fn render_search_result(result: &SearchResult) -> String {
     content.trim_end_matches('\n').to_string()
 }
 
-impl Repl<'_> {
-    fn command_error(command: &str, message: impl std::fmt::Display) -> Error {
-        Error::Command {
-            command: command.to_string(),
-            message: message.to_string(),
+fn command_error(command: &str, message: impl std::fmt::Display) -> Error {
+    Error::Command {
+        command: command.to_string(),
+        message: message.to_string(),
+    }
+}
+
+/// Port of `REPL.memoryCommand`. A free function, rather than a `Repl`
+/// method, so `tui::app`'s `/memory` dispatch can reuse it against its own
+/// captured-output buffers instead of a line-oriented `Repl`'s stdout/
+/// stderr.
+pub(crate) fn repl_memory_command(
+    controller: &Controller,
+    args: &str,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> Result<(), Error> {
+    let Some((service, user_scope, workspace_scope)) = controller.memory_manager() else {
+        return Err(command_error("/memory", MEMORY_UNAVAILABLE));
+    };
+    let fields: Vec<&str> = args.split_whitespace().collect();
+    let Some((subcommand, rest)) = fields.split_first() else {
+        let _ = writeln!(stderr, "{MEMORY_USAGE}");
+        return Ok(());
+    };
+    let scopes = vec![user_scope, workspace_scope];
+
+    match *subcommand {
+        "search" => {
+            let result = service
+                .search(&SearchRequest {
+                    query: rest.join(" "),
+                    scopes,
+                    limit: SEARCH_LIMIT,
+                    token_budget: SEARCH_TOKEN_BUDGET,
+                    now: Utc::now(),
+                    ..SearchRequest::default()
+                })
+                .map_err(|error| command_error("/memory search", error))?;
+            let _ = writeln!(stdout, "{}", render_search_result(&result));
+        }
+        "forget" if rest.len() == 1 => {
+            let id = rest[0];
+            let mut last_error = None;
+            for scope in scopes {
+                let reference = RecordRef {
+                    scope,
+                    id: id.to_string(),
+                };
+                let record = match service.get(&reference) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        last_error = Some(error);
+                        continue;
+                    }
+                };
+                let result = service
+                    .forget(&ForgetRequest {
+                        reference,
+                        expected_revision: record.revision,
+                        purge_backups: false,
+                        confirm_purge: false,
+                    })
+                    .map_err(|error| command_error("/memory forget", error))?;
+                let _ = writeln!(
+                    stdout,
+                    "forgot {} (revision {})",
+                    result.tombstone.id, record.revision
+                );
+                return Ok(());
+            }
+            let reason = last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "not found".to_string());
+            return Err(command_error(
+                "/memory forget",
+                format!("record {id} not found: {reason}"),
+            ));
+        }
+        _ => {
+            let _ = writeln!(stderr, "{MEMORY_USAGE}");
         }
     }
+    Ok(())
+}
 
+/// Port of `REPL.rememberCommand`. See [`repl_memory_command`] for why this
+/// is a free function.
+pub(crate) fn repl_remember_command(
+    controller: &Controller,
+    args: &str,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+) -> Result<(), Error> {
+    let Some((service, user_scope, workspace_scope)) = controller.memory_manager() else {
+        return Err(command_error("/remember", MEMORY_UNAVAILABLE));
+    };
+    let (scope_flag, kind, key, text) = parse_remember_argument(args);
+    if text.is_empty() {
+        let _ = writeln!(stderr, "{REMEMBER_USAGE}");
+        return Ok(());
+    }
+    let scope = match scope_flag {
+        "" | "workspace" => workspace_scope,
+        "user" => user_scope,
+        other => {
+            let _ = writeln!(stderr, "unknown scope {other:?}, want user or workspace");
+            return Ok(());
+        }
+    };
+    let record = service
+        .remember(&RememberRequest {
+            scope,
+            kind: kind.to_string(),
+            key: key.to_string(),
+            text: text.to_string(),
+            ..RememberRequest::default()
+        })
+        .map_err(|error| command_error("/remember", error))?;
+    let _ = writeln!(
+        stdout,
+        "remembered {} (scope={}/{} kind={})",
+        record.id, record.scope.namespace, record.scope.id, record.kind
+    );
+    Ok(())
+}
+
+impl Repl<'_> {
     /// Port of `REPL.memoryCommand`.
     pub(super) fn memory_command(&mut self, args: &str) -> Result<(), Error> {
-        let Some((service, user_scope, workspace_scope)) = self.controller.memory_manager() else {
-            return Err(Self::command_error("/memory", MEMORY_UNAVAILABLE));
-        };
-        let fields: Vec<&str> = args.split_whitespace().collect();
-        let Some((subcommand, rest)) = fields.split_first() else {
-            let _ = writeln!(self.stderr, "{MEMORY_USAGE}");
-            return Ok(());
-        };
-        let scopes = vec![user_scope, workspace_scope];
-
-        match *subcommand {
-            "search" => {
-                let result = service
-                    .search(&SearchRequest {
-                        query: rest.join(" "),
-                        scopes,
-                        limit: SEARCH_LIMIT,
-                        token_budget: SEARCH_TOKEN_BUDGET,
-                        now: Utc::now(),
-                        ..SearchRequest::default()
-                    })
-                    .map_err(|error| Self::command_error("/memory search", error))?;
-                let _ = writeln!(self.stdout, "{}", render_search_result(&result));
-            }
-            "forget" if rest.len() == 1 => {
-                let id = rest[0];
-                let mut last_error = None;
-                for scope in scopes {
-                    let reference = RecordRef {
-                        scope,
-                        id: id.to_string(),
-                    };
-                    let record = match service.get(&reference) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            last_error = Some(error);
-                            continue;
-                        }
-                    };
-                    let result = service
-                        .forget(&ForgetRequest {
-                            reference,
-                            expected_revision: record.revision,
-                            purge_backups: false,
-                            confirm_purge: false,
-                        })
-                        .map_err(|error| Self::command_error("/memory forget", error))?;
-                    let _ = writeln!(
-                        self.stdout,
-                        "forgot {} (revision {})",
-                        result.tombstone.id, record.revision
-                    );
-                    return Ok(());
-                }
-                let reason = last_error
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "not found".to_string());
-                return Err(Self::command_error(
-                    "/memory forget",
-                    format!("record {id} not found: {reason}"),
-                ));
-            }
-            _ => {
-                let _ = writeln!(self.stderr, "{MEMORY_USAGE}");
-            }
-        }
-        Ok(())
+        repl_memory_command(self.controller, args, &mut *self.stdout, &mut *self.stderr)
     }
 
     /// Port of `REPL.rememberCommand`.
     pub(super) fn remember_command(&mut self, args: &str) -> Result<(), Error> {
-        let Some((service, user_scope, workspace_scope)) = self.controller.memory_manager() else {
-            return Err(Self::command_error("/remember", MEMORY_UNAVAILABLE));
-        };
-        let (scope_flag, kind, key, text) = parse_remember_argument(args);
-        if text.is_empty() {
-            let _ = writeln!(self.stderr, "{REMEMBER_USAGE}");
-            return Ok(());
-        }
-        let scope = match scope_flag {
-            "" | "workspace" => workspace_scope,
-            "user" => user_scope,
-            other => {
-                let _ = writeln!(
-                    self.stderr,
-                    "unknown scope {other:?}, want user or workspace"
-                );
-                return Ok(());
-            }
-        };
-        let record = service
-            .remember(&RememberRequest {
-                scope,
-                kind: kind.to_string(),
-                key: key.to_string(),
-                text: text.to_string(),
-                ..RememberRequest::default()
-            })
-            .map_err(|error| Self::command_error("/remember", error))?;
-        let _ = writeln!(
-            self.stdout,
-            "remembered {} (scope={}/{} kind={})",
-            record.id, record.scope.namespace, record.scope.id, record.kind
-        );
-        Ok(())
+        repl_remember_command(self.controller, args, &mut *self.stdout, &mut *self.stderr)
     }
 
     /// Port of `REPL.tasksCommand`.

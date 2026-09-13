@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
+use otto_core::config::memory::MemoryRuntime;
 use otto_core::config::resolve::{Overrides, Runtime};
 use otto_core::config::{File, Profile};
 use otto_core::model::{Block, BlockType, Message, Role};
@@ -96,6 +97,48 @@ pub fn initial_runtime(builder: &Builder) -> Runtime {
 
 pub async fn controller(workspace_root: &Path, session_root: &Path) -> Controller {
     let builder = builder(workspace_root, session_root);
+    let runtime = initial_runtime(&builder);
+    let session = builder.create_session(&runtime).expect("session");
+    let runner = builder
+        .build_runner(&session, &runtime)
+        .await
+        .expect("runner");
+    let info = builder.runtime_info(&runtime);
+    Controller::new(builder, true, session, runner, info)
+}
+
+/// A controller whose builder carries a usable SQLite memory service.
+/// Shared with `tui::app`'s tests, which need the same fixture to exercise
+/// `/memory`/`/remember` dispatch; `repl_commands.rs`'s own memory tests
+/// keep their private copy since it predates this one.
+pub async fn controller_with_memory(
+    workspace: &Path,
+    session_root: &Path,
+    store_path: &Path,
+) -> Controller {
+    let mut builder = builder(workspace, session_root);
+    let runtime = MemoryRuntime {
+        enabled: true,
+        backend: "sqlite".into(),
+        sqlite_path: store_path.to_string_lossy().into_owned(),
+        ..MemoryRuntime::default()
+    };
+    let (service, user_scope, usable) =
+        super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
+            .expect("open memory service");
+    assert!(usable, "the test store must be usable");
+    builder.memory = super::wiring::MemoryWiring {
+        service,
+        usable,
+        user_scope,
+        workspace_scope: super::wiring::workspace_memory_scope(
+            &runtime,
+            &workspace.to_string_lossy(),
+        )
+        .expect("workspace scope"),
+        recall_limit: 8,
+        recall_token_budget: 1000,
+    };
     let runtime = initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder

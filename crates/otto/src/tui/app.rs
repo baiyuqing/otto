@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::tasks::{Task, TaskStatus};
 use crate::app::{Controller, PROFILE_SWITCH_UNAVAILABLE};
 use crate::cli::login;
+use crate::cli::repl_commands;
 
 use super::commands::{self, SlashCommandKind};
 use super::entries::{self, Entry, EntryKind};
@@ -40,13 +41,6 @@ const CTRL_C_ARM_WINDOW: Duration = Duration::from_secs(1);
 
 /// Go's `ctrlCExitStatus`.
 const CTRL_C_EXIT_STATUS: &str = "press Ctrl+C again to exit";
-
-/// Commands with no backing implementation yet. Phase 7 (memory, skills,
-/// sub-agents) lands `/memory` and `/remember`; the lead wires them into
-/// this table after merging phase 7 into `feat/rust`. `/tasks`/`/task` are
-/// wired for real below via [`Controller::tasks`], independent of the
-/// REPL's own (unrelated) choice to report them as unported.
-const UNPORTED: &[&str] = &["memory", "remember"];
 
 /// How many sessions a `/resume` or `/archive` picker lists. Port of Go's
 /// `resumeListLimit`/`archiveListLimit` (both `50` in `internal/tui`).
@@ -548,12 +542,52 @@ impl App {
                 self.push_system(task_report(controller, &args));
                 None
             }
-            SlashCommandKind::Memory | SlashCommandKind::Remember => {
-                let name = command.name.trim_start_matches('/');
-                debug_assert!(UNPORTED.contains(&name));
-                self.push_system(format!("/{name} is not yet ported"));
+            SlashCommandKind::Memory => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let result =
+                    repl_commands::repl_memory_command(controller, &args, &mut stdout, &mut stderr);
+                self.push_command_result(result, &stdout, &stderr, "/memory");
                 None
             }
+            SlashCommandKind::Remember => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let result = repl_commands::repl_remember_command(
+                    controller,
+                    &args,
+                    &mut stdout,
+                    &mut stderr,
+                );
+                self.push_command_result(result, &stdout, &stderr, "/remember");
+                None
+            }
+        }
+    }
+
+    /// Formats the captured output of a synchronous REPL-command free
+    /// function (`/memory`, `/remember`) into one system entry. Unlike
+    /// `/logout` (also captured this way), these commands can write usage or
+    /// error text to stderr as well as success text to stdout, so both
+    /// buffers are captured and concatenated; exactly one is ever non-empty
+    /// for a given call.
+    fn push_command_result(
+        &mut self,
+        result: Result<(), impl std::fmt::Display>,
+        stdout: &[u8],
+        stderr: &[u8],
+        command: &str,
+    ) {
+        match result {
+            Ok(()) => {
+                let mut text = String::from_utf8_lossy(stdout).into_owned();
+                text.push_str(&String::from_utf8_lossy(stderr));
+                let trimmed = text.trim_end();
+                if !trimmed.is_empty() {
+                    self.push_system(trimmed.to_string());
+                }
+            }
+            Err(error) => self.push_system(format!("{command}: {error}")),
         }
     }
 
@@ -908,5 +942,307 @@ mod tests {
             compaction_line(&estimated),
             "[context] compacted 12k \u{2192} 4k tokens"
         );
+    }
+
+    // Port of `internal/tui/memory_test.go` against this module's own unit
+    // seams (`dispatch_line`/`handle_key`) rather than Go's Bubble Tea
+    // `Update`/status-text plumbing: every command result here lands as one
+    // transcript entry via `push_system`/`push_command_result`, since this
+    // frontend has no separate status bar (see the module doc's "Not
+    // ported" note). `TestMemoryWarningEventSetsStatusDuringPrompt` is not
+    // ported here: it exercises `apply_event`'s existing `MemoryWarning`
+    // arm, unrelated to command dispatch.
+
+    use crate::cli::testutil;
+    use crate::memory::RememberRequest;
+
+    #[tokio::test]
+    async fn memory_command_without_a_service_pushes_the_unavailable_message() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/memory search vim", &controller, &cancel);
+
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            format!("/memory: {}", repl_commands::MEMORY_UNAVAILABLE)
+        );
+    }
+
+    #[tokio::test]
+    async fn remember_command_without_a_service_pushes_the_unavailable_message() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/remember prefers dark mode", &controller, &cancel);
+
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            format!("/remember: {}", repl_commands::MEMORY_UNAVAILABLE)
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_memory_command_pushes_the_usage_line() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/memory", &controller, &cancel);
+
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            repl_commands::MEMORY_USAGE
+        );
+    }
+
+    #[tokio::test]
+    async fn remember_with_only_a_scope_flag_pushes_the_usage_line() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/remember --scope user", &controller, &cancel);
+
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            repl_commands::REMEMBER_USAGE
+        );
+    }
+
+    /// Documents the pre-existing divergence recorded in
+    /// `repl_commands.rs`'s module doc: `/memory review` reaches candidate
+    /// review and automatic extraction, neither of which is ported, so the
+    /// subcommand always falls through to the same usage line as an unknown
+    /// one, regardless of whether the decision word is valid. This merges
+    /// Go's `TestMemoryReviewCommandTriesScopesAndAppliesDecision` and
+    /// `TestMemoryReviewCommandRejectsInvalidDecision`, which differ only in
+    /// whether the decision is valid — a distinction this frontend can't yet
+    /// observe.
+    #[tokio::test]
+    async fn memory_review_falls_through_to_the_usage_line_pending_the_reviewer_port() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/memory review cand-1 accept", &controller, &cancel);
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            repl_commands::MEMORY_USAGE
+        );
+
+        app.dispatch_line("/memory review cand-1 maybe", &controller, &cancel);
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            repl_commands::MEMORY_USAGE
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_search_pushes_the_rendered_records() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line(
+            "/remember --kind preference --key editor vim",
+            &controller,
+            &cancel,
+        );
+        app.dispatch_line("/memory search vim", &controller, &cancel);
+
+        let text = app.entries.last().expect("entry").raw.clone();
+        assert!(text.contains("1 records:"), "{text}");
+        assert!(text.contains("kind=preference"), "{text}");
+        assert!(text.contains("text=vim"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn memory_forget_resolves_the_revision_and_reports_a_missing_record() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let (service, _, workspace_scope) = controller.memory_manager().expect("memory");
+        let record = service
+            .remember(&RememberRequest {
+                scope: workspace_scope,
+                kind: "note".into(),
+                text: "vim".into(),
+                ..RememberRequest::default()
+            })
+            .expect("remember");
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line(
+            &format!("/memory forget {}", record.id),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            format!("forgot {} (revision 1)", record.id)
+        );
+
+        app.dispatch_line("/memory forget missing", &controller, &cancel);
+        let missing = app.entries.last().expect("entry").raw.clone();
+        assert!(missing.starts_with("/memory: "), "{missing}");
+        assert!(missing.contains("not found"), "{missing}");
+    }
+
+    #[tokio::test]
+    async fn remember_defaults_to_workspace_scope_and_note_kind() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let (_, _, workspace_scope) = controller.memory_manager().expect("memory");
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/remember prefers dark mode", &controller, &cancel);
+
+        let text = app.entries.last().expect("entry").raw.clone();
+        assert!(text.starts_with("remembered "), "{text}");
+        assert!(text.contains("kind=note"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "scope={}/{}",
+                workspace_scope.namespace, workspace_scope.id
+            )),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remember_parses_scope_kind_and_key_flags() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = tempfile::tempdir().expect("store");
+        let controller = testutil::controller_with_memory(
+            workspace.path(),
+            sessions.path(),
+            &store.path().join("m.db"),
+        )
+        .await;
+        let (_, user_scope, _) = controller.memory_manager().expect("memory");
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line(
+            "/remember --scope user --kind preference --key editor vim",
+            &controller,
+            &cancel,
+        );
+
+        let text = app.entries.last().expect("entry").raw.clone();
+        assert!(text.starts_with("remembered "), "{text}");
+        assert!(text.contains("kind=preference"), "{text}");
+        assert!(
+            text.contains(&format!("scope={}/{}", user_scope.namespace, user_scope.id)),
+            "{text}"
+        );
+    }
+
+    /// Port of `TestMemoryAndRememberCommandsRejectedWhileTurnActive`.
+    /// Divergence: Go's per-command guard sets `statusText` to
+    /// `app.ErrPromptActive`; this frontend has no per-command guard or
+    /// status bar, so [`App::handle_key`]'s single `if self.busy` check
+    /// (shared by every slash command, not memory-specific) silently
+    /// declines to dispatch instead of pushing a rejection message. What's
+    /// verified here is the same observable guarantee Go's test checks: the
+    /// command never runs while a turn is active.
+    #[tokio::test]
+    async fn busy_guard_rejects_slash_commands_while_a_turn_is_active() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let before = app.entries.len();
+        app.busy = true;
+        app.input = "/memory search vim".chars().collect();
+        app.cursor = app.input.len();
+        let cancel = CancellationToken::new();
+
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(action.is_none());
+        assert_eq!(app.entries.len(), before, "no command must run while busy");
+        assert_eq!(
+            app.input.iter().collect::<String>(),
+            "/memory search vim",
+            "the composer must be left untouched"
+        );
+    }
+
+    /// Port of the completion half of
+    /// `TestMemoryCommandRegistryCompletionAndHelp`; the help-overlay text
+    /// containment half is `super::render`'s concern, not this module's.
+    #[tokio::test]
+    async fn tab_completes_a_memory_prefix_to_the_full_command() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.input = "/mem".chars().collect();
+        app.cursor = app.input.len();
+        let cancel = CancellationToken::new();
+
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &controller, &cancel);
+
+        assert_eq!(app.input.iter().collect::<String>(), "/memory");
     }
 }

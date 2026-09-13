@@ -1,11 +1,10 @@
 //! The slash-command table and completion logic. Port of
 //! `internal/tui/commands.go`.
 //!
-//! `/memory` and `/remember` are listed here (matching Go's table exactly,
-//! including the `/task` singular quirk noted below) but have no backing
-//! implementation yet: phase 7 (memory/skills/subagents) lands that, and the
-//! command dispatcher in `tui::app` renders the same
-//! `"/{name} is not yet ported"` line the REPL uses for them until then.
+//! `/memory` and `/remember` are listed here matching Go's table exactly,
+//! including the `/task` singular quirk noted below. `tui::app`'s dispatcher
+//! backs both with `cli::repl_commands`'s free functions, the same code the
+//! line-oriented REPL uses.
 
 /// One entry in the slash-command table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +182,17 @@ mod tests {
     #[test]
     fn an_empty_prefix_matches_nothing_since_it_has_no_leading_slash() {
         assert!(matching_slash_commands("").is_empty());
+    }
+
+    /// Port of the completion half of Go's
+    /// `TestMemoryCommandRegistryCompletionAndHelp`.
+    #[test]
+    fn a_prefix_matches_only_the_memory_command() {
+        let names: Vec<&str> = matching_slash_commands("/mem")
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["/memory"]);
     }
 
     #[test]

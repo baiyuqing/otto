@@ -23,7 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal"] }
 tokio-util.workspace = true
 # Save() serializes, so the native crate needs "display" on top of otto-core's
 # parse-only feature set.

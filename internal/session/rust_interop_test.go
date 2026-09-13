@@ -48,7 +48,10 @@ type rustExpectation struct {
 	ContextInputTokens        int           `json:"contextInputTokens"`
 	ContextInputTokensPresent bool          `json:"contextInputTokensPresent"`
 	ContextInputTokensPending bool          `json:"contextInputTokensPending"`
-	Compaction                struct {
+	// CompactionPresent is nil for the store-written session, which always
+	// carries a checkpoint, and false for the one-turn binary session.
+	CompactionPresent *bool `json:"compactionPresent"`
+	Compaction        struct {
 		Summary          string `json:"summary"`
 		FirstKeptEntryID string `json:"firstKeptEntryId"`
 		TokensBefore     int    `json:"tokensBefore"`
@@ -72,59 +75,18 @@ func TestRustInterop(t *testing.T) {
 		t.Skip("OTTO_RUST_INTEROP_DIR is unset; run make rust-interop")
 	}
 
-	t.Run("go reads the rust session", func(t *testing.T) {
-		var want rustExpectation
-		readJSON(t, filepath.Join(directory, "expectation.json"), &want)
-
-		header, err := ReadHeader(want.SessionPath)
-		if err != nil {
-			t.Fatalf("ReadHeader() = %v", err)
-		}
-		if header.Version != want.Header.Version || header.ID != want.Header.ID ||
-			header.Provider != want.Header.Provider || header.Profile != want.Header.Profile ||
-			header.Model != want.Header.Model || header.Workspace != want.Workspace {
-			t.Fatalf("ReadHeader() = %#v, want %#v", header, want.Header)
-		}
-
-		store, warnings, err := Open(want.SessionPath)
-		if err != nil {
-			t.Fatalf("Open() = %v", err)
-		}
-		defer store.Close()
-		if len(warnings) != 0 {
-			t.Fatalf("Open() warnings = %#v, want none: the Rust store must write repair-free files", warnings)
-		}
-		if got := store.Name(); got != want.Name {
-			t.Fatalf("Name() = %q, want %q", got, want.Name)
-		}
-		if got := goMessages(store.Messages()); !reflect.DeepEqual(got, want.Messages) {
-			t.Fatalf("Messages() = %#v, want %#v", got, want.Messages)
-		}
-
-		usage, present := store.AggregateUsage()
-		if present != want.AggregateUsagePresent || !sameUsage(usage, want.AggregateUsage) {
-			t.Fatalf("AggregateUsage() = %#v/%v, want %#v/%v", usage, present, want.AggregateUsage, want.AggregateUsagePresent)
-		}
-
-		snapshot := store.Snapshot()
-		if snapshot.ContextInputTokens != want.ContextInputTokens ||
-			snapshot.ContextInputTokensPresent != want.ContextInputTokensPresent ||
-			snapshot.ContextInputTokensPending != want.ContextInputTokensPending {
-			t.Fatalf("Snapshot() = %#v, want context tokens %d/%v/%v", snapshot,
-				want.ContextInputTokens, want.ContextInputTokensPresent, want.ContextInputTokensPending)
-		}
-
-		latest, ok := store.LatestCompaction()
-		if !ok {
-			t.Fatal("LatestCompaction() reported no checkpoint")
-		}
-		if latest.Summary != want.Compaction.Summary ||
-			latest.FirstKeptEntryID != want.Compaction.FirstKeptEntryID ||
-			latest.TokensBefore != want.Compaction.TokensBefore ||
-			latest.RetainedTailOnly != want.Compaction.RetainedTailOnly {
-			t.Fatalf("LatestCompaction() = %#v, want %#v", latest, want.Compaction)
-		}
-	})
+	// The store-written session exercises every record type; the session the
+	// Rust binary wrote through one --approve turn checks the composed path.
+	for name, file := range map[string]string{
+		"go reads the rust session":        "expectation.json",
+		"go reads the rust binary session": "binary-expectation.json",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var want rustExpectation
+			readJSON(t, filepath.Join(directory, file), &want)
+			checkRustSession(t, want)
+		})
+	}
 
 	t.Run("rust decodes the go fixtures", func(t *testing.T) {
 		var want map[string]rustFixture
@@ -163,6 +125,66 @@ func TestRustInterop(t *testing.T) {
 			})
 		}
 	})
+}
+
+// checkRustSession opens the session file named by want with the Go store and
+// compares every accessor against what the Rust side recorded.
+func checkRustSession(t *testing.T, want rustExpectation) {
+	t.Helper()
+	header, err := ReadHeader(want.SessionPath)
+	if err != nil {
+		t.Fatalf("ReadHeader() = %v", err)
+	}
+	if header.Version != want.Header.Version || header.ID != want.Header.ID ||
+		header.Provider != want.Header.Provider || header.Profile != want.Header.Profile ||
+		header.Model != want.Header.Model || header.Workspace != want.Workspace {
+		t.Fatalf("ReadHeader() = %#v, want %#v", header, want.Header)
+	}
+
+	store, warnings, err := Open(want.SessionPath)
+	if err != nil {
+		t.Fatalf("Open() = %v", err)
+	}
+	defer store.Close()
+	if len(warnings) != 0 {
+		t.Fatalf("Open() warnings = %#v, want none: the Rust store must write repair-free files", warnings)
+	}
+	if got := store.Name(); got != want.Name {
+		t.Fatalf("Name() = %q, want %q", got, want.Name)
+	}
+	if got := goMessages(store.Messages()); !reflect.DeepEqual(got, want.Messages) {
+		t.Fatalf("Messages() = %#v, want %#v", got, want.Messages)
+	}
+
+	usage, present := store.AggregateUsage()
+	if present != want.AggregateUsagePresent || !sameUsage(usage, want.AggregateUsage) {
+		t.Fatalf("AggregateUsage() = %#v/%v, want %#v/%v", usage, present, want.AggregateUsage, want.AggregateUsagePresent)
+	}
+
+	snapshot := store.Snapshot()
+	if snapshot.ContextInputTokens != want.ContextInputTokens ||
+		snapshot.ContextInputTokensPresent != want.ContextInputTokensPresent ||
+		snapshot.ContextInputTokensPending != want.ContextInputTokensPending {
+		t.Fatalf("Snapshot() = %#v, want context tokens %d/%v/%v", snapshot,
+			want.ContextInputTokens, want.ContextInputTokensPresent, want.ContextInputTokensPending)
+	}
+
+	latest, ok := store.LatestCompaction()
+	if want.CompactionPresent != nil && !*want.CompactionPresent {
+		if ok {
+			t.Fatalf("LatestCompaction() = %#v, want none", latest)
+		}
+		return
+	}
+	if !ok {
+		t.Fatal("LatestCompaction() reported no checkpoint")
+	}
+	if latest.Summary != want.Compaction.Summary ||
+		latest.FirstKeptEntryID != want.Compaction.FirstKeptEntryID ||
+		latest.TokensBefore != want.Compaction.TokensBefore ||
+		latest.RetainedTailOnly != want.Compaction.RetainedTailOnly {
+		t.Fatalf("LatestCompaction() = %#v, want %#v", latest, want.Compaction)
+	}
 }
 
 func readJSON(t *testing.T, path string, target any) {

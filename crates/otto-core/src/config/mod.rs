@@ -15,7 +15,7 @@
 //! output does not change during the rewrite.
 
 pub mod agents;
-mod duration;
+pub mod duration;
 pub mod memory;
 pub mod model_limits;
 mod paths;

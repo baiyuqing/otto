@@ -10,7 +10,7 @@
 //! byte-matched to Go. Doesn't reproduce Go's arbitrary-precision overflow
 //! handling: config timeouts never approach `i64::MAX` nanoseconds.
 
-pub(super) fn parse_go_duration(input: &str) -> Result<i64, String> {
+pub fn parse_go_duration(input: &str) -> Result<i64, String> {
     let invalid = || format!("time: invalid duration {input:?}");
 
     let mut s = input;

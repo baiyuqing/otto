@@ -4,6 +4,8 @@
 //!
 //! * `session/` holds a session written entirely by the Rust store,
 //! * `expectation.json` states what Go must read back from it,
+//! * `binary-expectation.json` states the same for a session the built `otto`
+//!   binary produced by running one `--approve` turn,
 //! * `fixtures.json` states what Rust decoded from every Go fixture under
 //!   `internal/session/testdata/pi-v3`.
 //!
@@ -13,6 +15,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+mod common;
+use common::{Script, serve, text_reply, tool_call_reply};
 
 use chrono::{TimeZone, Utc};
 use otto::session::Store;
@@ -227,6 +234,119 @@ fn writes_the_interop_bundle() {
     reopened.close().expect("close the reopened session");
 
     decode_every_go_fixture(&directory);
+    write_binary_session(&directory);
+}
+
+/// Runs the built binary for one `--approve` turn and records the session it
+/// wrote, so the Go gate also reads a file produced by the whole process and
+/// not only by the store API.
+///
+/// The shape matches `expectation.json` except that a one-turn run has no
+/// compaction checkpoint, which `compactionPresent` states.
+fn write_binary_session(directory: &Path) {
+    let home = directory.join("binary-home");
+    let workspace = directory.join("binary-workspace");
+    fs::create_dir_all(workspace.join("sub")).expect("create the binary workspace");
+    fs::write(workspace.join("README.md"), "interop fixture\n").expect("seed README");
+    // Seatbelt keeps its private state under `$HOME/Library/Caches`, which both
+    // implementations require to exist already.
+    fs::create_dir_all(home.join("Library/Caches")).expect("create the cache base");
+    let config_directory = home.join(".config/otto");
+    fs::create_dir_all(&config_directory).expect("create the config directory");
+
+    let served = Arc::new(AtomicUsize::new(0));
+    let base_url = serve(Script {
+        replies: vec![
+            tool_call_reply("call-1", "read", r#"{"path":"README.md"}"#),
+            text_reply("the interop answer"),
+        ],
+        served: Arc::clone(&served),
+    });
+    fs::write(
+        config_directory.join("config.toml"),
+        format!(
+            "default_profile = \"interop\"\n\n[profiles.interop]\nprovider = \"openai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"interop-binary-model\"\napi_key_env = \"OTTO_API_KEY\"\n"
+        ),
+    )
+    .expect("write the config");
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_otto"));
+    command
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("SHELL", "/bin/sh")
+        .env("OTTO_API_KEY", "sk-interop-not-a-real-key")
+        .arg("--cwd")
+        .arg(&workspace)
+        .arg("--approve")
+        .arg("read the readme");
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        command.env("TMPDIR", tmpdir);
+    }
+    let output = command.output().expect("run the otto binary");
+    assert!(
+        output.status.success(),
+        "otto --approve exit = {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(served.load(Ordering::SeqCst), 2, "model turns served");
+
+    let path = only_session_file(&home);
+    let (store, warnings) = Store::open(&path).expect("open the binary session");
+    assert!(warnings.is_empty(), "reopen warnings: {warnings:?}");
+    let header = store.header().clone();
+    let messages: Vec<Value> = store.messages().iter().map(message_json).collect();
+    let (usage, usage_present) = store.aggregate_usage();
+    let snapshot = store.snapshot();
+    let name = store.name();
+    let compaction_present = store.latest_compaction().is_some();
+    store.close().expect("close the binary session");
+
+    let expectation = json!({
+        "sessionPath": path,
+        "workspace": header.workspace,
+        "header": {
+            "version": header.version,
+            "id": header.id,
+            "provider": header.provider,
+            "profile": header.profile,
+            "model": header.model,
+        },
+        "name": name,
+        "messages": messages,
+        "aggregateUsage": {
+            "inputTokens": usage.input_tokens,
+            "outputTokens": usage.output_tokens,
+            "cachedInputTokens": usage.cached_input_tokens,
+        },
+        "aggregateUsagePresent": usage_present,
+        "contextInputTokens": snapshot.context_input_tokens,
+        "contextInputTokensPresent": snapshot.context_input_tokens_present,
+        "contextInputTokensPending": snapshot.context_input_tokens_pending,
+        "compactionPresent": compaction_present,
+    });
+    fs::write(
+        directory.join("binary-expectation.json"),
+        serde_json::to_vec_pretty(&expectation).expect("encode the binary expectation"),
+    )
+    .expect("write the binary expectation");
+}
+
+/// The one session file the binary run left under `$HOME/.otto/sessions`.
+fn only_session_file(home: &Path) -> PathBuf {
+    let mut found = Vec::new();
+    for workspace in fs::read_dir(home.join(".otto/sessions")).expect("session root") {
+        for session in
+            fs::read_dir(workspace.expect("workspace entry").path()).expect("workspace sessions")
+        {
+            found.push(session.expect("session entry").path());
+        }
+    }
+    assert_eq!(found.len(), 1, "one session per run: {found:?}");
+    found.remove(0)
 }
 
 /// Decodes every Go fixture from a copy and records what Rust read.

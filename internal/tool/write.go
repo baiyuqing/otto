@@ -59,6 +59,8 @@ func (t *writeTool) Execute(_ context.Context, arguments json.RawMessage) Result
 	if err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}
+	unlock := t.workspace.lockPath(path)
+	defer unlock()
 	if err := writeFileAtomic(t.workspace, path, []byte(args.Content)); err != nil {
 		return Result{Content: err.Error(), IsError: true}
 	}

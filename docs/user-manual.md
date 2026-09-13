@@ -578,7 +578,10 @@ canonical workspace, even when `--sandbox off` is selected:
   symlinks in `@`.
 - `write` writes a complete file atomically.
 - `edit` replaces one or more unique text matches and shares the 64 MiB size
-  limit with `read`.
+  limit with `read`. When `old_text` has no exact match, `edit` retries with a
+  match that ignores trailing whitespace and treats curly quotes, dashes, and
+  non-breaking spaces as ASCII, and it rewrites only the part of `old_text`
+  that `new_text` changes.
 
 Recursive `grep` and `find` skip `.git` and discovered symlinks but include
 other dotfiles. Binary files, invalid UTF-8 files, and files with lines larger

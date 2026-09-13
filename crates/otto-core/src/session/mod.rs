@@ -14,9 +14,144 @@
 //! call returns a [`SessionError`]. A rejection never leaves partial state.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Mutex;
 
 use crate::model::{BlockType, Message, Role, ValidationError};
+
+pub mod codec;
+pub mod compaction;
+pub mod context;
+pub mod pi;
+pub mod types;
+
+pub use codec::{PiRecord, decode_pi_entry, decode_pi_file, decode_pi_header, encode_pi_record};
+pub use context::{
+    BRANCH_CONTEXT_TYPE, COMPACTION_CONTEXT_TYPE, ContextEntryIndex, OTTO_RUNTIME_CUSTOM_TYPE,
+    ResolvedContext, active_context_path, build_context, index_context_entries, is_pi_entry_id,
+    new_context_message,
+};
+pub use pi::{
+    MAX_SESSION_ENTRY_BYTES, MAX_SESSION_FILE_BYTES, PI_SESSION_VERSION, PiBranchSummary,
+    PiCompaction, PiContentBlock, PiCost, PiCustom, PiCustomMessage, PiEntry, PiFile, PiHeader,
+    PiLabel, PiMessage, PiModelChange, PiOttoDetails, PiSessionInfo, PiThinkingLevelChange,
+    PiUsage, decode_pi_otto_details, encode_pi_otto_details,
+};
+pub use types::{
+    CURRENT_VERSION, CompactionCheckpoint, CompactionDetails, CompactionMetadata, Header,
+    ListResult, RuntimeMetadata, SessionInfo, Snapshot, Warning,
+};
+
+/// Which of the Go sentinel errors a [`PiError`] corresponds to.
+///
+/// Callers branch on the kind the way Go callers use `errors.Is`: the kind
+/// survives every `context` prefix, so the classification of a failure deep
+/// inside a file survives being reported as "session line 7: ...".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiErrorKind {
+    /// The record is not a Pi v3 session, or carries an unsupported version.
+    UnsupportedFormat,
+    /// The record is a Pi session but breaks a validation rule.
+    Invalid,
+    /// One record exceeds [`MAX_SESSION_ENTRY_BYTES`].
+    EntryTooLarge,
+    /// The file exceeds [`MAX_SESSION_FILE_BYTES`].
+    FileTooLarge,
+    /// The record is valid Pi but carries content Otto cannot represent.
+    UnsupportedContent,
+    /// The session has been closed; Go's `errSessionClosed`.
+    Closed,
+    /// A durable write failed. Go poisons the store with
+    /// `ErrFatalPersistence` and refuses every later write.
+    FatalPersistence,
+    /// Anything with no Go sentinel, such as an encoding failure.
+    Other,
+}
+
+impl PiErrorKind {
+    /// The Go sentinel error text this kind prefixes its message with.
+    fn text(self) -> &'static str {
+        match self {
+            Self::UnsupportedFormat => "unsupported session format",
+            Self::Invalid => "invalid session",
+            Self::EntryTooLarge => "session entry too large",
+            Self::FileTooLarge => "session file too large",
+            Self::UnsupportedContent => "unsupported session content",
+            Self::Closed => "session is closed",
+            Self::FatalPersistence => "fatal session persistence failure",
+            Self::Other => "",
+        }
+    }
+}
+
+/// A session codec or store failure.
+///
+/// The rendered message matches the Go error text exactly, including any
+/// wrapping prefixes, so operators reading a log see the same string from
+/// either implementation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct PiError {
+    kind: PiErrorKind,
+    message: String,
+}
+
+impl PiError {
+    /// Builds `"<sentinel>: <detail>"` for one of the sentinel kinds.
+    pub fn new(kind: PiErrorKind, detail: impl fmt::Display) -> Self {
+        Self {
+            message: format!("{}: {detail}", kind.text()),
+            kind,
+        }
+    }
+
+    /// Shorthand for [`PiErrorKind::Invalid`], by far the most common kind.
+    pub fn invalid(detail: impl fmt::Display) -> Self {
+        Self::new(PiErrorKind::Invalid, detail)
+    }
+
+    /// An error with no Go sentinel; the message is used verbatim.
+    pub fn other(message: impl fmt::Display) -> Self {
+        Self {
+            kind: PiErrorKind::Other,
+            message: message.to_string(),
+        }
+    }
+
+    /// The closed-session error. Go's `errSessionClosed` carries no detail.
+    pub fn closed() -> Self {
+        Self {
+            kind: PiErrorKind::Closed,
+            message: PiErrorKind::Closed.text().to_owned(),
+        }
+    }
+
+    /// Wraps the cause of a failed durable write. Once a store returns this it
+    /// returns the same error from every later write.
+    pub fn fatal(cause: impl fmt::Display) -> Self {
+        Self::new(PiErrorKind::FatalPersistence, cause)
+    }
+
+    /// The size-limit message shared by the two too-large kinds.
+    pub fn size(kind: PiErrorKind, limit: usize) -> Self {
+        Self::new(kind, format!("maximum is {limit} bytes"))
+    }
+
+    /// Prefixes the message, keeping the kind. The Go equivalent is
+    /// `fmt.Errorf("%s: %w", prefix, err)`.
+    #[must_use]
+    pub fn context(self, prefix: impl fmt::Display) -> Self {
+        Self {
+            kind: self.kind,
+            message: format!("{prefix}: {}", self.message),
+        }
+    }
+
+    /// The sentinel this error corresponds to.
+    pub fn kind(&self) -> PiErrorKind {
+        self.kind
+    }
+}
 
 /// Why a message could not be appended.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -27,6 +162,10 @@ pub enum SessionError {
     /// The message is well formed but breaks the tool-call ordering rule.
     #[error("{0}")]
     Sequence(&'static str),
+    /// The message is well formed but could not be persisted. Only a
+    /// file-backed session produces this; [`MemorySession`] never does.
+    #[error("{0}")]
+    Persist(String),
 }
 
 /// An append-only transcript.

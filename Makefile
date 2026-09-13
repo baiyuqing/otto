@@ -8,7 +8,7 @@ STATICCHECK_VERSION := v0.8.1
 STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
 CORE_PACKAGES := ./internal/model ./internal/agent ./internal/app ./internal/provider/... ./internal/config ./internal/skill ./internal/subagent
 
-.PHONY: all build fmt fmt-fix vet lint test test-core test-architecture test-race test-tui check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test rust-check clean help
+.PHONY: all build fmt fmt-fix vet lint test test-core test-architecture test-race test-tui check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test rust-interop rust-check clean help
 
 all: build
 
@@ -71,7 +71,11 @@ rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 	wasm-pack test --node crates/otto-core
 	wasm-pack test --node crates/otto-web
 
-rust-check: rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test ## all Rust gates
+rust-interop: ## check Go/Rust session interoperability in both directions
+	cargo test -p otto --test interop
+	OTTO_RUST_INTEROP_DIR=$(CURDIR)/target/interop go test -tags rustinterop ./internal/session -run TestRustInterop
+
+rust-check: rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test rust-interop ## all Rust gates
 
 check-fast: fmt vet test-architecture test-core ## quick feedback; run targeted package tests too
 	@git diff --check

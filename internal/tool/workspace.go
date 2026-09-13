@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -12,6 +13,10 @@ type Workspace struct {
 	root        string
 	lexicalRoot string
 	rootFS      *os.Root
+	// mutations holds one *sync.Mutex per Root-relative path so that write and
+	// edit, which subagents share with the parent agent, never interleave a
+	// read-modify-write on the same file.
+	mutations sync.Map
 }
 
 func NewWorkspace(root string) (*Workspace, error) {
@@ -33,6 +38,17 @@ func NewWorkspace(root string) (*Workspace, error) {
 
 // Close releases the directory handle used to keep file tools in this workspace.
 func (w *Workspace) Close() error { return w.rootFS.Close() }
+
+// lockPath blocks until no other write or edit holds key, then returns the
+// function that releases it. key is the Root-relative name returned by
+// writeRelative, so write and edit lock the same entry for the same file.
+func (w *Workspace) lockPath(key string) func() {
+	// ponytail: entries live for the workspace lifetime; add ref-counted cleanup if path churn matters.
+	lock, _ := w.mutations.LoadOrStore(key, &sync.Mutex{})
+	mutex := lock.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
+}
 
 // Open opens an existing workspace file through the workspace directory handle.
 // The caller must close the returned file.

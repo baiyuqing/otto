@@ -1,6 +1,6 @@
 # Otto User Manual
 
-Otto is a minimal macOS coding agent written in Go. It turns a natural-language
+Otto is a minimal macOS coding agent written in Rust. It turns a natural-language
 prompt into a loop of model completions, optional tool calls, and — when needed —
 context compaction, all in a full-screen TUI or a line-oriented REPL.
 
@@ -32,7 +32,8 @@ what the CLI actually does today.
 ## Prerequisites
 
 - macOS.
-- Go 1.26+ to build from source.
+- The pinned Rust 1.98 toolchain and Node 24+ to build from source (see
+  [Install from source](../README.md#install-from-source)).
 - One of:
   - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming, plus an API key exposed through an environment variable, or
   - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription)).
@@ -42,7 +43,7 @@ what the CLI actually does today.
 Build the binary:
 
 ```bash
-go build -trimpath -o ./otto ./cmd/otto
+make build
 ```
 
 Create `~/.config/otto/config.toml`:
@@ -266,11 +267,10 @@ Key points:
   closed by disabling `bash` while keeping `read`, `grep`, `find`, `ls`,
   `write`, and `edit` available.
 
-  `/sandbox reload` applies edits to `driver`, `network`, and `read_paths` to
-  the running process (see [Slash commands](#slash-commands)). Two changes
-  still need a restart: `allow_env`, because the shell environment is fixed
-  when the `bash` tool is built, and any change made when the sandbox was
-  already unavailable at startup, because there is no `bash` tool to re-point.
+  `otto serve` can apply edits to `driver`, `network`, and `read_paths` to the
+  running process through `POST /v1/sandbox/reload`; the interactive REPL and
+  TUI have no live reload, so restart Otto to pick up a `[sandbox]` change
+  there (see [Slash commands](#slash-commands)).
 - `[skills]` discovers reusable instruction sets from configured roots and
   registers the `skill` tool when at least one skill is found. Config keys are
   `enabled` (default true) and `paths` (default `["~/.otto/skills", ".otto/skills"]`);
@@ -409,11 +409,10 @@ Shared commands:
   while a turn is in flight.
 - `/compact [focus]` creates a manual context checkpoint, or reports
   `[context] no-op` when nothing can be compacted.
-- `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads
-  `[sandbox]` from the config file and applies it to the running process,
-  printing the new state. It is rejected while a turn is in flight, and a
-  failed reload keeps the previous sandbox in place. `allow_env` changes and a
-  sandbox that was unavailable at startup still need a restart.
+- `/sandbox` shows the sandbox state now in effect. `/sandbox reload` reports
+  `sandbox reload is not available` in the interactive REPL and TUI; only
+  `otto serve` wires a live reload, through `POST /v1/sandbox/reload`. To pick
+  up a `[sandbox]` change in an interactive session, restart Otto.
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
@@ -569,7 +568,7 @@ canonical workspace, even when `--sandbox off` is selected:
 
 - `read` reads UTF-8 text with optional line offsets and limits; files larger
   than 64 MiB are rejected before being read into memory.
-- `grep` searches file contents with Go RE2 regular expressions
+- `grep` searches file contents with RE2-style regular expressions
   (case-insensitive matching, optional `**` glob filtering, up to 100 matches by
   default, 1000 maximum).
 - `find` returns sorted regular-file paths matching `**` globs (up to 1000 by
@@ -589,28 +588,21 @@ initial workspace.
 
 ### Interactive sandbox setup
 
-Run `otto sandbox setup` to choose network access and optionally add the built-in
-GitHub CLI recipe. Use `--config PATH` for another configuration file and `--cwd
-PATH` to select the workspace used by the check. No model or provider login is
-required.
+The `otto sandbox setup` wizard is not yet ported in this build; running
+`otto sandbox` exits with `otto: sandbox is not yet ported`. Configure the
+sandbox manually instead, by editing the `[sandbox]` table in your config file
+(see [Configuration](#configuration)):
 
-The wizard shows the proposed permissions before saving. It enables Seatbelt,
-preserves existing extra permissions and unrelated TOML content, and changes only
-the sandbox table. Cancel or end input to leave the file unchanged. Configuration
-uses a separate `[sandbox]` table; unsupported layouts are rejected without edits.
-Changes apply to future processes using that config file, not just the selected
-workspace.
+```toml
+[sandbox]
+driver = "auto"
+network = "allow"
+read_paths = []
+allow_env = []
+```
 
-The GitHub CLI recipe exposes its configuration directory read-only and allows
-`GH_CONFIG_DIR`. This can expose saved GitHub credentials to shell commands. The
-wizard uses an existing absolute `GH_CONFIG_DIR`, or defaults to `~/.config/gh`,
-and prints a launch command setting that variable because Otto replaces `HOME`.
-Run `gh auth login` outside Otto first if the configuration directory is missing.
-
-Choose `check` to test sandbox startup and, when selected, GitHub CLI availability
-and directory access using the displayed launch environment. The check does not
-contact GitHub or verify authentication or network connectivity. Choose `save`
-to write the reviewed configuration, then restart Otto with the printed command.
+Restart Otto after editing `[sandbox]`; the interactive REPL and TUI have no
+live reload (see [Slash commands](#slash-commands)).
 
 ### `bash` sandbox policy
 
@@ -933,7 +925,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessi
 ## Memory
 
 Otto has a local, per-workspace/per-user memory store backed by SQLite/FTS5
-(`internal/memory`, `internal/memory/sqlite`). It is enabled by default.
+(`crates/otto`'s `memory` module). It is enabled by default.
 
 Config (`[memory]` in TOML; all keys optional):
 

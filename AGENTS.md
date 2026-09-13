@@ -7,9 +7,10 @@ workflow.
 ## Scope and task map
 
 - Otto supports only the `openai-compatible` and `chatgpt` providers and runs on macOS.
-- `cmd/otto` owns composition and process lifecycle; `internal/app` owns shared lifecycle and frontend capabilities; `internal/agent` owns provider/tool turns; `internal/provider` owns the neutral provider contract and its two implementation packages own wire formats.
-- `internal/model`, `internal/session`, `internal/memory`, `internal/tool`, `internal/sandbox`, `internal/skill`, `internal/subagent`, `internal/repl`, `internal/tui`, and `internal/server` keep the responsibilities described in the [development guide](docs/development.md). `internal/server` also serves the embedded web UI; `ui/` (TypeScript) owns the browser frontend.
-- The [architecture contract design](docs/specs/2026-09-05-architecture-contracts.md) records compatibility and ownership rationale. The [architecture import policy](internal/architecture/imports_test.go) enforces package direction.
+- `crates/otto-core` is the wasm-safe library: `model`, `provider` (neutral contract), `openaicompat`/`openairesponses` (wire formats), `tool` (definitions), `session` (Pi v3 codec), `agent` (provider/tool turn loop), `config`, `wire`, and `safetext`.
+- `crates/otto` is the native binary: `cli` (composition, flags, REPL, process lifecycle), `app` (shared lifecycle and frontend capabilities), `session` (store), `tool` (native execution), `sandbox` (Seatbelt/direct drivers), `provider` (HTTP transports), `auth` (ChatGPT OAuth), `memory` (SQLite/FTS5 store and service), `skill`, `subagent`, `server` (HTTP/JSON/SSE and the embedded web UI), and `tui`.
+- `crates/otto-web` is the wasm cdylib the browser UI loads. `ui/` (TypeScript) owns the browser frontend and is a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only.
+- The [architecture contract design](docs/specs/2026-09-05-architecture-contracts.md) records compatibility and ownership rationale. `make rust-wasm-check` enforces the wasm32 boundary: `otto-core` and `otto-web` must stay buildable for `wasm32-unknown-unknown`, which keeps native-only code (sandbox, auth, SQLite, process control) out of the shared library.
 - Current user behavior belongs in the [README](README.md) and [user manual](docs/user-manual.md). Design documents are historical rationale unless they explicitly say otherwise.
 
 Do not document or implement other providers, and do not list planned
@@ -39,7 +40,7 @@ Apply these requirements to every feature, fix, and refactor:
 
 - API keys come only from environment variables; ChatGPT credentials come only from `otto login`. Never place secrets in config, fixtures, logs, docs, tests, or skill files.
 - File tools reject workspace and skill-directory escapes after canonical-path and symlink validation.
-- `bash` runs through `internal/sandbox`; Seatbelt is the default and only explicit sandbox `off` is unsandboxed. It still starts in the selected workspace.
+- `bash` runs through `crates/otto`'s `sandbox` module; Seatbelt is the default and only explicit sandbox `off` is unsandboxed. It still starts in the selected workspace.
 - Keep the default test suite offline: no provider credentials, network access, or real interactive terminal.
 
 ## Verification
@@ -47,11 +48,11 @@ Apply these requirements to every feature, fix, and refactor:
 Use the Makefile targets as the canonical commands:
 
 ```bash
-make check-fast  # fmt, vet, architecture imports, focused core tests
-make check       # full macOS build/lint/all-tests/race/PTY/diff gate
+make check-fast  # rustfmt, clippy, focused otto-core tests, git diff --check
+make check       # full macOS build/lint/all-tests/wasm/PTY/UI gate
 ```
 
-`make lint` uses pinned staticcheck v0.8.1. See the [development guide](docs/development.md)
+See the [development guide](docs/development.md)
 for the focused package set, test commands, and contract-specific checks.
 
 CI runs `make check` with the toolchain and action pins in

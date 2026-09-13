@@ -6,7 +6,7 @@
 
 [English](README.md) · [用户手册（英文）](docs/user-manual.md)
 
-**Otto 是一个使用 Go 编写、优先使用本地存储的 AI coding agent。**
+**Otto 是一个使用 Rust 编写、优先使用本地存储的 AI coding agent。**
 在终端中阅读代码、修改文件、运行测试，并在后续会话中继续工作。
 支持通过 API key 连接 OpenAI-compatible 接口，或通过 `otto login`
 登录使用 ChatGPT provider。模型请求会发送给所选服务；运行时、会话历史和记忆存储位于本地。
@@ -17,14 +17,18 @@
 
 ## 从源码安装
 
-需要 **macOS、Go 1.26 或更新版本**，以及受支持服务的访问权限。
+需要 **macOS**、由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链
+（`rustup toolchain install` 会自动安装），以及受支持服务的访问权限。
 
 ```bash
 git clone https://github.com/baiyuqing/otto.git
 cd otto
-go build -trimpath -o ./otto ./cmd/otto
+make build
 ./otto --help
 ```
+
+`make build` 会把 `ui/dist` 中已有的内容嵌入二进制。若要嵌入完整的 Web UI，
+需先运行 `make ui`（需要 Node 24+）；否则 `otto serve` 的 `/` 只会返回一行占位文本。
 
 以下命令在该目录中运行。将二进制文件放入 `PATH` 后，可以在其他目录直接使用 `otto`。
 

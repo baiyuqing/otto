@@ -2,9 +2,9 @@
 //!
 //! This crate must build for `wasm32-unknown-unknown`. It therefore uses no
 //! filesystem, network, process, or wall-clock API: callers inject the clock
-//! and the identifier generator. The `wasm32` build is the architecture guard
-//! for that rule, the role `internal/architecture/imports_test.go` plays for
-//! the Go packages.
+//! and the identifier generator. `make rust-wasm-check` (`cargo check -p
+//! otto-core --target wasm32-unknown-unknown`) is the architecture guard for
+//! that rule.
 
 pub mod agent;
 pub mod config;

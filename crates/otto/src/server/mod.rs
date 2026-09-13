@@ -46,10 +46,11 @@ use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 pub const SESSION_NOT_FOUND: &str = "session not found";
 
 /// The embedded API description. Served verbatim at `GET /v1/openapi.yaml`,
-/// read from the Go tree so the two frontends cannot drift.
+/// read from the shared fixture at the repository root so the server and the
+/// web UI's wire types cannot drift.
 pub const OPENAPI_YAML: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../internal/server/openapi.yaml"
+    "/../../testdata/server/openapi.yaml"
 ));
 
 // ---- process-level info ----

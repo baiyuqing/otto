@@ -55,7 +55,7 @@ url = "=2.5.8"
 # HTTP routing for `otto serve`. hyper and tower arrive transitively at the
 # versions axum pins; nothing depends on them by name.
 axum = "=0.8.9"
-# Embeds internal/server/ui/dist into the binary the way go:embed does.
+# Embeds ui/dist into the binary at build time.
 include_dir = "=0.7.4"
 # Serde bridge for the wasm-bindgen exports the browser UI calls.
 serde-wasm-bindgen = "=0.6.5"

@@ -902,31 +902,29 @@ pub(crate) mod tests {
     pub(crate) const FIXTURES: &[(&str, &[u8])] = &[
         (
             "compacted.jsonl",
-            include_bytes!("../../../../internal/session/testdata/pi-v3/compacted.jsonl"),
+            include_bytes!("../../../../testdata/session/pi-v3/compacted.jsonl"),
         ),
         (
             "compaction-dual-form.jsonl",
-            include_bytes!(
-                "../../../../internal/session/testdata/pi-v3/compaction-dual-form.jsonl"
-            ),
+            include_bytes!("../../../../testdata/session/pi-v3/compaction-dual-form.jsonl"),
         ),
         (
             "compaction-retained-tail-only.jsonl",
             include_bytes!(
-                "../../../../internal/session/testdata/pi-v3/compaction-retained-tail-only.jsonl"
+                "../../../../testdata/session/pi-v3/compaction-retained-tail-only.jsonl"
             ),
         ),
         (
             "linear.jsonl",
-            include_bytes!("../../../../internal/session/testdata/pi-v3/linear.jsonl"),
+            include_bytes!("../../../../testdata/session/pi-v3/linear.jsonl"),
         ),
         (
             "tree.jsonl",
-            include_bytes!("../../../../internal/session/testdata/pi-v3/tree.jsonl"),
+            include_bytes!("../../../../testdata/session/pi-v3/tree.jsonl"),
         ),
         (
             "unknown-entry.jsonl",
-            include_bytes!("../../../../internal/session/testdata/pi-v3/unknown-entry.jsonl"),
+            include_bytes!("../../../../testdata/session/pi-v3/unknown-entry.jsonl"),
         ),
     ];
 
@@ -1425,8 +1423,8 @@ pub(crate) mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn pi_v3_fixtures_are_exact_lf_delimited_json() {
-        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../internal/session/testdata/pi-v3");
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/session/pi-v3");
         let mut names: Vec<String> = std::fs::read_dir(&directory)
             .expect("fixture directory")
             .map(|entry| {

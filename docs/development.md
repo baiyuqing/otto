@@ -2,64 +2,73 @@
 
 `AGENTS.md` is the short entry point and canonical repository rulebook. This
 page holds the detailed package contracts and development workflow. The
-architecture policy is enforced by
-[`internal/architecture/imports_test.go`](../internal/architecture/imports_test.go);
-the rationale and compatibility details are in the
+wasm32 architecture boundary is enforced by `make rust-wasm-check`, which
+requires `crates/otto-core` and `crates/otto-web` to stay buildable for
+`wasm32-unknown-unknown`; the rationale and compatibility details are in the
 [architecture contract design](specs/2026-09-05-architecture-contracts.md).
 
 ## Package boundaries
 
-Keep responsibilities split along the current Go package layout:
+Keep responsibilities split along the current Rust crate/module layout:
 
-- `cmd/otto`: composition root, CLI wiring, flags, process lifecycle, signal handling, and concrete dependency injection
-- `internal/agent`: provider/tool orchestration and event emission
-- `internal/app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
-- `internal/config`: TOML loading and runtime resolution
-- `internal/model`: provider-neutral message/tool types, message/block validation, and shared deep-copy helpers
-- `internal/memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation composing them with a `Store`/`Retriever`, a null service fallback, and the shared Store conformance harness
-- `internal/memory/sqlite`: secure local SQLite/FTS5 store and retriever implementing the memory contracts
-- `internal/provider`: neutral provider contract
-- `internal/provider/openaicompat`: all OpenAI-compatible Chat Completions HTTP/JSON/SSE wire code
-- `internal/provider/openairesponses`: all ChatGPT Responses API HTTP/JSON/SSE wire code
-- `internal/auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, access-token refresh, and the credential service injected through `app.Authentication`
-- `internal/repl`: line-oriented REPL rendering and commands
-- `internal/server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI build (`internal/server/ui/dist`, written by `make ui`)
-- `ui/`: the TypeScript browser frontend; a client of `internal/server`'s HTTP API only, with no Go code and no part in `make check`
-- `internal/sandbox`: sandbox driver contracts, environment filtering, and conformance helpers
-- `internal/session`: in-memory and JSONL session storage
-- `internal/skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing; `ParseFrontmatter` is exported for `internal/subagent`'s AGENT.md parsing
-- `internal/subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status` tools, shared task-formatting helpers (`format.go`) used by both the REPL and the TUI, AGENT.md definition discovery (`definition.go`, may import `internal/skill` for `ParseFrontmatter`), the `## Agents` prompt section (`prompt.go`), and the `context: inherit` snapshot (`inherit.go`)
-- `internal/tool`: workspace validation plus `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`
-- `internal/tui`: Bubble Tea frontend on the terminal alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
+- `crates/otto-core` (wasm-safe library; no filesystem, network, process, or wall-clock API):
+  - `model`: provider-neutral message/tool types, message/block validation, and shared deep-copy helpers
+  - `provider`: neutral provider contract
+  - `openaicompat`: all OpenAI-compatible Chat Completions HTTP/JSON/SSE wire code
+  - `openairesponses`: all ChatGPT Responses API HTTP/JSON/SSE wire code
+  - `tool`: tool definitions and schema assembly
+  - `session`: the Pi v3 JSONL codec, compaction, and context association types
+  - `agent`: provider/tool orchestration and event emission
+  - `config`: TOML loading and runtime resolution
+  - `wire`: shared wire DTOs
+  - `safetext`: redaction and secret-form detection shared by native and wasm code
+- `crates/otto` (native binary):
+  - `cli`: composition root, flag parsing, process lifecycle, signal handling, the REPL, and concrete dependency injection
+  - `app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
+  - `session`: native JSONL session storage built on `otto_core::session`
+  - `tool`: native execution of `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, with workspace validation
+  - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
+  - `provider`: native HTTP transports for the two provider implementations
+  - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
+  - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the SQLite/FTS5 store and retriever
+  - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
+  - `subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status` tools, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
+  - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
+  - `tui`: the terminal frontend on the alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
+- `crates/otto-web`: the wasm cdylib the browser UI loads; exports `otto-core`'s wire codecs to JavaScript through `wasm-bindgen`
+- `ui/`: the TypeScript browser frontend; a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only, with no Rust code of its own and no part in `make check-fast`
 
 Keep provider-specific wire structs inside the two provider implementation
-packages. Keep file-tool workspace enforcement inside `internal/tool`, session
-persistence append-only, and `bash` delegated through `internal/sandbox`; only
-explicit sandbox `off` may use direct execution, and it still starts in the
-selected workspace.
+modules. Keep file-tool workspace enforcement inside `crates/otto`'s `tool`
+module, session persistence append-only, and `bash` delegated through
+`crates/otto`'s `sandbox` module; only explicit sandbox `off` may use direct
+execution, and it still starts in the selected workspace.
 
-Keep `internal/memory` behind its neutral contracts. The agent loop, tools, and
-frontends must never reach a Store directly: use `memory.Binding`,
-`memory.Reader`, `memory.Proposer`, or the `app.Controller` memory facade.
-Per-turn recall and explicit management (`memory_search`/`remember`/`forget`
-tools, `/memory`/`/remember` in both frontends, and `otto memory status|forget`)
-are wired end to end via `[memory]` TOML config. Model- and human-originated
-writes always land as pending candidates requiring review. Automatic extraction
-(`Binding.Observe`) and durability (backup/restore/verify) remain unwired.
+Keep `crates/otto`'s `memory` module behind its neutral contracts. The agent
+loop, tools, and frontends must never reach a store directly: use the
+`Service`'s bound accessors or the `Controller` memory facade. Per-turn recall
+and explicit management (`memory_search`/`remember`/`forget` tools,
+`/memory`/`/remember` in the REPL, and `otto memory status|forget`) are wired
+end to end via `[memory]` TOML config. Model- and human-originated writes
+always land as pending candidates requiring review. Automatic extraction and
+durability (backup/restore/verify) remain unwired. `/memory` and `/remember`
+are not yet wired into the TUI; `crates/otto/src/tui/app.rs`'s `UNPORTED`
+table names them and the dispatcher answers with a "not yet ported" line
+until they land.
 
-Keep `internal/skill` free of imports from other Otto packages. The skill tool's
-file reads stay confined to the skill directory via `tool.Workspace`. Do not
-document `/skills`, `/skill`, or `allowed-tools` enforcement as working
-features.
-
-Keep `internal/subagent` behind `agent.New`: children are built only through
-`agent.New`; `internal/agent` knows tasks only through `agent.Tasks`/`agent.Inbox`
-and never imports `internal/subagent`; frontends reach tasks only through
-`app.TaskLister`; children never receive `agent*`, `remember`, `forget`, or
-`memory_search`; child transcripts are not persisted. Definitions cannot add
-tools outside the child tool set; `tools` only narrows it. `[agents]` is TOML
-only, like `[skills]`. Do not document `agent_send`/`agent_cancel`/`agent_report`
+Keep `crates/otto`'s `skill` module free of imports from other Otto modules
+besides `otto-core`. The skill tool's file reads stay confined to the skill
+directory. Do not document `/skills`, `/skill`, or `allowed-tools` enforcement
 as working features.
+
+Keep `crates/otto`'s `subagent` module behind the runner's construction path:
+children are built only through it; the agent loop knows tasks only through
+its own task registry and never imports `subagent` directly; frontends reach
+tasks only through the shared task-lister facade; children never receive
+`agent*`, `remember`, `forget`, or `memory_search`; child transcripts are not
+persisted. Definitions cannot add tools outside the child tool set; `tools`
+only narrows it. `[agents]` is TOML only, like `[skills]`. Do not document
+`agent_send`/`agent_cancel`/`agent_report` as working features.
 
 ## Core contracts
 
@@ -69,7 +78,7 @@ as working features.
 - Keep context associations in typed `ContextMetadata`. Prefer structured TaskID over notification wording; text parsing is only a legacy-history fallback. Preserve append-only Pi v3 compatibility and namespaced optional details, including the explicit-zero usage marker. Do not rewrite old records or invent missing historical metadata.
 - `tool.Result.PersistedContent == nil` selects `Content`; a non-nil pointer selects its value, including empty text. Preserve redaction and the current-turn full-result overlay. Reuse tool definitions and assembly helpers, including `tool.BashDefinition`; keep conservative preflight and final registry validation.
 - Provider and Tool instances may be shared concurrently. Respect borrowed read-only request/argument data and caller-owned returned data/schema. Per-call provider callbacks are ordered and finish before `Complete` returns; event consumers must copy reference fields before retaining mutable payloads.
-- Reuse the shared compaction result payload. Keep HTTP/SSE DTOs separate from internal structs; update `internal/server/openapi.yaml` alongside wire changes and preserve existing field meanings.
+- Reuse the shared compaction result payload. Keep HTTP/SSE DTOs separate from internal structs; update `testdata/server/openapi.yaml` alongside wire changes and preserve existing field meanings.
 
 ## Lifecycle and frontend contracts
 
@@ -95,7 +104,7 @@ approval before writing production code or tests. Once approved, carry the
 agreed work through implementation and verification without repeated
 confirmation; seek clarification only for material scope or contract changes.
 
-## Go workflow
+## Rust workflow
 
 Full host validation uses macOS 26+ with standalone Command Line Tools selected.
 The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
@@ -103,75 +112,86 @@ require the third-party arm64e support introduced in macOS 26. CI selects
 `/Library/Developer/CommandLineTools` so Git and Clang use the existing reviewed
 developer read root. See [the workflow](../.github/workflows/checks.yml) for pins.
 
+`rust-toolchain.toml` pins the exact channel (1.98.0) and the
+`wasm32-unknown-unknown` target; `rustup toolchain install` in a repository
+checkout installs that toolchain without asking. Workspace dependencies in
+`Cargo.toml` are exact-pinned (`=x.y.z`), so `cargo update` never silently
+changes a dependency version.
+
 The canonical Make targets are:
 
 ```bash
-make check-fast  # fmt, vet, architecture imports, and focused core tests
-make check       # full macOS gate: check-fast, build, lint, all tests, race, PTY, diff check
-make build
-make lint        # pinned staticcheck v0.8.1
-make test        # go test ./... (offline)
-make test-race   # go test -race -timeout=20m ./...
-make test-tui    # offline PTY lifecycle smoke test
+make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
+make check          # full macOS gate: check-fast, build, all tests, wasm check+test, PTY test, UI test
+make build          # cargo build --release, then copy the binary to ./otto
+make rust-fmt       # cargo fmt --all -- --check
+make rust-lint      # cargo clippy --workspace --all-targets -- -D warnings
+make rust-test      # cargo test --workspace (offline)
+make rust-wasm-check # cargo check -p otto-core and -p otto-web for wasm32-unknown-unknown
+make rust-wasm-test  # wasm-pack test --node for otto-core and otto-web
+make test-tui       # cargo test -p otto --test tui_pty (needs a real PTY)
 ```
 
-`check-fast` runs `fmt`, `vet`, `test-architecture`, and `test-core`; the core
-set is `internal/model`, `internal/agent`, `internal/app`,
-`internal/provider/...` (including both adapters), `internal/config`, `internal/skill`, and
-`internal/subagent`. `check` adds the trimmed macOS build, `make lint`, all
-tests, race tests, the PTY test, and `git diff --check`.
+`check-fast` runs `rustfmt`, `clippy`, and the focused `otto-core` test suite;
+`check` adds the release build, the full workspace test suite, the wasm32
+build check, the wasm tests under Node, the PTY smoke test, and `make
+ui-test`.
 
-The complete race suite has a 20-minute per-package budget: the SQLite suite
-can exceed Go's default 10-minute package timeout on hosted runners. Individual
-behavioral assertions and their deadlines remain unchanged.
-
-Use `make lint` as the canonical staticcheck invocation. The pinned v0.8.1
-module supports Go 1.26. Keep the default test suite offline: it must not need
-network access, provider credentials, or a real interactive terminal.
+`rust-wasm-test` and `make ui`/`make ui-test` need `wasm-pack` (pinned to
+0.15.0 in CI via `cargo install wasm-pack --version 0.15.0 --locked`).
+`test-tui` needs a real PTY, which is unavailable in some sandboxed shells;
+run it directly with `cargo test -p otto --test tui_pty` on a host that has
+one. Keep the default test suite (`cargo test --workspace` without extra
+flags) offline: it must not need network access, provider credentials, or a
+real interactive terminal.
 
 ## Web UI workflow
 
 `ui/` is a Vite + React + TypeScript project with `react-markdown` and
-`remark-gfm` as its only runtime dependencies. It needs Node 24+ and is not
-part of `make check`; CI stays Go-only.
+`remark-gfm` as its only runtime dependencies, plus the `otto-web` wasm
+package built from `crates/otto-web`. It needs Node 24+ and wasm-pack, and it
+is exercised by `make check` through `make ui-test`.
 
 ```bash
-make ui       # npm ci && npm run build → internal/server/ui/dist, then go build embeds it
-make ui-test  # vitest: the SSE frame parser and the transcript reducer
+make ui       # wasm-pack build, then npm ci && npm run build → ui/dist, embedded by cargo build
+make ui-test  # wasm-pack build, then npm ci && npm test (vitest): the SSE frame parser and the transcript reducer
 ```
 
-`internal/server/ui/dist` is a build output: only `.gitkeep` is tracked, and a
-`go build` without a prior `make ui` embeds the placeholder page. Do not commit
-built assets.
+`ui/dist` is a build output: only `.gitkeep` is tracked, and a `cargo build`
+without a prior `make ui` embeds the placeholder page. Do not commit built
+assets.
 
 For development, run `otto serve --listen 127.0.0.1:8787` in one terminal and
 `cd ui && OTTO_URL=http://127.0.0.1:8787 npm run dev` in another, then open the
 Vite URL with the `?token=` query from the `otto serve` startup line. Vite
-proxies `/v1` to the Go server, so the page stays same-origin and no CORS is
+proxies `/v1` to the server, so the page stays same-origin and no CORS is
 involved. Wire types in `ui/src/types.ts` mirror
-[openapi.yaml](../internal/server/openapi.yaml); update both together.
+[openapi.yaml](../testdata/server/openapi.yaml); update both together.
 
 ## Test-driven development
 
 TDD is required for feature work and bug fixes:
 
 1. Write or update the failing test first.
-2. Run the smallest relevant `go test ...` command and watch it fail for the expected reason.
+2. Run the smallest relevant `cargo test ...` command and watch it fail for the expected reason.
 3. Make the minimal code change.
 4. Re-run the focused test.
-5. Re-run the broader relevant package or repository gates.
+5. Re-run the broader relevant crate or repository gates.
 
 Do not add production behavior without a failing test first unless the user
 explicitly approves an exception for docs-only work or another non-code change.
-Keep tests next to the package they cover. Prefer `testing`, `httptest`, and
-`t.TempDir()`. TTY-specific coverage must stay offline and automated, such as
-the PTY smoke test in `cmd/otto/tui_pty_test.go`. Live provider tests are
-opt-in only and excluded from the default suite. Contract changes need focused
-coverage for ownership, invalid states, cancellation, and history/wire
-compatibility; verify both Session implementations where they share a
-contract. Report failing gates and reruns accurately, check the baseline for
-unchanged failures, and never weaken validation or safety checks to obtain a
-pass. Preserve unrelated behavioral assertions when migrating test fixtures.
+Keep unit tests next to the module they cover (`#[cfg(test)] mod tests`), and
+integration tests in the crate's `tests/` directory. Prefer
+`#[test]`/`#[tokio::test]` and `tempfile::TempDir`. TTY-specific coverage must
+stay offline and automated, such as the PTY smoke test in
+`crates/otto/tests/tui_pty.rs`. Live provider tests are opt-in only and
+excluded from the default suite. Contract changes need focused coverage for
+ownership, invalid states, cancellation, and history/wire compatibility;
+verify both `Session` implementations (`MemorySession` and `Store`) where they
+share a contract. Report failing gates and reruns accurately, check the
+baseline for unchanged failures, and never weaken validation or safety checks
+to obtain a pass. Preserve unrelated behavioral assertions when migrating test
+fixtures.
 
 ## Secrets, safety, and documentation
 
@@ -183,11 +203,11 @@ pass. Preserve unrelated behavioral assertions when migrating test fixtures.
 
 Keep README limited to implemented, tested behavior; list unsupported behavior
 under Limitations. Do not list roadmap stages or planned providers. Keep command
-examples aligned with the actual CLI flags in `cmd/otto/main.go`. Document the
-config, session, and safety behavior that tests enforce today, not aspirational
-behavior.
+examples aligned with the actual CLI flags in `crates/otto/src/cli/flags.rs`.
+Document the config, session, and safety behavior that tests enforce today,
+not aspirational behavior.
 
 Use small, focused commits with imperative subjects, for example
 `feat: add OpenAI-compatible streaming` or `docs: document the ChatGPT sign-in
-flow`. Before committing, run the relevant Go gates and confirm that the
+flow`. Before committing, run the relevant Rust gates and confirm that the
 working tree contains only intentional changes.

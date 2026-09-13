@@ -1,9 +1,8 @@
 //! The embedded web UI.
 //!
-//! Port of `internal/server/ui.go`. The built bundle is read from the Go
-//! tree's `internal/server/ui/dist` (what `make ui` writes) and compiled into
-//! the binary, the way `go:embed all:ui/dist` does. The directory is tracked
-//! with only a `.gitkeep`, so a plain checkout still builds and the root then
+//! The built bundle is read from `ui/dist` (what `make ui` writes) and
+//! compiled into the binary at build time. The directory is tracked with
+//! only a `.gitkeep`, so a plain checkout still builds and the root then
 //! answers with a one-line placeholder.
 //!
 //! The UI is not part of the API: no token, not in the route table, not in
@@ -14,7 +13,7 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use include_dir::{Dir, include_dir};
 
-static DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../internal/server/ui/dist");
+static DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../ui/dist");
 
 /// What `GET /` returns when `make ui` has not run.
 pub const PLACEHOLDER: &str = "Web UI not built; run make ui\n";
@@ -129,10 +128,9 @@ mod tests {
     }
 
     #[test]
-    fn the_go_tree_bundle_is_embedded() {
-        // `make ui` writes into the Go tree; the checked-in directory holds
-        // only .gitkeep, so this asserts the embed path resolves, not that a
-        // build has run.
+    fn the_embed_path_resolves_on_an_unbuilt_checkout() {
+        // The checked-in directory holds only .gitkeep, so this asserts the
+        // embed path resolves, not that `make ui` has run.
         assert!(DIST.get_file("nothing-here").is_none());
     }
 }

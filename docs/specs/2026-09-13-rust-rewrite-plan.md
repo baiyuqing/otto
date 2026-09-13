@@ -1,6 +1,10 @@
 # Rust rewrite plan
 
-Status: proposal, not approved. No Rust code exists in the repository yet.
+Status: done. All phases below landed; the Go implementation was removed at
+tag `go-final`. This document is historical rationale; current behavior is
+described in [AGENTS.md](../../AGENTS.md), the [development
+guide](../development.md), the [README](../../README.md), and the [user
+manual](../user-manual.md).
 
 Goal: replace the Go implementation of Otto with Rust, keep every user-visible
 behavior and on-disk format, and compile the provider-neutral core to

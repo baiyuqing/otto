@@ -6,7 +6,7 @@
 
 [简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md)
 
-**Otto is a local-first AI coding assistant for your terminal, built in Go.**
+**Otto is a local-first AI coding assistant for your terminal, built in Rust.**
 Read an unfamiliar codebase, make focused edits, and run checks in one session.
 Connect through an OpenAI-compatible API endpoint or sign in with `otto login`
 for the ChatGPT provider. Model requests go to the selected provider; local-first
@@ -21,14 +21,20 @@ refers to the runtime, session history, and memory storage.
 
 ## Install from source
 
-Requires **macOS and Go 1.26 or newer**, plus access to one of the two providers.
+Requires **macOS**, the pinned **Rust 1.98** toolchain (`rustup toolchain
+install` picks it up from `rust-toolchain.toml`), and access to one of the two
+providers.
 
 ```bash
 git clone https://github.com/baiyuqing/otto.git
 cd otto
-go build -trimpath -o ./otto ./cmd/otto
+make build
 ./otto --help
 ```
+
+`make build` embeds whatever is already in `ui/dist`. Run `make ui` first
+(needs Node 24+) to embed the real web UI; otherwise `otto serve` serves a
+one-line placeholder page at `/` instead of the UI.
 
 The examples below run `./otto` from this directory. Put the binary on your
 `PATH` to use `otto` from other directories.
@@ -157,7 +163,8 @@ persisted.
   token persistence. The Unix socket relies on file permissions for access
   control.
 
-Configure shell permissions interactively with `otto sandbox setup`; see the
+The `otto sandbox setup` wizard is not yet ported; configure shell permissions
+by hand in the `[sandbox]` TOML table, see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup).
 
 Read [tools and safety](docs/user-manual.md#tools-and-safety) before granting
@@ -172,7 +179,7 @@ Design documents live in [docs/specs](docs/specs/).
 ```bash
 make build
 make check-fast  # quick core feedback; also run tests for the package you change
-make check       # full macOS acceptance, including race and PTY tests
+make check       # full macOS acceptance, including wasm and PTY tests
 ```
 
 ## License

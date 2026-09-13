@@ -2,69 +2,22 @@
 # Tests use no live provider credentials; tool/dependency setup may use network.
 
 BINARY := otto
-PKG    := ./cmd/otto
 
-STATICCHECK_VERSION := v0.8.1
-STATICCHECK := go run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
-CORE_PACKAGES := ./internal/model ./internal/agent ./internal/app ./internal/provider/... ./internal/config ./internal/skill ./internal/subagent
-
-.PHONY: all build fmt fmt-fix vet lint test test-core test-architecture test-race test-tui check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test rust-interop rust-check clean help
+.PHONY: all build check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test test-tui clean help
 
 all: build
 
-build: ## compile the otto binary (trimmed) to ./$(BINARY)
-	go build -trimpath -o ./$(BINARY) $(PKG)
+build: ## compile the Rust otto binary (release) to ./$(BINARY)
+	cargo build --release
+	cp target/release/$(BINARY) ./$(BINARY)
 
-fmt: ## fail if any Go file is not gofmt-formatted (CI-safe)
-	@test -z "$$(gofmt -l .)" || { echo "gofmt: unformatted files:"; gofmt -l .; exit 1; }
-
-fmt-fix: ## rewrite Go files with gofmt -w (local only)
-	gofmt -w .
-
-vet: ## run go vet
-	go vet ./...
-
-lint: ## run the pinned staticcheck version
-	$(STATICCHECK) ./...
-
-test: ## run the offline unit test suite
-	go test ./...
-
-test-core: ## run focused core tests without host process/Seatbelt suites
-	go test $(CORE_PACKAGES)
-
-test-architecture: ## verify production package import boundaries
-	go test ./internal/architecture
-
-test-race: ## run the test suite with the race detector
-	go test -race -timeout=20m ./...
-
-test-tui: ## run the TUI PTY lifecycle smoke test
-	go test ./cmd/otto -run TestTUIPseudoTerminalLifecycle -count=1
-
-# The web UI needs Node and is not part of check/check-fast; `go build`
-# embeds whatever internal/server/ui/dist holds (a placeholder when unbuilt).
-# ui/src imports the SSE reader, the transcript reducer and the wire types
-# from crates/otto-web, so the wasm package has to exist before vite runs.
-ui: ## build the web UI into internal/server/ui/dist (needs Node 24+ and wasm-pack)
-	rm -rf internal/server/ui/dist/assets internal/server/ui/dist/index.html
-	wasm-pack build --target web crates/otto-web
-	cd ui && npm ci && npm run build
-
-ui-test: ## run the web UI unit tests (needs Node 24+ and wasm-pack)
-	wasm-pack build --target web crates/otto-web
-	cd ui && npm ci && npm test
-
-# Rust rewrite gates (docs/specs/2026-09-13-rust-rewrite-plan.md). They are
-# deliberately not part of check/check-fast: the Go binary is the shipped
-# binary until the parity switch.
 rust-fmt: ## fail if any Rust file is not rustfmt-formatted
 	cargo fmt --all -- --check
 
 rust-lint: ## run clippy across the Rust workspace with warnings as errors
 	cargo clippy --workspace --all-targets -- -D warnings
 
-rust-test: ## run the native Rust test suite
+rust-test: ## run the full native Rust test suite
 	cargo test --workspace
 
 rust-wasm-check: ## verify otto-core and otto-web still build for wasm32
@@ -75,17 +28,24 @@ rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
 	wasm-pack test --node crates/otto-core
 	wasm-pack test --node crates/otto-web
 
-rust-interop: ## check Go/Rust session interoperability in both directions
-	cargo test -p otto --test interop
-	OTTO_RUST_INTEROP_DIR=$(CURDIR)/target/interop go test -tags rustinterop ./internal/session -run TestRustInterop
+test-tui: ## run the TUI PTY lifecycle smoke test (needs a real PTY)
+	cargo test -p otto --test tui_pty
 
-rust-check: rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test rust-interop ## all Rust gates
-
-check-fast: fmt vet test-architecture test-core ## quick feedback; run targeted package tests too
+check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core tests
+	cargo test -p otto-core
 	@git diff --check
 
-check: check-fast build lint test test-race test-tui ## full macOS acceptance, including host integration and PTY
+check: check-fast build rust-test rust-wasm-check rust-wasm-test test-tui ui-test ## full macOS acceptance, including host integration, PTY and web UI tests
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
+
+ui: ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)
+	rm -rf ui/dist/assets ui/dist/index.html
+	wasm-pack build --target web crates/otto-web
+	cd ui && npm ci && npm run build
+
+ui-test: ## run the web UI unit tests (needs Node 24+ and wasm-pack)
+	wasm-pack build --target web crates/otto-web
+	cd ui && npm ci && npm test
 
 clean: ## remove the built binary
 	rm -f ./$(BINARY)

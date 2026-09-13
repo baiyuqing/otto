@@ -2,9 +2,14 @@
 //! `cmd/otto/main.go`.
 //!
 //! The order of operations, the exact stderr text and the exit codes match
-//! Go, because `cmd/otto/main_test.go` pins them. What is deliberately absent
-//! is named by a "not yet ported" message rather than silently skipped: the
-//! `sandbox` subcommand and `/sandbox reload`.
+//! Go, because `cmd/otto/main_test.go` pins them.
+//!
+//! The composition root opens one process sandbox and hands it to a
+//! [`SandboxSwitch`], so `/sandbox reload`, `POST /v1/sandbox/reload` and the
+//! TUI all re-point bash at a new runtime without restarting the process.
+//!
+//! `sandbox`, `memory`, `login` and `logout` dispatch before flag parsing,
+//! because their argument grammars are their own; nothing is left unported.
 //!
 //! The TUI (`--ui tui`, or `--ui auto` on a terminal) dispatches to
 //! [`crate::tui::run`], the phase 8 port of `internal/tui`.
@@ -41,6 +46,7 @@ use super::sandbox_runtime::{
     OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
     open_sandbox_runtime, sandbox_runtime_warning, settings_from_config,
 };
+use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use super::serve;
 
 /// Go's `maxApprovePromptBytes`.
@@ -82,7 +88,7 @@ pub(crate) fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
 /// startup path is reachable from tests.
 pub async fn run(
     args: &[String],
-    stdin: Box<dyn BufRead + Send + 'static>,
+    mut stdin: Box<dyn BufRead + Send + 'static>,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
     environment_entries: Vec<Vec<u8>>,
@@ -94,16 +100,27 @@ pub async fn run(
     if let Some(first) = args.first()
         && matches!(first.as_str(), "sandbox" | "memory")
     {
+        let host_entries = match capture_environment(environment_entries) {
+            Ok(entries) => entries,
+            Err(message) => return fail(stderr, &message),
+        };
+        let lookup = match environment_lookup(&host_entries) {
+            Ok(lookup) => lookup,
+            Err(message) => return fail(stderr, &message),
+        };
         if first == "memory" {
-            let lookup = match capture_environment(environment_entries)
-                .and_then(|entries| environment_lookup(&entries))
-            {
-                Ok(lookup) => lookup,
-                Err(message) => return fail(stderr, &message),
-            };
             return super::memory_command::run(&args[1..], stdout, stderr, &lookup);
         }
-        return fail(stderr, &format!("{first} is not yet ported"));
+        return super::sandbox_setup::run(
+            &args[1..],
+            &mut stdin,
+            stdout,
+            stderr,
+            &host_entries,
+            &lookup,
+            cancel,
+        )
+        .await;
     }
     if let Some(first) = args.first()
         && matches!(first.as_str(), "login" | "logout")
@@ -377,31 +394,55 @@ pub async fn run(
         provider_names: sandbox_provider_environment_names(&config_file, &resolved.api_key_env),
     };
     let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
+    // The bash tool captures its executor when a runner is built, so the
+    // process sandbox lives behind a switch that `/sandbox reload` can
+    // replace without rebuilding the session or the runner. Port of
+    // `newSandboxSwitch` at `cmd/otto/main.go`.
+    let had_executor = sandbox.executor.is_some();
+    let sandbox_environment = sandbox.environment.clone();
+    let sandbox_info = sandbox.info;
+    let redaction_values = sandbox.redaction_values.clone();
+    let redactions_complete = sandbox.redactions_complete;
+    let control = SandboxSwitch::new(sandbox);
     if cancel.is_cancelled() {
-        let _ = sandbox.close();
+        let _ = control.close().await;
         return 130;
     }
-    if let Some(executor) = sandbox.executor.clone() {
-        builder.command_executor = Some(executor);
+    if had_executor {
+        builder.command_executor =
+            Some(Arc::clone(&control) as Arc<dyn crate::sandbox::CommandExecutor>);
     }
-    builder.sandbox_environment = sandbox.environment.clone();
-    builder.sandbox_info = sandbox.info;
-    let (merged, merged_complete) =
-        merge_redactions(&builder.sandbox_secrets, &sandbox.redaction_values);
+    builder.sandbox_environment = sandbox_environment;
+    builder.sandbox_info = sandbox_info;
+    let (merged, merged_complete) = merge_redactions(&builder.sandbox_secrets, &redaction_values);
     builder.sandbox_secrets = merged;
     builder.sandbox_secrets_complete =
-        builder.sandbox_secrets_complete && sandbox.redactions_complete && merged_complete;
+        builder.sandbox_secrets_complete && redactions_complete && merged_complete;
     if let Some(warning) = sandbox_runtime_warning(builder.effective_sandbox_info()) {
         let _ = stderr.write_all(warning.as_bytes());
     }
+    // Port of `runtimeBuilder.sandboxReload`: no reloader at all without a
+    // usable sandbox, because there is then nothing to re-point.
+    let reloader = (had_executor && builder.effective_sandbox_info().bash_available).then(|| {
+        Arc::new(SandboxReloader {
+            control: Arc::clone(&control),
+            config_path: PathBuf::from(&config_path),
+            explicit_config: options.explicit_config,
+            driver_override: sandbox_driver_override.clone(),
+            environment: environment.clone(),
+            api_key_env: resolved.api_key_env.clone(),
+            reopen: open_options,
+            cancel: cancel.child_token(),
+        })
+    });
     if cancel.is_cancelled() {
-        let _ = sandbox.close();
+        let _ = control.close().await;
         return 130;
     }
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
     if (prepared_initial.is_some() || options.serve) && !dynamic_content {
-        let _ = sandbox.close();
+        let _ = control.close().await;
         return fail(stderr, SESSION_OPERATION_UNAVAILABLE);
     }
     if dynamic_content {
@@ -413,14 +454,14 @@ pub async fn run(
                 builder.memory.usable = usable;
             }
             Err(error) => {
-                let _ = sandbox.close();
+                let _ = control.close().await;
                 return fail(stderr, &builder.redact_error(&error, Some(&resolved)));
             }
         }
         match super::wiring::workspace_memory_scope(&memory_config, &workspace_path) {
             Ok(scope) => builder.memory.workspace_scope = scope,
             Err(error) => {
-                let _ = sandbox.close();
+                let _ = control.close().await;
                 return fail(stderr, &error);
             }
         }
@@ -429,7 +470,7 @@ pub async fn run(
     builder.memory.recall_token_budget = memory_config.recall_tokens;
     let memory_service = Arc::clone(&builder.memory.service);
     if cancel.is_cancelled() {
-        let _ = sandbox.close();
+        let _ = control.close().await;
         return 130;
     }
 
@@ -438,23 +479,17 @@ pub async fn run(
             match resolve_server(&config_file, &environment, &options.socket, &options.listen) {
                 Ok(listen) => listen,
                 Err(error) => {
-                    let _ = sandbox.close();
+                    let _ = control.close().await;
                     return fail(stderr, &builder.redact_error(&error.to_string(), None));
                 }
             };
-        let api_key_env = resolved.api_key_env.clone();
         return serve::run(
             serve::ServeOptions {
                 builder,
                 runtime: resolved,
                 listen,
-                sandbox,
-                reopen: open_options,
-                config_path: PathBuf::from(&config_path),
-                explicit_config: options.explicit_config,
-                driver_override: sandbox_driver_override,
-                environment,
-                api_key_env,
+                control,
+                reloader,
             },
             stdout,
             stderr,
@@ -467,7 +502,7 @@ pub async fn run(
         match activate_initial_session(&builder, prepared_initial, dynamic_content, &resolved) {
             Ok(activated) => activated,
             Err(message) => {
-                let _ = sandbox.close();
+                let _ = control.close().await;
                 return fail(stderr, &message);
             }
         };
@@ -476,7 +511,7 @@ pub async fn run(
     }
     if cancel.is_cancelled() {
         let _ = initial_session.close();
-        let _ = sandbox.close();
+        let _ = control.close().await;
         return 130;
     }
 
@@ -484,7 +519,7 @@ pub async fn run(
         Ok(runner) => runner,
         Err(message) => {
             let _ = initial_session.close();
-            let _ = sandbox.close();
+            let _ = control.close().await;
             if cancel.is_cancelled() {
                 return 130;
             }
@@ -494,7 +529,7 @@ pub async fn run(
     if let Err(message) = builder.update_session_runtime(&initial_session, &resolved) {
         runner.close();
         let _ = initial_session.close();
-        let _ = sandbox.close();
+        let _ = control.close().await;
         if cancel.is_cancelled() {
             return 130;
         }
@@ -503,7 +538,7 @@ pub async fn run(
     if cancel.is_cancelled() {
         runner.close();
         let _ = initial_session.close();
-        let _ = sandbox.close();
+        let _ = control.close().await;
         return 130;
     }
 
@@ -512,6 +547,14 @@ pub async fn run(
     let tail_redactor = boundary::secret_redactor(&builder.boundary_inputs(), Some(&resolved));
     let info = builder.runtime_info(&resolved);
     let controller = Controller::new(builder, dynamic_content, initial_session, runner, info);
+    // One process sandbox serves every controller, so each one reports the
+    // live state rather than the value captured when it was built. Port of
+    // `app.WithSandboxControl`.
+    let controller = match &reloader {
+        Some(reloader) => controller
+            .with_sandbox_control(Arc::clone(reloader) as Arc<dyn crate::app::SandboxControl>),
+        None => controller,
+    };
 
     let run_error = match frontend {
         Frontend::Once => {
@@ -531,7 +574,7 @@ pub async fn run(
     let frontend_cancelled = matches!(run_error, Err(repl::Error::Cancelled));
     cancel.cancel();
     let controller_error = controller.close();
-    let sandbox_error = sandbox.close();
+    let sandbox_error = control.close().await;
     let _ = memory_service.close();
     if let Err(message) = controller_error {
         return fail(
@@ -1044,32 +1087,6 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(settings.read_paths.contains(&skills), "{settings:?}");
-    }
-
-    #[tokio::test]
-    async fn unported_subcommands_exit_non_zero() {
-        // `login` and `logout` are ported and dispatch before this arm; they
-        // are covered in `cli::login`, which injects a temporary home. Running
-        // them here would reach the real `~/.otto/auth/chatgpt.json`.
-        for command in ["sandbox"] {
-            let mut stdout = Vec::new();
-            let mut stderr = Vec::new();
-            let code = run(
-                &[command.to_string()],
-                Box::new(Cursor::new(Vec::new())),
-                &mut stdout,
-                &mut stderr,
-                Vec::new(),
-                false,
-                &tokio_util::sync::CancellationToken::new(),
-            )
-            .await;
-            assert_eq!(code, 1, "{command}");
-            assert_eq!(
-                String::from_utf8_lossy(&stderr),
-                format!("otto: {command} is not yet ported\n")
-            );
-        }
     }
 
     #[tokio::test]

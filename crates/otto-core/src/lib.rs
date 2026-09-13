@@ -7,6 +7,7 @@
 //! the Go packages.
 
 pub mod agent;
+pub mod config;
 pub mod model;
 pub mod openaicompat;
 pub mod provider;

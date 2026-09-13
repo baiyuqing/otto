@@ -44,4 +44,9 @@ tempfile = "=3.27.0"
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 # `TryStreamExt::try_next` over the reqwest byte stream.
 futures-util = { version = "=0.3.34", default-features = false }
+# otto-core only parses TOML (config loading is resolution-only there); the
+# native crate adds "display" for Save's serialization.
+toml = { version = "=1.1.6", default-features = false, features = ["parse", "serde", "std"] }
+# WHATWG URL parsing for base_url validation, mirroring net/url's checks.
+url = "=2.5.8"
 otto-core = { path = "crates/otto-core" }

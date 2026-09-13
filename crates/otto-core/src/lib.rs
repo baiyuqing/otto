@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod model;
+pub mod openaicompat;
 pub mod provider;
 pub mod session;
 pub mod tool;

@@ -14,4 +14,5 @@ pub mod session;
 pub mod skill;
 pub mod subagent;
 pub mod tool;
+pub mod tui;
 pub mod urlprivacy;

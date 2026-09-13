@@ -4,7 +4,10 @@
 //! The order of operations, the exact stderr text and the exit codes match
 //! Go, because `cmd/otto/main_test.go` pins them. What is deliberately absent
 //! is named by a "not yet ported" message rather than silently skipped: the
-//! `sandbox` subcommand, `serve`, the TUI and `/sandbox reload`.
+//! `sandbox` subcommand and `/sandbox reload`.
+//!
+//! The TUI (`--ui tui`, or `--ui auto` on a terminal) dispatches to
+//! [`crate::tui::run`], the phase 8 port of `internal/tui`.
 //!
 //! Safety: every diagnostic that could carry a host path, an environment name
 //! or a provider URL goes through the redaction boundary before it is
@@ -54,15 +57,12 @@ const MAX_CAPTURED_ENVIRONMENT_BYTES: usize = 16 << 20;
 
 const ENVIRONMENT_SNAPSHOT_TOO_LARGE: &str = "process environment snapshot is too large";
 
-/// Phase 8 owns the terminal frontend; until then an explicit `--ui tui` on a
-/// real terminal is refused rather than silently answered with the REPL.
-const TUI_NOT_PORTED: &str = "--ui tui is not yet ported; use --ui repl";
-
 /// Which frontend the resolved UI mode selected. Port of `frontendKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frontend {
     Repl,
     Once,
+    Tui,
 }
 
 /// The process environment, parsed into names and values.
@@ -513,12 +513,18 @@ pub async fn run(
     let info = builder.runtime_info(&resolved);
     let controller = Controller::new(builder, dynamic_content, initial_session, runner, info);
 
-    let run_error = {
-        let mut console = Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr));
-        match frontend {
-            Frontend::Once => console.run_once(&approve_prompt, cancel).await,
-            Frontend::Repl => console.run(stdin, cancel).await,
+    let run_error = match frontend {
+        Frontend::Once => {
+            let mut console =
+                Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr));
+            console.run_once(&approve_prompt, cancel).await
         }
+        Frontend::Repl => {
+            let mut console =
+                Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr));
+            console.run(stdin, cancel).await
+        }
+        Frontend::Tui => crate::tui::run(&controller, cancel).await,
     };
 
     let cancelled_before_exit = cancel.is_cancelled();
@@ -884,12 +890,13 @@ pub(super) fn resolve_sandbox_settings(
     resolve_sandbox(&raw, driver_override).map_err(|error| error.to_string())
 }
 
-/// Port of `selectFrontend`. `auto` on a terminal selects the REPL rather
-/// than the TUI for as long as the TUI is unported.
+/// Port of `selectFrontend`.
 fn select_frontend(mode: UiMode, terminal: bool) -> Result<Frontend, String> {
     match mode {
-        UiMode::Auto | UiMode::Repl => Ok(Frontend::Repl),
-        UiMode::Tui if terminal => Err(TUI_NOT_PORTED.to_string()),
+        UiMode::Auto if terminal => Ok(Frontend::Tui),
+        UiMode::Auto => Ok(Frontend::Repl),
+        UiMode::Repl => Ok(Frontend::Repl),
+        UiMode::Tui if terminal => Ok(Frontend::Tui),
         UiMode::Tui => Err(
             "--ui tui requires terminal stdin and stdout; use --ui repl for redirected input"
                 .to_string(),
@@ -1009,18 +1016,16 @@ mod tests {
     fn the_frontend_follows_the_ui_mode_and_the_terminal() {
         use otto_core::config::UiMode;
         assert_eq!(select_frontend(UiMode::Auto, false), Ok(Frontend::Repl));
-        assert_eq!(select_frontend(UiMode::Auto, true), Ok(Frontend::Repl));
+        assert_eq!(select_frontend(UiMode::Auto, true), Ok(Frontend::Tui));
         assert_eq!(select_frontend(UiMode::Repl, true), Ok(Frontend::Repl));
+        assert_eq!(select_frontend(UiMode::Repl, false), Ok(Frontend::Repl));
+        assert_eq!(select_frontend(UiMode::Tui, true), Ok(Frontend::Tui));
         assert_eq!(
             select_frontend(UiMode::Tui, false),
             Err(
                 "--ui tui requires terminal stdin and stdout; use --ui repl for redirected input"
                     .to_string()
             )
-        );
-        assert_eq!(
-            select_frontend(UiMode::Tui, true),
-            Err(TUI_NOT_PORTED.to_string())
         );
     }
 

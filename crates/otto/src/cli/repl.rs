@@ -666,7 +666,7 @@ fn first_line(content: &str) -> &str {
 /// ponytail: the kind does not survive `SessionError::Persist(String)`, so
 /// this matches the sentinel text the store prefixes onto the message. A
 /// typed flag on `SessionError` would be the upgrade, in `otto-core`.
-fn is_fatal_persistence(error: &AgentError) -> bool {
+pub(crate) fn is_fatal_persistence(error: &AgentError) -> bool {
     matches!(error, AgentError::Persist { source, .. }
         if source.to_string().starts_with("fatal session persistence failure"))
 }

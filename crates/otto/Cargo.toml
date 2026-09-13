@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 otto-core.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 # Native-only: the store timestamps records from the wall clock and converts
@@ -23,7 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal", "net"] }
 tokio-util.workspace = true
 # Save() serializes, so the native crate needs "display" on top of otto-core's
 # parse-only feature set.

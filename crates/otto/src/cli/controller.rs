@@ -102,6 +102,11 @@ impl Controller {
         self.builder.effective_sandbox_info()
     }
 
+    /// The captured ChatGPT credential path, empty when none was captured.
+    pub fn auth_path(&self) -> &str {
+        &self.builder.auth_path
+    }
+
     pub fn dynamic_content(&self) -> bool {
         self.dynamic_content
     }

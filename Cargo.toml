@@ -33,6 +33,9 @@ regex = "=1.13.1"
 libc = "=0.2.189"
 # SHA-256 for the workspace directory key. No hash lives in std.
 sha2 = { version = "=0.10.9", default-features = false }
+# base64url for the OAuth PKCE challenge, the state parameter and the JWT
+# payload in `otto::auth`. Already in the lock file as a transitive dependency.
+base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 # Native-only. nix gives the openat/readlinkat walk the workspace boundary needs
 # and the setpgid/killpg process-group control the sandbox drivers need.
 nix = { version = "=0.31.3", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }

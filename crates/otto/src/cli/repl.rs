@@ -4,7 +4,7 @@
 //! event rendering are byte-identical to the Go REPL's for the same inputs.
 //!
 //! Not ported in this phase, and answered with a "not yet ported" line on
-//! stderr: `/memory`, `/remember`, `/tasks`, `/task`, `/login`, `/logout`.
+//! stderr: `/memory`, `/remember`, `/tasks`, `/task`.
 //! Sub-agent wake turns and the task drain in `RunOnce` go with them. Go's
 //! `/sandbox reload` needs the sandbox reloader, which is also a later phase,
 //! so it reports Go's `ErrSandboxReloadUnavailable` text.
@@ -26,10 +26,10 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n";
+const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n";
 
 /// Commands `internal/repl` has that this phase does not.
-const UNPORTED: [&str; 6] = ["memory", "remember", "tasks", "task", "login", "logout"];
+const UNPORTED: [&str; 4] = ["memory", "remember", "tasks", "task"];
 
 /// Why the loop stopped. Port of the error values `Run` returns.
 #[derive(Debug)]
@@ -263,6 +263,24 @@ impl<'a> Repl<'a> {
                     Some(false)
                 }
                 "sandbox" => self.sandbox(args)?.then_some(false),
+                "login" => {
+                    super::login::repl_login(
+                        self.controller,
+                        &mut *self.stdout,
+                        &mut *self.stderr,
+                        args,
+                        cancel,
+                    )
+                    .await?;
+                    Some(false)
+                }
+                "logout" => {
+                    if !args.is_empty() {
+                        break 'dispatch None;
+                    }
+                    super::login::repl_logout(self.controller, &mut *self.stdout, cancel)?;
+                    Some(false)
+                }
                 _ if UNPORTED.contains(&name) => {
                     let _ = writeln!(self.stderr, "/{name} is not yet ported");
                     Some(false)
@@ -845,20 +863,13 @@ mod tests {
         let controller = controller(workspace.path(), sessions.path()).await;
 
         let (_, stderr, result) = session(
-            "/memory search x\n/remember note\n/tasks\n/task 1\n/login\n/logout\n/exit\n",
+            "/memory search x\n/remember note\n/tasks\n/task 1\n/exit\n",
             &controller,
         )
         .await;
 
         assert!(result.is_ok(), "{result:?}");
-        for command in [
-            "/memory",
-            "/remember",
-            "/tasks",
-            "/task",
-            "/login",
-            "/logout",
-        ] {
+        for command in ["/memory", "/remember", "/tasks", "/task"] {
             assert!(
                 stderr.contains(&format!("{command} is not yet ported\n")),
                 "{command} missing from {stderr}"

@@ -263,6 +263,7 @@ impl Session for SharedSession {
 /// without an `Option`, so the agent's type parameter stays concrete.
 pub enum ProviderClient {
     Compat(Arc<Client>),
+    ChatGpt(Arc<crate::provider::chatgpt::Client>),
     Unavailable,
 }
 
@@ -276,6 +277,7 @@ impl Provider for ProviderClient {
     ) -> Result<Response, ProviderError> {
         match self {
             Self::Compat(client) => client.complete(request, emit, cancel).await,
+            Self::ChatGpt(client) => client.complete(request, emit, cancel).await,
             Self::Unavailable => Err(ProviderError::Other(
                 "provider is unavailable: redaction is incomplete".to_string(),
             )),
@@ -356,6 +358,12 @@ pub struct Builder {
     pub sandbox_info: SandboxInfo,
     pub sandbox_secrets: Vec<String>,
     pub sandbox_secrets_complete: bool,
+    /// Go's `runtimeBuilder.authPath`: the captured `~/.otto/auth/chatgpt.json`.
+    pub auth_path: String,
+    /// Go's `runtimeBuilder.authCredentials`, valid only when loaded is true.
+    pub auth_credentials: crate::auth::Credentials,
+    /// Go's `runtimeBuilder.authCredentialsLoaded`.
+    pub auth_credentials_loaded: bool,
 }
 
 impl Builder {
@@ -524,10 +532,16 @@ impl Builder {
         }
 
         let redactor = self.boundary_redactor(Some(runtime));
-        let client = if self.boundary_allows_dynamic(Some(runtime)) {
-            ProviderClient::Compat(Arc::new(Client::new(&runtime.base_url, &runtime.api_key)))
-        } else {
+        let client = if !self.boundary_allows_dynamic(Some(runtime)) {
             ProviderClient::Unavailable
+        } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
+            ProviderClient::ChatGpt(Arc::new(super::login::chatgpt_client(
+                &self.auth_path,
+                &self.auth_credentials,
+                self.auth_credentials_loaded,
+            )?))
+        } else {
+            ProviderClient::Compat(Arc::new(Client::new(&runtime.base_url, &runtime.api_key)))
         };
 
         // The workspace context runs `git status` through the sandbox, so it
@@ -563,6 +577,9 @@ impl Builder {
 
         let request_sizer = match &client {
             ProviderClient::Compat(client) => {
+                Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
+            }
+            ProviderClient::ChatGpt(client) => {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
             ProviderClient::Unavailable => None,
@@ -813,6 +830,9 @@ mod tests {
             session_root: root.join("sessions"),
             shell: "/bin/sh".to_string(),
             no_session: true,
+            auth_path: String::new(),
+            auth_credentials: crate::auth::Credentials::default(),
+            auth_credentials_loaded: false,
             overrides: Overrides::default(),
             command_executor: None,
             sandbox_environment: None,

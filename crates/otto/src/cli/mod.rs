@@ -8,6 +8,7 @@ pub mod boundary;
 pub mod controller;
 pub mod flags;
 pub mod info;
+pub mod login;
 pub mod prompt;
 pub mod repl;
 pub mod run;

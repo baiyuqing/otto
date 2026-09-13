@@ -4,7 +4,7 @@
 //! The order of operations, the exact stderr text and the exit codes match
 //! Go, because `cmd/otto/main_test.go` pins them. What is deliberately absent
 //! is named by a "not yet ported" message rather than silently skipped: the
-//! `login`, `logout`, `memory` and `sandbox` subcommands, `serve`, the TUI,
+//! `memory` and `sandbox` subcommands, `serve`, the TUI,
 //! memory wiring, skills, sub-agents and `/sandbox reload`.
 //!
 //! Safety: every diagnostic that could carry a host path, an environment name
@@ -92,9 +92,26 @@ pub async fn run(
     // Go dispatches these before flag parsing, because their argument
     // grammars are their own.
     if let Some(first) = args.first()
-        && matches!(first.as_str(), "sandbox" | "memory" | "login" | "logout")
+        && matches!(first.as_str(), "sandbox" | "memory")
     {
         return fail(stderr, &format!("{first} is not yet ported"));
+    }
+    if let Some(first) = args.first()
+        && matches!(first.as_str(), "login" | "logout")
+    {
+        let host_entries = match capture_environment(environment_entries) {
+            Ok(entries) => entries,
+            Err(message) => return fail(stderr, &message),
+        };
+        let lookup = match environment_lookup(&host_entries) {
+            Ok(lookup) => lookup,
+            Err(message) => return fail(stderr, &message),
+        };
+        let home = match resolve_home(&lookup) {
+            Ok(home) => home,
+            Err(message) => return fail(stderr, &message),
+        };
+        return super::login::run_auth_command(args, stdout, stderr, &home, cancel).await;
     }
 
     let options = match parse_flags(args, stdout) {
@@ -155,7 +172,6 @@ pub async fn run(
     );
     startup.config = config_file.clone();
     startup.environment = environment.clone();
-    // Phase 5 seam: Go also folds in the four `auth.Credentials` values here.
     let (merged, merged_complete) = merge_redactions(
         &startup.sandbox_secrets,
         configured_snapshot.redaction_values(),
@@ -163,6 +179,12 @@ pub async fn run(
     startup.sandbox_secrets = merged;
     startup.complete =
         startup.complete && configured_snapshot.redactions_complete() && merged_complete;
+    let captured_auth =
+        super::login::capture_auth_credentials(&crate::auth::path_for_home(Path::new(&home)));
+    let (merged, merged_complete) =
+        merge_redactions(&startup.sandbox_secrets, &captured_auth.redaction_values);
+    startup.sandbox_secrets = merged;
+    startup.complete = startup.complete && captured_auth.complete && merged_complete;
 
     if (!options.archive_path.is_empty()
         || !options.resume_path.is_empty()
@@ -297,6 +319,9 @@ pub async fn run(
         sandbox_info: super::info::SandboxInfo::default(),
         sandbox_secrets: startup.sandbox_secrets.clone(),
         sandbox_secrets_complete: startup.complete,
+        auth_path: captured_auth.path.clone(),
+        auth_credentials: captured_auth.credentials.clone(),
+        auth_credentials_loaded: captured_auth.loaded,
     };
 
     let mut prepared_initial = None;
@@ -937,7 +962,10 @@ mod tests {
 
     #[tokio::test]
     async fn unported_subcommands_exit_non_zero() {
-        for command in ["login", "logout", "memory", "sandbox"] {
+        // `login` and `logout` are ported and dispatch before this arm; they
+        // are covered in `cli::login`, which injects a temporary home. Running
+        // them here would reach the real `~/.otto/auth/chatgpt.json`.
+        for command in ["memory", "sandbox"] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             let code = run(

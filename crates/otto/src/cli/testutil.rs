@@ -76,6 +76,9 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         },
         sandbox_secrets: Vec::new(),
         sandbox_secrets_complete: true,
+        auth_path: String::new(),
+        auth_credentials: crate::auth::Credentials::default(),
+        auth_credentials_loaded: false,
     }
 }
 

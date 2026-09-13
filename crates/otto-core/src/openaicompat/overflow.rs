@@ -24,7 +24,7 @@ use serde_json::Value;
 use crate::provider::ContextOverflowError;
 
 /// The largest error body the classifier will inspect, 32 KiB. The HTTP layer
-/// truncates to the same bound before calling in; that truncation is phase 4.
+/// truncates to the same bound before calling in.
 pub const MAX_ERROR_BODY: usize = 32 << 10;
 
 /// Message phrases that identify a context-window rejection.

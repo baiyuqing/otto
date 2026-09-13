@@ -1,10 +1,9 @@
 //! Deterministic text canonicalization for security boundaries.
 //! Port of `internal/safetext`.
 //!
-//! Scope: the sandbox environment classifier and the `bash` tool both need
-//! this, so it is carried here rather than duplicated. It belongs in a shared
-//! crate once another crate needs it; nothing outside `crates/otto` uses it
-//! today.
+//! Scope: the agent's secret redactor, the sandbox environment classifier,
+//! and the `bash` tool all need this, so it lives in the shared crate. It is
+//! pure string manipulation with no I/O, so it builds for wasm32.
 //!
 //! Ownership: every function returns owned data. [`SecretCollector`] is a
 //! plain owned value with no interior mutability, so callers serialize access

@@ -10,12 +10,12 @@
 //! Everything here is a pure function over borrowed bytes. There is no shared
 //! state, no I/O, and nothing to cancel. Bytes rather than `str` because
 //! percent escapes routinely decode to invalid UTF-8; returned values are
-//! canonicalized to valid UTF-8 by [`crate::safetext::canonicalize_utf8`].
+//! canonicalized to valid UTF-8 by [`otto_core::safetext::canonicalize_utf8`].
 
 use std::collections::HashSet;
 
 use crate::gourl;
-use crate::safetext;
+use otto_core::safetext;
 
 /// Values longer than this are reported as ambiguous without being scanned, so
 /// that a pathological environment variable cannot drive the quadratic-looking
@@ -213,7 +213,7 @@ fn trim_start_slashes(value: &[u8]) -> &[u8] {
 }
 
 /// Deduplicating, bounded accumulator for candidate secret forms. The bounds
-/// are shared with [`crate::safetext`] so that a value rejected here is also one
+/// are shared with [`otto_core::safetext`] so that a value rejected here is also one
 /// the redactor would have refused.
 struct UserinfoCollector {
     values: Vec<String>,

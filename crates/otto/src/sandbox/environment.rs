@@ -26,9 +26,9 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use super::{Error, PrivateDirectories};
-use crate::safetext::SecretCollector;
 use crate::tool::gopath;
 use crate::urlprivacy;
+use otto_core::safetext::SecretCollector;
 
 /// The per-cache subdirectories a confined child is pointed at. Created at mode
 /// 0700 inside `PrivateDirectories::cache`.

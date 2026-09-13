@@ -37,4 +37,11 @@ sha2 = { version = "=0.10.9", default-features = false }
 # and the setpgid/killpg process-group control the sandbox drivers need.
 nix = { version = "=0.31.3", default-features = false, features = ["fs", "dir", "process", "signal", "user"] }
 tempfile = "=3.27.0"
+# Native-only HTTP transport for the provider client. rustls only: the Go
+# client uses the macOS trust store, so `rustls-tls-native-roots` keeps the
+# same set of trusted roots without linking Security.framework through
+# native-tls. `stream` gives the chunked body reader the SSE assembler needs.
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+# `TryStreamExt::try_next` over the reqwest byte stream.
+futures-util = { version = "=0.3.34", default-features = false }
 otto-core = { path = "crates/otto-core" }

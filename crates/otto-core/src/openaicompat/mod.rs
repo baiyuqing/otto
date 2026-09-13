@@ -4,8 +4,8 @@
 //! translation ([`protocol`]), the server-sent-event response assembler
 //! ([`stream`]), and the context-overflow classifier ([`overflow`]). The HTTP
 //! half of that Go package, the client, its timeouts, its retry policy, and
-//! its API-key redaction, is not here; it is phase 4 of the rewrite and lives
-//! in `crates/otto`, which will drive these three modules.
+//! its API-key redaction, is not here. It lives in
+//! `otto::provider::openaicompat`, which drives these three modules.
 //!
 //! Ownership: nothing in this module holds shared or global state. Free
 //! functions borrow their input and return owned values;

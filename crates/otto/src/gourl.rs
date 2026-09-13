@@ -8,7 +8,7 @@
 //!
 //! Everything works on bytes rather than `str` because Go strings may hold
 //! arbitrary bytes and percent escapes routinely decode to invalid UTF-8.
-//! Callers canonicalize with [`crate::safetext::canonicalize_utf8`].
+//! Callers canonicalize with [`otto_core::safetext::canonicalize_utf8`].
 //!
 //! These items are pure functions with no shared state, so they are `Send`,
 //! `Sync`, and free of cancellation concerns. Errors carry no detail: every

@@ -178,6 +178,19 @@ pub trait Session {
     /// Appends one message after validating it and the tool-call ordering
     /// rule. Nothing is stored when the call returns an error.
     async fn append(&self, message: Message) -> Result<(), SessionError>;
+
+    /// The compaction checkpoint currently in force, or `None` when the
+    /// session has never been compacted. Port of `LatestCompaction`.
+    fn latest_compaction(&self) -> Option<CompactionMetadata>;
+
+    /// Records a compaction checkpoint: the transcript becomes the summary
+    /// context message followed by the messages from
+    /// `checkpoint.first_kept_entry_id` onward. Nothing changes when the call
+    /// returns an error. Port of `AppendCompaction`.
+    async fn append_compaction(
+        &self,
+        checkpoint: CompactionCheckpoint,
+    ) -> Result<CompactionMetadata, SessionError>;
 }
 
 /// Tool calls from the most recent assistant message that have no result yet.
@@ -188,6 +201,14 @@ struct State {
     pending: HashMap<String, String>,
     /// Every tool-call id seen in this session, to reject reuse.
     seen_call_ids: HashSet<String>,
+    /// Every message id seen in this session, to reject reuse.
+    seen_ids: HashSet<String>,
+    latest_compaction: Option<CompactionMetadata>,
+    /// Numbers the synthetic checkpoint ids and the ids generated for
+    /// messages appended without one. Go draws a random Pi entry id; an
+    /// in-memory session has no file to share ids with, so a counter is
+    /// enough and keeps tests deterministic.
+    checkpoint_counter: u64,
 }
 
 impl State {
@@ -242,6 +263,29 @@ impl State {
         }
     }
 
+    /// Replays `messages` through the sequence rule from an empty state, the
+    /// way Go's `pendingToolCalls` validates a whole candidate slice.
+    fn replay(messages: &[Message]) -> Result<State, SessionError> {
+        let mut state = State::default();
+        for message in messages {
+            state.check_sequence(message)?;
+            state.record(message.clone());
+        }
+        Ok(state)
+    }
+
+    /// A fresh identifier for a message appended without one, matching Go's
+    /// blank-id fallback. The counter is bumped until the id is unused.
+    fn generate_id(&mut self) -> String {
+        loop {
+            self.checkpoint_counter += 1;
+            let id = format!("m-{}", self.checkpoint_counter);
+            if !self.seen_ids.contains(&id) {
+                return id;
+            }
+        }
+    }
+
     fn record(&mut self, message: Message) {
         match message.role {
             Role::Assistant => {
@@ -284,12 +328,99 @@ impl Session for MemorySession {
         self.state.lock().expect("session mutex").messages.clone()
     }
 
-    async fn append(&self, message: Message) -> Result<(), SessionError> {
+    async fn append(&self, mut message: Message) -> Result<(), SessionError> {
         message.validate()?;
         let mut state = self.state.lock().expect("session mutex");
+        if message.id.trim().is_empty() {
+            message.id = state.generate_id();
+        }
+        if state.seen_ids.contains(&message.id) {
+            return Err(SessionError::Sequence("duplicate message id"));
+        }
         state.check_sequence(&message)?;
+        if state
+            .latest_compaction
+            .as_ref()
+            .is_some_and(|latest| latest.first_post_checkpoint_message_id.is_empty())
+        {
+            if message.id.trim().is_empty() {
+                return Err(SessionError::Sequence(
+                    "first post-checkpoint message id is required",
+                ));
+            }
+            if !matches!(message.role, Role::User | Role::Assistant | Role::Tool) {
+                return Err(SessionError::Sequence(
+                    "first post-checkpoint message must have a normal role",
+                ));
+            }
+            let id = message.id.clone();
+            if let Some(latest) = state.latest_compaction.as_mut() {
+                latest.first_post_checkpoint_message_id = id;
+            }
+        }
+        state.seen_ids.insert(message.id.clone());
         state.record(message);
         Ok(())
+    }
+
+    fn latest_compaction(&self) -> Option<CompactionMetadata> {
+        self.state
+            .lock()
+            .expect("session mutex")
+            .latest_compaction
+            .clone()
+    }
+
+    async fn append_compaction(
+        &self,
+        checkpoint: CompactionCheckpoint,
+    ) -> Result<CompactionMetadata, SessionError> {
+        compaction::validate_compaction_checkpoint(&checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))?;
+        let mut state = self.state.lock().expect("session mutex");
+        let Some(first_kept) = state
+            .messages
+            .iter()
+            .position(|message| message.id == checkpoint.first_kept_entry_id)
+        else {
+            return Err(SessionError::Sequence(
+                "compaction first-kept message is not in the active context",
+            ));
+        };
+        state.checkpoint_counter += 1;
+        let checkpoint_id = format!("compaction-{}", state.checkpoint_counter);
+
+        let mut context = context::new_context_message(
+            &checkpoint_id,
+            context::COMPACTION_CONTEXT_TYPE,
+            true,
+            format!("[Compaction summary]\n{}", checkpoint.summary),
+            checkpoint.created_at,
+            checkpoint.usage,
+        );
+        context.context_tokens_before = checkpoint.tokens_before;
+
+        let mut candidate = Vec::with_capacity(1 + state.messages.len() - first_kept);
+        candidate.push(context);
+        candidate.extend_from_slice(&state.messages[first_kept..]);
+        let replayed = State::replay(&candidate)?;
+
+        let metadata = CompactionMetadata {
+            id: checkpoint_id.clone(),
+            summary: checkpoint.summary,
+            first_kept_entry_id: checkpoint.first_kept_entry_id,
+            tokens_before: checkpoint.tokens_before,
+            usage: checkpoint.usage,
+            details: checkpoint.details,
+            retained_tail_only: false,
+            first_post_checkpoint_message_id: String::new(),
+        };
+        state.messages = replayed.messages;
+        state.pending = replayed.pending;
+        state.seen_call_ids = replayed.seen_call_ids;
+        state.seen_ids.insert(checkpoint_id);
+        state.latest_compaction = Some(metadata.clone());
+        Ok(metadata)
     }
 }
 

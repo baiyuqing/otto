@@ -28,8 +28,8 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
-use crate::safetext::{dynamic_redaction_marker, secret_forms};
 use crate::sandbox::{CommandExecutor, Error, ExitStatus, Request, Streams};
+use otto_core::safetext::{dynamic_redaction_marker, secret_forms};
 
 use super::result::{
     CappedByteCollector, RedactingCollector, decode_strict_json, redact_exact_text,
@@ -1033,7 +1033,7 @@ mod tests {
     #[tokio::test]
     async fn an_exhausted_marker_set_suppresses_all_result_text() {
         let (_dir, workspace) = temp_workspace();
-        let marker = crate::safetext::dynamic_redaction_marker(&[])
+        let marker = otto_core::safetext::dynamic_redaction_marker(&[])
             .expect("the empty set has a shared marker");
         let values = [
             all_non_control_runes(),

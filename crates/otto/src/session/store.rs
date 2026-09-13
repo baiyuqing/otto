@@ -626,6 +626,18 @@ impl Session for Store {
         self.append_message(&message)
             .map_err(|error| SessionError::Persist(error.to_string()))
     }
+
+    fn latest_compaction(&self) -> Option<CompactionMetadata> {
+        Store::latest_compaction(self)
+    }
+
+    async fn append_compaction(
+        &self,
+        checkpoint: CompactionCheckpoint,
+    ) -> Result<CompactionMetadata, SessionError> {
+        Store::append_compaction(self, &checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))
+    }
 }
 
 /// Writes `encoded` plus its newline delimiter and `fsync`s the file.

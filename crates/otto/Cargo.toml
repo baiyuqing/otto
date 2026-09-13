@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 otto-core.workspace = true
 async-trait.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
 # Native-only: the store timestamps records from the wall clock and converts
 # filesystem times, neither of which otto-core's wasm-safe chrono can do.
 chrono = { workspace = true, features = ["clock", "std"] }
@@ -27,4 +29,5 @@ tokio-util.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 # `start_paused` drives the bash timeout deterministically without real waits.
-tokio = { workspace = true, features = ["test-util"] }
+# `net` gives the in-file provider tests a loopback TCP origin server.
+tokio = { workspace = true, features = ["test-util", "net"] }

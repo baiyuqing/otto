@@ -2,7 +2,7 @@
 //! clock, or the network. The portable half lives in `otto-core`.
 
 mod gourl;
-pub mod safetext;
+pub mod provider;
 pub mod sandbox;
 pub mod session;
 pub mod tool;

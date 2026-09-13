@@ -15,7 +15,7 @@
 //! for the same input, except that the decoder detail appended to
 //! [`StreamError::Decode`] is `serde_json`'s message rather than
 //! `encoding/json`'s. Transport read failures have no variant here: they
-//! belong to the HTTP layer, which is phase 4.
+//! belong to the HTTP layer in `otto::provider::openaicompat`.
 
 use std::collections::HashMap;
 

@@ -1,0 +1,55 @@
+[package]
+name = "otto"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+otto-core.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+axum.workspace = true
+include_dir.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+# Native-only: the store timestamps records from the wall clock and converts
+# filesystem times, neither of which otto-core's wasm-safe chrono can do.
+chrono = { workspace = true, features = ["clock", "std"] }
+libc.workspace = true
+nix.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync", "fs", "signal", "net"] }
+tokio-util.workspace = true
+# Save() serializes, so the native crate needs "display" on top of otto-core's
+# parse-only feature set.
+toml = { workspace = true, features = ["display"] }
+# The terminal frontend (`otto::tui`). Native-only; otto-core must stay
+# wasm32-buildable so these are not workspace dependencies.
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+# `all-widgets`/`macros`/`underline-color` are dropped: this TUI uses only the
+# widgets ratatui-widgets ships unconditionally (Paragraph, Block, List,
+# Table, Scrollbar), not the calendar widget or the `layout!` macro.
+# `unstable-rendered-line-info` gives `Paragraph::line_count`, used to size
+# the composer and to auto-scroll the transcript to its last wrapped line;
+# safe to depend on here since the version is pinned exactly, so it cannot
+# change under us.
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
+crossterm = "=0.29.0"
+
+[dev-dependencies]
+tempfile.workspace = true
+# `pty` for the TUI's PTY smoke test (crates/otto/tests/tui_pty.rs).
+nix = { workspace = true, features = ["term"] }
+# `start_paused` drives the bash timeout deterministically without real waits.
+# `net` gives the in-file provider tests a loopback TCP origin server.
+tokio = { workspace = true, features = ["test-util", "net"] }
+tower.workspace = true

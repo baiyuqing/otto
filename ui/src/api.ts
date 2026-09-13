@@ -1,5 +1,4 @@
-import type { Compaction, Info, Message, Session, SessionListRow, Task, TaskDetail, TurnSummary, WireEvent } from './types'
-import { readSSE, type Frame } from './sse'
+import { readSSE, type Compaction, type Frame, type Info, type Session, type SessionListRow, type Task, type TaskDetail, type TurnSummary, type WireEvent } from './wire'
 
 const TOKEN_KEY = 'otto.token'
 
@@ -55,6 +54,8 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 
 const json = async <T>(path: string, init?: RequestInit): Promise<T> => (await request(path, init)).json()
 
+const text = async (path: string, init?: RequestInit): Promise<string> => (await request(path, init)).text()
+
 export const api = {
   info: () => json<Info>('/v1/info'),
   listSessions: () => json<{ sessions: SessionListRow[] }>('/v1/sessions'),
@@ -63,7 +64,9 @@ export const api = {
   renameSession: (id: string, name: string) =>
     json<Session>(`/v1/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   getSession: (id: string) => json<Session>(`/v1/sessions/${id}`),
-  history: (id: string) => json<Message[]>(`/v1/sessions/${id}/history`),
+  // history returns the raw JSON body: fromHistory parses it in wasm so tool
+  // argument objects keep the key order the provider sent.
+  history: (id: string) => text(`/v1/sessions/${id}/history`),
   getTurn: (id: string, turnId: string) => json<TurnSummary>(`/v1/sessions/${id}/turns/${turnId}`),
   cancelTurn: (id: string, turnId: string) => request(`/v1/sessions/${id}/turns/${turnId}/cancel`, { method: 'POST' }),
   listTasks: (id: string) => json<{ tasks: Task[] }>(`/v1/sessions/${id}/tasks`),
@@ -85,6 +88,8 @@ export const api = {
 export interface TurnEvent {
   seq: number
   event: WireEvent
+  /** The frame's `data` field, passed to reduce() unparsed. */
+  raw: string
 }
 
 // events decodes an event-stream response into wire events with their
@@ -92,6 +97,6 @@ export interface TurnEvent {
 export async function* events(res: Response): AsyncGenerator<TurnEvent> {
   if (!res.body) return
   for await (const frame of readSSE(res.body) as AsyncGenerator<Frame>) {
-    yield { seq: frame.id ?? -1, event: JSON.parse(frame.data) as WireEvent }
+    yield { seq: frame.id ?? -1, event: JSON.parse(frame.data) as WireEvent, raw: frame.data }
   }
 }

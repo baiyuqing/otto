@@ -3,12 +3,16 @@
 /otto
 /dist/
 # Built web UI: `make ui` writes here; only the placeholder is tracked.
-internal/server/ui/dist/*
-!internal/server/ui/dist/.gitkeep
+ui/dist/*
+!ui/dist/.gitkeep
 ui/node_modules/
 .DS_Store
 .otto/
 *.test
+
+# Rust build artifacts and the generated wasm package.
+target/
+crates/otto-web/pkg/
 
 # Secrets — never commit credentials or config that may hold them.
 # Defensive/broad on purpose: better to ignore too much than leak one file.

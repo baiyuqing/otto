@@ -4,20 +4,26 @@
 //! event rendering are byte-identical to the Go REPL's for the same inputs.
 //!
 //! Not ported in this phase, and answered with a "not yet ported" line on
-//! stderr: none. Sub-agent wake turns and the task drain in `RunOnce` are
-//! not ported. Go's `/sandbox reload` needs the sandbox reloader, which is
-//! also a later phase, so it reports Go's `ErrSandboxReloadUnavailable`
-//! text.
+//! stderr: none. Go's `/sandbox reload` needs the sandbox reloader, which is
+//! a later phase, so it reports Go's `ErrSandboxReloadUnavailable` text.
 //!
 //! Input: one blocking reader task feeds a bounded channel, so a parent
 //! cancellation is observed while the loop is idle waiting for a line. A line
 //! longer than [`MAX_INPUT_BYTES`] ends the loop with an error, as Go's
 //! scanner limit does.
+//!
+//! Sub-agent wake turns: the loop also selects on the task registry's update
+//! signal and runs an empty-text turn whenever a notification is pending, and
+//! [`Repl::run_once`] drains the registry before returning.
 
 use std::io::{BufRead, Read, Write};
+use std::sync::Arc;
 
 use otto_core::agent::{AgentError, CompactionResult, Event};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+use crate::subagent::tasks::{TaskError, Tasks};
 
 use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE, SANDBOX_RELOAD_UNAVAILABLE};
 
@@ -96,12 +102,52 @@ impl<'a> Repl<'a> {
         let _ = writeln!(self.stdout, "Sandbox: {}", info.sandbox.summary());
 
         let mut lines = spawn_reader(input);
+        let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
         loop {
             let _ = write!(self.stdout, "> ");
             let _ = self.stdout.flush();
-            let line = tokio::select! {
-                _ = cancel.cancelled() => return Err(Error::Cancelled),
-                line = lines.recv() => line,
+            // Go re-reads `Tasks()` every iteration. The receiver is kept
+            // across iterations instead: subscribing now would mark a signal
+            // raised during the last turn as already seen, where Go's
+            // buffered channel still holds it.
+            match self.controller.subagent_tasks() {
+                Some(tasks) => {
+                    if updates
+                        .as_ref()
+                        .is_none_or(|(held, _)| !Arc::ptr_eq(held, &tasks))
+                    {
+                        let receiver = tasks.updates();
+                        updates = Some((tasks, receiver));
+                    }
+                }
+                None => updates = None,
+            }
+            // `Ok(line)` is a read; `Err(open)` is a registry signal, where
+            // `open == false` is Go's closed channel: the session was
+            // replaced and the next iteration re-reads the registry.
+            let read = {
+                let signal = async {
+                    match updates.as_mut() {
+                        Some((_, receiver)) => receiver.changed().await.is_ok(),
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(Error::Cancelled),
+                    open = signal => Err(open),
+                    line = lines.recv() => Ok(line),
+                }
+            };
+            let line = match read {
+                Ok(line) => line,
+                Err(false) => {
+                    updates = None;
+                    continue;
+                }
+                Err(true) => match self.wake(cancel).await {
+                    Ok(_) | Err(Error::Turn { fatal: false, .. }) => continue,
+                    Err(error) => return Err(error),
+                },
             };
             let Some(line) = line else { return Ok(()) };
             let line = line?;
@@ -124,14 +170,87 @@ impl<'a> Repl<'a> {
     }
 
     /// One prompt with the same rendering as [`Repl::run`], without the
-    /// banner or the prompt marker. Port of `REPL.RunOnce`; the sub-agent
-    /// task drain is a later phase.
+    /// banner or the prompt marker. Port of `REPL.RunOnce`: after the turn it
+    /// waits out any sub-agent task still running and wakes until nothing is
+    /// pending, so a one-shot `-p` run does not exit with children in flight.
     pub async fn run_once(
         &mut self,
         prompt: &str,
         cancel: &CancellationToken,
     ) -> Result<(), Error> {
-        self.prompt(prompt, cancel).await
+        self.prompt(prompt, cancel).await?;
+        self.drain_tasks(cancel).await
+    }
+
+    /// One empty-text turn delivering the pending sub-agent notifications,
+    /// and whether it ran. Port of `REPL.wake`: the leading newline keeps the
+    /// output off the `"> "` marker.
+    async fn wake(&mut self, cancel: &CancellationToken) -> Result<bool, Error> {
+        let Self {
+            controller,
+            stdout,
+            stderr,
+        } = self;
+        let wake = controller.prepare_wake().map_err(|message| Error::Turn {
+            fatal: false,
+            message,
+        })?;
+        let Some(wake) = wake else { return Ok(false) };
+        let _ = writeln!(stdout);
+        let turn = cancel.child_token();
+        let mut error_rendered = false;
+        let result = {
+            let mut sink = |event: Event| {
+                if render_event(&mut **stdout, &mut **stderr, &event) {
+                    error_rendered = true;
+                }
+            };
+            wake.run(&mut sink, &turn).await
+        };
+        if let Err(error) = &result
+            && !error_rendered
+        {
+            let _ = writeln!(stderr, "{error}");
+        }
+        let _ = writeln!(stdout);
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        match result {
+            Ok(()) => Ok(true),
+            Err(error) => Err(Error::Turn {
+                fatal: is_fatal_persistence(&error),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    /// Waits out every non-final task, then wakes until nothing is pending.
+    /// Port of `REPL.drainTasks`; each wait and wake is bounded by `cancel`.
+    async fn drain_tasks(&mut self, cancel: &CancellationToken) -> Result<(), Error> {
+        let Some(tasks) = self.controller.subagent_tasks() else {
+            return Ok(());
+        };
+        loop {
+            for task in tasks.list() {
+                if task.is_final() {
+                    continue;
+                }
+                match tasks.wait(&task.id, cancel).await {
+                    Ok(_) => {}
+                    Err(TaskError::Canceled) => return Err(Error::Cancelled),
+                    Err(error) => {
+                        return Err(Error::Turn {
+                            fatal: false,
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+            if !self.wake(cancel).await? {
+                return Ok(());
+            }
+        }
     }
 
     async fn prompt(&mut self, line: &str, cancel: &CancellationToken) -> Result<(), Error> {
@@ -602,8 +721,16 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::cli::runtime_builder::Runner;
     use crate::cli::testutil::{controller, user};
+    use crate::subagent::tasks::Tasks;
+    use otto_core::agent::inbox::Notification;
     use otto_core::agent::{CompactionResult, Event};
+    use otto_core::model::{Block, BlockType, FinishReason, Message, Role};
+    use otto_core::provider::{
+        Provider, ProviderError, Request as ProviderRequest, Response as ProviderResponse,
+        StreamEvent, StreamSink,
+    };
     use otto_core::session::Session;
     use otto_core::tool::ToolResult;
     use std::io::Cursor;
@@ -981,5 +1108,310 @@ mod tests {
         assert_eq!(split_command("/exit"), Some(("exit", "")));
         assert_eq!(split_command("/"), None);
         assert_eq!(split_command("model"), None);
+    }
+    // ---- sub-agent wake turns ----
+
+    /// One provider call per turn. The `cli` tests have no backend seam like
+    /// Go's `fakeBackend`, so the script sits one layer down, at the
+    /// provider, the way `server`'s tests script theirs. `reply` gets the
+    /// 1-based call index.
+    struct ScriptedProvider {
+        reply: Box<dyn Fn(usize) -> Result<String, String> + Send + Sync>,
+        /// The role of each call's last request message: `User` for a prompt
+        /// turn, `Context` for a wake turn's delivered notification. This is
+        /// what Go asserts as the empty prompt text of a wake call.
+        roles: Mutex<Vec<Role>>,
+        calls: tokio::sync::watch::Sender<usize>,
+    }
+
+    impl ScriptedProvider {
+        fn new(
+            reply: impl Fn(usize) -> Result<String, String> + Send + Sync + 'static,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                reply: Box::new(reply),
+                roles: Mutex::new(Vec::new()),
+                calls: tokio::sync::watch::channel(0).0,
+            })
+        }
+
+        fn roles(&self) -> Vec<Role> {
+            self.roles.lock().expect("roles").clone()
+        }
+
+        fn calls(&self) -> usize {
+            *self.calls.borrow()
+        }
+
+        /// Resolves once `count` calls have started.
+        async fn wait_calls(&self, count: usize) {
+            let mut receiver = self.calls.subscribe();
+            receiver
+                .wait_for(|seen| *seen >= count)
+                .await
+                .expect("sender");
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ScriptedProvider {
+        async fn complete(
+            &self,
+            request: &ProviderRequest,
+            emit: StreamSink<'_>,
+            _cancel: &CancellationToken,
+        ) -> Result<ProviderResponse, ProviderError> {
+            let call = {
+                let mut roles = self.roles.lock().expect("roles");
+                roles.push(
+                    request
+                        .messages
+                        .last()
+                        .map(|message| message.role.clone())
+                        .unwrap_or(Role::User),
+                );
+                roles.len()
+            };
+            self.calls.send_modify(|seen| *seen = call);
+            let text = (self.reply)(call).map_err(ProviderError::Other)?;
+            emit(StreamEvent::TextDelta { text: text.clone() });
+            Ok(ProviderResponse {
+                message: Message {
+                    role: Role::Assistant,
+                    finish_reason: Some(FinishReason::Stop),
+                    blocks: vec![Block {
+                        block_type: BlockType::Text,
+                        text,
+                        ..Block::default()
+                    }],
+                    ..Message::default()
+                },
+            })
+        }
+    }
+
+    /// Stdin that stays open until the test drops `sender`, which is Go's
+    /// `io.Pipe` writer close.
+    struct Pipe(std::sync::mpsc::Receiver<()>);
+
+    impl Read for Pipe {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            // The sender is never used to send: dropping it reports EOF.
+            let _ = self.0.recv();
+            Ok(0)
+        }
+    }
+
+    fn scripted_controller(
+        workspace_root: &Path,
+        session_root: &Path,
+        provider: Arc<ScriptedProvider>,
+        tasks: Arc<Tasks>,
+    ) -> Controller {
+        let builder = crate::cli::testutil::builder(workspace_root, session_root);
+        let runtime = crate::cli::testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("session");
+        let info = builder.runtime_info(&runtime);
+        let runner = Runner::scripted(
+            session.clone(),
+            provider as Arc<dyn Provider + Send + Sync>,
+            tasks,
+        );
+        Controller::new(builder, true, session, runner, info)
+    }
+
+    fn repl_buffers<'a>(controller: &'a Controller) -> (Repl<'a>, Buffer, Buffer) {
+        let stdout = Buffer::default();
+        let stderr = Buffer::default();
+        let repl = Repl::new(
+            controller,
+            Box::new(stdout.clone()),
+            Box::new(stderr.clone()),
+        );
+        (repl, stdout, stderr)
+    }
+
+    /// Port of `TestREPLRendersNotificationEvent`.
+    #[tokio::test]
+    async fn a_notification_renders_during_a_one_shot_turn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let tasks = Arc::new(Tasks::new());
+        tasks.notifications().push(Notification {
+            task_id: "t1".to_string(),
+            text: "[task-notification] task t1 (explorer) succeeded · 1s · 1 tool call\nall good"
+                .to_string(),
+            ..Notification::default()
+        });
+        let provider = ScriptedProvider::new(|_| Ok("ok".to_string()));
+        let controller = scripted_controller(
+            workspace.path(),
+            sessions.path(),
+            Arc::clone(&provider),
+            Arc::clone(&tasks),
+        );
+        let (mut repl, stdout, _stderr) = repl_buffers(&controller);
+
+        repl.run_once("go", &CancellationToken::new())
+            .await
+            .expect("run once");
+
+        assert!(
+            stdout.text().contains(
+                "\n[task-notification] task t1 (explorer) succeeded · 1s · 1 tool call\nall good\n"
+            ),
+            "{}",
+            stdout.text()
+        );
+    }
+
+    /// Port of `TestREPLWakesOnlyWhenNotificationIsPending`.
+    #[tokio::test]
+    async fn the_loop_wakes_only_when_a_notification_is_pending() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let tasks = Arc::new(Tasks::new());
+        let provider = ScriptedProvider::new(|_| Ok("woke up".to_string()));
+        let controller = scripted_controller(
+            workspace.path(),
+            sessions.path(),
+            Arc::clone(&provider),
+            Arc::clone(&tasks),
+        );
+        let (mut repl, stdout, _stderr) = repl_buffers(&controller);
+        let (sender, receiver) = std::sync::mpsc::channel::<()>();
+        let cancel = CancellationToken::new();
+
+        let driver = async {
+            // A registry signal with nothing pending must not wake a turn.
+            tasks
+                .add(crate::subagent::tasks::Task::default(), None, None)
+                .expect("add");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(
+                provider.calls(),
+                0,
+                "a wake turn ran before any notification was pending"
+            );
+            tasks.notifications().push(Notification {
+                task_id: "t1".to_string(),
+                text: "[task-notification] task t1 succeeded".to_string(),
+                ..Notification::default()
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), provider.wait_calls(1))
+                .await
+                .expect("the pending notification did not trigger a wake turn");
+            drop(sender);
+        };
+        let (result, ()) = tokio::join!(
+            repl.run(std::io::BufReader::new(Pipe(receiver)), &cancel),
+            driver
+        );
+
+        result.expect("run");
+        assert_eq!(
+            provider.roles(),
+            vec![Role::Context],
+            "want exactly one wake turn, whose last request message is the notification"
+        );
+        assert!(stdout.text().contains("\nwoke up"), "{}", stdout.text());
+    }
+
+    /// Port of `TestRunOnceWaitsForRunningTaskAndWakes`.
+    #[tokio::test]
+    async fn a_one_shot_run_waits_for_a_running_task_and_then_wakes() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let tasks = Arc::new(Tasks::new());
+        let added = tasks
+            .add(crate::subagent::tasks::Task::default(), None, None)
+            .expect("add");
+        tasks.mark_running(&added.id, chrono::Utc::now());
+        let child = Arc::clone(&tasks);
+        let id = added.id.clone();
+        let provider = ScriptedProvider::new(move |call| {
+            if call > 1 {
+                return Ok("reported".to_string());
+            }
+            let child = Arc::clone(&child);
+            let id = id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                // Pushed before the final update, as the sub-agent runner
+                // does: the wait unblocks on the update and the drain must
+                // then find the notification already pending.
+                child.notifications().push(Notification {
+                    task_id: id.clone(),
+                    text: format!("[task-notification] task {id} succeeded\nchild done"),
+                    ..Notification::default()
+                });
+                child.finish(
+                    &id,
+                    crate::subagent::tasks::TaskStatus::Succeeded,
+                    chrono::Utc::now(),
+                    "child done",
+                    "",
+                );
+            });
+            Ok("started".to_string())
+        });
+        let controller = scripted_controller(
+            workspace.path(),
+            sessions.path(),
+            Arc::clone(&provider),
+            Arc::clone(&tasks),
+        );
+        let (mut repl, stdout, _stderr) = repl_buffers(&controller);
+
+        repl.run_once("go", &CancellationToken::new())
+            .await
+            .expect("run once");
+
+        assert_eq!(
+            provider.roles(),
+            vec![Role::User, Role::Context],
+            "want the initial turn and one wake turn"
+        );
+        assert!(stdout.text().contains("reported"), "{}", stdout.text());
+    }
+
+    /// Port of `TestRunOnceReturnsWakeError`.
+    #[tokio::test]
+    async fn a_one_shot_run_returns_the_wake_turns_error() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let tasks = Arc::new(Tasks::new());
+        let pushed = Arc::clone(&tasks);
+        let provider = ScriptedProvider::new(move |call| {
+            if call > 1 {
+                return Err("wake provider failed".to_string());
+            }
+            // Pushed inside the first turn, after the agent drained the
+            // inbox, so the notification is still pending when it returns.
+            pushed.notifications().push(Notification {
+                task_id: "t1".to_string(),
+                kind: Some(otto_core::agent::inbox::NotificationKind::TaskReport),
+                text: "progress".to_string(),
+                ..Notification::default()
+            });
+            Ok("ok".to_string())
+        });
+        let controller = scripted_controller(
+            workspace.path(),
+            sessions.path(),
+            Arc::clone(&provider),
+            Arc::clone(&tasks),
+        );
+        let (mut repl, _stdout, _stderr) = repl_buffers(&controller);
+
+        let error = repl
+            .run_once("inspect", &CancellationToken::new())
+            .await
+            .expect_err("the wake turn's error");
+
+        assert!(
+            error.to_string().contains("wake provider failed"),
+            "{error}"
+        );
     }
 }

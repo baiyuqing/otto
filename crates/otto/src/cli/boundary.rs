@@ -17,9 +17,11 @@
 //! changes it, then the secret is a substring of text the model must see, and
 //! no redaction can separate the two.
 //!
-//! Not yet ported: ChatGPT credentials from `otto login` (phase 5). Their
-//! four values are collected by Go between the profile base URLs and the
-//! session runtime; the seam is marked below.
+//! Divergence from Go: Go collects the four `otto login` credential values
+//! itself, between the profile base URLs and the session runtime. Here the
+//! caller captures them and passes them in as [`BoundaryInputs`]'s
+//! `sandbox_secrets`, which are collected first; the resulting set is the
+//! same.
 
 use std::collections::HashMap;
 
@@ -123,8 +125,6 @@ pub fn boundary_secret_values(
     if !collect.open {
         return (collect.values(), false);
     }
-    // Phase 5 seam: the four `auth.Credentials` values (access, refresh and
-    // ID tokens, account id) are collected here in Go.
     if let Some(runtime) = runtime {
         if !collect.add(&runtime.api_key_env) || !collect.add(&runtime.api_key) {
             return (collect.values(), false);

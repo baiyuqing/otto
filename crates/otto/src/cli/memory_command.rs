@@ -4,10 +4,9 @@
 //! flag set is parsed, because its argument grammar is its own, and it builds
 //! only the memory service: no provider, session, or controller.
 //!
-//! Divergence from Go: Go folds captured `otto login` credentials into the
-//! secret set before deciding whether redaction is complete. ChatGPT
-//! credentials arrive in a different phase, so the set here is the
-//! configuration's alone.
+//! Like Go, it folds the credentials captured by `otto login` into the secret
+//! set before deciding whether redaction is complete, so a token never
+//! reaches the status output.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -119,6 +118,11 @@ pub fn run(
             "load config: configuration is invalid or unavailable",
         );
     };
+    // Go passes the captured credentials to `boundarySecretValues` as its own
+    // input; here they ride in on `sandbox_secrets`, which that function adds
+    // first, for the same resulting set.
+    let captured_auth =
+        super::login::capture_auth_credentials(&crate::auth::path_for_home(Path::new(&home)));
     let mut environment = super::run::config_environment_for(&config_file, lookup);
     environment.insert("HOME".to_string(), home);
     let Ok(memory_config) = resolve_memory(&config_file, &environment) else {
@@ -127,8 +131,8 @@ pub fn run(
 
     let (secret_values, complete) = boundary::boundary_secret_values(
         &BoundaryInputs {
-            sandbox_secrets: &[],
-            sandbox_secrets_complete: true,
+            sandbox_secrets: &captured_auth.redaction_values,
+            sandbox_secrets_complete: captured_auth.complete,
             config: &config_file,
             environment: &environment,
             overrides_base_url: "",
@@ -325,6 +329,48 @@ mod tests {
         for want in ["enabled: true", "backend: sqlite", &db_path, "usable: true"] {
             assert!(stdout.contains(want), "stdout = {stdout:?}, want {want:?}");
         }
+    }
+
+    /// Port of Go folding `captureAuthCredentials` into the secret set: a
+    /// captured token must not survive into the status output.
+    #[test]
+    fn status_redacts_captured_chatgpt_credentials() {
+        let home = tempfile::tempdir().expect("home");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let store = tempfile::tempdir().expect("store");
+        // Not a credential: a fixture value placed where the status output
+        // prints it, so an uncollected token is visible in the assertion.
+        let token = "captured-chatgpt-token-fixture";
+        let auth_path = crate::auth::path_for_home(home.path());
+        std::fs::create_dir_all(auth_path.parent().expect("auth directory"))
+            .expect("create auth directory");
+        std::fs::write(&auth_path, format!(r#"{{"access_token":"{token}"}}"#))
+            .expect("write credentials");
+        let db_path = store
+            .path()
+            .join(token)
+            .join("memory.db")
+            .to_string_lossy()
+            .into_owned();
+        let config = memory_config(home.path(), &db_path);
+
+        let (code, stdout, stderr) = memory(
+            &[
+                "status",
+                "--config",
+                &config,
+                "--cwd",
+                &workspace.path().to_string_lossy(),
+            ],
+            home.path(),
+        );
+
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(
+            !stdout.contains(token),
+            "stdout leaked the token: {stdout:?}"
+        );
+        assert!(stdout.contains("usable: true"), "stdout = {stdout:?}");
     }
 
     #[test]

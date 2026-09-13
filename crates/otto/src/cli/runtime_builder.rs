@@ -359,10 +359,19 @@ impl Runner {
         let _ = self.agent.close();
     }
 
-    /// A runner with no tools whose provider the test supplies. See
+    /// A runner with no tools whose provider the test supplies, carrying the
+    /// sub-agent registry the caller owns the way Go's test runners do. See
     /// [`ProviderClient::Scripted`].
+    ///
+    /// `tasks` is wired to both [`Options::tasks`] and [`Options::inbox`], so
+    /// an empty-text wake turn reaches the provider instead of being rejected
+    /// as empty user text.
     #[cfg(test)]
-    pub fn scripted(session: SharedSession, provider: Arc<dyn Provider + Send + Sync>) -> Self {
+    pub fn scripted(
+        session: SharedSession,
+        provider: Arc<dyn Provider + Send + Sync>,
+        tasks: Arc<crate::subagent::tasks::Tasks>,
+    ) -> Self {
         let registry = Registry::new(Vec::new()).expect("empty registry");
         let definitions = registry.definitions();
         Self {
@@ -374,12 +383,15 @@ impl Runner {
                     model: "test-model".to_string(),
                     provider_name: "openai-compatible".to_string(),
                     now: Box::new(Utc::now),
+                    inbox: Arc::clone(tasks.notifications()),
+                    tasks: Some(Arc::clone(&tasks)
+                        as Arc<dyn otto_core::agent::tasks::TaskRegistry + Send + Sync>),
                     ..Options::default()
                 },
             ),
             system_prompt: String::new(),
             definitions,
-            tasks: None,
+            tasks: Some(tasks),
         }
     }
 }

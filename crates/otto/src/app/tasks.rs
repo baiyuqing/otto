@@ -4,12 +4,18 @@
 //! and of the `agent.Task` record in `internal/agent/tasks.go` that the HTTP
 //! routes serialize.
 //!
-//! Ownership: phase 7 owns the registry itself. This module owns only the
-//! record shape and the read/control contract, because `otto::server` needs
-//! both to answer `/v1/sessions/{id}/tasks` before the registry exists.
-//! [`task_view`] is the one seam phase 7 replaces: it asks a [`Runner`] for
-//! its registry and today always answers `None`, which is exactly what Go's
-//! `Controller.Tasks` returns for a runner that tracks no tasks.
+//! Ownership: [`crate::subagent::tasks::Tasks`] owns the registry itself.
+//! This module owns the wire record and the read/control contract, and
+//! [`task_view`] adapts one to the other, the way Go's `taskView` wraps
+//! `*agent.Tasks`. A runner without a registry answers `None`, which is what
+//! Go's `Controller.Tasks` returns for a runner that tracks no tasks.
+//!
+//! Divergence from Go: Go's `agent.Task` is one record shared by the
+//! registry, the frontends and `internal/subagent`'s formatters, and
+//! `internal/server` converts it to `taskWire` at the edge. Here [`Task`] is
+//! that wire record, so it omits `prompt` and `context`. The REPL therefore
+//! reads the concrete registry rather than this view: `subagent::format`
+//! falls back to the prompt when a task has no description.
 
 use std::sync::Arc;
 
@@ -18,6 +24,7 @@ use otto_core::model::{Message, Usage};
 use serde::Serialize;
 
 use crate::cli::runtime_builder::Runner;
+use crate::subagent::tasks::{TaskError, TaskStatus as SubagentStatus, Tasks as Registry};
 
 /// Go's `agent.ErrTaskFinished`. The server maps it to 409 `task_done`.
 pub const TASK_FINISHED: &str = "task already finished";
@@ -106,41 +113,72 @@ pub trait TaskView: Send + Sync {
     fn pending(&self) -> usize;
 }
 
-/// A registry that holds no tasks. Mirrors
-/// [`otto_core::agent::tasks::NoTasks`] on the frontend side of the
-/// boundary, so a frontend can be exercised without phase 7's registry.
-#[derive(Debug, Default)]
-pub struct NoTasks;
+/// The wire record for one registry task. Port of `server.toTaskWire`.
+///
+/// `created_at` is set by the sub-agent runner on every real task; a record
+/// that never got one serializes the Unix epoch, where Go writes its zero
+/// `time.Time`.
+fn wire(task: &crate::subagent::tasks::Task) -> Task {
+    Task {
+        id: task.id.clone(),
+        name: task.name.clone(),
+        agent: task.agent.clone(),
+        description: task.description.clone(),
+        model: task.model.clone(),
+        status: match task.status {
+            SubagentStatus::Queued => TaskStatus::Queued,
+            SubagentStatus::Running => TaskStatus::Running,
+            SubagentStatus::Succeeded => TaskStatus::Succeeded,
+            SubagentStatus::Failed => TaskStatus::Failed,
+            SubagentStatus::Canceled => TaskStatus::Canceled,
+        },
+        created_at: task.created_at.unwrap_or_default(),
+        started_at: task.started_at,
+        finished_at: task.finished_at,
+        steps: task.steps,
+        tool_calls: task.tool_calls,
+        last_tool: task.last_tool.clone(),
+        last_text: task.last_text.clone(),
+        usage: task.usage,
+        usage_present: task.usage_present,
+        result: task.result.clone(),
+        error: task.error.clone(),
+    }
+}
 
-impl TaskView for NoTasks {
+/// Port of Go's `taskView`, the adapter `Controller.Tasks` hands a frontend.
+impl TaskView for Registry {
     fn list(&self) -> Vec<Task> {
-        Vec::new()
+        Registry::list(self).iter().map(wire).collect()
     }
 
-    fn get(&self, _reference: &str) -> Option<Task> {
-        None
+    fn get(&self, reference: &str) -> Option<Task> {
+        Registry::get(self, reference).as_ref().map(wire)
     }
 
-    fn history(&self, _reference: &str) -> Option<Vec<Message>> {
-        None
+    fn history(&self, reference: &str) -> Option<Vec<Message>> {
+        Registry::history(self, reference)
     }
 
-    fn cancel(&self, _reference: &str) -> Result<(), String> {
-        Err(TASK_NOT_FOUND.to_string())
+    fn cancel(&self, reference: &str) -> Result<(), String> {
+        Registry::cancel(self, reference).map_err(|error| match error {
+            TaskError::Finished(_) => TASK_FINISHED.to_string(),
+            TaskError::NotFound(_) => TASK_NOT_FOUND.to_string(),
+            other => other.to_string(),
+        })
     }
 
     fn pending(&self) -> usize {
-        0
+        Registry::pending(self)
     }
 }
 
 /// The task registry of one runner, or `None` when it tracks no tasks.
 ///
 /// Port of the `taskOwner` type assertion in `internal/app/controller.go`.
-/// Phase 7 replaces the body; every caller already handles `None`, which is
-/// what Go reports for a runner without a registry.
-pub fn task_view(_runner: &Runner) -> Option<Arc<dyn TaskView>> {
-    None
+pub fn task_view(runner: &Runner) -> Option<Arc<dyn TaskView>> {
+    let tasks = runner.tasks.clone()?;
+    Some(tasks as Arc<dyn TaskView>)
 }
 
 #[cfg(test)]
@@ -154,16 +192,6 @@ mod tests {
         assert!(TaskStatus::Succeeded.final_status());
         assert!(TaskStatus::Failed.final_status());
         assert!(TaskStatus::Canceled.final_status());
-    }
-
-    #[test]
-    fn the_empty_registry_answers_every_read_with_nothing() {
-        let tasks = NoTasks;
-        assert!(tasks.list().is_empty());
-        assert!(tasks.get("a").is_none());
-        assert!(tasks.history("a").is_none());
-        assert_eq!(tasks.cancel("a").expect_err("cancel"), TASK_NOT_FOUND);
-        assert_eq!(tasks.pending(), 0);
     }
 
     #[test]
@@ -191,5 +219,65 @@ mod tests {
             serde_json::to_string(&task).expect("json"),
             r#"{"id":"t1","agent":"reviewer","description":"check the diff","status":"running","created_at":"1970-01-01T00:00:00Z","steps":2,"tool_calls":1,"usage":{"input_tokens":0,"output_tokens":0},"usage_present":false}"#
         );
+    }
+
+    /// The adapter over the real registry, Go's `taskView`.
+    #[test]
+    fn the_view_maps_every_registry_read_onto_the_wire_record() {
+        let registry = Registry::new();
+        let added = registry
+            .add(
+                crate::subagent::tasks::Task {
+                    name: "lint".to_string(),
+                    agent: "reviewer".to_string(),
+                    description: "check the diff".to_string(),
+                    prompt: "the prompt the wire record omits".to_string(),
+                    model: "gpt-5".to_string(),
+                    created_at: DateTime::from_timestamp(0, 0),
+                    ..crate::subagent::tasks::Task::default()
+                },
+                None,
+                None,
+            )
+            .expect("add");
+        let view: &dyn TaskView = &registry;
+
+        let listed = view.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, added.id);
+        assert_eq!(listed[0].status, TaskStatus::Queued);
+        // A name resolves the same way an id does.
+        assert_eq!(view.get("lint").expect("by name").id, added.id);
+        // A task with no history hook has an empty transcript, not none.
+        assert!(view.history(&added.id).expect("known task").is_empty());
+        assert!(view.history("missing").is_none());
+        assert_eq!(view.pending(), 0);
+        assert_eq!(view.cancel("missing").expect_err("unknown"), TASK_NOT_FOUND);
+
+        registry.finish(
+            &added.id,
+            SubagentStatus::Succeeded,
+            DateTime::from_timestamp(1, 0).expect("epoch"),
+            "done",
+            "",
+        );
+        assert_eq!(view.cancel(&added.id).expect_err("final"), TASK_FINISHED);
+        assert_eq!(
+            view.get(&added.id).expect("task").status,
+            TaskStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn a_pushed_notification_is_pending_on_the_view() {
+        let registry = Registry::new();
+        registry
+            .notifications()
+            .push(otto_core::agent::inbox::Notification {
+                text: "[task-notification] task t1 succeeded".to_string(),
+                ..otto_core::agent::inbox::Notification::default()
+            });
+        let view: &dyn TaskView = &registry;
+        assert_eq!(view.pending(), 1);
     }
 }

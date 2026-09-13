@@ -3,10 +3,9 @@
 //! Port of `internal/server/tasks.go`. The wire record itself lives in
 //! [`crate::app::tasks::Task`], whose field order matches Go's `taskWire`.
 //!
-//! Until phase 7 lands the registry, [`crate::app::tasks::task_view`] answers
-//! `None` for every runner, so `GET .../tasks` returns an empty list and the
-//! two per-task routes answer 404 — exactly what Go does for a runner that
-//! tracks no tasks.
+//! [`crate::app::tasks::task_view`] answers `None` for a runner that tracks
+//! no tasks, in which case `GET .../tasks` returns an empty list and the two
+//! per-task routes answer 404 — exactly what Go does.
 
 use std::sync::Arc;
 

@@ -58,6 +58,12 @@ impl Controller {
     }
 
     /// Port of Go's `taskOwner`: the active runner's task registry.
+    ///
+    /// The REPL reads the concrete registry rather than
+    /// [`crate::app::Controller::tasks`], because that view carries the
+    /// server's wire record: it omits `prompt`, which
+    /// [`crate::subagent::format::task_label`] falls back to when a task has
+    /// no description, and `wait`/`updates`, which the wake path needs.
     pub(crate) fn subagent_tasks(&self) -> Option<Arc<Tasks>> {
         self.current_runner()?.tasks.clone()
     }

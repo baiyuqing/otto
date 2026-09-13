@@ -465,9 +465,10 @@ impl Server {
     // ---- turns ----
 
     /// Starts a user turn on `session`. Port of `Server.startTurn` with the
-    /// `trigger == triggerTask` branch omitted: `app::tasks::task_view`
-    /// answers `None` until phase 7 lands the registry, so no wake turn can
-    /// ever be admitted.
+    /// `trigger == triggerTask` branch omitted, together with Go's
+    /// `startWakeLoop`: the server does not yet drive its own wake turns from
+    /// the task registry. The REPL does, through
+    /// [`crate::app::Controller::prepare_wake`].
     fn start_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
@@ -525,8 +526,9 @@ impl Server {
                 ],
             );
             // ponytail: Go also signals openSession.turnFinished so the wake
-            // loop can retry a late task notification. There is no wake loop
-            // until phase 7 lands the task registry.
+            // loop can retry a late task notification. `Server.startWakeLoop`
+            // and the `triggerTask` branch of `startTurn` are not ported, so
+            // there is nothing to signal.
         });
 
         self.log.info(
@@ -1340,6 +1342,7 @@ mod tests {
             let runner = Runner::scripted(
                 session.clone(),
                 Arc::clone(&self.provider) as Arc<dyn Provider + Send + Sync>,
+                Arc::new(crate::subagent::tasks::Tasks::new()),
             );
             Controller::with_builder(
                 Arc::clone(&self.builder),
@@ -2480,7 +2483,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_task_routes_answer_empty_until_the_registry_lands() {
+    async fn the_task_routes_answer_empty_for_a_session_with_no_tasks() {
         let harness = Harness::new();
         let id = harness.create().await;
         let reply = harness
@@ -2499,6 +2502,95 @@ mod tests {
                 "{method} {path}"
             );
         }
+    }
+
+    /// The routes read the runner's real registry. Port of
+    /// `TestTaskRoutes`'s list and detail assertions in
+    /// `internal/server/tasks_test.go`, driven through the registry rather
+    /// than through a scripted `agent` tool call.
+    #[tokio::test]
+    async fn the_task_routes_list_and_detail_a_real_task() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let registry = harness
+            .server
+            .lookup(&id)
+            .expect("session")
+            .ctrl
+            .subagent_tasks()
+            .expect("registry");
+        let added = registry
+            .add(
+                crate::subagent::tasks::Task {
+                    name: "lint".to_string(),
+                    agent: "reviewer".to_string(),
+                    description: "check the diff".to_string(),
+                    model: "gpt-5".to_string(),
+                    created_at: Some(chrono::Utc::now()),
+                    ..crate::subagent::tasks::Task::default()
+                },
+                None,
+                None,
+            )
+            .expect("add");
+
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/tasks"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let listed = reply.json();
+        let listed = listed["tasks"].as_array().expect("tasks");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], added.id);
+        assert_eq!(listed[0]["name"], "lint");
+        assert_eq!(listed[0]["agent"], "reviewer");
+        assert_eq!(listed[0]["description"], "check the diff");
+        assert_eq!(listed[0]["model"], "gpt-5");
+        assert_eq!(listed[0]["status"], "queued");
+        // The wire record never carries the prompt.
+        assert!(listed[0].get("prompt").is_none());
+
+        let detail = harness
+            .send(
+                "GET",
+                &format!("/v1/sessions/{id}/tasks/{}", added.id),
+                None,
+            )
+            .await;
+        assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+        assert_eq!(detail.json()["id"], added.id);
+        assert_eq!(
+            detail.json()["history"].as_array().expect("history").len(),
+            0
+        );
+
+        let canceled = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/lint/cancel"),
+                None,
+            )
+            .await;
+        assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+        // Cancelling does not itself finish the task; once it is final the
+        // route answers 409 `task_done`.
+        assert_eq!(canceled.json()["status"], "queued");
+        registry.finish(
+            &added.id,
+            crate::subagent::tasks::TaskStatus::Canceled,
+            chrono::Utc::now(),
+            "",
+            "",
+        );
+        let repeat = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/tasks/lint/cancel"),
+                None,
+            )
+            .await;
+        assert_eq!(repeat.status, StatusCode::CONFLICT);
+        assert_eq!(repeat.json()["error"]["code"], "task_done");
     }
 
     // ---- the web UI ----

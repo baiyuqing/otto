@@ -24,10 +24,7 @@ use crate::auth::{self, AuthError, Credentials};
 
 use super::controller::Controller;
 use super::repl::Error as ReplError;
-
-/// Go's `memory.MaxExactGuardValueBytes`. The memory package is phase 7, so
-/// the one bound `captureAuthCredentials` needs is restated here.
-const MAX_EXACT_GUARD_VALUE_BYTES: usize = 8 << 10;
+use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 
 /// Go runs `exec.Command("open", url)`, a `PATH` lookup. The absolute path is
 /// used here because `PATH` is attacker-influenced input at this point.

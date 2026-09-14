@@ -133,7 +133,10 @@ pub(crate) struct App {
     pub suggestion: usize,
     pub show_help: bool,
     pub show_details: bool,
-    pub busy: bool,
+    /// When the turn now in flight started, or `None` between turns. One
+    /// field rather than a `bool` plus a timestamp, so "a turn is running"
+    /// and "how long it has been running" cannot disagree.
+    busy_since: Option<Instant>,
     pub status: Option<String>,
     ctrl_c_armed_at: Option<Instant>,
 }
@@ -152,10 +155,30 @@ impl App {
             suggestion: 0,
             show_help: false,
             show_details: false,
-            busy: false,
+            busy_since: None,
             status: None,
             ctrl_c_armed_at: None,
         }
+    }
+
+    /// Marks a turn as started. [`super::run_turn`]/[`super::run_compact`]
+    /// bracket every `Controller` call with this and [`App::end_turn`].
+    pub fn start_turn(&mut self) {
+        self.busy_since = Some(Instant::now());
+    }
+
+    pub fn end_turn(&mut self) {
+        self.busy_since = None;
+    }
+
+    pub fn busy(&self) -> bool {
+        self.busy_since.is_some()
+    }
+
+    /// How long the running turn has been in flight, or `None` between
+    /// turns. Drives the thinking indicator in [`super::render`].
+    pub fn thinking(&self) -> Option<Duration> {
+        Some(self.busy_since?.elapsed())
     }
 
     /// Rebuilds the transcript from the controller's current history.
@@ -228,7 +251,7 @@ impl App {
     /// intercepts Ctrl+C before it reaches [`App::handle_key`] at all (see
     /// [`is_interrupt_key`]) and cancels the turn directly instead of
     /// arming, matching Go's per-turn-interrupt-then-exit-prompt SIGINT
-    /// semantics; `self.busy` is therefore always false here.
+    /// semantics; [`App::busy`] is therefore always false here.
     fn handle_ctrl_c(&mut self) -> Option<Action> {
         let now = Instant::now();
         if self.ctrl_c_armed(now) {
@@ -291,7 +314,7 @@ impl App {
             self.show_details = !self.show_details;
             return None;
         }
-        if self.busy {
+        if self.busy() {
             // Go ignores most keys while a turn runs; Esc (Cancel) is
             // handled by the caller, which cancels the turn's child token.
             return None;
@@ -922,7 +945,7 @@ mod tests {
             suggestion: 0,
             show_help: false,
             show_details: false,
-            busy: false,
+            busy_since: None,
             status: None,
             ctrl_c_armed_at: None,
         };
@@ -944,7 +967,7 @@ mod tests {
             suggestion: 0,
             show_help: false,
             show_details: false,
-            busy: false,
+            busy_since: None,
             status: None,
             ctrl_c_armed_at: None,
         };
@@ -966,7 +989,7 @@ mod tests {
             suggestion: 0,
             show_help: false,
             show_details: false,
-            busy: false,
+            busy_since: None,
             status: None,
             ctrl_c_armed_at: None,
         };
@@ -1268,7 +1291,7 @@ mod tests {
     /// Port of `TestMemoryAndRememberCommandsRejectedWhileTurnActive`.
     /// Divergence: Go's per-command guard sets `statusText` to
     /// `app.ErrPromptActive`; this frontend has no per-command guard or
-    /// status bar, so [`App::handle_key`]'s single `if self.busy` check
+    /// status bar, so [`App::handle_key`]'s single [`App::busy`] check
     /// (shared by every slash command, not memory-specific) silently
     /// declines to dispatch instead of pushing a rejection message. What's
     /// verified here is the same observable guarantee Go's test checks: the
@@ -1280,7 +1303,7 @@ mod tests {
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
         let before = app.entries.len();
-        app.busy = true;
+        app.start_turn();
         app.input = "/memory search vim".chars().collect();
         app.cursor = app.input.len();
         let cancel = CancellationToken::new();

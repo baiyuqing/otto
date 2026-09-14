@@ -20,8 +20,9 @@
 //! rather than assumed, and no `vt100`/`vte`/terminal-emulator crate is in
 //! `Cargo.lock`. [`Screen`] below implements exactly the vocabulary that
 //! output can contain: `CSI r;cH`/`f` (cursor position), `CSI ?25h`/`l`
-//! (cursor visibility, no grid effect), `CSI ?1049h`/`l` (alt screen, no
-//! grid effect), `CSI ...m` (SGR, content-inert), and raw UTF-8 text. Any
+//! (cursor visibility, no grid effect), `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
+//! (mouse capture, no grid effect), `CSI ?1049h`/`l` (alt screen, no grid
+//! effect), `CSI ...m` (SGR, content-inert), and raw UTF-8 text. Any
 //! other control sequence is a bug (either in this scraper's assumptions or
 //! in the TUI emitting something unexpected) and fails the test loudly
 //! rather than silently mis-rendering.
@@ -164,6 +165,16 @@ impl Screen {
             }
             (true, b'l') if numbers == [25] => {
                 self.cursor_visible = false;
+                Ok(())
+            }
+            // Mouse capture modes are content-inert; raw output assertions
+            // verify that the TUI enables and restores them.
+            (true, b'h') | (true, b'l')
+                if matches!(
+                    numbers.as_slice(),
+                    [1000] | [1002] | [1003] | [1006] | [1015]
+                ) =>
+            {
                 Ok(())
             }
             // Alternate screen enter/leave: content-inert here (the raw byte
@@ -371,6 +382,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
 
     eprintln!("[tui_pty] waiting for workspace marker {workspace_marker:?}");
     wait_for_screen_text(&shared, &workspace_marker);
+    wait_for_raw_bytes(&shared, b"\x1b[?1000h");
     eprintln!("[tui_pty] saw workspace marker; typing prompt");
 
     master
@@ -399,5 +411,6 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     // A clean terminal restore leaves the alternate screen, matching Go's
     // `waitForSubsequence(t, collector, 0, altScreenExitSeq)`.
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
+    wait_for_raw_bytes(&shared, b"\x1b[?1000l");
     eprintln!("[tui_pty] saw alt-screen exit sequence");
 }

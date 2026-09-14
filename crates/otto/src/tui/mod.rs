@@ -230,35 +230,51 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
     }
 }
 
-/// Races one `Controller` call against the key reader so an interrupt key
-/// (see [`App::is_interrupt_key`]) can cancel `turn` while `future` is still
-/// in flight, without a busy-spin once the reader's channel closes. Needed
-/// only for [`Action::Prompt`]/[`Action::Compact`]: every other `Action` is
-/// a one-shot `.await` with no Go precedent for interrupting it, and raw
-/// mode leaves no real SIGINT to interrupt it with anyway.
-async fn await_turn<T, E>(
+/// Drives one `Controller` call to completion, owning the screen for its
+/// whole duration. Needed only for [`Action::Prompt`]/[`Action::Compact`]:
+/// every other `Action` is a one-shot `.await` with no Go precedent for
+/// interrupting it, and raw mode leaves no real SIGINT to interrupt it with
+/// anyway.
+///
+/// The call's sink cannot draw for itself, because it would have to hold
+/// `app` and `terminal` borrowed for the whole turn, leaving nothing here to
+/// redraw with. So the sink only forwards each [`Event`] down `events`, and
+/// this loop applies it, letting the same loop also redraw on a key, a
+/// resize, and every [`render::SPINNER_FRAME`] so the thinking indicator
+/// animates while nothing is streaming.
+async fn drive_turn<T, E>(
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
     keys: &mut mpsc::Receiver<TuiEvent>,
+    events: &mut mpsc::UnboundedReceiver<Event>,
     turn: &CancellationToken,
     future: impl Future<Output = Result<T, E>>,
+    mut apply: impl FnMut(&mut App, Event),
 ) -> Result<T, E> {
     tokio::pin!(future);
+    let mut frames = tokio::time::interval(render::SPINNER_FRAME);
     loop {
         tokio::select! {
-            result = &mut future => return result,
+            result = &mut future => {
+                // `select!` picks at random between ready branches, so the
+                // sink's last events can still be queued behind the call's
+                // own completion.
+                while let Ok(event) = events.try_recv() {
+                    apply(app, event);
+                }
+                return result;
+            }
+            Some(event) = events.recv() => apply(app, event),
             Some(event) = keys.recv() => {
-                // ponytail: a resize while a turn is running does not
-                // redraw here (the terminal is not in scope); the next
-                // sink-driven event redraws at the then-current size, so a
-                // resize is only briefly stale, never wrong. Upgrade path:
-                // thread `terminal` through if that lag is reported.
                 if let TuiEvent::Key(key) = event
                     && App::is_interrupt_key(&key)
                 {
                     turn.cancel();
                 }
             }
-            else => return future.await,
+            _ = frames.tick() => {}
         }
+        let _ = terminal.draw(|frame| render::draw(frame, app));
     }
 }
 
@@ -274,19 +290,30 @@ async fn run_turn(
     cancel: &CancellationToken,
     line: String,
 ) -> Result<(), ReplError> {
-    app.busy = true;
+    app.start_turn();
     let turn = cancel.child_token();
     let mut error_rendered = false;
     let result = {
+        let (events, mut received) = mpsc::unbounded_channel();
         let mut sink = |event: Event| {
-            if app.apply_event(event) {
-                error_rendered = true;
-            }
-            let _ = terminal.draw(|frame| render::draw(frame, app));
+            let _ = events.send(event);
         };
-        await_turn(keys, &turn, controller.prompt(&line, &mut sink, &turn)).await
+        drive_turn(
+            app,
+            terminal,
+            keys,
+            &mut received,
+            &turn,
+            controller.prompt(&line, &mut sink, &turn),
+            |app, event| {
+                if app.apply_event(event) {
+                    error_rendered = true;
+                }
+            },
+        )
+        .await
     };
-    app.busy = false;
+    app.end_turn();
     if !error_rendered && let Err(error) = &result {
         app.push_system(error.to_string());
     }
@@ -315,37 +342,47 @@ async fn run_compact(
     cancel: &CancellationToken,
     focus: String,
 ) -> Result<(), ReplError> {
-    app.busy = true;
+    app.start_turn();
     let turn = cancel.child_token();
     let mut rendered_ids: Vec<String> = Vec::new();
     let mut rendered_noop_empty = false;
     let mut error_rendered = false;
     let result = {
+        let (events, mut received) = mpsc::unbounded_channel();
         let mut sink = |event: Event| {
-            if let Event::CompactionCompleted { compaction } = &event {
-                let already = if !compaction.checkpoint_id.is_empty() {
-                    rendered_ids.contains(&compaction.checkpoint_id)
-                } else {
-                    compaction.noop && rendered_noop_empty
-                };
-                if already {
-                    let _ = terminal.draw(|frame| render::draw(frame, app));
-                    return;
-                }
-                if compaction.checkpoint_id.is_empty() {
-                    rendered_noop_empty = compaction.noop;
-                } else {
-                    rendered_ids.push(compaction.checkpoint_id.clone());
-                }
-            }
-            if app.apply_event(event) {
-                error_rendered = true;
-            }
-            let _ = terminal.draw(|frame| render::draw(frame, app));
+            let _ = events.send(event);
         };
-        await_turn(keys, &turn, controller.compact(&focus, &mut sink, &turn)).await
+        drive_turn(
+            app,
+            terminal,
+            keys,
+            &mut received,
+            &turn,
+            controller.compact(&focus, &mut sink, &turn),
+            |app, event| {
+                if let Event::CompactionCompleted { compaction } = &event {
+                    let already = if !compaction.checkpoint_id.is_empty() {
+                        rendered_ids.contains(&compaction.checkpoint_id)
+                    } else {
+                        compaction.noop && rendered_noop_empty
+                    };
+                    if already {
+                        return;
+                    }
+                    if compaction.checkpoint_id.is_empty() {
+                        rendered_noop_empty = compaction.noop;
+                    } else {
+                        rendered_ids.push(compaction.checkpoint_id.clone());
+                    }
+                }
+                if app.apply_event(event) {
+                    error_rendered = true;
+                }
+            },
+        )
+        .await
     };
-    app.busy = false;
+    app.end_turn();
     if cancel.is_cancelled() {
         return Err(ReplError::Cancelled);
     }

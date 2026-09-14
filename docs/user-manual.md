@@ -364,7 +364,12 @@ OTTO_UI=repl otto
 ### TUI behavior
 
 - Uses the terminal alternate screen buffer.
-- A submitted prompt is added to the transcript before the response streams in.
+- A submitted prompt is added to the transcript before the response streams in,
+  prefixed with `> ` and shown in green so it is distinct from the response.
+- Transcript entries are separated by a blank line.
+- While a turn is running, an animated `Thinking…` line with the elapsed
+  seconds is shown under the transcript, and the composer title reads
+  `Working (Esc to cancel)`.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
 - Tool calls and compaction checkpoints are folded by default; `Ctrl+O` toggles

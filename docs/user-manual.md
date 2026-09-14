@@ -372,8 +372,14 @@ OTTO_UI=repl otto
   `Working (Esc to cancel)`.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
-- Tool calls and compaction checkpoints are folded by default; `Ctrl+O` toggles
-  full tool arguments/output and expanded compaction summaries.
+- Tool calls are folded to the tool name, a cut-down first line of the
+  arguments, and a one-line result (the first line of the output and how many
+  more there are). `Ctrl+O` shows the call id, the arguments, and the output in
+  full, and toggles back.
+- The composer keeps a prompt history: `↑`/`↓` walk back and forth through the
+  lines already submitted, and `↓` past the newest one restores what was being
+  typed. It starts from the prompts the session already had, so a resumed
+  session can recall its own, and it is not persisted across runs.
 - Mouse-wheel transcript scrolling is enabled. Hold `Shift` while dragging to
   select visible terminal text.
 - The footer shows workspace/profile/model, token totals, and session ID when
@@ -386,10 +392,10 @@ OTTO_UI=repl otto
 | --- | --- |
 | `Enter` | Submit the current prompt, or run the highlighted slash-command suggestion |
 | `Tab` | Complete the selected slash-command suggestion |
-| `↑` / `↓` | Select a slash-command suggestion, or scroll the transcript by one line |
+| `↑` / `↓` | Recall the previous or next submitted prompt, or select a slash-command suggestion |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
-| `Ctrl+O` | Toggle complete tool arguments/output and folded summaries |
+| `Ctrl+O` | Toggle a tool call between its folded summary and full arguments/output |
 | `Shift`+drag | Select visible terminal text while mouse reporting is active |
 | Mouse wheel, `PgUp` / `PgDn` | Scroll the transcript |
 | `Home` / `End` | Move the cursor to the start or end of the composer |

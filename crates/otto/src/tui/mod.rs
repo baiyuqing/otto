@@ -265,16 +265,26 @@ async fn drive_turn<T, E>(
                 return result;
             }
             Some(event) = events.recv() => apply(app, event),
-            Some(event) = keys.recv() => {
-                if let TuiEvent::Key(key) = event
-                    && App::is_interrupt_key(&key)
-                {
-                    turn.cancel();
-                }
-            }
+            Some(event) = keys.recv() => apply_turn_key(app, event, turn),
             _ = frames.tick() => {}
         }
         let _ = terminal.draw(|frame| render::draw(frame, app));
+    }
+}
+
+/// Handles one key delivered while a turn is running: the interrupt keys
+/// cancel it, the scroll keys move the transcript, and everything else is
+/// dropped the way [`App::handle_key`]'s `busy()` branch drops it.
+///
+/// Scrolling has to work here and not only between turns: the wheel arrives
+/// as [`KeyCode::Up`]/[`KeyCode::Down`] (see [`map_terminal_event`]), and a
+/// streaming turn is when there is most output to read back through.
+fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
+    let TuiEvent::Key(key) = event else { return };
+    if App::is_interrupt_key(&key) {
+        turn.cancel();
+    } else {
+        app.handle_scroll_key(&key);
     }
 }
 
@@ -498,5 +508,35 @@ mod tests {
 
         assert_eq!(key_code(MouseEventKind::ScrollUp), Some(KeyCode::Up));
         assert_eq!(key_code(MouseEventKind::ScrollDown), Some(KeyCode::Down));
+    }
+
+    /// The reported bad experience: while a turn streamed, every key but the
+    /// interrupt keys was dropped, so the wheel (mapped to `Up`/`Down` by
+    /// [`map_terminal_event`]) did nothing at exactly the moment there was
+    /// output to scroll back through.
+    #[tokio::test]
+    async fn a_turn_scrolls_on_the_wheel_and_still_cancels_on_esc() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.max_scroll.set(10);
+        app.start_turn();
+        let turn = CancellationToken::new();
+
+        let wheel_up = map_terminal_event(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }))
+        .expect("wheel event");
+        apply_turn_key(&mut app, wheel_up, &turn);
+
+        assert_eq!(app.scroll, Some(9));
+        assert!(!turn.is_cancelled());
+
+        apply_turn_key(&mut app, TuiEvent::Key(KeyCode::Esc.into()), &turn);
+        assert!(turn.is_cancelled());
     }
 }

@@ -93,7 +93,11 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     let total_lines = paragraph.line_count(area.width) as u16;
     let bottom = total_lines.saturating_sub(area.height);
-    let scroll = bottom.saturating_sub(app.scroll.unwrap_or(0));
+    // The scroll keys need the bottom this layout produced to turn
+    // "following" into an absolute offset; nothing outside the renderer
+    // knows how the entries wrap at this width.
+    app.max_scroll.set(bottom);
+    let scroll = app.scroll.map_or(bottom, |top| top.min(bottom));
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
@@ -445,6 +449,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 ///   view with no manual clamping logic to port.
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyCode;
+    use otto_core::agent::Event;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
 
@@ -675,6 +681,36 @@ mod tests {
         app.scroll = Some(3);
         let scrolled = rendered(&app, MIN_TERMINAL_WIDTH, 12);
         assert!(!scrolled.contains("line 19"), "{scrolled}");
+    }
+
+    /// A manual scroll is an absolute top offset, so streamed output
+    /// appended below it leaves the rows being read exactly where they are
+    /// instead of pushing them off the top.
+    #[tokio::test]
+    async fn a_scrolled_view_stays_put_while_output_streams_in() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.push_system(
+            (0..20)
+                .map(|line| format!("line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+
+        // Lays out `max_scroll`, which the first scroll key reads.
+        let _ = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        app.handle_scroll_key(&KeyCode::PageUp.into());
+        let before = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        assert!(before.contains("line 05"), "{before}");
+
+        for index in 0..10 {
+            app.apply_event(Event::TextDelta {
+                text: format!("streamed {index}\n"),
+            });
+        }
+
+        let after = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        assert!(after.contains("line 05"), "{after}");
+        assert!(!after.contains("streamed 9"), "{after}");
     }
 
     /// Port of the view half of Go's `TestCommandSuggestionsMatchPrefix` in

@@ -18,6 +18,7 @@
 //! Upgrade path: split these into dedicated overlays if a user reports the
 //! inline transcript entries as hard to scan.
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -122,10 +123,22 @@ pub(crate) struct App {
     pub info: Info,
     pub input: Vec<char>,
     pub cursor: usize,
-    /// `None` follows the bottom of the transcript; `Some(n)` stays `n`
-    /// wrapped lines above it. Port of Go's `autoFollow` (inverted: Go stores
-    /// a bool and the last offset separately, this folds both into one field).
+    /// `None` follows the bottom of the transcript; `Some(top)` pins the
+    /// view to that absolute wrapped-line offset from the top. Port of Go's
+    /// `autoFollow` (inverted: Go stores a bool and the last offset
+    /// separately, this folds both into one field).
+    ///
+    /// The offset is absolute rather than measured from the bottom so that
+    /// output appended during a turn extends the transcript below the pinned
+    /// rows instead of pushing them off the top.
     pub scroll: Option<u16>,
+    /// The largest offset the last drawn frame could scroll to (its total
+    /// wrapped line count minus the transcript height), or `0` before the
+    /// first frame. [`super::render::draw`] is the sole writer; the scroll
+    /// keys read it to turn "following the bottom" into an absolute offset,
+    /// since only the renderer knows how the entries wrap at the current
+    /// width.
+    pub max_scroll: Cell<u16>,
     pub picker: Option<Picker>,
     /// The highlighted row of the slash-command suggestion panel (see
     /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
@@ -151,6 +164,7 @@ impl App {
             input: Vec::new(),
             cursor: 0,
             scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -235,14 +249,32 @@ impl App {
     }
 
     fn scroll_up(&mut self, lines: u16) {
-        self.scroll = Some(self.scroll.unwrap_or(0).saturating_add(lines));
+        let top = self.scroll.unwrap_or_else(|| self.max_scroll.get());
+        self.scroll = Some(top.saturating_sub(lines));
     }
 
     fn scroll_down(&mut self, lines: u16) {
-        self.scroll = match self.scroll {
-            Some(offset) if offset > lines => Some(offset - lines),
-            _ => None,
-        };
+        let Some(top) = self.scroll else { return };
+        let bottom = self.max_scroll.get();
+        let next = top.saturating_add(lines);
+        self.scroll = (next < bottom).then_some(next);
+    }
+
+    /// Applies one transcript scroll key, reporting whether `key` was one.
+    ///
+    /// Split out of [`App::handle_key`] because [`super::drive_turn`] has to
+    /// call it directly: `handle_key` drops every key while a turn is
+    /// running, and scrolling back through output as it arrives is the one
+    /// thing that still has to work then.
+    pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up => self.scroll_up(1),
+            KeyCode::Down => self.scroll_down(1),
+            KeyCode::PageUp => self.scroll_up(10),
+            KeyCode::PageDown => self.scroll_down(10),
+            _ => return false,
+        }
+        true
     }
 
     /// Port of `handleCtrlC`'s idle branch: a lone Ctrl+C clears the composer
@@ -404,20 +436,8 @@ impl App {
                 self.cursor = self.input.len();
                 None
             }
-            KeyCode::Up => {
-                self.scroll_up(1);
-                None
-            }
-            KeyCode::Down => {
-                self.scroll_down(1);
-                None
-            }
-            KeyCode::PageUp => {
-                self.scroll_up(10);
-                None
-            }
-            KeyCode::PageDown => {
-                self.scroll_down(10);
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                self.handle_scroll_key(&key);
                 None
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -719,7 +739,6 @@ impl App {
                         ..Entry::default()
                     });
                 }
-                self.scroll = None;
                 false
             }
             Event::ToolCallStarted {
@@ -735,7 +754,6 @@ impl App {
                     tool_args: arguments,
                     ..Entry::default()
                 });
-                self.scroll = None;
                 false
             }
             Event::ToolCallFinished {
@@ -750,7 +768,6 @@ impl App {
                     entry.tool_error = result.is_error;
                     entry.tool_done = true;
                 }
-                self.scroll = None;
                 false
             }
             Event::CompactionCompleted { compaction } => {
@@ -941,6 +958,7 @@ mod tests {
             input: Vec::new(),
             cursor: 0,
             scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -963,6 +981,7 @@ mod tests {
             input: "hello".chars().collect(),
             cursor: 5,
             scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -985,6 +1004,7 @@ mod tests {
             input: "abc".chars().collect(),
             cursor: 3,
             scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -1025,18 +1045,67 @@ mod tests {
         );
     }
 
+    /// [`App::scroll`] is an absolute top offset, so a scroll key starts
+    /// from the bottom the last frame laid out and returns to following the
+    /// bottom once it reaches it again.
     #[tokio::test]
-    async fn scroll_keys_track_lines_above_the_bottom() {
+    async fn scroll_keys_move_an_absolute_top_offset() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
         let cancel = CancellationToken::new();
+        app.max_scroll.set(10);
 
         app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
-        assert_eq!(app.scroll, Some(1));
+        assert_eq!(app.scroll, Some(9));
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
         assert_eq!(app.scroll, None);
+    }
+
+    /// The reported bad experience: scrolling up during a streaming turn was
+    /// undone by the next delta, so the transcript snapped back to the
+    /// bottom. Following the bottom stays the default; a manual offset is
+    /// only left by a scroll key or a new prompt.
+    #[tokio::test]
+    async fn streamed_events_keep_a_manual_scroll_offset() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+
+        app.apply_event(Event::TextDelta {
+            text: "first".to_string(),
+        });
+        assert_eq!(app.scroll, None, "an unscrolled transcript keeps following");
+
+        app.scroll = Some(4);
+        app.apply_event(Event::TextDelta {
+            text: "second".to_string(),
+        });
+        app.apply_event(Event::ToolCallStarted {
+            tool_name: "bash".to_string(),
+            tool_call_id: "call-1".to_string(),
+            arguments: String::new(),
+        });
+        assert_eq!(app.scroll, Some(4));
+    }
+
+    /// A turn ignores every other key ([`App::handle_key`] returns early
+    /// while busy), but the scroll keys have to keep working so the output
+    /// arriving can be read from where the reader left off.
+    #[tokio::test]
+    async fn scroll_keys_work_while_a_turn_is_running() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.max_scroll.set(10);
+        app.start_turn();
+
+        assert!(app.handle_scroll_key(&key(KeyCode::PageUp, KeyModifiers::NONE)));
+        assert_eq!(app.scroll, Some(0));
+        assert!(!app.handle_scroll_key(&key(KeyCode::Char('x'), KeyModifiers::NONE)));
     }
 
     // Port of `internal/tui/memory_test.go` against this module's own unit

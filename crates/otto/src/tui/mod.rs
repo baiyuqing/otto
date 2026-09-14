@@ -211,6 +211,7 @@ async fn run_app(
             }
         }
 
+        app.refresh_info(controller);
         terminal
             .draw(|frame| render::draw(frame, &app))
             .map_err(io_error)?;

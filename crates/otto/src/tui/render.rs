@@ -24,11 +24,9 @@ use super::commands::SLASH_COMMANDS;
 use super::entries::EntryKind;
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, escape_plain_text,
-    footer_workspace, format_context_percentage, format_token_count,
+    escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
 };
 use super::markdown;
-
-const DEFAULT_CONTEXT_WINDOW: i64 = 200_000;
 
 /// Draws one frame. Port of `Model.View`.
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
@@ -115,17 +113,48 @@ fn entry_lines(entry: &super::entries::Entry) -> Vec<Line<'static>> {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let percentage = format_context_percentage(app.usage.input_tokens, DEFAULT_CONTEXT_WINDOW);
-    let tokens = format_token_count(app.usage.input_tokens + app.usage.output_tokens);
-    let workspace = footer_workspace(&app.workspace);
-    let mut text = format!("{workspace}  {tokens} tokens ({percentage})");
-    if let Some(status) = &app.status {
-        text = format!("{status}  |  {text}");
-    }
     frame.render_widget(
-        Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM)),
+        Paragraph::new(footer_text(app)).style(Style::default().add_modifier(Modifier::DIM)),
         area,
     );
+}
+
+fn footer_text(app: &App) -> String {
+    let profile = escape_single_line_text(&app.info.profile);
+    let model = escape_single_line_text(&app.info.model);
+    let profile_model = match (profile.is_empty(), model.is_empty()) {
+        (true, true) => "unknown/unknown".to_string(),
+        _ => format!("{profile}/{model}").trim_matches('/').to_string(),
+    };
+    let mut text = format!(
+        "{profile_model} | {} | {} | tokens {}/{}",
+        app.info.sandbox.badge(),
+        escape_single_line_text(&footer_workspace(&app.info.workspace)),
+        format_token_count(app.usage.input_tokens),
+        format_token_count(app.usage.output_tokens)
+    );
+    if app.usage.cached_input_tokens > 0 {
+        text.push_str(&format!(
+            " (cached {})",
+            format_token_count(app.usage.cached_input_tokens)
+        ));
+    }
+    if app.info.context_input_tokens_pending {
+        text.push_str(" | ctx ?%");
+    } else if app.info.context_input_tokens_present && app.info.context_window > 0 {
+        text.push_str(&format!(
+            " | ctx {}",
+            format_context_percentage(app.info.context_input_tokens, app.info.context_window)
+        ));
+    }
+    if !app.info.session_id.is_empty() {
+        text.push_str(" | ");
+        text.push_str(&escape_single_line_text(&app.info.session_id));
+    }
+    match &app.status {
+        Some(status) => format!("{} | {text}", escape_single_line_text(status)),
+        None => text,
+    }
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
@@ -250,11 +279,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 ///   `super::app`'s module doc "Not ported" note), so there is no matching
 ///   content to assert on without adding production content nobody asked
 ///   for.
-/// - `TestLongSessionOverlayAndFooterStayWithinBounds` — tests
-///   `renderFooter`'s width-based field-dropping (e.g. dropping "Profile:"
-///   under narrow widths). [`draw_footer`] here is a single fixed-format
-///   line with no width-based field omission: a real (not just untested)
-///   gap versus Go, noted for the record rather than silently skipped.
+/// - `TestLongSessionOverlayAndFooterStayWithinBounds` — ratatui clips the
+///   fixed footer to its `Rect`; the session overlay itself is not ported.
 /// - `TestCompactionResponsiveCollapsedCheckpointStaysWithinBounds` — tests
 ///   `renderCompactionBlock`; compaction entries here fall through the
 ///   generic [`markdown::render`] path in [`entry_lines`], which has no
@@ -310,6 +336,23 @@ mod tests {
         let content = rendered(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
 
         assert!(!content.contains("Terminal too small"));
+    }
+
+    #[tokio::test]
+    async fn footer_shows_runtime_and_session_status() {
+        let (_workspace, _sessions, app) = app_fixture().await;
+        let session_id = app.info.session_id.clone();
+
+        let content = rendered(&app, 160, MIN_TERMINAL_HEIGHT);
+
+        assert!(content.contains("alpha/gpt-alpha"), "{content}");
+        assert!(content.contains("no-bash"), "{content}");
+        assert!(content.contains("tokens 0/0"), "{content}");
+        assert!(content.contains(&session_id), "{content}");
+
+        let narrow = rendered(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
+        assert!(narrow.contains("alpha/gpt-alpha"), "{narrow}");
+        assert!(narrow.contains("no-bash"), "{narrow}");
     }
 
     /// No-panic smoke test at Go's exact

@@ -31,7 +31,7 @@ use crate::app::{Controller, Info, PROFILE_SWITCH_UNAVAILABLE};
 use crate::cli::login;
 use crate::cli::repl_commands;
 
-use super::commands::{self, SlashCommandKind};
+use super::commands::{self, SlashCommand, SlashCommandKind};
 use super::entries::{self, Entry, EntryKind};
 use super::layout;
 
@@ -127,6 +127,10 @@ pub(crate) struct App {
     /// a bool and the last offset separately, this folds both into one field).
     pub scroll: Option<u16>,
     pub picker: Option<Picker>,
+    /// The highlighted row of the slash-command suggestion panel (see
+    /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
+    /// only ever indexes the match list the current value produces.
+    pub suggestion: usize,
     pub show_help: bool,
     pub show_details: bool,
     pub busy: bool,
@@ -145,6 +149,7 @@ impl App {
             cursor: 0,
             scroll: None,
             picker: None,
+            suggestion: 0,
             show_help: false,
             show_details: false,
             busy: false,
@@ -296,6 +301,36 @@ impl App {
             return None;
         }
 
+        // While the suggestion panel is open it owns the keys that would
+        // otherwise scroll the transcript or complete a prefix: up/down move
+        // the highlighted row, Tab accepts it, and Enter runs it rather than
+        // the typed prefix. Port of Go's `commandSuggestions` cursor.
+        let suggestions = self.suggestions();
+        if !suggestions.is_empty() {
+            let selected = self.suggestion.min(suggestions.len() - 1);
+            match key.code {
+                KeyCode::Up | KeyCode::Down => {
+                    let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                    self.suggestion =
+                        (selected as isize + delta).rem_euclid(suggestions.len() as isize) as usize;
+                    return None;
+                }
+                KeyCode::Tab => {
+                    self.set_input(suggestions[selected].name);
+                    return None;
+                }
+                KeyCode::Enter
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+                {
+                    // Falls through to the Enter arm below, which submits it.
+                    self.set_input(suggestions[selected].name);
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Enter
                 if key
@@ -312,6 +347,7 @@ impl App {
                 }
                 let line: String = std::mem::take(&mut self.input).into_iter().collect();
                 self.cursor = 0;
+                self.suggestion = 0;
                 self.dispatch_line(line.trim(), controller, cancel)
             }
             KeyCode::Backspace => {
@@ -319,12 +355,14 @@ impl App {
                     self.cursor -= 1;
                     self.input.remove(self.cursor);
                 }
+                self.suggestion = 0;
                 None
             }
             KeyCode::Delete => {
                 if self.cursor < self.input.len() {
                     self.input.remove(self.cursor);
                 }
+                self.suggestion = 0;
                 None
             }
             KeyCode::Left => {
@@ -341,10 +379,6 @@ impl App {
             }
             KeyCode::End => {
                 self.cursor = self.input.len();
-                None
-            }
-            KeyCode::Tab => {
-                self.complete();
                 None
             }
             KeyCode::Up => {
@@ -366,6 +400,7 @@ impl App {
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.insert(self.cursor, ch);
                 self.cursor += 1;
+                self.suggestion = 0;
                 None
             }
             _ => None,
@@ -382,32 +417,24 @@ impl App {
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     }
 
-    /// Port of `matchingSlashCommands` completion on Tab: fills the composer
-    /// with the single match, or the longest shared prefix of several.
-    fn complete(&mut self) {
-        let value: String = self.input.iter().collect();
-        let matches = commands::matching_slash_commands(&value);
-        let Some(first) = matches.first() else { return };
-        let target = if matches.len() == 1 {
-            first.name
-        } else {
-            let mut prefix = first.name;
-            for candidate in &matches[1..] {
-                let common = prefix
-                    .char_indices()
-                    .zip(candidate.name.chars())
-                    .take_while(|((_, a), b)| a == b)
-                    .last()
-                    .map(|((index, ch), _)| index + ch.len_utf8())
-                    .unwrap_or(0);
-                prefix = &prefix[..common];
-            }
-            prefix
-        };
-        if target.len() > value.len() {
-            self.input = target.chars().collect();
-            self.cursor = self.input.len();
+    /// The slash commands the composer's current value is a prefix of, with
+    /// [`App::suggestion`] indexing the highlighted one. Port of
+    /// `Model.commandSuggestions`: an open overlay hides the panel.
+    /// [`super::render`] draws exactly this list.
+    pub(super) fn suggestions(&self) -> Vec<SlashCommand> {
+        if self.show_help || self.picker.is_some() {
+            return Vec::new();
         }
+        let value: String = self.input.iter().collect();
+        commands::matching_slash_commands(&value)
+    }
+
+    /// Replaces the composer with an accepted command name. The panel is
+    /// then down to that one row, so the selection returns to it.
+    fn set_input(&mut self, value: &str) {
+        self.input = value.chars().collect();
+        self.cursor = self.input.len();
+        self.suggestion = 0;
     }
 
     /// Parses and dispatches one submitted line. Port of `internal/repl`'s
@@ -880,6 +907,7 @@ mod tests {
             cursor: 0,
             scroll: None,
             picker: None,
+            suggestion: 0,
             show_help: false,
             show_details: false,
             busy: false,
@@ -901,6 +929,7 @@ mod tests {
             cursor: 5,
             scroll: None,
             picker: None,
+            suggestion: 0,
             show_help: false,
             show_details: false,
             busy: false,
@@ -922,6 +951,7 @@ mod tests {
             cursor: 3,
             scroll: None,
             picker: None,
+            suggestion: 0,
             show_help: false,
             show_details: false,
             busy: false,
@@ -1274,5 +1304,102 @@ mod tests {
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &controller, &cancel);
 
         assert_eq!(app.input.iter().collect::<String>(), "/memory");
+    }
+
+    /// The suggestion panel's selection, the half `super::render`'s
+    /// display-only panel left out: up/down move the highlighted row rather
+    /// than scrolling the transcript, and the selection wraps like a
+    /// [`Picker`]'s.
+    #[tokio::test]
+    async fn arrow_keys_move_the_suggestion_selection_instead_of_scrolling() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.input = "/s".chars().collect();
+        app.cursor = app.input.len();
+
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.suggestion, 1, "/session then /sandbox");
+        assert_eq!(app.scroll, None, "the transcript must not scroll");
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.suggestion, 0, "selection wraps");
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.suggestion, 1);
+    }
+
+    #[tokio::test]
+    async fn tab_accepts_the_selected_suggestion() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.input = "/s".chars().collect();
+        app.cursor = app.input.len();
+
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &controller, &cancel);
+
+        assert_eq!(app.input.iter().collect::<String>(), "/sandbox");
+        assert_eq!(app.cursor, app.input.len());
+        assert_eq!(app.suggestion, 0, "the accepted row is the only match left");
+    }
+
+    #[tokio::test]
+    async fn enter_runs_the_selected_suggestion_not_the_typed_prefix() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.input = "/s".chars().collect();
+        app.cursor = app.input.len();
+
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(
+            app.entries
+                .last()
+                .expect("entry")
+                .raw
+                .starts_with("Sandbox:"),
+            "{:?}",
+            app.entries.last().map(|entry| entry.raw.clone())
+        );
+        assert!(app.input.is_empty());
+    }
+
+    #[tokio::test]
+    async fn editing_the_composer_resets_the_suggestion_selection() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.input = "/".chars().collect();
+        app.cursor = app.input.len();
+
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Char('s'), KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(app.suggestion, 0);
+
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::Backspace, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(app.suggestion, 0);
     }
 }

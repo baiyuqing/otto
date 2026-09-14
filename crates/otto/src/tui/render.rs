@@ -18,6 +18,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use super::app::App;
 use super::commands::{SLASH_COMMANDS, SlashCommand};
@@ -72,11 +73,10 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
 /// input up to [`INPUT_BOX_THRESHOLD`] lines before it stops growing and
 /// scrolls instead.
 fn composer_height(app: &App, width: u16) -> u16 {
-    let text: String = app.input.iter().collect();
-    let wrap_width = width.saturating_sub(2).max(1);
-    let wrapped = Paragraph::new(text).wrap(Wrap { trim: false });
-    let lines = wrapped.line_count(wrap_width).max(1) as u16;
-    lines.clamp(1, INPUT_BOX_THRESHOLD) + 2
+    // `width - 2` is the box's inner width, so this sizes the box from
+    // exactly the rows [`draw_composer`] will put in it.
+    let (lines, _, _) = composer_lines(&app.input, app.cursor, width.saturating_sub(2));
+    (lines.len() as u16).clamp(1, INPUT_BOX_THRESHOLD) + 2
 }
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
@@ -196,8 +196,57 @@ fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[SlashCommand], 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// Lays the composer value out into the rows the box will show, and reports
+/// the row/column the caret sits at.
+///
+/// The composer breaks lines itself rather than handing the value to
+/// `Paragraph::wrap`, because the caret has to land on the same grid the
+/// text does: `Wrap` breaks on word boundaries, which no arithmetic over
+/// the value's prefix can reproduce. Breaking is by display column (a CJK
+/// character takes two, a combining mark none) at an explicit `\n` or when
+/// the next character would not fit, so every returned line is at most
+/// `width` columns wide and `Paragraph` never re-wraps it.
+///
+/// The caret occupies one column, so it wraps to the next row when it would
+/// not fit either; that is also what makes the box grow a row once the value
+/// exactly fills the last one.
+fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u16, u16) {
+    let width = width.max(1) as usize;
+    let cursor = cursor.min(input.len());
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut column = 0usize;
+    let (mut caret_row, mut caret_column) = (0u16, 0u16);
+
+    for index in 0..=input.len() {
+        if index == cursor {
+            if column + 1 > width {
+                lines.push(std::mem::take(&mut line));
+                column = 0;
+            }
+            caret_row = lines.len() as u16;
+            caret_column = column as u16;
+        }
+        let Some(&ch) = input.get(index) else { break };
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut line));
+            column = 0;
+            continue;
+        }
+        let ch_width = ch.width().unwrap_or(0);
+        if column + ch_width > width && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+            column = 0;
+        }
+        line.push(ch);
+        column += ch_width;
+    }
+    lines.push(line);
+
+    (lines, caret_row, caret_column)
+}
+
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let text: String = app.input.iter().collect();
     let title = if app.busy {
         "Working (Esc to cancel)"
     } else {
@@ -206,14 +255,19 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
+
+    let (lines, caret_row, caret_column) = composer_lines(&app.input, app.cursor, inner.width);
+    // Once the value is taller than the box stopped growing at
+    // (`INPUT_BOX_THRESHOLD`), the box scrolls to keep the caret's row on
+    // screen instead of pinning the first rows and losing what is being typed.
+    let scroll = caret_row.saturating_sub(inner.height.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>()).scroll((scroll, 0)),
+        inner,
+    );
 
     if !app.busy {
-        let prefix: String = app.input[..app.cursor].iter().collect();
-        let wrap_width = inner.width.max(1) as usize;
-        let cursor_line = (prefix.chars().count() / wrap_width) as u16;
-        let cursor_col = (prefix.chars().count() % wrap_width) as u16;
-        frame.set_cursor_position((inner.x + cursor_col, inner.y + cursor_line));
+        frame.set_cursor_position((inner.x + caret_column, inner.y + caret_row - scroll));
     }
 }
 
@@ -330,7 +384,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
 
     use super::*;
     use crate::cli::testutil;
@@ -573,5 +627,62 @@ mod tests {
         });
         let overlaid = rendered(&app, 100, 20);
         assert!(!overlaid.contains("show session details"), "{overlaid}");
+    }
+
+    /// Where the terminal caret ends up after one frame.
+    fn cursor(app: &App, width: u16, height: u16) -> (u16, u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        let position = terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor position");
+        (position.x, position.y)
+    }
+
+    /// The caret sits after the last *column* the value occupies, not after
+    /// its last `char`: a CJK character takes two cells.
+    #[tokio::test]
+    async fn the_caret_follows_the_display_width_of_wide_characters() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.input = "测试ab".chars().collect();
+        app.cursor = app.input.len();
+
+        let (x, y) = cursor(&app, 100, 20);
+
+        assert_eq!((x, y), (1 + 6, 20 - 2));
+    }
+
+    /// A hard line break moves the caret to the next composer row.
+    #[tokio::test]
+    async fn the_caret_follows_an_embedded_newline() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.input = "ab\ncd".chars().collect();
+        app.cursor = app.input.len();
+
+        let (x, y) = cursor(&app, 100, 20);
+
+        assert_eq!((x, y), (1 + 2, 20 - 2));
+    }
+
+    /// Past [`INPUT_BOX_THRESHOLD`] rows the composer stops growing, so it
+    /// has to scroll: the tail of the value and the caret both stay inside
+    /// the box instead of the first rows being pinned and the caret
+    /// wandering onto the border.
+    #[tokio::test]
+    async fn a_value_taller_than_the_composer_scrolls_its_tail_into_view() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.input = format!("{}END", "x".repeat(98 * 13)).chars().collect();
+        app.cursor = app.input.len();
+
+        let height = 30;
+        let content = rendered(&app, 100, height);
+        let (x, y) = cursor(&app, 100, height);
+
+        assert!(content.contains("END"), "{content}");
+        // The box is `INPUT_BOX_THRESHOLD` text rows plus two borders, so
+        // its last text row is the second-to-last row of the frame.
+        assert_eq!((x, y), (1 + 3, height - 2));
     }
 }

@@ -115,6 +115,94 @@ pub(crate) enum Action {
     Login(String),
 }
 
+/// The composer's bash-style prompt history: the prompts the transcript
+/// already held when Otto started, then every line submitted since, plus
+/// the draft a recall interrupted.
+///
+/// ponytail: in-process only. Go's TUI has no prompt history at all and
+/// nothing persists one across runs. Upgrade path: write the lines to a
+/// history file if recall across runs is asked for.
+#[derive(Default)]
+pub(crate) struct History {
+    lines: Vec<String>,
+    /// Which line the composer is showing, or `None` while it holds what
+    /// was typed. Any composer edit clears it, so a recall never outlives
+    /// the value it put in the composer.
+    index: Option<usize>,
+    /// What the composer held when the recall started, restored by Down
+    /// past the newest line.
+    draft: String,
+}
+
+impl History {
+    fn seeded(lines: Vec<String>) -> Self {
+        Self {
+            lines,
+            ..Self::default()
+        }
+    }
+
+    /// Records one submitted line and ends any recall in force.
+    fn remember(&mut self, line: &str) {
+        self.index = None;
+        self.draft.clear();
+        if !line.is_empty() {
+            self.lines.push(line.to_string());
+        }
+    }
+
+    /// The line before the one showing, or `None` when there is nothing
+    /// older (the composer is then left as it is). The first recall saves
+    /// `current` as the draft.
+    fn previous(&mut self, current: &str) -> Option<String> {
+        let index = match self.index {
+            Some(0) => return None,
+            Some(index) => index - 1,
+            None => {
+                let newest = self.lines.len().checked_sub(1)?;
+                self.draft = current.to_string();
+                newest
+            }
+        };
+        self.index = Some(index);
+        Some(self.lines[index].clone())
+    }
+
+    /// The line after the one showing, the draft once past the newest, or
+    /// `None` when no recall is in force.
+    fn next(&mut self) -> Option<String> {
+        let index = self.index? + 1;
+        if let Some(line) = self.lines.get(index) {
+            self.index = Some(index);
+            return Some(line.clone());
+        }
+        self.index = None;
+        Some(std::mem::take(&mut self.draft))
+    }
+
+    /// Whether the composer is showing a recalled line rather than a draft.
+    /// The suggestion panel gives Up/Down back to the history while it is,
+    /// so a recalled slash command cannot strand the keys walking it.
+    fn recalling(&self) -> bool {
+        self.index.is_some()
+    }
+
+    /// Ends the recall, leaving the edited value as an ordinary draft.
+    fn stop_recall(&mut self) {
+        self.index = None;
+    }
+}
+
+/// The prompts a transcript holds, oldest first: what [`History`] starts
+/// from, so a session resumed at startup can recall its own prompts.
+fn prompt_history(entries: &[Entry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.kind == Some(EntryKind::User))
+        .map(|entry| entry.raw.clone())
+        .collect()
+}
+
 /// The terminal frontend's whole state. Port of the non-view fields of
 /// `internal/tui/model.go`'s `Model`.
 pub(crate) struct App {
@@ -123,6 +211,8 @@ pub(crate) struct App {
     pub info: Info,
     pub input: Vec<char>,
     pub cursor: usize,
+    /// Bash-style prompt history for the composer's Up/Down keys.
+    history: History,
     /// `None` follows the bottom of the transcript; `Some(top)` pins the
     /// view to that absolute wrapped-line offset from the top. Port of Go's
     /// `autoFollow` (inverted: Go stores a bool and the last offset
@@ -157,12 +247,14 @@ pub(crate) struct App {
 impl App {
     pub fn new(controller: &Controller) -> Self {
         let (entries, usage) = entries::entries_from_history(&controller.history());
+        let history = History::seeded(prompt_history(&entries));
         Self {
             entries,
             usage,
             info: controller.info(),
             input: Vec::new(),
             cursor: 0,
+            history,
             scroll: None,
             max_scroll: Cell::new(0),
             picker: None,
@@ -260,12 +352,26 @@ impl App {
         self.scroll = (next < bottom).then_some(next);
     }
 
+    /// Scrolls the transcript by one mouse-wheel notch. The wheel is its own
+    /// event rather than a synthesized key ([`super::TuiEvent::Wheel`]),
+    /// because an idle composer's Up/Down recall prompt history.
+    pub fn scroll_wheel(&mut self, up: bool) {
+        if up {
+            self.scroll_up(1);
+        } else {
+            self.scroll_down(1);
+        }
+    }
+
     /// Applies one transcript scroll key, reporting whether `key` was one.
     ///
     /// Split out of [`App::handle_key`] because [`super::drive_turn`] has to
     /// call it directly: `handle_key` drops every key while a turn is
     /// running, and scrolling back through output as it arrives is the one
-    /// thing that still has to work then.
+    /// thing that still has to work then. Up/Down scroll here but not in an
+    /// idle composer, where they recall prompt history ([`History`]); the
+    /// mouse wheel arrives as [`super::TuiEvent::Wheel`] and is routed here
+    /// in both states.
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
         match key.code {
             KeyCode::Up => self.scroll_up(1),
@@ -364,7 +470,7 @@ impl App {
         if !suggestions.is_empty() {
             let selected = self.suggestion.min(suggestions.len() - 1);
             match key.code {
-                KeyCode::Up | KeyCode::Down => {
+                KeyCode::Up | KeyCode::Down if !self.history.recalling() => {
                     let delta = if key.code == KeyCode::Up { -1 } else { 1 };
                     self.suggestion =
                         (selected as isize + delta).rem_euclid(suggestions.len() as isize) as usize;
@@ -400,24 +506,29 @@ impl App {
                 if self.input.is_empty() {
                     return None;
                 }
-                let line: String = std::mem::take(&mut self.input).into_iter().collect();
+                let line = std::mem::take(&mut self.input)
+                    .into_iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
                 self.cursor = 0;
                 self.suggestion = 0;
-                self.dispatch_line(line.trim(), controller, cancel)
+                self.history.remember(&line);
+                self.dispatch_line(&line, controller, cancel)
             }
             KeyCode::Backspace => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
                     self.input.remove(self.cursor);
                 }
-                self.suggestion = 0;
+                self.edited();
                 None
             }
             KeyCode::Delete => {
                 if self.cursor < self.input.len() {
                     self.input.remove(self.cursor);
                 }
-                self.suggestion = 0;
+                self.edited();
                 None
             }
             KeyCode::Left => {
@@ -436,14 +547,27 @@ impl App {
                 self.cursor = self.input.len();
                 None
             }
-            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+            KeyCode::Up => {
+                let current: String = self.input.iter().collect();
+                if let Some(line) = self.history.previous(&current) {
+                    self.set_input(&line);
+                }
+                None
+            }
+            KeyCode::Down => {
+                if let Some(line) = self.history.next() {
+                    self.set_input(&line);
+                }
+                None
+            }
+            KeyCode::PageUp | KeyCode::PageDown => {
                 self.handle_scroll_key(&key);
                 None
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.insert(self.cursor, ch);
                 self.cursor += 1;
-                self.suggestion = 0;
+                self.edited();
                 None
             }
             _ => None,
@@ -472,8 +596,16 @@ impl App {
         commands::matching_slash_commands(&value)
     }
 
-    /// Replaces the composer with an accepted command name. The panel is
-    /// then down to that one row, so the selection returns to it.
+    /// Records a composer edit: the suggestion selection returns to the
+    /// first match, and a recalled history line becomes an ordinary draft.
+    fn edited(&mut self) {
+        self.suggestion = 0;
+        self.history.stop_recall();
+    }
+
+    /// Replaces the composer with an accepted command name or a recalled
+    /// history line. The panel is then down to that one row (or reopened on
+    /// the recalled command), so the selection returns to the first match.
     fn set_input(&mut self, value: &str) {
         self.input = value.chars().collect();
         self.cursor = self.input.len();
@@ -957,6 +1089,7 @@ mod tests {
             info: Info::default(),
             input: Vec::new(),
             cursor: 0,
+            history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
             picker: None,
@@ -980,6 +1113,7 @@ mod tests {
             info: Info::default(),
             input: "hello".chars().collect(),
             cursor: 5,
+            history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
             picker: None,
@@ -1003,6 +1137,7 @@ mod tests {
             info: Info::default(),
             input: "abc".chars().collect(),
             cursor: 3,
+            history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
             picker: None,
@@ -1047,7 +1182,9 @@ mod tests {
 
     /// [`App::scroll`] is an absolute top offset, so a scroll key starts
     /// from the bottom the last frame laid out and returns to following the
-    /// bottom once it reaches it again.
+    /// bottom once it reaches it again. The composer's own Up/Down recall
+    /// prompt history, so the keys that scroll an idle transcript are
+    /// PgUp/PgDn and the wheel.
     #[tokio::test]
     async fn scroll_keys_move_an_absolute_top_offset() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1057,9 +1194,22 @@ mod tests {
         let cancel = CancellationToken::new();
         app.max_scroll.set(10);
 
-        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
-        assert_eq!(app.scroll, Some(9));
-        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        app.handle_key(
+            key(KeyCode::PageUp, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(app.scroll, Some(0));
+        app.handle_key(
+            key(KeyCode::PageDown, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(app.scroll, None);
+
+        app.scroll_wheel(true);
+        assert_eq!(app.scroll, Some(9), "one wheel notch is one line");
+        app.scroll_wheel(false);
         assert_eq!(app.scroll, None);
     }
 
@@ -1408,6 +1558,109 @@ mod tests {
         app.handle_key(key(KeyCode::Tab, KeyModifiers::NONE), &controller, &cancel);
 
         assert_eq!(app.input.iter().collect::<String>(), "/memory");
+    }
+
+    /// Bash-style prompt history: Up walks back through the lines already
+    /// submitted, the oldest one holds, and Down past the newest brings back
+    /// the draft the first Up interrupted.
+    #[test]
+    fn history_walks_back_through_submitted_lines_and_restores_the_draft() {
+        let mut history = History::default();
+        history.remember("first");
+        history.remember("/model");
+
+        assert_eq!(history.previous("draft").as_deref(), Some("/model"));
+        assert_eq!(history.previous("draft").as_deref(), Some("first"));
+        assert_eq!(history.previous("draft"), None, "the oldest line holds");
+        assert_eq!(history.next().as_deref(), Some("/model"));
+        assert_eq!(
+            history.next().as_deref(),
+            Some("draft"),
+            "the draft returns"
+        );
+        assert_eq!(history.next(), None, "Down on the draft does nothing");
+    }
+
+    #[test]
+    fn an_empty_history_leaves_the_composer_alone() {
+        let mut history = History::default();
+        assert_eq!(history.previous("draft"), None);
+        assert_eq!(history.next(), None);
+    }
+
+    /// A resumed session's own prompts are recallable, so the history a
+    /// session starts with is the transcript it starts with.
+    #[test]
+    fn the_history_starts_from_the_transcripts_prompts() {
+        let entries = vec![
+            Entry {
+                kind: Some(EntryKind::User),
+                raw: "resumed prompt".to_string(),
+                ..Entry::default()
+            },
+            Entry {
+                kind: Some(EntryKind::Assistant),
+                raw: "the reply".to_string(),
+                ..Entry::default()
+            },
+        ];
+
+        assert_eq!(prompt_history(&entries), vec!["resumed prompt".to_string()]);
+    }
+
+    /// A recalled slash command reopens the suggestion panel, which owns
+    /// Up/Down itself. While a recall is in force the history keeps them, so
+    /// one command in the history cannot strand the keys walking it.
+    #[tokio::test]
+    async fn arrow_keys_recall_prompts_and_the_suggestion_panel_does_not_steal_them() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.history.remember("first");
+        app.history.remember("/model");
+
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.input.iter().collect::<String>(), "/model");
+        assert_eq!(app.cursor, app.input.len());
+        assert_eq!(app.scroll, None, "the transcript must not scroll");
+        assert!(!app.suggestions().is_empty(), "the panel is open on /model");
+
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.input.iter().collect::<String>(), "first");
+
+        // An edit ends the recall, so the panel owns the keys again and the
+        // next Up starts over from the newest line.
+        app.handle_key(
+            key(KeyCode::Char('!'), KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.input.iter().collect::<String>(), "/model");
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.input.iter().collect::<String>(), "first!");
+    }
+
+    #[tokio::test]
+    async fn a_submitted_line_enters_the_history() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.input = "  hello  ".chars().collect();
+        app.cursor = app.input.len();
+
+        app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+
+        assert_eq!(app.input.iter().collect::<String>(), "hello");
     }
 
     /// The suggestion panel's selection, the half `super::render`'s

@@ -13,6 +13,8 @@
 //! screens. Upgrade path: give any of these a dedicated layout if a user
 //! reports the shared one as confusing.
 
+use std::time::Duration;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -22,7 +24,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::app::App;
 use super::commands::{SLASH_COMMANDS, SlashCommand};
-use super::entries::EntryKind;
+use super::entries::{Entry, EntryKind};
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, escape_plain_text,
     escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
@@ -80,9 +82,12 @@ fn composer_height(app: &App, width: u16) -> u16 {
 }
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for entry in &app.entries {
-        lines.extend(entry_lines(entry));
+    let mut lines = transcript_lines(&app.entries);
+    if let Some(elapsed) = app.thinking() {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(thinking_line(elapsed));
     }
 
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
@@ -92,11 +97,68 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
-/// Renders one transcript entry. User/assistant/system/compaction/error text
-/// is markdown; tool call/result bodies are plain, pre-escaped text (Go
-/// never runs tool output through the markdown renderer either).
-fn entry_lines(entry: &super::entries::Entry) -> Vec<Line<'static>> {
+/// The whole transcript, one blank line between entries so a prompt, a
+/// reply, and a tool block read as separate blocks instead of one run of
+/// text.
+fn transcript_lines(entries: &[Entry]) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for entry in entries {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(entry_lines(entry));
+    }
+    lines
+}
+
+/// Spinner frames, in order. Same braille set Go's Bubble Tea spinner uses.
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// How long one [`SPINNER_FRAMES`] frame is held. [`super::drive_turn`]
+/// redraws on this interval for as long as a turn runs.
+pub(super) const SPINNER_FRAME: Duration = Duration::from_millis(100);
+
+/// The line shown under the transcript while a turn is in flight. A turn
+/// streams nothing between the prompt and the model's first token, so this
+/// is the only thing that distinguishes waiting from a hung terminal.
+fn thinking_line(elapsed: Duration) -> Line<'static> {
+    let frame = elapsed.as_millis() / SPINNER_FRAME.as_millis();
+    Line::styled(
+        format!(
+            "{} Thinking… {}s",
+            SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()],
+            elapsed.as_secs()
+        ),
+        Style::default().fg(Color::Magenta),
+    )
+}
+
+/// What a user entry's lines are prefixed with. The prompt is the one piece
+/// of transcript text the person reading the screen wrote themselves, so it
+/// carries a marker the model's output never has.
+const USER_PREFIX: &str = "> ";
+
+/// Renders one transcript entry. Assistant/system/compaction/error text is
+/// markdown; tool call/result bodies are plain, pre-escaped text (Go never
+/// runs tool output through the markdown renderer either), and so is a user
+/// prompt, which is typed as literal text rather than authored as markdown.
+///
+/// ponytail: the prefix is part of the line's text, so `Paragraph::wrap`
+/// puts no marker on the continuation rows of a prompt wider than the
+/// terminal. Upgrade path: wrap user text here (as `composer_lines` already
+/// does for the composer) and prefix every row if that is reported as
+/// confusing.
+fn entry_lines(entry: &Entry) -> Vec<Line<'static>> {
     match entry.kind {
+        Some(EntryKind::User) => escape_plain_text(&entry.raw)
+            .lines()
+            .map(|line| {
+                Line::styled(
+                    format!("{USER_PREFIX}{line}"),
+                    Style::default().fg(Color::Green),
+                )
+            })
+            .collect(),
         Some(EntryKind::Tool) => {
             let mut lines = vec![Line::from(Span::styled(
                 format!("[tool] {} ({})", entry.tool_name, entry.tool_call_id),
@@ -247,7 +309,7 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.busy {
+    let title = if app.busy() {
         "Working (Esc to cancel)"
     } else {
         "Otto"
@@ -266,7 +328,7 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         inner,
     );
 
-    if !app.busy {
+    if !app.busy() {
         frame.set_cursor_position((inner.x + caret_column, inner.y + caret_row - scroll));
     }
 }
@@ -403,6 +465,83 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| draw(frame, app)).expect("draw");
         format!("{}", terminal.backend())
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    /// The frame index and the elapsed count both come from one `Duration`,
+    /// so they cannot disagree about how long the turn has been running.
+    #[test]
+    fn the_thinking_frame_advances_with_elapsed_time() {
+        let at = |ms| line_text(&thinking_line(Duration::from_millis(ms)));
+
+        assert_eq!(at(0), "⠋ Thinking… 0s");
+        assert_eq!(at(100), "⠙ Thinking… 0s");
+        assert_eq!(at(1_000), "⠋ Thinking… 1s");
+    }
+
+    /// A turn streams nothing until the model's first token, so without this
+    /// line the transcript sits unchanged and the terminal looks hung.
+    #[tokio::test]
+    async fn a_running_turn_shows_the_thinking_line_under_the_transcript() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries.push(Entry {
+            kind: Some(EntryKind::User),
+            raw: "hello otto".to_string(),
+            ..Default::default()
+        });
+
+        let idle = rendered(&app, 40, 10);
+        app.start_turn();
+        let busy = rendered(&app, 40, 10);
+        app.end_turn();
+
+        assert!(!idle.contains("Thinking"), "idle transcript:\n{idle}");
+        assert!(busy.contains("Thinking"), "running transcript:\n{busy}");
+        assert!(!rendered(&app, 40, 10).contains("Thinking"));
+    }
+
+    /// A user entry and the reply that follows it rendered as adjacent,
+    /// identically styled lines, so there was nothing on screen to tell the
+    /// prompt from the model's answer.
+    #[test]
+    fn a_user_entry_is_marked_and_separated_from_the_entry_after_it() {
+        let entries = vec![
+            crate::tui::entries::Entry {
+                kind: Some(EntryKind::User),
+                raw: "hello otto".to_string(),
+                ..Default::default()
+            },
+            crate::tui::entries::Entry {
+                kind: Some(EntryKind::Assistant),
+                raw: "the reply".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let lines: Vec<String> = transcript_lines(&entries).iter().map(line_text).collect();
+
+        assert_eq!(lines, vec!["> hello otto", "", "the reply"]);
+    }
+
+    /// Every line of a multi-line prompt carries the marker, so a pasted
+    /// block cannot be read as part of the reply.
+    #[test]
+    fn every_line_of_a_multi_line_prompt_is_marked() {
+        let entries = vec![crate::tui::entries::Entry {
+            kind: Some(EntryKind::User),
+            raw: "first\nsecond".to_string(),
+            ..Default::default()
+        }];
+
+        let lines: Vec<String> = transcript_lines(&entries).iter().map(line_text).collect();
+
+        assert_eq!(lines, vec!["> first", "> second"]);
     }
 
     #[tokio::test]

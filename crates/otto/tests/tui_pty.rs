@@ -430,7 +430,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     // echoed into it.
     let screen = shared.screen.lock().unwrap().dump();
     assert!(
-        screen.contains(PROMPT),
+        screen.contains(&format!("> {PROMPT}")),
         "the submitted prompt is missing from the transcript:\n{screen}"
     );
     assert!(

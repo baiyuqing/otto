@@ -452,6 +452,18 @@ impl App {
             return None;
         }
         let Some(rest) = line.strip_prefix('/') else {
+            // Echo the prompt before the turn starts: [`App::apply_event`]
+            // only ever sees the model's side of the turn, so this is the
+            // sole writer of the user's own text into the live transcript.
+            // A later [`App::refresh`] rebuilds every entry from history,
+            // which holds this message once, so this cannot duplicate it.
+            self.entries.push(Entry {
+                id: format!("user-{}", self.entries.len()),
+                kind: Some(EntryKind::User),
+                raw: line.to_string(),
+                ..Entry::default()
+            });
+            self.scroll = None;
             return Some(Action::Prompt(line.to_string()));
         };
         if rest.is_empty() {
@@ -1401,5 +1413,30 @@ mod tests {
             &cancel,
         );
         assert_eq!(app.suggestion, 0);
+    }
+
+    /// The composer is cleared on Enter and no streamed `Event` carries the
+    /// submitted text, so without this echo the prompt is never visible in
+    /// the transcript the turn streams into.
+    #[tokio::test]
+    async fn submitting_a_prompt_echoes_it_into_the_transcript() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.input = "hello otto".chars().collect();
+        app.cursor = app.input.len();
+
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(matches!(&action, Some(Action::Prompt(line)) if line == "hello otto"));
+        let entry = app.entries.last().expect("entry");
+        assert_eq!(entry.kind, Some(EntryKind::User));
+        assert_eq!(entry.raw, "hello otto");
     }
 }

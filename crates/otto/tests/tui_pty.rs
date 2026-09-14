@@ -324,6 +324,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         .into_owned();
 
     let served = Arc::new(AtomicUsize::new(0));
+    const PROMPT: &str = "send the scripted prompt";
     const REPLY: &str = "reply visible over the pty smoke test";
     let base_url = serve(Script {
         replies: vec![text_reply(REPLY)],
@@ -413,7 +414,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     eprintln!("[tui_pty] saw workspace marker; typing prompt");
 
     master
-        .write_all(b"send the scripted prompt\r")
+        .write_all(format!("{PROMPT}\r").as_bytes())
         .expect("type the prompt");
     eprintln!("[tui_pty] waiting for reply {REPLY:?}");
     wait_for_screen_text(&shared, REPLY);
@@ -424,6 +425,14 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     // before that title clears would be silently swallowed.
     wait_for_screen_text_gone(&shared, "Working (Esc to cancel)");
     eprintln!("[tui_pty] turn finished");
+    // The composer was cleared on Enter, so the only thing that can still
+    // put the prompt on screen is the transcript entry the submission
+    // echoed into it.
+    let screen = shared.screen.lock().unwrap().dump();
+    assert!(
+        screen.contains(PROMPT),
+        "the submitted prompt is missing from the transcript:\n{screen}"
+    );
     assert!(
         served.load(Ordering::SeqCst) >= 1,
         "the loopback server was never called"

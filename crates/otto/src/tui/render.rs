@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::app::App;
-use super::commands::SLASH_COMMANDS;
+use super::commands::{self, SLASH_COMMANDS, SlashCommand};
 use super::entries::EntryKind;
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, escape_plain_text,
@@ -40,18 +40,25 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     }
 
     let composer_height = composer_height(app, area.width);
+    let suggestions = suggestions(app);
+    // Go's `calculateLayout` clamps the panel the same way: it may take every
+    // row the composer and footer leave except one, which the transcript keeps.
+    let suggestion_height =
+        (suggestions.len() as u16).min(area.height.saturating_sub(composer_height + 2));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
             Constraint::Length(1),
+            Constraint::Length(suggestion_height),
             Constraint::Length(composer_height),
         ])
         .split(area);
 
     draw_transcript(frame, app, chunks[0]);
     draw_footer(frame, app, chunks[1]);
-    draw_composer(frame, app, chunks[2]);
+    draw_suggestions(frame, &suggestions, chunks[2]);
+    draw_composer(frame, app, chunks[3]);
 
     if app.show_help {
         draw_help(frame, area);
@@ -155,6 +162,47 @@ fn footer_text(app: &App) -> String {
         Some(status) => format!("{} | {text}", escape_single_line_text(status)),
         None => text,
     }
+}
+
+/// The slash commands the composer's current value is a prefix of. Port of
+/// `Model.commandSuggestions`: an open overlay hides the panel.
+fn suggestions(app: &App) -> Vec<SlashCommand> {
+    if app.show_help || app.picker.is_some() {
+        return Vec::new();
+    }
+    let value: String = app.input.iter().collect();
+    commands::matching_slash_commands(&value)
+}
+
+/// The command list drawn directly above the composer while the value being
+/// typed is a command prefix. Port of `renderCommandSuggestions`.
+///
+/// ponytail: Go also tracks a selected row that up/down move and Tab
+/// accepts. Here the panel is display-only and Tab keeps
+/// [`super::app::App::complete`]'s longest-common-prefix completion, so
+/// up/down stay transcript scrolling. Upgrade path: add a selection index if
+/// picking a row by arrow keys is missed.
+fn draw_suggestions(frame: &mut Frame, suggestions: &[SlashCommand], area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+    let lines: Vec<Line<'static>> = suggestions
+        .iter()
+        .take(area.height as usize)
+        .map(|command| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<12}", command.name),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    command.description.to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
@@ -445,5 +493,40 @@ mod tests {
         app.scroll = Some(3);
         let scrolled = rendered(&app, MIN_TERMINAL_WIDTH, 12);
         assert!(!scrolled.contains("line 19"), "{scrolled}");
+    }
+
+    /// Port of the view half of Go's `TestCommandSuggestionsMatchPrefix` in
+    /// `internal/tui/completion_test.go`: a `/` prefix lists the matching
+    /// commands with their descriptions and leaves the others out.
+    #[tokio::test]
+    async fn a_slash_prefix_lists_matching_commands_with_descriptions() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.input = "/s".chars().collect();
+        app.cursor = app.input.len();
+
+        let content = rendered(&app, 100, 20);
+
+        assert!(content.contains("show session details"), "{content}");
+        assert!(content.contains("/sandbox"), "{content}");
+        assert!(!content.contains("show help"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn ordinary_input_and_an_open_overlay_show_no_suggestions() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.input = "hello".chars().collect();
+        app.cursor = app.input.len();
+        let ordinary = rendered(&app, 100, 20);
+        assert!(!ordinary.contains("show session details"), "{ordinary}");
+
+        app.input = "/s".chars().collect();
+        app.cursor = app.input.len();
+        app.picker = Some(Picker {
+            kind: PickerKind::Resume,
+            rows: Vec::new(),
+            selected: 0,
+        });
+        let overlaid = rendered(&app, 100, 20);
+        assert!(!overlaid.contains("show session details"), "{overlaid}");
     }
 }

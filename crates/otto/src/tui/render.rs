@@ -17,10 +17,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::app::App;
-use super::commands::{self, SLASH_COMMANDS, SlashCommand};
+use super::commands::{SLASH_COMMANDS, SlashCommand};
 use super::entries::EntryKind;
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, escape_plain_text,
@@ -40,7 +40,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     }
 
     let composer_height = composer_height(app, area.width);
-    let suggestions = suggestions(app);
+    let suggestions = app.suggestions();
     // Go's `calculateLayout` clamps the panel the same way: it may take every
     // row the composer and footer leave except one, which the transcript keeps.
     let suggestion_height =
@@ -57,7 +57,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
 
     draw_transcript(frame, app, chunks[0]);
     draw_footer(frame, app, chunks[1]);
-    draw_suggestions(frame, &suggestions, chunks[2]);
+    draw_suggestions(frame, app, &suggestions, chunks[2]);
     draw_composer(frame, app, chunks[3]);
 
     if app.show_help {
@@ -164,45 +164,36 @@ fn footer_text(app: &App) -> String {
     }
 }
 
-/// The slash commands the composer's current value is a prefix of. Port of
-/// `Model.commandSuggestions`: an open overlay hides the panel.
-fn suggestions(app: &App) -> Vec<SlashCommand> {
-    if app.show_help || app.picker.is_some() {
-        return Vec::new();
-    }
-    let value: String = app.input.iter().collect();
-    commands::matching_slash_commands(&value)
-}
-
 /// The command list drawn directly above the composer while the value being
-/// typed is a command prefix. Port of `renderCommandSuggestions`.
+/// typed is a command prefix, with [`super::app::App::suggestion`]'s row
+/// highlighted. Port of `renderCommandSuggestions`.
 ///
-/// ponytail: Go also tracks a selected row that up/down move and Tab
-/// accepts. Here the panel is display-only and Tab keeps
-/// [`super::app::App::complete`]'s longest-common-prefix completion, so
-/// up/down stay transcript scrolling. Upgrade path: add a selection index if
-/// picking a row by arrow keys is missed.
-fn draw_suggestions(frame: &mut Frame, suggestions: &[SlashCommand], area: Rect) {
-    if area.height == 0 {
+/// A [`List`] rather than a [`Paragraph`] so that ratatui's own
+/// [`ListState`] scrolls the selected row into view when the match list is
+/// longer than the rows [`draw`] could give the panel.
+fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[SlashCommand], area: Rect) {
+    if area.height == 0 || suggestions.is_empty() {
         return;
     }
-    let lines: Vec<Line<'static>> = suggestions
+    let items: Vec<ListItem> = suggestions
         .iter()
-        .take(area.height as usize)
         .map(|command| {
-            Line::from(vec![
+            ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{:<12}", command.name),
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(
-                    command.description.to_string(),
+                    command.description,
                     Style::default().add_modifier(Modifier::DIM),
                 ),
-            ])
+            ]))
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+    let list = List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state =
+        ListState::default().with_selected(Some(app.suggestion.min(suggestions.len() - 1)));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
@@ -245,23 +236,21 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
     let items: Vec<ListItem> = picker
         .rows
         .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let style = if index == picker.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::styled(row.label.clone(), style))
-        })
+        .map(|row| ListItem::new(row.label.clone()))
         .collect();
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(picker.kind.title()),
-    );
+    // Stateful so that ratatui windows the list around the selection, the way
+    // Go's `resumeVisibleRange` does: a picker lists up to
+    // `PICKER_LIST_LIMIT` sessions, more than the popup can show.
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(picker.kind.title()),
+        )
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default().with_selected(Some(picker.selected));
     frame.render_widget(Clear, popup);
-    frame.render_widget(list, popup);
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 
 /// A centered `percent_x` by `percent_y` rectangle within `area`. Standard
@@ -509,6 +498,62 @@ mod tests {
         assert!(content.contains("show session details"), "{content}");
         assert!(content.contains("/sandbox"), "{content}");
         assert!(!content.contains("show help"), "{content}");
+    }
+
+    /// Every row holding at least one reversed-video cell, as text: the rows
+    /// a list is marking as selected.
+    fn highlighted_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .filter_map(|y| {
+                let row: Vec<&ratatui::buffer::Cell> =
+                    (0..width).filter_map(|x| buffer.cell((x, y))).collect();
+                row.iter()
+                    .any(|cell| cell.style().add_modifier.contains(Modifier::REVERSED))
+                    .then(|| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            })
+            .collect()
+    }
+
+    /// The panel marks which row Tab or Enter would take, the way
+    /// [`draw_picker`] marks its own selection.
+    #[tokio::test]
+    async fn the_selected_suggestion_row_is_highlighted() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.input = "/s".chars().collect();
+        app.cursor = app.input.len();
+        app.suggestion = 1;
+
+        let highlighted = highlighted_rows(&app, 100, 20);
+
+        assert_eq!(highlighted.len(), 1, "{highlighted:?}");
+        assert!(highlighted[0].starts_with("/sandbox"), "{highlighted:?}");
+    }
+
+    /// Go's `resumeVisibleRange` windows the session list around its cursor.
+    /// A picker holds up to `PICKER_LIST_LIMIT` (50) rows, more than a popup
+    /// ever shows, so a selection below the fold has to scroll into view.
+    #[tokio::test]
+    async fn a_picker_scrolls_a_selection_below_the_fold_into_view() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.picker = Some(Picker {
+            kind: PickerKind::Resume,
+            rows: (0..50)
+                .map(|index| PickerRow {
+                    label: format!("session {index:02}"),
+                    value: format!("path-{index}"),
+                })
+                .collect(),
+            selected: 40,
+        });
+
+        let highlighted = highlighted_rows(&app, 100, 30);
+
+        assert_eq!(highlighted.len(), 1, "{highlighted:?}");
+        assert!(highlighted[0].contains("session 40"), "{highlighted:?}");
     }
 
     #[tokio::test]

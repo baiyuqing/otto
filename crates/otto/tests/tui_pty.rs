@@ -21,8 +21,8 @@
 //! `Cargo.lock`. [`Screen`] below implements exactly the vocabulary that
 //! output can contain: `CSI r;cH`/`f` (cursor position), `CSI ?25h`/`l`
 //! (cursor visibility, no grid effect), `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
-//! (mouse capture, no grid effect), `CSI ?1049h`/`l` (alt screen, no grid
-//! effect), `CSI ...m` (SGR, content-inert), and raw UTF-8 text. Any
+//! (mouse capture, no grid effect), `CSI ?1049h`/`l` (alt screen; enter
+//! resets the grid), `CSI ...m` (SGR, content-inert), CR/LF, and raw UTF-8 text. Any
 //! other control sequence is a bug (either in this scraper's assumptions or
 //! in the TUI emitting something unexpected) and fails the test loudly
 //! rather than silently mis-rendering.
@@ -96,6 +96,15 @@ impl Screen {
                 let params = self.pending[2..end].to_vec();
                 self.apply_csi(&params, final_byte)?;
                 self.pending.drain(..=end);
+                continue;
+            }
+            if first == b'\r' || first == b'\n' {
+                if first == b'\r' {
+                    self.x = 0;
+                } else {
+                    self.y = self.y.saturating_add(1).min(self.height.saturating_sub(1));
+                }
+                self.pending.remove(0);
                 continue;
             }
             if first < 0x20 || first == 0x7f {
@@ -177,9 +186,16 @@ impl Screen {
             {
                 Ok(())
             }
-            // Alternate screen enter/leave: content-inert here (the raw byte
-            // log, not the grid, is what the test asserts a clean restore on).
-            (true, b'h') | (true, b'l') if numbers == [1049] => Ok(()),
+            (true, b'h') if numbers == [1049] => {
+                for row in &mut self.cells {
+                    row.fill(' ');
+                }
+                self.x = 0;
+                self.y = 0;
+                Ok(())
+            }
+            // The raw byte log, not the grid, asserts the restored main screen.
+            (true, b'l') if numbers == [1049] => Ok(()),
             // SGR: content-inert (never changes which character occupies a cell).
             (false, b'm') => Ok(()),
             _ => Err(format!(
@@ -278,6 +294,17 @@ fn wait_for_raw_bytes(shared: &Shared, needle: &[u8]) {
             raw.windows(needle.len()).any(|window| window == needle)
         },
     );
+}
+
+#[test]
+fn screen_handles_carriage_return_and_line_feed() {
+    let mut screen = Screen::new(4, 2);
+
+    screen.feed(b"abc\rX\nY").expect("valid terminal text");
+    assert_eq!(screen.dump(), "Xbc \n Y  ");
+
+    screen.feed(b"\x1b[?1049hnew").expect("alternate screen");
+    assert_eq!(screen.dump(), "new \n    ");
 }
 
 #[test]

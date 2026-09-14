@@ -136,7 +136,7 @@ components:
       required: [sessions]
     Message:
       type: object
-      description: internal/model.Message; see internal/model for the full shape.
+      description: otto_core::model::Message; see crates/otto-core/src/model.rs for the full shape.
     TurnSummary:
       type: object
       properties:
@@ -165,7 +165,7 @@ components:
       required: [id, trigger, status, text, usage, usage_present, started_at]
     Task:
       type: object
-      description: internal/agent.Task; see internal/agent/tasks.go for the full shape.
+      description: app::Task; see crates/otto/src/app/tasks.rs for the full shape.
       properties:
         id:
           type: string
@@ -356,6 +356,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Session"
+        "400":
+          description: Invalid JSON body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           description: resume id not found
           content:
@@ -512,6 +518,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "500":
+          description: The turn could not be started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/turns/{turn_id}:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -585,6 +597,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TaskList"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}/tasks/{task_id}:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -651,7 +669,10 @@ paths:
                   description: Optional guidance for what the summary should preserve
       responses:
         "200":
-          description: Compaction finished (noop:true when there was nothing to compact)
+          description: >
+            Compaction finished (noop:true when there was nothing to compact).
+            The body is empty when the compaction was cancelled by process
+            shutdown, since there is no result to report.
           content:
             application/json:
               schema:

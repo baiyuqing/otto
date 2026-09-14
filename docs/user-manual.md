@@ -378,15 +378,15 @@ OTTO_UI=repl otto
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Submit the current prompt or an exact slash command |
+| `Enter` | Submit the current prompt, or run the highlighted slash-command suggestion |
 | `Tab` | Complete the selected slash-command suggestion |
-| `↑` / `↓` | Select a slash-command suggestion |
+| `↑` / `↓` | Select a slash-command suggestion, or scroll the transcript by one line |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle complete tool arguments/output and folded summaries |
 | `Shift`+drag | Select visible terminal text while mouse reporting is active |
 | Mouse wheel, `PgUp` / `PgDn` | Scroll the transcript |
-| `Home` / `End` | Jump to the top or bottom of the transcript |
+| `Home` / `End` | Move the cursor to the start or end of the composer |
 | `Esc` | Cancel the active turn or close the current overlay |
 | `Ctrl+C` | Cancel; a second press within one second clears and quits |
 

@@ -3,20 +3,9 @@
 //! escaping every piece of untrusted text goes through before it reaches a
 //! `ratatui::text::Span`.
 //!
-//! Port of the non-layout parts of `internal/tui/layout.go`. The actual
-//! field-by-field, width-adaptive footer assembly
-//! (`renderFooter`/`renderFooterCore`) and the hand-rolled wrap/clip helpers
-//! are not ported: ratatui's own `Paragraph::wrap` and `Layout` constraints
-//! already do line-wrapping and area-fitting, so `render.rs` builds the
-//! footer as a `ratatui::text::Line` and lets the widget size it, instead of
-//! reimplementing Go's manual width arithmetic and field-dropping cascade.
-//!
-//! ponytail: dropping the width-adaptive field cascade (workspace/usage/
-//! context/session fields disappearing one by one as the terminal narrows)
-//! is a real simplification, not just a reformat — narrow terminals show a
-//! shorter fixed footer instead of Go's exact cascade order. Upgrade path:
-//! port `renderFooter`'s cascade loop verbatim if a narrow-terminal user
-//! reports the fixed footer as unreadable.
+//! Port of the non-layout parts of `internal/tui/layout.go`. Ratatui owns
+//! wrapping and clipping, so `render.rs` puts essential footer fields first
+//! and lets the widget clip the rest.
 
 /// The smallest terminal ratatui's TUI will actually lay out. Below this,
 /// [`crate::tui::run`] shows the "terminal is too small" message instead of

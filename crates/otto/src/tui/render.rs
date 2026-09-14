@@ -82,10 +82,8 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     let total_lines = paragraph.line_count(area.width) as u16;
-    let scroll = match app.scroll {
-        Some(offset) => offset,
-        None => total_lines.saturating_sub(area.height),
-    };
+    let bottom = total_lines.saturating_sub(area.height);
+    let scroll = bottom.saturating_sub(app.scroll.unwrap_or(0));
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
@@ -350,5 +348,21 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &app))
             .expect("draw with wide/unbroken content");
+    }
+
+    #[tokio::test]
+    async fn manual_scroll_moves_up_from_the_bottom() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.push_system(
+            (0..20)
+                .map(|line| format!("line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+
+        assert!(rendered(&app, MIN_TERMINAL_WIDTH, 12).contains("line 19"));
+        app.scroll = Some(3);
+        let scrolled = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        assert!(!scrolled.contains("line 19"), "{scrolled}");
     }
 }

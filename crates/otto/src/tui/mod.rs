@@ -18,7 +18,10 @@ mod render;
 
 use std::future::Future;
 
-use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind,
+    MouseEventKind,
+};
 use otto_core::agent::Event;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
@@ -32,29 +35,67 @@ use app::{Action, App};
 
 /// Runs the terminal frontend to completion. Port of `internal/tui.Run`.
 ///
-/// Enters the alternate screen and raw mode, restored on return *and* on
-/// panic, by [`ratatui::try_init`]/[`ratatui::try_restore`] (`try_init`
-/// installs the restoring panic hook itself; no custom hook is needed).
+/// Enters the alternate screen, raw mode, and mouse capture, all restored on
+/// return and panic.
 pub(crate) async fn run(
     controller: &Controller,
     cancel: &CancellationToken,
 ) -> Result<(), ReplError> {
     let mut terminal = ratatui::try_init().map_err(io_error)?;
+    let mouse_capture = match MouseCapture::enable() {
+        Ok(capture) => capture,
+        Err(error) => {
+            let _ = ratatui::try_restore();
+            return Err(io_error(error));
+        }
+    };
     let result = run_app(&mut terminal, controller, cancel).await;
+    drop(mouse_capture);
     let _ = ratatui::try_restore();
     result
+}
+
+struct MouseCapture;
+
+impl MouseCapture {
+    fn enable() -> std::io::Result<Self> {
+        crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for MouseCapture {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    }
 }
 
 fn io_error(error: std::io::Error) -> ReplError {
     ReplError::Input(error.to_string())
 }
 
-/// One event [`spawn_key_reader`] forwards to the main loop: either a
-/// keypress, or any other terminal event (currently just a resize) that
-/// only needs a redraw.
+/// One event [`spawn_key_reader`] forwards to the main loop: either a keypress
+/// (including a mouse wheel event mapped to the existing scroll keys), or a
+/// resize that only needs a redraw.
 enum TuiEvent {
     Key(KeyEvent),
     Redraw,
+}
+
+fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
+    match event {
+        TermEvent::Key(key) if key.kind == KeyEventKind::Press => Some(TuiEvent::Key(key)),
+        TermEvent::Mouse(mouse) => Some(TuiEvent::Key(
+            match mouse.kind {
+                MouseEventKind::ScrollUp => KeyCode::Up,
+                MouseEventKind::ScrollDown => KeyCode::Down,
+                _ => return None,
+            }
+            .into(),
+        )),
+        TermEvent::Resize(_, _) => Some(TuiEvent::Redraw),
+        _ => None,
+    }
 }
 
 /// Reads terminal events on a blocking OS thread. Unlike `cli::repl`'s
@@ -75,13 +116,10 @@ fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
     let (sender, receiver) = mpsc::channel(1);
     std::thread::spawn(move || {
         while let Ok(event) = crossterm::event::read() {
-            let forwarded = match event {
-                TermEvent::Key(key) if key.kind == KeyEventKind::Press => TuiEvent::Key(key),
-                TermEvent::Resize(_, _) => TuiEvent::Redraw,
-                // ponytail: focus/paste/key-release events have no Go
-                // equivalent to port and nothing in `App` reacts to them;
-                // dropped rather than forwarded as a no-op redraw.
-                _ => continue,
+            // ponytail: focus/paste/key-release and non-wheel mouse events
+            // have no behavior; drop them instead of redrawing.
+            let Some(forwarded) = map_terminal_event(event) else {
+                continue;
             };
             if sender.blocking_send(forwarded).is_err() {
                 break;
@@ -396,5 +434,31 @@ async fn login_dispatch(
             }
         }
         Err(error) => app.push_system(format!("/login: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+
+    use super::*;
+
+    #[test]
+    fn mouse_wheel_uses_the_existing_scroll_keys() {
+        let key_code = |kind| {
+            let event = TermEvent::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            });
+            match map_terminal_event(event) {
+                Some(TuiEvent::Key(key)) => Some(key.code),
+                _ => None,
+            }
+        };
+
+        assert_eq!(key_code(MouseEventKind::ScrollUp), Some(KeyCode::Up));
+        assert_eq!(key_code(MouseEventKind::ScrollDown), Some(KeyCode::Down));
     }
 }

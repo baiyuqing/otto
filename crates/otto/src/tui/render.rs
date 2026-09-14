@@ -17,7 +17,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::app::App;
 use super::commands::SLASH_COMMANDS;
@@ -212,6 +212,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
             .borders(Borders::ALL)
             .title(picker.kind.title()),
     );
+    frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
 }
 
@@ -296,6 +297,7 @@ mod tests {
 
     use super::*;
     use crate::cli::testutil;
+    use crate::tui::app::{Picker, PickerKind, PickerRow};
 
     async fn app_fixture() -> (tempfile::TempDir, tempfile::TempDir, App) {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -310,6 +312,42 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| draw(frame, app)).expect("draw");
         format!("{}", terminal.backend())
+    }
+
+    #[tokio::test]
+    async fn picker_clears_the_transcript_beneath_it() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.push_system(
+            (0..40)
+                .map(|_| "X".repeat(100))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        app.picker = Some(Picker {
+            kind: PickerKind::Resume,
+            rows: vec![PickerRow {
+                label: "session".to_string(),
+                value: "path".to_string(),
+            }],
+            selected: 0,
+        });
+
+        let width = 100;
+        let height = 30;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw");
+        let popup = centered_rect(80, 70, Rect::new(0, 0, width, height));
+
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((popup.x + 1, popup.y + 2))
+                .expect("popup cell")
+                .symbol(),
+            " "
+        );
     }
 
     /// Port of the guard half of Go's `calculateLayout`/`smallTerminalView`:

@@ -49,6 +49,9 @@ pub(crate) const REMEMBER_USAGE: &str =
 pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
 /// Go's `repl.tasksCommand` message when no runner carries a registry.
 const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
+/// The `/task` argument forms, as the README and the user manual document
+/// them. [`super::super::tui`] prints the same line for the same input.
+pub(crate) const TASK_USAGE: &str = "usage: /task <id|name> | /task cancel <id|name>";
 
 impl Controller {
     /// Port of `app.MemoryManagerAndScopes`: the bound service and its two
@@ -302,10 +305,7 @@ impl Repl<'_> {
             return;
         }
         if fields.len() != 1 || fields[0] == "cancel" {
-            let _ = writeln!(
-                self.stderr,
-                "usage: /task <id|name> | /task cancel <id|name>"
-            );
+            let _ = writeln!(self.stderr, "{TASK_USAGE}");
             return;
         }
         let id = fields[0];

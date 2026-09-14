@@ -765,10 +765,6 @@ impl App {
                 None
             }
             SlashCommandKind::Task => {
-                if args.is_empty() {
-                    self.push_system(format!("unknown command: {line}"));
-                    return None;
-                }
                 self.push_system(task_report(controller, &args));
                 None
             }
@@ -1012,24 +1008,44 @@ fn tasks_report(controller: &Controller) -> String {
     list.iter().map(task_line).collect::<Vec<_>>().join("\n")
 }
 
+/// One parsed `/task` argument list. `/task` is completable from the command
+/// table, so a bare `/task` answers with its usage instead of being rejected
+/// as an unknown command.
+#[derive(Debug, PartialEq, Eq)]
+enum TaskRequest<'a> {
+    Show(&'a str),
+    Cancel(&'a str),
+    Usage,
+}
+
+/// Splits `/task` arguments into the forms `repl_commands::task_command`
+/// accepts: `<id|name>` shows a task, `cancel <id|name>` cancels one.
+fn parse_task_args(args: &str) -> TaskRequest<'_> {
+    match args.split_whitespace().collect::<Vec<_>>()[..] {
+        ["cancel", reference] => TaskRequest::Cancel(reference),
+        [reference] if reference != "cancel" => TaskRequest::Show(reference),
+        _ => TaskRequest::Usage,
+    }
+}
+
 fn task_report(controller: &Controller, args: &str) -> String {
-    let mut parts = args.split_whitespace();
-    let Some(reference) = parts.next() else {
-        return "usage: /task <id> [cancel]".to_string();
-    };
-    let cancel = parts.next() == Some("cancel");
+    let request = parse_task_args(args);
+    if request == TaskRequest::Usage {
+        return repl_commands::TASK_USAGE.to_string();
+    }
     let Some(tasks) = controller.tasks() else {
         return "task not found".to_string();
     };
-    if cancel {
-        return match tasks.cancel(reference) {
+    match request {
+        TaskRequest::Cancel(reference) => match tasks.cancel(reference) {
             Ok(()) => format!("Cancelled task: {reference}"),
             Err(message) => format!("/task {reference} cancel: {message}"),
-        };
-    }
-    match tasks.get(reference) {
-        Some(task) => task_line(&task),
-        None => "task not found".to_string(),
+        },
+        TaskRequest::Show(reference) => match tasks.get(reference) {
+            Some(task) => task_line(&task),
+            None => "task not found".to_string(),
+        },
+        TaskRequest::Usage => unreachable!("returned above"),
     }
 }
 
@@ -1154,6 +1170,18 @@ mod tests {
         // so it is safe to exercise without one by checking state alone.
         assert!(!app.input.is_empty());
         let _ = event;
+    }
+
+    #[test]
+    fn task_arguments_accept_only_the_documented_forms() {
+        assert!(matches!(parse_task_args(""), TaskRequest::Usage));
+        assert!(matches!(parse_task_args("cancel"), TaskRequest::Usage));
+        assert!(matches!(parse_task_args("t7 cancel"), TaskRequest::Usage));
+        assert!(matches!(parse_task_args("  t7 "), TaskRequest::Show("t7")));
+        assert!(matches!(
+            parse_task_args("cancel t7"),
+            TaskRequest::Cancel("t7")
+        ));
     }
 
     #[test]

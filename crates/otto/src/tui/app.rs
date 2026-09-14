@@ -27,7 +27,7 @@ use otto_core::session::types::SessionInfo;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::tasks::{Task, TaskStatus};
-use crate::app::{Controller, PROFILE_SWITCH_UNAVAILABLE};
+use crate::app::{Controller, Info, PROFILE_SWITCH_UNAVAILABLE};
 use crate::cli::login;
 use crate::cli::repl_commands;
 
@@ -119,7 +119,7 @@ pub(crate) enum Action {
 pub(crate) struct App {
     pub entries: Vec<Entry>,
     pub usage: Usage,
-    pub workspace: String,
+    pub info: Info,
     pub input: Vec<char>,
     pub cursor: usize,
     /// `None` follows the bottom of the transcript; `Some(n)` stays `n`
@@ -140,7 +140,7 @@ impl App {
         Self {
             entries,
             usage,
-            workspace: controller.workspace().to_string(),
+            info: controller.info(),
             input: Vec::new(),
             cursor: 0,
             scroll: None,
@@ -167,7 +167,13 @@ impl App {
         let (entries, usage) = entries::entries_from_history(&controller.history());
         self.entries = entries;
         self.usage = usage;
+        self.info = controller.info();
         self.scroll = None;
+    }
+
+    pub fn refresh_info(&mut self, controller: &Controller) {
+        self.info = controller.info();
+        self.usage = self.info.usage;
     }
 
     /// Appends one informational line, e.g. a command's result or an error
@@ -869,7 +875,7 @@ mod tests {
         let mut app = App {
             entries: Vec::new(),
             usage: Usage::default(),
-            workspace: String::new(),
+            info: Info::default(),
             input: Vec::new(),
             cursor: 0,
             scroll: None,
@@ -890,7 +896,7 @@ mod tests {
         let mut app = App {
             entries: Vec::new(),
             usage: Usage::default(),
-            workspace: String::new(),
+            info: Info::default(),
             input: "hello".chars().collect(),
             cursor: 5,
             scroll: None,
@@ -911,7 +917,7 @@ mod tests {
         let app = App {
             entries: Vec::new(),
             usage: Usage::default(),
-            workspace: String::new(),
+            info: Info::default(),
             input: "abc".chars().collect(),
             cursor: 3,
             scroll: None,

@@ -19,7 +19,7 @@ mod render;
 use std::future::Future;
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEvent, KeyEventKind,
     MouseEventKind,
 };
 use otto_core::agent::Event;
@@ -74,25 +74,28 @@ fn io_error(error: std::io::Error) -> ReplError {
     ReplError::Input(error.to_string())
 }
 
-/// One event [`spawn_key_reader`] forwards to the main loop: either a keypress
-/// (including a mouse wheel event mapped to the existing scroll keys), or a
-/// resize that only needs a redraw.
+/// One event [`spawn_key_reader`] forwards to the main loop: a keypress, one
+/// mouse-wheel notch, or a resize that only needs a redraw.
+///
+/// The wheel is its own variant rather than a synthesized `Up`/`Down` key,
+/// because the composer's own Up/Down recall prompt history
+/// ([`app::History`]); a wheel notch always scrolls the transcript.
 enum TuiEvent {
     Key(KeyEvent),
+    Wheel { up: bool },
     Redraw,
 }
 
 fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
     match event {
         TermEvent::Key(key) if key.kind == KeyEventKind::Press => Some(TuiEvent::Key(key)),
-        TermEvent::Mouse(mouse) => Some(TuiEvent::Key(
-            match mouse.kind {
-                MouseEventKind::ScrollUp => KeyCode::Up,
-                MouseEventKind::ScrollDown => KeyCode::Down,
+        TermEvent::Mouse(mouse) => Some(TuiEvent::Wheel {
+            up: match mouse.kind {
+                MouseEventKind::ScrollUp => true,
+                MouseEventKind::ScrollDown => false,
                 _ => return None,
-            }
-            .into(),
-        )),
+            },
+        }),
         TermEvent::Resize(_, _) => Some(TuiEvent::Redraw),
         _ => None,
     }
@@ -148,6 +151,13 @@ async fn run_app(
         let Some(event) = event else { return Ok(()) };
         let key = match event {
             TuiEvent::Key(key) => key,
+            TuiEvent::Wheel { up } => {
+                app.scroll_wheel(up);
+                terminal
+                    .draw(|frame| render::draw(frame, &app))
+                    .map_err(io_error)?;
+                continue;
+            }
             TuiEvent::Redraw => {
                 terminal
                     .draw(|frame| render::draw(frame, &app))
@@ -276,11 +286,17 @@ async fn drive_turn<T, E>(
 /// cancel it, the scroll keys move the transcript, and everything else is
 /// dropped the way [`App::handle_key`]'s `busy()` branch drops it.
 ///
-/// Scrolling has to work here and not only between turns: the wheel arrives
-/// as [`KeyCode::Up`]/[`KeyCode::Down`] (see [`map_terminal_event`]), and a
-/// streaming turn is when there is most output to read back through.
+/// Scrolling has to work here and not only between turns: a streaming turn
+/// is when there is most output to read back through.
 fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
-    let TuiEvent::Key(key) = event else { return };
+    let key = match event {
+        TuiEvent::Key(key) => key,
+        TuiEvent::Wheel { up } => {
+            app.scroll_wheel(up);
+            return;
+        }
+        TuiEvent::Redraw => return,
+    };
     if App::is_interrupt_key(&key) {
         turn.cancel();
     } else {
@@ -491,9 +507,12 @@ mod tests {
 
     use super::*;
 
+    /// The wheel must not reach the composer's keys: Up/Down there recall
+    /// prompt history, so a wheel notch mapped onto them would scroll the
+    /// history instead of the transcript.
     #[test]
-    fn mouse_wheel_uses_the_existing_scroll_keys() {
-        let key_code = |kind| {
+    fn mouse_wheel_scrolls_without_becoming_a_composer_key() {
+        let wheel = |kind| {
             let event = TermEvent::Mouse(MouseEvent {
                 kind,
                 column: 0,
@@ -501,19 +520,19 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             });
             match map_terminal_event(event) {
-                Some(TuiEvent::Key(key)) => Some(key.code),
+                Some(TuiEvent::Wheel { up }) => Some(up),
                 _ => None,
             }
         };
 
-        assert_eq!(key_code(MouseEventKind::ScrollUp), Some(KeyCode::Up));
-        assert_eq!(key_code(MouseEventKind::ScrollDown), Some(KeyCode::Down));
+        assert_eq!(wheel(MouseEventKind::ScrollUp), Some(true));
+        assert_eq!(wheel(MouseEventKind::ScrollDown), Some(false));
+        assert!(wheel(MouseEventKind::Moved).is_none());
     }
 
     /// The reported bad experience: while a turn streamed, every key but the
-    /// interrupt keys was dropped, so the wheel (mapped to `Up`/`Down` by
-    /// [`map_terminal_event`]) did nothing at exactly the moment there was
-    /// output to scroll back through.
+    /// interrupt keys was dropped, so the wheel did nothing at exactly the
+    /// moment there was output to scroll back through.
     #[tokio::test]
     async fn a_turn_scrolls_on_the_wheel_and_still_cancels_on_esc() {
         let workspace = tempfile::tempdir().expect("workspace");

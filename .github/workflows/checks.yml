@@ -41,7 +41,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
+        run: |
+          wasm-pack --version 2>/dev/null | grep -qx 'wasm-pack 0.15.0' ||
+            cargo install wasm-pack --version 0.15.0 --locked --force
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'

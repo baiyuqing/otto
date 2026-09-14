@@ -122,10 +122,9 @@ pub(crate) struct App {
     pub workspace: String,
     pub input: Vec<char>,
     pub cursor: usize,
-    /// `None` follows the bottom of the transcript; `Some(n)` pins the top
-    /// visible wrapped line, set by manual scrolling. Port of Go's
-    /// `autoFollow` (inverted: Go stores a bool and the last offset
-    /// separately, this folds both into one field).
+    /// `None` follows the bottom of the transcript; `Some(n)` stays `n`
+    /// wrapped lines above it. Port of Go's `autoFollow` (inverted: Go stores
+    /// a bool and the last offset separately, this folds both into one field).
     pub scroll: Option<u16>,
     pub picker: Option<Picker>,
     pub show_help: bool,
@@ -199,6 +198,17 @@ impl App {
     fn arm_ctrl_c(&mut self, now: Instant) {
         self.ctrl_c_armed_at = Some(now);
         self.status = Some(CTRL_C_EXIT_STATUS.to_string());
+    }
+
+    fn scroll_up(&mut self, lines: u16) {
+        self.scroll = Some(self.scroll.unwrap_or(0).saturating_add(lines));
+    }
+
+    fn scroll_down(&mut self, lines: u16) {
+        self.scroll = match self.scroll {
+            Some(offset) if offset > lines => Some(offset - lines),
+            _ => None,
+        };
     }
 
     /// Port of `handleCtrlC`'s idle branch: a lone Ctrl+C clears the composer
@@ -332,19 +342,19 @@ impl App {
                 None
             }
             KeyCode::Up => {
-                self.scroll = Some(self.scroll.unwrap_or(u16::MAX).saturating_sub(1));
+                self.scroll_up(1);
                 None
             }
             KeyCode::Down => {
-                self.scroll = Some(self.scroll.map_or(0, |scroll| scroll.saturating_add(1)));
+                self.scroll_down(1);
                 None
             }
             KeyCode::PageUp => {
-                self.scroll = Some(self.scroll.unwrap_or(u16::MAX).saturating_sub(10));
+                self.scroll_up(10);
                 None
             }
             KeyCode::PageDown => {
-                self.scroll = Some(self.scroll.map_or(0, |scroll| scroll.saturating_add(10)));
+                self.scroll_down(10);
                 None
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -942,6 +952,20 @@ mod tests {
             compaction_line(&estimated),
             "[context] compacted 12k \u{2192} 4k tokens"
         );
+    }
+
+    #[tokio::test]
+    async fn scroll_keys_track_lines_above_the_bottom() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.scroll, Some(1));
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+        assert_eq!(app.scroll, None);
     }
 
     // Port of `internal/tui/memory_test.go` against this module's own unit

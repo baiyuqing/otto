@@ -112,6 +112,7 @@ pub(crate) enum Action {
     Resume(String),
     Archive(String),
     SandboxReload,
+    Approve(String),
     Login(String),
 }
 
@@ -739,6 +740,14 @@ impl App {
                 } else {
                     self.push_system(format!("unknown command: /sandbox {args}"));
                     None
+                }
+            }
+            SlashCommandKind::Approve => {
+                if args.is_empty() || args.contains(char::is_whitespace) {
+                    self.push_system(format!("unknown command: {line}"));
+                    None
+                } else {
+                    Some(Action::Approve(args))
                 }
             }
             SlashCommandKind::Login => Some(Action::Login(args)),

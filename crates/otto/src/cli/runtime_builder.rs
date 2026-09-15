@@ -422,6 +422,7 @@ pub struct Builder {
     pub no_session: bool,
     pub overrides: Overrides,
     pub command_executor: Option<Arc<dyn CommandExecutor>>,
+    pub bash_approvals: Option<Arc<bash::BashApprovals>>,
     pub sandbox_environment: Option<Vec<String>>,
     pub sandbox_info: SandboxInfo,
     pub sandbox_secrets: Vec<String>,
@@ -465,7 +466,10 @@ impl Builder {
             .collect();
         definitions.extend(self.boundary_memory_definitions(max_output));
         if self.planned_bash_available() {
-            definitions.push(bash::bash_definition());
+            definitions.push(match self.bash_approvals.is_some() {
+                true => bash::bash_definition_with_approvals(),
+                false => bash::bash_definition(),
+            });
         }
         let dynamic =
             boundary::secret_redactor(&self.boundary_inputs(), runtime).allows_dynamic_content();
@@ -593,7 +597,7 @@ impl Builder {
                 .command_executor
                 .clone()
                 .expect("bash_configured implies an executor");
-            let tool = bash::BashTool::new(
+            let mut tool = bash::BashTool::new(
                 self.workspace,
                 executor,
                 &self.shell,
@@ -603,6 +607,9 @@ impl Builder {
                 &redaction_values,
             )
             .map_err(|error| format!("create bash tool: {error}"))?;
+            if let Some(approvals) = &self.bash_approvals {
+                tool = tool.with_approvals(session.header().id, Arc::clone(approvals));
+            }
             tools.push(Box::new(tool));
         }
         let mut warnings = std::io::stderr();
@@ -945,6 +952,7 @@ mod tests {
             auth_credentials_loaded: false,
             overrides: Overrides::default(),
             command_executor: None,
+            bash_approvals: None,
             sandbox_environment: None,
             sandbox_info: SandboxInfo::unavailable(SandboxReason::SeatbeltMissing),
             sandbox_secrets: Vec::new(),
@@ -1033,6 +1041,46 @@ mod tests {
             .expect("runner");
         let names = tool_names(&runner);
         assert_eq!(names.iter().position(|name| name == "bash"), Some(6));
+    }
+
+    #[tokio::test]
+    async fn only_the_parent_bash_tool_advertises_temporary_elevation() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut builder = builder(dir.path());
+        with_bash(&mut builder, dir.path());
+        let elevated = Executor::new(
+            Arc::new(DirectDriver::new()),
+            Policy {
+                filesystem: FilesystemMode::Unconfined,
+                network: NetworkMode::Allow,
+            },
+            dir.path(),
+        )
+        .expect("elevated executor");
+        builder.bash_approvals = Some(Arc::new(bash::BashApprovals::new(
+            Arc::new(elevated),
+            vec!["HOME=/real-home".to_string()],
+        )));
+        let session = SharedSession::memory(Header {
+            id: "session-1".to_string(),
+            ..Header::default()
+        });
+
+        let runner = builder
+            .build_runner(&session, &runtime())
+            .await
+            .expect("runner");
+        let bash = runner
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "bash")
+            .expect("parent bash");
+        assert!(
+            bash.parameters
+                .expect("schema")
+                .get()
+                .contains("require_escalated")
+        );
     }
 
     #[test]

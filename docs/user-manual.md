@@ -428,6 +428,9 @@ Shared commands:
   printing the new state. It is rejected while a turn is in flight, and a
   failed reload keeps the previous sandbox in place. `allow_env` changes and a
   sandbox that was unavailable at startup still need a restart.
+- `/approve <id>` grants one pending elevated Bash command and immediately asks
+  Otto to retry it. The grant is tied to the current session and exact command,
+  is consumed once, and expires after five minutes.
 - `/skills` lists the skills available in the current session.
 - `/skill <name>` displays one skill's description, location, and instructions.
 - `/exit` exits when idle (REPL EOF also exits).
@@ -675,6 +678,15 @@ If you explicitly select `--sandbox off`, Otto prints a persistent local warning
 and `bash` runs unsandboxed as your current macOS user. In that mode,
 `network = "deny"`, private-home/cache replacement, and `read_paths` no longer
 constrain the shell.
+
+In an interactive parent session using Seatbelt, the model may set
+`sandbox_permissions` to `require_escalated` and provide a justification. Otto
+does not run the command; it returns an approval ID. Review the exact command
+and reason, then enter `/approve <id>`. The matching command runs once through
+the existing unconfined driver with the same filtered environment rules as
+other Bash commands. Approval is never automatic, is unavailable to child
+agents and one-shot `--approve` runs, expires after five minutes, and does not
+modify sandbox configuration.
 
 ### Seatbelt limitations
 

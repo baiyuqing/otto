@@ -34,13 +34,11 @@ pub enum SlashCommandKind {
     Skill,
     Skills,
     Sandbox,
+    Approve,
 }
 
-/// The command table, in the exact order Go declares it (completion and
-/// `/help` both rely on this order). Note `/task` (singular) is a real Go
-/// command handled by `command()` but is NOT itself completable from this
-/// table in Go's `slashCommands` var... actually it *is* listed (Go's table
-/// includes both `/tasks` and `/task`); kept here for exact parity.
+/// The command table used by completion and `/help`. The inherited commands
+/// keep Go's order; `/approve` sits beside the sandbox command it controls.
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -86,6 +84,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/sandbox",
         description: "show sandbox state, or reload the [sandbox] configuration",
         kind: SlashCommandKind::Sandbox,
+    },
+    SlashCommand {
+        name: "/approve",
+        description: "allow one exact elevated Bash command",
+        kind: SlashCommandKind::Approve,
     },
     SlashCommand {
         name: "/memory",

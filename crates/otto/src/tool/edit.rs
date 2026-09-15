@@ -36,7 +36,7 @@ const MAX_DIFF_BYTES: usize = 4096;
 /// The wire shape of edit arguments. Port of `editRequest`: optional fields
 /// distinguish an absent key from an empty string so that `"new_text": ""`
 /// stays a valid deletion. Exactly one of `old_text`/`new_text` or `edits`
-/// must be present.
+/// must be present; an empty `edits` array counts as absent.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditRequest {
@@ -79,25 +79,30 @@ struct ResolvedEdit {
 impl EditRequest {
     /// Port of `editRequest.replacements`.
     fn replacements(&self) -> Result<Vec<EditReplacement>, String> {
-        if self.edits.is_some() && (self.old_text.is_some() || self.new_text.is_some()) {
-            return Err(
-                "invalid arguments: pass either old_text and new_text or edits, not both"
-                    .to_owned(),
-            );
-        }
-        let Some(edits) = &self.edits else {
-            return Ok(vec![replacement(
+        let single = self.old_text.is_some() || self.new_text.is_some();
+        // An empty `edits` array reads as the absent key: models emit it as a
+        // placeholder next to old_text/new_text.
+        match self.edits.as_deref() {
+            Some(edits) if !edits.is_empty() => {
+                if single {
+                    return Err(
+                        "invalid arguments: pass either old_text and new_text or edits, not both"
+                            .to_owned(),
+                    );
+                }
+                edits
+                    .iter()
+                    .map(|item| replacement(item.old_text.as_deref(), item.new_text.as_deref()))
+                    .collect()
+            }
+            Some(_) if !single => {
+                Err("invalid argument edits: must contain at least one replacement".to_owned())
+            }
+            _ => Ok(vec![replacement(
                 self.old_text.as_deref(),
                 self.new_text.as_deref(),
-            )?]);
-        };
-        if edits.is_empty() {
-            return Err("invalid argument edits: must contain at least one replacement".to_owned());
+            )?]),
         }
-        edits
-            .iter()
-            .map(|item| replacement(item.old_text.as_deref(), item.new_text.as_deref()))
-            .collect()
     }
 }
 
@@ -912,18 +917,23 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a b c\n");
     }
 
-    /// Port of `TestEditAllowsNullEditsWithSingleReplacement`.
+    /// Port of `TestEditAllowsNullEditsWithSingleReplacement`, extended to the
+    /// empty array models send in the same placeholder position.
     #[tokio::test]
-    async fn a_null_edits_key_allows_a_single_replacement() {
-        let (root, path) = sample("a\n");
-        let workspace = workspace(root.path());
-        let result = run(
-            &EditTool::new(&workspace),
-            r#"{"path":"sample.txt","old_text":"a","new_text":"A","edits":null}"#,
-        )
-        .await;
-        assert!(!result.is_error, "{result:?}");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\n");
+    async fn an_empty_edits_key_allows_a_single_replacement() {
+        for edits in ["null", "[]"] {
+            let (root, path) = sample("a\n");
+            let workspace = workspace(root.path());
+            let result = run(
+                &EditTool::new(&workspace),
+                &format!(
+                    r#"{{"path":"sample.txt","old_text":"a","new_text":"A","edits":{edits}}}"#
+                ),
+            )
+            .await;
+            assert!(!result.is_error, "{edits}: {result:?}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\n");
+        }
     }
 
     #[tokio::test]

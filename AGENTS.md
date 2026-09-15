@@ -30,7 +30,7 @@ Apply these requirements to every feature, fix, and refactor:
 
 ## Change rules
 
-- Use a dedicated Git worktree and development branch for every feature or bug fix; never implement directly on `main`.
+- Use a dedicated Git worktree at `.worktree/<name>` under the primary checkout (never a sibling directory) and a development branch for every feature or bug fix; never implement directly on `main`.
 - If a design or spec is needed, get explicit approval before writing production code or tests. After approval, implement and verify the agreed scope without repeated confirmation; ask only for material scope or contract changes.
 - TDD is required for feature work and bug fixes: failing test first, smallest RED run, minimal change, focused GREEN run, then broader relevant gates. Docs-only changes are exempt.
 - The parent owns planning, interfaces, integration review, and acceptance. Delegated work has bounded file ownership; hand off overlapping file ownership and preserve other workers' changes.

@@ -15,6 +15,7 @@
 //!
 //! Security: a child never receives the agent-control or memory tools, so it
 //! can neither start children of its own nor read or write long-term memory.
+//! It also never receives `remind`, which wakes the parent session.
 //! A definition's `tools` list can only narrow the set the runner already
 //! built, never widen it. Definition bodies are untrusted text, appended to
 //! the child's system prompt under a fixed `## Sub-agent role` heading.
@@ -62,9 +63,9 @@ use crate::tool::registry::Registry;
 use crate::tool::result::capped_text_result;
 
 /// Tools a child never receives: the agent-control tools, because delegation
-/// depth is fixed at one, and the memory tools, because a child gets no memory
-/// binding.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 8] = [
+/// depth is fixed at one; the memory tools, because a child gets no memory
+/// binding; and `remind`, which wakes the parent session.
+pub const EXCLUDED_CHILD_TOOLS: [&str; 9] = [
     "agent",
     "agent_wait",
     "agent_status",
@@ -73,6 +74,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 8] = [
     "remember",
     "forget",
     "memory_search",
+    "remind",
 ];
 
 /// Appended to a child's system prompt under `## Sub-agent role` when it has

@@ -1,3 +1,5 @@
+# Feature worktrees: `git worktree add .worktree/<name> -b feat/...`
+.worktree/
 .worktrees/
 .superpowers/
 /otto

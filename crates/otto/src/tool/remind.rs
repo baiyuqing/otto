@@ -179,11 +179,12 @@ impl RemindTool {
             self.inflight.fetch_sub(1, Ordering::SeqCst);
             return Err(format!("too many reminders (max {MAX_INFLIGHT})"));
         }
-        if write && let Some(store) = &self.persist {
-            if let Err(error) = store.lock().expect(PERSIST_MUTEX).insert(item.clone()) {
-                self.inflight.fetch_sub(1, Ordering::SeqCst);
-                return Err(error);
-            }
+        if write
+            && let Some(store) = &self.persist
+            && let Err(error) = store.lock().expect(PERSIST_MUTEX).insert(item.clone())
+        {
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            return Err(error);
         }
         let delay = delay_until(item.fire_at);
         let inbox = Arc::clone(&self.inbox);

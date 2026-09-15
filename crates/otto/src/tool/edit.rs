@@ -26,7 +26,7 @@ use super::read::read_validated_text_file;
 use super::result::decode_strict_json;
 use super::workspace::Workspace;
 use super::write::write_file_atomic;
-use super::{Tool, definition, error_result, text_result};
+use super::{Tool, definition, empty_as_none, error_result, text_result};
 
 /// Lines of unchanged context kept on either side of a hunk.
 const DIFF_CONTEXT_LINES: usize = 3;
@@ -46,7 +46,7 @@ struct EditRequest {
     old_text: Option<String>,
     #[serde(default)]
     new_text: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "empty_as_none")]
     edits: Option<Vec<EditRequestItem>>,
 }
 
@@ -79,30 +79,24 @@ struct ResolvedEdit {
 impl EditRequest {
     /// Port of `editRequest.replacements`.
     fn replacements(&self) -> Result<Vec<EditReplacement>, String> {
-        let single = self.old_text.is_some() || self.new_text.is_some();
-        // An empty `edits` array reads as the absent key: models emit it as a
-        // placeholder next to old_text/new_text.
-        match self.edits.as_deref() {
-            Some(edits) if !edits.is_empty() => {
-                if single {
-                    return Err(
-                        "invalid arguments: pass either old_text and new_text or edits, not both"
-                            .to_owned(),
-                    );
-                }
-                edits
-                    .iter()
-                    .map(|item| replacement(item.old_text.as_deref(), item.new_text.as_deref()))
-                    .collect()
-            }
-            Some(_) if !single => {
-                Err("invalid argument edits: must contain at least one replacement".to_owned())
-            }
-            _ => Ok(vec![replacement(
+        if self.edits.is_some() && (self.old_text.is_some() || self.new_text.is_some()) {
+            return Err(
+                "invalid arguments: pass either old_text and new_text or edits, not both"
+                    .to_owned(),
+            );
+        }
+        // `empty_as_none` has already folded an empty list into `None`, so a
+        // present `edits` holds at least one entry.
+        let Some(edits) = &self.edits else {
+            return Ok(vec![replacement(
                 self.old_text.as_deref(),
                 self.new_text.as_deref(),
-            )?]),
-        }
+            )?]);
+        };
+        edits
+            .iter()
+            .map(|item| replacement(item.old_text.as_deref(), item.new_text.as_deref()))
+            .collect()
     }
 }
 

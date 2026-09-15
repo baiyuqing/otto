@@ -768,6 +768,18 @@ impl App {
                 self.push_system(task_report(controller, &args));
                 None
             }
+            SlashCommandKind::Skills => {
+                if !args.is_empty() {
+                    self.push_system(format!("unknown command: {line}"));
+                    return None;
+                }
+                self.push_system(repl_commands::skills_report(controller));
+                None
+            }
+            SlashCommandKind::Skill => {
+                self.push_system(repl_commands::skill_report(controller, &args));
+                None
+            }
             SlashCommandKind::Memory => {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
@@ -1297,6 +1309,35 @@ mod tests {
 
     use crate::cli::testutil;
     use crate::memory::RememberRequest;
+
+    #[tokio::test]
+    async fn skill_commands_push_the_catalog_and_skill_body() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        testutil::write_skill(
+            workspace.path(),
+            "rust-helper",
+            "Rust guidance",
+            "Use small focused Rust changes.",
+        );
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/skills", &controller, &cancel);
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            "Available skills:\n- rust-helper: Rust guidance"
+        );
+
+        app.dispatch_line("/skill rust-helper", &controller, &cancel);
+        let detail = &app.entries.last().expect("entry").raw;
+        assert!(detail.contains("Skill: rust-helper"), "{detail}");
+        assert!(
+            detail.contains("Use small focused Rust changes."),
+            "{detail}"
+        );
+    }
 
     #[tokio::test]
     async fn memory_command_without_a_service_pushes_the_unavailable_message() {

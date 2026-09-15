@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use crate::provider::openaicompat::Client;
 use crate::sandbox::CommandExecutor;
 use crate::session::Store;
+use crate::skill::Catalog;
 use crate::tool::registry::Registry;
 use crate::tool::workspace::Workspace;
 use crate::tool::{Tool, bash, edit, find, grep, ls, read, write};
@@ -314,6 +315,8 @@ pub struct Runner {
     /// The sub-agent task registry, absent when sub-agents are off. Port of
     /// Go's `taskOwner`: `/tasks` and `/task` read the active runner's.
     pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
+    /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
+    pub(crate) skills: Catalog,
 }
 
 impl Runner {
@@ -351,6 +354,10 @@ impl Runner {
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.definitions.clone()
+    }
+
+    pub fn skills(&self) -> &Catalog {
+        &self.skills
     }
 
     /// Releases the agent's own resources. The session is closed separately,
@@ -392,6 +399,7 @@ impl Runner {
             system_prompt: String::new(),
             definitions,
             tasks: Some(tasks),
+            skills: Catalog::default(),
         }
     }
 }
@@ -705,6 +713,7 @@ impl Builder {
             system_prompt,
             definitions,
             tasks: subagents.tasks,
+            skills: catalogs.skills.clone(),
         })
     }
 

@@ -26,6 +26,7 @@ use chrono::Utc;
 use crate::memory::{
     ForgetRequest, RecordRef, RememberRequest, Scope, SearchRequest, SearchResult, Service,
 };
+use crate::skill;
 use crate::subagent::format::{task_line, task_steps};
 use crate::subagent::tasks::Tasks;
 
@@ -52,6 +53,7 @@ const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
 /// The `/task` argument forms, as the README and the user manual document
 /// them. [`super::super::tui`] prints the same line for the same input.
 pub(crate) const TASK_USAGE: &str = "usage: /task <id|name> | /task cancel <id|name>";
+pub(crate) const SKILL_USAGE: &str = "usage: /skill <name>";
 
 impl Controller {
     /// Port of `app.MemoryManagerAndScopes`: the bound service and its two
@@ -129,6 +131,40 @@ fn render_search_result(result: &SearchResult) -> String {
         );
     }
     content.trim_end_matches('\n').to_string()
+}
+
+pub(crate) fn skills_report(controller: &Controller) -> String {
+    let catalog = controller.skills();
+    if catalog.is_empty() {
+        return "No skills found.".to_string();
+    }
+    let mut out = "Available skills:".to_string();
+    for skill in catalog.skills() {
+        let _ = write!(out, "\n- {}: {}", skill.name, skill.description);
+    }
+    out
+}
+
+pub(crate) fn skill_report(controller: &Controller, args: &str) -> String {
+    let fields: Vec<&str> = args.split_whitespace().collect();
+    if fields.len() != 1 {
+        return SKILL_USAGE.to_string();
+    }
+    let name = fields[0];
+    let catalog = controller.skills();
+    let Some(found) = catalog.lookup(name) else {
+        return format!("unknown skill: {name}");
+    };
+    match skill::load(found) {
+        Ok(body) => format!(
+            "Skill: {}\nLocation: {}\nDescription: {}\n\n{}",
+            found.name,
+            found.directory.display(),
+            found.description,
+            body.trim_end()
+        ),
+        Err(error) => format!("skill {name}: {error}"),
+    }
 }
 
 fn command_error(command: &str, message: impl std::fmt::Display) -> Error {
@@ -267,6 +303,19 @@ impl Repl<'_> {
     /// Port of `REPL.rememberCommand`.
     pub(super) fn remember_command(&mut self, args: &str) -> Result<(), Error> {
         repl_remember_command(self.controller, args, &mut *self.stdout, &mut *self.stderr)
+    }
+
+    pub(super) fn skills_command(&mut self) {
+        let _ = writeln!(self.stdout, "{}", skills_report(self.controller));
+    }
+
+    pub(super) fn skill_command(&mut self, args: &str) {
+        let text = skill_report(self.controller, args);
+        if text == SKILL_USAGE || text.starts_with("unknown skill:") || text.starts_with("skill ") {
+            let _ = writeln!(self.stderr, "{text}");
+        } else {
+            let _ = writeln!(self.stdout, "{text}");
+        }
     }
 
     /// Port of `REPL.tasksCommand`.

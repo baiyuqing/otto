@@ -61,5 +61,5 @@ macOS 26+ and standalone Command Line Tools; see the development guide.
 
 Keep README and user-facing docs limited to implemented, tested behavior. Do
 not describe `agent_send`, `agent_cancel`, `agent_report`, automatic memory
-extraction, memory backup/restore/verify, `/skills`, `/skill`, or
-`allowed-tools` enforcement as working features.
+extraction, memory backup/restore/verify, or `allowed-tools` enforcement as
+working features.

@@ -1752,11 +1752,11 @@ mod tests {
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
         let cancel = CancellationToken::new();
-        app.input = "/s".chars().collect();
+        app.input = "/sk".chars().collect();
         app.cursor = app.input.len();
 
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
-        assert_eq!(app.suggestion, 1, "/session then /sandbox");
+        assert_eq!(app.suggestion, 1, "/skill then /skills");
         assert_eq!(app.scroll, None, "the transcript must not scroll");
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
         assert_eq!(app.suggestion, 0, "selection wraps");

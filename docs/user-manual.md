@@ -370,9 +370,9 @@ OTTO_UI=repl otto
 - While a turn is running, an animated `Thinking…` line with the elapsed
   seconds is shown under the transcript, and the composer title reads
   `Working (Esc to cancel)`.
-- While idle, a finished sub-agent task starts a wake turn that delivers the
-  notification and lets the model continue. Esc cancels it the same way as a
-  user turn. Composer text is left in place.
+- While idle, a pending notification — a finished sub-agent, or a `remind`
+  timer — starts a wake turn that delivers it and lets the model continue.
+  Esc cancels it the same way as a user turn. Composer text is left in place.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
 - Tool calls are folded to the tool name, a cut-down first line of the
@@ -611,6 +611,15 @@ than 1 MiB are skipped by `grep`. Otto canonicalizes paths, resolves symlinks,
 and rejects workspace escapes. Actual file operations use a directory handle
 so replacing a path during an operation cannot redirect them outside the
 initial workspace.
+
+### `remind`
+
+`remind` schedules a later wake in the same process. It returns immediately.
+When the delay elapses, Otto delivers a `[timer]` notification and the idle
+wake loop starts a turn, the same way a finished sub-agent does. At most eight
+timers can be outstanding. Each delay is 1 to 3600 seconds. Timers are not
+persisted: `/new`, session replacement, and exiting the process forget them.
+Child agents do not get this tool.
 
 ### Interactive sandbox setup
 

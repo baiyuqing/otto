@@ -8,6 +8,11 @@
 //! lifecycle, reads keys on a background task the way `cli::repl`'s
 //! `spawn_reader` reads lines, and drives [`app::App`] against the same
 //! [`Controller`] the REPL uses.
+//!
+//! Sub-agent wake turns: the idle loop also selects on the task registry's
+//! update signal and runs an empty-text turn whenever a notification is
+//! pending, matching [`crate::cli::repl::Repl`]. There is no second
+//! scheduler.
 
 mod app;
 mod commands;
@@ -17,19 +22,22 @@ mod markdown;
 mod render;
 
 use std::future::Future;
+use std::sync::Arc;
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEvent, KeyEventKind,
     MouseEventKind,
 };
 use otto_core::agent::Event;
-use ratatui::DefaultTerminal;
-use tokio::sync::mpsc;
+use ratatui::Terminal;
+use ratatui::backend::Backend;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::Controller;
 use crate::cli::login;
 use crate::cli::repl::{Error as ReplError, is_fatal_persistence};
+use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
 
@@ -49,7 +57,8 @@ pub(crate) async fn run(
             return Err(io_error(error));
         }
     };
-    let result = run_app(&mut terminal, controller, cancel).await;
+    let mut keys = spawn_key_reader();
+    let result = run_app(&mut terminal, controller, cancel, &mut keys).await;
     drop(mouse_capture);
     let _ = ratatui::try_restore();
     result
@@ -132,21 +141,73 @@ fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
     receiver
 }
 
-async fn run_app(
-    terminal: &mut DefaultTerminal,
+fn draw_error<E: std::fmt::Display>(error: E) -> ReplError {
+    io_error(std::io::Error::other(error.to_string()))
+}
+
+/// What the idle loop woke up for. Port of the REPL's `select` over stdin
+/// versus the task-registry watch: keys stay one branch, and a registry
+/// signal is the other, so a pending notification can start a turn without
+/// a keypress.
+enum IdleEvent {
+    Input(Option<TuiEvent>),
+    Registry(bool),
+}
+
+async fn run_app<B: Backend>(
+    terminal: &mut Terminal<B>,
     controller: &Controller,
     cancel: &CancellationToken,
+    keys: &mut mpsc::Receiver<TuiEvent>,
 ) -> Result<(), ReplError> {
     let mut app = App::new(controller);
-    let mut keys = spawn_key_reader();
     terminal
         .draw(|frame| render::draw(frame, &app))
-        .map_err(io_error)?;
+        .map_err(draw_error)?;
 
+    let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
     loop {
-        let event = tokio::select! {
-            _ = cancel.cancelled() => return Err(ReplError::Cancelled),
-            event = keys.recv() => event,
+        match controller.subagent_tasks() {
+            Some(tasks) => {
+                if updates
+                    .as_ref()
+                    .is_none_or(|(held, _)| !Arc::ptr_eq(held, &tasks))
+                {
+                    let receiver = tasks.updates();
+                    updates = Some((tasks, receiver));
+                }
+            }
+            None => updates = None,
+        }
+        let event = {
+            let signal = async {
+                match updates.as_mut() {
+                    Some((_, receiver)) => receiver.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(ReplError::Cancelled),
+                event = keys.recv() => IdleEvent::Input(event),
+                open = signal => IdleEvent::Registry(open),
+            }
+        };
+        let event = match event {
+            IdleEvent::Input(event) => event,
+            IdleEvent::Registry(false) => {
+                updates = None;
+                continue;
+            }
+            IdleEvent::Registry(true) => {
+                if let Err(error) = run_wake(&mut app, terminal, keys, controller, cancel).await {
+                    propagate_turn_error(error)?;
+                }
+                app.refresh_info(controller);
+                terminal
+                    .draw(|frame| render::draw(frame, &app))
+                    .map_err(draw_error)?;
+                continue;
+            }
         };
         let Some(event) = event else { return Ok(()) };
         let key = match event {
@@ -155,13 +216,13 @@ async fn run_app(
                 app.scroll_wheel(up);
                 terminal
                     .draw(|frame| render::draw(frame, &app))
-                    .map_err(io_error)?;
+                    .map_err(draw_error)?;
                 continue;
             }
             TuiEvent::Redraw => {
                 terminal
                     .draw(|frame| render::draw(frame, &app))
-                    .map_err(io_error)?;
+                    .map_err(draw_error)?;
                 continue;
             }
         };
@@ -171,14 +232,14 @@ async fn run_app(
             Some(Action::Exit) => return Ok(()),
             Some(Action::Prompt(line)) => {
                 if let Err(error) =
-                    run_turn(&mut app, terminal, &mut keys, controller, cancel, line).await
+                    run_turn(&mut app, terminal, keys, controller, cancel, line).await
                 {
                     propagate_turn_error(error)?;
                 }
             }
             Some(Action::Compact(focus)) => {
                 if let Err(error) =
-                    run_compact(&mut app, terminal, &mut keys, controller, cancel, focus).await
+                    run_compact(&mut app, terminal, keys, controller, cancel, focus).await
                 {
                     propagate_turn_error(error)?;
                 }
@@ -220,7 +281,7 @@ async fn run_app(
                 Ok(prompt) => {
                     app.push_system(format!("Approved {id} for one command."));
                     if let Err(error) =
-                        run_turn(&mut app, terminal, &mut keys, controller, cancel, prompt).await
+                        run_turn(&mut app, terminal, keys, controller, cancel, prompt).await
                     {
                         propagate_turn_error(error)?;
                     }
@@ -235,13 +296,13 @@ async fn run_app(
         app.refresh_info(controller);
         terminal
             .draw(|frame| render::draw(frame, &app))
-            .map_err(io_error)?;
+            .map_err(draw_error)?;
     }
 }
 
 /// Port of `internal/repl::Repl::run`'s handling of its own `prompt()`'s
 /// result: a non-fatal turn failure (already shown in the transcript by
-/// [`run_turn`]/[`run_compact`]) is swallowed so the session continues;
+/// [`run_turn`]/[`run_compact`]/[`run_wake`]) is swallowed so the session continues;
 /// everything else (a fatal persistence failure, or the outer `cancel`
 /// itself firing) ends [`run`].
 fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
@@ -252,10 +313,10 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 }
 
 /// Drives one `Controller` call to completion, owning the screen for its
-/// whole duration. Needed only for [`Action::Prompt`]/[`Action::Compact`]:
-/// every other `Action` is a one-shot `.await` with no Go precedent for
-/// interrupting it, and raw mode leaves no real SIGINT to interrupt it with
-/// anyway.
+/// whole duration. Needed for [`Action::Prompt`]/[`Action::Compact`] and for
+/// a wake turn: every other `Action` is a one-shot `.await` with no Go
+/// precedent for interrupting it, and raw mode leaves no real SIGINT to
+/// interrupt it with anyway.
 ///
 /// The call's sink cannot draw for itself, because it would have to hold
 /// `app` and `terminal` borrowed for the whole turn, leaving nothing here to
@@ -263,9 +324,9 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 /// this loop applies it, letting the same loop also redraw on a key, a
 /// resize, and every [`render::SPINNER_FRAME`] so the thinking indicator
 /// animates while nothing is streaming.
-async fn drive_turn<T, E>(
+async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Terminal<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     events: &mut mpsc::UnboundedReceiver<Event>,
     turn: &CancellationToken,
@@ -319,9 +380,9 @@ fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
 /// `prompt()`: build a sink over the live view, await the call, and turn a
 /// non-cancelled `Err` into [`Error::Turn`] using the same
 /// [`is_fatal_persistence`] check.
-async fn run_turn(
+async fn run_turn<B: Backend>(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Terminal<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -366,14 +427,79 @@ async fn run_turn(
     }
 }
 
+/// One empty-text turn delivering pending sub-agent notifications.
+/// Port of `internal/repl`'s `wake`: the TUI has no `"> "` marker to skip,
+/// so the only extra work is bracketing the claim with [`App::start_turn`]
+/// so Esc still cancels and the thinking line still animates.
+async fn run_wake<B: Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    keys: &mut mpsc::Receiver<TuiEvent>,
+    controller: &Controller,
+    cancel: &CancellationToken,
+) -> Result<(), ReplError> {
+    let wake = match controller.prepare_wake() {
+        Ok(Some(wake)) => wake,
+        Ok(None) => return Ok(()),
+        // A prompt or close raced the idle loop; both are the server wake
+        // loop's ignored `errTurnActive` / `ErrClosed`.
+        Err(message) if message == crate::app::PROMPT_ACTIVE || message == crate::app::CLOSED => {
+            return Ok(());
+        }
+        Err(message) => {
+            return Err(ReplError::Turn {
+                fatal: false,
+                message,
+            });
+        }
+    };
+    app.start_turn();
+    let turn = cancel.child_token();
+    let mut error_rendered = false;
+    let result = {
+        let (events, mut received) = mpsc::unbounded_channel();
+        let mut sink = |event: Event| {
+            let _ = events.send(event);
+        };
+        drive_turn(
+            app,
+            terminal,
+            keys,
+            &mut received,
+            &turn,
+            wake.run(&mut sink, &turn),
+            |app, event| {
+                if app.apply_event(event) {
+                    error_rendered = true;
+                }
+            },
+        )
+        .await
+    };
+    app.end_turn();
+    if !error_rendered && let Err(error) = &result {
+        app.push_system(error.to_string());
+    }
+    if cancel.is_cancelled() {
+        return Err(ReplError::Cancelled);
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(ReplError::Turn {
+            fatal: is_fatal_persistence(&error),
+            message: error.to_string(),
+        }),
+    }
+}
+
 /// Runs one `/compact`. Structurally a port of `internal/repl`'s own
 /// `compact()`, including its checkpoint/no-op de-duplication between a
 /// streamed [`Event::CompactionCompleted`] and the call's final
 /// [`otto_core::agent::CompactionResult`] (both can describe the same
 /// compaction).
-async fn run_compact(
+async fn run_compact<B: Backend>(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Terminal<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -568,5 +694,151 @@ mod tests {
 
         apply_turn_key(&mut app, TuiEvent::Key(KeyCode::Esc.into()), &turn);
         assert!(turn.is_cancelled());
+    }
+
+    /// Port of `TestREPLWakesOnlyWhenNotificationIsPending`, against the TUI
+    /// idle loop rather than stdin. A registry signal with nothing pending
+    /// must not start a turn; a later pending notification must.
+    #[tokio::test]
+    async fn the_idle_loop_wakes_only_when_a_notification_is_pending() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use otto_core::agent::inbox::Notification;
+        use otto_core::model::{Block, BlockType, FinishReason, Message, Role};
+        use otto_core::provider::{
+            Provider, ProviderError, Request as ProviderRequest, Response as ProviderResponse,
+            StreamEvent, StreamSink,
+        };
+        use ratatui::backend::TestBackend;
+
+        use crate::cli::runtime_builder::Runner;
+        use crate::subagent::tasks::Tasks;
+
+        struct ScriptedProvider {
+            reply: Box<dyn Fn(usize) -> Result<String, String> + Send + Sync>,
+            roles: Mutex<Vec<Role>>,
+            calls: tokio::sync::watch::Sender<usize>,
+        }
+
+        impl ScriptedProvider {
+            fn new(
+                reply: impl Fn(usize) -> Result<String, String> + Send + Sync + 'static,
+            ) -> Arc<Self> {
+                Arc::new(Self {
+                    reply: Box::new(reply),
+                    roles: Mutex::new(Vec::new()),
+                    calls: tokio::sync::watch::channel(0).0,
+                })
+            }
+
+            fn roles(&self) -> Vec<Role> {
+                self.roles.lock().expect("roles").clone()
+            }
+
+            fn calls(&self) -> usize {
+                *self.calls.borrow()
+            }
+
+            async fn wait_calls(&self, count: usize) {
+                let mut receiver = self.calls.subscribe();
+                receiver
+                    .wait_for(|seen| *seen >= count)
+                    .await
+                    .expect("sender");
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for ScriptedProvider {
+            async fn complete(
+                &self,
+                request: &ProviderRequest,
+                emit: StreamSink<'_>,
+                _cancel: &CancellationToken,
+            ) -> Result<ProviderResponse, ProviderError> {
+                let call = {
+                    let mut roles = self.roles.lock().expect("roles");
+                    roles.push(
+                        request
+                            .messages
+                            .last()
+                            .map(|message| message.role.clone())
+                            .unwrap_or(Role::User),
+                    );
+                    roles.len()
+                };
+                self.calls.send_modify(|seen| *seen = call);
+                let text = (self.reply)(call).map_err(ProviderError::Other)?;
+                emit(StreamEvent::TextDelta { text: text.clone() });
+                Ok(ProviderResponse {
+                    message: Message {
+                        role: Role::Assistant,
+                        finish_reason: Some(FinishReason::Stop),
+                        blocks: vec![Block {
+                            block_type: BlockType::Text,
+                            text,
+                            ..Block::default()
+                        }],
+                        ..Message::default()
+                    },
+                })
+            }
+        }
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let tasks = Arc::new(Tasks::new());
+        let provider = ScriptedProvider::new(|_| Ok("woke up".to_string()));
+        let builder = crate::cli::testutil::builder(workspace.path(), sessions.path());
+        let runtime = crate::cli::testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("session");
+        let info = builder.runtime_info(&runtime);
+        let runner = Runner::scripted(
+            session.clone(),
+            Arc::clone(&provider) as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+        );
+        let controller = Controller::new(builder, true, session, runner, info);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let (_keys_tx, mut keys) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+
+        let driver = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tasks
+                .add(crate::subagent::tasks::Task::default(), None, None)
+                .expect("add");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                provider.calls(),
+                0,
+                "a wake turn ran before any notification was pending"
+            );
+            tasks.notifications().push(Notification {
+                task_id: "t1".to_string(),
+                text: "[task-notification] task t1 succeeded".to_string(),
+                ..Notification::default()
+            });
+            tokio::time::timeout(Duration::from_secs(2), provider.wait_calls(1))
+                .await
+                .expect("the pending notification did not trigger a wake turn");
+            cancel.cancel();
+        };
+        let (result, ()) = tokio::join!(
+            run_app(&mut terminal, &controller, &cancel, &mut keys),
+            driver
+        );
+
+        match result {
+            Err(ReplError::Cancelled) => {}
+            other => panic!("idle loop should end on cancel, got {other:?}"),
+        }
+        assert_eq!(
+            provider.roles(),
+            vec![Role::Context],
+            "want exactly one wake turn, whose last request message is the notification"
+        );
     }
 }

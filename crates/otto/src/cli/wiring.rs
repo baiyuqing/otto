@@ -18,6 +18,7 @@
 //!   their own instances of the same tools, built the same way.
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use otto_core::agent::inbox::Inbox;
@@ -281,17 +282,22 @@ impl Builder {
         child_tools: Vec<Box<dyn Tool + Send + Sync>>,
         stderr: &mut dyn Write,
     ) -> Result<SubagentWiring, BuildError> {
-        let ProviderClient::Compat(provider) = client else {
-            return Ok(SubagentWiring::default());
+        let provider: Arc<dyn otto_core::provider::Provider + Send + Sync> = match client {
+            ProviderClient::Compat(provider) => Arc::clone(provider) as _,
+            ProviderClient::ChatGpt(provider) => Arc::clone(provider) as _,
+            ProviderClient::Unavailable => return Ok(SubagentWiring::default()),
+            #[cfg(test)]
+            ProviderClient::Scripted(_) => return Ok(SubagentWiring::default()),
         };
         if !catalogs.agents.enabled {
             return Ok(SubagentWiring::default());
         }
 
+        let persist = self.reminder_persist_path(session);
         let tasks = Arc::new(Tasks::new());
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
-            provider: Arc::clone(provider) as Arc<dyn otto_core::provider::Provider + Send + Sync>,
+            provider,
             tools: child_tools,
             redaction_values: redaction_values.to_vec(),
             redaction_complete: redactor.allows_dynamic_content(),
@@ -325,11 +331,29 @@ impl Builder {
         let inbox = Arc::clone(tasks.notifications());
         tools.extend(subagent::tools::tools(&Arc::new(runner)));
         // Parent-only; the child registry drops `remind` by name.
-        tools.push(Box::new(RemindTool::new(Arc::clone(&inbox))));
+        tools.push(Box::new(match persist {
+            Some(path) => RemindTool::with_persist(Arc::clone(&inbox), path),
+            None => RemindTool::new(Arc::clone(&inbox)),
+        }));
         Ok(SubagentWiring {
             tasks: Some(tasks),
             inbox: Some(inbox),
         })
+    }
+
+    fn reminder_persist_path(&self, session: &SharedSession) -> Option<PathBuf> {
+        if self.no_session {
+            return None;
+        }
+        let id = session.header().id;
+        if id.is_empty() {
+            return None;
+        }
+        Some(
+            crate::session::session_directory(&self.session_root, &self.workspace_path)
+                .ok()?
+                .join(format!("{id}.reminders.json")),
+        )
     }
 
     /// A second set of the parent's non-memory tools, for the children.

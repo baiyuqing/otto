@@ -73,6 +73,8 @@ export const api = {
   getTask: (id: string, taskId: string) => json<TaskDetail>(`/v1/sessions/${id}/tasks/${taskId}`),
   cancelTask: (id: string, taskId: string) => request(`/v1/sessions/${id}/tasks/${taskId}/cancel`, { method: 'POST' }),
   reloadSandbox: () => json<Session['sandbox']>('/v1/sandbox/reload', { method: 'POST' }),
+  approveBash: (id: string, approvalId: string) =>
+    json<{ prompt: string }>(`/v1/sessions/${id}/approvals/${approvalId}`, { method: 'POST' }),
   compact: (id: string, focus: string, signal?: AbortSignal) =>
     json<Compaction>(`/v1/sessions/${id}/compact`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
 

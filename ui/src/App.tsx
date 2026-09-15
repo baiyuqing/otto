@@ -156,7 +156,7 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const send = async (text: string) => {
+  const send = async (text: string): Promise<void> => {
     if (!session) return
     setError('')
     const command = parseWebCommand(text)
@@ -228,6 +228,16 @@ export function App() {
         setSession(fresh)
         setInfo((prev) => (prev ? { ...prev, sandbox: sandbox.summary } : prev))
         setItems((prev) => [...prev, { kind: 'notice', text: `Sandbox reloaded: ${sandbox.summary}` }])
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
+    if (command.kind === 'approve') {
+      try {
+        const { prompt } = await api.approveBash(session.id, command.id)
+        setItems((prev) => [...prev, { kind: 'notice', text: `Approved ${command.id} for one command.` }])
+        await send(prompt)
       } catch (e) {
         fail(e)
       }

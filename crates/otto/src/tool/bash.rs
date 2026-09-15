@@ -17,9 +17,10 @@
 //! `status: timed out after <duration>`; a parent cancellation observed at the
 //! same time wins.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
@@ -45,6 +46,121 @@ const SANDBOX_EXECUTION_UNAVAILABLE: &str = "sandbox execution unavailable";
 struct BashArgs {
     #[serde(default)]
     command: String,
+    #[serde(default)]
+    sandbox_permissions: SandboxPermissions,
+    #[serde(default)]
+    justification: String,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SandboxPermissions {
+    #[default]
+    UseDefault,
+    RequireEscalated,
+}
+
+const APPROVAL_LIFETIME: Duration = Duration::from_secs(5 * 60);
+
+struct Approval {
+    id: String,
+    command: String,
+    created_at: Instant,
+    granted: bool,
+}
+
+#[derive(Default)]
+struct ApprovalState {
+    next_id: u64,
+    requests: HashMap<String, Approval>,
+}
+
+/// Process-local, one-shot permission grants for exact Bash commands.
+///
+/// One mutex serializes requests across sessions. A session keeps only its
+/// newest request; approval expires after five minutes and is removed before
+/// the matching command starts, so failure or cancellation cannot reuse it.
+pub struct BashApprovals {
+    executor: Arc<dyn CommandExecutor>,
+    environment: Vec<String>,
+    lifetime: Duration,
+    state: Mutex<ApprovalState>,
+}
+
+impl BashApprovals {
+    pub fn new(executor: Arc<dyn CommandExecutor>, environment: Vec<String>) -> Self {
+        Self::with_lifetime(executor, environment, APPROVAL_LIFETIME)
+    }
+
+    fn with_lifetime(
+        executor: Arc<dyn CommandExecutor>,
+        environment: Vec<String>,
+        lifetime: Duration,
+    ) -> Self {
+        Self {
+            executor,
+            environment,
+            lifetime,
+            state: Mutex::new(ApprovalState::default()),
+        }
+    }
+
+    fn retain_fresh(&self, state: &mut ApprovalState) {
+        state
+            .requests
+            .retain(|_, request| request.created_at.elapsed() < self.lifetime);
+    }
+
+    fn request(&self, session_id: &str, command: &str) -> String {
+        let mut state = self.state.lock().expect("bash approval mutex");
+        self.retain_fresh(&mut state);
+        if let Some(request) = state
+            .requests
+            .get(session_id)
+            .filter(|request| request.command == command)
+        {
+            return request.id.clone();
+        }
+        state.next_id += 1;
+        let id = format!("approval-{}", state.next_id);
+        state.requests.insert(
+            session_id.to_owned(),
+            Approval {
+                id: id.clone(),
+                command: command.to_owned(),
+                created_at: Instant::now(),
+                granted: false,
+            },
+        );
+        id
+    }
+
+    /// Grants one pending command for `session_id`.
+    pub fn approve(&self, session_id: &str, id: &str) -> Result<(), &'static str> {
+        let mut state = self.state.lock().expect("bash approval mutex");
+        self.retain_fresh(&mut state);
+        let request = state
+            .requests
+            .get_mut(session_id)
+            .filter(|request| request.id == id)
+            .ok_or("approval request not found or expired")?;
+        request.granted = true;
+        Ok(())
+    }
+
+    fn take(&self, session_id: &str, command: &str) -> bool {
+        let mut state = self.state.lock().expect("bash approval mutex");
+        self.retain_fresh(&mut state);
+        let granted = state
+            .requests
+            .get(session_id)
+            .is_some_and(|request| request.granted && request.command == command);
+        if !granted {
+            return false;
+        }
+        state.requests.remove(session_id);
+        true
+    }
 }
 
 /// The single error [`BashTool::new`] reports.
@@ -67,6 +183,7 @@ pub struct BashTool {
     redact_values: Vec<String>,
     redaction_marker: String,
     dynamic_content: bool,
+    approvals: Option<(String, Arc<BashApprovals>)>,
 }
 
 impl BashTool {
@@ -118,21 +235,34 @@ impl BashTool {
             redact_values,
             redaction_marker,
             dynamic_content,
+            approvals: None,
         })
     }
 
-    fn request(&self, command: &str) -> Request {
+    /// Enables explicit, one-shot elevation for this session.
+    pub fn with_approvals(
+        mut self,
+        session_id: impl Into<String>,
+        approvals: Arc<BashApprovals>,
+    ) -> Self {
+        self.approvals = Some((session_id.into(), approvals));
+        self
+    }
+
+    fn request(&self, command: &str, environment: &[String]) -> Request {
         Request {
             argv: vec![self.shell.clone(), "-lc".to_owned(), command.to_owned()],
             dir: self.workspace_root.clone(),
-            env: self.environment.clone(),
+            env: environment.to_vec(),
         }
     }
 
     /// Runs `request`, cancelling a private child token once the timeout
     /// elapses. Returns whether the timeout fired alongside the outcome.
-    async fn run(
+    async fn run_with(
         &self,
+        executor: &Arc<dyn CommandExecutor>,
+        environment: &[String],
         command: &str,
         stdout: &mut (dyn std::io::Write + Send),
         stderr: &mut (dyn std::io::Write + Send),
@@ -140,9 +270,7 @@ impl BashTool {
     ) -> (ExitStatus, Result<(), Error>, bool) {
         let child = cancel.child_token();
         let streams = Streams { stdout, stderr };
-        let execute = self
-            .executor
-            .execute(self.request(command), streams, &child);
+        let execute = executor.execute(self.request(command, environment), streams, &child);
         let mut execute = std::pin::pin!(execute);
         let sleep = tokio::time::sleep(self.timeout);
         let mut sleep = std::pin::pin!(sleep);
@@ -167,7 +295,16 @@ impl BashTool {
         }
         let mut stdout = std::io::sink();
         let mut stderr = std::io::sink();
-        let (_, outcome, _) = self.run(command, &mut stdout, &mut stderr, cancel).await;
+        let (_, outcome, _) = self
+            .run_with(
+                &self.executor,
+                &self.environment,
+                command,
+                &mut stdout,
+                &mut stderr,
+                cancel,
+            )
+            .await;
         match outcome {
             Ok(()) | Err(Error::Cancelled) => ToolResult::default(),
             Err(_) => ToolResult {
@@ -242,10 +379,41 @@ pub fn bash_definition() -> ToolDefinition {
     )
 }
 
+pub fn bash_definition_with_approvals() -> ToolDefinition {
+    definition(
+        "bash",
+        "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. The command will not run unsandboxed until the user grants one-time approval with /approve.",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute"
+                },
+                "sandbox_permissions": {
+                    "type": "string",
+                    "enum": ["use_default", "require_escalated"],
+                    "description": "Use require_escalated to request one-time unsandboxed execution"
+                },
+                "justification": {
+                    "type": "string",
+                    "description": "Why unsandboxed execution is required"
+                }
+            },
+            "required": ["command"]
+        }),
+    )
+}
+
 #[async_trait::async_trait]
 impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
-        bash_definition()
+        if self.approvals.is_some() {
+            bash_definition_with_approvals()
+        } else {
+            bash_definition()
+        }
     }
 
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
@@ -259,6 +427,27 @@ impl Tool for BashTool {
         if !self.dynamic_content {
             return self.execute_suppressed(&args.command, cancel).await;
         }
+        let (executor, environment) = match args.sandbox_permissions {
+            SandboxPermissions::UseDefault => (&self.executor, self.environment.as_slice()),
+            SandboxPermissions::RequireEscalated => {
+                if args.justification.trim().is_empty() {
+                    return self.argument_error("justification is required for elevated execution");
+                }
+                let Some((session_id, approvals)) = &self.approvals else {
+                    return self.argument_error("elevated execution is unavailable");
+                };
+                if !approvals.take(session_id, &args.command) {
+                    let id = approvals.request(session_id, &args.command);
+                    let command = serde_json::to_string(&args.command).expect("string encodes");
+                    let justification =
+                        serde_json::to_string(&args.justification).expect("string encodes");
+                    return self.argument_error(&format!(
+                        "unsandboxed approval required: run /approve {id}; command={command}; justification={justification}"
+                    ));
+                }
+                (&approvals.executor, approvals.environment.as_slice())
+            }
+        };
         if cancel.is_cancelled() {
             return self.result(
                 &CappedByteCollector::new(self.max_output_bytes),
@@ -279,7 +468,14 @@ impl Tool for BashTool {
             &self.redaction_marker,
         );
         let (status, outcome, timed_out) = self
-            .run(&args.command, &mut stdout, &mut stderr, cancel)
+            .run_with(
+                executor,
+                environment,
+                &args.command,
+                &mut stdout,
+                &mut stderr,
+                cancel,
+            )
             .await;
         if matches!(outcome, Err(ref error) if *error != Error::Cancelled) {
             return infrastructure_result();
@@ -537,6 +733,102 @@ mod tests {
             .expect("the arguments encode");
         tool.execute(&raw(&arguments), &CancellationToken::new())
             .await
+    }
+
+    async fn run_escalated(tool: &BashTool, command: &str, justification: &str) -> ToolResult {
+        let arguments = serde_json::to_string(&serde_json::json!({
+            "command": command,
+            "sandbox_permissions": "require_escalated",
+            "justification": justification,
+        }))
+        .expect("the arguments encode");
+        tool.execute(&raw(&arguments), &CancellationToken::new())
+            .await
+    }
+
+    #[tokio::test]
+    async fn elevated_command_requires_an_exact_one_shot_approval() {
+        let (_dir, workspace) = temp_workspace();
+        let confined = Arc::new(FakeExecutor::default());
+        let elevated = Arc::new(FakeExecutor::default());
+        let approvals = Arc::new(BashApprovals::new(
+            elevated.clone(),
+            strings(&["HOME=/real-home"]),
+        ));
+        let tool = bash(&workspace, confined.clone(), &[], 1024, &[])
+            .with_approvals("session-1", approvals.clone());
+
+        let requested = run_escalated(&tool, "git push", "push the reviewed branch").await;
+        assert!(requested.is_error);
+        assert_eq!(
+            requested.content,
+            "unsandboxed approval required: run /approve approval-1; command=\"git push\"; justification=\"push the reviewed branch\""
+        );
+        assert_eq!(confined.calls(), 0);
+        assert_eq!(elevated.calls(), 0);
+
+        assert!(approvals.approve("another-session", "approval-1").is_err());
+        approvals
+            .approve("session-1", "approval-1")
+            .expect("approve exact request");
+        run_escalated(&tool, "git status", "different command").await;
+        assert_eq!(elevated.calls(), 0);
+
+        let requested = run_escalated(&tool, "git push", "push the reviewed branch").await;
+        assert_eq!(
+            requested.content,
+            "unsandboxed approval required: run /approve approval-3; command=\"git push\"; justification=\"push the reviewed branch\""
+        );
+        approvals
+            .approve("session-1", "approval-3")
+            .expect("approve exact request");
+
+        let approved = run_escalated(&tool, "git push", "push the reviewed branch").await;
+        assert!(!approved.is_error);
+        assert_eq!(elevated.calls(), 1);
+        assert_eq!(elevated.requests()[0].env, strings(&["HOME=/real-home"]));
+
+        let consumed = run_escalated(&tool, "git push", "push the reviewed branch").await;
+        assert!(consumed.is_error);
+        assert_eq!(elevated.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn elevated_command_requires_a_justification() {
+        let (_dir, workspace) = temp_workspace();
+        let approvals = Arc::new(BashApprovals::new(
+            Arc::new(FakeExecutor::default()),
+            Vec::new(),
+        ));
+        let tool = bash(
+            &workspace,
+            Arc::new(FakeExecutor::default()),
+            &[],
+            1024,
+            &[],
+        )
+        .with_approvals("session-1", approvals);
+
+        let result = run_escalated(&tool, "git push", "  ").await;
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            "justification is required for elevated execution"
+        );
+    }
+
+    #[test]
+    fn expired_approval_requests_cannot_be_granted() {
+        let approvals = BashApprovals::with_lifetime(
+            Arc::new(FakeExecutor::default()),
+            Vec::new(),
+            Duration::ZERO,
+        );
+        let id = approvals.request("session-1", "git push");
+        assert_eq!(
+            approvals.approve("session-1", &id),
+            Err("approval request not found or expired")
+        );
     }
 
     /// The captured stdout body, mirroring Go's `sandboxedBashStdout`.

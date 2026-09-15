@@ -51,6 +51,12 @@ components:
           type: boolean
         summary:
           type: string
+    ApprovalResponse:
+      type: object
+      properties:
+        prompt:
+          type: string
+      required: [prompt]
     Compaction:
       type: object
       description: The compaction_completed event payload, also returned by POST /v1/sessions/{id}/compact.
@@ -321,6 +327,12 @@ components:
       description: Task id or name.
       schema:
         type: string
+    approvalID:
+      name: approval_id
+      in: path
+      required: true
+      schema:
+        type: string
     after:
       name: after
       in: query
@@ -465,6 +477,31 @@ paths:
                   $ref: "#/components/schemas/Message"
         "404":
           description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/approvals/{approval_id}:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/approvalID"
+    post:
+      summary: Approve one exact elevated Bash command
+      responses:
+        "200":
+          description: Approved; submit the returned prompt as the next turn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalResponse"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Approval unavailable, unknown, expired, or a turn is active
           content:
             application/json:
               schema:

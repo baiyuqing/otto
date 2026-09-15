@@ -216,6 +216,17 @@ async fn run_app(
                 Ok(info) => app.push_system(format!("Sandbox: {}", info.summary())),
                 Err(message) => app.push_system(format!("/sandbox reload: {message}")),
             },
+            Some(Action::Approve(id)) => match controller.approve_bash(&id) {
+                Ok(prompt) => {
+                    app.push_system(format!("Approved {id} for one command."));
+                    if let Err(error) =
+                        run_turn(&mut app, terminal, &mut keys, controller, cancel, prompt).await
+                    {
+                        propagate_turn_error(error)?;
+                    }
+                }
+                Err(message) => app.push_system(format!("/approve: {message}")),
+            },
             Some(Action::Login(args)) => {
                 login_dispatch(&mut app, controller, &args, cancel).await;
             }

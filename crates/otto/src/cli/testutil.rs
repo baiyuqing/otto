@@ -68,6 +68,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
             ..Overrides::default()
         },
         command_executor: None,
+        bash_approvals: None,
         sandbox_environment: None,
         sandbox_info: SandboxInfo {
             mode: SandboxMode::Off,

@@ -12,6 +12,7 @@ describe('web slash commands', () => {
     expect(parseWebCommand('/compact focus on auth')).toEqual({ kind: 'compact', focus: 'focus on auth' })
     expect(parseWebCommand('/sandbox')).toEqual({ kind: 'sandbox' })
     expect(parseWebCommand('/sandbox reload')).toEqual({ kind: 'sandboxReload' })
+    expect(parseWebCommand('/approve approval-1')).toEqual({ kind: 'approve', id: 'approval-1' })
     expect(parseWebCommand('/tasks')).toEqual({ kind: 'tasks' })
     expect(parseWebCommand('/task t1')).toEqual({ kind: 'task', id: 't1' })
     expect(parseWebCommand('/task cancel t1')).toEqual({ kind: 'taskCancel', id: 't1' })
@@ -28,6 +29,7 @@ describe('web slash commands', () => {
     expect(parseWebCommand('/rename   ')).toEqual({ kind: 'error', message: 'usage: /rename <name>' })
     expect(parseWebCommand('/task')).toEqual({ kind: 'error', message: 'usage: /task <id|name> | /task cancel <id|name>' })
     expect(parseWebCommand('/task cancel')).toEqual({ kind: 'error', message: 'usage: /task <id|name> | /task cancel <id|name>' })
+    expect(parseWebCommand('/approve')).toEqual({ kind: 'error', message: 'usage: /approve <id>' })
   })
 
   it('leaves non-commands and unsupported commands as prompts', () => {
@@ -46,6 +48,7 @@ describe('web slash commands', () => {
       { name: '/rename', description: 'rename the current session' },
       { name: '/compact', description: 'compact context with optional focus' },
       { name: '/sandbox', description: 'show sandbox state, or reload configuration' },
+      { name: '/approve', description: 'allow one exact elevated Bash command' },
       { name: '/tasks', description: 'list sub-agent tasks' },
       { name: '/task', description: 'show or cancel a sub-agent task' },
       { name: '/exit', description: 'close the browser tab' },

@@ -31,6 +31,8 @@ pub enum SlashCommandKind {
     Exit,
     Tasks,
     Task,
+    Skill,
+    Skills,
     Sandbox,
 }
 
@@ -120,6 +122,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "show or cancel a sub-agent task",
         kind: SlashCommandKind::Task,
     },
+    SlashCommand {
+        name: "/skill",
+        description: "show a skill by name",
+        kind: SlashCommandKind::Skill,
+    },
+    SlashCommand {
+        name: "/skills",
+        description: "list available skills",
+        kind: SlashCommandKind::Skills,
+    },
 ];
 
 /// Every table entry whose name starts with `value`. Port of
@@ -166,7 +178,7 @@ mod tests {
             .iter()
             .map(|c| c.name)
             .collect();
-        assert_eq!(names, ["/session", "/sandbox"]);
+        assert_eq!(names, ["/session", "/sandbox", "/skill", "/skills"]);
     }
 
     #[test]
@@ -193,6 +205,15 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, ["/memory"]);
+    }
+
+    #[test]
+    fn a_prefix_matches_the_skill_commands() {
+        let names: Vec<&str> = matching_slash_commands("/ski")
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["/skill", "/skills"]);
     }
 
     #[test]

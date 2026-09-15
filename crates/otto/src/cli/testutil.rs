@@ -149,6 +149,16 @@ pub async fn controller_with_memory(
     Controller::new(builder, true, session, runner, info)
 }
 
+pub fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
+    let directory = root.join(".otto").join("skills").join(name);
+    std::fs::create_dir_all(&directory).expect("skill directory");
+    std::fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n"),
+    )
+    .expect("write skill");
+}
+
 pub fn user(text: &str) -> Message {
     Message {
         role: Role::User,

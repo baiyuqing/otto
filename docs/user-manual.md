@@ -428,6 +428,8 @@ Shared commands:
   printing the new state. It is rejected while a turn is in flight, and a
   failed reload keeps the previous sandbox in place. `allow_env` changes and a
   sandbox that was unavailable at startup still need a restart.
+- `/skills` lists the skills available in the current session.
+- `/skill <name>` displays one skill's description, location, and instructions.
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
@@ -1016,13 +1018,14 @@ What's wired:
 - Validation: `name` equals the directory name (`a-z`, `0-9`, `-`; 1 to 64
   characters) and `description` is 1 to 1024 characters. Invalid skills print
   one stderr warning and are skipped.
+- `/skills` lists the skills available in the current session.
+- `/skill <name>` displays one skill's description, location, and Markdown body.
 - Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is
   fixed within a session. A loaded body is a normal tool result stored in the
   session and re-sent on every later request until compaction.
 
 Not yet implemented:
 
-- `/skills` and `/skill <name>` user commands.
 - `allowed-tools` enforcement.
 - Reading `~/.claude/skills`; hot reload inside a session.
 

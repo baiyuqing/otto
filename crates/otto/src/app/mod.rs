@@ -436,6 +436,15 @@ impl Controller {
             .unwrap_or_default()
     }
 
+    /// The skill catalog fixed for the current runner.
+    pub fn skills(&self) -> crate::skill::Catalog {
+        self.lock()
+            .current
+            .as_ref()
+            .map(|current| current.runner.skills().clone())
+            .unwrap_or_default()
+    }
+
     fn runner(&self) -> Result<Arc<Runner>, String> {
         self.lock()
             .current

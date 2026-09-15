@@ -33,7 +33,7 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n";
+const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n";
 
 /// Commands `internal/repl` has that this phase does not.
 const UNPORTED: [&str; 0] = [];
@@ -409,6 +409,17 @@ impl<'a> Repl<'a> {
                     self.remember_command(args)?;
                     Some(false)
                 }
+                "skills" => {
+                    if !args.is_empty() {
+                        break 'dispatch None;
+                    }
+                    self.skills_command();
+                    Some(false)
+                }
+                "skill" => {
+                    self.skill_command(args);
+                    Some(false)
+                }
                 "tasks" => {
                     self.tasks_command();
                     Some(false)
@@ -737,7 +748,7 @@ mod tests {
     use crate::cli::controller::SANDBOX_RELOAD_UNAVAILABLE;
     use crate::cli::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
     use crate::cli::runtime_builder::Runner;
-    use crate::cli::testutil::{controller, user};
+    use crate::cli::testutil::{self, controller, user};
     use crate::subagent::tasks::Tasks;
     use otto_core::agent::inbox::Notification;
     use otto_core::agent::{CompactionResult, Event};
@@ -827,6 +838,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skill_commands_list_and_show_discovered_skills() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        testutil::write_skill(
+            workspace.path(),
+            "rust-helper",
+            "Rust guidance",
+            "Use small focused Rust changes.",
+        );
+        let controller = controller(workspace.path(), sessions.path()).await;
+
+        let (stdout, stderr, result) = session(
+            "/skills\n/skill rust-helper\n/skill missing\n/skill\n/exit\n",
+            &controller,
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            stdout.contains("Available skills:\n- rust-helper: Rust guidance"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("Skill: rust-helper"), "{stdout}");
+        assert!(stdout.contains("Description: Rust guidance"), "{stdout}");
+        assert!(
+            stdout.contains("Use small focused Rust changes."),
+            "{stdout}"
+        );
+        assert!(stderr.contains("unknown skill: missing"), "{stderr}");
+        assert!(
+            stderr.contains(crate::cli::repl_commands::SKILL_USAGE),
+            "{stderr}"
+        );
+    }
+
+    #[tokio::test]
     async fn help_and_session_describe_the_ported_commands_and_the_session() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
@@ -852,6 +899,8 @@ mod tests {
             "/model [profile]",
             "/compact [focus] compact context",
             "/sandbox [reload]",
+            "/skills   list available skills",
+            "/skill <name> show a skill",
         ] {
             assert!(
                 stdout.contains(expected),

@@ -42,6 +42,7 @@ use crate::subagent::runner::{
 use crate::subagent::tasks::Tasks;
 use crate::tool::Tool;
 use crate::tool::memory::{ForgetTool, MemorySearchTool, RememberTool};
+use crate::tool::remind::{RemindTool, remind_definition};
 use crate::tool::skill::SkillTool;
 
 /// The process-wide memory service and the two scopes one session reads.
@@ -264,7 +265,7 @@ impl Builder {
         })
     }
 
-    /// Builds the sub-agent runner and appends its three tools to `tools`.
+    /// Builds the sub-agent runner and appends the agent tools and `remind`.
     /// Port of `buildRunner`'s `if client != nil && agents.Enabled` block.
     #[allow(clippy::too_many_arguments)]
     pub fn build_subagents(
@@ -323,6 +324,8 @@ impl Builder {
 
         let inbox = Arc::clone(tasks.notifications());
         tools.extend(subagent::tools::tools(&Arc::new(runner)));
+        // Parent-only; the child registry drops `remind` by name.
+        tools.push(Box::new(RemindTool::new(Arc::clone(&inbox))));
         Ok(SubagentWiring {
             tasks: Some(tasks),
             inbox: Some(inbox),
@@ -429,6 +432,7 @@ impl Builder {
                 .unwrap_or(true)
         {
             definitions.extend(subagent::tools::tool_definitions());
+            definitions.push(remind_definition());
         }
         definitions
     }
@@ -842,7 +846,7 @@ mod catalog_tests {
         );
         assert_eq!(warnings, "");
         let names = definition_names(&fixture.builder.boundary_catalog_definitions(65536, true));
-        for want in ["agent", "agent_wait", "agent_status"] {
+        for want in ["agent", "agent_wait", "agent_status", "remind"] {
             assert!(
                 names.contains(&want.to_string()),
                 "{names:?} is missing {want}"
@@ -867,7 +871,7 @@ mod catalog_tests {
         assert!(!wiring.agents.enabled);
         assert_eq!(wiring.agent_section, "");
         let names = definition_names(&fixture.builder.boundary_catalog_definitions(65536, true));
-        for unwanted in ["agent", "agent_wait", "agent_status"] {
+        for unwanted in ["agent", "agent_wait", "agent_status", "remind"] {
             assert!(
                 !names.contains(&unwanted.to_string()),
                 "{names:?} still lists {unwanted}"

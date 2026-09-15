@@ -1023,7 +1023,8 @@ mod tests {
                 "edit",
                 "agent",
                 "agent_wait",
-                "agent_status"
+                "agent_status",
+                "remind"
             ]
         );
     }
@@ -1131,7 +1132,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("You are Otto, a concise coding agent."));
         assert!(prompt.contains(
-            "Usable tools: read, grep, find, ls, write, edit, agent, agent_wait, agent_status."
+            "Usable tools: read, grep, find, ls, write, edit, agent, agent_wait, agent_status, remind."
         ));
         assert!(prompt.contains("<workspace-instructions"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");

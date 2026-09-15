@@ -26,7 +26,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `cli`: composition root, flag parsing, process lifecycle, signal handling, the REPL, and concrete dependency injection
   - `app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
   - `session`: native JSONL session storage built on `otto_core::session`
-  - `tool`: native execution of `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, with workspace validation
+  - `tool`: native execution of workspace-confined `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, and in-process `remind`
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
@@ -65,7 +65,7 @@ Keep `crates/otto`'s `subagent` module behind the runner's construction path:
 children are built only through it; the agent loop knows tasks only through
 its own task registry and never imports `subagent` directly; frontends reach
 tasks only through the shared task-lister facade; children never receive
-`agent*`, `remember`, `forget`, or `memory_search`; child transcripts are not
+`agent*`, `remember`, `forget`, `memory_search`, or `remind`; child transcripts are not
 persisted. Definitions cannot add tools outside the child tool set; `tools`
 only narrows it. `[agents]` is TOML only, like `[skills]`. Do not document
 `agent_send`/`agent_cancel`/`agent_report` as working features.
@@ -99,6 +99,17 @@ changes.
 Use a dedicated Git worktree and development branch for every feature or bug
 fix. Never implement directly on `main`. If implementation changes are
 accidentally made on `main`, restore them before continuing in the worktree.
+
+Put each worktree at `.worktree/<name>` under the primary checkout, not as a
+sibling directory of the repository:
+
+```bash
+git worktree add .worktree/<name> -b feat/<name>
+```
+
+`.worktree/` is gitignored. After the pull request merges, remove that
+worktree and its local branch (`git worktree remove .worktree/<name>`, then
+`git branch -d`).
 
 When work requires a design or spec, finish the discussion and get explicit
 approval before writing production code or tests. Once approved, carry the

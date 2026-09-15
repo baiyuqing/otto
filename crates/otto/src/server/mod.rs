@@ -10,6 +10,7 @@
 //! operations. Each [`OpenSession`] has its own `Mutex` for the turn and
 //! compaction slots, matching Go's `openSession.mu`.
 
+pub mod approvals;
 pub mod auth;
 pub mod compact;
 pub mod listen;
@@ -349,6 +350,10 @@ impl Server {
                     .delete(delete_session),
             )
             .route("/v1/sessions/{id}/history", get(history))
+            .route(
+                "/v1/sessions/{id}/approvals/{approval_id}",
+                post(approvals::approve),
+            )
             .route("/v1/sessions/{id}/turns", post(start_turn))
             .route("/v1/sessions/{id}/turns/{turn_id}", get(get_turn))
             .route("/v1/sessions/{id}/turns/{turn_id}/events", get(turn_events))
@@ -2570,6 +2575,7 @@ mod tests {
         "/v1/sessions",
         "/v1/sessions/{id}",
         "/v1/sessions/{id}/history",
+        "/v1/sessions/{id}/approvals/{approval_id}",
         "/v1/sessions/{id}/turns",
         "/v1/sessions/{id}/turns/{turn_id}",
         "/v1/sessions/{id}/turns/{turn_id}/events",
@@ -2602,7 +2608,8 @@ mod tests {
             let probe = path
                 .replace("{id}", &id)
                 .replace("{turn_id}", "nope")
-                .replace("{task_id}", "nope");
+                .replace("{task_id}", "nope")
+                .replace("{approval_id}", "nope");
             // An unmatched path logs the route label "unmatched"; a matched
             // one logs its own pattern. That is the reachability check.
             let before = harness.logged().len();
@@ -2687,6 +2694,28 @@ mod tests {
         let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
         assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
         assert_eq!(reply.json()["error"]["code"], "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn approval_route_is_session_scoped_and_fails_closed() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/approvals/approval-1"),
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT);
+        assert_eq!(reply.json()["error"]["code"], "approval_failed");
+        assert_eq!(
+            harness
+                .send("POST", "/v1/sessions/missing/approvals/approval-1", None,)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

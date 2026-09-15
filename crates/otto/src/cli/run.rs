@@ -32,7 +32,9 @@ use otto_core::config::{
 use otto_core::session::{CURRENT_VERSION, Header, RuntimeMetadata};
 use tokio_util::sync::CancellationToken;
 
+use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resolve_environment};
+use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 use crate::session;
 
 use super::boundary::{self, BoundaryInputs};
@@ -337,6 +339,7 @@ pub async fn run(
         no_session: options.no_session,
         overrides: overrides_from(&options),
         command_executor: None,
+        bash_approvals: None,
         sandbox_environment: None,
         sandbox_info: super::info::SandboxInfo::default(),
         sandbox_secrets: startup.sandbox_secrets.clone(),
@@ -404,6 +407,7 @@ pub async fn run(
     let redaction_values = sandbox.redaction_values.clone();
     let redactions_complete = sandbox.redactions_complete;
     let control = SandboxSwitch::new(sandbox);
+    let mut approval_executor: Option<Arc<Executor>> = None;
     if cancel.is_cancelled() {
         let _ = control.close().await;
         return 130;
@@ -418,6 +422,40 @@ pub async fn run(
     builder.sandbox_secrets = merged;
     builder.sandbox_secrets_complete =
         builder.sandbox_secrets_complete && redactions_complete && merged_complete;
+    if (options.serve || frontend != Frontend::Once)
+        && sandbox_info.mode == super::info::SandboxMode::Seatbelt
+    {
+        let elevated_environment = resolve_environment(&EnvironmentOptions {
+            host_entries: host_entries.clone(),
+            provider_names: sandbox_provider_environment_names(&config_file, &resolved.api_key_env),
+            allow_names: sandbox_settings.allow_env.clone(),
+            private_directories: None,
+        });
+        if let Ok(snapshot) = elevated_environment
+            && snapshot.redactions_complete()
+            && let Some(entries) = snapshot.entries()
+            && let Ok(executor) = Executor::new(
+                Arc::new(DirectDriver::new()),
+                Policy {
+                    filesystem: FilesystemMode::Unconfined,
+                    network: NetworkMode::Allow,
+                },
+                workspace.root(),
+            )
+        {
+            let executor = Arc::new(executor);
+            let command_executor: Arc<dyn crate::sandbox::CommandExecutor> = executor.clone();
+            builder.bash_approvals = Some(Arc::new(crate::tool::bash::BashApprovals::new(
+                command_executor,
+                entries.to_vec(),
+            )));
+            let (merged, complete) =
+                merge_redactions(&builder.sandbox_secrets, snapshot.redaction_values());
+            builder.sandbox_secrets = merged;
+            builder.sandbox_secrets_complete &= complete;
+            approval_executor = Some(executor);
+        }
+    }
     if let Some(warning) = sandbox_runtime_warning(builder.effective_sandbox_info()) {
         let _ = stderr.write_all(warning.as_bytes());
     }
@@ -483,7 +521,7 @@ pub async fn run(
                     return fail(stderr, &builder.redact_error(&error.to_string(), None));
                 }
             };
-        return serve::run(
+        let exit = serve::run(
             serve::ServeOptions {
                 builder,
                 runtime: resolved,
@@ -496,6 +534,13 @@ pub async fn run(
             cancel,
         )
         .await;
+        if approval_executor
+            .as_ref()
+            .is_some_and(|executor| executor.close().is_err())
+        {
+            return fail(stderr, "close sandbox: sandbox runtime close failed");
+        }
+        return exit;
     }
 
     let (initial_session, warnings) =
@@ -575,6 +620,11 @@ pub async fn run(
     cancel.cancel();
     let controller_error = controller.close();
     let sandbox_error = control.close().await;
+    let approval_error = approval_executor
+        .as_ref()
+        .map(|executor| executor.close())
+        .transpose()
+        .err();
     let _ = memory_service.close();
     if let Err(message) = controller_error {
         return fail(
@@ -582,7 +632,7 @@ pub async fn run(
             &format!("close session: {}", redact_with(&tail_redactor, &message)),
         );
     }
-    if sandbox_error.is_err() {
+    if sandbox_error.is_err() || approval_error.is_some() {
         return fail(stderr, "close sandbox: sandbox runtime close failed");
     }
     if cancelled_before_exit || frontend_cancelled {

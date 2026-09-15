@@ -112,6 +112,7 @@ pub(crate) enum Action {
     Resume(String),
     Archive(String),
     SandboxReload,
+    Approve(String),
     Login(String),
 }
 
@@ -739,6 +740,14 @@ impl App {
                 } else {
                     self.push_system(format!("unknown command: /sandbox {args}"));
                     None
+                }
+            }
+            SlashCommandKind::Approve => {
+                if args.is_empty() || args.contains(char::is_whitespace) {
+                    self.push_system(format!("unknown command: {line}"));
+                    None
+                } else {
+                    Some(Action::Approve(args))
                 }
             }
             SlashCommandKind::Login => Some(Action::Login(args)),
@@ -1743,11 +1752,11 @@ mod tests {
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
         let cancel = CancellationToken::new();
-        app.input = "/s".chars().collect();
+        app.input = "/sk".chars().collect();
         app.cursor = app.input.len();
 
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
-        assert_eq!(app.suggestion, 1, "/session then /sandbox");
+        assert_eq!(app.suggestion, 1, "/skill then /skills");
         assert_eq!(app.scroll, None, "the transcript must not scroll");
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
         assert_eq!(app.suggestion, 0, "selection wraps");

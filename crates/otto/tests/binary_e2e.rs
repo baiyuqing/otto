@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{io::Write, process::Stdio};
 
 mod common;
 use common::{Script, serve, text_reply, tool_call_reply};
@@ -25,6 +26,19 @@ fn only_session_transcript(home: &std::path::Path) -> String {
     }
     assert_eq!(transcripts.len(), 1, "one session per run");
     transcripts.remove(0)
+}
+
+fn configure(home: &std::path::Path, base_url: &str) {
+    std::fs::create_dir_all(home.join("Library/Caches")).expect("cache base");
+    let config_dir = home.join(".config/otto");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"gpt-test\"\napi_key_env = \"OTTO_API_KEY\"\n"
+        ),
+    )
+    .expect("write config");
 }
 
 #[test]
@@ -47,20 +61,7 @@ fn the_binary_runs_one_approved_turn_with_bash_and_write_under_seatbelt() {
         served: Arc::clone(&served),
     });
 
-    // Seatbelt puts its private state under `$HOME/Library/Caches`, and both
-    // Go's `createState` and the Rust port require that directory to exist
-    // already. A real macOS home always has it; a temporary one does not.
-    std::fs::create_dir_all(home.path().join("Library/Caches")).expect("cache base");
-
-    let config_dir = home.path().join(".config/otto");
-    std::fs::create_dir_all(&config_dir).expect("config dir");
-    std::fs::write(
-        config_dir.join("config.toml"),
-        format!(
-            "default_profile = \"test\"\n\n[profiles.test]\nprovider = \"openai-compatible\"\nbase_url = \"{base_url}\"\nmodel = \"gpt-test\"\napi_key_env = \"OTTO_API_KEY\"\n"
-        ),
-    )
-    .expect("write config");
+    configure(home.path(), &base_url);
 
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_otto"));
     command
@@ -118,4 +119,75 @@ fn the_binary_runs_one_approved_turn_with_bash_and_write_under_seatbelt() {
         .expect("the write tool created notes.txt");
     assert_eq!(written, "written by the agent\n");
     assert_eq!(served.load(Ordering::SeqCst), 3, "stdout:\n{stdout}");
+}
+
+#[test]
+fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(home.path().join("elevated.txt"), "outside-seatbelt\n").expect("home fixture");
+
+    let arguments = serde_json::json!({
+        "command": "cat \"$HOME/elevated.txt\"",
+        "sandbox_permissions": "require_escalated",
+        "justification": "read the reviewed home fixture",
+    })
+    .to_string();
+    let served = Arc::new(AtomicUsize::new(0));
+    let base_url = serve(Script {
+        replies: vec![
+            tool_call_reply("call-1", "bash", &arguments),
+            text_reply("approval needed"),
+            tool_call_reply("call-2", "bash", &arguments),
+            text_reply("done"),
+        ],
+        served: Arc::clone(&served),
+    });
+    configure(home.path(), &base_url);
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_otto"));
+    child
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("SHELL", "/bin/sh")
+        .env("OTTO_API_KEY", "sk-e2e-not-a-real-key")
+        .arg("--cwd")
+        .arg(workspace.path())
+        .arg("--sandbox")
+        .arg("seatbelt")
+        .arg("--ui")
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        child.env("TMPDIR", tmpdir);
+    }
+    let mut child = child.spawn().expect("run otto");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"read the fixture\n/approve approval-1\n/exit\n")
+        .expect("write prompts");
+    let output = child.wait_with_output().expect("wait for otto");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "exit = {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+    assert!(
+        stdout.contains("unsandboxed approval required: run /approve approval-1"),
+        "stdout:\n{stdout}"
+    );
+    assert!(stdout.contains("done"), "stdout:\n{stdout}");
+    assert!(
+        only_session_transcript(home.path()).contains("outside-seatbelt"),
+        "stdout:\n{stdout}"
+    );
+    assert_eq!(served.load(Ordering::SeqCst), 4, "stdout:\n{stdout}");
 }

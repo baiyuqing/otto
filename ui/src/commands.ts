@@ -9,6 +9,7 @@ export type WebCommand =
   | { kind: 'compact'; focus: string }
   | { kind: 'sandbox' }
   | { kind: 'sandboxReload' }
+  | { kind: 'approve'; id: string }
   | { kind: 'tasks' }
   | { kind: 'task'; id: string }
   | { kind: 'taskCancel'; id: string }
@@ -29,6 +30,7 @@ export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/rename', description: 'rename the current session' },
   { name: '/compact', description: 'compact context with optional focus' },
   { name: '/sandbox', description: 'show sandbox state, or reload configuration' },
+  { name: '/approve', description: 'allow one exact elevated Bash command' },
   { name: '/tasks', description: 'list sub-agent tasks' },
   { name: '/task', description: 'show or cancel a sub-agent task' },
   { name: '/exit', description: 'close the browser tab' },
@@ -67,6 +69,10 @@ export function parseWebCommand(text: string): WebCommand {
       if (!argument) return { kind: 'sandbox' }
       if (argument === 'reload') return { kind: 'sandboxReload' }
       return { kind: 'prompt', text: trimmed }
+    case '/approve':
+      return argument && !/\s/.test(argument)
+        ? { kind: 'approve', id: argument }
+        : { kind: 'error', message: 'usage: /approve <id>' }
     case '/tasks':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'tasks' }
     case '/task': {

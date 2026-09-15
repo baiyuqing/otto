@@ -767,6 +767,35 @@ impl Controller {
         control.reload().await
     }
 
+    /// Grants one pending elevated Bash command for the current session.
+    pub fn approve_bash(&self, id: &str) -> Result<String, String> {
+        let session_id = {
+            let state = self.lock();
+            if state.closed {
+                return Err(CLOSED.to_string());
+            }
+            if state.busy {
+                return Err(PROMPT_ACTIVE.to_string());
+            }
+            state
+                .current
+                .as_ref()
+                .ok_or_else(|| CLOSED.to_string())?
+                .session
+                .header()
+                .id
+        };
+        let approvals = self
+            .builder
+            .bash_approvals
+            .as_ref()
+            .ok_or_else(|| "temporary elevation is unavailable".to_string())?;
+        approvals.approve(&session_id, id).map_err(str::to_string)?;
+        Ok(format!(
+            "The user approved {id} for one exact command. Retry the same elevated Bash command now."
+        ))
+    }
+
     // ---- replacement helpers ----
 
     fn current_metadata(&self) -> Result<RuntimeMetadata, String> {
@@ -991,6 +1020,22 @@ mod tests {
         assert_eq!(info.session_path, "");
         assert_eq!(info.sandbox.summary(), controller.sandbox_info().summary());
         assert_eq!(info.workspace, controller.workspace());
+    }
+
+    #[tokio::test]
+    async fn bash_approval_fails_closed_when_unavailable_or_busy() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        assert_eq!(
+            controller.approve_bash("approval-1"),
+            Err("temporary elevation is unavailable".to_string())
+        );
+        let _admission = controller.begin_operation().expect("admit turn");
+        assert_eq!(
+            controller.approve_bash("approval-1"),
+            Err(PROMPT_ACTIVE.to_string())
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Workspace-confined tools.
+//! Workspace-confined file tools, plus in-process `remind`.
 //!
 //! Port of `internal/tool`. Every filesystem tool resolves paths through
 //! [`workspace::Workspace`], which rejects escapes from the selected workspace
@@ -21,6 +21,7 @@ pub mod ls;
 pub mod memory;
 pub mod read;
 pub mod registry;
+pub mod remind;
 pub mod result;
 pub(crate) mod root;
 mod search;

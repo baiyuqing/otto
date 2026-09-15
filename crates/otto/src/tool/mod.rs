@@ -30,6 +30,7 @@ pub mod write;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
@@ -46,6 +47,23 @@ pub trait Tool: Send + Sync {
 
     /// Runs one call. `arguments` is borrowed for the duration of the call.
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult;
+}
+
+/// Deserializes an optional list argument, reading an empty list the same as
+/// `null` or an absent key.
+///
+/// Models emit `[]` in the position of an argument they are not using, beside
+/// the arguments they are using. A tool that distinguishes the two rejects
+/// calls it can otherwise serve, and the model cannot retry its way out: the
+/// empty list is the shape it produces. Every optional list argument uses
+/// this; `tests/tool_argument_contract.rs` fails on one that does not.
+pub(crate) fn empty_as_none<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    let items = Option::<Vec<T>>::deserialize(deserializer)?;
+    Ok(items.filter(|items| !items.is_empty()))
 }
 
 /// Builds a tool definition from a JSON schema literal.

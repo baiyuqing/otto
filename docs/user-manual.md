@@ -614,12 +614,14 @@ initial workspace.
 
 ### `remind`
 
-`remind` schedules a later wake in the same process. It returns immediately.
-When the delay elapses, Otto delivers a `[timer]` notification and the idle
-wake loop starts a turn, the same way a finished sub-agent does. At most eight
-timers can be outstanding. Each delay is 1 to 3600 seconds. Timers are not
-persisted: `/new`, session replacement, and exiting the process forget them.
-Child agents do not get this tool.
+`remind` schedules a later wake. It returns immediately. When the delay
+elapses, Otto delivers a `[timer]` notification and the idle wake loop
+starts a turn, the same way a finished sub-agent does. At most eight timers
+can be outstanding. Each delay is 1 to 3600 seconds. File-backed sessions
+keep outstanding timers across a restart; opening that session restores
+them, and a timer that is already due fires as soon as Otto is idle. `/new`
+starts a different session without them. `--no-session` timers live only in
+the current process. Child agents do not get this tool.
 
 ### Interactive sandbox setup
 

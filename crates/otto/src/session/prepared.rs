@@ -241,6 +241,10 @@ pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResul
     // destination, closing the check-then-rename race.
     fsops::rename_excl(Path::new(&candidate_path), &destination)
         .map_err(|error| PiError::other(format!("archive session file: {error}")))?;
+    let sidecar = Path::new(&candidate_path).with_extension("reminders.json");
+    if sidecar.is_file() {
+        let _ = fsops::rename_excl(&sidecar, &destination.with_extension("reminders.json"));
+    }
     Ok(ArchiveResult {
         path: destination.to_string_lossy().into_owned(),
         id: session_info.id,

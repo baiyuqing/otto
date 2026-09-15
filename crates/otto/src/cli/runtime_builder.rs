@@ -1030,6 +1030,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chatgpt_runtime_registers_remind() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut builder = builder(dir.path());
+        builder.auth_credentials_loaded = true;
+        builder.auth_path = dir
+            .path()
+            .join("chatgpt.json")
+            .to_string_lossy()
+            .into_owned();
+        builder.auth_credentials = crate::auth::Credentials {
+            account_id: "acct".into(),
+            access_token: "tok".into(),
+            ..crate::auth::Credentials::default()
+        };
+        let mut runtime = runtime();
+        runtime.provider = otto_core::config::PROVIDER_CHATGPT.to_string();
+        let session = SharedSession::memory(Header::default());
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let names = tool_names(&runner);
+        assert!(names.contains(&"remind".to_string()), "{names:?}");
+        assert!(names.contains(&"agent".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
     async fn the_bash_tool_is_added_only_when_the_sandbox_is_usable() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut builder = builder(dir.path());

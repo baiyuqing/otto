@@ -268,8 +268,9 @@ impl App {
         }
     }
 
-    /// Marks a turn as started. [`super::run_turn`]/[`super::run_compact`]
-    /// bracket every `Controller` call with this and [`App::end_turn`].
+    /// Marks a turn as started. [`super::run_turn`]/[`super::run_compact`]/
+    /// [`super::run_wake`] bracket every `Controller` call with this and
+    /// [`App::end_turn`].
     pub fn start_turn(&mut self) {
         self.busy_since = Some(Instant::now());
     }

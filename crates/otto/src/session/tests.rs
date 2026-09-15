@@ -1397,6 +1397,20 @@ fn archive_moves_active_session_preserving_bytes_and_mode() {
 }
 
 #[test]
+fn archive_moves_reminder_sidecar_with_the_session() {
+    let temp = TempDir::new();
+    let (root, workspace, paths) = seeded_workspace(&temp, 1);
+    let sidecar = Path::new(&paths[0]).with_extension("reminders.json");
+    fs::write(&sidecar, b"[]").expect("sidecar");
+
+    let result =
+        archive(&root, &workspace.to_string_lossy(), Path::new(&paths[0])).expect("archive");
+    assert!(!sidecar.exists());
+    let archived = Path::new(&result.path).with_extension("reminders.json");
+    assert_eq!(fs::read(&archived).expect("read sidecar"), b"[]");
+}
+
+#[test]
 fn archive_removes_session_from_list_but_keeps_it_resumable() {
     let temp = TempDir::new();
     let (root, workspace, paths) = seeded_workspace(&temp, 2);

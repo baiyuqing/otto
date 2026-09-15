@@ -36,7 +36,8 @@ const MAX_DIFF_BYTES: usize = 4096;
 /// The wire shape of edit arguments. Port of `editRequest`: optional fields
 /// distinguish an absent key from an empty string so that `"new_text": ""`
 /// stays a valid deletion. Exactly one of `old_text`/`new_text` or `edits`
-/// must be present; an empty `edits` array counts as absent.
+/// must be present; an empty `edits` array counts as absent, and so does a
+/// blank `old_text` and `new_text` pair.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditRequest {
@@ -79,7 +80,14 @@ struct ResolvedEdit {
 impl EditRequest {
     /// Port of `editRequest.replacements`.
     fn replacements(&self) -> Result<Vec<EditReplacement>, String> {
-        if self.edits.is_some() && (self.old_text.is_some() || self.new_text.is_some()) {
+        // A blank string is the mirror of the empty `edits` array: models fill
+        // the argument position they are not using beside the one they are.
+        // Only a non-empty value asks for a single replacement, so
+        // `"new_text": ""` beside a non-empty `old_text` stays a deletion.
+        let single = [&self.old_text, &self.new_text]
+            .into_iter()
+            .any(|text| text.as_deref().is_some_and(|text| !text.is_empty()));
+        if self.edits.is_some() && single {
             return Err(
                 "invalid arguments: pass either old_text and new_text or edits, not both"
                     .to_owned(),
@@ -928,6 +936,22 @@ mod tests {
             assert!(!result.is_error, "{edits}: {result:?}");
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\n");
         }
+    }
+
+    /// The mirror of the empty `edits` array: models emit `""` in the
+    /// old_text/new_text position they are not using, beside the `edits` they
+    /// are using.
+    #[tokio::test]
+    async fn blank_single_keys_allow_an_array_of_edits() {
+        let (root, path) = sample("one\ntwo\nthree\n");
+        let workspace = workspace(root.path());
+        let result = run(
+            &EditTool::new(&workspace),
+            r#"{"path":"sample.txt","old_text":"","new_text":"","edits":[{"old_text":"one","new_text":"ONE"},{"old_text":"three","new_text":"THREE"}]}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\nTHREE\n");
     }
 
     #[tokio::test]

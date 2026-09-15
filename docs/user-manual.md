@@ -370,6 +370,9 @@ OTTO_UI=repl otto
 - While a turn is running, an animated `Thinking…` line with the elapsed
   seconds is shown under the transcript, and the composer title reads
   `Working (Esc to cancel)`.
+- While idle, a finished sub-agent task starts a wake turn that delivers the
+  notification and lets the model continue. Esc cancels it the same way as a
+  user turn. Composer text is left in place.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
 - Tool calls are folded to the tool name, a cut-down first line of the

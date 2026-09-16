@@ -133,6 +133,11 @@ impl Inbox {
         self.len() == 0
     }
 
+    /// Copies queued notifications without draining them.
+    pub fn snapshot(&self) -> Vec<Notification> {
+        self.lock().clone()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Notification>> {
         self.items
             .lock()
@@ -179,6 +184,16 @@ mod tests {
         );
         assert!(inbox.is_empty());
         assert!(inbox.drain().is_empty());
+    }
+
+    #[test]
+    fn snapshot_copies_without_draining() {
+        let inbox = Inbox::new(None);
+        inbox.push(notification("t1", NotificationKind::Message));
+        let copied = inbox.snapshot();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].task_id, "t1");
+        assert_eq!(inbox.len(), 1);
     }
 
     #[test]

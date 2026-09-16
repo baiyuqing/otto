@@ -1,8 +1,9 @@
 # Otto User Manual
 
-Otto is a minimal macOS coding agent written in Rust. It turns a natural-language
-prompt into a loop of model completions, optional tool calls, and — when needed —
-context compaction, all in a full-screen TUI or a line-oriented REPL.
+Otto is a local-first agent for macOS, written in Rust. It turns a
+natural-language prompt into a loop of model completions, optional tool calls,
+and — when needed — context compaction, in a full-screen TUI, a line-oriented
+REPL, or `otto serve`.
 
 This manual describes the behavior implemented by the current build: the
 OpenAI-compatible provider and the ChatGPT-subscription provider. It covers only
@@ -237,6 +238,11 @@ paths = ["~/.otto/skills", ".otto/skills"]
 socket = "~/.otto/otto.sock"
 # listen = "127.0.0.1:8787"  # loopback TCP instead of the socket
 
+[inbound.feishu]
+enabled = false
+# binary = "lark-cli"
+# chat_ids = ["oc_xxx"]
+
 [profiles.example]
 provider = "openai-compatible"
 base_url = "https://example.invalid/v1"
@@ -283,6 +289,14 @@ Key points:
   `[server].listen` a loopback `HOST:PORT` to use instead (see
   [Agent server](#agent-server)). TOML-only aside from the `--socket` and
   `--listen` flags; no environment variable.
+- `[inbound.feishu]` is off by default. When `enabled = true`, `otto serve`
+  spawns `lark-cli event consume im.message.receive_v1 --as bot` and delivers
+  each text message to every open session inbox, which starts a wake turn
+  when the session is idle. `binary` defaults to `lark-cli`. `chat_ids`
+  restricts delivery to those chats; empty means every chat. Credentials stay
+  in `lark-cli`'s own store, not in Otto config: unknown keys such as `token`
+  fail config load. A missing binary logs an error and disables inbound;
+  serve keeps running. The TUI and REPL do not spawn this consumer.
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
   `api_key_env`. Optional `context_window` and `compaction_window` size
   proactive compaction for private or unknown model IDs.
@@ -746,6 +760,16 @@ otto serve [--socket PATH | --listen HOST:PORT]
 `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
 `--socket` or `--listen`. It rejects `--ui`, `--approve`, `--resume`,
 `--continue`, `--archive`, and `--no-session`.
+
+### Feishu inbound
+
+When `[inbound.feishu].enabled` is true, the serve process consumes Feishu
+`im.message.receive_v1` events through `lark-cli` and pushes them as
+`[feishu]` inbox messages. Open sessions receive a copy; an idle session
+starts a wake turn with HTTP `trigger` still `task`. Interactive cards and
+empty bodies are ignored. Shutting down the server sends SIGTERM to the
+child. Replying in Feishu is not wired: a model that should respond uses a
+user-installed `lark-cli` skill through `bash`.
 
 ### Listener
 

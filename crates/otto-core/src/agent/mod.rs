@@ -389,6 +389,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     async fn deliver_notifications(&self, emit: EventSink<'_>) -> Result<(), AgentError> {
         for notification in self.options.inbox.drain() {
             let text = self.redactor.redact_string(&notification.text);
+            let metadata = ContextMetadata {
+                task_id: notification.task_id.clone(),
+            };
+            let context_metadata = metadata.validate().is_ok().then_some(metadata);
             let message = Message {
                 id: (self.options.new_id)(),
                 role: Role::Context,
@@ -396,9 +400,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 display: true,
                 created_at: (self.options.now)(),
                 usage: notification.usage,
-                context_metadata: Some(ContextMetadata {
-                    task_id: notification.task_id.clone(),
-                }),
+                context_metadata,
                 blocks: vec![Block::text(text.clone())],
                 ..Message::default()
             };

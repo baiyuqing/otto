@@ -31,6 +31,7 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::{get, post};
+use otto_core::agent::inbox::Notification;
 use otto_core::model::{Message, Usage};
 use otto_core::session::ListResult;
 use otto_core::wire::sse::format_frame;
@@ -110,8 +111,8 @@ pub struct Options {
 
 /// Go `slog` `TextHandler` output, hand-rolled.
 ///
-/// ponytail: no logging crate is pinned and the server writes nine fixed
-/// lines, so a 30-line formatter beats adding `tracing` plus a subscriber.
+/// ponytail: no logging crate is pinned and the server writes a handful of
+/// fixed lines, so a small formatter beats adding `tracing` plus a subscriber.
 /// Swap for `tracing` if any other crate needs structured logs.
 pub struct Logger {
     sink: Mutex<Box<dyn std::io::Write + Send>>,
@@ -291,6 +292,17 @@ impl Server {
 
     pub fn logger(&self) -> &Arc<Logger> {
         &self.log
+    }
+
+    /// Fans `notification` out to every currently open session. Sessions that
+    /// have no task registry (sub-agents off) drop it. Returns how many
+    /// sessions were open, including those that could not receive it.
+    pub(crate) fn notify_open_sessions(&self, notification: Notification) -> usize {
+        let sessions = self.all_sessions();
+        for session in &sessions {
+            session.ctrl.notify(notification.clone());
+        }
+        sessions.len()
     }
 
     /// Cancels every in-flight turn, then closes every open controller.
@@ -597,13 +609,20 @@ impl Server {
         };
 
         self.metrics.turn_started();
-        self.log.info(
-            "turn_started",
-            &[
-                ("turn_id", turn.id.clone()),
-                ("trigger", TRIGGER_TASK.to_string()),
-            ],
-        );
+        let mut fields = vec![
+            ("turn_id", turn.id.clone()),
+            ("trigger", TRIGGER_TASK.to_string()),
+        ];
+        if let Some(kind) = session.ctrl.subagent_tasks().and_then(|tasks| {
+            tasks
+                .notifications()
+                .snapshot()
+                .into_iter()
+                .find_map(|item| item.kind)
+        }) {
+            fields.push(("inbox_kind", kind.as_str().to_string()));
+        }
+        self.log.info("turn_started", &fields);
         let cancel = turn.cancel_token();
         let result = {
             let mut emit = turn.emitter(&self.metrics);
@@ -2877,6 +2896,54 @@ mod tests {
 
         let done = harness.wait_turn_done(&id, &turn_id).await;
         assert_eq!(done["trigger"], turn::TRIGGER_TASK);
+    }
+
+    #[tokio::test]
+    async fn notify_open_sessions_fans_out_to_every_open_controller() {
+        let harness = Harness::new();
+        let first = harness.create().await;
+        let second = harness.create().await;
+        let notification = otto_core::agent::inbox::Notification {
+            kind: Some(otto_core::agent::inbox::NotificationKind::Message),
+            text: "[feishu] hello".to_string(),
+            ..otto_core::agent::inbox::Notification::default()
+        };
+        assert_eq!(harness.server.notify_open_sessions(notification), 2);
+        for id in [first, second] {
+            let pending = harness
+                .server
+                .lookup(&id)
+                .expect("session")
+                .ctrl
+                .subagent_tasks()
+                .expect("registry")
+                .notifications()
+                .snapshot();
+            assert_eq!(pending.len(), 1, "{id}");
+            assert_eq!(pending[0].text, "[feishu] hello");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_message_wake_logs_inbox_kind() {
+        let (harness, tasks) = wake_harness(Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        });
+        harness.create().await;
+        tasks
+            .notifications()
+            .push(otto_core::agent::inbox::Notification {
+                kind: Some(otto_core::agent::inbox::NotificationKind::Message),
+                text: "[feishu] hi".to_string(),
+                ..otto_core::agent::inbox::Notification::default()
+            });
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+            .await
+            .expect("the message did not start a wake turn");
+        let log = harness.logged();
+        assert!(log.contains("msg=turn_started"), "{log}");
+        assert!(log.contains("inbox_kind=message"), "{log}");
     }
 
     /// Port of `TestWakeTurnSkippedWhileUserTurnActive`.

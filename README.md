@@ -2,22 +2,24 @@
   <img src="docs/logo.png" alt="Otto logo" width="320">
 </p>
 
-# Otto — AI Coding Agent for macOS
+# Otto — a local-first agent for macOS
 
 [简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md)
 
-**Otto is a local-first AI coding assistant for your terminal, built in Rust.**
-Read an unfamiliar codebase, make focused edits, and run checks in one session.
-Connect through an OpenAI-compatible API endpoint or sign in with `otto login`
-for the ChatGPT provider. Model requests go to the selected provider; local-first
-refers to the runtime, session history, and memory storage.
+**Otto is a local-first agent for your terminal, built in Rust.**
+Give it a task; it runs a loop of model completions, tool calls, and — when
+needed — context compaction. Connect through an OpenAI-compatible API endpoint
+or sign in with `otto login` for the ChatGPT provider. Model requests go to the
+selected provider; local-first refers to the runtime, session history, and
+memory storage.
 
 - **Work in your terminal.** A full-screen TUI for interactive work, a REPL for pipes,
   and headless mode for scripts.
 - **Keep access bounded.** Workspace-confined file tools and macOS Seatbelt
   sandboxing for shell commands by default.
-- **Continue across tasks.** Persistent sessions, context compaction, local
-  memory, reusable skills, and bounded sub-agents.
+- **Keep going without you typing.** Persistent sessions, local memory, reusable
+  skills, bounded sub-agents, timers, and — with `otto serve` — optional Feishu
+  inbound into the session inbox.
 
 ## Install from source
 
@@ -68,26 +70,26 @@ Otto reads API keys from the profile's `api_key_env` variable or falls back to
 `OTTO_API_KEY`. Keys have no CLI flag and must not be stored in TOML. For a
 persistent setup, see [configuration](docs/user-manual.md#configuration).
 
-## Try a coding task
+## Try a task
 
-Start Otto in the project you want to work on:
+Start Otto in the workspace you want it to use:
 
 ```bash
-./otto --provider chatgpt --model YOUR_MODEL_ID --cwd /path/to/project
+./otto --provider chatgpt --model YOUR_MODEL_ID --cwd /path/to/workspace
 ```
 
 Example prompts to enter in the interactive session:
 
 ```text
-Explain this repository's entry points and how to run its tests.
-Add a failing test for the bug we just identified, then make the smallest fix.
-Run the relevant tests and summarize the diff.
+What is in this workspace, and what should I do next?
+Remind me in five minutes to follow up.
+Remember that we decided to ship the inbox path first.
 ```
 
 After configuring a default profile, you can also run one prompt and exit:
 
 ```bash
-./otto --approve "summarize TODOs in this repo"
+./otto --approve "summarize what this workspace is for"
 ./otto --continue
 ```
 
@@ -100,16 +102,18 @@ archiving. See [sessions](docs/user-manual.md#sessions) and
 - [Local memory](docs/user-manual.md#memory): search, remember, review, and forget.
 - [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
-  socket or a loopback TCP port, with an embedded browser UI.
+  socket or a loopback TCP port, with an embedded browser UI. Optional
+  [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
+  text into open session inboxes.
 - [Configuration](docs/user-manual.md#configuration),
   [CLI reference](docs/user-manual.md#command-line-reference), and
   [troubleshooting](docs/user-manual.md#troubleshooting).
 
 ### Delegate work to sub-agents
 
-Sub-agents let the model start bounded child tasks for parallel exploration,
-review, or research. They run in the same workspace, sandbox, and provider as the
-parent, with a fresh context by default.
+Sub-agents let the model start bounded child tasks that run in parallel. They
+use the same workspace, sandbox, and provider as the parent, with a fresh
+context by default.
 
 Optional named definitions live under:
 
@@ -121,17 +125,17 @@ Optional named definitions live under:
 Example:
 
 ```text
-~/.otto/agents/reviewer/AGENT.md
+~/.otto/agents/researcher/AGENT.md
 ```
 
 ```markdown
 ---
-name: reviewer
-description: Review a diff for correctness and missing tests.
-tools: read, grep, find, ls, bash
+name: researcher
+description: Gather facts from the workspace and return a short brief.
+tools: read, grep, find, ls
 context: fresh
 ---
-Report findings as file:line bullets ordered by severity.
+Return a brief with sources. Do not edit files.
 ```
 
 Interactive task commands:
@@ -154,8 +158,8 @@ persisted.
 - In an interactive parent session, Otto can request one-time unsandboxed Bash
   execution. Review the exact command and run `/approve <id>` to grant it once;
   the request expires after five minutes and never changes `config.toml`.
-- Session files may contain source code, prompts, and tool results. Treat them
-  as sensitive project data.
+- Session files may contain workspace files, prompts, and tool results. Treat
+  them as sensitive.
 - No plugins, automatic project-local config discovery, session trees/forks,
   deletion, or search.
 - No automatic memory extraction or memory backup/restore/verify commands.
@@ -178,7 +182,7 @@ The code is a Cargo workspace of three crates:
 - `crates/otto-core` holds the provider contract, wire codecs, session codec,
   agent loop, and config. It builds for `wasm32-unknown-unknown`.
 - `crates/otto` is the macOS binary: CLI, REPL, TUI, tools, sandbox, memory,
-  skills, sub-agents, and the `otto serve` server.
+  skills, sub-agents, inbound adapters, and the `otto serve` server.
 - `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
   `ui/`, so the web frontend and the binary share one implementation.
 

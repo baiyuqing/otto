@@ -480,6 +480,53 @@ async fn empty_text_with_a_notification_is_a_wake_turn() {
     assert_eq!(messages[0].context_type, "task_notification");
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_notification_without_a_generated_task_id_still_persists() {
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        task_id: String::new(),
+        kind: Some(NotificationKind::Message),
+        text: "[feishu] hello".into(),
+        usage: None,
+    });
+    inbox.push(Notification {
+        task_id: "timer".into(),
+        text: "[timer] due".into(),
+        usage: None,
+        kind: None,
+    });
+    let provider = FakeProvider::new(vec![Turn::text("ok")]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            inbox: inbox.clone(),
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("a wake turn runs");
+    let contexts: Vec<_> = agent
+        .session()
+        .messages()
+        .into_iter()
+        .filter(|message| message.role == Role::Context)
+        .collect();
+    assert_eq!(contexts.len(), 2);
+    assert!(
+        contexts
+            .iter()
+            .all(|message| message.context_metadata.is_none()),
+        "ungenerated task ids must not become context metadata: {contexts:?}"
+    );
+    assert_eq!(contexts[0].context_type, "parent_message");
+    assert_eq!(contexts[1].context_type, "task_notification");
+}
+
 // -- memory ----------------------------------------------------------------
 
 fn one_record() -> Vec<Record> {

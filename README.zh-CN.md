@@ -2,18 +2,18 @@
   <img src="docs/logo.png" alt="Otto 标志" width="320">
 </p>
 
-# Otto — macOS 终端 AI 编程助手
+# Otto — macOS 上的本地优先 Agent
 
 [English](README.md) · [用户手册（英文）](docs/user-manual.md)
 
-**Otto 是一个使用 Rust 编写、优先使用本地存储的 AI coding agent。**
-在终端中阅读代码、修改文件、运行测试，并在后续会话中继续工作。
+**Otto 是一个使用 Rust 编写、优先使用本地存储的 Agent。**
+给它一项任务，它会循环调用模型、按需使用工具，并在需要时压缩上下文。
 支持通过 API key 连接 OpenAI-compatible 接口，或通过 `otto login`
 登录使用 ChatGPT provider。模型请求会发送给所选服务；运行时、会话历史和记忆存储位于本地。
 
-- **在终端中完成开发任务：** 内联 TUI、面向管道的 REPL，以及用于脚本的非交互模式。
+- **在终端里工作：** 全屏 TUI、面向管道的 REPL，以及用于脚本的非交互模式。
 - **限定访问范围：** 文件工具限制在工作区内，Shell 命令默认通过 macOS Seatbelt 沙箱执行。
-- **延续工作上下文：** 持久化会话、上下文压缩、本地记忆、可复用 Skills 和有明确边界的子代理任务。
+- **不必一直盯着：** 持久化会话、本地记忆、可复用 Skills、有边界的子代理、定时器；`otto serve` 还可选把飞书消息送进会话 inbox。
 
 ## 从源码安装
 
@@ -57,26 +57,26 @@ API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO
 没有 `--api-key` 参数，也不要把密钥写入 TOML。长期使用可设置
 [默认 profile](docs/user-manual.md#configuration)。
 
-## 尝试一个开发任务
+## 试一次任务
 
-选择要处理的项目目录：
+选择 Otto 要使用的工作区：
 
 ```bash
-./otto --provider chatgpt --model YOUR_MODEL_ID --cwd /path/to/project
+./otto --provider chatgpt --model YOUR_MODEL_ID --cwd /path/to/workspace
 ```
 
 进入交互界面后，可以依次输入这些任务示例：
 
 ```text
-解释这个仓库的入口，以及如何运行测试。
-为刚才发现的问题添加一个失败测试，再做最小修复。
-运行相关测试，并总结 diff。
+这个工作区里有什么，我接下来该做什么？
+五分钟后提醒我跟进。
+记住我们决定先做 inbox 这条路径。
 ```
 
 配置默认 profile 后，也可以运行一次任务并退出，或继续最近的会话：
 
 ```bash
-./otto --approve "总结这个仓库中的 TODO"
+./otto --approve "总结这个工作区是做什么的"
 ./otto --continue
 ```
 
@@ -88,7 +88,7 @@ API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO
 - [本地记忆](docs/user-manual.md#memory)
 - [Skills](docs/user-manual.md#skills)
 - [子代理](README.md#delegate-work-to-sub-agents)
-- [本地服务：otto serve](docs/user-manual.md#agent-server)
+- [本地服务：otto serve](docs/user-manual.md#agent-server)，可选[飞书 inbound](docs/user-manual.md#feishu-inbound)
 - [命令参考](docs/user-manual.md#command-line-reference)与[问题排查](docs/user-manual.md#troubleshooting)
 
 ## 安全与限制
@@ -96,7 +96,7 @@ API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO
 仅支持 macOS，provider 为 `openai-compatible` 和 `chatgpt`。
 文件工具限定在工作区内；`--sandbox off` 会显式关闭 Shell 沙箱。
 Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏。
-会话文件可能包含源代码、提示词和工具结果，应按项目敏感数据处理。
+会话文件可能包含工作区文件、提示词和工具结果，应按敏感数据处理。
 
 不支持插件、自动发现项目配置、嵌套子代理，以及自动记忆提取。
 其他限制见[英文 README](README.md#safety-and-limitations)，完整访问规则见
@@ -107,7 +107,7 @@ Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏�
 代码是一个包含三个 crate 的 Cargo workspace：
 
 - `crates/otto-core`：provider 契约、wire 编解码、会话编解码、agent 循环和配置，可编译到 `wasm32-unknown-unknown`。
-- `crates/otto`：macOS 二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理和 `otto serve`。
+- `crates/otto`：macOS 二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理、inbound 适配器和 `otto serve`。
 - `crates/otto-web`：把 `otto-core` 编译为 WebAssembly 供 `ui/` 中的浏览器前端使用，前端与二进制共用同一份实现。
 
 开发约定和检查命令见 [AGENTS.md](AGENTS.md)，包契约见[开发指南（英文）](docs/development.md)。

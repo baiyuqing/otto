@@ -13,10 +13,12 @@ use std::sync::Arc;
 
 use otto_core::config::ServerRuntime;
 use otto_core::config::resolve::Runtime;
+use otto_core::config::resolve_feishu;
 use otto_core::session::ListResult;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{Controller, SandboxControl};
+use crate::inbound;
 use crate::server::listen::{Listener, listen_tcp, listen_unix};
 use crate::server::{self, Factory, Info, Options, SESSION_NOT_FOUND, Server};
 use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
@@ -150,6 +152,7 @@ pub async fn run(
     }
 
     let info = builder.runtime_info(&runtime);
+    let feishu = resolve_feishu(&builder.config);
     let mut profiles: Vec<String> = builder.config.profiles.keys().cloned().collect();
     profiles.sort();
     let server = Server::new(Options {
@@ -173,6 +176,7 @@ pub async fn run(
         // to read it.
         logger: None,
     });
+    let inbound = inbound::maybe_start(Arc::clone(&server), feishu, serve_cancel.clone());
 
     // SIGTERM is how a long-running `otto serve` is asked to shut down; the
     // process token covers SIGINT already.
@@ -181,6 +185,9 @@ pub async fn run(
         .await
         .err();
     serve_cancel.cancel();
+    if let Some(handle) = inbound {
+        let _ = handle.await;
+    }
     if let Some(handle) = terminate {
         let _ = handle.await;
     }

@@ -16,6 +16,7 @@
 
 pub mod agents;
 pub mod duration;
+pub mod inbound;
 pub mod memory;
 pub mod model_limits;
 mod paths;
@@ -32,6 +33,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
+pub use inbound::{FeishuRuntime, Inbound, resolve_feishu};
 pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
 pub use model_limits::ModelLimits;
 pub use resolve::{CompactionRuntime, Overrides, Runtime, SessionDefaults, resolve};
@@ -76,6 +78,8 @@ pub struct File {
     pub skills: Skills,
     #[serde(default)]
     pub agents: Agents,
+    #[serde(default, skip_serializing_if = "Inbound::is_default")]
+    pub inbound: Inbound,
     #[serde(default)]
     pub server: Server,
     #[serde(default)]

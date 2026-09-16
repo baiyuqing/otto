@@ -27,6 +27,7 @@ pub mod wake;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
+use otto_core::agent::inbox::Notification;
 use otto_core::agent::{AgentError, CompactionResult, EventSink};
 use otto_core::config::resolve::Runtime;
 use otto_core::model::{Message, Usage};
@@ -749,6 +750,28 @@ impl Controller {
         Ok(Some(WakeOperation::new(self, admission)))
     }
 
+    /// Pushes `notification` into the current runner's inbox. Returns true
+    /// when a registry received it. A closed controller or a runner without
+    /// tasks drops it.
+    pub fn notify(&self, notification: Notification) -> bool {
+        let tasks = {
+            let state = self.lock();
+            if state.closed {
+                return false;
+            }
+            let Some(tasks) = state
+                .current
+                .as_ref()
+                .and_then(|current| current.runner.tasks.clone())
+            else {
+                return false;
+            };
+            tasks
+        };
+        tasks.notifications().push(notification);
+        true
+    }
+
     /// Port of `Controller.ReloadSandbox`.
     pub async fn reload_sandbox(&self) -> Result<SandboxInfo, String> {
         let control = {
@@ -1004,6 +1027,7 @@ fn clean(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::cli::testutil::{builder, controller, initial_runtime, user};
+    use otto_core::agent::inbox::NotificationKind;
 
     #[tokio::test]
     async fn info_reports_the_current_session_and_the_resolved_profile() {
@@ -1479,5 +1503,27 @@ mod tests {
         );
         wake.cancel();
         controller.begin_operation().expect("admit");
+    }
+
+    #[tokio::test]
+    async fn notify_queues_a_message_that_claims_a_wake_turn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        assert!(controller.notify(Notification {
+            kind: Some(NotificationKind::Message),
+            text: "[feishu] hello".to_string(),
+            ..Notification::default()
+        }));
+        let wake = controller
+            .prepare_wake()
+            .expect("prepare")
+            .expect("claimed");
+        wake.cancel();
+        controller.close().expect("close");
+        assert!(!controller.notify(Notification {
+            text: "late".to_string(),
+            ..Notification::default()
+        }));
     }
 }

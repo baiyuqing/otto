@@ -1,34 +1,39 @@
 :root {
   color-scheme: light dark;
-  font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #0f172a;
-  color: #dbeafe;
-  --bg: #0f172a;
-  --panel: color-mix(in srgb, #111827 88%, white 12%);
-  --panel-strong: color-mix(in srgb, #111827 80%, white 20%);
-  --text: #e5eefc;
-  --muted: #93a4ba;
-  --line: rgba(148, 163, 184, 0.2);
-  --accent: #38bdf8;
-  --accent-strong: #0ea5e9;
-  --danger: #fb7185;
-  --shadow: 0 18px 60px rgba(2, 6, 23, 0.35);
+  font: 14px/1.45 "Avenir Next", "Helvetica Neue", Helvetica, sans-serif;
+  background: #efece6;
+  color: #1c1915;
+  --bg: #efece6;
+  --panel: #f7f4ee;
+  --panel-strong: #fbf8f2;
+  --text: #1c1915;
+  --muted: #5e584f;
+  --line: #cfc8ba;
+  --accent: #9a3412;
+  --accent-strong: #7c2d12;
+  --danger: #9f1239;
+  --code-bg: #e7e2d6;
+  --code-fg: #1c1915;
+  --shadow: none;
+  --radius: 3px;
+  --mono: "SF Mono", "Menlo", "IBM Plex Mono", ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: light) {
+@media (prefers-color-scheme: dark) {
   :root {
-    background: #eef5ff;
-    color: #172033;
-    --bg: #eef5ff;
-    --panel: rgba(255, 255, 255, 0.82);
-    --panel-strong: #ffffff;
-    --text: #172033;
-    --muted: #64748b;
-    --line: rgba(15, 23, 42, 0.12);
-    --accent: #0284c7;
-    --accent-strong: #0369a1;
-    --danger: #dc2626;
-    --shadow: 0 18px 60px rgba(30, 64, 175, 0.14);
+    background: #161412;
+    color: #e8e2d4;
+    --bg: #161412;
+    --panel: #1c1916;
+    --panel-strong: #221f1b;
+    --text: #e8e2d4;
+    --muted: #a39a8c;
+    --line: #3a342c;
+    --accent: #e07a3d;
+    --accent-strong: #c45c26;
+    --danger: #f87171;
+    --code-bg: #241f1a;
+    --code-fg: #e8e2d4;
   }
 }
 
@@ -36,56 +41,63 @@
 body {
   margin: 0;
   min-width: 360px;
-  background:
-    radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 24%, transparent), transparent 34rem),
-    radial-gradient(circle at bottom right, rgba(168, 85, 247, 0.16), transparent 30rem),
-    var(--bg);
+  background: var(--bg);
   color: var(--text);
 }
 button, select, textarea { font: inherit; }
 button, select {
   border: 1px solid var(--line);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--panel-strong) 90%, transparent);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
   color: var(--text);
 }
 button {
   cursor: pointer;
-  padding: 7px 12px;
-  font-weight: 650;
-  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease, opacity 120ms ease;
+  padding: 6px 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
-button:hover:not(:disabled) { transform: translateY(-1px); border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
-button:disabled { cursor: not-allowed; opacity: 0.5; }
-select { min-width: 13rem; padding: 7px 32px 7px 12px; }
-button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-strong)); border-color: transparent; color: white; }
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:disabled { cursor: not-allowed; opacity: 0.45; }
+select { min-width: 13rem; padding: 6px 28px 6px 10px; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fbf8f2;
+}
+button.primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); color: #fbf8f2; }
 button.secondary { background: transparent; }
-button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: color-mix(in srgb, var(--danger) 46%, var(--line)); color: var(--danger); }
+button.danger {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+}
 
 .app { display: flex; flex-direction: column; height: 100vh; }
 .topbar {
   display: flex;
   gap: 14px;
   align-items: center;
-  padding: 12px 18px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  backdrop-filter: blur(18px);
+  background: var(--panel);
 }
 .topbar .spacer { flex: 1; }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 9rem; }
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, var(--accent), #a855f7);
-  color: white;
-  font-weight: 850;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 32%, transparent);
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
 }
-.brand-name { font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; }
+.brand-name { font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; line-height: 1.1; font-size: 13px; }
 .brand-subtitle { color: var(--muted); font-size: 12px; line-height: 1.2; }
 .session-picker { display: flex; gap: 8px; align-items: center; }
 .session-chip {
@@ -94,27 +106,29 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
   align-items: center;
   min-width: 0;
   max-width: min(34vw, 32rem);
-  padding: 7px 11px;
+  padding: 5px 9px;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--panel-strong) 76%, transparent);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
   color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
 }
 .session-chip strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-.session-chip button { padding: 3px 8px; font-size: 11px; }
+.session-chip button { padding: 2px 7px; font-size: 11px; }
 .workspace-shell { min-height: 0; flex: 1; display: flex; }
-.transcript { flex: 1; overflow-y: auto; padding: 26px 18px 18px; scroll-behavior: smooth; }
-.item { max-width: 76rem; margin: 0 auto 16px; }
+.transcript { flex: 1; overflow-y: auto; padding: 22px 16px 16px; scroll-behavior: smooth; }
+.item { max-width: 76rem; margin: 0 auto 14px; }
 .item.user {
   width: fit-content;
   max-width: min(76rem, 88%);
   margin-left: max(calc((100% - 76rem) / 2), 0px);
   white-space: pre-wrap;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 26%, var(--panel)), color-mix(in srgb, var(--accent) 12%, var(--panel)));
-  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
-  padding: 11px 14px;
-  border-radius: 18px 18px 4px 18px;
-  box-shadow: var(--shadow);
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  padding: 10px 12px;
+  border-radius: var(--radius);
 }
 .item.assistant {
   padding: 2px 2px;
@@ -123,117 +137,122 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
 .item.assistant p:first-child { margin-top: 0; }
 .item.assistant p:last-child { margin-bottom: 0; }
 .item.assistant a { color: var(--accent); }
-.item.assistant code { border-radius: 5px; background: color-mix(in srgb, currentColor 8%, transparent); padding: 0.1em 0.3em; }
+.item.assistant code {
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: var(--mono);
+  font-size: 0.92em;
+  padding: 0.1em 0.3em;
+}
 .item.assistant pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
   overflow-x: auto;
   padding: 12px;
   border: 1px solid var(--line);
-  background: color-mix(in srgb, #020617 74%, var(--panel));
-  border-radius: 12px;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.45;
 }
-.item.assistant pre code { background: transparent; padding: 0; }
+.item.assistant pre code { background: transparent; padding: 0; color: inherit; }
 .item.assistant .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0; }
 .mermaid-diagram {
   overflow-x: auto;
   padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--panel-strong) 86%, transparent);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
 }
 .mermaid-diagram svg { max-width: 100%; height: auto; }
 .mermaid-diagram.pending { color: var(--muted); font-size: 12px; }
-.mermaid-error { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
+.mermaid-error { border-color: var(--danger); }
 .item.tool {
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--panel) 76%, transparent);
+  border-radius: var(--radius);
+  background: var(--panel);
 }
 .item.tool summary {
   display: flex;
   justify-content: space-between;
   gap: 14px;
   cursor: pointer;
-  padding: 9px 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 8px 10px;
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--muted);
 }
 .item.tool pre {
   font-size: 12px;
+  font-family: var(--mono);
   overflow-x: auto;
   margin: 0;
   padding: 10px 12px;
   border-top: 1px solid var(--line);
-  background: color-mix(in srgb, currentColor 5%, transparent);
+  background: var(--code-bg);
+  color: var(--code-fg);
   white-space: pre-wrap;
 }
 .item.tool.error summary { color: var(--danger); }
 .item.notice {
   width: fit-content;
-  padding: 6px 10px;
+  padding: 4px 8px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: var(--radius);
   color: var(--muted);
-  background: color-mix(in srgb, var(--panel) 68%, transparent);
+  background: var(--panel);
+  font-family: var(--mono);
   font-size: 12px;
 }
 .item.error {
   white-space: pre-wrap;
   color: var(--danger);
-  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border: 1px solid var(--danger);
+  background: transparent;
   padding: 10px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius);
 }
 .empty-state {
-  max-width: 44rem;
-  margin: 16vh auto 0;
-  text-align: center;
-  padding: 28px;
-  border: 1px solid var(--line);
-  border-radius: 28px;
-  background: color-mix(in srgb, var(--panel) 78%, transparent);
-  box-shadow: var(--shadow);
+  max-width: 36rem;
+  margin: 18vh auto 0;
+  text-align: left;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
-.empty-orb {
-  display: grid;
-  place-items: center;
-  width: 58px;
-  height: 58px;
-  margin: 0 auto 12px;
-  border-radius: 22px;
-  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 85%, white), #a855f7);
-  color: white;
-  font-size: 28px;
+.empty-state h1 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
-.empty-state h1 { margin: 0 0 8px; font-size: clamp(28px, 5vw, 46px); letter-spacing: -0.06em; }
 .empty-state p { margin: 0; color: var(--muted); }
 .banner {
   display: flex;
   gap: 12px;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 18px;
-  background: color-mix(in srgb, var(--danger) 18%, var(--panel));
-  color: var(--text);
-  border-bottom: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--danger);
+  border-bottom: 1px solid var(--danger);
 }
 .banner button { color: inherit; padding: 2px 8px; background: transparent; }
 .composer {
-  padding: 10px 18px 12px;
+  padding: 10px 16px 12px;
   border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 88%, transparent);
-  backdrop-filter: blur(18px);
+  background: var(--panel);
 }
 .composer-card {
   max-width: 76rem;
   margin: 0 auto;
   border: 1px solid var(--line);
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
-  box-shadow: var(--shadow);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
 }
 .composer textarea {
   display: block;
@@ -245,9 +264,9 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
   outline: none;
   color: var(--text);
   background: transparent;
-  padding: 13px 14px 8px;
+  padding: 12px 12px 8px;
 }
-.composer textarea::placeholder { color: color-mix(in srgb, var(--muted) 80%, transparent); }
+.composer textarea::placeholder { color: var(--muted); }
 .command-suggestions {
   display: grid;
   gap: 2px;
@@ -260,12 +279,12 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
   gap: 10px;
   align-items: center;
   width: 100%;
-  border-radius: 10px;
+  border-radius: var(--radius);
   background: transparent;
   text-align: left;
 }
-.command-suggestions button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.command-suggestions code { min-width: 5.5rem; color: var(--accent); }
+.command-suggestions button:hover { background: var(--code-bg); }
+.command-suggestions code { min-width: 5.5rem; color: var(--accent); font-family: var(--mono); }
 .command-suggestions span { color: var(--muted); font-size: 12px; }
 .composer-actions {
   display: flex;
@@ -274,22 +293,24 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
   padding: 8px;
   border-top: 1px solid var(--line);
 }
-.composer-hint { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
+.composer-hint { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; font-family: var(--mono); }
 .footer {
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
-  padding: 7px 18px;
+  padding: 7px 16px;
   font-size: 12px;
+  font-family: var(--mono);
   color: var(--muted);
   border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 76%, transparent);
+  background: var(--panel);
 }
 .tasks {
-  padding: 8px 18px;
+  padding: 8px 16px;
   font-size: 12px;
+  font-family: var(--mono);
   border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 74%, transparent);
+  background: var(--panel);
 }
 .tasks summary { cursor: pointer; font-weight: 700; }
 .tasks ul { margin: 8px 0 0; padding-left: 18px; }
@@ -297,7 +318,17 @@ button.danger { background: color-mix(in srgb, var(--danger) 14%, transparent); 
 .tasks li.running, .tasks li.queued { color: var(--text); }
 .tasks li.failed { color: var(--danger); }
 .tasks li button { margin-left: 8px; font-size: 11px; padding: 3px 8px; }
-.tasks pre { font-size: 11px; max-height: 8em; overflow: auto; margin: 4px 0; white-space: pre-wrap; }
+.tasks pre {
+  font-size: 11px;
+  max-height: 8em;
+  overflow: auto;
+  margin: 4px 0;
+  white-space: pre-wrap;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 8px;
+  border: 1px solid var(--line);
+}
 
 @media (max-width: 760px) {
   .topbar { flex-wrap: wrap; padding: 10px; }

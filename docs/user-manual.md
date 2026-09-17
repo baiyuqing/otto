@@ -162,7 +162,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
 | `otto logout` | Remove stored ChatGPT credentials. |
 | `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
-| `otto serve [--socket PATH \| --listen HOST:PORT]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
+| `otto serve [--socket PATH \| --listen HOST:PORT [--open]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
 
 | Flag | Description |
 | --- | --- |
@@ -185,6 +185,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`. |
 | `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. Cannot be combined with `--listen`. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. Cannot be combined with `--socket`. |
+| `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open`). Requires a TCP listener (`--listen` or `[server].listen`). Cannot be combined with `--socket`. A failed launch is not fatal: the URL is still printed. |
 
 ## Environment variables
 
@@ -752,14 +753,16 @@ turn on a session that already has one active returns `409`. It listens on
 either a Unix domain socket (the default) or a loopback TCP port.
 
 ```bash
-otto serve [--socket PATH | --listen HOST:PORT]
+otto serve [--socket PATH | --listen HOST:PORT [--open]]
 ```
 
 `serve` accepts the same startup flags as the interactive frontends
 (`--config`, `--cwd`, `--profile`, `--provider`, `--base-url`, `--model`,
 `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
-`--socket` or `--listen`. It rejects `--ui`, `--approve`, `--resume`,
-`--continue`, `--archive`, and `--no-session`.
+`--socket` or `--listen`, and `--open` to launch the printed TCP URL in the
+default browser. It rejects `--ui`, `--approve`, `--resume`, `--continue`,
+`--archive`, and `--no-session`. `--open` also rejects `--socket` and a Unix
+socket from config or the default path.
 
 ### Feishu inbound
 
@@ -797,6 +800,10 @@ line to stdout before serving:
 otto serve: http://127.0.0.1:PORT/?token=<token>
 ```
 
+`--open` then launches that URL with `/usr/bin/open`. A failed launch is not
+fatal. `--open` with a Unix socket (the default, `--socket`, or
+`[server].socket`) exits with `otto: --open requires a TCP listener`.
+
 Every `/v1/` request must then carry `Authorization: Bearer <token>`; a
 missing or wrong token returns `401` with `WWW-Authenticate: Bearer`. The
 token is accepted from that header only, never from a query parameter. `/`,
@@ -810,10 +817,11 @@ machine.
 `GET /` serves the browser UI built by `make ui` and embedded into the
 binary, and `GET /assets/` its static files. A binary built without running
 `make ui` answers `/` with the plain-text line `Web UI not built; run make ui`.
-Open the URL printed at startup in a browser. The page moves the token from
-the query string into the tab's `sessionStorage`, removes it from the address
-bar, and sends it as the `Authorization` header on every API call. Closing the
-tab discards it; open the printed URL again to get back in.
+`--open` opens that URL in the default browser; otherwise open the printed
+URL yourself. The page moves the token from the query string into the tab's
+`sessionStorage`, removes it from the address bar, and sends it as the
+`Authorization` header on every API call. Closing the tab discards it; open
+the printed URL again to get back in.
 
 The page has a session picker (`GET /v1/sessions`), a **New session** button,
 the transcript, and a composer:

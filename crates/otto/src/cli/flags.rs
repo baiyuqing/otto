@@ -47,6 +47,7 @@ pub struct CliOptions {
     pub archive_path: String,
     pub socket: String,
     pub listen: String,
+    pub open: bool,
 
     pub explicit_config: bool,
     pub shell_time_set: bool,
@@ -118,6 +119,7 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.archive_path = set.string("archive");
     options.socket = set.string("socket");
     options.listen = set.string("listen");
+    options.open = set.bool_value("open");
 
     options.explicit_config = set.visited("config");
     options.shell_time_set = set.visited("shell-timeout");
@@ -200,6 +202,12 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
             "otto: --socket and --listen cannot be used together",
         ));
     }
+    if options.open && !options.serve {
+        return Err(reject("otto: --open requires the serve subcommand"));
+    }
+    if options.open && options.socket_set {
+        return Err(reject("otto: --open cannot be used with --socket"));
+    }
     if options.shell_time_set && options.shell_timeout.is_zero() {
         return Err(reject("otto: --shell-timeout must be greater than zero"));
     }
@@ -229,7 +237,7 @@ pub fn print_usage(output: &mut dyn Write) {
 }
 
 const USAGE: &str = r"Usage: otto [options]
-       otto serve [options] [--socket PATH | --listen HOST:PORT]
+       otto serve [options] [--socket PATH | --listen HOST:PORT [--open]]
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto memory status|forget <id>
@@ -259,6 +267,7 @@ Options:
   --archive PATH         archive an active session file
   --socket PATH          unix socket path for the serve subcommand
   --listen HOST:PORT     loopback TCP address for the serve subcommand (prints a URL with the access token)
+  --open                 open the serve URL in the default browser (TCP listener only)
 ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -297,6 +306,7 @@ const DECLARED: &[(&str, Kind)] = &[
     ("archive", Kind::Str),
     ("socket", Kind::Str),
     ("listen", Kind::Str),
+    ("open", Kind::Bool),
 ];
 
 impl FlagSet {
@@ -533,6 +543,15 @@ mod tests {
     }
 
     #[test]
+    fn open_is_serve_only_and_needs_a_tcp_listener() {
+        let got = options(&["serve", "--listen", "127.0.0.1:0", "--open"]);
+        assert!(got.serve);
+        assert!(got.open);
+        assert!(got.listen_set);
+        assert!(!options(&["serve", "--listen", "127.0.0.1:0"]).open);
+    }
+
+    #[test]
     fn help_prints_usage_and_stops() {
         for flag in ["--help", "-h"] {
             let mut stdout = Vec::new();
@@ -542,6 +561,9 @@ mod tests {
             assert!(text.starts_with("Usage: otto [options]\n"), "{text}");
             assert!(text.contains(
                 "  --sandbox MODE         sandbox mode: auto, seatbelt, or off (off is unsafe)\n"
+            ));
+            assert!(text.contains(
+                "  --open                 open the serve URL in the default browser (TCP listener only)\n"
             ));
         }
     }
@@ -655,6 +677,11 @@ mod tests {
                     "127.0.0.1:0",
                 ],
                 "otto: --socket and --listen cannot be used together\n",
+            ),
+            (&["--open"], "otto: --open requires the serve subcommand\n"),
+            (
+                &["serve", "--open", "--socket", "/tmp/otto.sock"],
+                "otto: --open cannot be used with --socket\n",
             ),
             (
                 &["--shell-timeout", "0s"],

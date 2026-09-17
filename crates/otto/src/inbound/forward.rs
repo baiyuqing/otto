@@ -61,6 +61,54 @@ pub(super) fn content_from_mget_json(json: &str, message_id: &str) -> Option<Str
     Some(content.to_string())
 }
 
+pub(super) fn collapse_nested_forwards(content: &str) -> String {
+    const OPEN: &str = "<forwarded_messages>";
+    const CLOSE: &str = "</forwarded_messages>";
+    const PLACEHOLDER: &str = "[Merged forward]";
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0;
+    let mut depth = 0usize;
+    while i < content.len() {
+        if content[i..].starts_with(OPEN) {
+            if depth == 0 {
+                out.push_str(OPEN);
+                depth = 1;
+                i += OPEN.len();
+                continue;
+            }
+            out.push_str(PLACEHOLDER);
+            let mut nested = 1usize;
+            i += OPEN.len();
+            while i < content.len() && nested > 0 {
+                if content[i..].starts_with(OPEN) {
+                    nested += 1;
+                    i += OPEN.len();
+                } else if content[i..].starts_with(CLOSE) {
+                    nested -= 1;
+                    i += CLOSE.len();
+                } else {
+                    i += content[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+                }
+            }
+            continue;
+        }
+        if content[i..].starts_with(CLOSE) {
+            if depth == 1 {
+                out.push_str(CLOSE);
+            }
+            depth = depth.saturating_sub(1);
+            i += CLOSE.len();
+            continue;
+        }
+        let Some(ch) = content[i..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 pub(super) fn truncate_forwarded(content: String) -> String {
     if content.len() <= FORWARD_MAX_CHARS {
         return content;
@@ -138,7 +186,9 @@ pub(super) async fn expand_merge_forward_with_timeout(
         return Err(format!("lark-cli mget exited {status}"));
     }
     let stdout = String::from_utf8(stdout).map_err(|error| error.to_string())?;
-    content_from_mget_json(&stdout, message_id).ok_or_else(|| "mget returned no content".into())
+    let content = content_from_mget_json(&stdout, message_id)
+        .ok_or_else(|| "mget returned no content".to_string())?;
+    Ok(collapse_nested_forwards(&content))
 }
 
 #[cfg(test)]
@@ -209,6 +259,33 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn nested_forwarded_blocks_are_not_expanded() {
+        let content = concat!(
+            "<forwarded_messages>\n",
+            "outer\n",
+            "<forwarded_messages>inner <forwarded_messages>deep</forwarded_messages></forwarded_messages>\n",
+            "tail\n",
+            "</forwarded_messages>",
+        );
+        assert_eq!(
+            collapse_nested_forwards(content),
+            concat!(
+                "<forwarded_messages>\n",
+                "outer\n",
+                "[Merged forward]\n",
+                "tail\n",
+                "</forwarded_messages>",
+            )
+        );
+    }
+
+    #[test]
+    fn a_single_forwarded_block_is_unchanged() {
+        let content = "<forwarded_messages>abc</forwarded_messages>";
+        assert_eq!(collapse_nested_forwards(content), content);
     }
 
     #[test]

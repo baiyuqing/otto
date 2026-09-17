@@ -769,8 +769,9 @@ When `[inbound.feishu].enabled` is true, the serve process consumes Feishu
 starts a wake turn with HTTP `trigger` still `task`. An open Web UI follows
 that wake without a reload: it attaches while the turn is running, or
 reloads history if the turn finished between polls. A `merge_forward`
-message is expanded with `lark-cli im +messages-mget --as bot` (8s timeout,
-30000 character cap); if that fails, the original placeholder is kept.
+message is expanded one level with `lark-cli im +messages-mget --as bot`
+(8s timeout, 30000 character cap). Nested forwards inside that body stay as
+`[Merged forward]`. If mget fails, the original placeholder is kept.
 Interactive cards and empty bodies are ignored. Shutting down the server
 sends SIGTERM to the child. Replying in Feishu is not wired: a model that
 should respond uses a user-installed `lark-cli` skill through `bash`.

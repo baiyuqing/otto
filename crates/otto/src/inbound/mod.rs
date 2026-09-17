@@ -1,6 +1,7 @@
 //! Host-side inbound event sources that push the session inbox.
 
 mod feishu;
+mod forward;
 
 pub use feishu::maybe_start;
 
@@ -25,8 +26,15 @@ struct FeishuMessage {
 /// Turns one NDJSON line from `lark-cli event consume im.message.receive_v1`
 /// into an inbox notification. Blank lines, invalid JSON, empty content,
 /// interactive cards, and chats outside `chat_ids` (when that filter is
-/// non-empty) are skipped.
+/// non-empty) are skipped. `merge_forward` bodies stay as-is unless the
+/// caller expands them first.
+#[cfg(test)]
 pub(crate) fn notification_from_ndjson(line: &str, chat_ids: &[String]) -> Option<Notification> {
+    let event = parse_event(line, chat_ids)?;
+    notification_from_event(&event, event.content.as_deref().unwrap_or(""))
+}
+
+fn parse_event(line: &str, chat_ids: &[String]) -> Option<FeishuMessage> {
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -35,23 +43,59 @@ pub(crate) fn notification_from_ndjson(line: &str, chat_ids: &[String]) -> Optio
     if event.message_type.as_deref() == Some("interactive") {
         return None;
     }
-    let content = event
-        .content
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
     if !chat_ids.is_empty() {
         let chat_id = event.chat_id.as_deref().unwrap_or("").trim();
         if !chat_ids.iter().any(|id| id == chat_id) {
             return None;
         }
     }
+    Some(event)
+}
+
+fn notification_from_event(event: &FeishuMessage, content: &str) -> Option<Notification> {
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
     Some(Notification {
         task_id: String::new(),
         kind: Some(NotificationKind::Message),
-        text: render_inbound(&event, content),
+        text: render_inbound(event, content),
         usage: None,
     })
+}
+
+async fn notification_from_line(
+    line: &str,
+    chat_ids: &[String],
+    binary: &str,
+    log: &crate::server::Logger,
+) -> Option<Notification> {
+    let event = parse_event(line, chat_ids)?;
+    let mut content = event.content.clone().unwrap_or_default();
+    if forward::should_expand(event.message_type.as_deref(), event.message_id.as_deref()) {
+        let message_id = event.message_id.as_deref().unwrap_or_default();
+        match forward::expand_merge_forward(binary, message_id).await {
+            Ok(expanded) => {
+                let expanded = forward::truncate_forwarded(expanded);
+                log.info(
+                    "feishu inbound: expanded merge_forward",
+                    &[
+                        ("message_id", message_id.to_string()),
+                        ("chars", expanded.len().to_string()),
+                    ],
+                );
+                content = expanded;
+            }
+            Err(error) => {
+                log.error(
+                    "feishu inbound: merge_forward expand failed",
+                    &[("message_id", message_id.to_string()), ("error", error)],
+                );
+            }
+        }
+    }
+    notification_from_event(&event, &content)
 }
 
 fn push_trimmed(header: &mut String, prefix: &str, value: Option<&str>) {
@@ -106,5 +150,15 @@ mod tests {
         assert!(notification_from_ndjson(line(), &["oc_other".into()]).is_none());
         let kept = notification_from_ndjson(line(), &["oc_1".into()]).expect("kept");
         assert!(kept.text.contains("oc_1"));
+    }
+
+    #[test]
+    fn merge_forward_keeps_the_placeholder_without_expand() {
+        let line = r#"{"chat_id":"oc_1","sender_id":"ou_1","message_id":"om_1","message_type":"merge_forward","chat_type":"p2p","content":"[Merged forward]"}"#;
+        let notification = notification_from_ndjson(line, &[]).expect("parsed");
+        assert_eq!(
+            notification.text,
+            "[feishu] p2p oc_1 om_1 from ou_1\n[Merged forward]"
+        );
     }
 }

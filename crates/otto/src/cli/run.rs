@@ -528,6 +528,7 @@ pub async fn run(
                 listen,
                 control,
                 reloader,
+                open: options.open,
             },
             stdout,
             stderr,

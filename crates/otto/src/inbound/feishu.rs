@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio_util::sync::CancellationToken;
 
-use super::{FEISHU_MESSAGE_EVENT, notification_from_ndjson};
+use super::{FEISHU_MESSAGE_EVENT, notification_from_line};
 use crate::server::{Logger, Server};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
@@ -107,7 +107,7 @@ async fn run_once(
         });
     }
 
-    consume_stdout(BufReader::new(stdout), &runtime.chat_ids, deliver, cancel).await;
+    consume_stdout(BufReader::new(stdout), runtime, deliver, log, cancel).await;
     shutdown_child(child).await;
     if cancel.is_cancelled() {
         RunEnd::Cancelled
@@ -130,8 +130,9 @@ fn spawn_lark_cli(binary: &str) -> std::io::Result<Child> {
 /// ignored; parse skips are silent.
 async fn consume_stdout(
     mut stdout: impl AsyncBufRead + Unpin,
-    chat_ids: &[String],
+    runtime: &FeishuRuntime,
     mut deliver: impl FnMut(Notification),
+    log: &Arc<Logger>,
     cancel: &CancellationToken,
 ) {
     let mut line = String::new();
@@ -143,7 +144,14 @@ async fn consume_stdout(
                 match result {
                     Ok(0) | Err(_) => return,
                     Ok(_) => {
-                        if let Some(notification) = notification_from_ndjson(&line, chat_ids) {
+                        if let Some(notification) = notification_from_line(
+                            &line,
+                            &runtime.chat_ids,
+                            &runtime.binary,
+                            log,
+                        )
+                        .await
+                        {
                             deliver(notification);
                         }
                     }
@@ -279,5 +287,57 @@ while :; do sleep 1; done
         assert_eq!(items[0].text, "[feishu] group oc_1 from ou_1\nhello");
         let marked = std::fs::read_to_string(marker.path()).unwrap_or_default();
         assert_eq!(marked.trim(), "term", "child must see SIGTERM, not SIGKILL");
+    }
+
+    #[tokio::test]
+    async fn a_merge_forward_event_is_expanded_via_mget() {
+        let marker = tempfile::NamedTempFile::new().expect("marker");
+        let marker_path = marker.path().to_string_lossy().into_owned();
+        let script = write_script(&format!(
+            r#"#!/bin/sh
+if [ "$1" = im ]; then
+  printf '%s\n' '{{"ok":true,"data":{{"messages":[{{"message_id":"om_1","content":"<forwarded_messages>abc</forwarded_messages>"}}]}}}}'
+  exit 0
+fi
+printf '%s\n' '{{"chat_id":"oc_1","sender_id":"ou_1","message_id":"om_1","message_type":"merge_forward","chat_type":"p2p","content":"[Merged forward]"}}'
+printf '%s\n' '[event] ready event_key=im.message.receive_v1' >&2
+trap 'printf term > "{marker_path}"; exit 0' TERM
+while :; do sleep 1; done
+"#
+        ));
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&collected);
+        let stop = CancellationToken::new();
+        let cancel = stop.clone();
+        let runtime = runtime(&script.path().to_string_lossy());
+        let log = logger();
+        let handle = tokio::spawn(async move {
+            run_once(
+                &runtime,
+                |notification| sink.lock().expect("lock").push(notification),
+                &log,
+                &cancel,
+            )
+            .await
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if !collected.lock().expect("lock").is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop.cancel();
+        let end = handle.await.expect("join");
+        assert!(matches!(end, RunEnd::Cancelled));
+        let items = collected.lock().expect("lock");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].text,
+            "[feishu] p2p oc_1 om_1 from ou_1\n<forwarded_messages>abc</forwarded_messages>"
+        );
     }
 }

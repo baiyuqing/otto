@@ -766,7 +766,9 @@ otto serve [--socket PATH | --listen HOST:PORT]
 When `[inbound.feishu].enabled` is true, the serve process consumes Feishu
 `im.message.receive_v1` events through `lark-cli` and pushes them as
 `[feishu]` inbox messages. Open sessions receive a copy; an idle session
-starts a wake turn with HTTP `trigger` still `task`. Interactive cards and
+starts a wake turn with HTTP `trigger` still `task`. An open Web UI follows
+that wake without a reload: it attaches while the turn is running, or
+reloads history if the turn finished between polls. Interactive cards and
 empty bodies are ignored. Shutting down the server sends SIGTERM to the
 child. Replying in Feishu is not wired: a model that should respond uses a
 user-installed `lark-cli` skill through `bash`.
@@ -834,6 +836,10 @@ the transcript, and a composer:
 - Reloading the page during a turn re-attaches to the running turn's event
   stream and continues rendering it; if the stream drops, the page re-reads
   it from the last sequence number it saw.
+- While a session is open and idle, the page polls `GET /v1/sessions/{id}`
+  about once a second. A server-started wake (`trigger` `task`, including
+  Feishu inbound and `remind`) is attached if it is still running; if it
+  already finished, the page reloads history.
 
 - **Compact** calls `POST /v1/sessions/{id}/compact`; any text in the
   composer is sent as the `focus`. The result appears as a notice in the

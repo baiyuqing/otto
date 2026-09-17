@@ -1,0 +1,4 @@
+# Cursor imports .gitignore, which is only for `git add`. Feature worktrees
+# live under `.worktree/` and must stay in the agent workspace.
+!.worktree/
+!.worktrees/

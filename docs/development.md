@@ -108,9 +108,11 @@ sibling directory of the repository:
 git worktree add .worktree/<name> -b feat/<name>
 ```
 
-`.worktree/` is gitignored. After the pull request merges, remove that
-worktree and its local branch (`git worktree remove .worktree/<name>`, then
-`git branch -d`).
+`.worktree/` is gitignored so checkouts are not committed. Cursor also
+imports `.gitignore` into the agent workspace; `.cursorignore` un-ignores
+`.worktree/` so file tools do not treat a worktree as outside the project.
+After the pull request merges, remove that worktree and its local branch
+(`git worktree remove .worktree/<name>`, then `git branch -d`).
 
 When work requires a design or spec, finish the discussion and get explicit
 approval before writing production code or tests. Once approved, carry the

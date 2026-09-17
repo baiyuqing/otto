@@ -8,6 +8,7 @@ import { Composer } from './Composer'
 import { Footer } from './Footer'
 import { Tasks } from './Tasks'
 import { sessionLabel, workspaceName } from './uiText'
+import { IDLE_POLL_MS, idleFollow } from './follow'
 
 setToken(loadToken())
 
@@ -155,6 +156,49 @@ export function App() {
     // attach twice in development.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const sessionRef = useRef(session)
+  sessionRef.current = session
+  const turnIdRef = useRef(turnId)
+  turnIdRef.current = turnId
+  const compactingRef = useRef(compacting)
+  compactingRef.current = compacting
+
+  // Server-started wakes (Feishu inbound, remind) never go through startTurn,
+  // so an idle page has to poll the open session and attach or reload history.
+  useEffect(() => {
+    if (!session || turnId !== null || compacting) return
+    const sessionId = session.id
+    let inFlight = false
+    const tick = async () => {
+      if (inFlight || turnIdRef.current || compactingRef.current) return
+      const previous = sessionRef.current
+      if (!previous || previous.id !== sessionId) return
+      inFlight = true
+      try {
+        const next = await api.getSession(sessionId)
+        if (turnIdRef.current || compactingRef.current || sessionRef.current?.id !== sessionId) return
+        const action = idleFollow(previous, next)
+        if (action.kind === 'none') return
+        if (action.kind === 'attach') {
+          turnIdRef.current = action.turnId
+          setTurnId(action.turnId)
+        }
+        sessionRef.current = next
+        setSession(next)
+        setItems(fromHistory(await api.history(sessionId)))
+        if (action.kind === 'attach') {
+          void consume(sessionId, await api.attach(sessionId, action.turnId))
+        }
+      } catch (e) {
+        fail(e)
+      } finally {
+        inFlight = false
+      }
+    }
+    const id = setInterval(() => void tick(), IDLE_POLL_MS)
+    return () => clearInterval(id)
+  }, [session?.id, turnId, compacting, consume, fail])
 
   const send = async (text: string): Promise<void> => {
     if (!session) return

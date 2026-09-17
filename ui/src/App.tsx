@@ -393,7 +393,7 @@ export function App() {
           <span className="brand-mark">O</span>
           <div>
             <div className="brand-name">Otto</div>
-            <div className="brand-subtitle">AI coding agent</div>
+            <div className="brand-subtitle">local agent</div>
           </div>
         </div>
         <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />

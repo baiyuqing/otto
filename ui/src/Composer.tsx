@@ -56,7 +56,7 @@ export function Composer(props: {
         )}
         <textarea
           value={text}
-          placeholder={props.disabled ? 'Open or create a session first' : 'Ask Otto to inspect, edit, or verify this workspace…'}
+          placeholder={props.disabled ? 'Open or create a session first' : 'Message Otto…'}
           disabled={props.disabled || props.running || props.compacting}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}

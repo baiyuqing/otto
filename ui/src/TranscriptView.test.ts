@@ -36,3 +36,13 @@ describe('TranscriptView markdown extensions', () => {
     expect(mermaidMock.render).toHaveBeenCalledWith(expect.stringMatching(/^mermaid-/), 'graph TD\n  A[Start] --> B[Done]')
   })
 })
+
+describe('TranscriptView empty state', () => {
+  it('empty session copy is a workspace, not a coding mascot', () => {
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items: [] }))
+    expect(container.querySelector('.empty-orb')).toBeNull()
+    expect(container.textContent).not.toMatch(/codebase/i)
+    expect(container.textContent).not.toMatch(/Ready when you are/)
+    expect(container.textContent).toMatch(/Session is open/)
+  })
+})

@@ -30,12 +30,11 @@ export function TranscriptView(props: { items: Item[]; activeSession: boolean })
     <div className="transcript" ref={ref}>
       {props.items.length === 0 ? (
         <div className="empty-state">
-          <div className="empty-orb">✦</div>
-          <h1>{props.activeSession ? 'Ready when you are.' : 'Open a session to start.'}</h1>
+          <h1>{props.activeSession ? 'Session is open' : 'No session'}</h1>
           <p>
             {props.activeSession
-              ? 'Ask Otto to explore the codebase, make a focused edit, or run verification.'
-              : 'Create a new session or resume an existing one from the top bar.'}
+              ? 'Type below. Otto works in this workspace.'
+              : 'Create a session or resume one from the top bar.'}
           </p>
         </div>
       ) : (

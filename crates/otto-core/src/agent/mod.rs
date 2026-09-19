@@ -211,6 +211,16 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.run_with_image(user_text, None, emit, cancel).await
+    }
+
+    pub async fn run_with_image(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
         if !self.redactor.allows_dynamic_content() {
             return self.run_with_incomplete_redactions(emit, cancel);
         }
@@ -223,11 +233,13 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let mut state = RunDispatchState::default();
         if !text.is_empty() {
             let redacted = self.redactor.redact_string(user_text);
+            let mut blocks = vec![Block::text(redacted.clone())];
+            blocks.extend(image);
             let user = Message {
                 id: (self.options.new_id)(),
                 role: Role::User,
                 created_at: (self.options.now)(),
-                blocks: vec![Block::text(redacted.clone())],
+                blocks,
                 ..Message::default()
             };
             if let Err(source) = self.session.append(user).await {
@@ -563,8 +575,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let mut messages = self.session.messages();
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
         if !state.memory_context.is_empty() {
+            let current_user = messages
+                .iter()
+                .rposition(|message| message.role == Role::User)
+                .unwrap_or(messages.len());
             messages.insert(
-                0,
+                current_user,
                 Message {
                     role: Role::User,
                     blocks: vec![Block::text(state.memory_context.clone())],

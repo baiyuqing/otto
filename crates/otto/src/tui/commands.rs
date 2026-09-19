@@ -24,6 +24,7 @@ pub enum SlashCommandKind {
     Archive,
     Rename,
     Compact,
+    Image,
     Memory,
     Remember,
     Login,
@@ -79,6 +80,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/compact",
         description: "compact context",
         kind: SlashCommandKind::Compact,
+    },
+    SlashCommand {
+        name: "/image",
+        description: "attach an image to the next prompt",
+        kind: SlashCommandKind::Image,
     },
     SlashCommand {
         name: "/sandbox",

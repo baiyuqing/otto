@@ -119,6 +119,13 @@ pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
                     }
                     text.push_str(&block.text);
                 }
+                BlockType::Image => {
+                    flush_text(&mut entries, &mut text, &mut text_ordinal, false);
+                    entries.push(Entry {
+                        raw: "[image]".into(),
+                        ..Entry::new(format!("{base_id}-image-{block_index}"), EntryKind::User)
+                    });
+                }
                 BlockType::ToolCall => {
                     flush_text(&mut entries, &mut text, &mut text_ordinal, false);
                     let entry = Entry {
@@ -394,6 +401,22 @@ mod tests {
         assert_eq!(entries[0].raw, "hi");
         assert_eq!(entries[1].kind, Some(EntryKind::Assistant));
         assert_eq!(entries[1].raw, "hello");
+    }
+
+    #[test]
+    fn an_image_is_visible_in_resumed_history() {
+        let history = [Message {
+            role: Role::User,
+            blocks: vec![
+                Block::image("iVBORw0KGgo=", "image/png"),
+                Block::text("read it"),
+            ],
+            ..Message::default()
+        }];
+        let (entries, _) = entries_from_history(&history);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].raw, "[image]");
+        assert_eq!(entries[1].raw, "read it");
     }
 
     #[test]

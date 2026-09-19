@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from 'react'
+import { useState, type ClipboardEvent, type KeyboardEvent } from 'react'
 import { webCommandSuggestions } from './commands'
 import { sendHint } from './uiText'
 
@@ -6,12 +6,13 @@ export function Composer(props: {
   disabled: boolean
   running: boolean
   compacting: boolean
-  onSend: (text: string) => void
+  onSend: (text: string, image?: { data: string; mime_type: string }) => void
   onCancel: () => void
   // onCompact receives the composer text as the optional focus.
   onCompact: (focus: string) => void
 }) {
   const [text, setText] = useState('')
+  const [image, setImage] = useState<{ name: string; data: string; mime_type: string } | null>(null)
   const hint = sendHint()
   const suggestions = props.disabled || props.running || props.compacting ? [] : webCommandSuggestions(text)
 
@@ -23,7 +24,24 @@ export function Composer(props: {
     const t = text.trim()
     if (!t || props.disabled || props.running || props.compacting) return
     setText('')
-    props.onSend(t)
+    const selected = image ? { data: image.data, mime_type: image.mime_type } : undefined
+    setImage(null)
+    props.onSend(t, selected)
+  }
+
+  const attach = (file?: File) => {
+    if (!file || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const encoded = String(reader.result).split(',', 2)[1]
+      if (encoded) setImage({ name: file.name, data: encoded, mime_type: file.type })
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const file = Array.from(e.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'))
+    if (file) attach(file)
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -60,7 +78,16 @@ export function Composer(props: {
           disabled={props.disabled || props.running || props.compacting}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
         />
+        {image && (
+          <div className="image-attachment">
+            <span>{image.name}</span>
+            <button type="button" aria-label="Remove image" onClick={() => setImage(null)}>
+              ×
+            </button>
+          </div>
+        )}
         <div className="composer-actions">
           <span className="composer-hint">
             {props.running
@@ -71,6 +98,16 @@ export function Composer(props: {
                   ? 'Tab or click to complete a command'
                   : hint}
           </span>
+          <label className={`image-picker${props.disabled || props.running || props.compacting ? ' disabled' : ''}`}>
+            Image
+            <input
+              aria-label="Attach image"
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              disabled={props.disabled || props.running || props.compacting}
+              onChange={(e) => attach(e.target.files?.[0])}
+            />
+          </label>
           <button
             className="secondary"
             title="Compact the context; the text above, if any, is the focus"

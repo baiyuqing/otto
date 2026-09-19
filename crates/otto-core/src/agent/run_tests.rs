@@ -315,6 +315,35 @@ fn names(events: &[Event]) -> Vec<&'static str> {
     events.iter().map(Event::name).collect()
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn image_is_persisted_and_sent_with_the_user_prompt() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .run_with_image(
+            "read it",
+            Some(Block::image("iVBORw0KGgo=", "image/png")),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let messages = agent.session().messages();
+    assert_eq!(messages[0].blocks[0], Block::text("read it"));
+    assert_eq!(messages[0].blocks[1].block_type, BlockType::Image);
+    let requests = agent.provider().normal_requests();
+    assert_eq!(
+        requests[0].messages[0].blocks[1].block_type,
+        BlockType::Image
+    );
+}
+
 // -- inbox and wake turns --------------------------------------------------
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -569,6 +598,33 @@ async fn the_rendered_memory_context_is_prepended_without_being_persisted() {
             "the memory block was persisted"
         );
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn memory_context_keeps_existing_history_as_the_request_prefix() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("first reply"), Turn::text("second reply")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            memory: Some(Arc::new(FakeMemory::with_records(one_record()))),
+            ..options()
+        },
+    );
+    let cancel = CancellationToken::new();
+    agent.run("first", &mut |_| {}, &cancel).await.expect("run");
+    agent
+        .run("second", &mut |_| {}, &cancel)
+        .await
+        .expect("run");
+
+    let requests = agent.provider().normal_requests();
+    let messages = &requests[1].messages;
+    assert_eq!(messages[0].text(), "first");
+    assert_eq!(messages[1].text(), "first reply");
+    assert!(messages[2].text().contains("prefers vim"));
+    assert_eq!(messages[3].text(), "second");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

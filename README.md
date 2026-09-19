@@ -108,8 +108,9 @@ The selected model and OpenAI-compatible endpoint must support image input.
   socket or a loopback TCP port, with an embedded browser UI. Optional
   [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
   text into open session inboxes.
-- [Usage history](docs/user-manual.md#observability): local provider token
-  totals and cache hit rate, without prompt or tool content.
+- [Usage history](docs/user-manual.md#observability): a Web UI analysis page
+  for local provider token trends and cache hit rate, without prompt or tool
+  content.
 - [Configuration](docs/user-manual.md#configuration),
   [CLI reference](docs/user-manual.md#command-line-reference), and
   [troubleshooting](docs/user-manual.md#troubleshooting).

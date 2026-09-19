@@ -107,6 +107,14 @@ impl Factory for ServeFactory {
     fn usage_summary(&self, session_id: Option<&str>) -> Result<crate::usage::Summary, String> {
         self.builder.usage_summary(session_id)
     }
+
+    fn usage_analysis(
+        &self,
+        days: u16,
+        session_id: Option<&str>,
+    ) -> Result<crate::usage::Analysis, String> {
+        self.builder.usage_analysis(days, session_id)
+    }
 }
 
 // ---- the command ----

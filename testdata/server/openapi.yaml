@@ -56,6 +56,33 @@ components:
         cache_hit_rate:
           type: number
       required: [requests, reported_requests, input_tokens, output_tokens, cached_input_tokens, cache_hit_rate]
+    DailyUsage:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        requests:
+          type: integer
+        reported_requests:
+          type: integer
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        cached_input_tokens:
+          type: integer
+      required: [date, requests, reported_requests, input_tokens, output_tokens, cached_input_tokens]
+    UsageAnalysis:
+      type: object
+      properties:
+        summary:
+          $ref: "#/components/schemas/UsageSummary"
+        daily:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyUsage"
+      required: [summary, daily]
     Sandbox:
       type: object
       properties:
@@ -814,6 +841,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UsageSummary"
+        "500":
+          description: Usage store unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/usage/daily:
+    get:
+      summary: Aggregate persisted provider token usage by UTC day
+      parameters:
+        - name: days
+          in: query
+          required: false
+          description: Inclusive UTC day range, default 30.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+        - name: session_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageAnalysis"
+        "400":
+          description: Invalid day range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           description: Usage store unavailable
           content:

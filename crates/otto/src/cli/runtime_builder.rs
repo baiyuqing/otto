@@ -478,6 +478,19 @@ impl Builder {
         }
     }
 
+    pub fn usage_analysis(
+        &self,
+        days: u16,
+        session_id: Option<&str>,
+    ) -> Result<crate::usage::Analysis, String> {
+        match &self.usage {
+            Some(store) => store
+                .daily(days, session_id)
+                .map_err(|error| error.to_string()),
+            None => crate::usage::Analysis::empty(days).map_err(|error| error.to_string()),
+        }
+    }
+
     pub(crate) fn usage_collector(
         &self,
         session: &SharedSession,

@@ -7,6 +7,7 @@ import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
 import { Footer } from './Footer'
 import { Tasks } from './Tasks'
+import { UsageView } from './UsageView'
 import { sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
 
@@ -63,6 +64,7 @@ const taskText = (task: {
     .join('\n')
 
 export function App() {
+  const [view, setView] = useState<'chat' | 'usage'>('chat')
   const [info, setInfo] = useState<Info | null>(null)
   const [sessions, setSessions] = useState<SessionListRow[]>([])
   const [session, setSession] = useState<Session | null>(null)
@@ -407,9 +409,19 @@ export function App() {
             <div className="brand-subtitle">local agent</div>
           </div>
         </div>
-        <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
+        <nav className="view-tabs" aria-label="View">
+          <button type="button" aria-pressed={view === 'chat'} onClick={() => setView('chat')}>
+            Chat
+          </button>
+          <button type="button" aria-pressed={view === 'usage'} onClick={() => setView('usage')}>
+            Usage
+          </button>
+        </nav>
+        {view === 'chat' && (
+          <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
+        )}
         <span className="spacer" />
-        {session && (
+        {view === 'chat' && session && (
           <div className="session-chip" title={session.id}>
             <span>{session.name ?? sessionLabel(session.id)}</span>
             <strong>{workspaceName(session.workspace)}</strong>
@@ -428,18 +440,20 @@ export function App() {
         </div>
       )}
       <main className="workspace-shell">
-        <TranscriptView items={items} activeSession={session !== null} />
+        {view === 'usage' ? <UsageView onError={fail} /> : <TranscriptView items={items} activeSession={session !== null} />}
       </main>
-      {session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
-      <Composer
-        key={session?.id ?? 'closed'}
-        disabled={!session}
-        running={turnId !== null}
-        compacting={compacting}
-        onSend={send}
-        onCancel={cancel}
-        onCompact={compact}
-      />
+      {view === 'chat' && session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
+      {view === 'chat' && (
+        <Composer
+          key={session?.id ?? 'closed'}
+          disabled={!session}
+          running={turnId !== null}
+          compacting={compacting}
+          onSend={send}
+          onCancel={cancel}
+          onCompact={compact}
+        />
+      )}
       <Footer info={info} session={session} turnUsage={turnUsage} recordedUsage={recordedUsage} />
     </div>
   )

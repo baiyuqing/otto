@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Info, Session } from './wire'
@@ -7,6 +7,7 @@ import type { Info, Session } from './wire'
 const api = vi.hoisted(() => ({
   info: vi.fn(),
   usage: vi.fn(),
+  usageDaily: vi.fn(),
   listSessions: vi.fn(),
   createSession: vi.fn(),
   getSession: vi.fn(),
@@ -78,6 +79,17 @@ describe('idle wake follow', () => {
       cached_input_tokens: 0,
       cache_hit_rate: 0,
     })
+    api.usageDaily.mockResolvedValue({
+      summary: {
+        requests: 0,
+        reported_requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_input_tokens: 0,
+        cache_hit_rate: 0,
+      },
+      daily: [],
+    })
     api.listSessions.mockResolvedValue({ sessions: [{ id: 'sess1', name: 'dev', open: true }] })
     api.createSession.mockResolvedValue(idle)
     api.getSession.mockResolvedValue(idle)
@@ -141,5 +153,17 @@ describe('idle wake follow', () => {
     expect(api.attach).not.toHaveBeenCalled()
     expect(screen.getByText(/\[feishu\].*hello/s)).toBeTruthy()
     expect(screen.getByText('Hi there.')).toBeTruthy()
+  })
+
+  it('switches from chat to the usage analysis page', async () => {
+    await openIdleSession()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Usage' }))
+
+    expect(screen.getByRole('heading', { name: 'Usage' })).toBeTruthy()
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(api.usageDaily).toHaveBeenCalledWith(30)
   })
 })

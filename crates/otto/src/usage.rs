@@ -1,12 +1,13 @@
 //! Provider token usage collection, SQLite storage, and aggregate queries.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{Days, NaiveDate, SecondsFormat, Utc};
 use otto_core::agent::Event;
 use otto_core::model::Usage;
 use rusqlite::{Connection, OpenFlags, params};
@@ -91,6 +92,79 @@ pub struct Summary {
     pub output_tokens: i64,
     pub cached_input_tokens: i64,
     pub cache_hit_rate: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DailyPoint {
+    pub date: String,
+    pub requests: i64,
+    pub reported_requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_input_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Analysis {
+    pub summary: Summary,
+    pub daily: Vec<DailyPoint>,
+}
+
+impl Analysis {
+    pub fn empty(days: u16) -> Result<Self> {
+        let (start, today) = date_range(days)?;
+        Self::empty_range(start, today, days)
+    }
+
+    fn empty_range(start: NaiveDate, today: NaiveDate, days: u16) -> Result<Self> {
+        let mut date = start;
+        let mut daily = Vec::with_capacity(days as usize);
+        loop {
+            daily.push(DailyPoint {
+                date: date.to_string(),
+                ..DailyPoint::default()
+            });
+            if date == today {
+                break;
+            }
+            date = date.checked_add_days(Days::new(1)).ok_or(Error)?;
+        }
+        Ok(Self {
+            daily,
+            ..Self::default()
+        })
+    }
+
+    fn total(&mut self) {
+        let mut summary = Summary::default();
+        for point in &self.daily {
+            summary.requests = summary.requests.saturating_add(point.requests);
+            summary.reported_requests = summary
+                .reported_requests
+                .saturating_add(point.reported_requests);
+            summary.input_tokens = summary.input_tokens.saturating_add(point.input_tokens);
+            summary.output_tokens = summary.output_tokens.saturating_add(point.output_tokens);
+            summary.cached_input_tokens = summary
+                .cached_input_tokens
+                .saturating_add(point.cached_input_tokens);
+        }
+        if summary.input_tokens > 0 {
+            summary.cache_hit_rate =
+                summary.cached_input_tokens as f64 / summary.input_tokens as f64;
+        }
+        self.summary = summary;
+    }
+}
+
+fn date_range(days: u16) -> Result<(NaiveDate, NaiveDate)> {
+    if !(1..=365).contains(&days) {
+        return Err(Error);
+    }
+    let today = Utc::now().date_naive();
+    let start = today
+        .checked_sub_days(Days::new(u64::from(days - 1)))
+        .ok_or(Error)?;
+    Ok((start, today))
 }
 
 /// One local SQLite database shared by collection and read-only analysis.
@@ -203,6 +277,53 @@ impl Store {
         }
         Ok(summary)
     }
+
+    /// Returns a zero-filled UTC day series, including today.
+    pub fn daily(&self, days: u16, session_id: Option<&str>) -> Result<Analysis> {
+        let (start, today) = date_range(days)?;
+        let since = format!("{start}T00:00:00.000000000Z");
+        let connection = self.connection.lock().map_err(|_| Error)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    substr(occurred_at, 1, 10),
+                    COUNT(*),
+                    COALESCE(SUM(usage_present), 0),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(cached_input_tokens), 0)
+                 FROM usage_events
+                 WHERE occurred_at >= ?1 AND (?2 IS NULL OR session_id = ?2)
+                 GROUP BY substr(occurred_at, 1, 10)
+                 ORDER BY substr(occurred_at, 1, 10)",
+            )
+            .map_err(|_| Error)?;
+        let rows = statement
+            .query_map(params![since, session_id], |row| {
+                Ok(DailyPoint {
+                    date: row.get(0)?,
+                    requests: row.get(1)?,
+                    reported_requests: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    cached_input_tokens: row.get(5)?,
+                })
+            })
+            .map_err(|_| Error)?;
+        let mut recorded = BTreeMap::new();
+        for row in rows {
+            let point = row.map_err(|_| Error)?;
+            recorded.insert(point.date.clone(), point);
+        }
+        let mut analysis = Analysis::empty_range(start, today, days)?;
+        for point in &mut analysis.daily {
+            if let Some(recorded) = recorded.remove(&point.date) {
+                *point = recorded;
+            }
+        }
+        analysis.total();
+        Ok(analysis)
+    }
 }
 
 impl Sink for Store {
@@ -251,10 +372,11 @@ impl Collector {
 mod tests {
     use std::sync::Arc;
 
+    use chrono::{Days, SecondsFormat, Utc};
     use otto_core::agent::{CompactionResult, Event};
     use otto_core::model::Usage;
 
-    use super::{Collector, Context, Store};
+    use super::{Collector, Context, Sink, Store, UsageRecord};
 
     fn usage(input: i64, output: i64, cached: i64) -> Usage {
         Usage {
@@ -385,5 +507,41 @@ mod tests {
             & 0o777;
         assert_eq!(directory_mode, 0o700);
         assert_eq!(file_mode, 0o600);
+    }
+
+    #[test]
+    fn daily_analysis_fills_the_range_and_sums_its_points() {
+        let store = Store::open_in_memory().expect("store");
+        let today = Utc::now().date_naive();
+        let yesterday = today.checked_sub_days(Days::new(1)).expect("yesterday");
+        for (date, tokens) in [(yesterday, usage(10, 2, 4)), (today, usage(20, 3, 6))] {
+            store
+                .append(&UsageRecord {
+                    occurred_at: date
+                        .and_hms_opt(12, 0, 0)
+                        .expect("time")
+                        .and_utc()
+                        .to_rfc3339_opts(SecondsFormat::Nanos, true),
+                    context: Context {
+                        session_id: "s1".into(),
+                        ..Context::default()
+                    },
+                    kind: "provider",
+                    usage: tokens,
+                    usage_present: true,
+                })
+                .expect("append");
+        }
+
+        let analysis = store.daily(3, Some("s1")).expect("analysis");
+        assert_eq!(analysis.daily.len(), 3);
+        assert_eq!(analysis.daily[0].input_tokens, 0);
+        assert_eq!(analysis.daily[1].date, yesterday.to_string());
+        assert_eq!(analysis.daily[2].date, today.to_string());
+        assert_eq!(analysis.summary.requests, 2);
+        assert_eq!(analysis.summary.input_tokens, 30);
+        assert_eq!(analysis.summary.output_tokens, 5);
+        assert_eq!(analysis.summary.cached_input_tokens, 10);
+        assert_eq!(analysis.summary.cache_hit_rate, 1.0 / 3.0);
     }
 }

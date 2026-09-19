@@ -31,7 +31,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
   - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the SQLite/FTS5 store and retriever
-  - `usage`: native collection of parent, sub-agent, and compaction token events; append-only SQLite storage; and aggregate queries consumed by the server
+  - `usage`: native collection of parent, sub-agent, and compaction token events; append-only SQLite storage; and total/daily aggregate queries consumed by the server
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
   - `subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status` tools, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
   - `inbound`: host adapters that turn external event streams into session inbox notifications. Feishu inbound spawns `lark-cli event consume im.message.receive_v1 --as bot`, parses NDJSON, expands `merge_forward` via `lark-cli im +messages-mget --as bot`, and fans messages out through `Controller::notify`

@@ -9,6 +9,20 @@ export interface UsageSummary {
   cache_hit_rate: number
 }
 
+export interface DailyUsage {
+  date: string
+  requests: number
+  reported_requests: number
+  input_tokens: number
+  output_tokens: number
+  cached_input_tokens: number
+}
+
+export interface UsageAnalysis {
+  summary: UsageSummary
+  daily: DailyUsage[]
+}
+
 const TOKEN_KEY = 'otto.token'
 
 // loadToken takes the token from the startup URL's query string, keeps it
@@ -69,6 +83,7 @@ export const api = {
   info: () => json<Info>('/v1/info'),
   usage: (sessionId?: string) =>
     json<UsageSummary>(`/v1/usage${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`),
+  usageDaily: (days: number) => json<UsageAnalysis>(`/v1/usage/daily?days=${days}`),
   listSessions: () => json<{ sessions: SessionListRow[] }>('/v1/sessions'),
   createSession: (resume?: string) =>
     json<Session>('/v1/sessions', { method: 'POST', body: JSON.stringify(resume ? { resume } : {}) }),

@@ -1,12 +1,18 @@
 import type { Info, Session, Usage } from './wire'
+import type { UsageSummary } from './api'
 
 const n = (v: number | undefined) => (v ?? 0).toLocaleString()
 
 // Footer shows the process (info) and the open session's cumulative usage
 // and context size. turnUsage is the running total of provider_usage events
 // for the turn in flight, cleared when the session is re-read at turn end.
-export function Footer(props: { info: Info | null; session: Session | null; turnUsage: Usage | null }) {
-  const { info, session, turnUsage } = props
+export function Footer(props: {
+  info: Info | null
+  session: Session | null
+  turnUsage: Usage | null
+  recordedUsage: UsageSummary | null
+}) {
+  const { info, session, turnUsage, recordedUsage } = props
   return (
     <div className="footer">
       {info && (
@@ -24,6 +30,12 @@ export function Footer(props: { info: Info | null; session: Session | null; turn
       {turnUsage && (
         <span>
           turn in {n(turnUsage.input_tokens)} out {n(turnUsage.output_tokens)}
+        </span>
+      )}
+      {recordedUsage && (
+        <span>
+          recorded in {n(recordedUsage.input_tokens)} out {n(recordedUsage.output_tokens)} cached{' '}
+          {n(recordedUsage.cached_input_tokens)} ({n(recordedUsage.cache_hit_rate * 100)}% hit)
         </span>
       )}
     </div>

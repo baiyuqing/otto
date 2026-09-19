@@ -295,6 +295,7 @@ impl Builder {
 
         let persist = self.reminder_persist_path(session);
         let tasks = Arc::new(Tasks::new());
+        let usage = self.usage_collector(session, runtime);
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
             provider,
@@ -322,6 +323,7 @@ impl Builder {
             })),
             max_parallel: catalogs.agents.max_parallel.max(0) as usize,
             max_output_bytes: runtime.max_output_bytes.max(0) as usize,
+            usage,
         })
         .map_err(|error| format!("create sub-agent runner: {error}"))?;
         for warning in &warnings {

@@ -298,6 +298,7 @@ pub(crate) fn test_config(
         parent_session: None,
         max_parallel: 4,
         max_output_bytes: 16384,
+        usage: None,
     }
 }
 

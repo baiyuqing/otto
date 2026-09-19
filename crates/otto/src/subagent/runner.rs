@@ -225,6 +225,8 @@ pub struct Config {
     /// Caps the report text inside notification and wait text; zero means
     /// 16384.
     pub max_output_bytes: usize,
+    /// The parent session's usage collector. Each child binds its task id.
+    pub usage: Option<crate::usage::Collector>,
 }
 
 /// One delegation request.
@@ -544,8 +546,18 @@ impl Runner {
         self.config.tasks.mark_running(&task_id, self.now());
 
         let mut progress = ChildProgress::new(Arc::clone(&self.config.tasks), task_id.clone());
+        let usage = self
+            .config
+            .usage
+            .as_ref()
+            .map(|collector| collector.for_task(&task_id));
         let outcome = {
-            let mut handle = |event: Event| progress.handle(event);
+            let mut handle = |event: Event| {
+                if let Some(usage) = &usage {
+                    let _ = usage.record(&event);
+                }
+                progress.handle(event);
+            };
             let sink: EventSink<'_> = &mut handle;
             child.run(&prompt, sink, &cancel).await
         };
@@ -897,6 +909,46 @@ mod tests {
             notification.text,
             completion_text(&final_task, runner.max_output_bytes())
         );
+    }
+
+    #[tokio::test]
+    async fn child_provider_usage_reaches_the_shared_collector() {
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![assistant_text(
+                "done",
+                Usage {
+                    input_tokens: 20,
+                    output_tokens: 4,
+                    cached_input_tokens: 10,
+                },
+            )],
+        );
+        let store = Arc::new(crate::usage::Store::open_in_memory().expect("usage store"));
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.usage = Some(crate::usage::Collector::new(
+            Arc::clone(&store),
+            crate::usage::Context {
+                session_id: "parent".into(),
+                ..crate::usage::Context::default()
+            },
+        ));
+        let (runner, _) = runner(config);
+
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start");
+        wait_final(&tasks, "t1").await;
+
+        let summary = store.summary(Some("parent")).expect("summary");
+        assert_eq!(summary.requests, 1);
+        assert_eq!(summary.input_tokens, 20);
+        assert_eq!(summary.cached_input_tokens, 10);
     }
 
     #[tokio::test]

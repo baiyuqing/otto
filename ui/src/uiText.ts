@@ -8,4 +8,4 @@ export const workspaceName = (workspace: string) => {
 export const sessionLabel = (id: string) => `#${id.slice(0, 8)}`
 
 export const sendHint = (isMac = navigator.platform.toLowerCase().includes('mac')) =>
-  isMac ? 'Enter to send · Shift+Enter newline · ⌘+Enter also works' : 'Enter to send · Shift+Enter newline · Ctrl+Enter also works'
+  isMac ? 'Enter send · Shift+Enter newline · ⌘V paste image' : 'Enter send · Shift+Enter newline · Ctrl+V paste image'

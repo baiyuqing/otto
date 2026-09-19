@@ -9,7 +9,7 @@ describe('ui text helpers', () => {
   })
 
   it('uses platform-specific send shortcut copy', () => {
-    expect(sendHint(true)).toBe('Enter to send · Shift+Enter newline · ⌘+Enter also works')
-    expect(sendHint(false)).toBe('Enter to send · Shift+Enter newline · Ctrl+Enter also works')
+    expect(sendHint(true)).toBe('Enter send · Shift+Enter newline · ⌘V paste image')
+    expect(sendHint(false)).toBe('Enter send · Shift+Enter newline · Ctrl+V paste image')
   })
 })

@@ -24,8 +24,8 @@ memory storage.
 ## Install from source
 
 Requires **macOS**, the pinned **Rust 1.98** toolchain (`rustup toolchain
-install` picks it up from `rust-toolchain.toml`), and access to one of the two
-providers.
+install` picks it up from `rust-toolchain.toml`), **Node 24+**, `wasm-pack`
+0.15, and access to one of the two providers.
 
 ```bash
 git clone https://github.com/baiyuqing/otto.git
@@ -34,9 +34,8 @@ make build
 ./otto --help
 ```
 
-`make build` embeds whatever is already in `ui/dist`. Run `make ui` first
-(needs Node 24+ and `wasm-pack` 0.15) to embed the real web UI; otherwise
-`otto serve` serves a one-line placeholder page at `/` instead of the UI.
+`make build` refreshes and embeds the Web UI before compiling Otto. A direct
+`cargo build` without a prior `make ui` embeds a one-line placeholder instead.
 
 The examples below run `./otto` from this directory. Put the binary on your
 `PATH` to use `otto` from other directories.

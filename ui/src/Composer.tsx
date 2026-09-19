@@ -22,7 +22,7 @@ export function Composer(props: {
 
   const submit = () => {
     const t = text.trim()
-    if (!t || props.disabled || props.running || props.compacting) return
+    if ((!t && !image) || props.disabled || props.running || props.compacting) return
     setText('')
     const selected = image ? { data: image.data, mime_type: image.mime_type } : undefined
     setImage(null)
@@ -83,6 +83,7 @@ export function Composer(props: {
         />
         {image && (
           <div className="image-attachment">
+            <img src={`data:${image.mime_type};base64,${image.data}`} alt={image.name} />
             <span>{image.name}</span>
             <button type="button" aria-label="Remove image" onClick={() => setImage(null)}>
               ×
@@ -125,7 +126,7 @@ export function Composer(props: {
               Cancel
             </button>
           ) : (
-            <button className="primary" onClick={submit} disabled={props.disabled || props.compacting || !text.trim()}>
+            <button className="primary" onClick={submit} disabled={props.disabled || props.compacting || (!text.trim() && !image)}>
               Send
             </button>
           )}

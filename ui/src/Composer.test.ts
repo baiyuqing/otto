@@ -50,4 +50,22 @@ describe('Composer image input', () => {
     })
     await waitFor(() => expect(screen.getByText('paste.jpg')).toBeTruthy())
   })
+
+  it('previews and sends an image without text', async () => {
+    const p = props()
+    render(createElement(Composer, p))
+    const file = new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], 'shot.png', {
+      type: 'image/png',
+    })
+
+    fireEvent.change(screen.getByLabelText('Attach image'), { target: { files: [file] } })
+
+    const preview = await screen.findByRole('img', { name: 'shot.png' })
+    expect(preview.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+    fireEvent.click(screen.getByText('Send'))
+    expect(p.onSend).toHaveBeenCalledWith('', {
+      data: 'iVBORw0KGgo=',
+      mime_type: 'image/png',
+    })
+  })
 })

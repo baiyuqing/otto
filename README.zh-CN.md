@@ -82,6 +82,9 @@ API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO
 
 输入 `/help` 查看交互命令。
 
+TUI 中可用 `/image <path>` 将一张 PNG、JPEG 或 WebP 图片附加到下一条提示词；
+Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible 端点必须支持图片输入。
+
 ## 更多用法
 
 - [会话与归档](docs/user-manual.md#sessions)
@@ -96,7 +99,7 @@ API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO
 仅支持 macOS，provider 为 `openai-compatible` 和 `chatgpt`。
 文件工具限定在工作区内；`--sandbox off` 会显式关闭 Shell 沙箱。
 Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏。
-会话文件可能包含工作区文件、提示词和工具结果，应按敏感数据处理。
+会话文件可能包含工作区文件、提示词、图片和工具结果，应按敏感数据处理。
 
 不支持插件、自动发现项目配置、嵌套子代理，以及自动记忆提取。
 其他限制见[英文 README](README.md#safety-and-limitations)，完整访问规则见

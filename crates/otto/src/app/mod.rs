@@ -30,7 +30,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use otto_core::agent::inbox::Notification;
 use otto_core::agent::{AgentError, CompactionResult, EventSink};
 use otto_core::config::resolve::Runtime;
-use otto_core::model::{Message, Usage};
+use otto_core::model::{Block, Message, Usage};
 use otto_core::session::{ListResult, RuntimeMetadata, Session};
 use tokio_util::sync::CancellationToken;
 
@@ -466,6 +466,18 @@ impl Controller {
         let _admission = self.begin_operation().map_err(AgentError::Other)?;
         let runner = self.runner().map_err(AgentError::Other)?;
         runner.run(text, emit, cancel).await
+    }
+
+    pub async fn prompt_with_image(
+        &self,
+        text: &str,
+        image: Block,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        let _admission = self.begin_operation().map_err(AgentError::Other)?;
+        let runner = self.runner().map_err(AgentError::Other)?;
+        runner.run_with_image(text, image, emit, cancel).await
     }
 
     /// Port of `Controller.Compact`.

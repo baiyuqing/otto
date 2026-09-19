@@ -61,7 +61,7 @@ describe('reduce', () => {
 
 describe('fromHistory', () => {
   const messages = JSON.stringify([
-    { id: '1', role: 'user', created_at: '', blocks: [{ type: 'text', text: 'list files' }] },
+    { id: '1', role: 'user', created_at: '', blocks: [{ type: 'image', data: 'iVBORw0KGgo=', mime_type: 'image/png' }, { type: 'text', text: 'list files' }] },
     {
       id: '2',
       role: 'assistant',
@@ -79,6 +79,7 @@ describe('fromHistory', () => {
 
   it('pairs tool results and shows only display context', () => {
     expect(fromHistory(messages)).toEqual([
+      { kind: 'user', text: '[image]' },
       { kind: 'user', text: 'list files' },
       { kind: 'assistant', text: 'Running ls.' },
       { kind: 'tool', id: 'c1', name: 'bash', args: '{\n  "command": "ls"\n}', result: 'a.go', isError: false },

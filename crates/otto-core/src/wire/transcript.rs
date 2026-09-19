@@ -204,6 +204,11 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
                         is_error: None,
                     });
                 }
+                "image" if message.role == "user" => {
+                    items.push(Item::User {
+                        text: "[image]".into(),
+                    });
+                }
                 _ => {
                     if block.text.is_empty() {
                         continue;

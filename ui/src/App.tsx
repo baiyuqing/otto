@@ -200,7 +200,7 @@ export function App() {
     return () => clearInterval(id)
   }, [session?.id, turnId, compacting, consume, fail])
 
-  const send = async (text: string): Promise<void> => {
+  const send = async (text: string, image?: { data: string; mime_type: string }): Promise<void> => {
     if (!session) return
     setError('')
     const command = parseWebCommand(text)
@@ -323,12 +323,12 @@ export function App() {
       return
     }
     try {
-      const res = await api.startTurn(session.id, command.text)
+      const res = await api.startTurn(session.id, command.text, image)
       // The stream carries no turn id; the session does.
       const s = await api.getSession(session.id)
       setSession(s)
       setTurnId(s.turn?.id ?? null)
-      setItems((prev) => [...prev, { kind: 'user', text }])
+      setItems((prev) => [...prev, { kind: 'user', text: image ? `[image]\n${text}` : text }])
       await consume(session.id, res)
     } catch (e) {
       fail(e)
@@ -421,6 +421,7 @@ export function App() {
       </main>
       {session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
       <Composer
+        key={session?.id ?? 'closed'}
         disabled={!session}
         running={turnId !== null}
         compacting={compacting}

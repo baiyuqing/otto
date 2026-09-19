@@ -24,11 +24,14 @@ mod render;
 use std::future::Future;
 use std::sync::Arc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEvent, KeyEventKind,
     MouseEventKind,
 };
 use otto_core::agent::Event;
+use otto_core::model::{Block, MAX_IMAGE_BYTES};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::{mpsc, watch};
@@ -161,6 +164,7 @@ async fn run_app<B: Backend>(
     keys: &mut mpsc::Receiver<TuiEvent>,
 ) -> Result<(), ReplError> {
     let mut app = App::new(controller);
+    let mut pending_image = None;
     terminal
         .draw(|frame| render::draw(frame, &app))
         .map_err(draw_error)?;
@@ -231,12 +235,27 @@ async fn run_app<B: Backend>(
             None => {}
             Some(Action::Exit) => return Ok(()),
             Some(Action::Prompt(line)) => {
-                if let Err(error) =
-                    run_turn(&mut app, terminal, keys, controller, cancel, line).await
+                if let Err(error) = run_turn(
+                    &mut app,
+                    terminal,
+                    keys,
+                    controller,
+                    cancel,
+                    line,
+                    pending_image.take(),
+                )
+                .await
                 {
                     propagate_turn_error(error)?;
                 }
             }
+            Some(Action::Image(path)) => match image_block_from_path(&path) {
+                Ok(image) => {
+                    pending_image = Some(image);
+                    app.push_system(format!("Attached image: {path}"));
+                }
+                Err(message) => app.push_system(format!("/image: {message}")),
+            },
             Some(Action::Compact(focus)) => {
                 if let Err(error) =
                     run_compact(&mut app, terminal, keys, controller, cancel, focus).await
@@ -244,35 +263,45 @@ async fn run_app<B: Backend>(
                     propagate_turn_error(error)?;
                 }
             }
-            Some(Action::NewSession) => match controller.new_session().await {
-                Ok(()) => {
-                    app.refresh(controller);
-                    push_session_id(&mut app, controller);
+            Some(Action::NewSession) => {
+                pending_image = None;
+                match controller.new_session().await {
+                    Ok(()) => {
+                        app.refresh(controller);
+                        push_session_id(&mut app, controller);
+                    }
+                    Err(message) => app.push_system(format!("/new: {message}")),
                 }
-                Err(message) => app.push_system(format!("/new: {message}")),
-            },
+            }
             Some(Action::SwitchProfile(profile)) => {
+                pending_image = None;
                 switch_profile(&mut app, controller, &profile).await;
             }
-            Some(Action::Resume(path)) => match controller.resume_session(&path).await {
-                Ok(result) => {
-                    app.refresh(controller);
-                    app.push_system(format!("Resumed: {}", result.session_path));
-                    for warning in &result.warnings {
-                        app.push_system(warning.clone());
+            Some(Action::Resume(path)) => {
+                pending_image = None;
+                match controller.resume_session(&path).await {
+                    Ok(result) => {
+                        app.refresh(controller);
+                        app.push_system(format!("Resumed: {}", result.session_path));
+                        for warning in &result.warnings {
+                            app.push_system(warning.clone());
+                        }
+                        push_session_id(&mut app, controller);
                     }
-                    push_session_id(&mut app, controller);
+                    Err(message) => app.push_system(format!("/resume: {message}")),
                 }
-                Err(message) => app.push_system(format!("/resume: {message}")),
-            },
-            Some(Action::Archive(path)) => match controller.archive_session(&path).await {
-                Ok(result) => {
-                    app.refresh(controller);
-                    app.push_system(format!("Archived: {}", result.path));
-                    push_session_id(&mut app, controller);
+            }
+            Some(Action::Archive(path)) => {
+                pending_image = None;
+                match controller.archive_session(&path).await {
+                    Ok(result) => {
+                        app.refresh(controller);
+                        app.push_system(format!("Archived: {}", result.path));
+                        push_session_id(&mut app, controller);
+                    }
+                    Err(message) => app.push_system(format!("/archive: {message}")),
                 }
-                Err(message) => app.push_system(format!("/archive: {message}")),
-            },
+            }
             Some(Action::SandboxReload) => match controller.reload_sandbox().await {
                 Ok(info) => app.push_system(format!("Sandbox: {}", info.summary())),
                 Err(message) => app.push_system(format!("/sandbox reload: {message}")),
@@ -281,7 +310,7 @@ async fn run_app<B: Backend>(
                 Ok(prompt) => {
                     app.push_system(format!("Approved {id} for one command."));
                     if let Err(error) =
-                        run_turn(&mut app, terminal, keys, controller, cancel, prompt).await
+                        run_turn(&mut app, terminal, keys, controller, cancel, prompt, None).await
                     {
                         propagate_turn_error(error)?;
                     }
@@ -387,6 +416,7 @@ async fn run_turn<B: Backend>(
     controller: &Controller,
     cancel: &CancellationToken,
     line: String,
+    image: Option<Block>,
 ) -> Result<(), ReplError> {
     app.start_turn();
     let turn = cancel.child_token();
@@ -402,7 +432,16 @@ async fn run_turn<B: Backend>(
             keys,
             &mut received,
             &turn,
-            controller.prompt(&line, &mut sink, &turn),
+            async {
+                match image {
+                    Some(image) => {
+                        controller
+                            .prompt_with_image(&line, image, &mut sink, &turn)
+                            .await
+                    }
+                    None => controller.prompt(&line, &mut sink, &turn).await,
+                }
+            },
             |app, event| {
                 if app.apply_event(event) {
                     error_rendered = true;
@@ -425,6 +464,26 @@ async fn run_turn<B: Backend>(
             message: error.to_string(),
         }),
     }
+}
+
+fn image_block_from_path(path: &str) -> Result<Block, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+        return Err(format!("image exceeds {MAX_IMAGE_BYTES} bytes"));
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let mime_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return Err("unsupported image; use PNG, JPEG, or WebP".into());
+    };
+    let image = Block::image(BASE64.encode(bytes), mime_type);
+    image.validate().map_err(|error| error.to_string())?;
+    Ok(image)
 }
 
 /// One empty-text turn delivering pending sub-agent notifications.
@@ -643,6 +702,22 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 
     use super::*;
+
+    #[test]
+    fn image_path_becomes_a_valid_image_block() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("shot.png");
+        std::fs::File::create(&path)
+            .expect("create")
+            .write_all(b"\x89PNG\r\n\x1a\n")
+            .expect("write");
+
+        let image = image_block_from_path(path.to_str().expect("utf8 path")).expect("image");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, "iVBORw0KGgo=");
+    }
 
     /// The wheel must not reach the composer's keys: Up/Down there recall
     /// prompt history, so a wheel notch mapped onto them would scroll the

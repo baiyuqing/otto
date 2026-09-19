@@ -14,6 +14,8 @@
 //! Errors: `validate` returns [`ValidationError`], which carries the same
 //! message text as the corresponding Go error.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
@@ -88,6 +90,7 @@ impl Default for Role {
 #[serde(from = "String", into = "String")]
 pub enum BlockType {
     Text,
+    Image,
     ToolCall,
     ToolResult,
     Other(String),
@@ -97,6 +100,7 @@ impl From<String> for BlockType {
     fn from(value: String) -> Self {
         match value.as_str() {
             "text" => Self::Text,
+            "image" => Self::Image,
             "tool_call" => Self::ToolCall,
             "tool_result" => Self::ToolResult,
             _ => Self::Other(value),
@@ -108,6 +112,7 @@ impl From<BlockType> for String {
     fn from(value: BlockType) -> Self {
         match value {
             BlockType::Text => "text".into(),
+            BlockType::Image => "image".into(),
             BlockType::ToolCall => "tool_call".into(),
             BlockType::ToolResult => "tool_result".into(),
             BlockType::Other(other) => other,
@@ -171,6 +176,10 @@ pub struct Block {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub data: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_call_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_name: String,
@@ -186,6 +195,8 @@ impl PartialEq for Block {
     fn eq(&self, other: &Self) -> bool {
         self.block_type == other.block_type
             && self.text == other.text
+            && self.data == other.data
+            && self.mime_type == other.mime_type
             && self.tool_call_id == other.tool_call_id
             && self.tool_name == other.tool_name
             && self.arguments.as_ref().map(|raw| raw.get())
@@ -206,11 +217,22 @@ impl Block {
         }
     }
 
+    pub fn image(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            block_type: BlockType::Image,
+            data: data.into(),
+            mime_type: mime_type.into(),
+            ..Self::default()
+        }
+    }
+
     /// Rejects blocks that carry fields incompatible with their type.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self.block_type {
             BlockType::Text => {
-                if !self.tool_call_id.is_empty()
+                if !self.data.is_empty()
+                    || !self.mime_type.is_empty()
+                    || !self.tool_call_id.is_empty()
                     || !self.tool_name.is_empty()
                     || self.arguments.is_some()
                     || self.is_error
@@ -218,10 +240,23 @@ impl Block {
                     return Err(ValidationError("text block contains incompatible fields"));
                 }
             }
+            BlockType::Image => {
+                if !self.text.is_empty()
+                    || !self.tool_call_id.is_empty()
+                    || !self.tool_name.is_empty()
+                    || self.arguments.is_some()
+                    || self.is_error
+                    || !valid_image(&self.data, &self.mime_type)
+                {
+                    return Err(ValidationError("image block is malformed"));
+                }
+            }
             BlockType::ToolCall => {
                 if self.tool_call_id.trim().is_empty()
                     || self.tool_name.trim().is_empty()
                     || !self.text.is_empty()
+                    || !self.data.is_empty()
+                    || !self.mime_type.is_empty()
                     || self.is_error
                     || !is_json_object(self.arguments.as_deref())
                 {
@@ -231,6 +266,8 @@ impl Block {
             BlockType::ToolResult => {
                 if self.tool_call_id.trim().is_empty()
                     || self.tool_name.trim().is_empty()
+                    || !self.data.is_empty()
+                    || !self.mime_type.is_empty()
                     || self.arguments.is_some()
                 {
                     return Err(ValidationError("tool-result block is malformed"));
@@ -372,7 +409,7 @@ impl Message {
                 if self
                     .blocks
                     .iter()
-                    .any(|block| block.block_type != BlockType::Text)
+                    .any(|block| !matches!(block.block_type, BlockType::Text | BlockType::Image))
                 {
                     return Err(ValidationError("user message contains incompatible block"));
                 }
@@ -440,6 +477,26 @@ impl Message {
             Role::Other(_) => unreachable!("rejected above"),
         }
         Ok(())
+    }
+}
+
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+fn valid_image(data: &str, mime_type: &str) -> bool {
+    if data.is_empty() || data.len() > MAX_IMAGE_BYTES * 4 / 3 + 4 {
+        return false;
+    }
+    let Ok(bytes) = BASE64.decode(data) else {
+        return false;
+    };
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return false;
+    }
+    match mime_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+        "image/webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP",
+        _ => false,
     }
 }
 
@@ -832,6 +889,25 @@ mod tests {
             }
             .validate(),
             Err(ValidationError("unsupported message block type"))
+        );
+    }
+
+    #[test]
+    fn image_block_is_valid_user_content_and_checks_its_bytes() {
+        let image = Block::image("iVBORw0KGgo=", "image/png");
+        assert_eq!(image.validate(), Ok(()));
+        assert_eq!(
+            Message {
+                role: Role::User,
+                blocks: vec![image],
+                ..Message::default()
+            }
+            .validate(),
+            Ok(())
+        );
+        assert_eq!(
+            Block::image("/9j/", "image/png").validate(),
+            Err(ValidationError("image block is malformed"))
         );
     }
 

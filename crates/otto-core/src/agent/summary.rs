@@ -184,6 +184,15 @@ pub fn serialize_summary_input(
                     };
                     format!("{label} {}", encode_json_string(&block.text))
                 }
+                BlockType::Image => {
+                    if message.role != Role::User {
+                        return Err("compaction source has an incompatible image".into());
+                    }
+                    format!(
+                        "[User image]: mime={}",
+                        encode_json_string(&block.mime_type)
+                    )
+                }
                 BlockType::ToolCall => {
                     let arguments = block.arguments.as_ref().map_or("", |raw| raw.get());
                     format!(

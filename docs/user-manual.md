@@ -398,6 +398,9 @@ OTTO_UI=repl otto
   lines already submitted, and `↓` past the newest one restores what was being
   typed. It starts from the prompts the session already had, so a resumed
   session can recall its own, and it is not persisted across runs.
+- `/image <path>` attaches one PNG, JPEG, or WebP image to the next ordinary
+  prompt. The path may contain spaces. A later `/image` replaces the pending
+  image.
 - Mouse-wheel transcript scrolling is enabled. Hold `Shift` while dragging to
   select visible terminal text.
 - The footer shows workspace/profile/model, token totals, and session ID when
@@ -454,6 +457,10 @@ Shared commands:
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
+
+- `/image <path>` attaches one image to the next prompt. The image is stored
+  inline in the session; the selected model and provider endpoint must support
+  image input. Otto sends images with `detail: high`.
 
 - `/resume` opens a modal of the up to 20 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,
@@ -842,6 +849,9 @@ the transcript, and a composer:
   math for `$...$` and `$$...$$`, plus Mermaid diagrams in fenced
   `mermaid` code blocks. Each tool call is a collapsible block with its
   arguments and result.
+- **Image** selects one PNG, JPEG, or WebP image; pasting a screenshot selects
+  it too. Sending stores the original image with the prompt in session history
+  and sends it with `detail: high`.
 - While a turn runs the composer is disabled and a **Cancel** button calls
   `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
 - Reloading the page during a turn re-attaches to the running turn's event
@@ -876,7 +886,7 @@ are served at the root. Request and error bodies are JSON.
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
 | `GET /v1/sessions/{id}/history` | Return the session's message history. |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`). `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |

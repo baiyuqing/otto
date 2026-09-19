@@ -847,9 +847,12 @@ the transcript, and a composer:
   by existing server APIs run locally instead of starting a provider turn:
   `/help`, `/session`, `/new`, `/resume`, `/model`, `/rename <name>`,
   `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/tasks`,
-  `/task <id|name>`, `/task cancel <id|name>`, and `/exit`. `/resume` asks
-  you to choose a session from the picker; `/exit` asks you to close the
+  `/task <id|name>`, `/task cancel <id|name>`, `/mcp`, and `/exit`. `/resume`
+  asks you to choose a session from the picker; `/exit` asks you to close the
   browser tab because a page cannot reliably close a tab it did not open.
+  `/mcp` shows each configured server's connection state only; signing in
+  runs on the host with `otto mcp login <server>`, since the OAuth flow opens
+  a browser there, not in the page.
 - Enter sends the composer text as a turn or Web command; Shift+Enter inserts
   a newline. Assistant text renders as GitHub-Flavored Markdown, with KaTeX
   math for `$...$` and `$$...$$`, plus Mermaid diagrams in fenced
@@ -907,6 +910,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
+| `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
 | `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |

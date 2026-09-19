@@ -36,6 +36,7 @@ pub enum SlashCommandKind {
     Skills,
     Sandbox,
     Approve,
+    Mcp,
 }
 
 /// The command table used by completion and `/help`. The inherited commands
@@ -115,6 +116,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/logout",
         description: "sign out of ChatGPT",
         kind: SlashCommandKind::Logout,
+    },
+    SlashCommand {
+        name: "/mcp",
+        description: "show MCP server status, or 'login <server>' to sign in",
+        kind: SlashCommandKind::Mcp,
     },
     SlashCommand {
         name: "/exit",
@@ -214,6 +220,15 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, ["/memory"]);
+    }
+
+    #[test]
+    fn a_prefix_matches_only_the_mcp_command() {
+        let names: Vec<&str> = matching_slash_commands("/mc")
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["/mcp"]);
     }
 
     #[test]

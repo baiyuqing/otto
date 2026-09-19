@@ -263,6 +263,33 @@ components:
           items:
             $ref: "#/components/schemas/Task"
       required: [tasks]
+    McpServer:
+      type: object
+      description: server::mcp::McpServer; see crates/otto/src/server/mcp.rs for the full shape.
+      properties:
+        name:
+          type: string
+        transport:
+          type: string
+          enum: [stdio, http]
+        protocol_version:
+          type: [string, "null"]
+        state:
+          type: string
+          enum: [connected, disabled, needs_login, failed]
+        tools:
+          type: integer
+        error:
+          type: [string, "null"]
+      required: [name, transport, protocol_version, state, tools, error]
+    McpServerList:
+      type: object
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpServer"
+      required: [servers]
     TaskWithHistory:
       allOf:
         - $ref: "#/components/schemas/Task"
@@ -734,6 +761,24 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: Task already finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/mcp:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List the session's MCP servers and their connection state, in configuration order
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpServerList"
+        "404":
+          description: Session not open
           content:
             application/json:
               schema:

@@ -17,6 +17,7 @@
 pub mod agents;
 pub mod duration;
 pub mod inbound;
+pub mod mcp;
 pub mod memory;
 pub mod model_limits;
 mod paths;
@@ -34,6 +35,7 @@ use serde::{Deserialize, Serialize};
 
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
 pub use inbound::{FeishuRuntime, Inbound, resolve_feishu};
+pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
 pub use model_limits::ModelLimits;
 pub use resolve::{CompactionRuntime, Overrides, Runtime, SessionDefaults, resolve};
@@ -74,6 +76,8 @@ pub struct File {
     pub agent: Agent,
     #[serde(default)]
     pub memory: Memory,
+    #[serde(default)]
+    pub mcp: Mcp,
     #[serde(default)]
     pub skills: Skills,
     #[serde(default)]

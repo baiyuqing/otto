@@ -13,6 +13,7 @@ export type WebCommand =
   | { kind: 'tasks' }
   | { kind: 'task'; id: string }
   | { kind: 'taskCancel'; id: string }
+  | { kind: 'mcp' }
   | { kind: 'exit' }
   | { kind: 'error'; message: string }
 
@@ -33,6 +34,7 @@ export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/approve', description: 'allow one exact elevated Bash command' },
   { name: '/tasks', description: 'list sub-agent tasks' },
   { name: '/task', description: 'show or cancel a sub-agent task' },
+  { name: '/mcp', description: 'list MCP servers and their state' },
   { name: '/exit', description: 'close the browser tab' },
 ]
 
@@ -81,6 +83,8 @@ export function parseWebCommand(text: string): WebCommand {
       if (parts.length === 1 && parts[0] !== 'cancel') return { kind: 'task', id: parts[0] }
       return { kind: 'error', message: 'usage: /task <id|name> | /task cancel <id|name>' }
     }
+    case '/mcp':
+      return argument ? { kind: 'prompt', text: trimmed } : { kind: 'mcp' }
     case '/exit':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'exit' }
     default:

@@ -1427,6 +1427,8 @@ mod tests {
     use crate::cli::testutil;
     use axum::body::Body;
     use axum::http::Request;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use futures_util::StreamExt;
     use otto_core::model::{Block, BlockType, Message, Role, Usage};
     use otto_core::provider::{
@@ -2270,6 +2272,25 @@ mod tests {
         assert_eq!(history[0]["blocks"][1]["type"], "image");
         assert_eq!(history[0]["blocks"][1]["mime_type"], "image/png");
         assert_eq!(history[0]["blocks"][1]["data"], "iVBORw0KGgo=");
+    }
+
+    #[tokio::test]
+    async fn image_turns_override_the_small_default_body_limit() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let mut bytes = vec![0; 1 << 20];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let body = serde_json::json!({
+            "text": "read it",
+            "image": { "data": BASE64.encode(bytes), "mime_type": "image/png" },
+            "stream": false
+        })
+        .to_string();
+
+        let reply = harness
+            .send("POST", &format!("/v1/sessions/{id}/turns"), Some(&body))
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     }
 
     #[tokio::test]

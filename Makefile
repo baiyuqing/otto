@@ -7,7 +7,7 @@ BINARY := otto
 
 all: build
 
-build: ## compile the Rust otto binary (release) to ./$(BINARY)
+build: ui ## build the Web UI and compile the Rust binary (release) to ./$(BINARY)
 	cargo build --release
 	cp target/release/$(BINARY) ./$(BINARY)
 

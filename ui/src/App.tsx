@@ -329,7 +329,8 @@ export function App() {
       setSession(s)
       setTurnId(s.turn?.id ?? null)
       setItems((prev) => {
-        const next: Item[] = [...prev, { kind: 'user', text }]
+        const next: Item[] = [...prev]
+        if (text) next.push({ kind: 'user', text })
         if (image) next.push({ kind: 'image', data: image.data, mime_type: image.mime_type })
         return next
       })

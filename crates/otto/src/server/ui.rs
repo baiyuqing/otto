@@ -133,4 +133,24 @@ mod tests {
         // embed path resolves, not that `make ui` has run.
         assert!(DIST.get_file("nothing-here").is_none());
     }
+
+    #[test]
+    fn make_build_refreshes_the_embedded_ui_first() {
+        let makefile = include_str!("../../../../Makefile");
+        let rule = makefile
+            .lines()
+            .find(|line| line.starts_with("build:"))
+            .expect("build rule");
+        let dependencies = rule
+            .split("##")
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("build:")
+            .split_whitespace();
+        assert!(
+            dependencies
+                .into_iter()
+                .any(|dependency| dependency == "ui")
+        );
+    }
 }

@@ -138,7 +138,7 @@ The canonical Make targets are:
 ```bash
 make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
 make check          # full macOS gate: check-fast, build, all tests, wasm check+test, PTY test, UI test
-make build          # cargo build --release, then copy the binary to ./otto
+make build          # build the Web UI, cargo build --release, then copy ./otto
 make rust-fmt       # cargo fmt --all -- --check
 make rust-lint      # cargo clippy --workspace --all-targets -- -D warnings
 make rust-test      # cargo test --workspace (offline)
@@ -148,8 +148,8 @@ make test-tui       # cargo test -p otto --test tui_pty (needs a real PTY)
 ```
 
 `check-fast` runs `rustfmt`, `clippy`, and the focused `otto-core` test suite;
-`check` adds the release build, the full workspace test suite, the wasm32
-build check, the wasm tests under Node, the PTY smoke test, and `make
+`check` adds the Web UI and release build, the full workspace test suite, the
+wasm32 build check, the wasm tests under Node, the PTY smoke test, and `make
 ui-test`.
 
 `rust-wasm-test` and `make ui`/`make ui-test` need `wasm-pack` (pinned to
@@ -165,16 +165,16 @@ real interactive terminal.
 `ui/` is a Vite + React + TypeScript project with `react-markdown` and
 `remark-gfm` as its only runtime dependencies, plus the `otto-web` wasm
 package built from `crates/otto-web`. It needs Node 24+ and wasm-pack, and it
-is exercised by `make check` through `make ui-test`.
+is exercised by `make check` through the production build and `make ui-test`.
 
 ```bash
 make ui       # wasm-pack build, then npm ci && npm run build → ui/dist, embedded by cargo build
 make ui-test  # wasm-pack build, then npm ci && npm test (vitest): the SSE frame parser and the transcript reducer
 ```
 
-`ui/dist` is a build output: only `.gitkeep` is tracked, and a `cargo build`
-without a prior `make ui` embeds the placeholder page. Do not commit built
-assets.
+`make build` runs `make ui` first. `ui/dist` is a build output: only `.gitkeep`
+is tracked, and a direct `cargo build` without a prior `make ui` embeds the
+placeholder page. Do not commit built assets.
 
 For development, run `otto serve --listen 127.0.0.1:8787` in one terminal and
 `cd ui && OTTO_URL=http://127.0.0.1:8787 npm run dev` in another, then open the

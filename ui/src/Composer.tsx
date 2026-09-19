@@ -40,7 +40,8 @@ export function Composer(props: {
   }
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const file = Array.from(e.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'))
+    const item = Array.from(e.clipboardData.items).find((candidate) => candidate.type.startsWith('image/'))
+    const file = item?.getAsFile() ?? Array.from(e.clipboardData.files).find((candidate) => candidate.type.startsWith('image/'))
     if (file) attach(file)
   }
 

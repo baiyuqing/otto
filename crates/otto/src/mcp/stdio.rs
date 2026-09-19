@@ -46,6 +46,9 @@ use super::{CallError, Outbound, Transport};
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 /// How much of the child's stderr is kept for failure messages.
 const STDERR_TAIL_BYTES: usize = 4 * 1024;
+/// How much of the kept stderr tail is folded into the "server exited"
+/// message; smaller than `STDERR_TAIL_BYTES` so that message stays readable.
+const STDERR_EXIT_TAIL_BYTES: usize = 1024;
 /// How long `close` waits after dropping stdin, and again after `SIGTERM`,
 /// before escalating.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
@@ -104,13 +107,15 @@ impl StdioTransport {
         let dead: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
 
-        tokio::spawn(drain_stderr(stderr, stderr_tail.clone()));
+        let stderr_task = tokio::spawn(drain_stderr(stderr, stderr_tail.clone()));
         tokio::spawn(reader_loop(
             child,
             stdout,
             pending.clone(),
             dead.clone(),
             stdin.clone(),
+            stderr_tail.clone(),
+            stderr_task,
         ));
 
         Ok(Self {
@@ -259,6 +264,8 @@ async fn reader_loop(
     pending: Arc<Mutex<Pending>>,
     dead: Arc<Mutex<Option<String>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
+    stderr_tail: Arc<std::sync::Mutex<String>>,
+    stderr_task: tokio::task::JoinHandle<()>,
 ) {
     let mut reader = tokio::io::BufReader::new(stdout);
     loop {
@@ -280,10 +287,23 @@ async fn reader_loop(
     }
 
     let status = child.wait().await.ok();
-    let reason = match status {
+    // Wait for stderr to finish draining so its tail is complete before it
+    // is folded into the exit message below. Bounded: a grandchild that
+    // inherited the stderr pipe keeps it open after the child exits, and the
+    // exit must still be reported.
+    let _ = tokio::time::timeout(SHUTDOWN_WAIT, stderr_task).await;
+
+    let mut reason = match status {
         Some(status) => format!("server exited ({status})"),
         None => "server exited".to_string(),
     };
+    let tail = stderr_tail.lock().expect("stderr tail lock").clone();
+    let tail = tail.trim();
+    if !tail.is_empty() {
+        reason.push_str("; stderr: ");
+        reason.push_str(last_bytes(tail, STDERR_EXIT_TAIL_BYTES));
+    }
+
     *dead.lock().await = Some(reason.clone());
     let orphaned: Vec<_> = std::mem::take(&mut *pending.lock().await)
         .into_values()
@@ -291,6 +311,18 @@ async fn reader_loop(
     for tx in orphaned {
         let _ = tx.send(Err(CallError::Transport(reason.clone())));
     }
+}
+
+/// The last `text.len().min(max)` bytes of `text`, cut on a char boundary.
+fn last_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let cut = text.len() - max;
+    let boundary = (cut..=text.len())
+        .find(|&index| text.is_char_boundary(index))
+        .unwrap_or(text.len());
+    &text[boundary..]
 }
 
 async fn handle_line(text: &str, pending: &Mutex<Pending>, stdin: &Mutex<Option<ChildStdin>>) {

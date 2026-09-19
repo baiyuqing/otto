@@ -464,6 +464,26 @@ impl Controller {
             .ok_or_else(|| CLOSED.to_string())
     }
 
+    /// Shuts every connected MCP server down, waiting up to 5 seconds. A
+    /// no-op on a controller with no current runner (already closed, or
+    /// never opened). [`Self::close`] also starts an MCP close, but only in
+    /// the background (`Runner::close`, via `Current::discard`): a process
+    /// exiting right after `close` returns would drop the runtime before
+    /// that spawned close ran. At a process-exit site, call this *before*
+    /// `close`, not after: [`crate::mcp::Servers::close`] uses `mem::take`
+    /// internally, so whichever of this awaited call or `close`'s
+    /// background one runs first is the one that actually closes anything.
+    pub async fn close_mcp(&self) {
+        let runner = self
+            .lock()
+            .current
+            .as_ref()
+            .map(|current| Arc::clone(&current.runner));
+        if let Some(runner) = runner {
+            runner.close_mcp().await;
+        }
+    }
+
     // ---- turns ----
 
     /// Port of `Controller.Prompt`.
@@ -965,6 +985,7 @@ async fn attach_runner(
         }
     };
     if let Err(error) = builder.update_session_runtime(&session, runtime) {
+        runner.close_mcp().await;
         runner.close();
         let _ = session.close();
         return Err(error);

@@ -603,6 +603,7 @@ pub async fn run(
         }
     };
     if let Err(message) = builder.update_session_runtime(&initial_session, &resolved) {
+        runner.close_mcp().await;
         runner.close();
         let _ = initial_session.close();
         let _ = control.close().await;
@@ -612,6 +613,7 @@ pub async fn run(
         return fail(stderr, &message);
     }
     if cancel.is_cancelled() {
+        runner.close_mcp().await;
         runner.close();
         let _ = initial_session.close();
         let _ = control.close().await;
@@ -649,6 +651,7 @@ pub async fn run(
     let cancelled_before_exit = cancel.is_cancelled();
     let frontend_cancelled = matches!(run_error, Err(repl::Error::Cancelled));
     cancel.cancel();
+    controller.close_mcp().await;
     let controller_error = controller.close();
     let sandbox_error = control.close().await;
     let approval_error = approval_executor

@@ -15,6 +15,7 @@ use crate::session::CompactionMetadata;
 const REQUEST_FRAMING_TOKENS: i64 = 3;
 const MESSAGE_FRAMING_TOKENS: i64 = 6;
 const TEXT_BLOCK_FRAMING_TOKENS: i64 = 2;
+const IMAGE_BLOCK_TOKENS: i64 = 2048;
 const TOOL_CALL_FRAMING_TOKENS: i64 = 12;
 const TOOL_RESULT_FRAMING_TOKENS: i64 = 8;
 const TOOL_DEFINITION_FRAMING_TOKENS: i64 = 16;
@@ -57,6 +58,7 @@ pub fn estimate_message(message: &Message) -> i64 {
 fn estimate_block(block: &Block) -> i64 {
     match block.block_type {
         BlockType::Text => saturating_add(TEXT_BLOCK_FRAMING_TOKENS, estimate_string(&block.text)),
+        BlockType::Image => IMAGE_BLOCK_TOKENS,
         BlockType::ToolCall => {
             let mut total = TOOL_CALL_FRAMING_TOKENS;
             total = saturating_add(total, estimate_string(&block.tool_call_id));
@@ -161,6 +163,7 @@ mod tests {
         for block in &message.blocks {
             want += match block.block_type {
                 BlockType::Text => 2 + formula(&block.text),
+                BlockType::Image => IMAGE_BLOCK_TOKENS,
                 BlockType::ToolCall => {
                     12 + formula(&block.tool_call_id)
                         + formula(&block.tool_name)

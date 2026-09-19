@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::model::{BlockType, FinishReason, Role};
+use crate::model::{BlockType, FinishReason, Message, Role};
 use crate::provider::Request;
 
 /// One `POST /responses` body. Otto always streams and never asks the backend
@@ -87,7 +87,12 @@ pub struct WireItem {
 pub struct WireContent {
     #[serde(rename = "type")]
     pub content_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub text: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub image_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 /// One decoded `data:` payload of the response stream. The payload repeats the
@@ -171,7 +176,8 @@ pub struct InputTokensDetails {
 /// Translates a neutral request into the Responses API body.
 ///
 /// The system prompt becomes `instructions` rather than an input item. User
-/// and context messages become `message` items with `input_text` content.
+/// Context messages become `input_text`; user images become `input_image`
+/// content with fixed high detail.
 /// An assistant message contributes an `output_text` message item when its
 /// text is non-empty, followed by one `function_call` item per tool-call
 /// block. A tool message expands into one `function_call_output` item per
@@ -180,9 +186,8 @@ pub fn build_request(request: &Request) -> WireRequest {
     let mut input: Vec<WireItem> = Vec::new();
     for message in &request.messages {
         match message.role {
-            Role::User | Role::Context => {
-                input.push(message_item("user", "input_text", message.text()))
-            }
+            Role::User => input.push(user_message_item(message)),
+            Role::Context => input.push(message_item("user", "input_text", message.text())),
             Role::Assistant => {
                 let text = message.text();
                 if !text.is_empty() {
@@ -281,7 +286,37 @@ fn message_item(role: &str, content_type: &str, text: String) -> WireItem {
         content: vec![WireContent {
             content_type: content_type.into(),
             text,
+            image_url: String::new(),
+            detail: String::new(),
         }],
+        ..WireItem::default()
+    }
+}
+
+fn user_message_item(message: &Message) -> WireItem {
+    let content = message
+        .blocks
+        .iter()
+        .filter_map(|block| match block.block_type {
+            BlockType::Text => Some(WireContent {
+                content_type: "input_text".into(),
+                text: block.text.clone(),
+                image_url: String::new(),
+                detail: String::new(),
+            }),
+            BlockType::Image => Some(WireContent {
+                content_type: "input_image".into(),
+                text: String::new(),
+                image_url: format!("data:{};base64,{}", block.mime_type, block.data),
+                detail: "high".into(),
+            }),
+            _ => None,
+        })
+        .collect();
+    WireItem {
+        item_type: "message".into(),
+        role: "user".into(),
+        content,
         ..WireItem::default()
     }
 }
@@ -470,6 +505,32 @@ mod tests {
             concat!(
                 r#"{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"recalled"}]}],"#,
                 r#""tools":[{"type":"function","name":"n","description":"d","parameters":null}],"#,
+                r#""stream":true,"store":false}"#
+            )
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn user_images_become_response_content_parts() {
+        let request = Request {
+            model: "m".into(),
+            messages: vec![Message {
+                role: Role::User,
+                blocks: vec![
+                    Block::text("read it"),
+                    Block::image("iVBORw0KGgo=", "image/png"),
+                ],
+                ..Message::default()
+            }],
+            ..Request::default()
+        };
+        assert_eq!(
+            encode(&request),
+            concat!(
+                r#"{"model":"m","input":[{"type":"message","role":"user","content":["#,
+                r#"{"type":"input_text","text":"read it"},"#,
+                r#"{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"high"}]}],"#,
                 r#""stream":true,"store":false}"#
             )
         );

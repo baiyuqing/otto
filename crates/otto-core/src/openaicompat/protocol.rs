@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::model::{BlockType, FinishReason, Role};
+use crate::model::{BlockType, FinishReason, Message, Role};
 use crate::provider::Request;
 
 /// One `POST /chat/completions` body. Otto always streams, and always asks for
@@ -47,15 +47,39 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
-/// One request message. `content` is always written, even when empty.
+/// One request message. Text-only content stays a string; a user image turns
+/// it into content parts with fixed high detail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireMessage {
     pub role: String,
-    pub content: String,
+    pub content: WireMessageContent,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<WireToolCall>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub tool_call_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum WireMessageContent {
+    Text(String),
+    Parts(Vec<WireContentPart>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireContentPart {
+    #[serde(rename = "type")]
+    pub content_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<WireImageUrl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireImageUrl {
+    pub url: String,
+    pub detail: String,
 }
 
 /// One advertised tool.
@@ -194,7 +218,8 @@ pub fn build_request(request: &Request) -> WireRequest {
     }
     for message in &request.messages {
         match message.role {
-            Role::User | Role::Context => messages.push(wire_message("user", message.text())),
+            Role::User => messages.push(user_wire_message(message)),
+            Role::Context => messages.push(wire_message("user", message.text())),
             Role::Assistant => {
                 let mut wire = wire_message("assistant", message.text());
                 for block in &message.blocks {
@@ -224,7 +249,7 @@ pub fn build_request(request: &Request) -> WireRequest {
                     }
                     messages.push(WireMessage {
                         role: "tool".into(),
-                        content: block.text.clone(),
+                        content: WireMessageContent::Text(block.text.clone()),
                         tool_calls: Vec::new(),
                         tool_call_id: block.tool_call_id.clone(),
                     });
@@ -282,7 +307,43 @@ pub fn valid_arguments(arguments: &str) -> bool {
 fn wire_message(role: &str, content: String) -> WireMessage {
     WireMessage {
         role: role.into(),
-        content,
+        content: WireMessageContent::Text(content),
+        tool_calls: Vec::new(),
+        tool_call_id: String::new(),
+    }
+}
+
+fn user_wire_message(message: &Message) -> WireMessage {
+    if !message
+        .blocks
+        .iter()
+        .any(|block| block.block_type == BlockType::Image)
+    {
+        return wire_message("user", message.text());
+    }
+    let content = message
+        .blocks
+        .iter()
+        .filter_map(|block| match block.block_type {
+            BlockType::Text => Some(WireContentPart {
+                content_type: "text".into(),
+                text: block.text.clone(),
+                image_url: None,
+            }),
+            BlockType::Image => Some(WireContentPart {
+                content_type: "image_url".into(),
+                text: String::new(),
+                image_url: Some(WireImageUrl {
+                    url: format!("data:{};base64,{}", block.mime_type, block.data),
+                    detail: "high".into(),
+                }),
+            }),
+            _ => None,
+        })
+        .collect();
+    WireMessage {
+        role: "user".into(),
+        content: WireMessageContent::Parts(content),
         tool_calls: Vec::new(),
         tool_call_id: String::new(),
     }
@@ -424,6 +485,32 @@ mod tests {
             concat!(
                 r#"{"model":"m","messages":[{"role":"user","content":"recalled"}],"#,
                 r#""tools":[{"type":"function","function":{"name":"n","description":"d","parameters":null}}],"#,
+                r#""stream":true,"stream_options":{"include_usage":true}}"#
+            )
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn user_images_become_chat_content_parts() {
+        let request = Request {
+            model: "m".into(),
+            messages: vec![Message {
+                role: Role::User,
+                blocks: vec![
+                    Block::text("read it"),
+                    Block::image("iVBORw0KGgo=", "image/png"),
+                ],
+                ..Message::default()
+            }],
+            ..Request::default()
+        };
+        assert_eq!(
+            encode(&request),
+            concat!(
+                r#"{"model":"m","messages":[{"role":"user","content":["#,
+                r#"{"type":"text","text":"read it"},"#,
+                r#"{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo=","detail":"high"}}]}],"#,
                 r#""stream":true,"stream_options":{"include_usage":true}}"#
             )
         );

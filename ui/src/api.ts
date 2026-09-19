@@ -79,8 +79,8 @@ export const api = {
     json<Compaction>(`/v1/sessions/${id}/compact`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
 
   // startTurn opens the turn's event stream from sequence 0.
-  startTurn: (id: string, text: string) =>
-    request(`/v1/sessions/${id}/turns`, { method: 'POST', body: JSON.stringify({ text, stream: true }) }),
+  startTurn: (id: string, text: string, image?: { data: string; mime_type: string }) =>
+    request(`/v1/sessions/${id}/turns`, { method: 'POST', body: JSON.stringify({ text, image, stream: true }) }),
   // attach re-reads a turn's events after sequence `after` (all of them when
   // omitted); used after a page reload or a dropped stream.
   attach: (id: string, turnId: string, after?: number) =>

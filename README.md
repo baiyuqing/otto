@@ -97,6 +97,10 @@ Use `/help` for interactive commands. Sessions support continuing, resuming, and
 archiving. See [sessions](docs/user-manual.md#sessions) and
 [headless mode](docs/user-manual.md#headless-mode).
 
+In the TUI, `/image <path>` attaches one PNG, JPEG, or WebP image to the next
+prompt. In the Web UI, choose **Image** or paste a screenshot before sending.
+The selected model and OpenAI-compatible endpoint must support image input.
+
 ## More workflows
 
 - [Local memory](docs/user-manual.md#memory): search, remember, review, and forget.
@@ -158,7 +162,7 @@ persisted.
 - In an interactive parent session, Otto can request one-time unsandboxed Bash
   execution. Review the exact command and run `/approve <id>` to grant it once;
   the request expires after five minutes and never changes `config.toml`.
-- Session files may contain workspace files, prompts, and tool results. Treat
+- Session files may contain workspace files, prompts, images, and tool results. Treat
   them as sensitive.
 - No plugins, automatic project-local config discovery, session trees/forks,
   deletion, or search.

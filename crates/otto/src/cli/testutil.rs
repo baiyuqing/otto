@@ -82,6 +82,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         auth_credentials: crate::auth::Credentials::default(),
         auth_credentials_loaded: false,
         memory: Default::default(),
+        usage: None,
     }
 }
 

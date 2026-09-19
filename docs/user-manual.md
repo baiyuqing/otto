@@ -872,9 +872,14 @@ the transcript, and a composer:
   tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
   and at turn end, polls every 3 seconds while a task is queued or running,
   and offers **Cancel** for those.
-- The footer shows `GET /v1/info` (provider, model, sandbox) and the session's
-  context size and cumulative usage from `GET /v1/sessions/{id}`; during a
+- The footer shows `GET /v1/info` (provider, model, sandbox), the session's
+  context size and cumulative usage from `GET /v1/sessions/{id}`, and persisted
+  all-session token totals and cache hit rate from `GET /v1/usage`; during a
   turn it also totals that turn's `provider_usage` events.
+- The top bar switches between **Chat** and **Usage**. Usage shows persisted
+  totals, a Mermaid token-volume chart for the last 7, 30, or 90 UTC days,
+  and an exact daily table. It reads `GET /v1/usage/daily` and does not expose
+  the SQLite database to the browser.
 
 ### HTTP API
 
@@ -899,6 +904,8 @@ are served at the root. Request and error bodies are JSON.
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
+| `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |
+| `GET /v1/usage/daily?days=30&session_id=<id>` | Return zero-filled daily usage and range totals for 1 to 365 UTC days. `session_id` is optional. |
 | `GET /v1/openapi.yaml` | The OpenAPI 3.1 document for this API. |
 | `GET /healthz` | `{"status":"ok","sessions_open":N}`. |
 | `GET /metrics` | Prometheus text-format metrics. |
@@ -981,6 +988,23 @@ Status codes:
 | `500` | Internal error. The response body is a fixed `internal error` message; details go to the server log only. |
 
 ### Observability
+
+Each normal provider response, compaction summary, and sub-agent provider
+response appends a content-free row to `~/.otto/usage.db`. The row contains
+time, workspace/session/task identifiers, provider/profile/model, usage
+presence, and token counts; it never contains prompts, response text, tool
+arguments, or tool output. Collection, SQLite storage, and the HTTP/UI query
+path are separate boundaries.
+
+`GET /v1/usage` returns all recorded totals; pass `session_id` to restrict the
+query. `cache_hit_rate` is the weighted ratio
+`cached_input_tokens / input_tokens`. A provider that omits its cache-token
+breakdown contributes zero cached tokens.
+
+`GET /v1/usage/daily` returns the same metrics grouped by UTC date and fills
+days without provider calls with zeroes. The Web UI uses the existing
+MIT-licensed Mermaid dependency for its chart; no separate analytics or chart
+backend is involved.
 
 `GET /metrics` exposes `otto_http_requests_total{route,method,status}`,
 `otto_http_request_duration_seconds{route}`,

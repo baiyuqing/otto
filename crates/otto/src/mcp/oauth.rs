@@ -230,6 +230,11 @@ pub struct TokenStore {
     path: PathBuf,
     http: Result<reqwest::Client, String>,
     cached: Mutex<Option<TokenFile>>,
+    /// Serializes refresh attempts so two concurrent callers near expiry
+    /// cannot both spend the same rotating refresh token. Held across the
+    /// whole refresh (load, POST, save); a waiter re-checks the cached
+    /// token after acquiring it in case another task already refreshed.
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl TokenStore {
@@ -239,6 +244,7 @@ impl TokenStore {
             path,
             http: auth::oauth::http_client(),
             cached: Mutex::new(None),
+            refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -265,12 +271,32 @@ impl BearerSource for TokenStore {
             expiry <= Utc::now().fixed_offset() + chrono::TimeDelta::seconds(60)
         });
         if expiring {
-            return self.refresh(cancel).await;
+            return self.refresh(&token.access_token, cancel).await;
         }
         Ok(token.access_token)
     }
 
-    async fn refresh(&self, cancel: &CancellationToken) -> Result<String, CallError> {
+    async fn refresh(
+        &self,
+        rejected: &str,
+        cancel: &CancellationToken,
+    ) -> Result<String, CallError> {
+        let _guard = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(CallError::Cancelled),
+            guard = self.refresh_lock.lock() => guard,
+        };
+
+        // Another task may have refreshed this token while this call waited
+        // for the lock. Reuse its result instead of spending the refresh
+        // token (which a rotating authorization server accepts only once)
+        // a second time.
+        if let Some(token) = self.loaded()?
+            && token.access_token != rejected
+        {
+            return Ok(token.access_token);
+        }
+
         let token = self.loaded()?.ok_or(CallError::NeedsLogin)?;
         let refresh_token = token.refresh_token.clone().ok_or(CallError::NeedsLogin)?;
         let client = self.http.as_ref().map_err(|_| CallError::NeedsLogin)?;
@@ -363,9 +389,20 @@ async fn discover_protected_resource(
 ) -> Result<(ProtectedResourceMetadata, Option<String>), McpLoginError> {
     let challenge = probe_unauthorized(client, url).await?;
     let base = reqwest::Url::parse(url).map_err(|_| McpLoginError::Discovery)?;
+    // The `resource_metadata` URL comes from the server's own 401 response,
+    // so a hostile HTTPS server could point it at an arbitrary origin (e.g.
+    // a loopback port `otto mcp login` will then trust). Only follow it when
+    // it names the same origin as the configured server; otherwise fall
+    // back to the well-known path under that server's own origin, exactly
+    // as when the header omits `resource_metadata` entirely.
+    let same_origin = challenge
+        .resource_metadata
+        .as_deref()
+        .and_then(|candidate| reqwest::Url::parse(candidate).ok())
+        .is_some_and(|candidate_url| candidate_url.origin() == base.origin());
     let candidates = match &challenge.resource_metadata {
-        Some(explicit) => vec![explicit.clone()],
-        None => well_known_candidates(&base, "oauth-protected-resource"),
+        Some(explicit) if same_origin => vec![explicit.clone()],
+        _ => well_known_candidates(&base, "oauth-protected-resource"),
     };
     for candidate in &candidates {
         check_secure(candidate)?;
@@ -1284,6 +1321,181 @@ mod tests {
             load_token(&path).unwrap().unwrap().access_token,
             "old-access"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_refresh_posts_only_once() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let server = testserver::spawn(move |_req| {
+            calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            json_response(
+                &json!({
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_in": 3600,
+                })
+                .to_string(),
+            )
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("server.json");
+        let stale = TokenFile {
+            access_token: "old-access".to_owned(),
+            refresh_token: Some("old-refresh".to_owned()),
+            expiry: Some(Utc::now().fixed_offset() - chrono::TimeDelta::seconds(1)),
+            client_id: "client".to_owned(),
+            token_endpoint: format!("{}/token", server.url),
+            resource: format!("{}/mcp", server.url),
+            scope: None,
+        };
+        save_token(&path, &stale).unwrap();
+
+        let store = TokenStore::new("server".to_owned(), path.clone());
+        let cancel = CancellationToken::new();
+        let (first, second) = tokio::join!(store.bearer(&cancel), store.bearer(&cancel));
+        assert_eq!(first.unwrap(), "new-access");
+        assert_eq!(second.unwrap(), "new-access");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_after_401_posts_even_when_token_is_not_expiring() {
+        // A server can reject an access token before its locally recorded
+        // expiry (revocation, clock skew). `refresh` must still spend the
+        // refresh token when the caller names the token that was rejected,
+        // rather than trusting the stored expiry.
+        let server = testserver::spawn(|_req| {
+            json_response(
+                &json!({
+                    "access_token": "new-access",
+                    "refresh_token": "new-refresh",
+                    "expires_in": 3600,
+                })
+                .to_string(),
+            )
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("server.json");
+        let current = TokenFile {
+            access_token: "old-access".to_owned(),
+            refresh_token: Some("old-refresh".to_owned()),
+            expiry: Some(Utc::now().fixed_offset() + chrono::TimeDelta::hours(1)),
+            client_id: "client".to_owned(),
+            token_endpoint: format!("{}/token", server.url),
+            resource: format!("{}/mcp", server.url),
+            scope: None,
+        };
+        save_token(&path, &current).unwrap();
+
+        let store = TokenStore::new("server".to_owned(), path.clone());
+        let cancel = CancellationToken::new();
+        let refreshed = store.refresh("old-access", &cancel).await.unwrap();
+        assert_eq!(refreshed, "new-access");
+        assert_eq!(server.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_skips_post_when_stored_token_already_differs() {
+        // If the stored access token no longer matches the one the caller
+        // says was rejected, another task already refreshed it; reuse that
+        // result instead of spending the refresh token again.
+        let server = testserver::spawn(|_req| {
+            json_response(
+                &json!({
+                    "access_token": "should-not-be-issued",
+                    "expires_in": 3600,
+                })
+                .to_string(),
+            )
+        })
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("server.json");
+        let current = TokenFile {
+            access_token: "current-access".to_owned(),
+            refresh_token: Some("current-refresh".to_owned()),
+            expiry: Some(Utc::now().fixed_offset() + chrono::TimeDelta::hours(1)),
+            client_id: "client".to_owned(),
+            token_endpoint: format!("{}/token", server.url),
+            resource: format!("{}/mcp", server.url),
+            scope: None,
+        };
+        save_token(&path, &current).unwrap();
+
+        let store = TokenStore::new("server".to_owned(), path.clone());
+        let cancel = CancellationToken::new();
+        let result = store.refresh("some-other-token", &cancel).await.unwrap();
+        assert_eq!(result, "current-access");
+        assert_eq!(server.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn discovery_ignores_a_cross_origin_resource_metadata_url() {
+        // A hostile HTTPS server names an attacker-controlled origin in the
+        // 401 challenge; discovery must ignore it and fall back to the
+        // well-known path under the configured server's own origin instead
+        // of ever contacting the attacker's URL.
+        let attacker = testserver::spawn(|_req| {
+            json_response(
+                &json!({
+                    "resource": "https://stolen.example/mcp",
+                    "authorization_servers": ["https://stolen.example"],
+                })
+                .to_string(),
+            )
+        })
+        .await;
+        let attacker_url = attacker.url.clone();
+
+        let (server, _url) = spawn_self_aware(move |base, request| match request.target.as_str() {
+            "/mcp" => unauthorized_response(&format!(
+                r#"Bearer resource_metadata="{attacker_url}/steal""#
+            )),
+            "/.well-known/oauth-protected-resource/mcp" => json_response(
+                &json!({"resource": format!("{base}/mcp"), "authorization_servers": [base]})
+                    .to_string(),
+            ),
+            "/.well-known/oauth-authorization-server" => json_response(
+                &json!({
+                    "authorization_endpoint": format!("{base}/authorize"),
+                    "token_endpoint": format!("{base}/token"),
+                })
+                .to_string(),
+            ),
+            "/token" => json_response(&json!({"access_token": "tok"}).to_string()),
+            _ => status_response(404, "{}"),
+        })
+        .await;
+
+        let url = format!("{}/mcp", server.url);
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("server.json");
+        let request = LoginRequest {
+            server: "server",
+            url: &url,
+            client_id: Some("c"),
+            scopes: &[],
+            ports: &[0],
+            token_path: &token_path,
+        };
+        login(
+            request,
+            &CancellationToken::new(),
+            browser("code", None, |_| {}).as_ref(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(attacker.count(), 0);
+        let targets: Vec<_> = server
+            .requests()
+            .iter()
+            .map(|request| request.target.clone())
+            .collect();
+        assert!(targets.contains(&"/.well-known/oauth-protected-resource/mcp".to_owned()));
     }
 
     #[tokio::test]

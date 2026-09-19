@@ -77,14 +77,18 @@ Keep `crates/otto`'s `mcp` module behind `crate::mcp`'s client, transport, and
 OAuth types; `crate::tool::mcp` (the model-facing tool adapter) and
 `Builder::connect_mcp` in `crates/otto/src/cli/wiring.rs` are the only two
 callers that construct a server connection. `connect_mcp` connects every
-enabled server when the runner is built; a disabled, failed, or
-sign-in-required server is reported as a warning and never blocks the runner
-from starting. `ServerState::NeedsLogin` marks an HTTP server using OAuth
+enabled server, one at a time in configuration order, when the runner is
+built; a failed or sign-in-required server is reported as a warning and
+never blocks the runner from starting, while a disabled server is recorded
+silently. `ServerState::NeedsLogin` marks an HTTP server using OAuth
 whose token is missing or cannot be refreshed. `/mcp` (REPL and TUI) and
 `otto mcp login|logout` in `crates/otto/src/cli/mcp.rs` are the only sign-in
 surfaces; a completed sign-in still requires restarting Otto to pick up the
-new token. A stdio server that exits stays connected until Otto restarts;
-there is no restart policy. Keep MCP transport tests offline: only a
+new token. A stdio server that exits stays disconnected until Otto
+restarts; there is no restart policy. A tool name that collides with one
+already registered by an earlier server, or a server whose `env`/`headers`
+secrets exceed the redaction limits in `otto_core::safetext`, is skipped
+with a warning instead of connecting. Keep MCP transport tests offline: only a
 nonexistent stdio command (reaching `ServerState::Failed`) and a disabled
 server (reaching `ServerState::Disabled`) exercise the real connect path in
 tests; cover the other states through pure functions such as

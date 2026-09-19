@@ -8,8 +8,12 @@
 //! tool to the model lives in `crate::tool::mcp`.
 //!
 //! Ownership: every server's client is created at runner build, shared by
-//! `Arc` between the tools that use it, and shut down by [`Servers::close`]
-//! from `Runner::close`. Concurrency: [`ToolServer::call`] takes `&self` and
+//! `Arc` between the tools that use it, and shut down by [`Servers::close`],
+//! called in the background from `Runner::close` (runner swap: `/new`,
+//! `/load`, `/model`) or awaited from `Runner::close_mcp` (process exit,
+//! where the awaited call must run first: `Servers::close` empties its
+//! client list with `mem::take`, so whichever of the two runs first is the
+//! one that actually closes anything). Concurrency: [`ToolServer::call`] takes `&self` and
 //! may run concurrently; each transport serializes its own writes.
 //! Cancellation: a cancelled token aborts the in-flight call with
 //! [`CallError::Cancelled`]; the stdio transport also sends
@@ -135,9 +139,15 @@ pub trait BearerSource: Send + Sync {
     /// The current access token, refreshed first when it is expired or
     /// expiring within 60 s. `Err(NeedsLogin)` when there is no usable token.
     async fn bearer(&self, cancel: &CancellationToken) -> Result<String, CallError>;
-    /// Called after a 401 with a token that `bearer` returned: refresh once
-    /// and return the new token, or `Err(NeedsLogin)`.
-    async fn refresh(&self, cancel: &CancellationToken) -> Result<String, CallError>;
+    /// Called after a 401 with `rejected`, the token `bearer` returned.
+    /// Refreshes once, unless the stored token already differs from
+    /// `rejected` (another task refreshed it), and returns the current
+    /// token or `Err(NeedsLogin)`.
+    async fn refresh(
+        &self,
+        rejected: &str,
+        cancel: &CancellationToken,
+    ) -> Result<String, CallError>;
     /// Secrets to redact from results and logs: the current access and
     /// refresh tokens.
     fn secrets(&self) -> Vec<String>;
@@ -188,7 +198,7 @@ pub struct ServerStatus {
 }
 
 /// The connected servers of one runner: their status rows for `/mcp` and the
-/// handles `Runner::close` shuts down.
+/// handles `Runner::close`/`Runner::close_mcp` shut down.
 #[derive(Default)]
 pub struct Servers {
     status: Mutex<Vec<ServerStatus>>,
@@ -214,5 +224,95 @@ impl Servers {
         for client in clients {
             client.close().await;
         }
+    }
+}
+
+/// Test fakes for building a real, connected [`client::Client`] without a
+/// live server. `pub(crate)` (not `#[cfg(test)] mod tests`-private) so
+/// `cli::runtime_builder`'s close-ordering regression test can reuse it
+/// instead of duplicating a second copy of [`FakeTransport`].
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{CallError, Outbound, Transport, client, jsonrpc};
+
+    /// A transport that answers just enough of the modern handshake
+    /// (`server/discover`, empty `tools/list`) for [`client::Client::connect`]
+    /// to succeed, and records whether it was closed.
+    pub(crate) struct FakeTransport {
+        pub(crate) closed: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for FakeTransport {
+        async fn request(
+            &self,
+            outbound: Outbound,
+            _cancel: &CancellationToken,
+        ) -> Result<Result<serde_json::Value, jsonrpc::RpcError>, CallError> {
+            match outbound.method.as_str() {
+                "tools/list" => Ok(Ok(json!({"tools": []}))),
+                _ => Ok(Ok(json!({}))),
+            }
+        }
+
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+
+        async fn close(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A real, connected client backed by [`FakeTransport`], for tests that
+    /// need to observe [`super::Servers::close`]'s behavior without a live
+    /// server. `closed` flips to `true` once the returned client is closed.
+    pub(crate) async fn connected_client(name: &str, closed: Arc<AtomicBool>) -> client::Client {
+        let transport = FakeTransport { closed };
+        let cancel = CancellationToken::new();
+        client::Client::connect(
+            name.to_string(),
+            Box::new(transport),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            &cancel,
+        )
+        .await
+        .expect("connect")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::test_support::connected_client;
+    use super::*;
+
+    #[tokio::test]
+    async fn close_waits_for_every_connected_client_to_close() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let client = connected_client("fake", Arc::clone(&closed)).await;
+
+        let servers = Servers::default();
+        servers.push(
+            ServerStatus {
+                name: "fake".to_string(),
+                transport: "stdio",
+                era: Some(Era::Modern),
+                state: ServerState::Connected { tools: 0 },
+            },
+            Some(Arc::new(client)),
+        );
+
+        servers.close().await;
+
+        assert!(closed.load(Ordering::SeqCst), "close was not awaited");
     }
 }

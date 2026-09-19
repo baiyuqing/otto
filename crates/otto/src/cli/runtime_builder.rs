@@ -319,7 +319,8 @@ pub struct Runner {
     /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
     pub(crate) skills: Catalog,
     /// The MCP servers connected for this runner. `/mcp` reads its status
-    /// rows; `Runner::close` shuts its clients down.
+    /// rows; `Runner::close` (best-effort, backgrounded) and
+    /// `Runner::close_mcp` (awaited, bounded) shut its clients down.
     pub(crate) mcp: Arc<crate::mcp::Servers>,
 }
 
@@ -391,19 +392,42 @@ impl Runner {
         &self.skills
     }
 
-    /// Releases the agent's own resources. The session is closed separately,
-    /// by whoever owns it. MCP shutdown is async ([`crate::mcp::Servers::close`]
-    /// closes stdio children and drops HTTP connections); a running Tokio
-    /// runtime spawns it in the background, and its absence (a scripted test
+    /// Releases the agent's own resources and best-effort starts MCP
+    /// shutdown in the background. The session is closed separately, by
+    /// whoever owns it. A running Tokio runtime spawns
+    /// [`crate::mcp::Servers::close`] in the background (closes stdio
+    /// children, drops HTTP connections); its absence (a scripted test
     /// runner, or a caller outside `#[tokio::main]`) just skips it, since
     /// there is nothing to release for `Servers::default()` and no runtime to
     /// block on for a real one.
+    ///
+    /// This is enough for a runner displaced by `/new`, `/load`, or
+    /// `/model`: nothing downstream needs its MCP servers gone by any
+    /// particular deadline. It is not enough at process exit, where a
+    /// dropped runtime can cancel the spawned task before it runs; call
+    /// [`Self::close_mcp`] there too, and call it *before* `close`, not
+    /// after: [`crate::mcp::Servers::close`] uses `mem::take` internally, so
+    /// whichever of the two runs first empties the client list and the
+    /// other becomes a no-op.
     pub fn close(&self) {
         let _ = self.agent.close();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let mcp = Arc::clone(&self.mcp);
             handle.spawn(async move { mcp.close().await });
         }
+    }
+
+    /// Shuts every connected MCP server down, waiting up to 5 seconds.
+    /// Idempotent with [`Self::close`]'s background close via `mem::take`,
+    /// but only awaiting this one guarantees MCP is down before the caller
+    /// proceeds. Call this *before* `close` at a process-exit site, so this
+    /// call is the one that actually drains `Servers`' client list instead
+    /// of racing a background task that a subsequent process exit could
+    /// cancel before it runs. There is nothing to release for
+    /// `Servers::default()`, so this returns immediately for a runner built
+    /// without MCP servers.
+    pub async fn close_mcp(&self) {
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.mcp.close()).await;
     }
 
     /// A runner with no tools whose provider the test supplies, carrying the
@@ -443,6 +467,15 @@ impl Runner {
             skills: Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
         }
+    }
+
+    /// Replaces the MCP servers a [`Self::scripted`] runner was built with.
+    /// Test-only: lets a close-ordering test inject a [`crate::mcp::Servers`]
+    /// with a fake connected client instead of the empty default.
+    #[cfg(test)]
+    pub fn with_mcp(mut self, mcp: Arc<crate::mcp::Servers>) -> Self {
+        self.mcp = mcp;
+        self
     }
 }
 
@@ -1424,5 +1457,62 @@ mod tests {
         let summary = store.summary(Some("session-1")).expect("summary");
         assert_eq!(summary.input_tokens, 10);
         assert_eq!(summary.cached_input_tokens, 4);
+    }
+
+    /// A provider `Runner::scripted` needs a value for but this test never
+    /// calls: `close_mcp`/`close` never send a turn.
+    struct UnusedProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for UnusedProvider {
+        async fn complete(
+            &self,
+            _request: &Request,
+            _emit: StreamSink<'_>,
+            _cancel: &CancellationToken,
+        ) -> Result<Response, ProviderError> {
+            unreachable!("close-ordering test never sends a turn")
+        }
+    }
+
+    /// Regression test for the close-ordering rule in the doc comments on
+    /// [`Runner::close`] and [`Runner::close_mcp`]: `Servers::close` uses
+    /// `mem::take`, so calling `close_mcp` (awaited) before `close`
+    /// (backgrounded) is what makes the awaited call the one that actually
+    /// closes the client, instead of racing `close`'s spawned task.
+    #[tokio::test]
+    async fn close_mcp_before_close_actually_waits_for_the_real_close() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let closed = Arc::new(AtomicBool::new(false));
+        let client = crate::mcp::test_support::connected_client("fake", Arc::clone(&closed)).await;
+        let mcp = crate::mcp::Servers::default();
+        mcp.push(
+            crate::mcp::ServerStatus {
+                name: "fake".to_string(),
+                transport: "stdio",
+                era: Some(crate::mcp::Era::Modern),
+                state: crate::mcp::ServerState::Connected { tools: 0 },
+            },
+            Some(Arc::new(client)),
+        );
+
+        let runner = Runner::scripted(
+            SharedSession::memory(Header::default()),
+            Arc::new(UnusedProvider) as Arc<dyn Provider + Send + Sync>,
+            Arc::new(crate::subagent::tasks::Tasks::new()),
+        )
+        .with_mcp(Arc::new(mcp));
+
+        runner.close_mcp().await;
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "close_mcp did not wait for the real close"
+        );
+
+        // `close`'s background spawn now finds `Servers` already emptied by
+        // `mem::take`; it must be a harmless no-op, not a panic or a
+        // double-close.
+        runner.close();
     }
 }

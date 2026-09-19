@@ -851,7 +851,8 @@ the transcript, and a composer:
   arguments and result.
 - **Image** selects one PNG, JPEG, or WebP image; pasting a screenshot selects
   it too. Sending stores the original image with the prompt in session history
-  and sends it with `detail: high`.
+  and shows it in the transcript, including after resume. The provider receives
+  it with `detail: high`.
 - While a turn runs the composer is disabled and a **Cancel** button calls
   `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
 - Reloading the page during a turn re-attaches to the running turn's event

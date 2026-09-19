@@ -13,6 +13,7 @@ vi.mock('mermaid', () => ({
 }))
 
 import { TranscriptView } from './TranscriptView'
+import type { Item } from './wire'
 
 describe('TranscriptView markdown extensions', () => {
   beforeEach(() => {
@@ -44,5 +45,16 @@ describe('TranscriptView empty state', () => {
     expect(container.textContent).not.toMatch(/codebase/i)
     expect(container.textContent).not.toMatch(/Ready when you are/)
     expect(container.textContent).toMatch(/Session is open/)
+  })
+})
+
+describe('TranscriptView images', () => {
+  it('renders a sent image from its stored data', () => {
+    const image: Item = { kind: 'image', data: 'iVBORw0KGgo=', mime_type: 'image/png' }
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items: [image] }))
+
+    const element = container.querySelector('img')
+    expect(element?.getAttribute('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+    expect(element?.getAttribute('alt')).toBe('Sent image')
   })
 })

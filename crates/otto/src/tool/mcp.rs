@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::result::{capped_text_result, redact_exact_text};
 use super::{CONTEXT_CANCELED, Tool, error_result};
-use crate::mcp::{CallError, CallOutcome, ContentBlock, ToolInfo, ToolServer};
+use crate::mcp::{BearerSource, CallError, CallOutcome, ContentBlock, ToolInfo, ToolServer};
 
 /// Every registered MCP tool name starts with this.
 pub const NAME_PREFIX: &str = "mcp__";
@@ -104,6 +104,11 @@ pub struct McpTool {
     max_output_bytes: usize,
     secrets: Vec<String>,
     marker: String,
+    /// The OAuth token source for this server, when `auth = "oauth"`. Kept so
+    /// [`Self::effective_secrets`] can read the current access/refresh tokens
+    /// at call time rather than the tokens present when the tool was built,
+    /// covering a token rotated by a mid-session refresh.
+    bearer: Option<Arc<dyn BearerSource>>,
 }
 
 impl McpTool {
@@ -113,6 +118,7 @@ impl McpTool {
         info: &ToolInfo,
         max_output_bytes: usize,
         secrets: Vec<String>,
+        bearer: Option<Arc<dyn BearerSource>>,
     ) -> Self {
         let description = build_description(server.name(), info);
         let parameters = build_parameters(info);
@@ -126,11 +132,36 @@ impl McpTool {
             max_output_bytes,
             secrets,
             marker,
+            bearer,
         }
     }
 
     fn server_name(&self) -> &str {
         self.server.name()
+    }
+
+    /// The tool's name as advertised by the server, before prefixing. Used by
+    /// `crate::cli::wiring`'s cross-server collision warning, which needs the
+    /// remote name for its message even though the registered name is
+    /// [`Self::name`]'s sanitized, server-prefixed form.
+    pub fn remote_name(&self) -> &str {
+        &self.remote_name
+    }
+
+    /// `self.secrets` plus the OAuth bearer's current access/refresh tokens,
+    /// deduplicated, when this tool's server uses OAuth. Reads `bearer` at
+    /// call time so a token refreshed mid-session is still redacted.
+    fn effective_secrets(&self) -> Vec<String> {
+        let Some(bearer) = &self.bearer else {
+            return self.secrets.clone();
+        };
+        let mut combined = self.secrets.clone();
+        for secret in bearer.secrets() {
+            if !secret.is_empty() && !combined.contains(&secret) {
+                combined.push(secret);
+            }
+        }
+        combined
     }
 
     /// Parses the call arguments, mapping the shapes the model produces for
@@ -149,9 +180,31 @@ impl McpTool {
         }
     }
 
+    /// Redacts `text` against this tool's secrets, plus the OAuth bearer's
+    /// current tokens when it has one. Used for both call results and the
+    /// formatted error text: server-controlled error messages (RPC error
+    /// text, a stdio child's stderr tail) can echo a secret just as a result
+    /// can.
+    fn redact(&self, text: &str) -> String {
+        if self.bearer.is_some() {
+            let secrets = self.effective_secrets();
+            match dynamic_redaction_marker(&secrets) {
+                Some(marker) => redact_exact_text(text, &secrets, &marker),
+                // ponytail: the bearer's tokens pushed the combined secrets
+                // past the redaction limits (huge access/refresh token).
+                // Fall back to the static secrets, already known safe from
+                // the connect-time check in `cli::wiring::connect_mcp`,
+                // rather than blanking the whole result.
+                None => redact_exact_text(text, &self.secrets, &self.marker),
+            }
+        } else {
+            redact_exact_text(text, &self.secrets, &self.marker)
+        }
+    }
+
     fn map_outcome(&self, outcome: CallOutcome) -> ToolResult {
         let text = render_outcome_text(&outcome, self.server_name());
-        let redacted = redact_exact_text(&text, &self.secrets, &self.marker);
+        let redacted = self.redact(&text);
         let mut result = capped_text_result(&redacted, self.max_output_bytes);
         result.is_error = outcome.is_error;
         result
@@ -164,7 +217,7 @@ impl McpTool {
             CallError::NeedsLogin => error_result(format!(
                 "mcp {server}: authorization required; run 'otto mcp login {server}'"
             )),
-            other => error_result(format!("mcp {server}: {other}")),
+            other => error_result(self.redact(&format!("mcp {server}: {other}"))),
         }
     }
 }
@@ -261,6 +314,7 @@ pub fn tools_for(
     tools: &[ToolInfo],
     max_output_bytes: usize,
     secrets: Vec<String>,
+    bearer: Option<Arc<dyn BearerSource>>,
 ) -> (Vec<McpTool>, Vec<String>) {
     let server_name = server.name().to_owned();
     let mut warnings = Vec::new();
@@ -299,6 +353,7 @@ pub fn tools_for(
             info,
             max_output_bytes,
             secrets.clone(),
+            bearer.clone(),
         ));
     }
     (built, warnings)
@@ -362,6 +417,7 @@ mod tests {
             std::slice::from_ref(info),
             max_output_bytes,
             Vec::new(),
+            None,
         );
         assert!(warnings.is_empty(), "{warnings:?}");
         tools.pop().expect("one tool built")
@@ -411,8 +467,13 @@ mod tests {
     fn tools_for_skips_a_too_long_name_with_a_warning() {
         let server = FakeServer::new("s", ok(CallOutcome::default()));
         let too_long = info(&"t".repeat(MAX_TOOL_NAME_BYTES));
-        let (tools, warnings) =
-            tools_for(server, std::slice::from_ref(&too_long), 1024, Vec::new());
+        let (tools, warnings) = tools_for(
+            server,
+            std::slice::from_ref(&too_long),
+            1024,
+            Vec::new(),
+            None,
+        );
         assert!(tools.is_empty());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains(&too_long.name), "{warnings:?}");
@@ -425,7 +486,7 @@ mod tests {
         let a = info("a.b");
         let b = info("a/b");
         let c = info("distinct");
-        let (tools, warnings) = tools_for(server, &[a, b, c], 1024, Vec::new());
+        let (tools, warnings) = tools_for(server, &[a, b, c], 1024, Vec::new(), None);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].definition().name, "mcp__s__distinct");
         assert_eq!(warnings.len(), 2);
@@ -435,8 +496,13 @@ mod tests {
     #[test]
     fn tools_for_preserves_input_order() {
         let server = FakeServer::new("s", ok(CallOutcome::default()));
-        let (tools, warnings) =
-            tools_for(server, &[info("first"), info("second")], 1024, Vec::new());
+        let (tools, warnings) = tools_for(
+            server,
+            &[info("first"), info("second")],
+            1024,
+            Vec::new(),
+            None,
+        );
         assert!(warnings.is_empty());
         assert_eq!(
             tools
@@ -703,8 +769,13 @@ mod tests {
     async fn a_secret_echoed_by_the_server_is_redacted() {
         let outcome = text_outcome("token=SECRET123 done");
         let server = FakeServer::new("s", ok(outcome));
-        let (mut tools, warnings) =
-            tools_for(server, &[info("t")], 1024, vec!["SECRET123".to_owned()]);
+        let (mut tools, warnings) = tools_for(
+            server,
+            &[info("t")],
+            1024,
+            vec!["SECRET123".to_owned()],
+            None,
+        );
         assert!(warnings.is_empty());
         let tool = tools.pop().unwrap();
         let result = run(&tool, "{}").await;
@@ -750,6 +821,24 @@ mod tests {
         let result = run(&tool, "{}").await;
         assert!(result.is_error);
         assert_eq!(result.content, "mcp s: child exited (1)");
+    }
+
+    #[tokio::test]
+    async fn a_secret_in_a_transport_error_message_is_redacted() {
+        let server = FakeServer::new("s", Err(CallError::Transport("token=SECRET123".to_owned())));
+        let (mut tools, warnings) = tools_for(
+            server,
+            &[info("t")],
+            1024,
+            vec!["SECRET123".to_owned()],
+            None,
+        );
+        assert!(warnings.is_empty());
+        let tool = tools.pop().unwrap();
+        let result = run(&tool, "{}").await;
+        assert!(result.is_error);
+        assert!(!result.content.contains("SECRET123"), "{result:?}");
+        assert!(result.content.contains("token="), "{result:?}");
     }
 
     #[tokio::test]
@@ -835,5 +924,50 @@ mod tests {
         let (name, arguments) = seen.as_ref().unwrap();
         assert_eq!(name, "list.issues");
         assert_eq!(*arguments, serde_json::json!({"a": 1}));
+    }
+
+    // --- OAuth bearer secrets (Finding 6) ---
+
+    struct FakeBearer {
+        secrets: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl BearerSource for FakeBearer {
+        async fn bearer(&self, _cancel: &CancellationToken) -> Result<String, CallError> {
+            Err(CallError::NeedsLogin)
+        }
+
+        async fn refresh(
+            &self,
+            _rejected: &str,
+            _cancel: &CancellationToken,
+        ) -> Result<String, CallError> {
+            Err(CallError::NeedsLogin)
+        }
+
+        fn secrets(&self) -> Vec<String> {
+            self.secrets.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_bearer_tokens_are_redacted_from_results_though_never_configured_as_secrets() {
+        let token = "oauth-secret-token";
+        let server = FakeServer::new("s", ok(text_outcome(&format!("your token is {token}"))));
+        let bearer: Arc<dyn BearerSource> = Arc::new(FakeBearer {
+            secrets: vec![token.to_owned()],
+        });
+        let (mut tools, warnings) = tools_for(
+            server,
+            std::slice::from_ref(&info("t")),
+            1024,
+            Vec::new(),
+            Some(bearer),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let tool = tools.pop().expect("one tool built");
+        let result = run(&tool, "{}").await;
+        assert!(!result.content.contains(token), "{:?}", result.content);
     }
 }

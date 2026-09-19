@@ -369,6 +369,10 @@ async fn test_server_exit_fails_pending_and_later_calls() -> Result<(), String> 
         message.contains('7'),
         format!("error should mention exit status 7: {message}"),
     )?;
+    check(
+        message.contains("fake-server-die-marker"),
+        format!("error should include the child's stderr tail: {message}"),
+    )?;
 
     let second = client.call("die", json!({}), &cancel).await;
     check(
@@ -594,7 +598,10 @@ fn handle_message(
                         json!({"content": [{"type": "text", "text": vars.join("\n")}], "resultType": "complete"}),
                     );
                 }
-                "die" => std::process::exit(7),
+                "die" => {
+                    eprintln!("fake-server-die-marker: shutting down");
+                    std::process::exit(7);
+                }
                 _ => send_error(stdout_lock, id, -32601, "unknown tool", None),
             }
         }

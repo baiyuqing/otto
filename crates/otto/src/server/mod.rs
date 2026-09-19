@@ -335,6 +335,10 @@ impl Server {
         }
         let mut errors = Vec::new();
         for session in &sessions {
+            // Awaited before the blocking close: `Controller::close` only
+            // spawns the MCP shutdown, and a spawned task is dropped when the
+            // process exits right after this returns.
+            session.ctrl.close_mcp().await;
             let ctrl = Arc::clone(&session.ctrl);
             match tokio::task::spawn_blocking(move || ctrl.close()).await {
                 Ok(Err(error)) => errors.push(error),

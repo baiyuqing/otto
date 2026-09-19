@@ -17,6 +17,7 @@
 //!   runner. Rust tools are boxed and cannot be cloned, so the children get
 //!   their own instances of the same tools, built the same way.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use otto_core::config::agents::AgentsRuntime;
 use otto_core::config::memory::MemoryRuntime;
 use otto_core::config::{McpAuth, McpTransport, Runtime, resolve_agents, resolve_skills};
 use otto_core::model::ToolDefinition;
+use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;
 
 use super::runtime_builder::{BuildError, Builder, ProviderClient, SharedSession};
@@ -45,10 +47,17 @@ use crate::subagent::runner::{
 };
 use crate::subagent::tasks::Tasks;
 use crate::tool::Tool;
-use crate::tool::mcp::tools_for;
+use crate::tool::mcp::{McpTool, tools_for};
 use crate::tool::memory::{ForgetTool, MemorySearchTool, RememberTool};
 use crate::tool::remind::{RemindTool, remind_definition};
+use crate::tool::result::redact_exact_text;
 use crate::tool::skill::SkillTool;
+
+/// The message logged for [`Builder::connect_mcp`]'s redaction-limit guard
+/// (Finding 5b) so the test asserting on it and the production call site
+/// cannot drift apart.
+const SECRETS_EXCEED_REDACTION_LIMITS: &str =
+    "secret values exceed the redaction limits (64 values, 8 KiB each, 16 KiB total)";
 
 /// The process-wide memory service and the two scopes one session reads.
 ///
@@ -208,31 +217,92 @@ fn transport_label(transport: &McpTransport) -> &'static str {
     }
 }
 
+/// One MCP server `connect_mcp` connected: its client, the secrets to redact
+/// from its tool results (its configured secrets plus, for an OAuth server,
+/// its bearer's tokens), the bearer itself (so [`mcp_child_tools`] can build
+/// the same dynamically-redacting tools `connect_mcp` did), and the
+/// server-prefixed names of the tools that survived cross-server
+/// deduplication.
+pub struct ConnectedServer {
+    client: Arc<mcp::client::Client>,
+    secrets: Vec<String>,
+    bearer: Option<Arc<dyn mcp::BearerSource>>,
+    tool_names: Vec<String>,
+}
+
 /// A second set of tool adapters for the connected MCP clients, for the
 /// sub-agent registry. Mirrors [`Builder::child_tools`]: `mcp::tool::McpTool`
 /// cannot be cloned, so the children get their own adapters over the same
-/// `Arc<client::Client>` connections `connect_mcp` already opened. Any
-/// prefixing/collision warnings were already reported once by `connect_mcp`,
-/// so they are dropped here rather than reported twice.
+/// `Arc<client::Client>` connections `connect_mcp` already opened. Re-runs
+/// [`tools_for`] per server (it deterministically reproduces the same
+/// within-server-deduped candidate list from the same `client.tools()`) and
+/// keeps only the names `connect_mcp` recorded as registered, so the child
+/// set exactly matches the parent's without re-running the cross-server
+/// warnings a second time.
 pub fn mcp_child_tools(
-    connected: &[(Arc<mcp::client::Client>, Vec<String>)],
+    connected: &[ConnectedServer],
     max_output: usize,
 ) -> Vec<Box<dyn Tool + Send + Sync>> {
     let mut tools = Vec::new();
-    for (client, secrets) in connected {
+    for server in connected {
         let (server_tools, _warnings) = tools_for(
-            Arc::clone(client) as Arc<dyn mcp::ToolServer>,
-            client.tools(),
+            Arc::clone(&server.client) as Arc<dyn mcp::ToolServer>,
+            server.client.tools(),
             max_output,
-            secrets.clone(),
+            server.secrets.clone(),
+            server.bearer.clone(),
         );
+        let kept: HashSet<&str> = server.tool_names.iter().map(String::as_str).collect();
         tools.extend(
             server_tools
                 .into_iter()
+                .filter(|tool| kept.contains(tool.definition().name.as_str()))
                 .map(|tool| Box::new(tool) as Box<dyn Tool + Send + Sync>),
         );
     }
     tools
+}
+
+/// Cross-server tool-name collision guard (Finding 2). Server names may
+/// contain `_`, so [`tools_for`]'s per-server dedup cannot see a collision
+/// between, say, server `a` tool `b__c` and server `a__b` tool `c` — both
+/// sanitize to `mcp__a__b__c`, and `Registry::new` would otherwise reject the
+/// second one as a hard startup error. Called once per connected server, in
+/// configuration order, against the names already claimed by earlier
+/// servers; extends `registered` with every name this server keeps. A pure
+/// function over already-built tools so it is unit-testable without a live
+/// MCP connection.
+fn dedup_cross_server(
+    server_name: &str,
+    tools: &[McpTool],
+    registered: &mut HashSet<String>,
+) -> (Vec<usize>, Vec<String>) {
+    let mut keep = Vec::with_capacity(tools.len());
+    let mut warnings = Vec::new();
+    for (index, tool) in tools.iter().enumerate() {
+        let name = tool.definition().name;
+        if registered.insert(name.clone()) {
+            keep.push(index);
+        } else {
+            warnings.push(format!(
+                "mcp {server_name}: skipping tool {:?}: name {name:?} is already provided by another server",
+                tool.remote_name()
+            ));
+        }
+    }
+    (keep, warnings)
+}
+
+/// A connect failure's message, redacted against the server's configured
+/// secrets before it is stored in [`mcp::ServerState::Failed`] or written to
+/// the warning stream. `error`'s text is server-controlled (an RPC error
+/// message, or a stdio child's stderr tail) and can echo a secret just like
+/// a call result can. `marker` comes from `dynamic_redaction_marker`,
+/// already confirmed non-`None` for `secrets` by the caller's redaction-limit
+/// guard. A pure function over an already-produced error so it is
+/// unit-testable without a live MCP connection.
+fn failure_message(error: &mcp::CallError, secrets: &[String], marker: &str) -> String {
+    redact_exact_text(&error.to_string(), secrets, marker)
 }
 
 impl Builder {
@@ -436,22 +506,26 @@ impl Builder {
     /// `/mcp`; a disabled or failed server never stops the others, and never
     /// fails the build. Restarting an exited stdio server is out of scope; a
     /// server that later exits stays `Connected` until the process restarts.
+    /// A server whose configured secrets already exceed
+    /// [`dynamic_redaction_marker`]'s limits is reported `Failed` without
+    /// attempting to connect, so an oversized secret never falls back to
+    /// blanking every tool result with an empty marker (Finding 5b).
     ///
-    /// Returns the parent's tools, the connected clients paired with their
-    /// configured secrets (for [`mcp_child_tools`], since [`mcp::client::Client`]
-    /// tools cannot be cloned into a second registry), and the status handle.
+    /// Returns the parent's tools, the connected servers (for
+    /// [`mcp_child_tools`], since [`mcp::client::Client`] tools cannot be
+    /// cloned into a second registry), and the status handle.
     pub async fn connect_mcp(
         &self,
         max_output: usize,
         warnings: &mut (dyn Write + Send),
     ) -> (
         Vec<Box<dyn Tool + Send + Sync>>,
-        Vec<(Arc<mcp::client::Client>, Vec<String>)>,
+        Vec<ConnectedServer>,
         Arc<mcp::Servers>,
     ) {
         let servers = Arc::new(mcp::Servers::default());
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
-        let mut connected = Vec::new();
+        let mut connected: Vec<ConnectedServer> = Vec::new();
         if !self.mcp.enabled {
             return (tools, connected, servers);
         }
@@ -459,6 +533,7 @@ impl Builder {
         let cancel = CancellationToken::new();
         let connect_timeout = Duration::from_secs(self.mcp.connect_timeout_secs);
         let call_timeout = Duration::from_secs(self.mcp.call_timeout_secs);
+        let mut registered_names: HashSet<String> = HashSet::new();
         for server in &self.mcp.servers {
             let transport_kind = transport_label(&server.transport);
             if !server.enabled {
@@ -474,28 +549,67 @@ impl Builder {
                 continue;
             }
 
+            let Some(marker) = dynamic_redaction_marker(&server.secrets) else {
+                servers.push(
+                    mcp::ServerStatus {
+                        name: server.name.clone(),
+                        transport: transport_kind,
+                        era: None,
+                        state: mcp::ServerState::Failed(SECRETS_EXCEED_REDACTION_LIMITS.into()),
+                    },
+                    None,
+                );
+                let _ = writeln!(
+                    warnings,
+                    "warning: mcp server {:?} failed to connect: {SECRETS_EXCEED_REDACTION_LIMITS}",
+                    server.name
+                );
+                continue;
+            };
+
             match self
                 .connect_one(server, connect_timeout, call_timeout, &cancel)
                 .await
             {
-                Ok(client) => {
+                Ok((client, bearer)) => {
                     let client = Arc::new(client);
+                    let mut secrets = server.secrets.clone();
+                    if let Some(bearer) = &bearer {
+                        for secret in bearer.secrets() {
+                            if !secret.is_empty() && !secrets.contains(&secret) {
+                                secrets.push(secret);
+                            }
+                        }
+                    }
                     let (server_tools, tool_warnings) = tools_for(
                         Arc::clone(&client) as Arc<dyn mcp::ToolServer>,
                         client.tools(),
                         max_output,
-                        server.secrets.clone(),
+                        secrets.clone(),
+                        bearer.clone(),
                     );
                     for warning in &tool_warnings {
                         let _ = writeln!(warnings, "warning: {warning}");
                     }
+                    let (keep, dedup_warnings) =
+                        dedup_cross_server(&server.name, &server_tools, &mut registered_names);
+                    for warning in &dedup_warnings {
+                        let _ = writeln!(warnings, "warning: {warning}");
+                    }
+                    let keep: HashSet<usize> = keep.into_iter().collect();
+                    let tool_names: Vec<String> = server_tools
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| keep.contains(index))
+                        .map(|(_, tool)| tool.definition().name)
+                        .collect();
                     servers.push(
                         mcp::ServerStatus {
                             name: server.name.clone(),
                             transport: transport_kind,
                             era: Some(client.era().clone()),
                             state: mcp::ServerState::Connected {
-                                tools: client.tools().len(),
+                                tools: tool_names.len(),
                             },
                         },
                         Some(Arc::clone(&client)),
@@ -503,9 +617,16 @@ impl Builder {
                     tools.extend(
                         server_tools
                             .into_iter()
-                            .map(|tool| Box::new(tool) as Box<dyn Tool + Send + Sync>),
+                            .enumerate()
+                            .filter(|(index, _)| keep.contains(index))
+                            .map(|(_, tool)| Box::new(tool) as Box<dyn Tool + Send + Sync>),
                     );
-                    connected.push((client, server.secrets.clone()));
+                    connected.push(ConnectedServer {
+                        client,
+                        secrets,
+                        bearer,
+                        tool_names,
+                    });
                 }
                 Err(mcp::CallError::NeedsLogin) => {
                     servers.push(
@@ -524,7 +645,7 @@ impl Builder {
                     );
                 }
                 Err(error) => {
-                    let message = error.to_string();
+                    let message = failure_message(&error, &server.secrets, &marker);
                     servers.push(
                         mcp::ServerStatus {
                             name: server.name.clone(),
@@ -546,13 +667,16 @@ impl Builder {
     }
 
     /// Builds the transport for one configured server and connects it.
+    /// Returns the OAuth bearer alongside the client, when the server uses
+    /// one, so `connect_mcp` can redact its current tokens from tool results
+    /// (Finding 6) without `crate::mcp::oauth` gaining a caller outside tests.
     async fn connect_one(
         &self,
         server: &otto_core::config::McpServerRuntime,
         connect_timeout: Duration,
         call_timeout: Duration,
         cancel: &CancellationToken,
-    ) -> Result<mcp::client::Client, mcp::CallError> {
+    ) -> Result<(mcp::client::Client, Option<Arc<dyn mcp::BearerSource>>), mcp::CallError> {
         match &server.transport {
             McpTransport::Stdio {
                 command,
@@ -562,14 +686,15 @@ impl Builder {
             } => {
                 let transport =
                     mcp::stdio::StdioTransport::spawn(command, args, env, Path::new(cwd)).await?;
-                mcp::client::Client::connect(
+                let client = mcp::client::Client::connect(
                     server.name.clone(),
                     Box::new(transport),
                     connect_timeout,
                     call_timeout,
                     cancel,
                 )
-                .await
+                .await?;
+                Ok((client, None))
             }
             McpTransport::Http {
                 url, headers, auth, ..
@@ -584,17 +709,18 @@ impl Builder {
                 let transport = mcp::http::HttpTransport::new(
                     url.clone(),
                     headers.clone(),
-                    bearer,
+                    bearer.clone(),
                     call_timeout,
                 )?;
-                mcp::client::Client::connect(
+                let client = mcp::client::Client::connect(
                     server.name.clone(),
                     Box::new(transport),
                     connect_timeout,
                     call_timeout,
                     cancel,
                 )
-                .await
+                .await?;
+                Ok((client, bearer))
             }
         }
     }
@@ -769,9 +895,133 @@ mod mcp_tests {
         assert!(text.starts_with("warning: "), "{text:?}");
     }
 
+    #[tokio::test]
+    async fn a_server_whose_secrets_exceed_redaction_limits_fails_without_connecting() {
+        let directory = tempfile::tempdir().expect("directory");
+        let mut server = stdio_server(
+            "oversized",
+            true,
+            "otto-mcp-test-nonexistent-command",
+            directory.path(),
+        );
+        server.secrets = vec!["x".repeat(9 * 1024)];
+        let builder = builder_with_servers(directory.path(), vec![server]);
+
+        let mut warnings = Vec::new();
+        let (tools, connected, servers) = builder.connect_mcp(65536, &mut warnings).await;
+        assert!(tools.is_empty());
+        assert!(connected.is_empty());
+        let status = servers.status();
+        assert_eq!(status.len(), 1);
+        assert_eq!(
+            status[0].state,
+            mcp::ServerState::Failed(SECRETS_EXCEED_REDACTION_LIMITS.to_string())
+        );
+        let text = String::from_utf8(warnings).expect("utf-8 warnings");
+        assert!(text.contains(SECRETS_EXCEED_REDACTION_LIMITS), "{text:?}");
+    }
+
+    #[test]
+    fn a_secret_in_a_connect_failure_message_is_redacted() {
+        // `connect_mcp` cannot be driven end to end with a real connect
+        // failure that echoes a secret (a spawn error's text is OS-owned,
+        // not server-controlled); this drives the extracted pure
+        // `failure_message` helper `connect_mcp` calls in its `Err(error)`
+        // arm instead.
+        let secrets = vec!["SECRET123".to_owned()];
+        let marker = dynamic_redaction_marker(&secrets).expect("marker");
+        let error = mcp::CallError::Transport("token=SECRET123".to_owned());
+        let message = failure_message(&error, &secrets, &marker);
+        assert!(!message.contains("SECRET123"), "{message:?}");
+        assert!(message.contains("token="), "{message:?}");
+    }
+
     #[test]
     fn mcp_child_tools_is_empty_for_no_connected_servers() {
         assert!(mcp_child_tools(&[], 65536).is_empty());
+    }
+
+    // --- cross-server tool-name collisions (Finding 2) ---
+    //
+    // `connect_mcp` itself is not exercised end to end here: producing a
+    // real collision needs two servers that actually answer `tools/list`,
+    // which needs a live connection the offline test rule forbids. Instead
+    // this drives `tools_for` with two fake `ToolServer`s the way
+    // `connect_mcp` does, then feeds the results through the extracted pure
+    // `dedup_cross_server` helper `connect_mcp` also calls.
+
+    struct FakeToolServer {
+        name: String,
+    }
+
+    #[async_trait::async_trait]
+    impl mcp::ToolServer for FakeToolServer {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn call(
+            &self,
+            _tool: &str,
+            _arguments: serde_json::Value,
+            _cancel: &CancellationToken,
+        ) -> Result<mcp::CallOutcome, mcp::CallError> {
+            Ok(mcp::CallOutcome::default())
+        }
+    }
+
+    fn tool_info(name: &str) -> mcp::ToolInfo {
+        mcp::ToolInfo {
+            name: name.to_owned(),
+            title: None,
+            description: None,
+            input_schema: None,
+        }
+    }
+
+    #[test]
+    fn a_cross_server_collision_is_skipped_with_a_warning_and_the_child_set_matches() {
+        // Server "a" tool "b__c" and server "a__b" tool "c" both sanitize to
+        // "mcp__a__b__c": `tools_for`'s per-server dedup cannot see this, so
+        // it builds both tools without a warning.
+        let server_a: Arc<dyn mcp::ToolServer> = Arc::new(FakeToolServer { name: "a".into() });
+        let server_a_b: Arc<dyn mcp::ToolServer> = Arc::new(FakeToolServer {
+            name: "a__b".into(),
+        });
+        let (tools_a, warnings_a) = tools_for(
+            Arc::clone(&server_a),
+            &[tool_info("b__c")],
+            65536,
+            Vec::new(),
+            None,
+        );
+        assert!(warnings_a.is_empty(), "{warnings_a:?}");
+        let (tools_b, warnings_b) = tools_for(
+            Arc::clone(&server_a_b),
+            &[tool_info("c")],
+            65536,
+            Vec::new(),
+            None,
+        );
+        assert!(warnings_b.is_empty(), "{warnings_b:?}");
+        assert_eq!(tools_a[0].definition().name, "mcp__a__b__c");
+        assert_eq!(tools_b[0].definition().name, "mcp__a__b__c");
+
+        let mut registered = HashSet::new();
+        let (keep_a, dedup_warnings_a) = dedup_cross_server("a", &tools_a, &mut registered);
+        let (keep_b, dedup_warnings_b) = dedup_cross_server("a__b", &tools_b, &mut registered);
+
+        assert_eq!(keep_a, vec![0], "the first server's tool is registered");
+        assert!(dedup_warnings_a.is_empty(), "{dedup_warnings_a:?}");
+        assert!(
+            keep_b.is_empty(),
+            "the second server's colliding tool is skipped"
+        );
+        assert_eq!(dedup_warnings_b.len(), 1);
+        assert_eq!(
+            dedup_warnings_b[0],
+            "mcp a__b: skipping tool \"c\": name \"mcp__a__b__c\" is already provided by another server"
+        );
     }
 }
 

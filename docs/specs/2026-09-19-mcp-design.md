@@ -4,6 +4,23 @@ Status: proposed 2026-09-19; scope confirmed by the user on 2026-09-19
 (HTTP transport and OAuth are required; stdio servers run unsandboxed in
 this iteration). Branch `feat/mcp`, worktree `.worktree/mcp`.
 
+## Deviations from this design
+
+The implementation departs from this design in three places. The paragraphs
+below are marked "(superseded, see Deviations)"; the current behavior is the
+one documented in `docs/user-manual.md`.
+
+- **Connect order**: servers connect one at a time, in configuration order,
+  not concurrently. A hung server's `connect_timeout_secs` therefore delays
+  every server declared after it.
+- **stdio restart**: an exited stdio server's process is not restarted. Once
+  disconnected, it stays disconnected for the rest of the session; see
+  "Not yet implemented" in the user manual's MCP section.
+- **stderr handling**: the child's stderr is not drained to the debug log.
+  A bounded tail (last few KiB) is kept in memory and folded into the
+  `failed: ...` reason reported when the child exits or the connect fails;
+  it is never logged on its own.
+
 ## Goal
 
 Let Otto call tools exposed by external Model Context Protocol (MCP) servers.
@@ -168,7 +185,9 @@ reconnects.
 
 `crates/otto/src/mcp/stdio.rs`. The client spawns the command with
 `tokio::process::Command`, `stdin` and `stdout` piped, `stderr` piped and
-drained to the log at debug level (line-buffered, capped at 64 KiB per line).
+drained to the log at debug level (line-buffered, capped at 64 KiB per line)
+(superseded, see Deviations: stderr is kept as a bounded tail folded into
+the failure reason, not logged).
 Messages are newline-delimited JSON-RPC; a line that is not valid JSON-RPC
 is logged and skipped.
 
@@ -308,10 +327,11 @@ one trait with two implementations because there are two real consumers.
 
 - `build_runner` calls `mcp::connect_all(runtime, workspace)` after
   `build_catalogs` and before `Registry::new`. Servers connect concurrently
-  with `connect_timeout_secs`. A server that fails to connect is logged,
-  reported by `/mcp` as `failed: <reason>`, and contributes no tools; the
-  runner still starts. This mirrors how a missing skills directory is
-  handled.
+  with `connect_timeout_secs` (superseded, see Deviations: connects run one
+  server at a time, in configuration order). A server that fails to connect
+  is logged, reported by `/mcp` as `failed: <reason>`, and contributes no
+  tools; the runner still starts. This mirrors how a missing skills
+  directory is handled.
 - `connect_all` returns `McpTools { tools: Vec<Box<dyn Tool>>, status: Arc<McpStatus> }`.
   The tools are pushed into the tool vector; the status handle is stored on
   `Runner` and exposed through `Controller::mcp()` for the REPL.
@@ -343,7 +363,9 @@ mcp servers (2 configured, 1 connected)
 - The tool name prefix and the `[<server>]` description prefix let the model
   and the user attribute a tool to its server.
 - No secret is written to logs: `${VAR}` values are redacted from the debug
-  stderr log the same way they are redacted from results.
+  stderr log the same way they are redacted from results (superseded, see
+  Deviations and `docs/user-manual.md`: only `env`/`headers` substitutions
+  are secrets, and stderr is kept as an in-memory tail, not logged).
 - HTTP servers are contacted only over the configured URL; no redirects.
 - OAuth: the bearer token is sent only to the configured `url`; metadata and token endpoints must be `https` (or loopback `http`); `resource` in the protected resource metadata must match the configured URL; `state` is checked on the callback; the client never handles a client secret (`token_endpoint_auth_method: none`).
 - stdio servers run unsandboxed in this iteration. The user manual says so
@@ -388,7 +410,8 @@ written first in every step.
    redaction, cap, against a fake `Client` trait object. Model: sonnet.
 4. stdio transport and `Client` (`mcp/client.rs`, `mcp/stdio.rs`,
    `mcp/mod.rs`): era negotiation, tools/list pagination, tools/call,
-   cancel, shutdown, restart; tests drive `testdata/mcp/fake_server.py`.
+   cancel, shutdown, restart (superseded, see Deviations: restart was not
+   implemented); tests drive `testdata/mcp/fake_server.py`.
    Model: sonnet.
 5. HTTP transport (`mcp/http.rs`): modern and legacy against an in-process
    `tokio` TCP listener that serves scripted responses (JSON and SSE),

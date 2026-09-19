@@ -31,6 +31,14 @@ use crate::mcp::{BearerSource, CallError, Era, MODERN_VERSION, Outbound, Transpo
 /// SSE event size cap: matches the stdio transport's frame cap.
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
+/// Cap on a whole HTTP response body (JSON reply, 400 error body, or total
+/// bytes across an SSE stream): matches the stdio transport's line cap.
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// The exact message used when a response body exceeds its cap, so callers
+/// can distinguish it from other body-read failures without parsing prose.
+const BODY_TOO_LARGE: &str = "response body exceeds 16 MiB";
+
 /// One HTTP-based MCP server connection.
 pub struct HttpTransport {
     client: Client,
@@ -41,6 +49,10 @@ pub struct HttpTransport {
     /// replayed on every later request to the same server.
     session_id: Mutex<Option<String>>,
     next_id: AtomicI64,
+    /// Cap on a whole response body; [`MAX_BODY_BYTES`] outside tests, or a
+    /// smaller value a test installs to exercise the cap without sending a
+    /// real 16 MiB body.
+    max_body_bytes: usize,
 }
 
 impl HttpTransport {
@@ -64,7 +76,16 @@ impl HttpTransport {
             bearer,
             session_id: Mutex::new(None),
             next_id: AtomicI64::new(1),
+            max_body_bytes: MAX_BODY_BYTES,
         })
+    }
+
+    /// Installs a smaller body cap for a test, so it can exercise
+    /// [`BODY_TOO_LARGE`] without sending a real [`MAX_BODY_BYTES`] body.
+    #[cfg(test)]
+    fn with_max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = max;
+        self
     }
 
     fn next_id(&self) -> i64 {
@@ -188,7 +209,10 @@ impl HttpTransport {
         if response.status() == StatusCode::UNAUTHORIZED {
             match &self.bearer {
                 Some(source) => {
-                    let refreshed = source.refresh(cancel).await?;
+                    let rejected = token
+                        .as_deref()
+                        .expect("token is set whenever self.bearer is Some");
+                    let refreshed = source.refresh(rejected, cancel).await?;
                     response = self
                         .send_once(id, outbound, Some(&refreshed), cancel)
                         .await?;
@@ -212,7 +236,9 @@ impl HttpTransport {
         match response.status() {
             StatusCode::OK => self.handle_ok_body(response, expect_id, cancel).await,
             StatusCode::ACCEPTED => Err(CallError::Transport("202 accepted".to_string())),
-            StatusCode::BAD_REQUEST => handle_bad_request(response, is_probe).await,
+            StatusCode::BAD_REQUEST => {
+                handle_bad_request(response, is_probe, self.max_body_bytes).await
+            }
             StatusCode::FORBIDDEN => Err(handle_forbidden(&response)),
             StatusCode::NOT_FOUND => Err(CallError::Transport("404 session expired".to_string())),
             status if status.is_redirection() => Err(CallError::Transport(format!(
@@ -243,17 +269,15 @@ impl HttpTransport {
             .unwrap_or("")
             .to_string();
         if content_type.starts_with("application/json") {
-            let text = response
-                .text()
-                .await
-                .map_err(|_| CallError::Transport("response body error".to_string()))?;
+            let body = read_body_capped(response, self.max_body_bytes).await?;
+            let text = String::from_utf8_lossy(&body);
             match jsonrpc::parse_incoming(&text) {
                 Ok(Incoming::Response { result, .. }) => Ok(Ok(result)),
                 Ok(Incoming::Error { error, .. }) => Ok(Err(error)),
                 _ => Err(CallError::Transport("unexpected message type".to_string())),
             }
         } else if content_type.starts_with("text/event-stream") {
-            read_sse(response, expect_id, cancel).await
+            read_sse(response, expect_id, cancel, self.max_body_bytes).await
         } else {
             Err(CallError::Transport("unexpected content type".to_string()))
         }
@@ -286,13 +310,33 @@ fn classify_reqwest_error(error: reqwest::Error) -> CallError {
     CallError::Transport(kind.to_string())
 }
 
+/// Reads a whole response body, erroring once the running total exceeds
+/// `max_body_bytes` instead of buffering an unbounded amount of memory.
+async fn read_body_capped(
+    response: reqwest::Response,
+    max_body_bytes: usize,
+) -> Result<Vec<u8>, CallError> {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| CallError::Transport("response body error".to_string()))?;
+        body.extend_from_slice(&chunk);
+        if body.len() > max_body_bytes {
+            return Err(CallError::Transport(BODY_TOO_LARGE.to_string()));
+        }
+    }
+    Ok(body)
+}
+
 async fn read_sse(
     response: reqwest::Response,
     expect_id: Value,
     cancel: &CancellationToken,
+    max_body_bytes: usize,
 ) -> Result<Result<Value, RpcError>, CallError> {
     let mut stream = response.bytes_stream();
     let mut parser = SseParser::new(MAX_SSE_EVENT_BYTES);
+    let mut total_bytes = 0usize;
     loop {
         let next = tokio::select! {
             biased;
@@ -301,6 +345,10 @@ async fn read_sse(
         };
         match next {
             Some(Ok(bytes)) => {
+                total_bytes += bytes.len();
+                if total_bytes > max_body_bytes {
+                    return Err(CallError::Transport(BODY_TOO_LARGE.to_string()));
+                }
                 let events = parser
                     .feed(&bytes)
                     .map_err(|_| CallError::Transport("malformed sse stream".to_string()))?;
@@ -334,8 +382,19 @@ async fn read_sse(
 async fn handle_bad_request(
     response: reqwest::Response,
     is_probe: bool,
+    max_body_bytes: usize,
 ) -> Result<Result<Value, RpcError>, CallError> {
-    let text = response.text().await.unwrap_or_default();
+    let body = match read_body_capped(response, max_body_bytes).await {
+        Ok(body) => body,
+        Err(CallError::Transport(message)) if message == BODY_TOO_LARGE => {
+            return Err(CallError::Transport(message));
+        }
+        // A non-cap read failure (e.g. a dropped connection) here just
+        // means the 400's own body is unavailable; the status code alone
+        // still carries the case handled below.
+        Err(_) => Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&body);
     let parsed_error = match jsonrpc::parse_incoming(&text) {
         Ok(Incoming::Error { error, .. }) => Some(error),
         _ => None,
@@ -450,7 +509,11 @@ mod tests {
             self.bearer_result.lock().unwrap().clone()
         }
 
-        async fn refresh(&self, _cancel: &CancellationToken) -> Result<String, CallError> {
+        async fn refresh(
+            &self,
+            _rejected: &str,
+            _cancel: &CancellationToken,
+        ) -> Result<String, CallError> {
             *self.refresh_calls.lock().unwrap() += 1;
             self.refresh_result.lock().unwrap().clone()
         }
@@ -753,6 +816,71 @@ mod tests {
         let err = transport.request(outbound, &cancel).await.unwrap_err();
         match err {
             CallError::Transport(msg) => assert!(msg.contains("302")),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_body_over_cap_is_rejected() {
+        let oversized =
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"pad": "x".repeat(200)}}).to_string();
+        let server = testserver::spawn(move |_req| testserver::json_response(&oversized)).await;
+        let transport =
+            HttpTransport::new(server.url.clone(), vec![], None, Duration::from_secs(5))
+                .unwrap()
+                .with_max_body_bytes(100);
+        let outbound = modern_outbound("tools/list", json!({}));
+        let cancel = CancellationToken::new();
+        let err = transport.request(outbound, &cancel).await.unwrap_err();
+        match err {
+            CallError::Transport(msg) => assert_eq!(msg, BODY_TOO_LARGE),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bad_request_body_over_cap_is_rejected() {
+        let oversized = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32020, "message": "x".repeat(200), "data": null},
+        })
+        .to_string();
+        let server =
+            testserver::spawn(move |_req| testserver::status_response(400, &oversized)).await;
+        let transport =
+            HttpTransport::new(server.url.clone(), vec![], None, Duration::from_secs(5))
+                .unwrap()
+                .with_max_body_bytes(100);
+        let outbound = Outbound {
+            method: "tools/list".to_string(),
+            params: json!({}),
+            era: None,
+        };
+        let cancel = CancellationToken::new();
+        let err = transport.request(outbound, &cancel).await.unwrap_err();
+        match err {
+            CallError::Transport(msg) => assert_eq!(msg, BODY_TOO_LARGE),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_stream_over_body_cap_is_rejected() {
+        let oversized = format!(
+            "data: {}\n\ndata: {{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}\n\n",
+            "x".repeat(200)
+        );
+        let server = testserver::spawn(move |_req| testserver::sse_response(&oversized)).await;
+        let transport =
+            HttpTransport::new(server.url.clone(), vec![], None, Duration::from_secs(5))
+                .unwrap()
+                .with_max_body_bytes(100);
+        let outbound = modern_outbound("tools/list", json!({}));
+        let cancel = CancellationToken::new();
+        let err = transport.request(outbound, &cancel).await.unwrap_err();
+        match err {
+            CallError::Transport(msg) => assert_eq!(msg, BODY_TOO_LARGE),
             other => panic!("expected Transport, got {other:?}"),
         }
     }

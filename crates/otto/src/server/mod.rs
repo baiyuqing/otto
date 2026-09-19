@@ -95,6 +95,10 @@ pub trait Factory: Send + Sync {
     async fn reload_sandbox(&self) -> Option<Result<SandboxInfo, String>> {
         None
     }
+    /// Persisted provider token usage, optionally scoped to one session.
+    fn usage_summary(&self, _session_id: Option<&str>) -> Result<crate::usage::Summary, String> {
+        Ok(crate::usage::Summary::default())
+    }
 }
 
 /// Configures a [`Server`]. Port of `server.Options`.
@@ -386,6 +390,7 @@ impl Server {
             )
             .route("/v1/sandbox/reload", post(sandbox::reload))
             .route("/v1/info", get(info))
+            .route("/v1/usage", get(usage))
             .route("/v1/openapi.yaml", get(openapi))
             .route("/healthz", get(healthz))
             .route("/metrics", get(prometheus))
@@ -1306,6 +1311,18 @@ async fn cancel_turn(
 
 async fn info(State(server): State<Arc<Server>>) -> Response {
     json_response(StatusCode::OK, &server.info)
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UsageFilter {
+    session_id: Option<String>,
+}
+
+async fn usage(State(server): State<Arc<Server>>, Query(filter): Query<UsageFilter>) -> Response {
+    match server.factory.usage_summary(filter.session_id.as_deref()) {
+        Ok(summary) => json_response(StatusCode::OK, &summary),
+        Err(error) => internal_error(&server.log, &error),
+    }
 }
 
 async fn openapi() -> Response {
@@ -2694,6 +2711,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_usage_endpoint_returns_persisted_aggregates() {
+        let harness = Harness::new();
+        let reply = harness.send("GET", "/v1/usage", None).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            reply.json(),
+            serde_json::json!({
+                "requests": 0,
+                "reported_requests": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 0,
+                "cache_hit_rate": 0.0
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn the_openapi_endpoint_serves_the_embedded_document() {
         let harness = Harness::new();
         let reply = harness.send("GET", "/v1/openapi.yaml", None).await;
@@ -2722,6 +2757,7 @@ mod tests {
         "/v1/sessions/{id}/tasks/{task_id}/cancel",
         "/v1/sandbox/reload",
         "/v1/info",
+        "/v1/usage",
         "/v1/openapi.yaml",
         "/healthz",
         "/metrics",

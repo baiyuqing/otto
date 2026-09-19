@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, ApiError, events, loadToken, setToken } from './api'
+import { api, ApiError, events, loadToken, setToken, type UsageSummary } from './api'
 import { parseWebCommand, supportedCommands } from './commands'
 import { fromHistory, reduce, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
 import { SessionPicker } from './SessionPicker'
@@ -69,6 +69,7 @@ export function App() {
   const [items, setItems] = useState<Item[]>([])
   const [turnId, setTurnId] = useState<string | null>(null)
   const [turnUsage, setTurnUsage] = useState<Usage | null>(null)
+  const [recordedUsage, setRecordedUsage] = useState<UsageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
   const [tasksKey, setTasksKey] = useState(0)
   const [error, setError] = useState('')
@@ -84,6 +85,8 @@ export function App() {
         .catch(fail),
     [fail],
   )
+
+  const refreshUsage = useCallback(() => api.usage().then(setRecordedUsage).catch(fail), [fail])
 
   // consume reads a turn's stream to the end. The stream closes when the
   // turn is done, but also when the connection drops, so it then asks the
@@ -121,9 +124,10 @@ export function App() {
         setTurnId(null)
         setTurnUsage(null)
         setTasksKey((k) => k + 1)
+        void refreshUsage()
       }
     },
-    [fail],
+    [fail, refreshUsage],
   )
 
   const open = useCallback(
@@ -150,6 +154,7 @@ export function App() {
   useEffect(() => {
     api.info().then(setInfo).catch(fail)
     void refreshSessions()
+    void refreshUsage()
     const id = location.hash.slice(1)
     if (id) void open(id)
     // Runs once on mount; main.tsx does not use StrictMode, so this does not
@@ -371,6 +376,7 @@ export function App() {
     } finally {
       if (compactAbort.current === ac) compactAbort.current = null
       setCompacting(false)
+      void refreshUsage()
     }
   }
 
@@ -434,7 +440,7 @@ export function App() {
         onCancel={cancel}
         onCompact={compact}
       />
-      <Footer info={info} session={session} turnUsage={turnUsage} />
+      <Footer info={info} session={session} turnUsage={turnUsage} recordedUsage={recordedUsage} />
     </div>
   )
 }

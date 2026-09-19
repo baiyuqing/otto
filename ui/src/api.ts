@@ -1,5 +1,14 @@
 import { readSSE, type Compaction, type Frame, type Info, type Session, type SessionListRow, type Task, type TaskDetail, type TurnSummary, type WireEvent } from './wire'
 
+export interface UsageSummary {
+  requests: number
+  reported_requests: number
+  input_tokens: number
+  output_tokens: number
+  cached_input_tokens: number
+  cache_hit_rate: number
+}
+
 const TOKEN_KEY = 'otto.token'
 
 // loadToken takes the token from the startup URL's query string, keeps it
@@ -58,6 +67,8 @@ const text = async (path: string, init?: RequestInit): Promise<string> => (await
 
 export const api = {
   info: () => json<Info>('/v1/info'),
+  usage: (sessionId?: string) =>
+    json<UsageSummary>(`/v1/usage${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`),
   listSessions: () => json<{ sessions: SessionListRow[] }>('/v1/sessions'),
   createSession: (resume?: string) =>
     json<Session>('/v1/sessions', { method: 'POST', body: JSON.stringify(resume ? { resume } : {}) }),

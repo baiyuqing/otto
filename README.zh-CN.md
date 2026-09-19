@@ -92,6 +92,7 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 - [Skills](docs/user-manual.md#skills)
 - [子代理](README.md#delegate-work-to-sub-agents)
 - [本地服务：otto serve](docs/user-manual.md#agent-server)，可选[飞书 inbound](docs/user-manual.md#feishu-inbound)
+- [用量历史](docs/user-manual.md#observability)：本地 token 总量和缓存命中率，不保存提示词或工具内容
 - [命令参考](docs/user-manual.md#command-line-reference)与[问题排查](docs/user-manual.md#troubleshooting)
 
 ## 安全与限制

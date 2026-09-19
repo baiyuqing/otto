@@ -103,6 +103,10 @@ impl Factory for ServeFactory {
         let control = self.sandbox.as_ref()?;
         Some(SandboxControl::reload(control.as_ref()).await)
     }
+
+    fn usage_summary(&self, session_id: Option<&str>) -> Result<crate::usage::Summary, String> {
+        self.builder.usage_summary(session_id)
+    }
 }
 
 // ---- the command ----

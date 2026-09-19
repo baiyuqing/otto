@@ -17,3 +17,4 @@ pub mod subagent;
 pub mod tool;
 pub mod tui;
 pub mod urlprivacy;
+pub mod usage;

@@ -6,6 +6,7 @@ import type { Info, Session } from './wire'
 
 const api = vi.hoisted(() => ({
   info: vi.fn(),
+  usage: vi.fn(),
   listSessions: vi.fn(),
   createSession: vi.fn(),
   getSession: vi.fn(),
@@ -69,6 +70,14 @@ describe('idle wake follow', () => {
     vi.useFakeTimers()
     location.hash = '#sess1'
     api.info.mockResolvedValue(info)
+    api.usage.mockResolvedValue({
+      requests: 0,
+      reported_requests: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cached_input_tokens: 0,
+      cache_hit_rate: 0,
+    })
     api.listSessions.mockResolvedValue({ sessions: [{ id: 'sess1', name: 'dev', open: true }] })
     api.createSession.mockResolvedValue(idle)
     api.getSession.mockResolvedValue(idle)

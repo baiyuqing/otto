@@ -18,7 +18,8 @@
 ## 从源码安装
 
 需要 **macOS**、由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链
-（`rustup toolchain install` 会自动安装），以及受支持服务的访问权限。
+（`rustup toolchain install` 会自动安装）、**Node 24+**、`wasm-pack` 0.15，
+以及受支持服务的访问权限。
 
 ```bash
 git clone https://github.com/baiyuqing/otto.git
@@ -27,9 +28,8 @@ make build
 ./otto --help
 ```
 
-`make build` 会把 `ui/dist` 中已有的内容嵌入二进制。若要嵌入完整的 Web UI，
-需先运行 `make ui`（需要 Node 24+ 和 `wasm-pack` 0.15）；否则 `otto serve` 的 `/`
-只会返回一行占位文本。
+`make build` 会先刷新并嵌入 Web UI，再编译 Otto。若直接运行 `cargo build` 且
+此前未执行 `make ui`，二进制中只会嵌入一行占位文本。
 
 以下命令在该目录中运行。将二进制文件放入 `PATH` 后，可以在其他目录直接使用 `otto`。
 

@@ -344,6 +344,34 @@ async fn image_is_persisted_and_sent_with_the_user_prompt() {
     );
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn image_without_text_is_persisted_and_sent() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        options(),
+    );
+    agent
+        .run_with_image(
+            "",
+            Some(Block::image("iVBORw0KGgo=", "image/png")),
+            &mut |_| {},
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let messages = agent.session().messages();
+    assert_eq!(messages[0].blocks.len(), 1);
+    assert_eq!(messages[0].blocks[0].block_type, BlockType::Image);
+    assert_eq!(
+        agent.provider().normal_requests()[0].messages[0].blocks[0].block_type,
+        BlockType::Image
+    );
+}
+
 // -- inbox and wake turns --------------------------------------------------
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

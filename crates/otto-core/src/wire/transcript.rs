@@ -20,6 +20,10 @@ pub enum Item {
     User {
         text: String,
     },
+    Image {
+        data: String,
+        mime_type: String,
+    },
     Assistant {
         text: String,
     },
@@ -61,6 +65,10 @@ pub struct HistoryBlock {
     pub block_type: String,
     #[serde(default)]
     pub text: String,
+    #[serde(default)]
+    pub data: String,
+    #[serde(default)]
+    pub mime_type: String,
     #[serde(default)]
     pub tool_call_id: String,
     #[serde(default)]
@@ -205,8 +213,9 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
                     });
                 }
                 "image" if message.role == "user" => {
-                    items.push(Item::User {
-                        text: "[image]".into(),
+                    items.push(Item::Image {
+                        data: block.data.clone(),
+                        mime_type: block.mime_type.clone(),
                     });
                 }
                 _ => {
@@ -529,6 +538,20 @@ mod tests {
                     text: "One file.".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn preserves_user_images_for_display() {
+        let history = r#"[{"role":"user","blocks":[{"type":"image","data":"iVBORw0KGgo=","mime_type":"image/png"}]}]"#;
+        let items = from_history(history).expect("history decodes");
+        assert_eq!(
+            serde_json::to_value(items).expect("items encode"),
+            serde_json::json!([{
+                "kind": "image",
+                "data": "iVBORw0KGgo=",
+                "mime_type": "image/png"
+            }])
         );
     }
 

@@ -50,6 +50,14 @@ impl SseParser {
             let line_end = self.buffer.iter().position(|&b| b == b'\n' || b == b'\r');
 
             let consumed = match line_end {
+                Some(pos) if self.buffer[pos] == b'\r' && pos + 1 == self.buffer.len() => {
+                    // A lone `\r` at the very end of the buffered bytes is
+                    // ambiguous: the next `feed` call may deliver the `\n`
+                    // that completes a `\r\n` terminator split across a
+                    // chunk boundary. Hold it back rather than dispatching
+                    // early on a line that has not actually ended yet.
+                    break;
+                }
                 Some(pos) => {
                     let is_cr = self.buffer[pos] == b'\r';
                     let line_len = pos;
@@ -118,7 +126,16 @@ impl SseParser {
 
                     line_len + end_len
                 }
-                None => break,
+                None => {
+                    // No line terminator anywhere in the buffered bytes. A
+                    // stream that never sends one would otherwise grow this
+                    // buffer without bound, since the per-event size check
+                    // below only runs once a `data:` line is fully parsed.
+                    if self.buffer.len() > self.max_event_bytes {
+                        return Err(format!("sse event exceeds {} bytes", self.max_event_bytes));
+                    }
+                    break;
+                }
             };
 
             self.buffer.drain(..consumed);
@@ -129,6 +146,13 @@ impl SseParser {
 
     /// Finish parsing: dispatch any trailing event without a final blank line.
     pub fn finish(mut self) -> Result<Option<SseEvent>, String> {
+        // A trailing lone `\r` held back by `feed` (in case a `\n` was still
+        // to come) is now known final: the stream ended, so it terminates
+        // whatever line preceded it.
+        if self.buffer.last() == Some(&b'\r') {
+            self.buffer.pop();
+        }
+
         // Check for remaining data
         if !self.buffer.is_empty() {
             let line = std::str::from_utf8(&self.buffer)
@@ -198,9 +222,43 @@ mod tests {
     #[test]
     fn test_single_event_with_cr() {
         let mut parser = SseParser::new(10000);
+        // The trailing `\r` of the blank line is ambiguous within `feed`
+        // (a `\n` could still follow in the next chunk), so it is held
+        // back and only resolved at `finish`.
         let events = parser.feed(b"data: test\r\r").unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].data, "test");
+        assert_eq!(events.len(), 0);
+        let result = parser.finish().unwrap();
+        assert_eq!(result.unwrap().data, "test");
+    }
+
+    #[test]
+    fn test_crlf_split_across_chunks_does_not_dispatch_early() {
+        // Regression test: a `\r\n` line terminator split across two `feed`
+        // calls must not be mistaken for a separate blank line that
+        // dispatches the event before all `data:` lines have arrived.
+        let mut parser = SseParser::new(10000);
+        let events1 = parser.feed(b"data: {\"a\":1\r").unwrap();
+        assert_eq!(events1.len(), 0);
+        let events2 = parser.feed(b"\ndata: ,\"b\":2}\r\n\r\n").unwrap();
+        assert_eq!(events2.len(), 1);
+        assert_eq!(events2[0].data, "{\"a\":1\n,\"b\":2}");
+    }
+
+    #[test]
+    fn test_trailing_lone_cr_at_finish_still_dispatches() {
+        let mut parser = SseParser::new(10000);
+        let events = parser.feed(b"data: final\r").unwrap();
+        assert_eq!(events.len(), 0);
+        let result = parser.finish().unwrap();
+        assert_eq!(result.unwrap().data, "final");
+    }
+
+    #[test]
+    fn test_no_terminator_over_cap_is_rejected() {
+        let mut parser = SseParser::new(10);
+        let result = parser.feed(&[b'x'; 11]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds"));
     }
 
     #[test]

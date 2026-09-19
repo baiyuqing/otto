@@ -76,8 +76,10 @@ pub struct McpServerRuntime {
     pub name: String,
     pub enabled: bool,
     pub transport: McpTransport,
-    /// Every non-empty value substituted from `${VAR}` in this server's
-    /// config, deduplicated. Used to redact tool results and logs.
+    /// Every non-empty value substituted from `${VAR}` in this server's `env`
+    /// or `headers` table, deduplicated. `command`, `args`, `url`, and `cwd`
+    /// are not collected here, so a plain path or URL substitution is never
+    /// redacted from a tool result. Used to redact tool results and logs.
     pub secrets: Vec<String>,
 }
 
@@ -233,13 +235,13 @@ fn resolve_stdio(
             "mcp server {name}: command is required for stdio transport"
         ))
     })?;
-    let command = expand_value(raw_command, env, name, "command", secrets)?;
+    let command = expand_value(raw_command, env, name, "command", None)?;
 
     let mut args = Vec::new();
     if let Some(raw_args) = &server.args {
         for (index, raw_arg) in raw_args.iter().enumerate() {
             let key = format!("args[{index}]");
-            args.push(expand_value(raw_arg, env, name, &key, secrets)?);
+            args.push(expand_value(raw_arg, env, name, &key, None)?);
         }
     }
 
@@ -247,7 +249,7 @@ fn resolve_stdio(
     if let Some(raw_env) = &server.env {
         for (key, raw_value) in raw_env {
             check_literal_credential(name, key, raw_value)?;
-            let value = expand_value(raw_value, env, name, key, secrets)?;
+            let value = expand_value(raw_value, env, name, key, Some(&mut *secrets))?;
             env_table.insert(key.clone(), value);
         }
     }
@@ -262,7 +264,7 @@ fn resolve_stdio(
     let cwd = match &server.cwd {
         None => workspace_path.to_string(),
         Some(raw_cwd) => {
-            let expanded = expand_value(raw_cwd, env, name, "cwd", secrets)?;
+            let expanded = expand_value(raw_cwd, env, name, "cwd", None)?;
             resolve_roots(std::slice::from_ref(&expanded), env, workspace_path)
                 .into_iter()
                 .next()
@@ -312,7 +314,7 @@ fn resolve_http(
             "mcp server {name}: url is required for http transport"
         ))
     })?;
-    let expanded_url = expand_value(raw_url, env, name, "url", secrets)?;
+    let expanded_url = expand_value(raw_url, env, name, "url", None)?;
     let url = normalize_url(name, &expanded_url)?;
 
     let auth = match server.auth.as_deref().unwrap_or("none") {
@@ -345,7 +347,7 @@ fn resolve_http(
                     "mcp server {name}: headers cannot set {key} when auth = \"oauth\""
                 )));
             }
-            let value = expand_value(raw_value, env, name, key, secrets)?;
+            let value = expand_value(raw_value, env, name, key, Some(&mut *secrets))?;
             headers.push((key.clone(), value));
         }
     }
@@ -380,13 +382,16 @@ fn normalize_url(name: &str, raw: &str) -> Result<String, ConfigError> {
 /// Expands every `${VAR}` and `${VAR:-default}` reference in `raw` against
 /// `env`. `$$` and a `$` not followed by `{` are literal. Every non-empty
 /// value substituted from `env` (not a default) is pushed to `secrets` if not
-/// already present.
+/// already present, when the caller passes one: only `env` and `headers`
+/// values are redaction-worthy (the design's "Result mapping" section);
+/// `command`, `args`, `url`, and `cwd` pass `None` so a value such as
+/// `cwd = "${HOME}/x"` does not redact the home path from every tool result.
 fn expand_value(
     raw: &str,
     env: &HashMap<String, String>,
     server_name: &str,
     key: &str,
-    secrets: &mut Vec<String>,
+    mut secrets: Option<&mut Vec<String>>,
 ) -> Result<String, ConfigError> {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
@@ -404,7 +409,10 @@ fn expand_value(
             match env.get(var_name) {
                 Some(value) => {
                     out.push_str(value);
-                    if !value.is_empty() && !secrets.iter().any(|s| s == value) {
+                    if let Some(secrets) = secrets.as_deref_mut()
+                        && !value.is_empty()
+                        && !secrets.iter().any(|s| s == value)
+                    {
                         secrets.push(value.clone());
                     }
                 }
@@ -773,6 +781,41 @@ mod tests {
         assert!(entry.secrets.contains(&"secret-token".to_string()));
         // "prod" came from a default, not an env substitution: not a secret.
         assert!(!entry.secrets.contains(&"prod".to_string()));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn stdio_command_args_and_cwd_substitutions_are_not_collected_as_secrets() {
+        let mut server = stdio_server("${BIN}");
+        server.args = Some(vec!["${ARG_VAR}".into()]);
+        server.env = Some(BTreeMap::from([("TOKEN".into(), "${ENV_VAR}".into())]));
+        server.cwd = Some("${CWD_VAR}".into());
+        let file = file_with(vec![("s", server)]);
+        let env = env(&[
+            ("BIN", "/usr/bin/run"),
+            ("ARG_VAR", "arg-value"),
+            ("ENV_VAR", "env-secret"),
+            ("CWD_VAR", "sub"),
+        ]);
+        let runtime = resolve_mcp(&file, &env, "/work").expect("resolve");
+        let entry = &runtime.servers[0];
+        assert_eq!(entry.secrets, vec!["env-secret".to_string()]);
+        assert!(!entry.secrets.contains(&"/usr/bin/run".to_string()));
+        assert!(!entry.secrets.contains(&"arg-value".to_string()));
+        assert!(!entry.secrets.contains(&"sub".to_string()));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn http_url_substitutions_are_not_collected_as_secrets_but_headers_are() {
+        let mut server = http_server("https://${HOST_VAR}/mcp");
+        server.headers = Some(BTreeMap::from([("X-Token".into(), "${HEADER_VAR}".into())]));
+        let file = file_with(vec![("s", server)]);
+        let env = env(&[("HOST_VAR", "example.com"), ("HEADER_VAR", "header-secret")]);
+        let runtime = resolve_mcp(&file, &env, "/work").expect("resolve");
+        let entry = &runtime.servers[0];
+        assert_eq!(entry.secrets, vec!["header-secret".to_string()]);
+        assert!(!entry.secrets.contains(&"example.com".to_string()));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

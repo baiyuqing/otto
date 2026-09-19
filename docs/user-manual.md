@@ -1154,7 +1154,7 @@ Config (`[mcp]` and `[mcp.servers.<name>]` in TOML):
 [mcp]
 enabled = true              # default true; false skips every server
 call_timeout_secs = 60      # default 60; applies to each tool call
-connect_timeout_secs = 20   # default 20; applies to the connection handshake
+connect_timeout_secs = 20   # default 20; bounds the whole connect (discover probe, handshake, and tool listing together)
 
 [mcp.servers.github]
 transport = "stdio"
@@ -1193,8 +1193,15 @@ Rules:
   Seatbelt.
 - An MCP tool is registered as `mcp__<server>__<tool>`; non-`[A-Za-z0-9_-]`
   bytes in the tool name are replaced with `_`. If the result would exceed 64
-  bytes, or collides with another tool on the same server, the tool is
-  skipped and a warning is printed instead.
+  bytes, collides with another tool on the same server, or is already
+  provided by an earlier-connected server, the tool is skipped and a warning
+  is printed instead.
+- Only `${VAR}` substitutions in `env` and `headers` values are treated as
+  secrets and redacted from tool output; substitutions in `command`, `args`,
+  `url`, and `cwd` are not, since they are not exposed to the model. A server
+  whose `env`/`headers` secrets exceed the redaction limits (64 values, 8 KiB
+  each, 16 KiB total) is reported `failed: ...` at startup instead of being
+  connected.
 
 What's wired:
 
@@ -1218,10 +1225,12 @@ What's wired:
 - `otto mcp login <server>` and `otto mcp logout <server>` run the same sign-in
   flow, or remove the stored token, without starting a session. See
   [command-line reference](#command-line-reference).
-- Tool results are text-only: `image`/`audio`/`resource` content blocks
-  become a one-line placeholder naming the MIME type and byte count; the
-  content is never embedded. Every `${VAR}`-substituted value is redacted
-  from tool output before it reaches the transcript.
+- Tool results are text-only: `image`/`audio` content blocks, and a
+  `resource` block with no `text` field, become a one-line placeholder naming
+  the MIME type and byte count; binary content is never embedded. A
+  `resource` block that does carry a `text` field returns that text
+  verbatim. `env`/`headers` secrets (see Rules above) are redacted from tool
+  output before it reaches the transcript.
 
 Not yet implemented:
 
@@ -1273,11 +1282,13 @@ See [ChatGPT subscription](#chatgpt-subscription).
 ### `/mcp` reports `failed: ...` or `needs login`
 
 Check `/mcp` for the exact reason. `failed: <reason>` means the stdio command
-could not be spawned, or the HTTP connection or handshake did not complete
-within `connect_timeout_secs`; the server contributes no tools until Otto is
-restarted with the problem fixed. `needs login` means the server requires
-OAuth and has no valid stored token: run `/mcp login <server>` (or `otto mcp
-login <server>`), then restart Otto. See [MCP servers](#mcp-servers).
+could not be spawned, the HTTP connection, handshake, or tool listing did not
+complete within `connect_timeout_secs`, or the server's `env`/`headers`
+secrets exceed the redaction limits; the server contributes no tools until
+Otto is restarted with the problem fixed. `needs login` means the server
+requires OAuth and has no valid stored token: run `/mcp login <server>` (or
+`otto mcp login <server>`), then restart Otto. See
+[MCP servers](#mcp-servers).
 
 ### Context-length or prompt-size failures
 

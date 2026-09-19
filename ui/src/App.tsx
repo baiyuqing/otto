@@ -328,7 +328,11 @@ export function App() {
       const s = await api.getSession(session.id)
       setSession(s)
       setTurnId(s.turn?.id ?? null)
-      setItems((prev) => [...prev, { kind: 'user', text: image ? `[image]\n${text}` : text }])
+      setItems((prev) => {
+        const next: Item[] = [...prev, { kind: 'user', text }]
+        if (image) next.push({ kind: 'image', data: image.data, mime_type: image.mime_type })
+        return next
+      })
       await consume(session.id, res)
     } catch (e) {
       fail(e)

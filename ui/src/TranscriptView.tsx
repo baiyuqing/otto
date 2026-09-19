@@ -107,6 +107,12 @@ function ItemView({ item }: { item: Item }) {
   switch (item.kind) {
     case 'user':
       return <div className="item user">{item.text}</div>
+    case 'image':
+      return (
+        <div className="item user image">
+          <img src={`data:${item.mime_type};base64,${item.data}`} alt="Sent image" />
+        </div>
+      )
     case 'assistant':
       return (
         <div className="item assistant">

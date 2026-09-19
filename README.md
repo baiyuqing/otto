@@ -104,6 +104,8 @@ The selected model and OpenAI-compatible endpoint must support image input.
 
 - [Local memory](docs/user-manual.md#memory): search, remember, review, and forget.
 - [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
+- [MCP servers](docs/user-manual.md#mcp-servers): connect stdio or HTTP Model
+  Context Protocol servers and use their tools from the same turn loop.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
   socket or a loopback TCP port, with an embedded browser UI. Optional
   [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
@@ -171,6 +173,10 @@ persisted.
 - No automatic memory extraction or memory backup/restore/verify commands.
 - No per-skill `allowed-tools` enforcement.
 - No nested sub-agent delegation; child transcripts are not persisted.
+- MCP stdio servers run unsandboxed, with an explicit environment (`PATH`,
+  `HOME`, `TMPDIR`, `LANG`, `TERM`, plus the configured `env` table only).
+  An MCP server that exits stays disconnected until Otto restarts; Otto does
+  not respawn it.
 - The local server binds loopback addresses only; there is no TLS, CORS, or
   token persistence. The Unix socket relies on file permissions for access
   control.

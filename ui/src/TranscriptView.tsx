@@ -69,7 +69,7 @@ function MarkdownView({ text }: { text: string }) {
   )
 }
 
-function MermaidDiagram({ code }: { code: string }) {
+export function MermaidDiagram({ code, label }: { code: string; label?: string }) {
   const reactId = useId()
   const id = `mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, '')}`
   const [svg, setSVG] = useState('')
@@ -99,8 +99,26 @@ function MermaidDiagram({ code }: { code: string }) {
       </pre>
     )
   }
-  if (!svg) return <div className="mermaid-diagram pending">Rendering diagram…</div>
-  return <div className="mermaid-diagram" dangerouslySetInnerHTML={{ __html: svg }} />
+  if (!svg)
+    return (
+      <div
+        className="mermaid-diagram pending"
+        role={label ? 'img' : undefined}
+        aria-label={label}
+        tabIndex={label ? 0 : undefined}
+      >
+        Rendering diagram…
+      </div>
+    )
+  return (
+    <div
+      className="mermaid-diagram"
+      role={label ? 'img' : undefined}
+      aria-label={label}
+      tabIndex={label ? 0 : undefined}
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  )
 }
 
 function ItemView({ item }: { item: Item }) {

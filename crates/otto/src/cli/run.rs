@@ -327,6 +327,16 @@ pub async fn run(
         Ok(config) => config,
         Err(error) => return fail(stderr, &error.to_string()),
     };
+    let usage = match crate::usage::Store::open(&Path::new(&home).join(".otto/usage.db")) {
+        Ok(store) => Some(Arc::new(store)),
+        Err(_) => {
+            let _ = writeln!(
+                stderr,
+                "warning: usage store unavailable, continuing without usage history"
+            );
+            None
+        }
+    };
 
     let mut builder = Builder {
         config_path: PathBuf::from(&config_path),
@@ -348,6 +358,7 @@ pub async fn run(
         auth_credentials: captured_auth.credentials.clone(),
         auth_credentials_loaded: captured_auth.loaded,
         memory: Default::default(),
+        usage,
     };
 
     let mut prepared_initial = None;

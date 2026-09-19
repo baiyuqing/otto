@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, ApiError, events, loadToken, setToken } from './api'
+import { api, ApiError, events, loadToken, setToken, type UsageSummary } from './api'
 import { parseWebCommand, supportedCommands } from './commands'
 import { fromHistory, reduce, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
 import { SessionPicker } from './SessionPicker'
@@ -7,6 +7,7 @@ import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
 import { Footer } from './Footer'
 import { Tasks } from './Tasks'
+import { UsageView } from './UsageView'
 import { sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
 
@@ -63,12 +64,14 @@ const taskText = (task: {
     .join('\n')
 
 export function App() {
+  const [view, setView] = useState<'chat' | 'usage'>('chat')
   const [info, setInfo] = useState<Info | null>(null)
   const [sessions, setSessions] = useState<SessionListRow[]>([])
   const [session, setSession] = useState<Session | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [turnId, setTurnId] = useState<string | null>(null)
   const [turnUsage, setTurnUsage] = useState<Usage | null>(null)
+  const [recordedUsage, setRecordedUsage] = useState<UsageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
   const [tasksKey, setTasksKey] = useState(0)
   const [error, setError] = useState('')
@@ -84,6 +87,8 @@ export function App() {
         .catch(fail),
     [fail],
   )
+
+  const refreshUsage = useCallback(() => api.usage().then(setRecordedUsage).catch(fail), [fail])
 
   // consume reads a turn's stream to the end. The stream closes when the
   // turn is done, but also when the connection drops, so it then asks the
@@ -121,9 +126,10 @@ export function App() {
         setTurnId(null)
         setTurnUsage(null)
         setTasksKey((k) => k + 1)
+        void refreshUsage()
       }
     },
-    [fail],
+    [fail, refreshUsage],
   )
 
   const open = useCallback(
@@ -150,6 +156,7 @@ export function App() {
   useEffect(() => {
     api.info().then(setInfo).catch(fail)
     void refreshSessions()
+    void refreshUsage()
     const id = location.hash.slice(1)
     if (id) void open(id)
     // Runs once on mount; main.tsx does not use StrictMode, so this does not
@@ -371,6 +378,7 @@ export function App() {
     } finally {
       if (compactAbort.current === ac) compactAbort.current = null
       setCompacting(false)
+      void refreshUsage()
     }
   }
 
@@ -401,9 +409,19 @@ export function App() {
             <div className="brand-subtitle">local agent</div>
           </div>
         </div>
-        <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
+        <nav className="view-tabs" aria-label="View">
+          <button type="button" aria-pressed={view === 'chat'} onClick={() => setView('chat')}>
+            Chat
+          </button>
+          <button type="button" aria-pressed={view === 'usage'} onClick={() => setView('usage')}>
+            Usage
+          </button>
+        </nav>
+        {view === 'chat' && (
+          <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
+        )}
         <span className="spacer" />
-        {session && (
+        {view === 'chat' && session && (
           <div className="session-chip" title={session.id}>
             <span>{session.name ?? sessionLabel(session.id)}</span>
             <strong>{workspaceName(session.workspace)}</strong>
@@ -422,19 +440,21 @@ export function App() {
         </div>
       )}
       <main className="workspace-shell">
-        <TranscriptView items={items} activeSession={session !== null} />
+        {view === 'usage' ? <UsageView onError={fail} /> : <TranscriptView items={items} activeSession={session !== null} />}
       </main>
-      {session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
-      <Composer
-        key={session?.id ?? 'closed'}
-        disabled={!session}
-        running={turnId !== null}
-        compacting={compacting}
-        onSend={send}
-        onCancel={cancel}
-        onCompact={compact}
-      />
-      <Footer info={info} session={session} turnUsage={turnUsage} />
+      {view === 'chat' && session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
+      {view === 'chat' && (
+        <Composer
+          key={session?.id ?? 'closed'}
+          disabled={!session}
+          running={turnId !== null}
+          compacting={compacting}
+          onSend={send}
+          onCancel={cancel}
+          onCompact={compact}
+        />
+      )}
+      <Footer info={info} session={session} turnUsage={turnUsage} recordedUsage={recordedUsage} />
     </div>
   )
 }

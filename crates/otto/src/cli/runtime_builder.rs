@@ -312,6 +312,7 @@ pub struct Runner {
     agent: Agent<ProviderClient, Registry, SharedSession>,
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
+    usage: Option<crate::usage::Collector>,
     /// The sub-agent task registry, absent when sub-agents are off. Port of
     /// Go's `taskOwner`: `/tasks` and `/task` read the active runner's.
     pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
@@ -327,7 +328,8 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        self.agent.run(user_text, emit, cancel).await
+        let mut emit = self.collecting(emit);
+        self.agent.run(user_text, &mut emit, cancel).await
     }
 
     pub async fn run_with_image(
@@ -337,8 +339,9 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let mut emit = self.collecting(emit);
         self.agent
-            .run_with_image(user_text, Some(image), emit, cancel)
+            .run_with_image(user_text, Some(image), &mut emit, cancel)
             .await
     }
 
@@ -349,7 +352,20 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<CompactionResult, AgentError> {
-        self.agent.compact(focus, emit, cancel).await
+        let mut emit = self.collecting(emit);
+        self.agent.compact(focus, &mut emit, cancel).await
+    }
+
+    fn collecting<'a>(
+        &'a self,
+        emit: EventSink<'a>,
+    ) -> impl FnMut(otto_core::agent::Event) + Send + use<'a> {
+        move |event| {
+            if let Some(usage) = &self.usage {
+                let _ = usage.record(&event);
+            }
+            emit(event);
+        }
     }
 
     pub fn session(&self) -> &SharedSession {
@@ -410,6 +426,7 @@ impl Runner {
             ),
             system_prompt: String::new(),
             definitions,
+            usage: None,
             tasks: Some(tasks),
             skills: Catalog::default(),
         }
@@ -448,9 +465,53 @@ pub struct Builder {
     /// The process-wide memory service and its two scopes. Default is Go's
     /// zero value: a null service reporting memory as disabled.
     pub memory: super::wiring::MemoryWiring,
+    /// Process-wide append-only token usage storage. `None` keeps usage
+    /// collection from affecting an otherwise usable runtime.
+    pub usage: Option<Arc<crate::usage::Store>>,
 }
 
 impl Builder {
+    pub fn usage_summary(&self, session_id: Option<&str>) -> Result<crate::usage::Summary, String> {
+        match &self.usage {
+            Some(store) => store.summary(session_id).map_err(|error| error.to_string()),
+            None => Ok(crate::usage::Summary::default()),
+        }
+    }
+
+    pub fn usage_analysis(
+        &self,
+        days: u16,
+        session_id: Option<&str>,
+    ) -> Result<crate::usage::Analysis, String> {
+        match &self.usage {
+            Some(store) => store
+                .daily(days, session_id)
+                .map_err(|error| error.to_string()),
+            None => crate::usage::Analysis::empty(days).map_err(|error| error.to_string()),
+        }
+    }
+
+    pub(crate) fn usage_collector(
+        &self,
+        session: &SharedSession,
+        runtime: &Runtime,
+    ) -> Option<crate::usage::Collector> {
+        self.usage.as_ref().map(|store| {
+            let header = session.header();
+            crate::usage::Collector::new(
+                Arc::clone(store),
+                crate::usage::Context {
+                    workspace: header.workspace,
+                    session_id: header.id,
+                    provider: runtime.provider.clone(),
+                    profile: runtime.profile.clone(),
+                    model: runtime.model.clone(),
+                    task_id: String::new(),
+                },
+            )
+        })
+    }
+
     pub fn boundary_inputs(&self) -> BoundaryInputs<'_> {
         BoundaryInputs {
             sandbox_secrets: &self.sandbox_secrets,
@@ -731,6 +792,7 @@ impl Builder {
             agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
             system_prompt,
             definitions,
+            usage: self.usage_collector(session, runtime),
             tasks: subagents.tasks,
             skills: catalogs.skills.clone(),
         })
@@ -970,6 +1032,7 @@ mod tests {
             sandbox_secrets: Vec::new(),
             sandbox_secrets_complete: true,
             memory: Default::default(),
+            usage: None,
         }
     }
 
@@ -1296,5 +1359,36 @@ mod tests {
             })
             .expect("update runtime");
         assert_eq!(session.header().model, "gpt-next");
+    }
+
+    #[test]
+    fn usage_collector_is_bound_to_the_runtime_and_session() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut builder = builder(dir.path());
+        let store = Arc::new(crate::usage::Store::open_in_memory().expect("usage store"));
+        builder.usage = Some(Arc::clone(&store));
+        let runtime = runtime();
+        let session = SharedSession::memory(Header {
+            id: "session-1".into(),
+            workspace: builder.workspace_path.clone(),
+            ..Header::default()
+        });
+
+        builder
+            .usage_collector(&session, &runtime)
+            .expect("collector")
+            .record(&otto_core::agent::Event::ProviderUsage {
+                usage: otto_core::model::Usage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cached_input_tokens: 4,
+                },
+                present: true,
+            })
+            .expect("record");
+
+        let summary = store.summary(Some("session-1")).expect("summary");
+        assert_eq!(summary.input_tokens, 10);
+        assert_eq!(summary.cached_input_tokens, 4);
     }
 }

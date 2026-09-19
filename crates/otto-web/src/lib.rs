@@ -102,8 +102,10 @@ export interface TurnSummary {
 }
 
 export interface Block {
-  type: 'text' | 'tool_call' | 'tool_result'
+  type: 'text' | 'image' | 'tool_call' | 'tool_result'
   text?: string
+  data?: string
+  mime_type?: string
   tool_call_id?: string
   tool_name?: string
   arguments?: unknown

@@ -32,7 +32,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::routing::{get, post};
 use otto_core::agent::inbox::Notification;
-use otto_core::model::{Message, Usage};
+use otto_core::model::{Block, MAX_IMAGE_BYTES, Message, Usage};
 use otto_core::session::ListResult;
 use otto_core::wire::sse::format_frame;
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,7 @@ use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 /// Go's `server.ErrSessionNotFound`. A [`Factory::open`] that answers with
 /// exactly this text produces 404 `not_found` instead of 500.
 pub const SESSION_NOT_FOUND: &str = "session not found";
+const IMAGE_TURN_BODY_MAX_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 4096;
 
 /// The embedded API description. Served verbatim at `GET /v1/openapi.yaml`,
 /// read from the shared fixture at the repository root so the server and the
@@ -366,7 +367,10 @@ impl Server {
                 "/v1/sessions/{id}/approvals/{approval_id}",
                 post(approvals::approve),
             )
-            .route("/v1/sessions/{id}/turns", post(start_turn))
+            .route(
+                "/v1/sessions/{id}/turns",
+                post(start_turn).layer(DefaultBodyLimit::max(IMAGE_TURN_BODY_MAX_BYTES)),
+            )
             .route("/v1/sessions/{id}/turns/{turn_id}", get(get_turn))
             .route("/v1/sessions/{id}/turns/{turn_id}/events", get(turn_events))
             .route(
@@ -664,6 +668,7 @@ impl Server {
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
         text: String,
+        image: Option<Block>,
     ) -> Result<Arc<Turn>, String> {
         let turn = {
             let mut state = session.lock();
@@ -686,7 +691,15 @@ impl Server {
             let cancel = spawned.cancel_token();
             let result = {
                 let mut emit = spawned.emitter(&server.metrics);
-                session.ctrl.prompt(&text, &mut emit, &cancel).await
+                match image {
+                    Some(image) => {
+                        session
+                            .ctrl
+                            .prompt_with_image(&text, image, &mut emit, &cancel)
+                            .await
+                    }
+                    None => session.ctrl.prompt(&text, &mut emit, &cancel).await,
+                }
             };
             let (error, canceled) = match &result {
                 Ok(()) => (None, false),
@@ -1154,6 +1167,16 @@ struct StartTurnBody {
     text: String,
     #[serde(default)]
     stream: Option<bool>,
+    #[serde(default)]
+    image: Option<StartTurnImage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StartTurnImage {
+    #[serde(default)]
+    data: String,
+    #[serde(default)]
+    mime_type: String,
 }
 
 async fn start_turn(
@@ -1173,9 +1196,18 @@ async fn start_turn(
     if parsed.text.trim().is_empty() {
         return bad_request("text must not be empty");
     }
+    let image = parsed
+        .image
+        .map(|image| Block::image(image.data, image.mime_type));
+    if image
+        .as_ref()
+        .is_some_and(|image| image.validate().is_err())
+    {
+        return bad_request("image is invalid");
+    }
     let stream = parsed.stream.unwrap_or(true);
 
-    let turn = match server.start_turn(&session, parsed.text) {
+    let turn = match server.start_turn(&session, parsed.text, image) {
         Ok(turn) => turn,
         Err(error) if error == TURN_ACTIVE => {
             return turn_active("a turn is already active for this session");
@@ -2214,6 +2246,47 @@ mod tests {
         assert_eq!(summary["status"], turn::TURN_OK);
         assert_eq!(summary["text"], "ok");
         assert!(summary["finished_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn posting_an_image_persists_it_with_the_user_prompt() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(
+                    r#"{"text":"read it","image":{"data":"iVBORw0KGgo=","mime_type":"image/png"},"stream":false}"#,
+                ),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+        let history = harness
+            .send("GET", &format!("/v1/sessions/{id}/history"), None)
+            .await
+            .json();
+        assert_eq!(history[0]["blocks"][1]["type"], "image");
+        assert_eq!(history[0]["blocks"][1]["mime_type"], "image/png");
+        assert_eq!(history[0]["blocks"][1]["data"], "iVBORw0KGgo=");
+    }
+
+    #[tokio::test]
+    async fn posting_a_malformed_image_is_a_bad_request() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(
+                    r#"{"text":"read it","image":{"data":"/9j/","mime_type":"image/png"},"stream":false}"#,
+                ),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(reply.json()["error"]["message"], "image is invalid");
     }
 
     #[tokio::test]

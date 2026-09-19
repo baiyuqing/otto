@@ -293,6 +293,42 @@ button.danger {
   padding: 8px;
   border-top: 1px solid var(--line);
 }
+
+.image-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 6px 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.image-picker input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.image-picker:focus-within { border-color: var(--accent); color: var(--accent); }
+.image-picker.disabled { cursor: not-allowed; opacity: 0.45; }
+
+.image-attachment {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.image-attachment button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
 .composer-hint { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; font-family: var(--mono); }
 .footer {
   display: flex;

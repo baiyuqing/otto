@@ -106,6 +106,7 @@ impl Picker {
 pub(crate) enum Action {
     Exit,
     Prompt(String),
+    Image(String),
     Compact(String),
     NewSession,
     SwitchProfile(String),
@@ -694,6 +695,14 @@ impl App {
                 None
             }
             SlashCommandKind::Compact => Some(Action::Compact(args)),
+            SlashCommandKind::Image => {
+                if args.is_empty() {
+                    self.push_system("usage: /image <path>");
+                    None
+                } else {
+                    Some(Action::Image(args))
+                }
+            }
             SlashCommandKind::Model => {
                 if !controller.dynamic_content() {
                     self.push_system(format!("/model: {PROFILE_SWITCH_UNAVAILABLE}"));
@@ -1346,6 +1355,23 @@ mod tests {
         assert!(
             detail.contains("Use small focused Rust changes."),
             "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_command_attaches_a_path_for_the_next_prompt() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+
+        let action = app.dispatch_line(
+            "/image /tmp/screenshot with spaces.png",
+            &controller,
+            &CancellationToken::new(),
+        );
+        assert!(
+            matches!(action, Some(Action::Image(path)) if path == "/tmp/screenshot with spaces.png")
         );
     }
 

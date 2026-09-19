@@ -467,6 +467,8 @@ fn pi_message_to_context_message(
             message.blocks = vec![Block {
                 block_type: BlockType::ToolResult,
                 text,
+                data: String::new(),
+                mime_type: String::new(),
                 tool_call_id: wire.tool_call_id.clone(),
                 tool_name: wire.tool_name.clone(),
                 arguments: None,
@@ -559,13 +561,28 @@ fn pi_context_text_and_tool_blocks(message: &PiMessage, role: Role) -> Result<Ve
                 blocks.push(Block {
                     block_type: BlockType::ToolCall,
                     text: String::new(),
+                    data: String::new(),
+                    mime_type: String::new(),
                     tool_call_id: block.id.clone(),
                     tool_name: block.name.clone(),
                     arguments: block.arguments.clone(),
                     is_error: false,
                 });
             }
-            "image" | "thinking" => {
+            "image" => {
+                if role != Role::User {
+                    return Err(PiError::new(
+                        PiErrorKind::UnsupportedContent,
+                        "image content is incompatible with message role",
+                    ));
+                }
+                let image = Block::image(block.data.clone(), block.mime_type.clone());
+                image
+                    .validate()
+                    .map_err(|_| PiError::invalid("image content is malformed"))?;
+                blocks.push(image);
+            }
+            "thinking" => {
                 return Err(PiError::new(
                     PiErrorKind::UnsupportedContent,
                     "Pi message content is not supported by Otto",
@@ -931,6 +948,19 @@ fn model_blocks_to_pi_content(role: Role, blocks: &[Block]) -> Result<Box<RawVal
                 content.push(PiContentBlock {
                     type_name: "text".into(),
                     text: block.text.clone(),
+                    ..PiContentBlock::default()
+                });
+            }
+            BlockType::Image => {
+                if role != Role::User {
+                    return Err(PiError::invalid(
+                        "image content is incompatible with message role",
+                    ));
+                }
+                content.push(PiContentBlock {
+                    type_name: "image".into(),
+                    data: block.data.clone(),
+                    mime_type: block.mime_type.clone(),
                     ..PiContentBlock::default()
                 });
             }
@@ -1635,16 +1665,18 @@ mod tests {
         assert_eq!(error.kind(), PiErrorKind::Invalid);
     });
 
-    test!(build_context_rejects_an_image_on_the_active_branch_only {
+    test!(build_context_keeps_an_image_on_the_active_branch_only {
         let root = user_entry("10000001", None, "root");
         let image = decode_entry(
-            r#"{"type":"message","id":"10000002","parentId":"10000001","timestamp":"2026-08-27T12:00:02Z","message":{"role":"user","content":[{"type":"image","data":"aW1hZ2U=","mimeType":"image/png"}],"timestamp":2}}"#,
+            r#"{"type":"message","id":"10000002","parentId":"10000001","timestamp":"2026-08-27T12:00:02Z","message":{"role":"user","content":[{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}],"timestamp":2}}"#,
         );
         let text = user_entry("10000003", Some("10000001"), "text leaf");
         let entries = vec![root, image, text];
 
-        let error = build_context(&entries, "10000002").expect_err("image accepted");
-        assert_eq!(error.kind(), PiErrorKind::UnsupportedContent);
+        let (context, _) = build_context(&entries, "10000002").expect("build image context");
+        assert_eq!(context.messages.len(), 2);
+        assert_eq!(context.messages[1].blocks[0].block_type, BlockType::Image);
+        assert_eq!(context.messages[1].blocks[0].mime_type, "image/png");
         let (context, _) = build_context(&entries, "10000003").expect("build context");
         assert_eq!(texts(&context.messages), ["root", "text leaf"]);
     });

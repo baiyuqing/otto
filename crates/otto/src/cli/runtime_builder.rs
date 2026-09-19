@@ -22,7 +22,7 @@ use otto_core::agent::{
 };
 use otto_core::config::resolve::{Overrides, Runtime, SessionDefaults};
 use otto_core::config::{ConfigError, File};
-use otto_core::model::{Message, ToolDefinition};
+use otto_core::model::{Block, Message, ToolDefinition};
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, MemorySession,
@@ -328,6 +328,18 @@ impl Runner {
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
         self.agent.run(user_text, emit, cancel).await
+    }
+
+    pub async fn run_with_image(
+        &self,
+        user_text: &str,
+        image: Block,
+        emit: EventSink<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<(), AgentError> {
+        self.agent
+            .run_with_image(user_text, Some(image), emit, cancel)
+            .await
     }
 
     /// Compacts the transcript. Port of `app.Runner.Compact`.

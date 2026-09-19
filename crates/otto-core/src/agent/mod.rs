@@ -225,15 +225,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return self.run_with_incomplete_redactions(emit, cancel);
         }
         let text = trim_go_space(user_text);
-        if text.is_empty() && self.options.inbox.is_empty() {
+        if text.is_empty() && image.is_none() && self.options.inbox.is_empty() {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
         emit(Event::AgentStarted);
 
         let mut state = RunDispatchState::default();
-        if !text.is_empty() {
+        if !text.is_empty() || image.is_some() {
             let redacted = self.redactor.redact_string(user_text);
-            let mut blocks = vec![Block::text(redacted.clone())];
+            let mut blocks = Vec::new();
+            if !text.is_empty() {
+                blocks.push(Block::text(redacted.clone()));
+            }
             blocks.extend(image);
             let user = Message {
                 id: (self.options.new_id)(),
@@ -251,7 +254,9 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     },
                 ));
             }
-            if let Some(binding) = &self.options.memory {
+            if !text.is_empty()
+                && let Some(binding) = &self.options.memory
+            {
                 let request = memory::RecallRequest {
                     query: redacted,
                     limit: self.options.memory_recall_limit,

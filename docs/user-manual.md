@@ -33,8 +33,8 @@ what the CLI actually does today.
 ## Prerequisites
 
 - macOS.
-- The pinned Rust 1.98 toolchain and Node 24+ to build from source (see
-  [Install from source](../README.md#install-from-source)).
+- The pinned Rust 1.98 toolchain, Node 24+, and `wasm-pack` 0.15 to build from
+  source (see [Install from source](../README.md#install-from-source)).
 - One of:
   - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming, plus an API key exposed through an environment variable, or
   - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription)).
@@ -822,8 +822,9 @@ machine.
 ### Web UI
 
 `GET /` serves the browser UI built by `make ui` and embedded into the
-binary, and `GET /assets/` its static files. A binary built without running
-`make ui` answers `/` with the plain-text line `Web UI not built; run make ui`.
+binary, and `GET /assets/` its static files. `make build` refreshes the UI
+first; a direct `cargo build` without running `make ui` answers `/` with the
+plain-text line `Web UI not built; run make ui`.
 `--open` opens that URL in the default browser; otherwise open the printed
 URL yourself. The page moves the token from the query string into the tab's
 `sessionStorage`, removes it from the address bar, and sends it as the
@@ -850,9 +851,10 @@ the transcript, and a composer:
   `mermaid` code blocks. Each tool call is a collapsible block with its
   arguments and result.
 - **Image** selects one PNG, JPEG, or WebP image; pasting a screenshot selects
-  it too. Sending stores the original image with the prompt in session history
-  and shows it in the transcript, including after resume. The provider receives
-  it with `detail: high`.
+  it too. The composer shows a preview, and the image can be sent without text.
+  Sending stores the original image with the prompt in session history and
+  shows it in the transcript, including after resume. The provider receives it
+  with `detail: high`.
 - While a turn runs the composer is disabled and a **Cancel** button calls
   `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
 - Reloading the page during a turn re-attaches to the running turn's event
@@ -887,7 +889,7 @@ are served at the root. Request and error bodies are JSON.
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
 | `GET /v1/sessions/{id}/history` | Return the session's message history. |
-| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`). `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
+| `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |

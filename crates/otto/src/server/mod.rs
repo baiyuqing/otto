@@ -1193,7 +1193,7 @@ async fn start_turn(
         Ok(parsed) => parsed,
         Err(_) => return bad_request("invalid JSON body"),
     };
-    if parsed.text.trim().is_empty() {
+    if parsed.text.trim().is_empty() && parsed.image.is_none() {
         return bad_request("text must not be empty");
     }
     let image = parsed
@@ -2272,6 +2272,29 @@ mod tests {
         assert_eq!(history[0]["blocks"][1]["type"], "image");
         assert_eq!(history[0]["blocks"][1]["mime_type"], "image/png");
         assert_eq!(history[0]["blocks"][1]["data"], "iVBORw0KGgo=");
+    }
+
+    #[tokio::test]
+    async fn posting_an_image_without_text_starts_a_turn() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(
+                    r#"{"text":"","image":{"data":"iVBORw0KGgo=","mime_type":"image/png"},"stream":false}"#,
+                ),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+        let history = harness
+            .send("GET", &format!("/v1/sessions/{id}/history"), None)
+            .await
+            .json();
+        assert_eq!(history[0]["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(history[0]["blocks"][0]["type"], "image");
     }
 
     #[tokio::test]

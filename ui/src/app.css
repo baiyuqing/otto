@@ -321,10 +321,13 @@ button.danger {
 .image-attachment {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   color: var(--muted);
   font-size: 0.85rem;
 }
+
+.image-attachment img { width: 64px; height: 64px; border-radius: var(--radius); object-fit: contain; }
+.image-attachment span { flex: 1; }
 
 .image-attachment button {
   border: 0;

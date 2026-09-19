@@ -33,7 +33,7 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n";
+const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
 /// Commands `internal/repl` has that this phase does not.
 const UNPORTED: [&str; 0] = [];
@@ -414,6 +414,17 @@ impl<'a> Repl<'a> {
                         break 'dispatch None;
                     }
                     super::login::repl_logout(self.controller, &mut *self.stdout, cancel)?;
+                    Some(false)
+                }
+                "mcp" => {
+                    super::repl_commands::repl_mcp_command(
+                        self.controller,
+                        args,
+                        &mut *self.stdout,
+                        &mut *self.stderr,
+                        cancel,
+                    )
+                    .await?;
                     Some(false)
                 }
                 "memory" => {

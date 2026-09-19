@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 mod gourl;
 pub mod inbound;
+pub mod mcp;
 pub mod memory;
 pub mod provider;
 pub mod sandbox;

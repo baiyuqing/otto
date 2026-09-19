@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app::Controller;
 use crate::cli::login;
 use crate::cli::repl::{Error as ReplError, is_fatal_persistence};
+use crate::cli::repl_commands;
 use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
@@ -319,6 +320,9 @@ async fn run_app<B: Backend>(
             },
             Some(Action::Login(args)) => {
                 login_dispatch(&mut app, controller, &args, cancel).await;
+            }
+            Some(Action::McpLogin(name)) => {
+                mcp_login_dispatch(&mut app, controller, &name, cancel).await;
             }
         }
 
@@ -694,6 +698,43 @@ async fn login_dispatch(
             }
         }
         Err(error) => app.push_system(format!("/login: {error}")),
+    }
+}
+
+/// Port of `/mcp login <server>` dispatch: reuses [`repl_commands::repl_mcp_command`]
+/// against captured buffers, matching [`login_dispatch`] above.
+async fn mcp_login_dispatch(
+    app: &mut App,
+    controller: &Controller,
+    name: &str,
+    cancel: &CancellationToken,
+) {
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let result = repl_commands::repl_mcp_command(
+        controller,
+        &format!("login {name}"),
+        &mut out,
+        &mut err,
+        cancel,
+    )
+    .await;
+    let mut text = String::from_utf8_lossy(&out).trim_end().to_string();
+    let err_text = String::from_utf8_lossy(&err);
+    let err_text = err_text.trim_end();
+    if !err_text.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(err_text);
+    }
+    match result {
+        Ok(()) => {
+            if !text.is_empty() {
+                app.push_system(text);
+            }
+        }
+        Err(error) => app.push_system(format!("/mcp login: {error}")),
     }
 }
 

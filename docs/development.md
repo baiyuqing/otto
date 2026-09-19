@@ -26,7 +26,8 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `cli`: composition root, flag parsing, process lifecycle, signal handling, the REPL, and concrete dependency injection
   - `app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
   - `session`: native JSONL session storage built on `otto_core::session`
-  - `tool`: native execution of workspace-confined `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, and in-process `remind`
+  - `tool`: native execution of workspace-confined `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, in-process `remind`, and the MCP tool adapter (`tool::mcp`) that presents one external server's tools to the model
+  - `mcp`: the JSON-RPC codec, the stdio and HTTP transports, OAuth 2.1 sign-in for HTTP servers, and the per-server client that negotiates the protocol era and serves `tools/list`/`tools/call`
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers
   - `provider`: native HTTP transports for the two provider implementations
   - `auth`: ChatGPT OAuth sign-in (`otto login`/`otto logout`), credential storage at `~/.otto/auth/chatgpt.json`, and access-token refresh
@@ -71,6 +72,24 @@ tasks only through the shared task-lister facade; children never receive
 persisted. Definitions cannot add tools outside the child tool set; `tools`
 only narrows it. `[agents]` is TOML only, like `[skills]`. Do not document
 `agent_send`/`agent_cancel`/`agent_report` as working features.
+
+Keep `crates/otto`'s `mcp` module behind `crate::mcp`'s client, transport, and
+OAuth types; `crate::tool::mcp` (the model-facing tool adapter) and
+`Builder::connect_mcp` in `crates/otto/src/cli/wiring.rs` are the only two
+callers that construct a server connection. `connect_mcp` connects every
+enabled server when the runner is built; a disabled, failed, or
+sign-in-required server is reported as a warning and never blocks the runner
+from starting. `ServerState::NeedsLogin` marks an HTTP server using OAuth
+whose token is missing or cannot be refreshed. `/mcp` (REPL and TUI) and
+`otto mcp login|logout` in `crates/otto/src/cli/mcp.rs` are the only sign-in
+surfaces; a completed sign-in still requires restarting Otto to pick up the
+new token. A stdio server that exits stays connected until Otto restarts;
+there is no restart policy. Keep MCP transport tests offline: only a
+nonexistent stdio command (reaching `ServerState::Failed`) and a disabled
+server (reaching `ServerState::Disabled`) exercise the real connect path in
+tests; cover the other states through pure functions such as
+`format_mcp_report` with hand-built `ServerStatus` fixtures instead of a real
+server or OAuth round-trip.
 
 ## Core contracts
 

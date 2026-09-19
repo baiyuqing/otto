@@ -19,10 +19,14 @@
 
 use std::fmt::Write as _;
 use std::io::Write;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use otto_core::config::{McpAuth, McpTransport};
+use tokio_util::sync::CancellationToken;
 
+use crate::mcp::{Era, ServerState};
 use crate::memory::{
     ForgetRequest, RecordRef, RememberRequest, Scope, SearchRequest, SearchResult, Service,
 };
@@ -31,6 +35,7 @@ use crate::subagent::format::{task_line, task_steps};
 use crate::subagent::tasks::Tasks;
 
 use super::controller::Controller;
+use super::login::{SharedWriter, browser_opener};
 use super::repl::{Error, Repl};
 
 /// Go's `app.MemorySearchLimit` and `app.MemorySearchTokenBudget`.
@@ -54,6 +59,7 @@ const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
 /// them. [`super::super::tui`] prints the same line for the same input.
 pub(crate) const TASK_USAGE: &str = "usage: /task <id|name> | /task cancel <id|name>";
 pub(crate) const SKILL_USAGE: &str = "usage: /skill <name>";
+pub(crate) const MCP_USAGE: &str = "usage: /mcp | /mcp login <server>";
 
 impl Controller {
     /// Port of `app.MemoryManagerAndScopes`: the bound service and its two
@@ -164,6 +170,132 @@ pub(crate) fn skill_report(controller: &Controller, args: &str) -> String {
             body.trim_end()
         ),
         Err(error) => format!("skill {name}: {error}"),
+    }
+}
+
+/// Port of `/mcp`: one line per configured server, in configuration order.
+pub(crate) fn mcp_report(controller: &Controller) -> String {
+    format_mcp_report(&controller.mcp())
+}
+
+/// The formatting `mcp_report` applies to `Controller::mcp`'s status rows.
+/// A free function so the per-state line format has a test that does not
+/// need a runner with a real MCP server behind it.
+fn format_mcp_report(servers: &[crate::mcp::ServerStatus]) -> String {
+    if servers.is_empty() {
+        return "No MCP servers configured.".to_string();
+    }
+    let mut out = "MCP servers:".to_string();
+    for server in servers {
+        let era = match &server.era {
+            Some(Era::Modern) => "modern".to_string(),
+            Some(Era::Legacy(version)) => format!("legacy {version}"),
+            None => "-".to_string(),
+        };
+        let state = match &server.state {
+            ServerState::Connected { tools } => format!("connected ({tools} tools)"),
+            ServerState::Disabled => "disabled".to_string(),
+            ServerState::NeedsLogin => "needs login".to_string(),
+            ServerState::Failed(message) => format!("failed: {message}"),
+        };
+        let _ = write!(
+            out,
+            "\n- {}: {} ({}, {})",
+            server.name, state, server.transport, era
+        );
+    }
+    out
+}
+
+/// Runs the OAuth flow for one configured HTTP server and persists its
+/// token. Port of `/mcp login <server>`.
+async fn mcp_login(
+    controller: &Controller,
+    name: &str,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    if !controller.dynamic_content() {
+        let _ = writeln!(stdout, "MCP sign-in is unavailable in this session");
+        return Ok(());
+    }
+    let builder = controller.builder();
+    let Some(server) = builder
+        .mcp
+        .servers
+        .iter()
+        .find(|server| server.name == name)
+    else {
+        let _ = writeln!(stderr, "unknown MCP server: {name}");
+        return Ok(());
+    };
+    let McpTransport::Http {
+        url,
+        auth,
+        oauth_client_id,
+        oauth_scopes,
+        ..
+    } = &server.transport
+    else {
+        let _ = writeln!(
+            stderr,
+            "{name} is a stdio server; MCP login only applies to HTTP servers with OAuth"
+        );
+        return Ok(());
+    };
+    if *auth != McpAuth::OAuth {
+        let _ = writeln!(stderr, "{name} does not use OAuth; no login is required");
+        return Ok(());
+    }
+    let token_path = crate::mcp::oauth::token_path(Path::new(&builder.home), name);
+    let shared: SharedWriter<'_> = Mutex::new(stdout);
+    let opener = browser_opener(&shared);
+    let request = crate::mcp::oauth::LoginRequest {
+        server: name,
+        url,
+        client_id: oauth_client_id.as_deref(),
+        scopes: oauth_scopes,
+        ports: &crate::auth::oauth::LOOPBACK_PORTS,
+        token_path: &token_path,
+    };
+    let result = crate::mcp::oauth::login(request, cancel, &opener).await;
+    drop(opener);
+    let stdout = shared
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner());
+    match result {
+        Ok(()) => {
+            let _ = writeln!(
+                stdout,
+                "Signed in to {name}. Restart Otto to use the new credentials."
+            );
+            Ok(())
+        }
+        Err(error) => Err(command_error("/mcp login", error)),
+    }
+}
+
+/// Port of `/mcp` / `/mcp login <server>`. A free function, rather than a
+/// `Repl` method, for the same reason as [`repl_memory_command`].
+pub(crate) async fn repl_mcp_command(
+    controller: &Controller,
+    args: &str,
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    let fields: Vec<&str> = args.split_whitespace().collect();
+    match fields.as_slice() {
+        [] => {
+            let _ = writeln!(stdout, "{}", mcp_report(controller));
+            Ok(())
+        }
+        ["login", name] => mcp_login(controller, name, stdout, stderr, cancel).await,
+        _ => {
+            let _ = writeln!(stderr, "{MCP_USAGE}");
+            Ok(())
+        }
     }
 }
 
@@ -509,6 +641,207 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_empty_server_list_reports_none_configured() {
+        assert_eq!(format_mcp_report(&[]), "No MCP servers configured.");
+    }
+
+    #[test]
+    fn each_server_state_and_era_renders_its_own_line() {
+        use crate::mcp::ServerStatus;
+
+        let servers = vec![
+            ServerStatus {
+                name: "docs".to_string(),
+                transport: "http",
+                era: Some(Era::Modern),
+                state: ServerState::Connected { tools: 3 },
+            },
+            ServerStatus {
+                name: "legacy-tool".to_string(),
+                transport: "http",
+                era: Some(Era::Legacy("2025-11-25".to_string())),
+                state: ServerState::NeedsLogin,
+            },
+            ServerStatus {
+                name: "shell".to_string(),
+                transport: "stdio",
+                era: None,
+                state: ServerState::Disabled,
+            },
+            ServerStatus {
+                name: "broken".to_string(),
+                transport: "stdio",
+                era: None,
+                state: ServerState::Failed("spawn failed: not found".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            format_mcp_report(&servers),
+            "MCP servers:\n\
+             - docs: connected (3 tools) (http, modern)\n\
+             - legacy-tool: needs login (http, legacy 2025-11-25)\n\
+             - shell: disabled (stdio, -)\n\
+             - broken: failed: spawn failed: not found (stdio, -)"
+        );
+    }
+
+    /// A controller whose builder carries the given MCP servers, each
+    /// reachable through `Controller::builder().mcp.servers` for `/mcp
+    /// login`'s validation without a real connection ever being attempted
+    /// (servers are `enabled: false`, so `connect_mcp` reports them as
+    /// `Disabled` instead of dialing out).
+    async fn controller_with_mcp_servers(
+        workspace: &Path,
+        sessions: &Path,
+        servers: Vec<otto_core::config::McpServerRuntime>,
+        dynamic_content: bool,
+    ) -> Controller {
+        let mut builder = testutil::builder(workspace, sessions);
+        builder.mcp = otto_core::config::McpRuntime {
+            enabled: true,
+            call_timeout_secs: 5,
+            connect_timeout_secs: 1,
+            servers,
+        };
+        let runtime = testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("session");
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let info = builder.runtime_info(&runtime);
+        Controller::new(builder, dynamic_content, session, runner, info)
+    }
+
+    fn stdio_server(name: &str) -> otto_core::config::McpServerRuntime {
+        otto_core::config::McpServerRuntime {
+            name: name.to_string(),
+            enabled: false,
+            transport: McpTransport::Stdio {
+                command: "otto-mcp-test-nonexistent-command".to_string(),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd: ".".to_string(),
+            },
+            secrets: Vec::new(),
+        }
+    }
+
+    fn http_server(name: &str, auth: McpAuth) -> otto_core::config::McpServerRuntime {
+        otto_core::config::McpServerRuntime {
+            name: name.to_string(),
+            enabled: false,
+            transport: McpTransport::Http {
+                url: "https://mcp.example.com".to_string(),
+                headers: Vec::new(),
+                auth,
+                oauth_client_id: None,
+                oauth_scopes: Vec::new(),
+            },
+            secrets: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_with_no_servers_reports_none_configured() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+
+        let (stdout, stderr) = session("/mcp\n/exit\n", &controller).await;
+        assert!(stderr.is_empty(), "{stderr}");
+        assert!(stdout.contains("No MCP servers configured."), "{stdout}");
+    }
+
+    #[tokio::test]
+    async fn mcp_with_malformed_arguments_prints_usage_on_stderr() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+
+        for input in ["/mcp bogus\n/exit\n", "/mcp login\n/exit\n"] {
+            let (_, stderr) = session(input, &controller).await;
+            assert!(stderr.contains(MCP_USAGE), "{input:?} -> {stderr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_login_for_an_unknown_server_reports_it_on_stderr() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller_with_mcp_servers(
+            workspace.path(),
+            sessions.path(),
+            vec![stdio_server("shell")],
+            true,
+        )
+        .await;
+
+        let (_, stderr) = session("/mcp login ghost\n/exit\n", &controller).await;
+        assert!(stderr.contains("unknown MCP server: ghost"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn mcp_login_for_a_stdio_server_reports_it_on_stderr() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller_with_mcp_servers(
+            workspace.path(),
+            sessions.path(),
+            vec![stdio_server("shell")],
+            true,
+        )
+        .await;
+
+        let (_, stderr) = session("/mcp login shell\n/exit\n", &controller).await;
+        assert!(
+            stderr.contains(
+                "shell is a stdio server; MCP login only applies to HTTP servers with OAuth"
+            ),
+            "{stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_login_for_a_non_oauth_http_server_reports_no_login_required() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller_with_mcp_servers(
+            workspace.path(),
+            sessions.path(),
+            vec![http_server("docs", McpAuth::None)],
+            true,
+        )
+        .await;
+
+        let (_, stderr) = session("/mcp login docs\n/exit\n", &controller).await;
+        assert!(
+            stderr.contains("docs does not use OAuth; no login is required"),
+            "{stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_login_is_unavailable_without_dynamic_content() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller_with_mcp_servers(
+            workspace.path(),
+            sessions.path(),
+            vec![http_server("docs", McpAuth::OAuth)],
+            false,
+        )
+        .await;
+
+        let (stdout, _) = session("/mcp login docs\n/exit\n", &controller).await;
+        assert!(
+            stdout.contains("MCP sign-in is unavailable in this session"),
+            "{stdout}"
+        );
+    }
+
     #[tokio::test]
     async fn the_help_text_lists_the_memory_and_task_commands() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -517,7 +850,7 @@ mod tests {
 
         let (stdout, _) = session("/help\n/exit\n", &controller).await;
 
-        for command in ["/memory", "/remember", "/tasks", "/task "] {
+        for command in ["/memory", "/remember", "/tasks", "/task ", "/mcp"] {
             assert!(stdout.contains(command), "{command} missing from {stdout}");
         }
     }

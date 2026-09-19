@@ -16,7 +16,12 @@ describe('web slash commands', () => {
     expect(parseWebCommand('/tasks')).toEqual({ kind: 'tasks' })
     expect(parseWebCommand('/task t1')).toEqual({ kind: 'task', id: 't1' })
     expect(parseWebCommand('/task cancel t1')).toEqual({ kind: 'taskCancel', id: 't1' })
+    expect(parseWebCommand('/mcp')).toEqual({ kind: 'mcp' })
     expect(parseWebCommand('/exit')).toEqual({ kind: 'exit' })
+  })
+
+  it('falls through to a prompt when /mcp has an argument', () => {
+    expect(parseWebCommand('/mcp x')).toEqual({ kind: 'prompt', text: '/mcp x' })
   })
 
   it('parses rename commands with a trimmed name', () => {
@@ -51,6 +56,7 @@ describe('web slash commands', () => {
       { name: '/approve', description: 'allow one exact elevated Bash command' },
       { name: '/tasks', description: 'list sub-agent tasks' },
       { name: '/task', description: 'show or cancel a sub-agent task' },
+      { name: '/mcp', description: 'list MCP servers and their state' },
       { name: '/exit', description: 'close the browser tab' },
     ])
     expect(webCommandSuggestions('/r')).toEqual([

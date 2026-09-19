@@ -181,27 +181,9 @@ impl Credentials {
         if !self.within_bounds() {
             return Err(AuthError::CredentialsPersistence);
         }
-        let directory = path.parent().ok_or(AuthError::CredentialsPersistence)?;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(directory)
-            .map_err(|_| AuthError::CredentialsPersistence)?;
         let data =
             serde_json::to_vec_pretty(self).map_err(|_| AuthError::CredentialsPersistence)?;
-        if data.len() > MAX_CREDENTIAL_FILE_BYTES {
-            return Err(AuthError::CredentialsPersistence);
-        }
-        let (temporary_path, mut temporary) = create_temp(directory)?;
-        let written = temporary
-            .write_all(&data)
-            .and_then(|()| temporary.sync_all());
-        drop(temporary);
-        if written.is_err() || std::fs::rename(&temporary_path, path).is_err() {
-            let _ = std::fs::remove_file(&temporary_path);
-            return Err(AuthError::CredentialsPersistence);
-        }
-        Ok(())
+        write_secret_file(path, &data)
     }
 
     /// Port of `credentialsWithinBounds`.
@@ -222,13 +204,41 @@ impl Credentials {
     }
 }
 
-/// Creates an exclusive `.chatgpt-*.tmp` file in `directory` with mode 0600,
-/// mirroring `os.CreateTemp` plus the `Chmod(0o600)` Go applies to it. The
-/// suffix comes from `/dev/urandom` so the name cannot be pre-created.
+/// Writes `data` to `path` atomically: creates the parent directory (mode
+/// 0700, recursively), writes to a mode-0600 temp file in that directory,
+/// then renames it onto `path`. Extracted from `Credentials::save`, which
+/// this crate's ChatGPT credential file and the MCP OAuth token files
+/// (`mcp::oauth`) both use, so the two credential stores share one
+/// atomic-write implementation.
+pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<(), AuthError> {
+    if data.len() > MAX_CREDENTIAL_FILE_BYTES {
+        return Err(AuthError::CredentialsPersistence);
+    }
+    let directory = path.parent().ok_or(AuthError::CredentialsPersistence)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .map_err(|_| AuthError::CredentialsPersistence)?;
+    let (temporary_path, mut temporary) = create_temp(directory)?;
+    let written = temporary
+        .write_all(data)
+        .and_then(|()| temporary.sync_all());
+    drop(temporary);
+    if written.is_err() || std::fs::rename(&temporary_path, path).is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(AuthError::CredentialsPersistence);
+    }
+    Ok(())
+}
+
+/// Creates an exclusive `.otto-secret-*.tmp` file in `directory` with mode
+/// 0600, mirroring `os.CreateTemp` plus the `Chmod(0o600)` Go applies to it.
+/// The suffix comes from `/dev/urandom` so the name cannot be pre-created.
 fn create_temp(directory: &Path) -> Result<(PathBuf, File), AuthError> {
     for _ in 0..100 {
         let suffix = random_hex::<8>().map_err(|_| AuthError::CredentialsPersistence)?;
-        let candidate = directory.join(format!(".chatgpt-{suffix}.tmp"));
+        let candidate = directory.join(format!(".otto-secret-{suffix}.tmp"));
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -437,6 +447,25 @@ mod tests {
             .filter(|name| name != "chatgpt.json")
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// `write_secret_file` is the extracted body `Credentials::save` now
+    /// calls; it must produce the same 0700/0600 permissions on its own,
+    /// independent of the `Credentials` type.
+    #[test]
+    fn write_secret_file_uses_owner_only_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested").join("token.json");
+        write_secret_file(&path, b"{}").unwrap();
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "file mode {file_mode:o}");
+        let directory_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(directory_mode, 0o700, "directory mode {directory_mode:o}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
     }
 
     /// Port of `TestLoadMissingReturnsErrNoCredentials`.

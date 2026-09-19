@@ -26,8 +26,8 @@ use std::sync::Arc;
 
 use otto_core::config::resolve::{Overrides, Runtime};
 use otto_core::config::{
-    File, SandboxSettings, UiMode, resolve_agents, resolve_memory, resolve_sandbox, resolve_server,
-    resolve_skills, resolve_ui_mode,
+    File, SandboxSettings, UiMode, resolve_agents, resolve_mcp, resolve_memory, resolve_sandbox,
+    resolve_server, resolve_skills, resolve_ui_mode,
 };
 use otto_core::session::{CURRENT_VERSION, Header, RuntimeMetadata};
 use tokio_util::sync::CancellationToken;
@@ -123,6 +123,19 @@ pub async fn run(
             cancel,
         )
         .await;
+    }
+    if let Some(first) = args.first()
+        && first == "mcp"
+    {
+        let host_entries = match capture_environment(environment_entries) {
+            Ok(entries) => entries,
+            Err(message) => return fail(stderr, &message),
+        };
+        let lookup = match environment_lookup(&host_entries) {
+            Ok(lookup) => lookup,
+            Err(message) => return fail(stderr, &message),
+        };
+        return super::mcp::run(&args[1..], stdout, stderr, &lookup, cancel).await;
     }
     if let Some(first) = args.first()
         && matches!(first.as_str(), "login" | "logout")
@@ -327,6 +340,10 @@ pub async fn run(
         Ok(config) => config,
         Err(error) => return fail(stderr, &error.to_string()),
     };
+    let mcp_config = match resolve_mcp(&config_file, &environment, &workspace_path) {
+        Ok(config) => config,
+        Err(error) => return fail(stderr, &error.to_string()),
+    };
     let usage = match crate::usage::Store::open(&Path::new(&home).join(".otto/usage.db")) {
         Ok(store) => Some(Arc::new(store)),
         Err(_) => {
@@ -342,6 +359,7 @@ pub async fn run(
         config_path: PathBuf::from(&config_path),
         config: config_file.clone(),
         environment: environment.clone(),
+        home: home.clone(),
         workspace,
         workspace_path: workspace_path.clone(),
         session_root: session_root.clone(),
@@ -359,6 +377,7 @@ pub async fn run(
         auth_credentials_loaded: captured_auth.loaded,
         memory: Default::default(),
         usage,
+        mcp: mcp_config,
     };
 
     let mut prepared_initial = None;

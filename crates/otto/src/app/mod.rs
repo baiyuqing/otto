@@ -446,6 +446,16 @@ impl Controller {
             .unwrap_or_default()
     }
 
+    /// The MCP server status rows for `/mcp`, in configuration order. Empty
+    /// for a closed controller.
+    pub fn mcp(&self) -> Vec<crate::mcp::ServerStatus> {
+        self.lock()
+            .current
+            .as_ref()
+            .map(|current| current.runner.mcp.status())
+            .unwrap_or_default()
+    }
+
     fn runner(&self) -> Result<Arc<Runner>, String> {
         self.lock()
             .current

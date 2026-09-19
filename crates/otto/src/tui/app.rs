@@ -115,6 +115,7 @@ pub(crate) enum Action {
     SandboxReload,
     Approve(String),
     Login(String),
+    McpLogin(String),
 }
 
 /// The composer's bash-style prompt history: the prompts the transcript
@@ -761,6 +762,20 @@ impl App {
                 }
             }
             SlashCommandKind::Login => Some(Action::Login(args)),
+            SlashCommandKind::Mcp => {
+                let fields: Vec<&str> = args.split_whitespace().collect();
+                match fields.as_slice() {
+                    [] => {
+                        self.push_system(repl_commands::mcp_report(controller));
+                        None
+                    }
+                    ["login", name] => Some(Action::McpLogin((*name).to_string())),
+                    _ => {
+                        self.push_system(repl_commands::MCP_USAGE);
+                        None
+                    }
+                }
+            }
             SlashCommandKind::Logout => {
                 if !args.is_empty() {
                     self.push_system(format!("unknown command: {line}"));
@@ -1355,6 +1370,30 @@ mod tests {
         assert!(
             detail.contains("Use small focused Rust changes."),
             "{detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_command_pushes_the_status_report_and_returns_a_login_action() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        app.dispatch_line("/mcp", &controller, &cancel);
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            "No MCP servers configured."
+        );
+
+        let action = app.dispatch_line("/mcp login docs", &controller, &cancel);
+        assert!(matches!(action, Some(Action::McpLogin(name)) if name == "docs"));
+
+        app.dispatch_line("/mcp bogus", &controller, &cancel);
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            repl_commands::MCP_USAGE
         );
     }
 

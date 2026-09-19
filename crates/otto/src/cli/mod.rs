@@ -11,6 +11,7 @@ pub use crate::app as controller;
 pub mod flags;
 pub mod info;
 pub mod login;
+pub mod mcp;
 pub mod memory_command;
 pub mod prompt;
 pub mod repl;

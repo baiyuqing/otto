@@ -14,6 +14,7 @@ const api = vi.hoisted(() => ({
   history: vi.fn(),
   attach: vi.fn(),
   listTasks: vi.fn(),
+  listMcp: vi.fn(),
 }))
 
 vi.mock('./api', async (importOriginal) => {
@@ -95,6 +96,7 @@ describe('idle wake follow', () => {
     api.getSession.mockResolvedValue(idle)
     api.history.mockResolvedValue(emptyHistory)
     api.listTasks.mockResolvedValue({ tasks: [] })
+    api.listMcp.mockResolvedValue({ servers: [] })
     api.attach.mockResolvedValue(new Response('', { headers: { 'Content-Type': 'text/event-stream' } }))
   })
 
@@ -165,5 +167,22 @@ describe('idle wake follow', () => {
       await Promise.resolve()
     })
     expect(api.usageDaily).toHaveBeenCalledWith(30)
+  })
+
+  it('lists MCP servers for the /mcp command', async () => {
+    await openIdleSession()
+    api.listMcp.mockResolvedValue({
+      servers: [{ name: 'docs', transport: 'http', protocol_version: '2026-07-28', state: 'connected', tools: 3, error: null }],
+    })
+
+    const input = screen.getByPlaceholderText('Message Otto…')
+    fireEvent.change(input, { target: { value: '/mcp' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(api.listMcp).toHaveBeenCalledWith('sess1')
+    expect(screen.getByText('docs: connected (3 tools) (http, 2026-07-28)')).toBeTruthy()
   })
 })

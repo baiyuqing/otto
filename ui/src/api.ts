@@ -23,6 +23,15 @@ export interface UsageAnalysis {
   daily: DailyUsage[]
 }
 
+export interface McpServer {
+  name: string
+  transport: string
+  protocol_version: string | null
+  state: string
+  tools: number
+  error: string | null
+}
+
 const TOKEN_KEY = 'otto.token'
 
 // loadToken takes the token from the startup URL's query string, keeps it
@@ -96,6 +105,7 @@ export const api = {
   getTurn: (id: string, turnId: string) => json<TurnSummary>(`/v1/sessions/${id}/turns/${turnId}`),
   cancelTurn: (id: string, turnId: string) => request(`/v1/sessions/${id}/turns/${turnId}/cancel`, { method: 'POST' }),
   listTasks: (id: string) => json<{ tasks: Task[] }>(`/v1/sessions/${id}/tasks`),
+  listMcp: (id: string) => json<{ servers: McpServer[] }>(`/v1/sessions/${id}/mcp`),
   getTask: (id: string, taskId: string) => json<TaskDetail>(`/v1/sessions/${id}/tasks/${taskId}`),
   cancelTask: (id: string, taskId: string) => request(`/v1/sessions/${id}/tasks/${taskId}/cancel`, { method: 'POST' }),
   reloadSandbox: () => json<Session['sandbox']>('/v1/sandbox/reload', { method: 'POST' }),

@@ -18,6 +18,7 @@ pub mod find;
 pub(crate) mod gopath;
 pub mod grep;
 pub mod ls;
+pub mod mcp;
 pub mod memory;
 pub mod read;
 pub mod registry;

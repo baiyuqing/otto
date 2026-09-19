@@ -14,6 +14,7 @@ pub mod approvals;
 pub mod auth;
 pub mod compact;
 pub mod listen;
+pub mod mcp;
 pub mod metrics;
 pub mod sandbox;
 pub mod tasks;
@@ -395,6 +396,7 @@ impl Server {
                 "/v1/sessions/{id}/tasks/{task_id}/cancel",
                 post(tasks::cancel),
             )
+            .route("/v1/sessions/{id}/mcp", get(mcp::list))
             .route("/v1/sandbox/reload", post(sandbox::reload))
             .route("/v1/info", get(info))
             .route("/v1/usage", get(usage))
@@ -2803,6 +2805,7 @@ mod tests {
         "/v1/sessions/{id}/tasks",
         "/v1/sessions/{id}/tasks/{task_id}",
         "/v1/sessions/{id}/tasks/{task_id}/cancel",
+        "/v1/sessions/{id}/mcp",
         "/v1/sandbox/reload",
         "/v1/info",
         "/v1/usage",
@@ -2959,6 +2962,28 @@ mod tests {
                 "{method} {path}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_mcp_route_answers_empty_for_a_session_with_no_servers_configured() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/mcp"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(
+            reply.json()["servers"].as_array().expect("servers").len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn the_mcp_route_answers_404_for_an_unknown_session() {
+        let harness = Harness::new();
+        let reply = harness.send("GET", "/v1/sessions/missing/mcp", None).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND);
+        assert_eq!(reply.json()["error"]["code"], "not_found");
     }
 
     /// The routes read the runner's real registry. Port of

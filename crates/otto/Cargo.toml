@@ -57,3 +57,8 @@ nix = { workspace = true, features = ["term"] }
 # `net` gives the in-file provider tests a loopback TCP origin server.
 tokio = { workspace = true, features = ["test-util", "net"] }
 tower.workspace = true
+
+[[test]]
+name = "mcp_stdio"
+path = "tests/mcp_stdio.rs"
+harness = false

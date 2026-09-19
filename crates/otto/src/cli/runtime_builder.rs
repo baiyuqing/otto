@@ -21,7 +21,7 @@ use otto_core::agent::{
     Agent, AgentError, CompactionResult, CompactionSettings, EventSink, Options,
 };
 use otto_core::config::resolve::{Overrides, Runtime, SessionDefaults};
-use otto_core::config::{ConfigError, File};
+use otto_core::config::{ConfigError, File, McpRuntime};
 use otto_core::model::{Block, Message, ToolDefinition};
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{
@@ -318,6 +318,9 @@ pub struct Runner {
     pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
     /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
     pub(crate) skills: Catalog,
+    /// The MCP servers connected for this runner. `/mcp` reads its status
+    /// rows; `Runner::close` shuts its clients down.
+    pub(crate) mcp: Arc<crate::mcp::Servers>,
 }
 
 impl Runner {
@@ -389,9 +392,18 @@ impl Runner {
     }
 
     /// Releases the agent's own resources. The session is closed separately,
-    /// by whoever owns it.
+    /// by whoever owns it. MCP shutdown is async ([`crate::mcp::Servers::close`]
+    /// closes stdio children and drops HTTP connections); a running Tokio
+    /// runtime spawns it in the background, and its absence (a scripted test
+    /// runner, or a caller outside `#[tokio::main]`) just skips it, since
+    /// there is nothing to release for `Servers::default()` and no runtime to
+    /// block on for a real one.
     pub fn close(&self) {
         let _ = self.agent.close();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let mcp = Arc::clone(&self.mcp);
+            handle.spawn(async move { mcp.close().await });
+        }
     }
 
     /// A runner with no tools whose provider the test supplies, carrying the
@@ -429,6 +441,7 @@ impl Runner {
             usage: None,
             tasks: Some(tasks),
             skills: Catalog::default(),
+            mcp: Arc::new(crate::mcp::Servers::default()),
         }
     }
 }
@@ -442,6 +455,9 @@ pub struct Builder {
     pub config_path: PathBuf,
     pub config: File,
     pub environment: HashMap<String, String>,
+    /// The resolved home directory, used to locate MCP OAuth token files
+    /// (`crate::mcp::oauth::token_path`).
+    pub home: String,
     /// Leaked for the process lifetime so the file tools, which borrow it,
     /// satisfy the registry's `'static` bound. See `leaked_workspace`.
     pub workspace: &'static Workspace,
@@ -468,6 +484,10 @@ pub struct Builder {
     /// Process-wide append-only token usage storage. `None` keeps usage
     /// collection from affecting an otherwise usable runtime.
     pub usage: Option<Arc<crate::usage::Store>>,
+    /// The resolved `[mcp]` configuration. `connect_mcp` reads this at
+    /// `build_runner` time; the servers themselves are not connected until
+    /// then.
+    pub mcp: McpRuntime,
 }
 
 impl Builder {
@@ -690,6 +710,9 @@ impl Builder {
             tools.extend(self.memory_tools(max_output));
         }
         let catalogs = self.build_catalogs(&mut tools, max_output, &mut warnings)?;
+        let (mcp_tools, mcp_connected, mcp_servers) =
+            self.connect_mcp(max_output, &mut warnings).await;
+        tools.extend(mcp_tools);
 
         let redactor = self.boundary_redactor(Some(runtime));
         let client = if !self.boundary_allows_dynamic(Some(runtime)) {
@@ -725,6 +748,9 @@ impl Builder {
         );
         let parent_agent_section = redactor.redact_string(&catalogs.agent_section);
         let endpoint_host = boundary::endpoint_host_for(&runtime.base_url);
+        let mut child_tools =
+            self.child_tools(runtime, max_output, &redaction_values, &catalogs.skills)?;
+        child_tools.extend(super::wiring::mcp_child_tools(&mcp_connected, max_output));
         let subagents = self.build_subagents(
             &mut tools,
             &catalogs,
@@ -734,7 +760,7 @@ impl Builder {
             runtime,
             session,
             self.child_prompt_for(runtime, &endpoint_host, &prompt_tail),
-            self.child_tools(runtime, max_output, &redaction_values, &catalogs.skills)?,
+            child_tools,
             &mut warnings,
         )?;
 
@@ -795,6 +821,7 @@ impl Builder {
             usage: self.usage_collector(session, runtime),
             tasks: subagents.tasks,
             skills: catalogs.skills.clone(),
+            mcp: mcp_servers,
         })
     }
 
@@ -1016,6 +1043,7 @@ mod tests {
             config_path: root.join("config.toml"),
             config: File::default(),
             environment: HashMap::new(),
+            home: root.to_string_lossy().into_owned(),
             workspace,
             workspace_path: workspace.root().to_string_lossy().into_owned(),
             session_root: root.join("sessions"),
@@ -1033,6 +1061,12 @@ mod tests {
             sandbox_secrets_complete: true,
             memory: Default::default(),
             usage: None,
+            mcp: McpRuntime {
+                enabled: false,
+                call_timeout_secs: 60,
+                connect_timeout_secs: 20,
+                servers: Vec::new(),
+            },
         }
     }
 

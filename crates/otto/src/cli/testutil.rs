@@ -57,6 +57,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         config_path: workspace_root.join("config.toml"),
         config: config(),
         environment: environment(),
+        home: workspace_root.to_string_lossy().into_owned(),
         workspace: leaked_workspace(workspace_root).expect("workspace"),
         workspace_path: workspace_root.to_string_lossy().into_owned(),
         session_root: session_root.to_path_buf(),
@@ -83,6 +84,12 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         auth_credentials_loaded: false,
         memory: Default::default(),
         usage: None,
+        mcp: otto_core::config::McpRuntime {
+            enabled: false,
+            call_timeout_secs: 60,
+            connect_timeout_secs: 20,
+            servers: Vec::new(),
+        },
     }
 }
 

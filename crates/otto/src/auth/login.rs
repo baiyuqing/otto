@@ -124,7 +124,10 @@ pub(crate) async fn login_with(
 /// Accepts loopback connections until one requests `/auth/callback`, then
 /// applies Go's `callbackHandler` checks in the same order: `error` parameter,
 /// then `state` equality, then a non-empty `code`.
-async fn serve_callback(
+///
+/// `pub(crate)`: `mcp::oauth`'s login flow reuses this listener rather than
+/// duplicating the callback HTTP handling.
+pub(crate) async fn serve_callback(
     listener: &tokio::net::TcpListener,
     want_state: &str,
 ) -> Result<String, LoginError> {

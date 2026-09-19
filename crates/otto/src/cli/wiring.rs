@@ -18,17 +18,20 @@
 //!   their own instances of the same tools, built the same way.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use otto_core::agent::inbox::Inbox;
 use otto_core::agent::redactor::Redactor;
 use otto_core::config::agents::AgentsRuntime;
 use otto_core::config::memory::MemoryRuntime;
-use otto_core::config::{Runtime, resolve_agents, resolve_skills};
+use otto_core::config::{McpAuth, McpTransport, Runtime, resolve_agents, resolve_skills};
 use otto_core::model::ToolDefinition;
+use tokio_util::sync::CancellationToken;
 
 use super::runtime_builder::{BuildError, Builder, ProviderClient, SharedSession};
+use crate::mcp;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
 use crate::memory::scope::new_workspace_scope;
 use crate::memory::sqlite::{Options as StoreOptions, Store};
@@ -42,6 +45,7 @@ use crate::subagent::runner::{
 };
 use crate::subagent::tasks::Tasks;
 use crate::tool::Tool;
+use crate::tool::mcp::tools_for;
 use crate::tool::memory::{ForgetTool, MemorySearchTool, RememberTool};
 use crate::tool::remind::{RemindTool, remind_definition};
 use crate::tool::skill::SkillTool;
@@ -194,6 +198,41 @@ pub struct CatalogWiring {
 pub struct SubagentWiring {
     pub tasks: Option<Arc<Tasks>>,
     pub inbox: Option<Arc<Inbox>>,
+}
+
+/// `"stdio"` or `"http"`, for [`mcp::ServerStatus::transport`].
+fn transport_label(transport: &McpTransport) -> &'static str {
+    match transport {
+        McpTransport::Stdio { .. } => "stdio",
+        McpTransport::Http { .. } => "http",
+    }
+}
+
+/// A second set of tool adapters for the connected MCP clients, for the
+/// sub-agent registry. Mirrors [`Builder::child_tools`]: `mcp::tool::McpTool`
+/// cannot be cloned, so the children get their own adapters over the same
+/// `Arc<client::Client>` connections `connect_mcp` already opened. Any
+/// prefixing/collision warnings were already reported once by `connect_mcp`,
+/// so they are dropped here rather than reported twice.
+pub fn mcp_child_tools(
+    connected: &[(Arc<mcp::client::Client>, Vec<String>)],
+    max_output: usize,
+) -> Vec<Box<dyn Tool + Send + Sync>> {
+    let mut tools = Vec::new();
+    for (client, secrets) in connected {
+        let (server_tools, _warnings) = tools_for(
+            Arc::clone(client) as Arc<dyn mcp::ToolServer>,
+            client.tools(),
+            max_output,
+            secrets.clone(),
+        );
+        tools.extend(
+            server_tools
+                .into_iter()
+                .map(|tool| Box::new(tool) as Box<dyn Tool + Send + Sync>),
+        );
+    }
+    tools
 }
 
 impl Builder {
@@ -391,6 +430,175 @@ impl Builder {
         Ok(tools)
     }
 
+    /// Connects every enabled MCP server in configuration order, one after
+    /// another so `warnings` stays in a stable, reproducible order. Each
+    /// server's outcome is pushed to the returned [`mcp::Servers`] handle for
+    /// `/mcp`; a disabled or failed server never stops the others, and never
+    /// fails the build. Restarting an exited stdio server is out of scope; a
+    /// server that later exits stays `Connected` until the process restarts.
+    ///
+    /// Returns the parent's tools, the connected clients paired with their
+    /// configured secrets (for [`mcp_child_tools`], since [`mcp::client::Client`]
+    /// tools cannot be cloned into a second registry), and the status handle.
+    pub async fn connect_mcp(
+        &self,
+        max_output: usize,
+        warnings: &mut (dyn Write + Send),
+    ) -> (
+        Vec<Box<dyn Tool + Send + Sync>>,
+        Vec<(Arc<mcp::client::Client>, Vec<String>)>,
+        Arc<mcp::Servers>,
+    ) {
+        let servers = Arc::new(mcp::Servers::default());
+        let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
+        let mut connected = Vec::new();
+        if !self.mcp.enabled {
+            return (tools, connected, servers);
+        }
+
+        let cancel = CancellationToken::new();
+        let connect_timeout = Duration::from_secs(self.mcp.connect_timeout_secs);
+        let call_timeout = Duration::from_secs(self.mcp.call_timeout_secs);
+        for server in &self.mcp.servers {
+            let transport_kind = transport_label(&server.transport);
+            if !server.enabled {
+                servers.push(
+                    mcp::ServerStatus {
+                        name: server.name.clone(),
+                        transport: transport_kind,
+                        era: None,
+                        state: mcp::ServerState::Disabled,
+                    },
+                    None,
+                );
+                continue;
+            }
+
+            match self
+                .connect_one(server, connect_timeout, call_timeout, &cancel)
+                .await
+            {
+                Ok(client) => {
+                    let client = Arc::new(client);
+                    let (server_tools, tool_warnings) = tools_for(
+                        Arc::clone(&client) as Arc<dyn mcp::ToolServer>,
+                        client.tools(),
+                        max_output,
+                        server.secrets.clone(),
+                    );
+                    for warning in &tool_warnings {
+                        let _ = writeln!(warnings, "warning: {warning}");
+                    }
+                    servers.push(
+                        mcp::ServerStatus {
+                            name: server.name.clone(),
+                            transport: transport_kind,
+                            era: Some(client.era().clone()),
+                            state: mcp::ServerState::Connected {
+                                tools: client.tools().len(),
+                            },
+                        },
+                        Some(Arc::clone(&client)),
+                    );
+                    tools.extend(
+                        server_tools
+                            .into_iter()
+                            .map(|tool| Box::new(tool) as Box<dyn Tool + Send + Sync>),
+                    );
+                    connected.push((client, server.secrets.clone()));
+                }
+                Err(mcp::CallError::NeedsLogin) => {
+                    servers.push(
+                        mcp::ServerStatus {
+                            name: server.name.clone(),
+                            transport: transport_kind,
+                            era: None,
+                            state: mcp::ServerState::NeedsLogin,
+                        },
+                        None,
+                    );
+                    let _ = writeln!(
+                        warnings,
+                        "warning: mcp server {:?} needs login: run 'otto mcp login {}'",
+                        server.name, server.name
+                    );
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    servers.push(
+                        mcp::ServerStatus {
+                            name: server.name.clone(),
+                            transport: transport_kind,
+                            era: None,
+                            state: mcp::ServerState::Failed(message.clone()),
+                        },
+                        None,
+                    );
+                    let _ = writeln!(
+                        warnings,
+                        "warning: mcp server {:?} failed to connect: {message}",
+                        server.name
+                    );
+                }
+            }
+        }
+        (tools, connected, servers)
+    }
+
+    /// Builds the transport for one configured server and connects it.
+    async fn connect_one(
+        &self,
+        server: &otto_core::config::McpServerRuntime,
+        connect_timeout: Duration,
+        call_timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<mcp::client::Client, mcp::CallError> {
+        match &server.transport {
+            McpTransport::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                let transport =
+                    mcp::stdio::StdioTransport::spawn(command, args, env, Path::new(cwd)).await?;
+                mcp::client::Client::connect(
+                    server.name.clone(),
+                    Box::new(transport),
+                    connect_timeout,
+                    call_timeout,
+                    cancel,
+                )
+                .await
+            }
+            McpTransport::Http {
+                url, headers, auth, ..
+            } => {
+                let bearer: Option<Arc<dyn mcp::BearerSource>> = match auth {
+                    McpAuth::OAuth => Some(Arc::new(mcp::oauth::TokenStore::new(
+                        server.name.clone(),
+                        mcp::oauth::token_path(Path::new(&self.home), &server.name),
+                    ))),
+                    McpAuth::None => None,
+                };
+                let transport = mcp::http::HttpTransport::new(
+                    url.clone(),
+                    headers.clone(),
+                    bearer,
+                    call_timeout,
+                )?;
+                mcp::client::Client::connect(
+                    server.name.clone(),
+                    Box::new(transport),
+                    connect_timeout,
+                    call_timeout,
+                    cancel,
+                )
+                .await
+            }
+        }
+    }
+
     /// Renders a child's static system prompt: the parent's prompt for the
     /// child's tool set, plus the shared redacted tail. The Agents section is
     /// parent-only, because children never have the agent tool.
@@ -461,6 +669,109 @@ impl Builder {
             definitions.push(remind_definition());
         }
         definitions
+    }
+}
+
+/// Port of the `connect_mcp` half of `docs/specs/2026-09-19-mcp-design.md`.
+/// Only the outcomes reachable without a real MCP server are covered: a
+/// disabled server is never dialed, and an unspawnable command reports
+/// `Failed` with one warning. A working stdio/HTTP connection would need a
+/// real server process or socket, which the offline test rule forbids;
+/// `crates/otto/tests/mcp_stdio.rs` covers the transport itself with a fake
+/// server subprocess.
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+    use otto_core::config::{McpRuntime, McpServerRuntime};
+
+    fn builder_with_servers(root: &std::path::Path, servers: Vec<McpServerRuntime>) -> Builder {
+        let mut builder = crate::cli::testutil::builder(root, &root.join("sessions"));
+        builder.mcp = McpRuntime {
+            enabled: true,
+            call_timeout_secs: 5,
+            connect_timeout_secs: 1,
+            servers,
+        };
+        builder
+    }
+
+    fn stdio_server(
+        name: &str,
+        enabled: bool,
+        command: &str,
+        cwd: &std::path::Path,
+    ) -> McpServerRuntime {
+        McpServerRuntime {
+            name: name.to_string(),
+            enabled,
+            transport: McpTransport::Stdio {
+                command: command.to_string(),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd: cwd.to_string_lossy().into_owned(),
+            },
+            secrets: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_server_is_reported_without_connecting() {
+        let directory = tempfile::tempdir().expect("directory");
+        let builder = builder_with_servers(
+            directory.path(),
+            vec![stdio_server(
+                "example",
+                false,
+                "otto-mcp-test-nonexistent-command",
+                directory.path(),
+            )],
+        );
+
+        let mut warnings = Vec::new();
+        let (tools, connected, servers) = builder.connect_mcp(65536, &mut warnings).await;
+        assert!(tools.is_empty());
+        assert!(connected.is_empty());
+        let status = servers.status();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].name, "example");
+        assert_eq!(status[0].transport, "stdio");
+        assert_eq!(status[0].state, mcp::ServerState::Disabled);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_cannot_be_spawned_is_reported_as_failed_and_does_not_stop_the_runner() {
+        let directory = tempfile::tempdir().expect("directory");
+        let builder = builder_with_servers(
+            directory.path(),
+            vec![stdio_server(
+                "broken",
+                true,
+                "otto-mcp-test-nonexistent-command",
+                directory.path(),
+            )],
+        );
+
+        let mut warnings = Vec::new();
+        let (tools, connected, servers) = builder.connect_mcp(65536, &mut warnings).await;
+        assert!(tools.is_empty());
+        assert!(connected.is_empty());
+        let status = servers.status();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].name, "broken");
+        assert!(
+            matches!(status[0].state, mcp::ServerState::Failed(_)),
+            "{:?}",
+            status[0].state
+        );
+        let text = String::from_utf8(warnings).expect("utf-8 warnings");
+        assert!(text.contains("broken"), "{text:?}");
+        assert!(text.starts_with("warning: "), "{text:?}");
+    }
+
+    #[test]
+    fn mcp_child_tools_is_empty_for_no_connected_servers() {
+        assert!(mcp_child_tools(&[], 65536).is_empty());
     }
 }
 

@@ -168,6 +168,14 @@ pub(crate) fn redirect_response(status: u16, location: &str) -> String {
     )
 }
 
+/// A 401 response carrying `header` as its `WWW-Authenticate` value. Used by
+/// `mcp::oauth`'s discovery tests to simulate the initial unauthorized probe.
+pub(crate) fn unauthorized_response(header: &str) -> String {
+    format!(
+        "HTTP/1.1 401 X\r\nWWW-Authenticate: {header}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+}
+
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())

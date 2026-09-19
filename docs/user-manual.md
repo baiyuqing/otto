@@ -162,6 +162,8 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
 | `otto logout` | Remove stored ChatGPT credentials. |
 | `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
+| `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
+| `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto serve [--socket PATH \| --listen HOST:PORT [--open]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
 
 | Flag | Description |
@@ -454,6 +456,9 @@ Shared commands:
   is consumed once, and expires after five minutes.
 - `/skills` lists the skills available in the current session.
 - `/skill <name>` displays one skill's description, location, and instructions.
+- `/mcp` shows every configured MCP server and its connection state.
+  `/mcp login <server>` signs in to one HTTP server that uses OAuth. See
+  [MCP servers](#mcp-servers).
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
@@ -842,9 +847,12 @@ the transcript, and a composer:
   by existing server APIs run locally instead of starting a provider turn:
   `/help`, `/session`, `/new`, `/resume`, `/model`, `/rename <name>`,
   `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/tasks`,
-  `/task <id|name>`, `/task cancel <id|name>`, and `/exit`. `/resume` asks
-  you to choose a session from the picker; `/exit` asks you to close the
+  `/task <id|name>`, `/task cancel <id|name>`, `/mcp`, and `/exit`. `/resume`
+  asks you to choose a session from the picker; `/exit` asks you to close the
   browser tab because a page cannot reliably close a tab it did not open.
+  `/mcp` shows each configured server's connection state only; signing in
+  runs on the host with `otto mcp login <server>`, since the OAuth flow opens
+  a browser there, not in the page.
 - Enter sends the composer text as a turn or Web command; Shift+Enter inserts
   a newline. Assistant text renders as GitHub-Flavored Markdown, with KaTeX
   math for `$...$` and `$$...$$`, plus Mermaid diagrams in fenced
@@ -902,6 +910,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
+| `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
 | `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |
@@ -1133,6 +1142,97 @@ Not yet implemented:
 - `allowed-tools` enforcement.
 - Reading `~/.claude/skills`; hot reload inside a session.
 
+## MCP servers
+
+Otto connects to Model Context Protocol (MCP) servers over stdio (a local
+subprocess) or Streamable HTTP, and registers each server's tools for the
+model to call in the same turn loop as the built-in tools.
+
+Config (`[mcp]` and `[mcp.servers.<name>]` in TOML):
+
+```toml
+[mcp]
+enabled = true              # default true; false skips every server
+call_timeout_secs = 60      # default 60; applies to each tool call
+connect_timeout_secs = 20   # default 20; applies to the connection handshake
+
+[mcp.servers.github]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "${GITHUB_TOKEN}" }
+cwd = "."                    # default: the workspace path
+
+[mcp.servers.docs]
+transport = "http"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${DOCS_MCP_TOKEN}" }
+
+[mcp.servers.remote]
+transport = "http"
+url = "https://remote.example.com/mcp"
+auth = "oauth"               # default "none"
+oauth_client_id = "otto"     # optional; used only if the server has no dynamic registration
+oauth_scopes = ["mcp:tools"] # optional
+
+[mcp.servers.legacy]
+transport = "stdio"
+command = "./bin/legacy-server"
+enabled = false              # declared but not connected
+```
+
+Rules:
+
+- Server names match `^[A-Za-z0-9_-]{1,32}$`.
+- `${VAR}` and `${VAR:-default}` in `env` values, `headers` values, `url`,
+  `command`, `args`, and `cwd` expand from the process environment at startup.
+  An unset variable without a default is a configuration error. Credentials never appear verbatim in `config.toml`.
+- A stdio server's child process gets exactly the `env` table plus `PATH`,
+  `HOME`, `TMPDIR`, `LANG`, and `TERM` copied from Otto's own environment; no
+  other variables are inherited. **stdio servers run unsandboxed**, outside
+  Seatbelt.
+- An MCP tool is registered as `mcp__<server>__<tool>`; non-`[A-Za-z0-9_-]`
+  bytes in the tool name are replaced with `_`. If the result would exceed 64
+  bytes, or collides with another tool on the same server, the tool is
+  skipped and a warning is printed instead.
+
+What's wired:
+
+- Otto connects every enabled server at startup, one at a time in
+  configuration order. A server that fails to connect (bad command, connection refused, handshake
+  timeout) is reported as `failed: <reason>` and contributes no tools; the
+  runner still starts with every other tool available.
+- An HTTP server configured with `auth = "oauth"` that has no valid stored
+  token is reported as `needs login`, contributing no tools, until `/mcp
+  login <server>` (or `otto mcp login <server>`) completes and Otto is
+  restarted.
+- `/mcp` (REPL and TUI) prints one line per configured server: its connection
+  state (`connected (N tools)`, `disabled`, `needs login`, or `failed:
+  <reason>`), transport (`stdio` or `http`), and protocol era (`modern`,
+  `legacy <version>`, or `-` for a server that never negotiated one).
+- `/mcp login <server>` runs the OAuth authorization code flow for one
+  configured HTTP server with `auth = "oauth"`, opens the authorization URL,
+  and stores the resulting token under `~/.otto/auth/mcp/<server>.json`.
+  Otto must be restarted afterward to connect with the new token; the running
+  session keeps reporting `needs login` until then.
+- `otto mcp login <server>` and `otto mcp logout <server>` run the same sign-in
+  flow, or remove the stored token, without starting a session. See
+  [command-line reference](#command-line-reference).
+- Tool results are text-only: `image`/`audio`/`resource` content blocks
+  become a one-line placeholder naming the MIME type and byte count; the
+  content is never embedded. Every `${VAR}`-substituted value is redacted
+  from tool output before it reaches the transcript.
+
+Not yet implemented:
+
+- Restarting an exited stdio server. Once a connected stdio server's process
+  exits, it stays disconnected for the rest of the session; restart Otto to
+  reconnect.
+- Running stdio servers under the Seatbelt sandbox.
+- Reloading `[mcp]` without a restart, and re-registering tools in a running
+  session after `/mcp login`.
+- Resources, prompts, and per-tool approval prompts.
+
 ## Troubleshooting
 
 ### `otto: missing api key`
@@ -1169,6 +1269,15 @@ config). Common fixes:
 The `chatgpt` provider has no stored OAuth credentials. Run `otto login` to sign
 in with your ChatGPT subscription, or check state with `otto login --status`.
 See [ChatGPT subscription](#chatgpt-subscription).
+
+### `/mcp` reports `failed: ...` or `needs login`
+
+Check `/mcp` for the exact reason. `failed: <reason>` means the stdio command
+could not be spawned, or the HTTP connection or handshake did not complete
+within `connect_timeout_secs`; the server contributes no tools until Otto is
+restarted with the problem fixed. `needs login` means the server requires
+OAuth and has no valid stored token: run `/mcp login <server>` (or `otto mcp
+login <server>`), then restart Otto. See [MCP servers](#mcp-servers).
 
 ### Context-length or prompt-size failures
 

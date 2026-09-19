@@ -8,7 +8,7 @@ import { Composer } from './Composer'
 import { Footer } from './Footer'
 import { Tasks } from './Tasks'
 import { UsageView } from './UsageView'
-import { sessionLabel, workspaceName } from './uiText'
+import { mcpServerLine, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
 
 setToken(loadToken())
@@ -319,6 +319,16 @@ export function App() {
         await api.cancelTask(session.id, command.id)
         setTasksKey((k) => k + 1)
         setItems((prev) => [...prev, { kind: 'notice', text: `Canceled task ${command.id}` }])
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
+    if (command.kind === 'mcp') {
+      try {
+        const r = await api.listMcp(session.id)
+        const list = r.servers.length ? r.servers.map(mcpServerLine).join('\n') : 'No MCP servers configured.'
+        setItems((prev) => [...prev, { kind: 'notice', text: list }])
       } catch (e) {
         fail(e)
       }

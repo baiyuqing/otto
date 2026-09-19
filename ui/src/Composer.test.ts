@@ -42,7 +42,12 @@ describe('Composer image input', () => {
     })
     const composer = screen.getByPlaceholderText('Message Otto…')
 
-    fireEvent.paste(composer, { clipboardData: { files: [file] } })
+    fireEvent.paste(composer, {
+      clipboardData: {
+        files: [],
+        items: [{ kind: 'file', type: 'image/jpeg', getAsFile: () => file }],
+      },
+    })
     await waitFor(() => expect(screen.getByText('paste.jpg')).toBeTruthy())
   })
 })

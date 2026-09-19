@@ -602,6 +602,33 @@ async fn the_rendered_memory_context_is_prepended_without_being_persisted() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn memory_context_keeps_existing_history_as_the_request_prefix() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("first reply"), Turn::text("second reply")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            memory: Some(Arc::new(FakeMemory::with_records(one_record()))),
+            ..options()
+        },
+    );
+    let cancel = CancellationToken::new();
+    agent.run("first", &mut |_| {}, &cancel).await.expect("run");
+    agent
+        .run("second", &mut |_| {}, &cancel)
+        .await
+        .expect("run");
+
+    let requests = agent.provider().normal_requests();
+    let messages = &requests[1].messages;
+    assert_eq!(messages[0].text(), "first");
+    assert_eq!(messages[1].text(), "first reply");
+    assert!(messages[2].text().contains("prefers vim"));
+    assert_eq!(messages[3].text(), "second");
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn recall_runs_once_across_the_tool_loop() {
     let memory = Arc::new(FakeMemory::with_records(one_record()));
     let provider = FakeProvider::new(vec![

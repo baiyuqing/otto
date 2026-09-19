@@ -47,7 +47,8 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
-/// One request message. `content` is always written, even when empty.
+/// One request message. Text-only content stays a string; a user image turns
+/// it into content parts with fixed high detail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireMessage {
     pub role: String,
@@ -78,6 +79,7 @@ pub struct WireContentPart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireImageUrl {
     pub url: String,
+    pub detail: String,
 }
 
 /// One advertised tool.
@@ -333,6 +335,7 @@ fn user_wire_message(message: &Message) -> WireMessage {
                 text: String::new(),
                 image_url: Some(WireImageUrl {
                     url: format!("data:{};base64,{}", block.mime_type, block.data),
+                    detail: "high".into(),
                 }),
             }),
             _ => None,
@@ -507,7 +510,7 @@ mod tests {
             concat!(
                 r#"{"model":"m","messages":[{"role":"user","content":["#,
                 r#"{"type":"text","text":"read it"},"#,
-                r#"{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]}],"#,
+                r#"{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo=","detail":"high"}}]}],"#,
                 r#""stream":true,"stream_options":{"include_usage":true}}"#
             )
         );

@@ -460,7 +460,7 @@ TUI-only commands:
 
 - `/image <path>` attaches one image to the next prompt. The image is stored
   inline in the session; the selected model and provider endpoint must support
-  image input.
+  image input. Otto sends images with `detail: high`.
 
 - `/resume` opens a modal of the up to 20 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,
@@ -850,7 +850,8 @@ the transcript, and a composer:
   `mermaid` code blocks. Each tool call is a collapsible block with its
   arguments and result.
 - **Image** selects one PNG, JPEG, or WebP image; pasting a screenshot selects
-  it too. Sending stores the original image with the prompt in session history.
+  it too. Sending stores the original image with the prompt in session history
+  and sends it with `detail: high`.
 - While a turn runs the composer is disabled and a **Cancel** button calls
   `POST /v1/sessions/{id}/turns/{turn_id}/cancel`.
 - Reloading the page during a turn re-attaches to the running turn's event

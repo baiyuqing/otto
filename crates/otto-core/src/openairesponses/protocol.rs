@@ -91,6 +91,8 @@ pub struct WireContent {
     pub text: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub image_url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 /// One decoded `data:` payload of the response stream. The payload repeats the
@@ -174,7 +176,8 @@ pub struct InputTokensDetails {
 /// Translates a neutral request into the Responses API body.
 ///
 /// The system prompt becomes `instructions` rather than an input item. User
-/// and context messages become `message` items with `input_text` content.
+/// Context messages become `input_text`; user images become `input_image`
+/// content with fixed high detail.
 /// An assistant message contributes an `output_text` message item when its
 /// text is non-empty, followed by one `function_call` item per tool-call
 /// block. A tool message expands into one `function_call_output` item per
@@ -284,6 +287,7 @@ fn message_item(role: &str, content_type: &str, text: String) -> WireItem {
             content_type: content_type.into(),
             text,
             image_url: String::new(),
+            detail: String::new(),
         }],
         ..WireItem::default()
     }
@@ -298,11 +302,13 @@ fn user_message_item(message: &Message) -> WireItem {
                 content_type: "input_text".into(),
                 text: block.text.clone(),
                 image_url: String::new(),
+                detail: String::new(),
             }),
             BlockType::Image => Some(WireContent {
                 content_type: "input_image".into(),
                 text: String::new(),
                 image_url: format!("data:{};base64,{}", block.mime_type, block.data),
+                detail: "high".into(),
             }),
             _ => None,
         })
@@ -524,7 +530,7 @@ mod tests {
             concat!(
                 r#"{"model":"m","input":[{"type":"message","role":"user","content":["#,
                 r#"{"type":"input_text","text":"read it"},"#,
-                r#"{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo="}]}],"#,
+                r#"{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgo=","detail":"high"}]}],"#,
                 r#""stream":true,"store":false}"#
             )
         );

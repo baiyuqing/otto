@@ -575,8 +575,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let mut messages = self.session.messages();
         apply_tool_result_overlay(&mut messages, &state.tool_result_overlay);
         if !state.memory_context.is_empty() {
+            let current_user = messages
+                .iter()
+                .rposition(|message| message.role == Role::User)
+                .unwrap_or(messages.len());
             messages.insert(
-                0,
+                current_user,
                 Message {
                     role: Role::User,
                     blocks: vec![Block::text(state.memory_context.clone())],

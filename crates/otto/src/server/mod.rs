@@ -18,6 +18,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod sandbox;
 pub mod tasks;
+pub mod timers;
 pub mod turn;
 pub mod ui;
 
@@ -400,6 +401,11 @@ impl Server {
             .route(
                 "/v1/sessions/{id}/tasks/{task_id}/cancel",
                 post(tasks::cancel),
+            )
+            .route("/v1/sessions/{id}/timers", get(timers::list))
+            .route(
+                "/v1/sessions/{id}/timers/{timer_id}/cancel",
+                post(timers::cancel),
             )
             .route("/v1/sessions/{id}/mcp", get(mcp::list))
             .route("/v1/sandbox/reload", post(sandbox::reload))
@@ -2814,6 +2820,8 @@ mod tests {
         "/v1/sessions/{id}/tasks",
         "/v1/sessions/{id}/tasks/{task_id}",
         "/v1/sessions/{id}/tasks/{task_id}/cancel",
+        "/v1/sessions/{id}/timers",
+        "/v1/sessions/{id}/timers/{timer_id}/cancel",
         "/v1/sessions/{id}/mcp",
         "/v1/sandbox/reload",
         "/v1/info",
@@ -2842,6 +2850,7 @@ mod tests {
                 .replace("{id}", &id)
                 .replace("{turn_id}", "nope")
                 .replace("{task_id}", "nope")
+                .replace("{timer_id}", "nope")
                 .replace("{approval_id}", "nope");
             // An unmatched path logs the route label "unmatched"; a matched
             // one logs its own pattern. That is the reachability check.
@@ -3082,6 +3091,44 @@ mod tests {
             .await;
         assert_eq!(repeat.status, StatusCode::CONFLICT);
         assert_eq!(repeat.json()["error"]["code"], "task_done");
+    }
+
+    #[tokio::test]
+    async fn the_timer_routes_list_and_cancel_a_real_timer() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reminders = harness
+            .server
+            .lookup(&id)
+            .expect("session")
+            .ctrl
+            .reminders()
+            .expect("registry");
+        let scheduled = reminders
+            .schedule(Duration::from_secs(600), "check the build".to_string())
+            .expect("schedule");
+
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/timers"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let listed = reply.json();
+        let listed = listed["timers"].as_array().expect("timers");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], scheduled.id);
+        assert_eq!(listed[0]["message"], "check the build");
+        assert!(listed[0]["fire_at"].is_string(), "{listed:?}");
+
+        let path = format!("/v1/sessions/{id}/timers/{}/cancel", scheduled.id);
+        let canceled = harness.send("POST", &path, None).await;
+        assert_eq!(canceled.status, StatusCode::OK, "{}", canceled.body);
+        assert_eq!(canceled.json()["id"], scheduled.id);
+        assert!(reminders.list().is_empty());
+
+        // A second cancel finds nothing left to cancel.
+        let repeat = harness.send("POST", &path, None).await;
+        assert_eq!(repeat.status, StatusCode::NOT_FOUND);
+        assert_eq!(repeat.json()["error"]["code"], "not_found");
     }
 
     // ---- wake turns ----

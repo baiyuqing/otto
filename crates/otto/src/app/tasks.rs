@@ -1,21 +1,12 @@
 //! The frontend-safe read/control view of a runner's sub-agent tasks.
 //!
-//! Port of the `TaskLister`/`TaskView` pair in `internal/app/controller.go`
-//! and of the `agent.Task` record in `internal/agent/tasks.go` that the HTTP
-//! routes serialize.
+//! Ownership: [`crate::subagent::tasks::Tasks`] owns the registry itself. This
+//! module owns the wire record and the read/control contract, and [`task_view`]
+//! adapts one to the other. A runner without a registry answers `None`.
 //!
-//! Ownership: [`crate::subagent::tasks::Tasks`] owns the registry itself.
-//! This module owns the wire record and the read/control contract, and
-//! [`task_view`] adapts one to the other, the way Go's `taskView` wraps
-//! `*agent.Tasks`. A runner without a registry answers `None`, which is what
-//! Go's `Controller.Tasks` returns for a runner that tracks no tasks.
-//!
-//! Divergence from Go: Go's `agent.Task` is one record shared by the
-//! registry, the frontends and `internal/subagent`'s formatters, and
-//! `internal/server` converts it to `taskWire` at the edge. Here [`Task`] is
-//! that wire record, so it omits `prompt` and `context`. The REPL therefore
-//! reads the concrete registry rather than this view: `subagent::format`
-//! falls back to the prompt when a task has no description.
+//! [`Task`] is the wire record, so it omits `prompt` and `context`. The REPL
+//! therefore reads the concrete registry rather than this view:
+//! `subagent::format` falls back to the prompt when a task has no description.
 
 use std::sync::Arc;
 
@@ -26,12 +17,10 @@ use serde::Serialize;
 use crate::cli::runtime_builder::Runner;
 use crate::subagent::tasks::{TaskError, TaskStatus as SubagentStatus, Tasks as Registry};
 
-/// Go's `agent.ErrTaskFinished`. The server maps it to 409 `task_done`.
+/// The server maps it to 409 `task_done`.
 pub const TASK_FINISHED: &str = "task already finished";
-/// Go's `agent.ErrTaskNotFound`.
 pub const TASK_NOT_FOUND: &str = "task not found";
 
-/// Port of `agent.TaskStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -53,14 +42,13 @@ impl TaskStatus {
         }
     }
 
-    /// Port of `agent.Task.Final`: the statuses no further update can leave.
+    /// The statuses no further update can leave.
     pub fn final_status(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::Canceled)
     }
 }
 
-/// One sub-agent task. Field order matches Go's `taskWire` so the JSON the
-/// server writes is byte-compatible.
+/// One sub-agent task.
 #[derive(Debug, Clone, Serialize)]
 pub struct Task {
     pub id: String,
@@ -90,10 +78,10 @@ pub struct Task {
     pub error: String,
 }
 
-/// The read/control contract a frontend gets. Port of `app.TaskView`.
+/// The read/control contract a frontend gets.
 ///
-/// Concurrency: an implementation is shared with every running task, so
-/// every method takes `&self`.
+/// Concurrency: an implementation is shared with every running task, so every
+/// method takes `&self`.
 pub trait TaskView: Send + Sync {
     /// Every task in creation order.
     fn list(&self) -> Vec<Task>;
@@ -113,11 +101,10 @@ pub trait TaskView: Send + Sync {
     fn pending(&self) -> usize;
 }
 
-/// The wire record for one registry task. Port of `server.toTaskWire`.
+/// The wire record for one registry task.
 ///
 /// `created_at` is set by the sub-agent runner on every real task; a record
-/// that never got one serializes the Unix epoch, where Go writes its zero
-/// `time.Time`.
+/// that never got one serializes the Unix epoch.
 fn wire(task: &crate::subagent::tasks::Task) -> Task {
     Task {
         id: task.id.clone(),
@@ -146,7 +133,7 @@ fn wire(task: &crate::subagent::tasks::Task) -> Task {
     }
 }
 
-/// Port of Go's `taskView`, the adapter `Controller.Tasks` hands a frontend.
+/// The adapter `Controller.Tasks` hands a frontend.
 impl TaskView for Registry {
     fn list(&self) -> Vec<Task> {
         Registry::list(self).iter().map(wire).collect()
@@ -174,8 +161,6 @@ impl TaskView for Registry {
 }
 
 /// The task registry of one runner, or `None` when it tracks no tasks.
-///
-/// Port of the `taskOwner` type assertion in `internal/app/controller.go`.
 pub fn task_view(runner: &Runner) -> Option<Arc<dyn TaskView>> {
     let tasks = runner.tasks.clone()?;
     Some(tasks as Arc<dyn TaskView>)
@@ -221,7 +206,7 @@ mod tests {
         );
     }
 
-    /// The adapter over the real registry, Go's `taskView`.
+    /// The adapter over the real registry.
     #[test]
     fn the_view_maps_every_registry_read_onto_the_wire_record() {
         let registry = Registry::new();

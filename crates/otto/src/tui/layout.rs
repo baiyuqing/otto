@@ -1,20 +1,19 @@
 //! Small pure-logic helpers shared by the footer and the transcript: size
-//! thresholds, token/percentage formatting, and the control-character
-//! escaping every piece of untrusted text goes through before it reaches a
+//! thresholds, token/percentage formatting, and the control-character escaping
+//! every piece of untrusted text goes through before it reaches a
 //! `ratatui::text::Span`.
 //!
-//! Port of the non-layout parts of `internal/tui/layout.go`. Ratatui owns
-//! wrapping and clipping, so `render.rs` puts essential footer fields first
-//! and lets the widget clip the rest.
+//! Ratatui owns wrapping and clipping, so `render.rs` puts essential footer
+//! fields first and lets the widget clip the rest.
 
 /// The smallest terminal ratatui's TUI will actually lay out. Below this,
-/// [`crate::tui::run`] shows the "terminal is too small" message instead of
-/// the normal view. Port of `minTerminalWidth`/`minTerminalHeight`.
+/// [`crate::tui::run`] shows the "terminal is too small" message instead of the
+/// normal view.
 pub const MIN_TERMINAL_WIDTH: u16 = 40;
 pub const MIN_TERMINAL_HEIGHT: u16 = 8;
 
-/// Below this height the composer collapses to a single input line instead
-/// of a boxed multi-line editor. Port of `inputBoxThreshold`.
+/// Below this height the composer collapses to a single input line instead of a
+/// boxed multi-line editor.
 pub const INPUT_BOX_THRESHOLD: u16 = 12;
 
 /// Empty columns kept at each side of the normal TUI layout so transcript,
@@ -23,9 +22,8 @@ pub const INPUT_BOX_THRESHOLD: u16 = 12;
 pub const SIDE_MARGIN: u16 = 1;
 
 /// The status bar reports the fraction of the context window in use as one
-/// decimal place, rounded to the nearest tenth of a percent. Port of
-/// `formatFooterContextPercentage` (the `big.Int` there guards against
-/// overflow on 32-bit Go; token counts fit `i64` comfortably here).
+/// decimal place, rounded to the nearest tenth of a percent. The fraction of
+/// the context window in use, as the footer shows it.
 pub fn format_context_percentage(input_tokens: i64, context_window: i64) -> String {
     let input_tokens = input_tokens.max(0);
     if context_window <= 0 {
@@ -43,15 +41,11 @@ pub fn format_context_percentage(input_tokens: i64, context_window: i64) -> Stri
 }
 
 /// Formats a token count as `k`/`M`/`B`, rounded to the nearest tenth of the
-/// unit. Port of `formatFooterTokenCount`/`formatFooterTokenCountUnit`.
+/// unit.
 ///
-/// ponytail: Go has a second, k-only formatter in `compaction.go`
-/// (`formatCompactionTokenCount`) that truncates instead of rounding, so it
-/// disagrees with this one on values like 12360 (it prints "12.3k"; this
-/// prints "12.4k"). Both formatters are cosmetic (a status line, not a
-/// money or security path), so `entries.rs`'s compaction line and the footer
-/// share this single rounding formatter instead of keeping two. Upgrade
-/// path: reintroduce the truncating variant if a test pins the old text.
+/// ponytail: one rounding formatter, shared by `entries.rs`'s compaction line
+/// and the footer. It is cosmetic (a status line, not a money or security
+/// path). Upgrade path: add a truncating variant if a test pins different text.
 pub fn format_token_count(tokens: i64) -> String {
     if tokens <= 0 {
         return "0".to_string();
@@ -91,10 +85,9 @@ fn format_token_count_unit(
     }
 }
 
-/// The footer's workspace field is the directory's last path component, not
-/// its full path. Port of `footerWorkspace`; Otto is macOS-only, so this
-/// works in `/`-separated paths rather than `std::path`'s platform-generic
-/// (and here, unneeded) separator handling.
+/// The footer's workspace field is the directory's last path component, not its
+/// full path. Otto is macOS-only, so this works in `/`-separated paths rather
+/// than `std::path`'s platform-generic (and here, unneeded) separator handling.
 pub fn footer_workspace(workspace: &str) -> String {
     if workspace.is_empty() {
         return String::new();
@@ -113,23 +106,20 @@ pub fn footer_workspace(workspace: &str) -> String {
 }
 
 /// Escapes control characters other than `\n`/`\t` for text that may span
-/// multiple lines (transcript entries, tool output). Port of
-/// `escapePlainText`.
+/// multiple lines (transcript entries, tool output).
 pub fn escape_plain_text(text: &str) -> String {
     escape_text_controls(text, true)
 }
 
 /// Escapes every control character, including `\n`/`\t`, for text that must
-/// render on one line (footer fields, status text). Port of
-/// `escapeSingleLineText`.
+/// render on one line (footer fields, status text).
 pub fn escape_single_line_text(text: &str) -> String {
     escape_text_controls(text, false)
 }
 
-/// Security: a `ratatui`/`crossterm` `Span` prints its content straight to
-/// the terminal, so a raw ESC (or other control byte) inside model or tool
-/// output would be interpreted by the real terminal, not by ratatui. Port of
-/// `escapeTextControls`.
+/// Security: a `ratatui`/`crossterm` `Span` prints its content straight to the
+/// terminal, so a raw ESC (or other control byte) inside model or tool output
+/// would be interpreted by the real terminal, not by ratatui.
 fn escape_text_controls(text: &str, preserve_multiline_whitespace: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {

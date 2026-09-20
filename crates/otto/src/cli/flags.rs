@@ -1,22 +1,19 @@
 //! Command-line parsing for the `otto` binary.
 //!
-//! Port of `parseFlags` and `printUsage` in `cmd/otto/main.go`.
-//!
 //! ponytail: the flag scanner is hand written rather than delegated to a
-//! parsing crate. Go's `flag.FlagSet` accepts `-name` and `--name`
+//! parsing crate. Otto's command line accepts `-name` and `--name`
 //! interchangeably, takes a value either as `-name=value` or as the next
-//! argument, stops at the first non-flag argument, and exposes `Visit` for
-//! the set of flags that were actually written on the command line. Seven of
-//! Otto's behaviours (`--config`, `--shell-timeout`, `--max-output-bytes`,
-//! `--approve`, `--sandbox`, `--socket`, `--listen`) branch on that
-//! "explicitly set" set, and `cmd/otto/main_test.go` pins the resulting
-//! stderr text and exit code 2 byte for byte. No general-purpose parser has
-//! those exact semantics, so matching Go costs less here than bending one.
+//! argument, stops at the first non-flag argument, and records which flags were
+//! actually written on the command line. Seven of Otto's behaviours
+//! (`--config`, `--shell-timeout`, `--max-output-bytes`, `--approve`,
+//! `--sandbox`, `--socket`, `--listen`) branch on that "explicitly set" set,
+//! and the tests pin the resulting stderr text and exit code 2 byte for byte.
+//! No general-purpose parser has those exact semantics, so matching them costs
+//! less here than bending one.
 //!
 //! Errors: a rejected command line carries the message the caller must print;
-//! [`ParseFailure::Unsafe`] stands for Go's `errUnsafeFlagParse`, whose
-//! diagnostic is deliberately replaced with a fixed string so a malformed
-//! argument can never echo a secret back to the terminal.
+//! [`ParseFailure::Unsafe`]'s diagnostic is deliberately replaced with a fixed
+//! string so a malformed argument can never echo a secret back to the terminal.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -24,9 +21,9 @@ use std::time::Duration;
 
 use otto_core::config::duration::parse_go_duration;
 
-/// Every command-line option, after parsing and validation. Port of Go's
-/// `cliOptions`, including the `*Set` flags that record which options were
-/// written explicitly.
+/// Every command-line option, after parsing and validation. The parsed options,
+/// including the `*Set` flags that record which options were written
+/// explicitly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CliOptions {
     pub config_path: String,
@@ -231,7 +228,7 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     Ok(())
 }
 
-/// The exact usage text Go's `printUsage` writes.
+/// The exact usage text the binary writes.
 pub fn print_usage(output: &mut dyn Write) {
     let _ = output.write_all(USAGE.as_bytes());
 }
@@ -382,8 +379,8 @@ impl FlagSet {
         }
     }
 
-    /// The last value scanned for `name`, the way Go's flag package lets a
-    /// repeated flag overwrite the earlier one.
+    /// The last value scanned for `name`: a repeated flag overwrites the
+    /// earlier one.
     fn raw(&self, name: &str) -> Option<&str> {
         self.values
             .iter()
@@ -415,8 +412,8 @@ impl FlagSet {
             .raw(name)
             .and_then(|value| parse_go_duration(value).ok())
             .unwrap_or(0);
-        // Go's negative durations are rejected by the caller's `<= 0` check;
-        // a saturating conversion keeps them at zero here.
+        // Negative durations are rejected by the caller's `<= 0` check; a
+        // saturating conversion keeps them at zero here.
         Duration::from_nanos(nanos.max(0) as u64)
     }
 
@@ -606,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_messages_match_the_go_binary() {
+    fn every_invalid_flag_reports_its_allowed_values() {
         let cases: &[(&[&str], &str)] = &[
             (
                 &["--sandbox", "docker"],

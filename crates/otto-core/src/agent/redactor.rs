@@ -1,15 +1,14 @@
 //! Removes resolved secret values at the provider-neutral agent boundary.
 //!
-//! Port of `internal/agent/redactor.go`. The agent runs every tool result,
-//! every streamed text delta, and every error string through a [`Redactor`]
-//! before it reaches an event sink or the session file.
+//! The agent runs every tool result, every streamed text delta, and every error
+//! string through a [`Redactor`] before it reaches an event sink or the session
+//! file.
 //!
 //! Ownership: a [`Redactor`] owns its secret values and never exposes them.
 //! There is no accessor and no `Debug` output that could print one.
 //!
-//! Concurrency: a [`Redactor`] is immutable after construction and is `Sync`.
-//! A [`StreamRedactor`] holds mutable carry-over state and belongs to one
-//! stream.
+//! Concurrency: a [`Redactor`] is immutable after construction and is `Sync`. A
+//! [`StreamRedactor`] holds mutable carry-over state and belongs to one stream.
 //!
 //! Errors: nothing here fails. When exact redaction is not representable the
 //! redactor fails closed, dropping the text instead of risking a leak.
@@ -23,11 +22,11 @@ use crate::safetext;
 
 use super::events::AgentError;
 
-/// The preferred replacement rune, Go's `redactionMarker`.
+/// The preferred replacement rune.
 pub const REDACTION_MARKER: &str = "\u{E000}";
 
-/// Go's `maximumJSONDepth`: how deeply [`Redactor::redact_json_strings`] will
-/// descend before it fails closed.
+/// How deeply [`Redactor::redact_json_strings`] will descend before it fails
+/// closed.
 const MAXIMUM_JSON_DEPTH: usize = 10_000;
 
 /// Replaces known secret values with a marker rune.
@@ -178,7 +177,7 @@ impl Redactor {
         let value = self.parse_value(&mut parser)?;
         parser.skip_whitespace();
         if parser.index != parser.bytes.len() {
-            // Go's `ensureJSONEOF`: a second value is not a document.
+            // A second value is not a document.
             return None;
         }
         Some(value)
@@ -399,9 +398,9 @@ impl Parser<'_> {
 
     /// Decodes a JSON string starting at the opening quote.
     ///
-    /// Escape handling matches Go's decoder: an unpaired surrogate becomes
-    /// U+FFFD, and any byte that is not valid UTF-8 becomes U+FFFD too. A raw
-    /// control character or an unknown escape is a parse failure.
+    /// Escape handling: an unpaired surrogate becomes U+FFFD, and any byte that
+    /// is not valid UTF-8 becomes U+FFFD too. A raw control character or an
+    /// unknown escape is a parse failure.
     fn parse_string(&mut self) -> Option<String> {
         self.index += 1;
         let mut decoded: Vec<u8> = Vec::new();
@@ -518,10 +517,9 @@ fn null_json() -> Box<RawValue> {
     RawValue::from_string("null".to_owned()).expect("null is valid JSON")
 }
 
-/// Encodes a string the way Go's `json.Marshal` does, including its HTML
-/// escaping of `<`, `>` and `&` and its escaping of U+2028 and U+2029.
-/// Encodes one string the way Go's `json.Marshal` does, HTML escaping and
-/// U+2028/U+2029 escaping included.
+/// Encodes a string with the HTML escaping of `<`, `>` and `&` and the escaping
+/// of U+2028 and U+2029 that the session format uses. Encodes one string, HTML
+/// escaping and U+2028/U+2029 escaping included.
 pub(super) fn encode_json_string(value: &str) -> String {
     let encoded = serde_json::to_string(value).expect("a string always encodes");
     if !encoded.contains(['<', '>', '&', '\u{2028}', '\u{2029}']) {
@@ -539,9 +537,9 @@ fn encode_array(items: &[String]) -> String {
     format!("[{}]", items.join(","))
 }
 
-/// Encodes object members the way Go does after redaction: duplicate keys,
-/// normalized aliases and post-redaction collisions all resolve to `null`, and
-/// the result is key sorted because Go marshals a `map[string]any`.
+/// Encodes object members after redaction: duplicate keys, normalized aliases
+/// and post-redaction collisions all resolve to `null`, and the result is key
+/// sorted.
 fn encode_object(members: Vec<(String, String)>) -> String {
     let mut resolved: BTreeMap<String, Option<String>> = BTreeMap::new();
     for (key, value) in members {
@@ -931,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn escapes_html_characters_the_way_go_marshals_them() {
+    fn escapes_html_characters_the_way_encoding_json_does() {
         assert_eq!(
             redact_json(&["secret"], r#"{"html":"<a>&b"}"#),
             r#"{"html":"\u003ca\u003e\u0026b"}"#

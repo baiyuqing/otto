@@ -1,9 +1,8 @@
 //! SQL fragments shared by the list and retrieval paths.
 //!
-//! Ported from Go `internal/memory/sqlite/query.go` and the query builders in
-//! `records.go`. Every projected column is wrapped in a safety `CASE`, so a row
-//! whose stored shape is wrong reaches the decoder as NULL and is reported as
-//! corruption instead of being silently coerced.
+//! Every projected column is wrapped in a safety `CASE`, so a row whose stored
+//! shape is wrong reaches the decoder as NULL and is reported as corruption
+//! instead of being silently coerced.
 
 use rusqlite::types::Value;
 
@@ -19,11 +18,11 @@ use super::codec::{MAX_LABELS_JSON_BYTES, MAX_SOURCE_JSON_BYTES, format_timestam
 
 /// Whether a rune makes a token run worth searching for.
 ///
-/// Go asks `unicode.IsLetter || IsMark || IsNumber || IsSymbol`. Rust's std has
+/// A full answer would ask for Letter, Mark, Number or Symbol. Rust's std has
 /// no Mark or Symbol predicate, so this covers Letter and Number exactly and
 /// Symbol only across ASCII. A run made entirely of non-ASCII marks or symbols
-/// is dropped here where Go would keep it; every run containing a letter or
-/// digit behaves identically.
+/// is therefore dropped; every run containing a letter or digit behaves
+/// identically.
 fn meaningful(character: char) -> bool {
     character.is_alphanumeric()
         || matches!(

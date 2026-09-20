@@ -1,12 +1,11 @@
 //! One admitted, empty-text notification turn.
 //!
-//! Port of `internal/app/wake.go`. A wake exists so a frontend can deliver
-//! sub-agent notifications without racing a user turn: the claim is taken
-//! under the same admission rule as a prompt, and the turn runs at most once.
+//! A wake exists so a frontend can deliver sub-agent notifications without
+//! racing a user turn: the claim is taken under the same admission rule as a
+//! prompt, and the turn runs at most once.
 //!
 //! Lifetime: the claim is held by an [`Admission`], so dropping a
-//! [`WakeOperation`] without running it releases the claim. That is Go's
-//! `Cancel`, made automatic.
+//! [`WakeOperation`] without running it releases the claim.
 
 use otto_core::agent::{AgentError, EventSink};
 use tokio_util::sync::CancellationToken;

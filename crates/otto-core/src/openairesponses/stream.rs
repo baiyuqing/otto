@@ -1,25 +1,21 @@
 //! Server-sent-event assembler for a Responses API response stream.
 //!
-//! Port of `internal/provider/openairesponses/stream.go`. The Go version reads
-//! from an `io.Reader`; this one is push-based so it depends on no I/O trait
-//! and builds for `wasm32-unknown-unknown`. The caller feeds response bytes to
-//! [`StreamAssembler::push`] in whatever sizes the transport delivers and
-//! calls [`StreamAssembler::finish`] at end of body. Line assembly spans
-//! pushes, so the result does not depend on where the chunk boundaries fall.
+//! The assembler is push-based, so it depends on no I/O trait and builds for
+//! `wasm32-unknown-unknown`. The caller feeds response bytes to
+//! [`StreamAssembler::push`] in whatever sizes the transport delivers and calls
+//! [`StreamAssembler::finish`] at end of body. Line assembly spans pushes, so
+//! the result does not depend on where the chunk boundaries fall.
 //!
 //! The Responses stream has no `[DONE]` sentinel: it ends with a
 //! `response.completed` or `response.incomplete` event and then the body
 //! closes.
 //!
 //! Ownership: the assembler owns all partial state; one instance serves one
-//! response and is not shared. The `emit` callback is borrowed for the
-//! duration of the call and is invoked synchronously and in arrival order.
+//! response and is not shared. The `emit` callback is borrowed for the duration
+//! of the call and is invoked synchronously and in arrival order.
 //!
-//! Errors: every failure is a [`StreamError`] whose text matches the Go error
-//! for the same input, except that the decoder detail appended to
-//! [`StreamError::Decode`] is `serde_json`'s message rather than
-//! `encoding/json`'s. Transport read failures have no variant here: they
-//! belong to the HTTP layer in `otto::provider::chatgpt`.
+//! Errors: every failure is a [`StreamError`]; the decoder detail appended to
+//! [`StreamError::Decode`] is `serde_json`'s message.
 
 use std::collections::HashMap;
 
@@ -83,8 +79,7 @@ impl StreamAssembler {
     ///
     /// Complete lines are processed immediately; a trailing partial line is
     /// held until the next push or until [`Self::finish`]. Bytes that arrive
-    /// after the terminal event are discarded, matching the Go reader, which
-    /// stops reading at that point.
+    /// after the terminal event are discarded.
     pub fn push(
         &mut self,
         bytes: &[u8],

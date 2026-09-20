@@ -1,7 +1,7 @@
-//! The `## Skills` system-prompt section. Port of `internal/skill/prompt.go`.
+//! The `## Skills` system-prompt section.
 //!
-//! The rendered text must stay byte-identical to Go's for the same catalog,
-//! because both binaries send it to the same providers.
+//! The rendered text goes to the provider verbatim, so the tests pin it byte
+//! for byte.
 
 use super::{Catalog, Skill};
 
@@ -62,7 +62,7 @@ fn render_entry(skill: &Skill) -> String {
     )
 }
 
-/// Go's `html.EscapeString`: the same five replacements, in the same spellings.
+/// Escapes the five characters `html.EscapeString` does, in the same spellings.
 pub(crate) fn escape_html(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
@@ -79,7 +79,7 @@ pub(crate) fn escape_html(value: &str) -> String {
 }
 
 /// Replaces every run of whitespace, including newlines, with a single space.
-/// Go's `\s` in RE2 is ASCII-only, so this matches the same five bytes.
+/// RE2's `\s` is ASCII-only, so this matches the same five bytes.
 pub(crate) fn collapse_whitespace(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut in_run = false;
@@ -101,7 +101,6 @@ pub(crate) fn collapse_whitespace(value: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Go's `TestPromptSectionEmptyCatalog` and `TestCatalogZeroValueIsUsable`.
     #[test]
     fn an_empty_catalog_renders_nothing() {
         let catalog = Catalog::default();
@@ -111,7 +110,6 @@ mod tests {
         assert_eq!(prompt_section(&catalog), (String::new(), Vec::new()));
     }
 
-    /// Go's `TestPromptSectionRendersAndEscapes`.
     #[test]
     fn a_rendered_entry_escapes_markup_and_collapses_whitespace() {
         let skill = Skill {
@@ -140,7 +138,6 @@ mod tests {
         assert!(!section.contains("<PDF>"), "markup leaked: {section:?}");
     }
 
-    /// Go's `TestPromptSectionByteCapDropsWithWarning`.
     #[test]
     fn entries_past_the_byte_cap_are_dropped_with_one_warning() {
         let skills = [

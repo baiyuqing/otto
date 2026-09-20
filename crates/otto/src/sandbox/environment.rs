@@ -1,9 +1,8 @@
 //! Classification of host environment variables for a sandboxed child.
 //!
-//! Port of Go's `internal/sandbox/environment.go`. Three questions are decided
-//! here for every host variable: whether the child may see it, whether its
-//! value must be redacted from transcripts, and whether the classification can
-//! be proven complete.
+//! Three questions are decided here for every host variable: whether the child
+//! may see it, whether its value must be redacted from transcripts, and whether
+//! the classification can be proven complete.
 //!
 //! Ownership: [`resolve_environment`] copies everything it needs out of its
 //! options, so an [`EnvironmentSnapshot`] shares no storage with the caller and
@@ -40,7 +39,7 @@ const DERIVED_CACHE_NAMES: [&str; 6] = ["go-build", "go-mod", "npm", "pip", "uv"
 /// because a real environment may hold bytes that are not UTF-8 and those
 /// entries must be rejected rather than repaired. `provider_names` and
 /// `allow_names` come from configuration, which is UTF-8 by construction, so
-/// Go's UTF-8 check on those two is unreachable here and is not ported.
+/// they need no UTF-8 check.
 #[derive(Debug, Clone, Default)]
 pub struct EnvironmentOptions {
     pub host_entries: Vec<Vec<u8>>,
@@ -538,8 +537,8 @@ fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
-/// Go's `securePrivateDirectoryInfo`: a directory, permissions exactly 0700,
-/// no setuid/setgid/sticky bit, owned by the effective user.
+/// What a secure private directory must be: a directory, permissions exactly
+/// 0700, no setuid/setgid/sticky bit, owned by the effective user.
 fn secure_private_directory_info(info: &fs::Metadata) -> bool {
     let mode = info.mode();
     info.is_dir() && mode & 0o7777 == 0o700 && info.uid() == nix::unistd::Uid::effective().as_raw()
@@ -604,8 +603,8 @@ mod tests {
         );
     }
 
-    /// Go's `newPrivateDirectories`: four owner-only directories under one
-    /// temporary root, returned with the guard that keeps them alive.
+    /// Four owner-only directories under one temporary root, returned with the
+    /// guard that keeps them alive.
     fn new_private_directories() -> (tempfile::TempDir, PrivateDirectories) {
         let temp = tempfile::tempdir().expect("temporary directory");
         let root = temp.path().join("private");

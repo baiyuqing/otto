@@ -1,17 +1,12 @@
 //! The line-oriented frontend.
 //!
-//! Port of `internal/repl`. The banner, prompt marker, command output and
-//! event rendering are byte-identical to the Go REPL's for the same inputs.
-//!
 //! `/sandbox reload` goes through [`Controller::reload_sandbox`], which the
 //! composition root in [`super::run`] wires to the process sandbox switch, so
-//! it re-points bash without restarting. Nothing is left unported: the
-//! `UNPORTED` list that answers with a "not yet ported" line is empty.
+//! it re-points bash without restarting.
 //!
 //! Input: one blocking reader task feeds a bounded channel, so a parent
 //! cancellation is observed while the loop is idle waiting for a line. A line
-//! longer than [`MAX_INPUT_BYTES`] ends the loop with an error, as Go's
-//! scanner limit does.
+//! longer than [`MAX_INPUT_BYTES`] ends the loop with an error.
 //!
 //! Sub-agent wake turns: the loop also selects on the task registry's update
 //! signal and runs an empty-text turn whenever a notification is pending, and
@@ -28,27 +23,24 @@ use crate::subagent::tasks::{TaskError, Tasks};
 
 use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE};
 
-/// The longest line the REPL accepts, matching Go's `maxInputBytes`.
+/// The longest line the REPL accepts.
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
 const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
-/// Commands `internal/repl` has that this phase does not.
-const UNPORTED: [&str; 0] = [];
-
-/// Why the loop stopped. Port of the error values `Run` returns.
+/// Why the loop stopped.
 #[derive(Debug)]
 pub enum Error {
-    /// The process context was cancelled. Go returns `ctx.Err()`.
+    /// The process context was cancelled.
     Cancelled,
     /// The input could not be read, or a line exceeded the limit.
     Input(String),
-    /// Port of `commandError`: the command that failed and its message.
+    /// The command that failed and its message.
     Command { command: String, message: String },
-    /// A turn failed. `fatal` marks Go's `session.ErrFatalPersistence`, the
-    /// only turn failure that ends the loop.
+    /// A turn failed. `fatal` marks a fatal persistence failure, the only turn
+    /// failure that ends the loop.
     Turn { message: String, fatal: bool },
 }
 
@@ -65,7 +57,6 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Port of `repl.IsCommandError`.
 pub fn is_command_error(error: &Error, command: &str) -> bool {
     matches!(error, Error::Command { command: name, .. } if name == command)
 }
@@ -89,7 +80,7 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// The interactive loop. Port of `REPL.Run`.
+    /// The interactive loop.
     pub async fn run<R: BufRead + Send + 'static>(
         &mut self,
         input: R,
@@ -107,10 +98,9 @@ impl<'a> Repl<'a> {
         loop {
             let _ = write!(self.stdout, "> ");
             let _ = self.stdout.flush();
-            // Go re-reads `Tasks()` every iteration. The receiver is kept
-            // across iterations instead: subscribing now would mark a signal
-            // raised during the last turn as already seen, where Go's
-            // buffered channel still holds it.
+            // The receiver is kept across iterations rather than re-subscribed:
+            // subscribing now would mark a signal raised during the last turn
+            // as already seen.
             match self.controller.subagent_tasks() {
                 Some(tasks) => {
                     if updates
@@ -124,8 +114,8 @@ impl<'a> Repl<'a> {
                 None => updates = None,
             }
             // `Ok(line)` is a read; `Err(open)` is a registry signal, where
-            // `open == false` is Go's closed channel: the session was
-            // replaced and the next iteration re-reads the registry.
+            // `open == false` means the session was replaced and the next
+            // iteration re-reads the registry.
             let read = {
                 let signal = async {
                     match updates.as_mut() {
@@ -170,10 +160,10 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// One prompt with the same rendering as [`Repl::run`], without the
-    /// banner or the prompt marker. Port of `REPL.RunOnce`: after the turn it
-    /// waits out any sub-agent task still running and wakes until nothing is
-    /// pending, so a one-shot `-p` run does not exit with children in flight.
+    /// One prompt with the same rendering as [`Repl::run`], without the banner
+    /// or the prompt marker. After the turn it waits out any sub-agent task
+    /// still running and wakes until nothing is pending, so a one-shot `-p` run
+    /// does not exit with children in flight.
     pub async fn run_once(
         &mut self,
         prompt: &str,
@@ -183,9 +173,9 @@ impl<'a> Repl<'a> {
         self.drain_tasks(cancel).await
     }
 
-    /// One empty-text turn delivering the pending sub-agent notifications,
-    /// and whether it ran. Port of `REPL.wake`: the leading newline keeps the
-    /// output off the `"> "` marker.
+    /// One empty-text turn delivering the pending sub-agent notifications, and
+    /// whether it ran. The leading newline keeps the output off the `"> "`
+    /// marker.
     async fn wake(&mut self, cancel: &CancellationToken) -> Result<bool, Error> {
         let Self {
             controller,
@@ -227,7 +217,7 @@ impl<'a> Repl<'a> {
     }
 
     /// Waits out every non-final task, then wakes until nothing is pending.
-    /// Port of `REPL.drainTasks`; each wait and wake is bounded by `cancel`.
+    /// Each wait and wake is bounded by `cancel`.
     async fn drain_tasks(&mut self, cancel: &CancellationToken) -> Result<(), Error> {
         let Some(tasks) = self.controller.subagent_tasks() else {
             return Ok(());
@@ -463,10 +453,6 @@ impl<'a> Repl<'a> {
                     self.timers_command(args);
                     Some(false)
                 }
-                _ if UNPORTED.contains(&name) => {
-                    let _ = writeln!(self.stderr, "/{name} is not yet ported");
-                    Some(false)
-                }
                 _ => None,
             }
         };
@@ -479,7 +465,6 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// Port of `modelCommand` plus Otto's reasoning-effort extension.
     async fn model(&mut self, args: &str) -> Result<(), Error> {
         let unavailable = || Error::Command {
             command: "/model".to_string(),
@@ -622,7 +607,7 @@ impl<'a> Repl<'a> {
         Ok(())
     }
 
-    /// Port of `sandboxCommand`. False means "unknown command".
+    /// False means "unknown command".
     async fn sandbox(&mut self, args: &str) -> Result<bool, Error> {
         match args {
             "" => {
@@ -648,7 +633,6 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// Port of `REPL.printSandbox`.
     fn print_sandbox(&mut self, info: crate::cli::info::SandboxInfo) {
         let _ = writeln!(self.stdout, "Sandbox: {}", info.summary());
         let reason = info.reason_code();
@@ -657,8 +641,8 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// Port of `REPL.compact`, including the checkpoint de-duplication that
-    /// keeps an event and the returned result from rendering twice.
+    /// Includes the checkpoint de-duplication that keeps an event and the
+    /// returned result from rendering twice.
     async fn compact(&mut self, focus: &str, cancel: &CancellationToken) -> Result<(), Error> {
         let Self {
             controller,
@@ -730,8 +714,8 @@ impl<'a> Repl<'a> {
     }
 }
 
-/// Renders one event. Returns true when it wrote an agent error, so the
-/// caller does not print the same failure twice. Port of `renderEvent`.
+/// Renders one event. Returns true when it wrote an agent error, so the caller
+/// does not print the same failure twice.
 fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -> bool {
     match event {
         Event::TextDelta { text } => {
@@ -765,7 +749,6 @@ fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -
     false
 }
 
-/// Port of `compactionLine`.
 fn compaction_line(result: &CompactionResult) -> String {
     if result.noop {
         return "\n[context] no-op\n".to_string();
@@ -780,7 +763,6 @@ fn compaction_line(result: &CompactionResult) -> String {
     format!("\n[context] compacted {before} tokens\n")
 }
 
-/// Port of `formatTokenCount`.
 fn format_token_count(tokens: i64) -> String {
     if tokens < 1000 {
         return tokens.to_string();
@@ -842,8 +824,8 @@ fn parse_model_args(args: &str) -> Result<ParsedModelArgs, String> {
     Ok(parsed)
 }
 
-/// Port of `splitCommand`: the name and the trimmed remainder, or `None` when
-/// the line is not a command.
+/// The name and the trimmed remainder, or `None` when the line is not a
+/// command.
 fn split_command(command: &str) -> Option<(&str, &str)> {
     let body = command.strip_prefix('/')?;
     if body.is_empty() {
@@ -862,18 +844,18 @@ fn first_line(content: &str) -> &str {
     }
 }
 
-/// Go's `errors.Is(err, session.ErrFatalPersistence)`.
+/// Whether the error is the store's fatal-persistence failure.
 ///
-/// ponytail: the kind does not survive `SessionError::Persist(String)`, so
-/// this matches the sentinel text the store prefixes onto the message. A
-/// typed flag on `SessionError` would be the upgrade, in `otto-core`.
+/// ponytail: the kind does not survive `SessionError::Persist(String)`, so this
+/// matches the sentinel text the store prefixes onto the message. A typed flag
+/// on `SessionError` would be the upgrade, in `otto-core`.
 pub(crate) fn is_fatal_persistence(error: &AgentError) -> bool {
     matches!(error, AgentError::Persist { source, .. }
         if source.to_string().starts_with("fatal session persistence failure"))
 }
 
 /// Reads lines on a blocking task so the loop can wait on cancellation at the
-/// same time. The channel holds one line, which is Go's scan/ack handshake.
+/// same time. The channel holds one line, a read/ack handshake.
 fn spawn_reader<R: BufRead + Send + 'static>(
     mut input: R,
 ) -> tokio::sync::mpsc::Receiver<Result<String, Error>> {
@@ -1257,7 +1239,6 @@ mod tests {
         assert_eq!(stderr, "unknown command: /sandbox bogus\n");
     }
 
-    /// Go's `seatbeltInfo`.
     fn seatbelt(network: SandboxNetwork) -> SandboxInfo {
         SandboxInfo {
             mode: SandboxMode::Seatbelt,
@@ -1267,7 +1248,7 @@ mod tests {
         }
     }
 
-    /// Go's `fakeSandboxBackend`: the reload capability without a sandbox.
+    /// The reload capability without a sandbox.
     struct FakeSandbox {
         info: SandboxInfo,
         reloaded: SandboxInfo,
@@ -1308,7 +1289,6 @@ mod tests {
         (controller, calls)
     }
 
-    /// Port of `TestREPLSandboxShowsCurrentStateWithoutReloading`.
     #[tokio::test]
     async fn sandbox_shows_the_current_state_without_reloading() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1327,7 +1307,6 @@ mod tests {
         assert_eq!(*calls.lock().expect("calls"), 0);
     }
 
-    /// Port of `TestREPLSandboxReloadReportsNewState`.
     #[tokio::test]
     async fn sandbox_reload_reports_the_new_state() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1342,7 +1321,6 @@ mod tests {
         assert!(stdout.contains("network denied"), "{stdout}");
     }
 
-    /// Port of `TestREPLSandboxReloadReportsFailure`.
     #[tokio::test]
     async fn sandbox_reload_reports_a_failure() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1361,8 +1339,7 @@ mod tests {
         assert_eq!(error.to_string(), "sandbox reload failed: self-test-failed");
     }
 
-    /// Port of `TestREPLSandboxReloadWithoutCapabilityIsReported`: the CLI
-    /// builds no control when bash never came up.
+    /// The CLI builds no control when bash never came up.
     #[tokio::test]
     async fn sandbox_reload_without_a_control_is_reported() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1401,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn events_render_the_way_the_go_frontend_renders_them() {
+    fn every_event_renders_to_the_expected_line() {
         let mut stdout = Buffer::default();
         let mut stderr = Buffer::default();
         let events = [
@@ -1453,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_lines_match_the_go_text() {
+    fn compaction_lines_match_the_expected_text() {
         assert_eq!(
             compaction_line(&CompactionResult {
                 noop: true,
@@ -1488,15 +1465,13 @@ mod tests {
     }
     // ---- sub-agent wake turns ----
 
-    /// One provider call per turn. The `cli` tests have no backend seam like
-    /// Go's `fakeBackend`, so the script sits one layer down, at the
-    /// provider, the way `server`'s tests script theirs. `reply` gets the
-    /// 1-based call index.
+    /// One provider call per turn. The `cli` tests have no backend seam, so the
+    /// script sits one layer down, at the provider, the way `server`'s tests
+    /// script theirs. `reply` gets the 1-based call index.
     struct ScriptedProvider {
         reply: Box<dyn Fn(usize) -> Result<String, String> + Send + Sync>,
         /// The role of each call's last request message: `User` for a prompt
-        /// turn, `Context` for a wake turn's delivered notification. This is
-        /// what Go asserts as the empty prompt text of a wake call.
+        /// turn, `Context` for a wake turn's delivered notification.
         roles: Mutex<Vec<Role>>,
         calls: tokio::sync::watch::Sender<usize>,
     }
@@ -1567,8 +1542,7 @@ mod tests {
         }
     }
 
-    /// Stdin that stays open until the test drops `sender`, which is Go's
-    /// `io.Pipe` writer close.
+    /// Stdin that stays open until the test drops `sender`.
     struct Pipe(std::sync::mpsc::Receiver<()>);
 
     impl Read for Pipe {
@@ -1608,7 +1582,6 @@ mod tests {
         (repl, stdout, stderr)
     }
 
-    /// Port of `TestREPLRendersNotificationEvent`.
     #[tokio::test]
     async fn a_notification_renders_during_a_one_shot_turn() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1642,7 +1615,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestREPLWakesOnlyWhenNotificationIsPending`.
     #[tokio::test]
     async fn the_loop_wakes_only_when_a_notification_is_pending() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1694,7 +1666,6 @@ mod tests {
         assert!(stdout.text().contains("\nwoke up"), "{}", stdout.text());
     }
 
-    /// Port of `TestRunOnceWaitsForRunningTaskAndWakes`.
     #[tokio::test]
     async fn a_one_shot_run_waits_for_a_running_task_and_then_wakes() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1752,7 +1723,6 @@ mod tests {
         assert!(stdout.text().contains("reported"), "{}", stdout.text());
     }
 
-    /// Port of `TestRunOnceReturnsWakeError`.
     #[tokio::test]
     async fn a_one_shot_run_returns_the_wake_turns_error() {
         let workspace = tempfile::tempdir().expect("workspace");

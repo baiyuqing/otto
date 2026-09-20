@@ -1,24 +1,22 @@
 //! The subagent task registry contract.
 //!
-//! `internal/agent/tasks.go` holds a concurrent registry of subagent tasks,
-//! but the turn loop itself touches only one method: it closes the registry
-//! when the agent shuts down. Everything else on the Go type is used by
-//! `internal/subagent` and by the frontends.
+//! A concurrent registry of subagent tasks lives in `crate::subagent`, but the
+//! turn loop itself touches only one method: it closes the registry when the
+//! agent shuts down.
 //!
-//! This module therefore ships only the boundary the turn loop needs. The
-//! full registry, its task records, and its name validation are phase 7 work
-//! and will implement this trait from the subagent crate.
+//! This module therefore ships only the boundary the turn loop needs. The full
+//! registry, its task records, and its name validation live in the native
+//! crate, which implements this trait.
 //!
 //! Ownership: the agent borrows a registry through `Options`. Closing it
-//! belongs to the agent, because the agent's shutdown is what must stop
-//! running tasks.
+//! belongs to the agent, because the agent's shutdown is what must stop running
+//! tasks.
 //!
-//! Concurrency: an implementation is shared with every running task, so
-//! `close` takes `&self` and must be safe to call from any task and more than
-//! once.
+//! Concurrency: an implementation is shared with every running task, so `close`
+//! takes `&self` and must be safe to call from any task and more than once.
 //!
-//! Errors: none. Closing is best effort; a registry that is already closed
-//! does nothing.
+//! Errors: none. Closing is best effort; a registry that is already closed does
+//! nothing.
 
 /// The part of the subagent task registry the turn loop depends on.
 pub trait TaskRegistry {

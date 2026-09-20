@@ -1,4 +1,4 @@
-//! The `[skills]` table and its resolution. Port of `internal/config/skills.go`.
+//! The `[skills]` table and its resolution.
 
 use std::collections::HashMap;
 

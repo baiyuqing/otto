@@ -1,5 +1,4 @@
-//! The narrow capability the frontends get. Port of
-//! `internal/auth/service.go`.
+//! The narrow capability the frontends get.
 //!
 //! Every failure the sign-in flow can produce collapses to
 //! [`AuthError::LoginFailed`] here, so nothing an OAuth endpoint or a callback
@@ -12,11 +11,9 @@ use tokio_util::sync::CancellationToken;
 use super::login::{LoginError, Opener};
 use super::{AuthError, Credentials};
 
-/// How `login` runs. `Production` is the real PKCE flow; `Stub` is the Rust
-/// form of the `login` field Go's tests overwrite.
-/// The injected sign-in flow. Go passes `login` as a variadic argument to
-/// `NewService`; here it is a boxed closure so the production path stays a
-/// plain function call.
+/// How `login` runs. `Production` is the real PKCE flow; `Stub` is what tests
+/// substitute. The injected sign-in flow. `login` is a boxed closure so the
+/// production path stays a plain function call.
 #[cfg(test)]
 type LoginFlow = Box<dyn Fn(&Opener<'_>) -> Result<Credentials, LoginError> + Send + Sync>;
 
@@ -27,14 +24,13 @@ enum Flow {
 }
 
 /// Owns the configured credential file and the operations that mutate or
-/// inspect it. Port of `auth.Service`.
+/// inspect it.
 pub struct Service {
     path: PathBuf,
     flow: Flow,
 }
 
 impl Service {
-    /// Port of `NewService(path)`.
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
@@ -42,7 +38,6 @@ impl Service {
         }
     }
 
-    /// Port of `NewService(path, login)`.
     #[cfg(test)]
     pub(crate) fn with_flow(
         path: PathBuf,
@@ -58,7 +53,7 @@ impl Service {
         &self.path
     }
 
-    /// Port of `Service.Login`. `open` is `None` where Go passes a nil func.
+    /// `open` is `None` when no browser opener is supplied.
     pub async fn login(
         &self,
         cancel: &CancellationToken,
@@ -81,7 +76,7 @@ impl Service {
             Err(_) if cancel.is_cancelled() => return Err(AuthError::Cancelled),
             Err(_) => return Err(AuthError::LoginFailed),
         };
-        // Go re-checks the context here so a cancellation that arrived during
+        // The token is re-checked here so a cancellation that arrived during
         // the flow cannot still write a credential file.
         if cancel.is_cancelled() {
             return Err(AuthError::Cancelled);
@@ -91,7 +86,7 @@ impl Service {
             .map_err(|_| AuthError::CredentialsPersistence)
     }
 
-    /// Port of `Service.Logout`. The bool reports whether a file was removed.
+    /// The bool reports whether a file was removed.
     pub fn logout(&self, cancel: &CancellationToken) -> Result<bool, AuthError> {
         if cancel.is_cancelled() {
             return Err(AuthError::Cancelled);
@@ -103,7 +98,6 @@ impl Service {
         }
     }
 
-    /// Port of `Service.Status`.
     pub fn status(&self, cancel: &CancellationToken) -> (String, bool) {
         if cancel.is_cancelled() {
             return (AuthError::InteractiveUnavailable.to_string(), false);
@@ -117,7 +111,6 @@ mod tests {
     use super::*;
     use crate::auth::load;
 
-    /// Port of `TestServiceLoginPersistsCredentialsAndHidesOAuthError`.
     #[tokio::test]
     async fn a_flow_failure_is_reported_as_a_bare_login_failure() {
         let directory = tempfile::tempdir().unwrap();
@@ -134,7 +127,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Port of `TestServiceLoginSavesAndLogoutReportsPresence`.
     #[tokio::test]
     async fn login_saves_and_logout_reports_whether_a_file_was_removed() {
         let directory = tempfile::tempdir().unwrap();
@@ -159,8 +151,8 @@ mod tests {
         assert!(!service.logout(&cancel).unwrap());
     }
 
-    /// Port of `TestServicePreservesCancellation`: a nil opener and a
-    /// cancelled token are distinct outcomes, and cancellation wins.
+    /// A missing opener and a cancelled token are distinct outcomes, and
+    /// cancellation wins.
     #[tokio::test]
     async fn cancellation_precedes_the_missing_opener_check() {
         let directory = tempfile::tempdir().unwrap();
@@ -177,7 +169,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestServiceDoesNotSaveAfterOAuthCancellation`.
     #[tokio::test]
     async fn credentials_are_not_saved_when_cancellation_arrives_during_the_flow() {
         let directory = tempfile::tempdir().unwrap();

@@ -1,10 +1,10 @@
-//! Shared search helpers. Port of `internal/tool/search.go`.
+//! Shared search helpers.
 //!
 //! The glob matcher reproduces Go's `path.Match` per segment plus recursive
-//! `**` segments, because the tool contract advertises exactly that syntax.
-//! The `.git` rules are a security boundary: a search root inside the
-//! repository metadata directory, reached directly or through a symlink alias,
-//! returns nothing rather than the contents of the object store.
+//! `**` segments, because the tool contract advertises exactly that syntax. The
+//! `.git` rules are a security boundary: a search root inside the repository
+//! metadata directory, reached directly or through a symlink alias, returns
+//! nothing rather than the contents of the object store.
 
 use std::io;
 use std::path::Path;
@@ -17,18 +17,16 @@ use super::workspace::Workspace;
 const BAD_PATTERN: &str = "syntax error in pattern";
 
 /// Reports whether `name` matches `pattern`, which may contain recursive `**`
-/// segments. Port of `matchRecursiveGlob`, which Go also exercises only from
-/// its tests; the tools split validation from matching so they can validate
-/// the pattern once per call instead of once per candidate.
+/// segments. The tools split validation from matching so they can validate the
+/// pattern once per call instead of once per candidate.
 #[cfg(test)]
 pub(crate) fn match_recursive_glob(pattern: &str, name: &str) -> Result<bool, String> {
     let segments = validated_glob_segments(pattern)?;
     Ok(match_glob_segments(&segments, name))
 }
 
-/// Matches pre-split pattern segments against a slash-separated name. Port of
-/// `matchGlobSegments`; the memo table keeps the `**` backtracking linear in
-/// the product of the two lengths.
+/// Matches pre-split pattern segments against a slash-separated name. The memo
+/// table keeps the `**` backtracking linear in the product of the two lengths.
 pub(crate) fn match_glob_segments(segments: &[String], name: &str) -> bool {
     let name = name.strip_prefix("./").unwrap_or(name);
     let name_segments: Vec<&str> = name.split('/').collect();
@@ -47,7 +45,7 @@ fn matches_from(
     if let Some(cached) = memo[key] {
         return cached;
     }
-    // Go seeds the memo before recursing, so a cycle resolves to false.
+    // The memo is seeded before recursing, so a cycle resolves to false.
     memo[key] = Some(false);
 
     let matched = if pattern_index == segments.len() {
@@ -72,8 +70,8 @@ fn matches_from(
     matched
 }
 
-/// Splits and validates a glob pattern. Port of `validatedGlobSegments`; the
-/// error texts are the ones the model sees.
+/// Splits and validates a glob pattern. The error texts are the ones the model
+/// sees.
 pub(crate) fn validated_glob_segments(pattern: &str) -> Result<Vec<String>, String> {
     if pattern.is_empty() {
         return Err("pattern must not be empty".to_owned());
@@ -96,8 +94,8 @@ pub(crate) fn validated_glob_segments(pattern: &str) -> Result<Vec<String>, Stri
     Ok(segments)
 }
 
-/// Port of Go's `path.Match` for one pattern. `/` is the separator, so a `*`
-/// never crosses a segment boundary even when a caller passes a full path.
+/// `/` is the separator, so a `*` never crosses a segment boundary even when a
+/// caller passes a full path.
 fn go_match(pattern: &str, name: &str) -> Result<bool, &'static str> {
     let mut pattern = pattern;
     let mut name = name;
@@ -153,8 +151,7 @@ fn go_match(pattern: &str, name: &str) -> Result<bool, &'static str> {
     Ok(name.is_empty())
 }
 
-/// Splits off the leading stars and the following literal run. Port of
-/// `scanChunk`.
+/// Splits off the leading stars and the following literal run.
 fn scan_chunk(pattern: &str) -> (bool, &str, &str) {
     let mut star = false;
     let mut pattern = pattern;
@@ -184,7 +181,7 @@ fn scan_chunk(pattern: &str) -> (bool, &str, &str) {
 }
 
 /// Matches one star-free chunk against a prefix of `name`, returning the
-/// unmatched remainder. Port of `matchChunk`.
+/// unmatched remainder.
 fn match_chunk<'a>(chunk: &str, name: &'a str) -> Result<Option<&'a str>, &'static str> {
     let mut failed = false;
     let mut chunk = chunk;
@@ -263,7 +260,7 @@ fn match_chunk<'a>(chunk: &str, name: &'a str) -> Result<Option<&'a str>, &'stat
     Ok(if failed { None } else { Some(name) })
 }
 
-/// Reads one possibly escaped character of a character class. Port of `getEsc`.
+/// Reads one possibly escaped character of a character class.
 fn get_escaped(chunk: &str) -> Result<(char, &str), &'static str> {
     if chunk.is_empty() || chunk.starts_with('-') || chunk.starts_with(']') {
         return Err(BAD_PATTERN);
@@ -281,8 +278,7 @@ fn get_escaped(chunk: &str) -> Result<(char, &str), &'static str> {
     Ok((character, rest))
 }
 
-/// The name a matched file is tested under, relative to the search root. Port
-/// of `searchRelativePath`.
+/// The name a matched file is tested under, relative to the search root.
 pub(crate) fn search_relative_path(root: &str, file_path: &str) -> io::Result<String> {
     let relative = rel(root.as_bytes(), file_path.as_bytes())?;
     if relative == b"." {
@@ -291,7 +287,7 @@ pub(crate) fn search_relative_path(root: &str, file_path: &str) -> io::Result<St
     Ok(String::from_utf8_lossy(&relative).into_owned())
 }
 
-/// Validates an optional result limit. Port of `resolveSearchLimit`.
+/// Validates an optional result limit.
 pub(crate) fn resolve_search_limit(
     value: Option<i64>,
     default_value: usize,
@@ -309,9 +305,8 @@ pub(crate) fn resolve_search_limit(
     Ok(value as usize)
 }
 
-/// Reports whether a search root lies in repository metadata, either
-/// lexically or through a `.git` symlink alias that still resolves inside the
-/// workspace. Port of `searchRootInsideGit`.
+/// Reports whether a search root lies in repository metadata, either lexically
+/// or through a `.git` symlink alias that still resolves inside the workspace.
 pub(crate) fn search_root_inside_git(
     workspace: &Workspace,
     requested_path: &str,
@@ -324,9 +319,8 @@ pub(crate) fn search_root_inside_git(
 }
 
 /// Walks the requested path element by element and reports whether any `.git`
-/// element resolves to a directory inside the workspace. Port of
-/// `requestedGitAliasInsideWorkspace`. The workspace root itself may be named
-/// `.git`, which is not an alias.
+/// element resolves to a directory inside the workspace. The workspace root
+/// itself may be named `.git`, which is not an alias.
 fn requested_git_alias_inside_workspace(
     workspace: &Workspace,
     requested_path: &str,
@@ -365,8 +359,7 @@ fn requested_git_alias_inside_workspace(
     Ok(false)
 }
 
-/// Reports whether any element of a slash path is `.git`. Port of
-/// `pathHasGitSegment`.
+/// Reports whether any element of a slash path is `.git`.
 pub(crate) fn path_has_git_segment(relative: &str) -> bool {
     relative.split('/').any(|segment| segment == ".git")
 }
@@ -389,9 +382,8 @@ pub(crate) enum WalkAction {
     Stop,
 }
 
-/// Walks `root` depth first in lexical order through the workspace root
-/// handle, calling `visit` for the root itself and then every entry. Port of
-/// the `fs.WalkDir` use in `grep.go` and `find.go`: symbolic links are
+/// Walks `root` depth first in lexical order through the workspace root handle,
+/// calling `visit` for the root itself and then every entry. Symbolic links are
 /// reported, never followed, so a link out of the workspace is skipped by the
 /// caller rather than traversed.
 ///
@@ -486,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn search_limits_follow_the_go_bounds() {
+    fn search_limits_follow_the_documented_bounds() {
         assert_eq!(resolve_search_limit(None, 100, 1000).unwrap(), 100);
         assert_eq!(resolve_search_limit(Some(7), 100, 1000).unwrap(), 7);
         assert_eq!(
@@ -506,7 +498,7 @@ mod tests {
 
 /// Joint `find` + `grep` coverage for the shared `.git` exclusion rules. The
 /// two tools route every path through [`search_root_inside_git`] and
-/// [`path_has_git_segment`], so the Go suite exercises them together.
+/// [`path_has_git_segment`], so the tests exercise them together.
 #[cfg(test)]
 mod git_alias_tests {
     use crate::tool::find::FindTool;
@@ -599,8 +591,8 @@ mod git_alias_tests {
         }
     }
 
-    /// Go's `filepath.Rel`, reused so the test states the same sibling path
-    /// (`../other-link/.git`) that the Go suite exercises.
+    /// The same lexical `Rel` the tools use, so the test can state the sibling
+    /// path (`../other-link/.git`) directly.
     fn pathdiff(base: &Path, target: &Path) -> String {
         use std::os::unix::ffi::OsStrExt;
         let relative =

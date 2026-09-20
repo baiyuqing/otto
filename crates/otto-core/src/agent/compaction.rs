@@ -1,23 +1,23 @@
 //! The compaction pipeline: select, summarize, checkpoint.
 //!
-//! Port of `internal/agent/compaction.go`. One compaction asks the provider
-//! for a summary of the older part of the transcript, then appends a
-//! checkpoint that replaces those messages with the summary.
+//! One compaction asks the provider for a summary of the older part of the
+//! transcript, then appends a checkpoint that replaces those messages with the
+//! summary.
 //!
 //! Ownership: the pipeline clones out of the session, redacts the clones, and
 //! hands the session a checkpoint. Session messages are never mutated.
 //!
 //! Concurrency and cancellation: neither entry point locks. The caller
-//! serializes `run` and `compact`, the way the Go composition root's mutex
-//! does. Cancellation is checked before the selection, before the durable append,
-//! and again after it. A cancellation seen after the append does not erase
-//! the committed checkpoint or its completion event.
+//! serializes `run` and `compact`. Cancellation is checked before the
+//! selection, before the durable append, and again after it. A cancellation
+//! seen after the append does not erase the committed checkpoint or its
+//! completion event.
 //!
 //! Errors: [`AgentError::NothingToCompact`] means there was no safe prefix, a
 //! successful no-op for a manual compaction.
 //! [`AgentError::InvalidCompactionSummary`] covers every rejection of the
-//! summary request or its response.
-//! [`AgentError::CompactionBoundary`] covers a failure the agent does not own.
+//! summary request or its response. [`AgentError::CompactionBoundary`] covers a
+//! failure the agent does not own.
 
 use crate::model::{BlockType, Message, Role, ToolDefinition, Usage};
 use crate::provider::{Provider, Request};
@@ -427,8 +427,7 @@ pub fn validate_raw_summary_response_bound(
     Ok(())
 }
 
-/// Go's `validateProviderResponseMessage`, reused by both the run loop and the
-/// summary path.
+/// Reused by both the run loop and the summary path.
 pub(super) fn validate_provider_response_message(message: &Message) -> Result<(), String> {
     if message.role != Role::Assistant {
         return Err("assistant role is required".into());
@@ -462,8 +461,8 @@ pub fn combine_compaction_usage(
     )
 }
 
-/// Adds two token counts. A negative operand yields zero and an overflow
-/// yields the maximum, matching Go's `saturatingTokenAdd`.
+/// Adds two token counts. A negative operand yields zero and an overflow yields
+/// the maximum.
 pub fn saturating_token_add(left: i64, right: i64) -> i64 {
     if left < 0 || right < 0 {
         return 0;

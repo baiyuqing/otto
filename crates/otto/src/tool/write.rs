@@ -1,10 +1,10 @@
-//! The `write` tool. Port of `internal/tool/write.go`.
+//! The `write` tool.
 //!
 //! Creates or replaces a workspace file. The write is atomic: content goes to a
 //! temporary file in the destination directory and is renamed into place
-//! through the workspace root handle, so a reader never observes a partial
-//! file and the destination is never resolved outside the workspace. An
-//! existing file's permission bits are preserved; a new file gets `0644`.
+//! through the workspace root handle, so a reader never observes a partial file
+//! and the destination is never resolved outside the workspace. An existing
+//! file's permission bits are preserved; a new file gets `0644`.
 
 use std::io::Write;
 use std::path::Path;
@@ -100,7 +100,7 @@ impl Tool for WriteTool<'_> {
 }
 
 /// Writes `content` to the root-relative `path` through a temporary file and a
-/// rename. Port of `writeFileAtomic`.
+/// rename.
 pub(crate) fn write_file_atomic(
     workspace: &Workspace,
     path: &Path,
@@ -145,9 +145,9 @@ pub(crate) fn write_file_atomic(
 
 use std::os::unix::fs::PermissionsExt;
 
-/// Creates an exclusive temporary file in `directory`. Port of
-/// `createWorkspaceTemp`; the name uses eight bytes from the system random
-/// source so a hostile workspace cannot predict and pre-create it.
+/// Creates an exclusive temporary file in `directory`. The name uses eight
+/// bytes from the system random source so a hostile workspace cannot predict
+/// and pre-create it.
 fn create_workspace_temp(
     workspace: &Workspace,
     directory: &Path,

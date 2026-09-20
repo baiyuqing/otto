@@ -1,18 +1,14 @@
-//! The terminal frontend (ratatui + crossterm). Port of `internal/tui`.
+//! The terminal frontend (ratatui + crossterm).
 //!
-//! This module is built up incrementally; each submodule is a direct port
-//! of the matching Go file(s) and says so in its own doc comment.
-//!
-//! [`run`] is the entry point `cli::run` dispatches to for `--ui tui` (or
-//! `--ui auto` on a terminal). It owns the alternate screen / raw mode
-//! lifecycle, reads keys on a background task the way `cli::repl`'s
-//! `spawn_reader` reads lines, and drives [`app::App`] against the same
-//! [`Controller`] the REPL uses.
+//! [`run`] is the entry point `cli::run` dispatches to for `--ui tui` (or `--ui
+//! auto` on a terminal). It owns the alternate screen / raw mode lifecycle,
+//! reads keys on a background task the way `cli::repl`'s `spawn_reader` reads
+//! lines, and drives [`app::App`] against the same [`Controller`] the REPL
+//! uses.
 //!
 //! Sub-agent wake turns: the idle loop also selects on the task registry's
 //! update signal and runs an empty-text turn whenever a notification is
-//! pending, matching [`crate::cli::repl::Repl`]. There is no second
-//! scheduler.
+//! pending, matching [`crate::cli::repl::Repl`]. There is no second scheduler.
 
 mod app;
 mod commands;
@@ -45,7 +41,7 @@ use crate::subagent::tasks::Tasks;
 use app::{Action, App};
 use selection::{DragPhase, Selection};
 
-/// Runs the terminal frontend to completion. Port of `internal/tui.Run`.
+/// Runs the terminal frontend to completion.
 ///
 /// Enters the alternate screen, raw mode, and mouse capture, all restored on
 /// return and panic.
@@ -248,10 +244,9 @@ fn draw_error<E: std::fmt::Display>(error: E) -> ReplError {
     io_error(std::io::Error::other(error.to_string()))
 }
 
-/// What the idle loop woke up for. Port of the REPL's `select` over stdin
-/// versus the task-registry watch: keys stay one branch, and a registry
-/// signal is the other, so a pending notification can start a turn without
-/// a keypress.
+/// What the idle loop woke up for. Keys stay one branch and the task-registry
+/// watch is the other, so a pending notification can start a turn without a
+/// keypress.
 enum IdleEvent {
     Input(Option<TuiEvent>),
     Registry(bool),
@@ -458,11 +453,10 @@ async fn run_app<B: Backend>(
     }
 }
 
-/// Port of `internal/repl::Repl::run`'s handling of its own `prompt()`'s
-/// result: a non-fatal turn failure (already shown in the transcript by
-/// [`run_turn`]/[`run_compact`]/[`run_wake`]) is swallowed so the session continues;
-/// everything else (a fatal persistence failure, or the outer `cancel`
-/// itself firing) ends [`run`].
+/// A non-fatal turn failure (already shown in the transcript by
+/// [`run_turn`]/[`run_compact`]/[`run_wake`]) is swallowed so the session
+/// continues; everything else (a fatal persistence failure, or the outer
+/// `cancel` itself firing) ends [`run`].
 fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
     match error {
         ReplError::Turn { fatal: false, .. } => Ok(()),
@@ -470,18 +464,17 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
     }
 }
 
-/// Drives one `Controller` call to completion, owning the screen for its
-/// whole duration. Needed for [`Action::Prompt`]/[`Action::Compact`] and for
-/// a wake turn: every other `Action` is a one-shot `.await` with no Go
-/// precedent for interrupting it, and raw mode leaves no real SIGINT to
-/// interrupt it with anyway.
+/// Drives one `Controller` call to completion, owning the screen for its whole
+/// duration. Needed for [`Action::Prompt`]/[`Action::Compact`] and for a wake
+/// turn: every other `Action` is a one-shot `.await`, and raw mode leaves no
+/// real SIGINT to interrupt it with anyway.
 ///
-/// The call's sink cannot draw for itself, because it would have to hold
-/// `app` and `terminal` borrowed for the whole turn, leaving nothing here to
-/// redraw with. So the sink only forwards each [`Event`] down `events`, and
-/// this loop applies it, letting the same loop also redraw on a key, a
-/// resize, and every [`render::SPINNER_FRAME`] so the thinking indicator
-/// animates while nothing is streaming.
+/// The call's sink cannot draw for itself, because it would have to hold `app`
+/// and `terminal` borrowed for the whole turn, leaving nothing here to redraw
+/// with. So the sink only forwards each [`Event`] down `events`, and this loop
+/// applies it, letting the same loop also redraw on a key, a resize, and every
+/// [`render::SPINNER_FRAME`] so the thinking indicator animates while nothing
+/// is streaming.
 async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
     terminal: &mut Terminal<B>,
@@ -553,10 +546,9 @@ fn apply_turn_key<B: Backend>(
     }
 }
 
-/// Runs one prompt turn. Structurally a port of `internal/repl`'s own
-/// `prompt()`: build a sink over the live view, await the call, and turn a
-/// non-cancelled `Err` into [`Error::Turn`] using the same
-/// [`is_fatal_persistence`] check.
+/// Runs one prompt turn: build a sink over the live view, await the call, and
+/// turn a non-cancelled `Err` into [`Error::Turn`] using the same
+/// [`is_fatal_persistence`] check the line frontend uses.
 async fn run_turn<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
@@ -634,10 +626,10 @@ fn image_block_from_path(path: &str) -> Result<Block, String> {
     Ok(image)
 }
 
-/// One empty-text turn delivering pending sub-agent notifications.
-/// Port of `internal/repl`'s `wake`: the TUI has no `"> "` marker to skip,
-/// so the only extra work is bracketing the claim with [`App::start_turn`]
-/// so Esc still cancels and the thinking line still animates.
+/// One empty-text turn delivering pending sub-agent notifications. The TUI has
+/// no `"> "` marker to skip, so the only extra work is bracketing the claim
+/// with [`App::start_turn`] so Esc still cancels and the thinking line still
+/// animates.
 async fn run_wake<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
@@ -699,9 +691,8 @@ async fn run_wake<B: Backend>(
     }
 }
 
-/// Runs one `/compact`. Structurally a port of `internal/repl`'s own
-/// `compact()`, including its checkpoint/no-op de-duplication between a
-/// streamed [`Event::CompactionCompleted`] and the call's final
+/// Runs one `/compact`, including the checkpoint/no-op de-duplication between
+/// a streamed [`Event::CompactionCompleted`] and the call's final
 /// [`otto_core::agent::CompactionResult`] (both can describe the same
 /// compaction).
 async fn run_compact<B: Backend>(
@@ -790,8 +781,8 @@ fn push_session_id(app: &mut App, controller: &Controller) {
     }
 }
 
-/// Port of `internal/repl`'s `model()` with-argument branch: switch, try to
-/// persist as the default profile, and report either way.
+/// The `/model <name>` branch: switch, try to persist as the default profile,
+/// and report either way.
 async fn switch_profile(app: &mut App, controller: &Controller, profile: &str) {
     if let Err(message) = controller.switch_profile(profile).await {
         app.push_system(format!("/model: {message}"));
@@ -813,10 +804,10 @@ async fn switch_profile(app: &mut App, controller: &Controller, profile: &str) {
     push_session_id(app, controller);
 }
 
-/// Port of `internal/repl`'s `/login` dispatch: `repl_login` writes its
-/// report to `stdout`/`stderr` buffers rather than the transcript directly,
-/// so capture both and push whatever they produced as one system entry,
-/// matching the `/logout` handling already in `App::dispatch_line`.
+/// `/login` dispatch: `repl_login` writes its report to `stdout`/`stderr`
+/// buffers rather than the transcript directly, so capture both and push
+/// whatever they produced as one system entry, matching the `/logout` handling
+/// already in `App::dispatch_line`.
 async fn login_dispatch(
     app: &mut App,
     controller: &Controller,
@@ -882,7 +873,7 @@ async fn apply_thinking(app: &mut App, controller: &Controller, thinking: &str, 
     }
 }
 
-/// Port of `/mcp login <server>` dispatch: reuses [`repl_commands::repl_mcp_command`]
+/// `/mcp login <server>` dispatch: reuses [`repl_commands::repl_mcp_command`]
 /// against captured buffers, matching [`login_dispatch`] above.
 async fn mcp_login_dispatch(
     app: &mut App,
@@ -1178,9 +1169,9 @@ mod tests {
         assert!(turn.is_cancelled());
     }
 
-    /// Port of `TestREPLWakesOnlyWhenNotificationIsPending`, against the TUI
-    /// idle loop rather than stdin. A registry signal with nothing pending
-    /// must not start a turn; a later pending notification must.
+    /// The idle loop starts a turn only when a notification is pending. A
+    /// registry signal with nothing pending must not start a turn; a later
+    /// pending notification must.
     #[tokio::test]
     async fn the_idle_loop_wakes_only_when_a_notification_is_pending() {
         use std::sync::{Arc, Mutex};

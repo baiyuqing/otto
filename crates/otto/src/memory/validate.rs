@@ -1,8 +1,8 @@
-//! Request and record validation ported from Go `internal/memory/validate.go`.
+//! Request and record validation.
 //!
-//! Every trust boundary into the store runs through here: the service
-//! validates before it touches the store, and the store validates again on
-//! decode so a corrupted row cannot become a valid record.
+//! Every trust boundary into the store runs through here: the service validates
+//! before it touches the store, and the store validates again on decode so a
+//! corrupted row cannot become a valid record.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,8 +10,8 @@ use chrono::{DateTime, Datelike, Utc};
 
 use super::contracts::*;
 
-/// Go's zero `time.Time`. Timestamps default to this and validation rejects
-/// it, so an unset time can never reach the store.
+/// Timestamps default to this and validation rejects it, so an unset time can
+/// never reach the store.
 pub fn zero_time() -> DateTime<Utc> {
     DateTime::UNIX_EPOCH
 }
@@ -295,9 +295,9 @@ pub fn validate_metadata(metadata: &BTreeMap<String, String>, record_base: bool)
     Ok(())
 }
 
-/// Case folding for duplicate detection. Go walks `unicode.SimpleFold` to the
-/// lowest rune in the orbit; lowercasing agrees for every case pair Otto
-/// stores and differs only for exotic orbits such as Kelvin sign.
+/// Case folding for duplicate detection. Lowercasing agrees with a full
+/// simple-fold walk for every case pair Otto stores and differs only for exotic
+/// orbits such as the Kelvin sign.
 fn fold_canonical(value: &str) -> String {
     value.to_lowercase()
 }
@@ -961,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn valid_name_matches_go_alphabet() {
+    fn valid_name_accepts_only_the_name_alphabet() {
         assert!(valid_name("preference", MAX_KIND_BYTES));
         assert!(valid_name("a.b_c-1", MAX_KIND_BYTES));
         assert!(!valid_name("", MAX_KIND_BYTES));

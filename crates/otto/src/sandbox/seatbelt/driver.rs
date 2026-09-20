@@ -1,8 +1,8 @@
 //! The Seatbelt [`Driver`].
 //!
-//! Port of `internal/sandbox/seatbelt/driver_darwin.go`. Every child is run as
-//! `/usr/bin/sandbox-exec -f <profile> -- <argv>` with a profile generated from
-//! the session's workspace, its private state tree and the reviewed read roots.
+//! Every child is run as `/usr/bin/sandbox-exec -f <profile> -- <argv>` with a
+//! profile generated from the session's workspace, its private state tree and
+//! the reviewed read roots.
 //!
 //! Ownership: [`SeatbeltDriver`] owns the private state tree and the process
 //! manager, and releases both exactly once in [`SeatbeltDriver::close`]. The
@@ -20,17 +20,10 @@
 //! exception is `sandbox-exec: execvp()`, which is an ordinary "command not
 //! found" and is suppressed without poisoning anything.
 //!
-//! Differences from Go, all forced by the type system:
-//!
-//! * Go's `driverDependencies` injects eleven functions so its tests can
-//!   simulate a hostile host. Nothing in this crate consumes that seam, so the
-//!   port calls the production operations directly.
-//! * Go joins a cancellation with any secondary failure into a multi-error.
-//!   [`Error`] is a closed enum with no join, so cancellation wins and the
-//!   secondary failure is dropped, which matches what Go's joined error
-//!   displays.
-//! * A private-state cleanup failure has no Go-equivalent [`Error`] variant; it
-//!   surfaces as [`UnavailableReason::RuntimeFailure`].
+//! Two error shapes worth noting: [`Error`] is a closed enum with no join, so
+//! a cancellation that arrives alongside a secondary failure wins and the
+//! secondary failure is dropped; and a private-state cleanup failure has no
+//! variant of its own, surfacing as [`UnavailableReason::RuntimeFailure`].
 
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
@@ -75,7 +68,7 @@ pub struct Options {
     /// The host environment, read only for its single `PATH` entry.
     pub host_entries: Vec<String>,
     pub read_paths: Vec<String>,
-    /// `None` is rejected, matching Go's refusal of the zero `NetworkMode`.
+    /// `None` is rejected; the mode must be explicit.
     pub network: Option<NetworkMode>,
 }
 
@@ -694,7 +687,7 @@ fn resolve_directory(path: &str) -> Option<String> {
     }
 }
 
-/// The platform user cache directory, Go's `os.UserCacheDir` on macOS.
+/// The platform user cache directory on macOS.
 fn user_cache_directory() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     if home.is_empty() || !std::path::Path::new(&home).is_absolute() {
@@ -917,10 +910,9 @@ fn could_begin_diagnostic(value: &[u8]) -> bool {
 
 /// The shared driver contract, run against Seatbelt in both network modes.
 ///
-/// Port of Go's `TestSeatbeltDriverContract`. Go gates the file with a
-/// `darwin` build tag; here every check skips with a printed reason when the
-/// host cannot run `sandbox-exec`, so the suite stays green off macOS and
-/// inside a nested sandbox.
+/// Every check skips with a printed reason when the host cannot run
+/// `sandbox-exec`, so the suite stays green off macOS and inside a nested
+/// sandbox.
 #[cfg(test)]
 mod contract {
     use std::path::Path;
@@ -933,8 +925,8 @@ mod contract {
     use crate::sandbox::conformance::{Contract, Fixture};
     use crate::sandbox::{Driver, NetworkMode, Request};
 
-    /// The probe Go does not need: a nested or Linux host has `sandbox-exec`
-    /// absent or refusing the most permissive profile there is.
+    /// The availability probe: a nested or Linux host has `sandbox-exec` absent
+    /// or refusing the most permissive profile there is.
     fn unavailable_reason() -> Option<String> {
         if !std::path::Path::new(SANDBOX_EXEC_PATH).exists() {
             return Some(format!("{SANDBOX_EXEC_PATH} is absent"));
@@ -952,8 +944,7 @@ mod contract {
         }
     }
 
-    /// Creates `name` under the fixture base at mode 0700 and canonicalizes it,
-    /// matching Go's `canonicalDriverTestDirectory`.
+    /// Creates `name` under the fixture base at mode 0700 and canonicalizes it.
     fn private_directory(fixture: &Fixture, name: &str) -> String {
         use std::os::unix::fs::PermissionsExt as _;
         let path = fixture.base.join(name);
@@ -1033,8 +1024,8 @@ mod contract {
             ]
         }
 
-        /// Go sets the same flag: `sandbox-exec` serialises profile
-        /// compilation, so sixteen simultaneous callers add nothing.
+        /// `sandbox-exec` serialises profile compilation, so sixteen
+        /// simultaneous callers add nothing.
         fn skip_concurrent_calls(&self) -> bool {
             true
         }

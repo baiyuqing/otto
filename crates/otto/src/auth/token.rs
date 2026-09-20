@@ -1,12 +1,9 @@
-//! The refreshing, disk-persisting token source. Port of
-//! `internal/auth/tokensource.go`.
+//! The refreshing, disk-persisting token source.
 //!
-//! Divergence from Go: Go single-flights concurrent refreshes with an explicit
-//! `refreshDone` channel. Here one `tokio::sync::Mutex` covers the whole
-//! check-refresh-store sequence, so a second caller that arrives during a
-//! refresh waits on the lock and then re-checks validity, which is the same
-//! outcome with less state. A waiter still aborts on cancellation rather than
-//! blocking, as Go's `select` on `ctx.Done()` does.
+//! Here one `tokio::sync::Mutex` covers the whole check-refresh-store sequence,
+//! so a second caller that arrives during a refresh waits on the lock and then
+//! re-checks validity, which is the same outcome with less state. A waiter
+//! aborts on cancellation rather than blocking.
 
 use std::path::PathBuf;
 
@@ -16,31 +13,29 @@ use super::oauth::{self, Endpoint};
 use super::{AuthError, Credentials};
 
 /// How a due refresh is performed. `Endpoint` is the only variant outside
-/// tests; `Stub` is the Rust form of Go's injectable `base oauth2.TokenSource`.
+/// tests; `Stub` is the injectable base token source.
 enum Refresher {
     Endpoint(Endpoint),
     #[cfg(test)]
     Stub(Box<dyn Fn() -> Result<oauth::Token, ()> + Send + Sync>),
 }
 
-/// Port of `persistingSource`. Refreshes through the refresh token when the
-/// access token has expired and writes the rotated tokens back to `path`, so a
-/// refresh survives across processes.
+/// Refreshes through the refresh token when the access token has expired and
+/// writes the rotated tokens back to `path`, so a refresh survives across
+/// processes.
 pub struct TokenSource {
     path: PathBuf,
-    /// The process-level cancellation Go carries as `persistingSource.ctx`.
+    /// The process-level cancellation.
     base: CancellationToken,
     refresher: Refresher,
     credentials: tokio::sync::Mutex<Credentials>,
 }
 
 impl TokenSource {
-    /// Port of `Credentials.TokenSource`.
     pub fn new(credentials: Credentials, path: PathBuf, base: CancellationToken) -> Self {
         Self::with_endpoint(Endpoint::production(), credentials, path, base)
     }
 
-    /// Port of `newTokenSource`.
     pub fn with_endpoint(
         endpoint: Endpoint,
         credentials: Credentials,
@@ -55,8 +50,8 @@ impl TokenSource {
         }
     }
 
-    /// Port of `TokenContext`: returns the stored credentials when the access
-    /// token is still valid, otherwise refreshes once and persists the result.
+    /// Returns the stored credentials when the access token is still valid,
+    /// otherwise refreshes once and persists the result.
     pub async fn token(&self, cancel: &CancellationToken) -> Result<Credentials, AuthError> {
         if self.cancelled(cancel) {
             return Err(AuthError::Cancelled);
@@ -79,9 +74,9 @@ impl TokenSource {
         cancel.is_cancelled() || self.base.is_cancelled()
     }
 
-    /// Port of `refresh`. The rotated credentials are validated against the
-    /// size bound before anything is written, and the file is only rewritten
-    /// when a value actually changed.
+    /// The rotated credentials are validated against the size bound before
+    /// anything is written, and the file is only rewritten when a value
+    /// actually changed.
     async fn refresh(
         &self,
         snapshot: &Credentials,
@@ -154,7 +149,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestTokenSourceRefreshesAndPersists`.
     #[tokio::test]
     async fn refresh_rotates_the_tokens_and_persists_them_once() {
         let body = r#"{"access_token":"access-new","refresh_token":"refresh-new","token_type":"bearer","expires_in":3600}"#;
@@ -191,7 +185,6 @@ mod tests {
         assert_eq!(server.count(), 1);
     }
 
-    /// Port of `TestTokenSourceValidTokenSkipsRefresh`.
     #[tokio::test]
     async fn a_valid_token_is_returned_without_contacting_the_endpoint() {
         let server = testserver::spawn(|_| json_response("{}")).await;
@@ -215,9 +208,8 @@ mod tests {
         assert_eq!(server.count(), 0);
     }
 
-    /// Port of `TestTokenSourceRefreshFailureReturnsFixedError`, including its
-    /// assertion that the endpoint's body, which echoes the credentials back,
-    /// never reaches the error.
+    /// The endpoint's body, which echoes the credentials back, never reaches
+    /// the error.
     #[tokio::test]
     async fn a_refresh_failure_reports_a_fixed_error_without_the_endpoint_body() {
         const ACCESS: &str = "access-secret";
@@ -244,7 +236,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestTokenSourceSaveFailureReturnsFixedError`.
     #[tokio::test]
     async fn a_save_failure_reports_the_persistence_error() {
         const ACCOUNT: &str = "acct-secret";
@@ -272,8 +263,6 @@ mod tests {
         }
     }
 
-    /// Port of
-    /// `TestTokenSourceRejectsOversizedRotatedCredentialsWithoutPersisting`.
     #[tokio::test]
     async fn an_oversized_rotation_is_rejected_without_persisting_or_mutating() {
         let directory = tempfile::tempdir().unwrap();
@@ -298,8 +287,7 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// A refresh that returns the same values writes nothing, which is Go's
-    /// `changed` guard.
+    /// A refresh that returns the same values writes nothing.
     #[tokio::test]
     async fn an_unchanged_rotation_does_not_rewrite_the_file() {
         let directory = tempfile::tempdir().unwrap();
@@ -327,7 +315,6 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Port of `TestTokenSourcePreservesContextCancellation`.
     #[tokio::test]
     async fn a_cancelled_base_token_is_reported_as_cancellation() {
         let directory = tempfile::tempdir().unwrap();
@@ -348,7 +335,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestTokenSourceRefreshBlocksAllRedirects`.
     #[tokio::test]
     async fn a_refresh_follows_no_redirect() {
         for status in [301u16, 302, 303, 307, 308] {
@@ -375,8 +361,7 @@ mod tests {
         }
     }
 
-    /// Port of `TestTokenSourceTokenContextUsesTurnCancellation`: the
-    /// per-call token aborts a refresh that is already in flight.
+    /// The per-call token aborts a refresh that is already in flight.
     #[tokio::test]
     async fn a_refresh_in_flight_aborts_on_the_per_call_token() {
         let url = testserver::spawn_hanging().await;
@@ -399,7 +384,6 @@ mod tests {
         assert_eq!(source.token(&cancel).await, Err(AuthError::Cancelled));
     }
 
-    /// Port of `TestTokenSourceTokenContextUsesBaseCancellation`.
     #[tokio::test]
     async fn a_refresh_in_flight_aborts_on_the_base_token() {
         let url = testserver::spawn_hanging().await;

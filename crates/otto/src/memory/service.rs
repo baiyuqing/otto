@@ -1,29 +1,25 @@
 //! The memory service: the single entry point the tools, the REPL commands and
 //! the agent binding call.
 //!
-//! Ported from Go `internal/memory/service.go` and `internal/memory/null.go`.
-//! One type covers both Go types: a [`Service`] built without a store is Go's
-//! `nullService` and answers every operation with the category error it was
-//! constructed from, while a binding on it recalls nothing instead of failing.
+//! A [`Service`] built without a store answers every operation with the
+//! category error it was constructed from, while a binding on it recalls
+//! nothing instead of failing.
 //!
 //! Ownership and concurrency: the service owns the store and closes it in
 //! [`Service::close`]. Every operation takes `&self` and serializes on the
 //! store's connection mutex, so the service adds no lock of its own.
 //!
-//! Divergences from Go, each following the phase brief:
+//! Deliberate absences:
 //!
 //! - `Observe`, the extractor and the per-binding content guard are absent,
 //!   because automatic memory extraction is out of scope. The store still
 //!   guards written content.
-//! - Go injects `Store`, `Retriever` and `Policy` as interfaces and answers a
-//!   nil one with `ErrInvalidRequest`. Here the store is the concrete SQLite
-//!   store and the policy a function, so there is no nil case to reject.
-//! - Go's `Close` waits on a `sync.WaitGroup` for in-flight operations before
-//!   closing the store. Here an in-flight operation already holds the store's
-//!   connection mutex, so `close` waits on that mutex instead, and a call that
-//!   arrives after it sees `Closed`.
-//! - There is no `context.Context`: the synchronous methods cannot be
-//!   cancelled, and only the async [`MemoryRecall`] adapter checks a token.
+//! - The store is the concrete SQLite store and the policy a function, so
+//!   there is no missing-dependency case to reject.
+//! - `close` waits on the store's connection mutex, which an in-flight
+//!   operation already holds; a call that arrives after it sees `Closed`.
+//! - The synchronous methods cannot be cancelled; only the async
+//!   [`MemoryRecall`] adapter checks a token.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,15 +43,12 @@ use super::{
     decide_default_policy, new_id,
 };
 
-/// Go's `nowUTC`.
 fn now_utc() -> DateTime<Utc> {
     Utc::now()
 }
 
-/// Go's `Policy` interface. The one implementation is
-/// [`decide_default_policy`], so a function replaces the interface; Go's error
-/// return has no source other than a cancelled context, which does not exist
-/// here.
+/// The one implementation is [`decide_default_policy`], so a function replaces
+/// the interface and cannot fail.
 pub type Policy = fn(&PolicyRequest) -> PolicyDecision;
 
 /// Turns one turn's user text into a query the store accepts.
@@ -97,9 +90,9 @@ pub struct Service {
 }
 
 impl Service {
-    /// Go's `NewService`, composing a store and a policy: human-authorized
-    /// writes land directly, model, extractor and import writes land as
-    /// pending candidates through [`Service::propose`].
+    /// Composes a store and a policy: human-authorized writes land directly,
+    /// model, extractor and import writes land as pending candidates through
+    /// [`Service::propose`].
     pub fn new(store: Store, policy: Policy) -> Self {
         Self {
             store: Some(store),
@@ -109,9 +102,9 @@ impl Service {
         }
     }
 
-    /// Go's `NewNullService`. The reason is reduced to a safe public category:
-    /// nothing and `Disabled` stay `Disabled`, everything else becomes
-    /// `Unavailable`, so an internal failure never leaks through the category.
+    /// The reason is reduced to a safe public category: nothing and `Disabled`
+    /// stay `Disabled`, everything else becomes `Unavailable`, so an internal
+    /// failure never leaks through the category.
     pub fn null(reason: Option<ErrorKind>) -> Self {
         let category = match reason {
             None | Some(ErrorKind::Disabled) => ErrorKind::Disabled,
@@ -131,8 +124,8 @@ impl Service {
         self.store.is_none()
     }
 
-    /// Go's `service.operationError` fused with the store lookup: the closed
-    /// check wins over the category, matching Go's ordering.
+    /// The operation error and the store lookup in one: the closed check wins
+    /// over the category.
     fn ready(&self) -> Result<&Store> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::new(ErrorKind::Closed));
@@ -392,7 +385,7 @@ impl Service {
         })
     }
 
-    /// Closes the store. Repeated calls are no-ops, matching Go.
+    /// Closes the store. Repeated calls are no-ops.
     pub fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -554,7 +547,6 @@ mod tests {
     use crate::memory::sqlite::testsupport::open_temp;
     use crate::memory::{CandidateRef, NAMESPACE_USER, NAMESPACE_WORKSPACE};
 
-    /// Go's `newTestService`.
     fn service() -> (tempfile::TempDir, Arc<Service>) {
         let (directory, store) = open_temp();
         (
@@ -592,9 +584,7 @@ mod tests {
         }
     }
 
-    /// Go's `TestServiceRememberCreateAndUpdate` and
-    /// `TestServiceRememberWithKeyAndNoExpectedRevisionUpdatesExistingRecord`:
-    /// a keyed remember updates in place whether or not a revision is given,
+    /// A keyed remember updates in place whether or not a revision is given,
     /// and never leaves a duplicate behind.
     #[test]
     fn a_keyed_remember_creates_once_and_then_updates_in_place() {
@@ -644,8 +634,8 @@ mod tests {
         );
     }
 
-    /// Go's `TestServiceRememberRejectsSensitiveContent`. The guard runs inside
-    /// the store, so this checks the service does not route around it.
+    /// The guard runs inside the store, so this checks the service does not
+    /// route around it.
     #[test]
     fn a_remember_carrying_a_secret_is_refused() {
         let (_directory, service) = service();
@@ -660,7 +650,6 @@ mod tests {
         assert!(error.is(ErrorKind::SensitiveMemory), "error = {error}");
     }
 
-    /// Go's `TestServiceForget` and `TestServiceForgetPurgeBackupsUnsupported`.
     #[test]
     fn forgetting_writes_a_tombstone_and_purging_backups_is_refused() {
         let (_directory, service) = service();
@@ -704,7 +693,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestServiceGetNotFound`.
     #[test]
     fn reading_a_record_that_was_never_written_is_not_found() {
         let (_directory, service) = service();
@@ -720,8 +708,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestServiceProposeRejectsNonPendingOrigin` and
-    /// `TestServiceProposeReturnsErrorWhenPolicyDoesNotPend`.
     #[test]
     fn a_proposal_is_queued_only_when_the_policy_pends() {
         let (_directory, service) = service();
@@ -759,8 +745,6 @@ mod tests {
         }
     }
 
-    /// Go's `TestServiceProposeAndReviewAcceptCreate` and
-    /// `TestServiceProposeAndReviewReject`.
     #[test]
     fn an_accepted_proposal_becomes_a_record_and_a_rejected_one_does_not() {
         let (_directory, service) = service();
@@ -818,8 +802,8 @@ mod tests {
         assert_eq!(rejected.candidate.state, CandidateState::Rejected);
     }
 
-    /// Go's `TestServiceSearch`: an empty query lists, a text query retrieves,
-    /// and candidates come back only when asked for.
+    /// An empty query lists, a text query retrieves, and candidates come back
+    /// only when asked for.
     #[test]
     fn search_lists_retrieves_and_reports_candidates() {
         let (_directory, service) = service();
@@ -866,8 +850,6 @@ mod tests {
         assert_eq!(with_candidates.candidates.len(), 1);
     }
 
-    /// Go's `TestServiceBindRecall`, plus the agent-facing adapter over the
-    /// same binding.
     #[tokio::test]
     async fn a_binding_recalls_the_records_in_its_scopes() {
         let (_directory, service) = service();
@@ -944,7 +926,6 @@ mod tests {
         assert_eq!(result.records[0].id, created.id);
     }
 
-    /// Go's `TestServiceCloseClosesStoreAndInvalidatesBindings`.
     #[test]
     fn closing_the_service_invalidates_it_and_every_binding() {
         let (_directory, service) = service();
@@ -984,10 +965,8 @@ mod tests {
         );
     }
 
-    /// Go's `TestNullServiceSanitizesConstructorReasonForCanonicalMethods` and
-    /// `TestNullServiceBindingEmptyResultsUseIndependentSlices`: a null service
-    /// answers with a safe category, but its binding still recalls nothing
-    /// rather than failing.
+    /// A null service answers with a safe category, but its binding still
+    /// recalls nothing rather than failing.
     #[test]
     fn a_null_service_answers_with_its_category_and_recalls_nothing() {
         let scope = user_scope();
@@ -1048,8 +1027,8 @@ mod tests {
         }
     }
 
-    /// Go's `TestNullServiceBindValidationAndIndependentBindings`: binding
-    /// still validates its scopes, on the null service as on a real one.
+    /// Binding still validates its scopes, on the null service as on a real
+    /// one.
     #[test]
     fn binding_rejects_a_write_scope_it_does_not_read() {
         let service = Arc::new(Service::null(None));

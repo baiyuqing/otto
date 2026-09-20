@@ -1,4 +1,4 @@
-//! The per-session sub-agent task registry. Port of `internal/agent/tasks.go`.
+//! The per-session sub-agent task registry.
 //!
 //! A [`Tasks`] registry tracks one record per delegated task, the cancellation
 //! token and history hook that belong to it, and the parent's notification
@@ -6,8 +6,8 @@
 //! [`otto_core::agent::tasks::TaskRegistry`], whose only method the turn loop
 //! calls is `close`.
 //!
-//! Ownership: the registry owns its records. Every accessor returns a clone,
-//! so a caller never holds a reference into the locked state.
+//! Ownership: the registry owns its records. Every accessor returns a clone, so
+//! a caller never holds a reference into the locked state.
 //!
 //! Concurrency: one mutex guards everything. `history` and `cancel` run their
 //! stored hooks after releasing it, because a hook may call back into the
@@ -15,11 +15,10 @@
 //!
 //! Errors: the lifecycle transitions (`mark_running`, `record_provider_step`,
 //! `record_tool_call`, `finish`) are no-ops for an unknown id or an invalid
-//! transition, matching Go. Only `add`, `cancel` and `wait` report errors.
+//! transition. Only `add`, `cancel` and `wait` report errors.
 //!
-//! Divergence from Go: the Go registry stores a `func()` cancel hook; here the
-//! hook is the child's [`CancellationToken`], which is what the runner has and
-//! what a test can observe.
+//! The cancel hook is the child's [`CancellationToken`], which is what the
+//! runner has and what a test can observe.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -44,7 +43,7 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    /// The Go `TaskStatus` string, as rendered in status output.
+    /// The status string, as rendered in status output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -561,7 +560,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestTasksLifecycle`.
     #[tokio::test]
     async fn a_task_moves_from_queued_through_running_to_canceled() {
         let tasks = Arc::new(Tasks::new());
@@ -675,7 +673,6 @@ mod tests {
         tasks.close();
     }
 
-    /// Port of `TestTasksExplicitTransitions`.
     #[test]
     fn add_clears_runtime_fields_and_only_valid_transitions_apply() {
         let tasks = Tasks::new();
@@ -759,7 +756,6 @@ mod tests {
         assert_eq!(finished.tool_calls, 1, "updates after finish are no-ops");
     }
 
-    /// Port of `TestTasksNames`, first subtest.
     #[tokio::test]
     async fn a_name_resolves_to_the_same_task_as_its_id() {
         let tasks = Arc::new(Tasks::new());
@@ -800,7 +796,6 @@ mod tests {
             .expect("the wait succeeded");
     }
 
-    /// Port of the remaining `TestTasksNames` subtests.
     #[test]
     fn names_are_validated_and_reserved() {
         let tasks = Tasks::new();
@@ -874,7 +869,6 @@ mod tests {
         assert_ne!(first.id, second.id);
     }
 
-    /// Port of `TestTasksWaitHonorsContext`.
     #[tokio::test]
     async fn wait_stops_on_cancellation_and_rejects_an_unknown_reference() {
         let tasks = Tasks::new();

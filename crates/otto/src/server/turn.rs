@@ -1,15 +1,14 @@
 //! One session's most recent turn, buffered away from the HTTP readers.
 //!
-//! Port of `internal/server/turn.go`. The agent calls [`Turn::emitter`]'s
-//! closure synchronously and it performs no I/O, so a slow SSE reader never
-//! applies backpressure to the provider loop. Readers take a
-//! [`Turn::snapshot`] and wait on the [`tokio::sync::watch`] version for
-//! more, which cannot miss an event: the append and the version bump happen
-//! under the same lock, and a receiver created before a snapshot reports any
-//! bump that follows it.
+//! The agent calls [`Turn::emitter`]'s closure synchronously and it performs no
+//! I/O, so a slow SSE reader never applies backpressure to the provider loop.
+//! Readers take a [`Turn::snapshot`] and wait on the [`tokio::sync::watch`]
+//! version for more, which cannot miss an event: the append and the version
+//! bump happen under the same lock, and a receiver created before a snapshot
+//! reports any bump that follows it.
 //!
-//! ponytail: only the latest turn per session is retained, matching Go; add
-//! a ring buffer of turns if replay across turns is ever needed.
+//! ponytail: only the latest turn per session is retained; add a ring buffer of
+//! turns if replay across turns is ever needed.
 
 use std::sync::Mutex;
 use std::time::Instant;
@@ -29,7 +28,7 @@ pub const TURN_OK: &str = "ok";
 pub const TURN_ERROR: &str = "error";
 pub const TURN_CANCELED: &str = "canceled";
 
-/// Why a turn started. Port of Go's `triggerUser`/`triggerTask`.
+/// Why a turn started.
 pub const TRIGGER_USER: &str = "user";
 pub const TRIGGER_TASK: &str = "task";
 
@@ -193,8 +192,8 @@ impl Turn {
                         duration,
                         status,
                     } => {
-                        // Go records the metric and returns: the API call is
-                        // not part of the event stream.
+                        // The metric is recorded and the call returns: the API
+                        // call is not part of the event stream.
                         drop(state);
                         metrics.provider_api_request(provider, model, status.name(), *duration);
                         return;
@@ -232,7 +231,7 @@ impl Turn {
     }
 }
 
-/// Port of Go's `turnSummary`. Field order matches, so the JSON bytes match.
+/// Field order matches, so the JSON bytes match.
 #[derive(Debug, Clone, Serialize)]
 pub struct TurnSummary {
     pub id: String,

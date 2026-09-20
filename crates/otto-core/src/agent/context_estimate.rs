@@ -1,8 +1,7 @@
 //! Token estimates for a provider request.
 //!
-//! Port of `internal/agent/context_estimate.go`. The numbers are a cheap
-//! byte-count heuristic, not a tokenizer: three bytes per token plus fixed
-//! framing costs. They only have to be consistent with the Go agent, because
+//! The numbers are a cheap byte-count heuristic, not a tokenizer: three bytes
+//! per token plus fixed framing costs. They only have to stay stable, because
 //! the compaction triggers are calibrated against them.
 //!
 //! Every addition saturates at [`i64::MAX`] instead of wrapping, so a hostile
@@ -72,8 +71,7 @@ fn estimate_block(block: &Block) -> i64 {
             total = saturating_add(total, estimate_string(&block.tool_call_id));
             saturating_add(total, estimate_string(&block.tool_name))
         }
-        // Go's switch has no default arm, so an unknown block type costs
-        // nothing.
+        // An unknown block type costs nothing.
         BlockType::Other(_) => 0,
     }
 }
@@ -90,9 +88,8 @@ fn estimate_tool_definition(definition: &ToolDefinition) -> i64 {
     let mut total = TOOL_DEFINITION_FRAMING_TOKENS;
     total = saturating_add(total, estimate_string(&definition.name));
     total = saturating_add(total, estimate_string(&definition.description));
-    // Go marshals `Parameters` and skips the cost on a marshal error. A
-    // `RawValue` is already the marshalled form, and `None` marshals to
-    // `null`, which Go also counts.
+    // A `RawValue` is already the marshalled form, and `None` marshals to
+    // `null`, which is counted too.
     let schema = definition
         .parameters
         .as_ref()
@@ -131,7 +128,7 @@ fn request_usage_anchor(
 }
 
 /// Adds two estimates, clamping at [`i64::MAX`] and ignoring non-positive
-/// deltas. Port of `saturatingEstimateAdd`.
+/// deltas.
 pub fn saturating_add(total: i64, delta: i64) -> i64 {
     if total == i64::MAX || delta <= 0 {
         return total;
@@ -152,12 +149,12 @@ mod tests {
     use crate::model::{Role, Usage};
     use serde_json::value::RawValue;
 
-    /// The Go test's independent restatement of the formula.
+    /// An independent restatement of the formula.
     fn formula(value: &str) -> i64 {
         (value.len() as i64 + 2) / 3
     }
 
-    /// The Go test's independent restatement of the per-message sum.
+    /// An independent restatement of the per-message sum.
     fn message_formula(message: &Message) -> i64 {
         let mut want = 6;
         for block in &message.blocks {

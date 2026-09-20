@@ -1,13 +1,9 @@
-//! Precedence resolution: combines a parsed [`File`](super::File), an
-//! injected environment map, session defaults, and CLI overrides into a
-//! [`Runtime`]. Port of `internal/config/resolve.go`'s `Resolve`,
-//! `resolveCompaction`, and `resolveAPIKey`.
+//! Precedence resolution: combines a parsed [`File`](super::File), an injected
+//! environment map, session defaults, and CLI overrides into a [`Runtime`].
 //!
 //! `env` is read here by key (never via `std::env::var`, which core cannot
 //! call): the native `otto::config` layer populates the map from the real
-//! process environment before calling in. This mirrors Go's own `Resolve`,
-//! which likewise takes an already-populated `map[string]string` and reads
-//! `env[key]` directly, including for the resolved API key value.
+//! process environment before calling in.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -35,8 +31,7 @@ pub struct SessionDefaults {
 }
 
 /// Explicit CLI overrides, applied after profile, environment, and session
-/// defaults. An empty string or zero `Duration`/`0` means "not set", matching
-/// Go's `!= ""` / `> 0` checks.
+/// defaults. An empty string or zero `Duration`/`0` means "not set".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
     pub profile: String,
@@ -335,16 +330,13 @@ fn resolve_api_key(
     Err(ConfigError::new("missing api key"))
 }
 
-/// Re-implements `openaicompat.NormalizeBaseURL` on the `url` crate.
+/// Re-implements `otto::provider::openaicompat::normalize_base_url` on the
+/// `url` crate.
 ///
-/// ponytail: this duplicates (rather than calls) the real
-/// `internal/provider/openaicompat.NormalizeBaseURL`, because otto-core
-/// cannot depend on the native `otto` crate that owns it, and that function
-/// isn't itself pure-Rust-portable code shared across a workspace boundary.
-/// Every case in `TestResolveRejectsBaseURLsRejectedByOpenAIClient` and
-/// `TestResolveNormalizesBaseURLLikeOpenAIClient` is ported as a test below
-/// to keep the two implementations in sync; if the Go rule ever changes,
-/// this must change with it.
+/// ponytail: this duplicates (rather than calls)
+/// `otto::provider::openaicompat::normalize_base_url`, because otto-core cannot
+/// depend on the native `otto` crate that owns it. The tests below pin every
+/// accepted and rejected form, so the two implementations stay in sync.
 fn normalize_base_url(base_url: &str) -> Result<String, &'static str> {
     const INVALID: &str = "invalid OpenAI-compatible base URL";
     let mut parsed = Url::parse(base_url).map_err(|_| INVALID)?;

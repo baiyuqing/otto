@@ -1,15 +1,13 @@
 //! Pi v3 session wire types.
 //!
-//! Port of `internal/session/pi_types.go` and `internal/session/pi_details.go`.
 //! These structs mirror the on-disk JSONL records field for field, including
-//! the serde rename and omit-empty behavior, so that a record written by
-//! either implementation decodes in the other.
+//! the serde rename and omit-empty behavior, so that a record written by either
+//! implementation decodes in the other.
 //!
-//! Ownership: every value here is owned and `Clone`. Fields that carry
-//! provider or forward-compatible JSON are kept as raw bytes
-//! (`Option<Box<RawValue>>` for serialized fields, `Vec<u8>` for the
-//! non-serialized `raw` capture) so unknown fields survive a decode/encode
-//! round trip unchanged.
+//! Ownership: every value here is owned and `Clone`. Fields that carry provider
+//! or forward-compatible JSON are kept as raw bytes (`Option<Box<RawValue>>`
+//! for serialized fields, `Vec<u8>` for the non-serialized `raw` capture) so
+//! unknown fields survive a decode/encode round trip unchanged.
 //!
 //! Concurrency: plain data, no interior mutability.
 //!
@@ -96,8 +94,7 @@ impl PiEntry {
 /// The `message` payload of a `message` entry, and the element type of a
 /// compaction's `retainedTail`.
 ///
-/// The field order matches the Go struct because both implementations encode
-/// in declaration order.
+/// The field order is the order stored session files are written in.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PiMessage {
@@ -278,8 +275,8 @@ pub struct PiCompaction {
     #[serde(rename = "fromHook", default, skip_serializing_if = "Option::is_none")]
     pub from_hook: Option<bool>,
     /// `None` when the record carried no `retainedTail` key at all; `Some`
-    /// (possibly empty) when it did. Go distinguishes a nil slice from an
-    /// empty one here, and the checkpoint form depends on that difference.
+    /// (possibly empty) when it did. A missing list and an empty list are
+    /// distinct here, and the checkpoint form depends on the difference.
     #[serde(
         rename = "retainedTail",
         default,
@@ -288,7 +285,7 @@ pub struct PiCompaction {
     pub retained_tail: Option<Vec<PiMessage>>,
 }
 
-/// Mirrors Go's `omitempty` on a slice: a nil or empty tail is not written.
+/// A missing or empty tail is not written.
 fn is_empty_retained_tail(tail: &Option<Vec<PiMessage>>) -> bool {
     tail.as_ref().is_none_or(Vec::is_empty)
 }

@@ -1,9 +1,8 @@
 //! Native child processes with process-group lifetime control.
 //!
-//! Port of `internal/sandbox/internal/nativeprocess`. Every child is the
-//! leader of a fresh process group, and the group is killed both when the
-//! caller cancels and after the leader exits, so a backgrounded descendant
-//! cannot outlive the execution that started it.
+//! Every child is the leader of a fresh process group, and the group is killed
+//! both when the caller cancels and after the leader exits, so a backgrounded
+//! descendant cannot outlive the execution that started it.
 //!
 //! Ownership: [`Manager`] owns the set of running children. A [`Manager`] is
 //! shared behind `&self` and is safe to use from any task.
@@ -39,7 +38,7 @@ const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 /// to disappear.
 const GROUP_OBSERVATION_DEADLINE: Duration = Duration::from_millis(100);
 
-/// How long each probe waits before the next, matching Go's observation loop.
+/// How long each probe waits before the next.
 const GROUP_OBSERVATION_INTERVAL: Duration = Duration::from_millis(1);
 
 const PIPE_CHUNK: usize = 32 * 1024;
@@ -54,7 +53,7 @@ pub(crate) struct Spec {
     pub(crate) environment: Vec<String>,
 }
 
-/// How the child finished. `code` is `-1` and `signal` is the Go signal
+/// How the child finished. `code` is `-1` and `signal` is the signal
 /// description whenever `signaled` is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Outcome {
@@ -278,7 +277,7 @@ async fn drain(
                         status = Some(std::process::ExitStatus::default());
                     }
                 }
-                // Go kills the group as soon as the leader is reaped, so a
+                // The group is killed as soon as the leader is reaped, so a
                 // backgrounded descendant cannot outlive the execution. The
                 // deadline then only bounds a descendant that survives the
                 // signal while still holding a pipe.
@@ -341,17 +340,17 @@ fn outcome_from(status: std::process::ExitStatus) -> Outcome {
 ///
 /// `ESRCH` means the group is already gone. Darwin answers `EPERM` while the
 /// group still holds an unreaped zombie, which happens routinely between the
-/// leader's exit and the drain loop reaping it. Go settles that case with a
-/// `kern.proc.pgrp` sysctl that reports the group terminated once every member
-/// is a zombie; the sysctl has no safe Rust binding, so this polls
-/// `kill(-pid, 0)` for the same bounded window and accepts the group only once
-/// the probe answers `ESRCH`.
+/// leader's exit and the drain loop reaping it. The `kern.proc.pgrp` sysctl
+/// would settle that case by reporting the group terminated once every member
+/// is a zombie, but it has no safe Rust binding, so this polls
+/// `kill(-pid, 0)` for a bounded window and accepts the group only once the
+/// probe answers `ESRCH`.
 ///
-/// The substitute is strictly more conservative than Go's. A zombie this
-/// process will never reap, such as a reparented grandchild still held by
-/// `launchd`, keeps answering `EPERM` and yields [`Error::ChildTerminate`]
-/// where Go proves the group harmless. It never accepts a group Go rejects: a
-/// live member that cannot be signalled keeps the probe at `EPERM` in both.
+/// The poll errs toward reporting a failure. A zombie this process will never
+/// reap, such as a reparented grandchild still held by `launchd`, keeps
+/// answering `EPERM` and yields [`Error::ChildTerminate`] even though the
+/// group is harmless. It never accepts a group that still holds a live member:
+/// one that cannot be signalled keeps the probe at `EPERM`.
 ///
 /// Blocking: the poll sleeps on the calling thread for at most
 /// [`GROUP_OBSERVATION_DEADLINE`]. Only the `EPERM` path sleeps at all, and the
@@ -389,9 +388,8 @@ fn terminate(entry: &Entry) -> Result<(), Error> {
     }
 }
 
-/// Resolves `spec.path` the way Go's manager does: a name containing a
-/// separator is used verbatim, and a bare name is looked up only in the
-/// request's own `PATH`, never the host's.
+/// Resolves `spec.path`: a name containing a separator is used verbatim, and a
+/// bare name is looked up only in the request's own `PATH`, never the host's.
 fn resolve_executable(spec: &Spec) -> Result<PathBuf, Error> {
     if spec.path.contains('/') {
         return Ok(PathBuf::from(&spec.path));
@@ -570,7 +568,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_signalled_child_reports_the_go_signal_description() {
+    async fn a_signalled_child_reports_the_darwin_signal_description() {
         let (outcome, result, _) = run(spec(
             "/bin/sh",
             &["-c", "kill -TERM $$"],

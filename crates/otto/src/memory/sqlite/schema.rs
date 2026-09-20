@@ -1,10 +1,9 @@
 //! The schema v1 migration, its fingerprint, and the verification that a
 //! database on disk was produced by exactly this manifest.
 //!
-//! Ported from Go `internal/memory/sqlite/schema.go`. The statement text is a
-//! byte-for-byte copy of the Go constants, because the fingerprint stored in
-//! `memory_meta` is SHA-256 over their concatenation and the Go binary rejects
-//! a database whose fingerprint disagrees.
+//! The statement text must not change: the fingerprint stored in `memory_meta`
+//! is SHA-256 over the concatenation of these statements, and a database whose
+//! fingerprint disagrees is rejected.
 
 use std::collections::BTreeMap;
 
@@ -138,7 +137,6 @@ pub const SCHEMA_STATEMENTS: [&str; 9] = [
 pub const COMPILED_SCHEMA_FINGERPRINT: &str =
     "f927b04baf82340748b4af92984d0f165f734acb4ea3e539f190e79dd54847e9";
 
-/// Go's `schemaManifest`.
 pub fn schema_manifest() -> String {
     SCHEMA_STATEMENTS.join(";\n")
 }
@@ -230,7 +228,7 @@ fn expected_fts_shadow_tables() -> BTreeMap<&'static str, &'static str> {
     ])
 }
 
-/// Go's `normalizeSchemaSQL`: trim, drop one trailing semicolon, collapse every
+/// Normalizes one statement: trim, drop one trailing semicolon, collapse every
 /// whitespace run to a single space.
 pub fn normalize_schema_sql(statement: &str) -> String {
     let trimmed = statement.trim();
@@ -238,7 +236,7 @@ pub fn normalize_schema_sql(statement: &str) -> String {
     trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Go's `validDatabaseID`: exactly 32 lowercase hex digits.
+/// A valid database ID: exactly 32 lowercase hex digits.
 pub fn valid_database_id(value: &str) -> bool {
     value.len() == 32
         && value
@@ -293,9 +291,8 @@ pub fn initialize_schema(conn: &Connection, database_id: &str, user_id: &str) ->
     }
 }
 
-/// Go's `verifySchema`. Every deviation from the compiled manifest is
-/// [`ErrorKind::Corrupt`]; a newer schema version is
-/// [`ErrorKind::IncompatibleSchema`].
+/// Every deviation from the compiled manifest is [`ErrorKind::Corrupt`]; a
+/// newer schema version is [`ErrorKind::IncompatibleSchema`].
 pub fn verify_schema(conn: &Connection) -> Result<StoreIdentity> {
     let version = user_version(conn)?;
     if version != SCHEMA_VERSION {
@@ -430,11 +427,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_manifest_fingerprint_matches_the_go_constant() {
+    fn the_manifest_fingerprint_matches_the_source_constant() {
         assert_eq!(
             fingerprint_manifest(&schema_manifest()),
             COMPILED_SCHEMA_FINGERPRINT,
-            "a schema statement diverged from internal/memory/sqlite/schema.go"
+            "a schema statement changed; an existing database file would no \
+             longer open"
         );
     }
 

@@ -136,8 +136,7 @@ pub struct LoginRequest<'a> {
 }
 
 /// Runs discovery, dynamic registration (if offered), the PKCE authorization
-/// code flow, and persists the resulting token. Port of the "OAuth 2.1
-/// authorization" section of the design doc.
+/// code flow, and persists the resulting token.
 pub async fn login(
     request: LoginRequest<'_>,
     cancel: &CancellationToken,

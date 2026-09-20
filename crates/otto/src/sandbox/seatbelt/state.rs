@@ -1,11 +1,11 @@
 //! The Seatbelt driver's private per-session state directory.
 //!
-//! Port of `internal/sandbox/seatbelt/state_unix.go`. The tree lives beneath a
-//! cache base outside the workspace and holds the child's `HOME`, `TMPDIR`,
-//! cache root and the generated profile. Every step is performed through
-//! directory descriptors with `O_NOFOLLOW` and re-validated against the inode
-//! identities recorded at creation, so a concurrent rename or symlink swap can
-//! never redirect a write or a removal outside the tree this process built.
+//! The tree lives beneath a cache base outside the workspace and holds the
+//! child's `HOME`, `TMPDIR`, cache root and the generated profile. Every step
+//! is performed through directory descriptors with `O_NOFOLLOW` and
+//! re-validated against the inode identities recorded at creation, so a
+//! concurrent rename or symlink swap can never redirect a write or a removal
+//! outside the tree this process built.
 //!
 //! Ownership: [`State`] owns the parent and root directory descriptors and
 //! closes them in [`State::close`]. Concurrency: [`State::write_profile`] and
@@ -94,15 +94,15 @@ pub(crate) struct Event {
 /// A filesystem object's device and inode pair.
 ///
 /// The all-zero value means "unknown" and never compares equal to a real
-/// object, mirroring Go's zero `stateIdentity`.
+/// object.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Identity {
     pub(crate) device: u64,
     pub(crate) inode: u64,
 }
 
-/// The `lstat` facts this module needs: Go's `fs.FileInfo` reduced to the three
-/// questions the validation asks of it.
+/// The `lstat` facts this module needs: the three questions the validation asks
+/// of a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Facts {
     pub(crate) symlink: bool,
@@ -1113,7 +1113,7 @@ pub(super) fn directory_still_matches(path: &str, file: &OwnedFd) -> bool {
     descriptor_path_matches(path, file, &lstat)
 }
 
-/// Go's `filepath.Base` for the cleaned absolute paths this module uses.
+/// The final component of the cleaned absolute paths this module uses.
 fn base(path: &str) -> String {
     match path.rfind('/') {
         Some(index) => path[index + 1..].to_string(),
@@ -1436,7 +1436,6 @@ mod tests {
         (directory, text)
     }
 
-    /// Go's `makeStateTestDirectory`.
     fn make_directory(path: &str, mode: u32) -> String {
         std::fs::create_dir(path).expect("create directory");
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
@@ -1448,7 +1447,6 @@ mod tests {
             .to_string()
     }
 
-    /// Go's `makeProfileTestFile`.
     fn make_file(path: &str, mode: u32) -> String {
         std::fs::create_dir_all(profile::dir(path)).expect("create parent");
         std::fs::write(path, b"fixture").expect("write fixture");
@@ -1928,8 +1926,8 @@ mod tests {
         }
     }
 
-    /// Go's `stateCloseReuseProbe`: fails one descriptor close after proving the
-    /// number has already been handed to an unrelated open file.
+    /// Fails one descriptor close after proving the number has already been
+    /// handed to an unrelated open file.
     struct CloseReuseProbe {
         sentinel: String,
         enabled: Mutex<bool>,
@@ -1949,10 +1947,9 @@ mod tests {
             *self.enabled.lock().expect("probe") = true;
         }
 
-        /// Go closes the descriptor and reopens a sentinel, relying on the
-        /// kernel handing back the same number. Rust's test harness runs tests
-        /// on parallel threads of one process, so the lowest free number is not
-        /// reliably the one just released. `dup2` onto the same number gives the
+        /// Rust's test harness runs tests on parallel threads of one process,
+        /// so closing the descriptor and reopening a sentinel would not
+        /// reliably get the number back. `dup2` onto the same number gives the
         /// identical end state without the race: the number the production code
         /// still holds now names an unrelated open file, so a second close would
         /// close the sentinel and the assertion would see it.
@@ -2127,7 +2124,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&moved);
     }
 
-    /// Go's `makeStateReplacementTree`: a look-alike tree with fresh inodes.
+    /// A look-alike tree with fresh inodes.
     fn make_replacement_tree(root: &str, external_profile: Option<&str>) {
         std::fs::create_dir(root).expect("create replacement root");
         chmod(root, 0o700);

@@ -1,9 +1,5 @@
 //! Output capping, secret redaction, and strict argument decoding.
 //!
-//! Port of `internal/tool/result.go`, the capping helpers in
-//! `internal/tool/search.go`, `DecodeStrictJSON` from `internal/tool/read.go`,
-//! and the parts of `internal/safetext` the bash tool needs.
-//!
 //! Tool output is untrusted bytes from the filesystem or a child process, so
 //! three rules apply to everything that reaches the model:
 //!
@@ -17,16 +13,17 @@
 //! Ownership: every type here owns its buffers and is single-owner; none is
 //! `Sync`-shared. Concurrency: callers must not share one collector across
 //! threads without external synchronization. Errors: the writers cannot fail,
-//! so they have no error channel; decoding returns the Go error text.
+//! so they have no error channel; decoding returns the `encoding/json` error
+//! text the model sees.
 //!
-//! Go's `canonicalizeUTF8` on configured values has no Rust counterpart: a
-//! `String` is already valid UTF-8, so only the byte stream needs normalizing.
+//! A configured value is a `String` and therefore already valid UTF-8, so only
+//! the byte stream needs normalizing.
 
 use serde::de::DeserializeOwned;
 
 use otto_core::tool::ToolResult;
 
-/// The marker Go uses when no dynamic marker was negotiated.
+/// The marker used when no dynamic marker was negotiated.
 #[cfg(test)]
 const LEGACY_REDACTION_MARKER: &str = "[REDACTED]";
 
@@ -101,8 +98,8 @@ impl CappedByteCollector {
 }
 
 /// Returns the length of the longest prefix of `value[..limit]` that ends on a
-/// UTF-8 boundary, matching Go's `completeUTF8Prefix`. An invalid byte stops
-/// the scan, so invalid input truncates rather than being copied through.
+/// UTF-8 boundary. An invalid byte stops the scan, so invalid input truncates
+/// rather than being copied through.
 fn complete_utf8_prefix(value: &[u8], limit: usize) -> usize {
     let limit = limit.min(value.len());
     let mut index = 0;
@@ -158,11 +155,10 @@ pub(crate) fn valid_utf8_prefix(data: &[u8]) -> &[u8] {
 
 /// A capped collector fronted by UTF-8 normalization and secret redaction.
 ///
-/// Go builds this as three chained `io.Writer`s
-/// (`utf8NormalizingWriter` → `exactRedactingWriter` → `cappedByteCollector`).
-/// The stages are combined into one type here because both call sites use the
-/// whole chain and a chain of owned writers cannot be handed to the sandbox
-/// driver as a single sink.
+/// The three stages (UTF-8 normalization, exact redaction, capped collection)
+/// are combined into one type because both call sites use the whole chain and a
+/// chain of owned writers cannot be handed to the sandbox driver as a single
+/// sink.
 ///
 /// [`RedactingCollector::flush`] must be called once the stream ends; until
 /// then a trailing partial rune and a trailing partial secret match are held
@@ -359,8 +355,8 @@ pub(crate) fn capped_collector_result(collector: &CappedByteCollector, marker: &
 }
 
 /// Decodes tool arguments, rejecting unknown fields, trailing tokens, and
-/// missing required keys. Port of `DecodeStrictJSON`; the returned text is the
-/// message the model sees, so it matches the Go wording.
+/// missing required keys. The returned text is the message the model sees, so
+/// it matches `encoding/json`'s wording.
 pub(crate) fn decode_strict_json<T: DeserializeOwned>(
     arguments: &str,
     required: &[&str],
@@ -392,8 +388,8 @@ pub(crate) fn decode_strict_json<T: DeserializeOwned>(
     Ok(decoded)
 }
 
-/// Extracts the field name from serde's unknown-field message so the caller
-/// can render Go's wording.
+/// Extracts the field name from serde's unknown-field message so the caller can
+/// render the `encoding/json` wording.
 fn unknown_field_name(message: &str) -> Option<String> {
     let rest = message.strip_prefix("unknown field `")?;
     let end = rest.find('`')?;
@@ -535,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_decoding_reports_the_go_error_text() {
+    fn strict_decoding_reports_the_fixed_error_text() {
         let ok: Args = decode_strict_json(r#"{"path":"a"}"#, &["path"]).unwrap();
         assert_eq!(ok.path, "a");
 

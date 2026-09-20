@@ -1,12 +1,10 @@
 //! Pending candidates and their review.
 //!
-//! Ported from Go `internal/memory/sqlite/candidates.go`.
-//!
-//! Divergences from Go, both stated in the phase brief: observation receipts
-//! are not implemented, because automatic memory extraction is out of scope, so
-//! a row's `observation_id` is read and carried but never cross-checked against
-//! a receipt; and the compare-and-swap that protects a review compares the
-//! decoded candidate rather than a SHA-256 digest of its canonical JSON.
+//! Observation receipts are not implemented, because automatic memory
+//! extraction is out of scope, so a row's `observation_id` is read and carried
+//! but never cross-checked against a receipt. The compare-and-swap that
+//! protects a review compares the decoded candidate rather than a SHA-256
+//! digest of its canonical JSON.
 
 use rusqlite::{Connection, Row, params, params_from_iter, types::Value};
 
@@ -44,7 +42,7 @@ fn corrupt() -> Error {
 /// The proposed record as stored in `memory_candidates.proposed_json`.
 ///
 /// A wholly empty provenance stores as `{}` rather than the fully populated
-/// object [`encode_provenance`] emits, matching Go.
+/// object [`encode_provenance`] emits.
 pub fn encode_proposed_record(record: &Record) -> Result<String> {
     let source = if provenance_zero(&record.source) {
         "{}".to_string()
@@ -879,8 +877,9 @@ mod tests {
         let raw = encode_proposed_record(&record).expect("encode");
         assert!(raw.contains("\"confidence\":0.5"));
         assert_eq!(decode_proposed_record(&raw).expect("decode"), record);
-        // Go writes `0` where serde_json writes `0.0`; either spelling decodes,
-        // so only the byte-equality check separates them.
+        // The stored bytes spell a whole float as `0` where serde_json writes
+        // `0.0`; either spelling decodes, so only the byte-equality check
+        // separates them.
         let rewritten = raw.replace("\"confidence\":0.5", "\"confidence\":0.50");
         assert!(decode_proposed_record(&rewritten).is_err());
     }
@@ -980,7 +979,7 @@ mod tests {
         assert_eq!(updated.revision, 2);
         assert_eq!(updated.text, "prefers terse replies");
         assert_eq!(updated.created_at, record.created_at);
-        // Go clears the result ID on the wire for a non-create acceptance.
+        // The result ID is cleared on the wire for a non-create acceptance.
         assert_eq!(
             store
                 .get_candidate(&reference(&scope, "cand-3"))

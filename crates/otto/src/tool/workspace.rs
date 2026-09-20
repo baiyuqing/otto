@@ -1,9 +1,8 @@
 //! The workspace boundary shared by every file tool.
 //!
 //! A [`Workspace`] holds one directory tree and turns a caller-supplied path
-//! into a name that is guaranteed to stay inside it. Port of
-//! `internal/tool/workspace.go`; the resolution order and the rejection rules
-//! are the security contract and are reproduced exactly:
+//! into a name that is guaranteed to stay inside it. The resolution order and
+//! the rejection rules are the security contract:
 //!
 //! - the root is canonicalized once at construction and kept open as a
 //!   directory handle, so renaming or replacing the root directory afterwards
@@ -27,7 +26,7 @@
 //! path.
 //!
 //! Errors: all failures are `std::io::Error`; escapes use
-//! [`std::io::ErrorKind::InvalidInput`] with the Go message text.
+//! [`std::io::ErrorKind::InvalidInput`] with the message text above.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -41,8 +40,7 @@ use nix::sys::stat::Mode;
 use super::gopath::{bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel};
 use super::root::{Root, is_symlink};
 
-/// Maximum number of symbolic links followed while resolving a write target,
-/// matching the loop bound in Go's `finalWriteRelative`.
+/// Maximum number of symbolic links followed while resolving a write target.
 const MAX_WRITE_SYMLINKS: usize = 40;
 
 /// A directory tree that file tools may not leave.
@@ -53,7 +51,7 @@ pub struct Workspace {
     root_fs: Root,
     /// One mutex per root-relative path so that `write` and `edit`, which
     /// subagents share with the parent agent, never interleave a
-    /// read-modify-write on the same file. Port of `Workspace.mutations`.
+    /// read-modify-write on the same file.
     mutations: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -81,7 +79,7 @@ impl Workspace {
     /// Waits until no other `write` or `edit` holds `key`, then returns the
     /// guard that releases it. `key` is the root-relative name returned by
     /// [`Workspace::write_relative`], so both tools lock the same entry for the
-    /// same file. Port of `Workspace.lockPath`.
+    /// same file.
     // ponytail: entries live for the workspace lifetime; add ref-counted
     // cleanup if path churn matters.
     pub(crate) async fn lock_path(&self, key: &Path) -> tokio::sync::OwnedMutexGuard<()> {
@@ -246,9 +244,11 @@ impl Workspace {
             current = if parent == b"." {
                 target
             } else {
-                // Deliberately unjoined: the next iteration must see the same
-                // uncleaned name Go builds, so that a `..` inside the link
-                // target is resolved by the root handle rather than lexically.
+                // Deliberately unjoined: the next iteration must see the
+                // uncleaned name, so that a `..` inside the link target is
+                // resolved by the root handle rather than lexically. inside the
+                // link target is resolved by the root handle rather than
+                // lexically.
                 let mut spliced = parent;
                 spliced.push(b'/');
                 spliced.extend_from_slice(bytes(&target));

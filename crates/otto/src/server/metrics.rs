@@ -1,13 +1,13 @@
 //! Prometheus text exposition for `otto serve`.
 //!
-//! Port of `internal/server/metrics.go`. Every counter, gauge and histogram
-//! is hand-rolled: the output is the `version=0.0.4` text format, written in
-//! the same order and with the same label sets Go writes, so an existing
-//! scrape config keeps working.
+//! Every counter, gauge and histogram is hand-rolled: the output is the
+//! `version=0.0.4` text format, written in the order and with the label sets
+//! the previously released binary used, so an existing scrape config keeps
+//! working.
 //!
-//! Ordering: Go sorts each label-key map before writing. The maps here are
-//! [`BTreeMap`]s keyed by the same tuples, so iteration order already matches
-//! Go's comparators without a sort step.
+//! Ordering: each label-key map is written in sorted key order. The maps here
+//! are [`BTreeMap`]s, so iteration order already gives that without a sort
+//! step.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -18,11 +18,9 @@ use otto_core::model::Usage;
 
 use crate::app::TaskStatus;
 
-/// Go's `httpBuckets`.
 const HTTP_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
-/// Go's `turnToolBuckets`.
 const TURN_TOOL_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 ];
@@ -46,9 +44,8 @@ impl Histogram {
         }
     }
 
-    /// Port of Go's `observe`: `sort.SearchFloat64s` finds the first bucket
-    /// whose upper bound is at least `value`; a value past the last bound is
-    /// counted only in `+Inf`.
+    /// Finds the first bucket whose upper bound is at least `value`; a value
+    /// past the last bound is counted only in `+Inf`.
     fn observe(&mut self, value: f64) {
         self.sum += value;
         self.count += 1;
@@ -174,8 +171,8 @@ impl Metrics {
             .observe(elapsed.as_secs_f64());
     }
 
-    /// Port of `replaceSessionContexts`: the gauge set is rebuilt on every
-    /// scrape so a closed session's series disappears.
+    /// The gauge set is rebuilt on every scrape so a closed session's series
+    /// disappears.
     pub fn replace_session_contexts(&self, samples: Vec<SessionContext>) {
         let mut next = BTreeMap::new();
         for sample in samples {
@@ -247,9 +244,9 @@ impl Metrics {
         self.lock().stream_clients += delta;
     }
 
-    /// Port of `diffTasks`. `seen` carries each task id's last-observed
-    /// status; a task that is both unseen and already final counts as one
-    /// started and one finished, because the update signal coalesces.
+    /// `seen` carries each task id's last-observed status; a task that is both
+    /// unseen and already final counts as one started and one finished, because
+    /// the update signal coalesces.
     pub fn diff_tasks(&self, seen: &mut BTreeMap<String, TaskStatus>, list: &[crate::app::Task]) {
         let mut state = self.lock();
         for task in list {
@@ -275,7 +272,7 @@ impl Metrics {
         }
     }
 
-    /// The `text/plain; version=0.0.4` body, in Go's write order.
+    /// The `text/plain; version=0.0.4` body.
     pub fn render(&self) -> String {
         let state = self.lock();
         let mut out = String::new();
@@ -375,9 +372,8 @@ fn quote_label(value: &str) -> String {
     format!("\"{}\"", escape_label_value(value))
 }
 
-/// Port of `strconv.FormatFloat(v, 'g', -1, 64)`: the shortest round-trip
-/// decimal, switching to exponent form when the leading digit's power of ten
-/// is below -4 or at least 21.
+/// The shortest round-trip decimal, switching to exponent form when the leading
+/// digit's power of ten is below -4 or at least 21.
 fn format_float(value: f64) -> String {
     if value == 0.0 {
         return "0".to_string();

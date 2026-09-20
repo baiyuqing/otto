@@ -1,9 +1,8 @@
 //! Task rendering shared by the `agent_status` tool and the `/tasks` REPL
-//! command. Port of `internal/subagent/format.go`.
+//! command.
 //!
-//! Every function here is pure. The output must stay byte-identical to Go's,
-//! including the column widths, because both binaries print it to the same
-//! terminals and the Go tests pin the exact strings.
+//! Every function here is pure. The column widths and the exact strings are
+//! pinned by the tests, because this output goes straight to a terminal.
 
 use chrono::{DateTime, TimeDelta, Utc};
 use otto_core::model::{BlockType, Message, Role};
@@ -92,15 +91,14 @@ pub fn task_label(task: &Task) -> String {
     label
 }
 
-/// Collapses `value` to a single line, joining fields with one space. Go's
-/// `strings.Fields` splits on Unicode whitespace, which `char::is_whitespace`
-/// matches.
+/// Collapses `value` to a single line, joining fields with one space. Splits on
+/// Unicode whitespace, which `char::is_whitespace` matches.
 pub fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 /// The first `count` characters of `value`, unchanged when it is no longer.
-/// Go counts runes; Rust chars are the same scalar values.
+/// Counted in scalar values, not bytes.
 pub fn first_runes(value: &str, count: usize) -> String {
     value.chars().take(count).collect()
 }
@@ -146,9 +144,9 @@ pub fn task_steps(history: &[Message]) -> String {
     out
 }
 
-/// Go's `time.Duration.Round(time.Second).String()` for the whole-second
+/// The Go `time.Duration` spelling, rounded to the second, for the whole-second
 /// durations this module produces: `"0s"`, `"42s"`, `"2m0s"`, `"1h0m0s"`.
-/// Rounding is half away from zero, as Go's is.
+/// Rounding is half away from zero.
 pub(crate) fn round_to_seconds(delta: TimeDelta) -> String {
     let milliseconds = delta.num_milliseconds();
     let negative = milliseconds < 0;
@@ -177,7 +175,6 @@ mod tests {
         }
     }
 
-    /// Go's `TestTaskLineFormatsColumns`.
     #[test]
     fn a_running_task_fills_every_column() {
         let now = Utc::now();
@@ -196,8 +193,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestTaskLineDefaultAgentAndDescriptionLabel`,
-    /// `TestTaskLabelPrefixesTheName` and `TestTaskLineIncludesTheName`.
     #[test]
     fn a_queued_task_shows_the_default_agent_and_its_label() {
         let now = Utc::now();
@@ -218,7 +213,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestTaskStepsRendersToolCallsAndAssistantTextOnly`.
     #[test]
     fn steps_render_tool_calls_and_assistant_text_only() {
         let history = [
@@ -269,11 +263,11 @@ mod tests {
         );
     }
 
-    /// The pieces Go's format tests exercise only indirectly: the thousands
+    /// The pieces the format tests exercise only indirectly: the thousands
     /// separator, the elapsed-time fallback for a task canceled while queued,
-    /// and Go's duration spelling above one minute.
+    /// and the duration spelling above one minute.
     #[test]
-    fn the_column_helpers_match_gos_spellings() {
+    fn the_column_helpers_match_the_go_duration_spellings() {
         assert_eq!(comma_int(0), "0");
         assert_eq!(comma_int(999), "999");
         assert_eq!(comma_int(12310), "12,310");

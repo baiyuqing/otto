@@ -17,6 +17,11 @@ pub const MIN_TERMINAL_HEIGHT: u16 = 8;
 /// of a boxed multi-line editor. Port of `inputBoxThreshold`.
 pub const INPUT_BOX_THRESHOLD: u16 = 12;
 
+/// Empty columns kept at each side of the normal TUI layout so transcript,
+/// footer, suggestions, and composer do not sit directly against the
+/// terminal edge.
+pub const SIDE_MARGIN: u16 = 1;
+
 /// The status bar reports the fraction of the context window in use as one
 /// decimal place, rounded to the nearest tenth of a percent. Port of
 /// `formatFooterContextPercentage` (the `big.Int` there guards against

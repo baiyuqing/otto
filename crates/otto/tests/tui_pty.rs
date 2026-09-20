@@ -10,22 +10,27 @@
 //! ## Why the screen scraper here is much smaller than Go's
 //!
 //! `cmd/otto/pty_terminal_screen_test.go` (664 lines) interprets Bubble
-//! Tea's *inline* renderer, which relies on scroll regions (`CSI r`),
+//! Tea's inline renderer, which relies on scroll regions (`CSI r`),
 //! insert/delete line/character (`CSI L`/`M`/`@`/`P`), character repeat
-//! (`CSI b`), reverse index (`ESC M`), and OSC sequences. ratatui's
-//! crossterm backend, on an alternate screen, never emits any of those: it
-//! redraws the whole frame every tick with only cursor moves, SGR, and raw
-//! text. This was confirmed by reading the exact pinned dependency sources
-//! (`ratatui-crossterm-0.1.2`, `ratatui-core-0.1.2`, `crossterm-0.29.0`)
-//! rather than assumed, and no `vt100`/`vte`/terminal-emulator crate is in
-//! `Cargo.lock`. [`Screen`] below implements exactly the vocabulary that
-//! output can contain: `CSI r;cH`/`f` (cursor position), `CSI ?25h`/`l`
-//! (cursor visibility, no grid effect), optional `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
-//! (mouse capture in transcript-browsing mode only, no grid effect), `CSI ?1049h`/`l` (alt screen; enter
-//! resets the grid), `CSI ...m` (SGR, content-inert), CR/LF, and raw UTF-8 text. Any
-//! other control sequence is a bug (either in this scraper's assumptions or
-//! in the TUI emitting something unexpected) and fails the test loudly
-//! rather than silently mis-rendering.
+//! (`CSI b`), reverse index (`ESC M`), and OSC sequences. Otto emits none of
+//! those: `tui::inline::LiveRegion` drives a `Viewport::Fixed` through
+//! ratatui's crossterm backend, which writes only cursor moves, erases, SGR,
+//! line feeds, and raw text. This was confirmed by reading the exact pinned
+//! dependency sources (`ratatui-crossterm-0.1.2`, `ratatui-core-0.1.2`,
+//! `crossterm-0.29.0`) rather than assumed, and no `vt100`/`vte`/
+//! terminal-emulator crate is in `Cargo.lock`. [`Screen`] below implements
+//! exactly the vocabulary that output can contain: `CSI r;cH`/`f` (cursor
+//! position), `CSI J`/`1J`/`2J` (erase in display), `CSI K`/`1K`/`2K` (erase
+//! in line), `CSI 6n` (the single cursor-position query `LiveRegion::new`
+//! makes before the key reader starts; the reply travels the other way),
+//! `CSI ?25h`/`l` (cursor visibility, no grid effect), `CSI ...m` (SGR,
+//! content-inert), CR, LF (scrolls at the bottom row), and raw UTF-8 text.
+//! Any other control sequence is a bug (either in this scraper's assumptions
+//! or in the TUI emitting something unexpected) and fails the test loudly
+//! rather than silently mis-rendering. `CSI ?1049h` (alternate screen) and
+//! `CSI ?1000h` (mouse capture) are deliberately absent from that list: the
+//! transcript lives in the terminal's own scrollback so that the wheel and
+//! drag-selection keep working natively.
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -102,7 +107,7 @@ impl Screen {
                 if first == b'\r' {
                     self.x = 0;
                 } else {
-                    self.y = self.y.saturating_add(1).min(self.height.saturating_sub(1));
+                    self.index();
                 }
                 self.pending.remove(0);
                 continue;
@@ -176,26 +181,48 @@ impl Screen {
                 self.cursor_visible = false;
                 Ok(())
             }
-            // Mouse capture modes are content-inert when transcript-browsing
-            // mode enables them; startup stays in native-selection mode.
-            (true, b'h') | (true, b'l')
-                if matches!(
-                    numbers.as_slice(),
-                    [1000] | [1002] | [1003] | [1006] | [1015]
-                ) =>
-            {
-                Ok(())
-            }
-            (true, b'h') if numbers == [1049] => {
-                for row in &mut self.cells {
-                    row.fill(' ');
+            // Erase in display. `LiveRegion` clears from the cursor down
+            // (`CSI J`) before every commit and whenever the live region is
+            // resized; ratatui's `Terminal::resize` clears the whole screen
+            // (`CSI 2J`) when the terminal gets narrower.
+            (false, b'J') => {
+                let column = self.x.min(self.width);
+                match numbers.first().copied().unwrap_or(0) {
+                    0 => {
+                        self.cells[self.y][column..].fill(' ');
+                        for row in &mut self.cells[self.y + 1..] {
+                            row.fill(' ');
+                        }
+                    }
+                    1 => {
+                        self.cells[self.y][..=column.min(self.width - 1)].fill(' ');
+                        for row in &mut self.cells[..self.y] {
+                            row.fill(' ');
+                        }
+                    }
+                    2 => {
+                        for row in &mut self.cells {
+                            row.fill(' ');
+                        }
+                    }
+                    mode => return Err(format!("unsupported erase in display: {mode}")),
                 }
-                self.x = 0;
-                self.y = 0;
                 Ok(())
             }
-            // The raw byte log, not the grid, asserts the restored main screen.
-            (true, b'l') if numbers == [1049] => Ok(()),
+            (false, b'K') => {
+                let column = self.x.min(self.width);
+                match numbers.first().copied().unwrap_or(0) {
+                    0 => self.cells[self.y][column..].fill(' '),
+                    1 => self.cells[self.y][..=column.min(self.width - 1)].fill(' '),
+                    2 => self.cells[self.y].fill(' '),
+                    mode => return Err(format!("unsupported erase in line: {mode}")),
+                }
+                Ok(())
+            }
+            // Cursor-position report request. `LiveRegion::new` makes exactly
+            // one, before the key-reader thread exists; the reply travels
+            // from the terminal to Otto and never reaches this stream.
+            (false, b'n') => Ok(()),
             // SGR: content-inert (never changes which character occupies a cell).
             (false, b'm') => Ok(()),
             _ => Err(format!(
@@ -207,18 +234,27 @@ impl Screen {
         }
     }
 
+    /// Line feed. On the bottom row the terminal scrolls instead of moving
+    /// the cursor, which is how `LiveRegion` pushes committed rows into
+    /// scrollback (`Backend::append_lines` writes plain `\n`).
+    ///
+    /// ponytail: rows that scroll off the top are dropped, not kept in a
+    /// scrollback buffer. Upgrade path: keep them in a `Vec<Vec<char>>` if a
+    /// test needs to assert on text the terminal has scrolled away.
+    fn index(&mut self) {
+        if self.y + 1 < self.height {
+            self.y += 1;
+        } else {
+            self.cells.remove(0);
+            self.cells.push(vec![' '; self.width]);
+        }
+    }
+
     fn write_text(&mut self, text: &str) {
         for ch in text.chars() {
             if self.x >= self.width {
                 self.x = 0;
-                self.y += 1;
-            }
-            if self.y >= self.height {
-                // ponytail: no scrollback model; overflow past the bottom
-                // row is dropped instead of shifting rows up. Upgrade path:
-                // implement scroll-up if a test needs content that would
-                // scroll off a fixed-size screen.
-                break;
+                self.index();
             }
             self.cells[self.y][self.x] = ch;
             self.x += 1;
@@ -272,11 +308,11 @@ fn wait_for_screen_text(shared: &Shared, needle: &str) {
     });
 }
 
-/// Waits for `needle` to stop appearing on screen. Used to detect the
-/// composer leaving its "Working (Esc to cancel)" busy title: while a turn
-/// runs, `App::handle_key` drops every key except Ctrl+C/Ctrl+O (see
-/// `app.rs`), so typing ahead (e.g. `/exit`) during that window is silently
-/// swallowed rather than queued.
+/// Waits for `needle` to stop appearing on screen. Used twice: to detect the
+/// composer leaving its "Working (Esc to cancel)" busy title, because while a
+/// turn runs Ctrl+C cancels the turn instead of arming the exit prompt (see
+/// `App::is_interrupt_key`); and to detect the composer border going away
+/// when `LiveRegion::finish` erases the live region at exit.
 fn wait_for_screen_text_gone(shared: &Shared, needle: &str) {
     wait_until(
         shared,
@@ -290,23 +326,21 @@ fn raw_contains(shared: &Shared, needle: &[u8]) -> bool {
     raw.windows(needle.len()).any(|window| window == needle)
 }
 
-fn wait_for_raw_bytes(shared: &Shared, needle: &[u8]) {
-    wait_until(
-        shared,
-        &format!("raw bytes {:?}", String::from_utf8_lossy(needle)),
-        |shared| raw_contains(shared, needle),
-    );
-}
-
 #[test]
-fn screen_handles_carriage_return_and_line_feed() {
+fn screen_handles_carriage_return_line_feed_and_erase() {
     let mut screen = Screen::new(4, 2);
 
+    // Raw mode: a line feed moves down without returning to column 0.
     screen.feed(b"abc\rX\nY").expect("valid terminal text");
     assert_eq!(screen.dump(), "Xbc \n Y  ");
 
-    screen.feed(b"\x1b[?1049hnew").expect("alternate screen");
-    assert_eq!(screen.dump(), "new \n    ");
+    // On the bottom row the same line feed scrolls instead.
+    screen.feed(b"\nZ").expect("scroll at the bottom row");
+    assert_eq!(screen.dump(), " Y  \n  Z ");
+
+    // Erase from the cursor down is how the live region is cleared.
+    screen.feed(b"\x1b[1;1H\x1b[J").expect("erase in display");
+    assert_eq!(screen.dump(), "    \n    ");
 }
 
 #[test]
@@ -388,6 +422,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     let mut reader_master = master
         .try_clone()
         .expect("clone master for the reader thread");
+    let mut reply_master = master.try_clone().expect("clone master for DSR replies");
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         loop {
@@ -401,6 +436,15 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
                         *reader_shared.parse_error.lock().unwrap() = Some(message);
                         return;
                     }
+                    // Answer the cursor-position query `LiveRegion::new`
+                    // makes, the way a real terminal does. Without a reply
+                    // crossterm times out after two seconds and the region
+                    // falls back to the bottom of the screen, which would
+                    // leave that path untested.
+                    if chunk.windows(4).any(|window| window == b"\x1b[6n") {
+                        let report = format!("\x1b[{};{}R", screen.y + 1, screen.x + 1);
+                        let _ = reply_master.write_all(report.as_bytes());
+                    }
                 }
             }
         }
@@ -408,10 +452,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
 
     eprintln!("[tui_pty] waiting for startup marker {STARTUP_MARKER:?}");
     wait_for_screen_text(&shared, STARTUP_MARKER);
-    assert!(
-        !raw_contains(&shared, b"\x1b[?1000h"),
-        "the default TUI must leave mouse drags to the terminal for native text selection"
-    );
+    assert_no_alternate_screen_or_mouse_capture(&shared);
     eprintln!("[tui_pty] saw startup marker; typing prompt");
 
     master
@@ -422,8 +463,8 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     eprintln!("[tui_pty] saw reply; waiting for the turn to finish (busy title to clear)");
     // The reply text lands on screen mid-turn (the streaming sink redraws on
     // every event), while the composer still shows "Working (Esc to
-    // cancel)" and drops keys other than Ctrl+C/Ctrl+O. Typing `/exit`
-    // before that title clears would be silently swallowed.
+    // cancel)". Ctrl+C during that window cancels the turn rather than
+    // arming the exit prompt.
     wait_for_screen_text_gone(&shared, "Working (Esc to cancel)");
     eprintln!("[tui_pty] turn finished");
     // The composer was cleared on Enter, so the only thing that can still
@@ -439,17 +480,39 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         "the loopback server was never called"
     );
 
-    master.write_all(b"/exit\r").expect("type /exit");
-    eprintln!("[tui_pty] typed /exit; waiting for child to exit");
+    // Ctrl+C twice, not `/exit`: typing `/` opens the slash-command
+    // suggestion list, which is 27 rows tall on this 30-row screen and
+    // scrolls the committed transcript out of the visible grid before the
+    // assertions below can look at it.
+    master.write_all(b"\x03\x03").expect("press Ctrl+C twice");
+    eprintln!("[tui_pty] pressed Ctrl+C twice; waiting for child to exit");
     let status = child.wait().expect("wait for the child to exit");
     eprintln!("[tui_pty] child exited: {status:?}");
     assert!(status.success(), "otto --ui tui exited with {status:?}");
 
-    // A clean terminal restore leaves the alternate screen, matching Go's
-    // `waitForSubsequence(t, collector, 0, altScreenExitSeq)`. Mouse capture
-    // is not enabled in the default native-selection mode, so there is no
-    // startup capture sequence that would force users to hold Shift to select.
-    wait_for_raw_bytes(&shared, b"\x1b[?1049l");
-    assert!(!raw_contains(&shared, b"\x1b[?1000h"));
-    eprintln!("[tui_pty] saw alt-screen exit sequence");
+    // There is no alternate screen to restore. `LiveRegion::finish` erases
+    // the live region, which takes the composer border off screen, and
+    // leaves the committed transcript where the shell prompt follows it.
+    wait_for_screen_text_gone(&shared, STARTUP_MARKER);
+    let screen = shared.screen.lock().unwrap().dump();
+    assert!(
+        screen.contains(&format!("> {PROMPT}")) && screen.contains(REPLY),
+        "the transcript must stay in the terminal after exit:\n{screen}"
+    );
+    assert_no_alternate_screen_or_mouse_capture(&shared);
+    eprintln!("[tui_pty] live region cleared, transcript retained");
+}
+
+/// The two sequences the inline-viewport design exists to avoid: the
+/// alternate screen (no scrollback for the wheel to scroll) and mouse
+/// capture (terminals stop doing native drag-selection while it is on).
+fn assert_no_alternate_screen_or_mouse_capture(shared: &Shared) {
+    assert!(
+        !raw_contains(shared, b"\x1b[?1049h"),
+        "the transcript must live in the terminal's own scrollback, not on the alternate screen"
+    );
+    assert!(
+        !raw_contains(shared, b"\x1b[?1000h"),
+        "the TUI must leave mouse events to the terminal for native selection and wheel scrolling"
+    );
 }

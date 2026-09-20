@@ -68,7 +68,7 @@ Keep `crates/otto`'s `subagent` module behind the runner's construction path:
 children are built only through it; the agent loop knows tasks only through
 its own task registry and never imports `subagent` directly; frontends reach
 tasks only through the shared task-lister facade; children never receive
-`agent*`, `remember`, `forget`, `memory_search`, or `remind`; child transcripts are not
+`agent*`, `remember`, `forget`, `memory_search`, or `remind*`; child transcripts are not
 persisted. Definitions cannot add tools outside the child tool set; `tools`
 only narrows it. `[agents]` is TOML only, like `[skills]`. Do not document
 `agent_send`/`agent_cancel`/`agent_report` as working features.

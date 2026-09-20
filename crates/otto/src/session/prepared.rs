@@ -241,10 +241,12 @@ pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResul
     // destination, closing the check-then-rename race.
     fsops::rename_excl(Path::new(&candidate_path), &destination)
         .map_err(|error| PiError::other(format!("archive session file: {error}")))?;
-    let sidecar = Path::new(&candidate_path).with_extension("reminders.json");
-    if sidecar.is_file() {
-        let _ = fsops::rename_excl(&sidecar, &destination.with_extension("reminders.json"));
-    }
+    // Archiving ends the session, so its outstanding timers end with it: the
+    // sidecar is removed rather than moved. Best-effort, because the session
+    // file has already moved and there is no state left to roll back to. A
+    // live session also clears its in-process timers in
+    // `app::Controller::archive_current_session`.
+    let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("reminders.json"));
     Ok(ArchiveResult {
         path: destination.to_string_lossy().into_owned(),
         id: session_info.id,

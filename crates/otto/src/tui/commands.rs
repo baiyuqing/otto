@@ -34,6 +34,7 @@ pub enum SlashCommandKind {
     Exit,
     Tasks,
     Task,
+    Timers,
     Skill,
     Skills,
     Sandbox,
@@ -150,6 +151,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         kind: SlashCommandKind::Task,
     },
     SlashCommand {
+        name: "/timers",
+        description: "list or cancel this session's timers",
+        kind: SlashCommandKind::Timers,
+    },
+    SlashCommand {
         name: "/skill",
         description: "show a skill by name",
         kind: SlashCommandKind::Skill,
@@ -241,6 +247,15 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, ["/memory"]);
+    }
+
+    #[test]
+    fn a_prefix_matches_only_the_timers_command() {
+        let names: Vec<&str> = matching_slash_commands("/ti")
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["/timers"]);
     }
 
     #[test]

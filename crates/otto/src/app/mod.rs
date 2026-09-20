@@ -37,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cli::info::SandboxInfo;
 use crate::cli::runtime_builder::{Builder, Runner, RuntimeInfo, SharedSession};
 use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
+use crate::tool::remind::Reminders;
 
 pub use sandbox::SandboxControl;
 pub use tasks::{Task, TaskStatus, TaskView};
@@ -861,6 +862,13 @@ impl Controller {
     /// The replacement is built before the archive move, so every failure
     /// path leaves the current session intact. The move is the last and only
     /// committed state change.
+    ///
+    /// Archiving ends the session, so its outstanding timers end with it:
+    /// `sessionfs::archive` removes the sidecar and the registry is cleared
+    /// here. The clear runs only after the move succeeds, because a refused
+    /// archive leaves the session running and its timers must survive. It
+    /// also runs before the swap, so a timer that fires between the two
+    /// cannot write the sidecar back.
     pub async fn archive_current_session(&self) -> Result<ArchiveResult, String> {
         let admission = self.begin_replacement()?;
         let (path, info) = {
@@ -879,6 +887,9 @@ impl Controller {
             Path::new(&path),
         ) {
             Ok(result) => {
+                if let Some(reminders) = self.reminders() {
+                    reminders.clear();
+                }
                 self.commit(replacement, admission)?;
                 Ok(result)
             }
@@ -901,6 +912,17 @@ impl Controller {
             return None;
         }
         tasks::task_view(state.current.as_ref()?.runner.as_ref())
+    }
+
+    /// The current runner's timer registry, or `None` when the timer tools
+    /// are not registered or the controller is closed. `/timers` lists it and
+    /// [`Self::archive_current_session`] clears it.
+    pub fn reminders(&self) -> Option<Arc<Reminders>> {
+        let state = self.lock();
+        if state.closed {
+            return None;
+        }
+        state.current.as_ref()?.runner.reminders.clone()
     }
 
     /// Claims a turn only when the runner has pending task notifications.
@@ -1367,6 +1389,30 @@ mod tests {
         assert!(Path::new(&result.path).exists());
         assert!(!Path::new(&before.session_path).exists());
         assert_ne!(controller.info().session_id, before.session_id);
+    }
+
+    #[tokio::test]
+    async fn archiving_cancels_the_session_timers() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        controller
+            .current_session()
+            .append(user("hello"))
+            .await
+            .expect("append");
+        let reminders = controller.reminders().expect("timer registry");
+        reminders
+            .schedule(std::time::Duration::from_secs(60), "outstanding".into())
+            .expect("schedule");
+
+        controller.archive_current_session().await.expect("archive");
+
+        assert!(
+            reminders.list().is_empty(),
+            "archiving must cancel outstanding timers"
+        );
+        assert!(controller.reminders().expect("registry").list().is_empty());
     }
 
     #[tokio::test]

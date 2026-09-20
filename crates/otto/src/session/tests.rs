@@ -1397,7 +1397,7 @@ fn archive_moves_active_session_preserving_bytes_and_mode() {
 }
 
 #[test]
-fn archive_moves_reminder_sidecar_with_the_session() {
+fn archive_deletes_the_reminder_sidecar() {
     let temp = TempDir::new();
     let (root, workspace, paths) = seeded_workspace(&temp, 1);
     let sidecar = Path::new(&paths[0]).with_extension("reminders.json");
@@ -1407,7 +1407,7 @@ fn archive_moves_reminder_sidecar_with_the_session() {
         archive(&root, &workspace.to_string_lossy(), Path::new(&paths[0])).expect("archive");
     assert!(!sidecar.exists());
     let archived = Path::new(&result.path).with_extension("reminders.json");
-    assert_eq!(fs::read(&archived).expect("read sidecar"), b"[]");
+    assert!(!archived.exists(), "archiving disables outstanding timers");
 }
 
 #[test]

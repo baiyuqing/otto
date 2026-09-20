@@ -162,6 +162,10 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
 | `otto logout` | Remove stored ChatGPT credentials. |
 | `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
+| `otto mcp list` | List MCP servers declared in the configuration file. See [MCP servers](#mcp-servers). |
+| `otto mcp add <server> ...` | Add an MCP server to `~/.config/otto/config.toml`. |
+| `otto mcp remove <server>` | Remove one configured MCP server. |
+| `otto mcp enable <server>` / `otto mcp disable <server>` | Toggle one configured MCP server. |
 | `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
 | `otto serve [--socket PATH \| --listen HOST:PORT [--open]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
@@ -1165,7 +1169,46 @@ Otto connects to Model Context Protocol (MCP) servers over stdio (a local
 subprocess) or Streamable HTTP, and registers each server's tools for the
 model to call in the same turn loop as the built-in tools.
 
-Config (`[mcp]` and `[mcp.servers.<name>]` in TOML):
+You can edit TOML directly, or use `otto mcp add` to write the server table
+for you. The commands below write the default config file
+`~/.config/otto/config.toml` and print a reminder to restart Otto:
+
+```bash
+otto mcp add github \
+  --transport stdio \
+  --command npx \
+  --arg -y \
+  --arg @modelcontextprotocol/server-github \
+  --env GITHUB_TOKEN=GITHUB_TOKEN
+
+otto mcp add docs \
+  --transport http \
+  --url https://mcp.example.com/mcp \
+  --header 'Authorization=Bearer ${DOCS_MCP_TOKEN}'
+
+otto mcp add remote \
+  --transport http \
+  --url https://remote.example.com/mcp \
+  --auth oauth \
+  --scope mcp:tools
+```
+
+`--env KEY=ENVVAR` stores `KEY = "${ENVVAR}"`, not the current environment
+value. For HTTP headers, pass the desired header value; use `${VAR}` in that
+value for secrets. Other configuration commands are:
+
+```bash
+otto mcp list
+otto mcp disable github
+otto mcp enable github
+otto mcp remove github
+```
+
+After adding or changing a server, restart Otto before expecting the running
+session to see new tools. For OAuth HTTP servers, run `otto mcp login <server>`
+and then restart.
+
+Manual config (`[mcp]` and `[mcp.servers.<name>]` in TOML):
 
 ```toml
 [mcp]
@@ -1239,6 +1282,10 @@ What's wired:
   and stores the resulting token under `~/.otto/auth/mcp/<server>.json`.
   Otto must be restarted afterward to connect with the new token; the running
   session keeps reporting `needs login` until then.
+- `otto mcp list`, `otto mcp add`, `otto mcp remove`, `otto mcp enable`, and
+  `otto mcp disable` manage server declarations in the default config file
+  without starting a session. They do not connect servers in an already-running
+  Otto process; restart Otto to apply the change.
 - `otto mcp login <server>` and `otto mcp logout <server>` run the same sign-in
   flow, or remove the stored token, without starting a session. See
   [command-line reference](#command-line-reference).

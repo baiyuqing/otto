@@ -33,6 +33,7 @@ use crate::memory::{
 use crate::skill;
 use crate::subagent::format::{task_line, task_steps};
 use crate::subagent::tasks::Tasks;
+use crate::tool::remind::{NO_TIMERS, timer_line};
 
 use super::controller::Controller;
 use super::login::{SharedWriter, browser_opener};
@@ -58,6 +59,11 @@ const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
 /// The `/task` argument forms, as the README and the user manual document
 /// them. [`super::super::tui`] prints the same line for the same input.
 pub(crate) const TASK_USAGE: &str = "usage: /task <id|name> | /task cancel <id|name>";
+/// The `/timers` argument forms. Both frontends print it for anything else.
+pub(crate) const TIMERS_USAGE: &str = "usage: /timers [cancel <id>]";
+/// What `/timers` reports when the runner registers no timer tools, in the
+/// shape [`SUBAGENTS_UNAVAILABLE`] uses for `/tasks`.
+pub(crate) const TIMERS_UNAVAILABLE: &str = "timers are not available";
 pub(crate) const SKILL_USAGE: &str = "usage: /skill <name>";
 pub(crate) const MCP_USAGE: &str = "usage: /mcp | /mcp login <server>";
 
@@ -86,6 +92,34 @@ impl Controller {
     /// no description, and `wait`/`updates`, which the wake path needs.
     pub(crate) fn subagent_tasks(&self) -> Option<Arc<Tasks>> {
         self.current_runner()?.tasks.clone()
+    }
+}
+
+/// `/timers` and `/timers cancel <id>` for both frontends: the `Ok` text is
+/// the listing or the confirmation, the `Err` text a usage line or a failed
+/// cancel. A free function, not a [`Repl`] method, so `tui::app` renders the
+/// same text from its own buffers.
+pub(crate) fn timers_report(controller: &Controller, args: &str) -> Result<String, String> {
+    let Some(reminders) = controller.reminders() else {
+        return Err(TIMERS_UNAVAILABLE.to_string());
+    };
+    match args.split_whitespace().collect::<Vec<_>>()[..] {
+        [] => {
+            let items = reminders.list();
+            if items.is_empty() {
+                return Ok(NO_TIMERS.to_string());
+            }
+            let now = Utc::now();
+            Ok(items
+                .iter()
+                .map(|item| timer_line(item, now))
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        ["cancel", id] => reminders
+            .cancel(id)
+            .map(|item| format!("canceled {}: {}", item.id, item.message)),
+        _ => Err(TIMERS_USAGE.to_string()),
     }
 }
 
@@ -464,6 +498,18 @@ impl Repl<'_> {
         let now = Utc::now();
         for task in &list {
             let _ = writeln!(self.stdout, "{}", task_line(task, now));
+        }
+    }
+
+    /// `/timers`: the session's outstanding timers, or one cancelled.
+    pub(super) fn timers_command(&mut self, args: &str) {
+        match timers_report(self.controller, args) {
+            Ok(text) => {
+                let _ = writeln!(self.stdout, "{text}");
+            }
+            Err(text) => {
+                let _ = writeln!(self.stderr, "{text}");
+            }
         }
     }
 
@@ -988,6 +1034,37 @@ mod tests {
             "{stderr}"
         );
         assert!(stderr.contains("unknown task: nope"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn timers_lists_cancels_and_reports_bad_input() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let reminders = controller.reminders().expect("timer registry");
+        reminders
+            .schedule(std::time::Duration::from_secs(90), "check the build".into())
+            .expect("schedule");
+
+        let (stdout, stderr) = session(
+            "/timers
+/timers cancel r1
+/timers
+/timers cancel r1
+/timers nope
+/exit
+",
+            &controller,
+        )
+        .await;
+
+        assert!(stdout.contains("check the build"), "{stdout}");
+        assert!(stdout.contains("in 1m"), "{stdout}");
+        assert!(stdout.contains("canceled r1"), "{stdout}");
+        assert!(stdout.contains("no timers in this session"), "{stdout}");
+        assert!(stderr.contains("unknown timer: r1"), "{stderr}");
+        assert!(stderr.contains("usage: /timers [cancel <id>]"), "{stderr}");
+        assert!(reminders.list().is_empty());
     }
 
     /// Ports Go's `/task <id>` detail rendering without a provider: the

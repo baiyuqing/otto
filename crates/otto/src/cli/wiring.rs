@@ -49,7 +49,7 @@ use crate::subagent::tasks::Tasks;
 use crate::tool::Tool;
 use crate::tool::mcp::{McpTool, tools_for};
 use crate::tool::memory::{ForgetTool, MemorySearchTool, RememberTool};
-use crate::tool::remind::{RemindTool, remind_definition};
+use crate::tool::remind::{self, Reminders};
 use crate::tool::result::redact_exact_text;
 use crate::tool::skill::SkillTool;
 
@@ -207,6 +207,9 @@ pub struct CatalogWiring {
 pub struct SubagentWiring {
     pub tasks: Option<Arc<Tasks>>,
     pub inbox: Option<Arc<Inbox>>,
+    /// The session's timer registry, absent when the timer tools are not
+    /// registered. `/timers` and archiving read the active runner's.
+    pub reminders: Option<Arc<Reminders>>,
 }
 
 /// `"stdio"` or `"http"`, for [`mcp::ServerStatus::transport`].
@@ -441,14 +444,16 @@ impl Builder {
 
         let inbox = Arc::clone(tasks.notifications());
         tools.extend(subagent::tools::tools(&Arc::new(runner)));
-        // Parent-only; the child registry drops `remind` by name.
-        tools.push(Box::new(match persist {
-            Some(path) => RemindTool::with_persist(Arc::clone(&inbox), path),
-            None => RemindTool::new(Arc::clone(&inbox)),
-        }));
+        // Parent-only; the child registry drops the timer tools by name.
+        let reminders = Arc::new(match persist {
+            Some(path) => Reminders::with_persist(Arc::clone(&inbox), path),
+            None => Reminders::new(Arc::clone(&inbox)),
+        });
+        tools.extend(remind::tools(&reminders));
         Ok(SubagentWiring {
             tasks: Some(tasks),
             inbox: Some(inbox),
+            reminders: Some(reminders),
         })
     }
 
@@ -792,7 +797,7 @@ impl Builder {
                 .unwrap_or(true)
         {
             definitions.extend(subagent::tools::tool_definitions());
-            definitions.push(remind_definition());
+            definitions.extend(remind::definitions());
         }
         definitions
     }
@@ -1433,7 +1438,14 @@ mod catalog_tests {
         );
         assert_eq!(warnings, "");
         let names = definition_names(&fixture.builder.boundary_catalog_definitions(65536, true));
-        for want in ["agent", "agent_wait", "agent_status", "remind"] {
+        for want in [
+            "agent",
+            "agent_wait",
+            "agent_status",
+            "remind",
+            "remind_status",
+            "remind_cancel",
+        ] {
             assert!(
                 names.contains(&want.to_string()),
                 "{names:?} is missing {want}"
@@ -1458,7 +1470,14 @@ mod catalog_tests {
         assert!(!wiring.agents.enabled);
         assert_eq!(wiring.agent_section, "");
         let names = definition_names(&fixture.builder.boundary_catalog_definitions(65536, true));
-        for unwanted in ["agent", "agent_wait", "agent_status", "remind"] {
+        for unwanted in [
+            "agent",
+            "agent_wait",
+            "agent_status",
+            "remind",
+            "remind_status",
+            "remind_cancel",
+        ] {
             assert!(
                 !names.contains(&unwanted.to_string()),
                 "{names:?} still lists {unwanted}"

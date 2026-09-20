@@ -106,6 +106,9 @@ The selected model and OpenAI-compatible endpoint must support image input.
 - [Skills](docs/user-manual.md#skills): reusable instructions in `SKILL.md` files.
 - [MCP servers](docs/user-manual.md#mcp-servers): connect stdio or HTTP Model
   Context Protocol servers and use their tools from the same turn loop.
+- [Timers](docs/user-manual.md#remind): the model schedules a later wake with
+  `remind`; `/timers` lists this session's outstanding timers and
+  `/timers cancel <id>` stops one.
 - [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
   socket or a loopback TCP port, with an embedded browser UI. Optional
   [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat

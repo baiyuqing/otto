@@ -852,6 +852,13 @@ impl App {
                 self.push_system(task_report(controller, &args));
                 None
             }
+            SlashCommandKind::Timers => {
+                self.push_system(
+                    repl_commands::timers_report(controller, &args)
+                        .unwrap_or_else(|message| message),
+                );
+                None
+            }
             SlashCommandKind::Skills => {
                 if !args.is_empty() {
                     self.push_system(format!("unknown command: {line}"));

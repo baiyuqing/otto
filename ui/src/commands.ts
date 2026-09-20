@@ -26,6 +26,7 @@ export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/help', description: 'show web commands' },
   { name: '/session', description: 'show current session details' },
   { name: '/new', description: 'start a new session' },
+  { name: '/clear', description: 'start a new session' },
   { name: '/resume', description: 'resume a session from the picker' },
   { name: '/model', description: 'show current model and configured profiles' },
   { name: '/rename', description: 'rename the current session' },
@@ -58,6 +59,7 @@ export function parseWebCommand(text: string): WebCommand {
     case '/session':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'session' }
     case '/new':
+    case '/clear':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'new' }
     case '/resume':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'resume' }

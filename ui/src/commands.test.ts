@@ -6,6 +6,7 @@ describe('web slash commands', () => {
     expect(parseWebCommand('/help')).toEqual({ kind: 'help' })
     expect(parseWebCommand('/session')).toEqual({ kind: 'session' })
     expect(parseWebCommand('/new')).toEqual({ kind: 'new' })
+    expect(parseWebCommand('/clear')).toEqual({ kind: 'new' })
     expect(parseWebCommand('/resume')).toEqual({ kind: 'resume' })
     expect(parseWebCommand('/model')).toEqual({ kind: 'model' })
     expect(parseWebCommand('/compact')).toEqual({ kind: 'compact', focus: '' })
@@ -48,6 +49,7 @@ describe('web slash commands', () => {
       { name: '/help', description: 'show web commands' },
       { name: '/session', description: 'show current session details' },
       { name: '/new', description: 'start a new session' },
+      { name: '/clear', description: 'start a new session' },
       { name: '/resume', description: 'resume a session from the picker' },
       { name: '/model', description: 'show current model and configured profiles' },
       { name: '/rename', description: 'rename the current session' },
@@ -62,6 +64,9 @@ describe('web slash commands', () => {
     expect(webCommandSuggestions('/r')).toEqual([
       { name: '/resume', description: 'resume a session from the picker' },
       { name: '/rename', description: 'rename the current session' },
+    ])
+    expect(webCommandSuggestions('/cl')).toEqual([
+      { name: '/clear', description: 'start a new session' },
     ])
     expect(webCommandSuggestions('hello')).toEqual([])
   })

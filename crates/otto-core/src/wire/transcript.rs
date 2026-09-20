@@ -19,13 +19,19 @@ use super::events::WireEvent;
 pub enum Item {
     User {
         text: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        created_at: String,
     },
     Image {
         data: String,
         mime_type: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        created_at: String,
     },
     Assistant {
         text: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        created_at: String,
     },
     Tool {
         id: String,
@@ -35,6 +41,8 @@ pub enum Item {
         result: Option<String>,
         #[serde(rename = "isError", default, skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        created_at: String,
     },
     Notice {
         text: String,
@@ -56,6 +64,8 @@ pub struct HistoryMessage {
     pub blocks: Vec<HistoryBlock>,
     #[serde(default)]
     pub display: bool,
+    #[serde(default)]
+    pub created_at: String,
 }
 
 /// One block of a stored message.
@@ -77,6 +87,15 @@ pub struct HistoryBlock {
     pub arguments: Option<Box<RawValue>>,
     #[serde(default)]
     pub is_error: bool,
+}
+
+fn message_created_at(message: &HistoryMessage) -> String {
+    let created_at = message.created_at.trim();
+    if created_at.is_empty() || created_at == crate::model::zero_time().to_rfc3339() {
+        String::new()
+    } else {
+        created_at.to_string()
+    }
 }
 
 /// Renders tool arguments the way `JSON.stringify(args, null, 2)` does:
@@ -210,12 +229,14 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
                         args: format_args(block.arguments.as_deref()),
                         result: None,
                         is_error: None,
+                        created_at: message_created_at(message),
                     });
                 }
                 "image" if message.role == "user" => {
                     items.push(Item::Image {
                         data: block.data.clone(),
                         mime_type: block.mime_type.clone(),
+                        created_at: message_created_at(message),
                     });
                 }
                 _ => {
@@ -225,9 +246,11 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
                     match message.role.as_str() {
                         "user" => items.push(Item::User {
                             text: block.text.clone(),
+                            created_at: message_created_at(message),
                         }),
                         "assistant" => items.push(Item::Assistant {
                             text: block.text.clone(),
+                            created_at: message_created_at(message),
                         }),
                         "context" if message.display => items.push(Item::Notice {
                             text: block.text.clone(),
@@ -256,11 +279,12 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
                 return items.to_vec();
             }
             let mut next = items.to_vec();
-            if let Some(Item::Assistant { text }) = next.last_mut() {
+            if let Some(Item::Assistant { text, .. }) = next.last_mut() {
                 text.push_str(&event.text);
             } else {
                 next.push(Item::Assistant {
                     text: event.text.clone(),
+                    created_at: String::new(),
                 });
             }
             next
@@ -273,6 +297,7 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
                 args: format_args(event.tool_args.as_deref()),
                 result: None,
                 is_error: None,
+                created_at: String::new(),
             });
             next
         }
@@ -309,6 +334,7 @@ pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
                     args: String::new(),
                     result: Some(content),
                     is_error: Some(errored),
+                    created_at: String::new(),
                 }),
             }
             next
@@ -377,6 +403,20 @@ mod tests {
         items
     }
 
+    fn assistant(text: &str) -> Item {
+        Item::Assistant {
+            text: text.into(),
+            created_at: String::new(),
+        }
+    }
+
+    fn user(text: &str) -> Item {
+        Item::User {
+            text: text.into(),
+            created_at: String::new(),
+        }
+    }
+
     fn tool(
         id: &str,
         name: &str,
@@ -390,6 +430,7 @@ mod tests {
             args: args.into(),
             result: result.map(str::to_string),
             is_error,
+            created_at: String::new(),
         }
     }
 
@@ -401,12 +442,7 @@ mod tests {
             r#"{"type":"text_delta","text":"lo"}"#,
             r#"{"type":"agent_finished"}"#,
         ]);
-        assert_eq!(
-            items,
-            vec![Item::Assistant {
-                text: "hello".into()
-            }]
-        );
+        assert_eq!(items, vec![assistant("hello")]);
     }
 
     #[test]
@@ -420,9 +456,7 @@ mod tests {
         assert_eq!(
             items,
             vec![
-                Item::Assistant {
-                    text: "first".into()
-                },
+                assistant("first"),
                 tool(
                     "c1",
                     "bash",
@@ -430,9 +464,7 @@ mod tests {
                     Some("a\nb"),
                     Some(false)
                 ),
-                Item::Assistant {
-                    text: "second".into()
-                },
+                assistant("second"),
             ]
         );
     }
@@ -447,10 +479,10 @@ mod tests {
 
     #[test]
     fn does_not_mutate_the_previous_transcript() {
-        let before = vec![Item::Assistant { text: "a".into() }];
+        let before = vec![assistant("a")];
         let after = reduce_json(&before, r#"{"type":"text_delta","text":"b"}"#).expect("decodes");
-        assert_eq!(before, vec![Item::Assistant { text: "a".into() }]);
-        assert_eq!(after, vec![Item::Assistant { text: "ab".into() }]);
+        assert_eq!(before, vec![assistant("a")]);
+        assert_eq!(after, vec![assistant("ab")]);
     }
 
     #[test]
@@ -518,12 +550,8 @@ mod tests {
         assert_eq!(
             from_history(history).expect("history decodes"),
             vec![
-                Item::User {
-                    text: "list files".into()
-                },
-                Item::Assistant {
-                    text: "Running ls.".into()
-                },
+                user("list files"),
+                assistant("Running ls."),
                 tool(
                     "c1",
                     "bash",
@@ -534,9 +562,7 @@ mod tests {
                 Item::Notice {
                     text: "Task t1 finished".into()
                 },
-                Item::Assistant {
-                    text: "One file.".into()
-                },
+                assistant("One file."),
             ]
         );
     }

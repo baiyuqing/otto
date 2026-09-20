@@ -8,7 +8,6 @@ export type {
   Compaction,
   Frame,
   Info,
-  Item,
   Message,
   ParsedFrames,
   Sandbox,
@@ -22,6 +21,16 @@ export type {
   Usage,
   WireEvent,
 } from 'otto-web'
+
+import type { Item as WebItem } from 'otto-web'
+
+export type Item =
+  | (Extract<WebItem, { kind: 'user' }> & { created_at?: string })
+  | (Extract<WebItem, { kind: 'image' }> & { created_at?: string })
+  | (Extract<WebItem, { kind: 'assistant' }> & { created_at?: string })
+  | (Extract<WebItem, { kind: 'tool' }> & { created_at?: string })
+  | Extract<WebItem, { kind: 'notice' | 'error' }>
+
 export { fromHistory, parseFrames, reduce } from 'otto-web'
 
 import init, { parseFrames, type Frame } from 'otto-web'

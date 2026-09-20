@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ComponentPropsWithoutRef } from 'react'
+import { useEffect, useId, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import remarkGfm from 'remark-gfm'
@@ -69,6 +69,84 @@ function MarkdownView({ text }: { text: string }) {
   )
 }
 
+const TOOL_PREVIEW_LIMIT = 96
+
+function itemCreatedAt(item: Item): string {
+  return (item as Item & { created_at?: string }).created_at ?? ''
+}
+
+function formatTimestamp(value: string): string {
+  const match = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})/.exec(value)
+  return match?.[1] ?? value
+}
+
+function Timestamp({ value }: { value: string }) {
+  if (!value) return null
+  return (
+    <time className="item-timestamp" dateTime={value} title={value}>
+      {formatTimestamp(value)}
+    </time>
+  )
+}
+
+function firstLine(text: string): string {
+  const line = text.split(/\r?\n/, 1)[0]?.trim() ?? ''
+  return line.length > TOOL_PREVIEW_LIMIT ? `${line.slice(0, TOOL_PREVIEW_LIMIT)}…` : line
+}
+
+function parseToolArgs(args: string): Record<string, unknown> | null {
+  if (!args.trim()) return null
+  try {
+    const parsed = JSON.parse(args) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+function stringField(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function diffSnippet(args: Record<string, unknown>): string {
+  const oldText = stringField(args.old_text)
+  const newText = stringField(args.new_text)
+  if (oldText || newText) return [`- ${firstLine(oldText)}`, `+ ${firstLine(newText)}`].filter(Boolean).join(' ')
+  const edits = Array.isArray(args.edits) ? args.edits : []
+  const firstEdit = edits.find((edit): edit is Record<string, unknown> => !!edit && typeof edit === 'object' && !Array.isArray(edit))
+  return firstEdit ? diffSnippet(firstEdit) : ''
+}
+
+function toolArgumentSummary(name: string, args: string): string {
+  const parsed = parseToolArgs(args)
+  if (!parsed) return firstLine(args)
+  const path = stringField(parsed.path)
+  if (name === 'bash') return firstLine(stringField(parsed.command))
+  if (name === 'ls') return path || '.'
+  if (name === 'read') return [path, stringField(parsed.offset), stringField(parsed.limit)].filter(Boolean).join(' ')
+  if (name === 'edit' || name === 'write') return [path, diffSnippet(parsed)].filter(Boolean).join(' ')
+  if (name === 'grep') return [stringField(parsed.pattern), path || stringField(parsed.glob)].filter(Boolean).join(' ')
+  if (name === 'find') return [path, stringField(parsed.pattern)].filter(Boolean).join(' ')
+  return firstLine(args)
+}
+
+function toolResultSummary(item: Extract<Item, { kind: 'tool' }>): string {
+  if (item.result === undefined) return 'Running…'
+  if (!item.result.trim()) return item.isError ? 'Failed: no output' : 'Done: no output'
+  const more = item.result.split(/\r?\n/).length - 1
+  const suffix = more > 0 ? ` (+${more} ${more === 1 ? 'line' : 'lines'})` : ''
+  return `${item.isError ? 'Failed' : 'Done'}: ${firstLine(item.result)}${suffix}`
+}
+
+function ItemFrame({ item, className, children }: { item: Item; className: string; children: ReactNode }) {
+  return (
+    <div className={className}>
+      <Timestamp value={itemCreatedAt(item)} />
+      {children}
+    </div>
+  )
+}
+
 export function MermaidDiagram({ code, label }: { code: string; label?: string }) {
   const reactId = useId()
   const id = `mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, '')}`
@@ -124,25 +202,29 @@ export function MermaidDiagram({ code, label }: { code: string; label?: string }
 function ItemView({ item }: { item: Item }) {
   switch (item.kind) {
     case 'user':
-      return <div className="item user">{item.text}</div>
+      return <ItemFrame item={item} className="item user">{item.text}</ItemFrame>
     case 'image':
       return (
-        <div className="item user image">
+        <ItemFrame item={item} className="item user image">
           <img src={`data:${item.mime_type};base64,${item.data}`} alt="Sent image" />
-        </div>
+        </ItemFrame>
       )
     case 'assistant':
       return (
-        <div className="item assistant">
+        <ItemFrame item={item} className="item assistant">
           <MarkdownView text={item.text} />
-        </div>
+        </ItemFrame>
       )
     case 'tool':
       return (
         <details className={`item tool${item.isError ? ' error' : ''}`}>
           <summary>
-            <span>{item.name}</span>
-            <span>{item.result === undefined ? 'Running…' : item.isError ? 'Failed' : 'Done'}</span>
+            <span className="tool-heading">
+              <Timestamp value={itemCreatedAt(item)} />
+              <strong>{item.name} </strong>
+              {item.args && <span className="tool-args-preview">{toolArgumentSummary(item.name, item.args)}</span>}
+            </span>
+            <span className="tool-state"> {toolResultSummary(item)}</span>
           </summary>
           {item.args && <pre>{item.args}</pre>}
           {item.result !== undefined && <pre>{item.result}</pre>}

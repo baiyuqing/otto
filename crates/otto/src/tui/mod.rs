@@ -22,6 +22,7 @@ mod markdown;
 mod render;
 
 use std::future::Future;
+use std::io;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -54,32 +55,87 @@ pub(crate) async fn run(
     cancel: &CancellationToken,
 ) -> Result<(), ReplError> {
     let mut terminal = ratatui::try_init().map_err(io_error)?;
-    let mouse_capture = match MouseCapture::enable() {
-        Ok(capture) => capture,
-        Err(error) => {
-            let _ = ratatui::try_restore();
-            return Err(io_error(error));
-        }
-    };
+    let mut input = TerminalInput::new();
+    if let Err(error) = input.configure_mouse(std::io::stdout(), MousePolicy::NativeSelection) {
+        let _ = ratatui::try_restore();
+        return Err(io_error(error));
+    }
     let mut keys = spawn_key_reader();
-    let result = run_app(&mut terminal, controller, cancel, &mut keys).await;
-    drop(mouse_capture);
+    let result = run_app(&mut terminal, &mut input, controller, cancel, &mut keys).await;
+    let _ = input.restore_mouse(std::io::stdout());
     let _ = ratatui::try_restore();
     result
 }
 
-struct MouseCapture;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MousePolicy {
+    /// Leave pointer drags to the terminal emulator so text selection works
+    /// normally, without the user holding Shift. This is Otto's default.
+    NativeSelection,
+    /// Ask the terminal to report mouse events to Otto. Use this only for
+    /// transcript-browsing mode, where the wheel keeps scrolling the pinned
+    /// transcript. While active, most terminal emulators reserve plain drag
+    /// for the application and require Shift for native selection.
+    Capture,
+}
 
-impl MouseCapture {
-    fn enable() -> std::io::Result<Self> {
-        crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
-        Ok(Self)
+fn mouse_policy_for_scroll(scroll: Option<u16>) -> MousePolicy {
+    if scroll.is_some() {
+        MousePolicy::Capture
+    } else {
+        MousePolicy::NativeSelection
     }
 }
 
-impl Drop for MouseCapture {
+fn mouse_policy(app: &App) -> MousePolicy {
+    mouse_policy_for_scroll(app.scroll)
+}
+
+fn sync_mouse_policy(app: &App, input: &mut TerminalInput) -> Result<(), ReplError> {
+    input
+        .configure_mouse(std::io::stdout(), mouse_policy(app))
+        .map_err(io_error)
+}
+
+#[derive(Default)]
+struct TerminalInput {
+    mouse_active: bool,
+}
+
+impl TerminalInput {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn configure_mouse(
+        &mut self,
+        mut writer: impl io::Write,
+        policy: MousePolicy,
+    ) -> io::Result<()> {
+        match policy {
+            MousePolicy::NativeSelection => self.restore_mouse(writer),
+            MousePolicy::Capture if self.mouse_active => Ok(()),
+            MousePolicy::Capture => {
+                crossterm::execute!(writer, EnableMouseCapture)?;
+                self.mouse_active = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn restore_mouse(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        if !self.mouse_active {
+            return Ok(());
+        }
+        crossterm::execute!(writer, DisableMouseCapture)?;
+        self.mouse_active = false;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalInput {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = self.restore_mouse(std::io::stdout());
     }
 }
 
@@ -160,11 +216,13 @@ enum IdleEvent {
 
 async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
+    input: &mut TerminalInput,
     controller: &Controller,
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
 ) -> Result<(), ReplError> {
     let mut app = App::new(controller);
+    sync_mouse_policy(&app, input)?;
     let mut pending_image = None;
     terminal
         .draw(|frame| render::draw(frame, &app))
@@ -204,7 +262,9 @@ async fn run_app<B: Backend>(
                 continue;
             }
             IdleEvent::Registry(true) => {
-                if let Err(error) = run_wake(&mut app, terminal, keys, controller, cancel).await {
+                if let Err(error) =
+                    run_wake(&mut app, terminal, input, keys, controller, cancel).await
+                {
                     propagate_turn_error(error)?;
                 }
                 app.refresh_info(controller);
@@ -219,6 +279,7 @@ async fn run_app<B: Backend>(
             TuiEvent::Key(key) => key,
             TuiEvent::Wheel { up } => {
                 app.scroll_wheel(up);
+                sync_mouse_policy(&app, input)?;
                 terminal
                     .draw(|frame| render::draw(frame, &app))
                     .map_err(draw_error)?;
@@ -232,13 +293,16 @@ async fn run_app<B: Backend>(
             }
         };
 
-        match app.handle_key(key, controller, cancel) {
+        let action = app.handle_key(key, controller, cancel);
+        sync_mouse_policy(&app, input)?;
+        match action {
             None => {}
             Some(Action::Exit) => return Ok(()),
             Some(Action::Prompt(line)) => {
                 if let Err(error) = run_turn(
                     &mut app,
                     terminal,
+                    input,
                     keys,
                     controller,
                     cancel,
@@ -259,7 +323,7 @@ async fn run_app<B: Backend>(
             },
             Some(Action::Compact(focus)) => {
                 if let Err(error) =
-                    run_compact(&mut app, terminal, keys, controller, cancel, focus).await
+                    run_compact(&mut app, terminal, input, keys, controller, cancel, focus).await
                 {
                     propagate_turn_error(error)?;
                 }
@@ -322,8 +386,10 @@ async fn run_app<B: Backend>(
             Some(Action::Approve(id)) => match controller.approve_bash(&id) {
                 Ok(prompt) => {
                     app.push_system(format!("Approved {id} for one command."));
-                    if let Err(error) =
-                        run_turn(&mut app, terminal, keys, controller, cancel, prompt, None).await
+                    if let Err(error) = run_turn(
+                        &mut app, terminal, input, keys, controller, cancel, prompt, None,
+                    )
+                    .await
                     {
                         propagate_turn_error(error)?;
                     }
@@ -339,6 +405,7 @@ async fn run_app<B: Backend>(
         }
 
         app.refresh_info(controller);
+        sync_mouse_policy(&app, input)?;
         terminal
             .draw(|frame| render::draw(frame, &app))
             .map_err(draw_error)?;
@@ -372,6 +439,7 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
     terminal: &mut Terminal<B>,
+    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     events: &mut mpsc::UnboundedReceiver<Event>,
     turn: &CancellationToken,
@@ -392,7 +460,10 @@ async fn drive_turn<B: Backend, T, E>(
                 return result;
             }
             Some(event) = events.recv() => apply(app, event),
-            Some(event) = keys.recv() => apply_turn_key(app, event, turn),
+            Some(event) = keys.recv() => {
+                apply_turn_key(app, event, turn);
+                let _ = sync_mouse_policy(app, input);
+            }
             _ = frames.tick() => {}
         }
         let _ = terminal.draw(|frame| render::draw(frame, app));
@@ -428,6 +499,7 @@ fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
 async fn run_turn<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
+    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -445,6 +517,7 @@ async fn run_turn<B: Backend>(
         drive_turn(
             app,
             terminal,
+            input,
             keys,
             &mut received,
             &turn,
@@ -509,6 +582,7 @@ fn image_block_from_path(path: &str) -> Result<Block, String> {
 async fn run_wake<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
+    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -539,6 +613,7 @@ async fn run_wake<B: Backend>(
         drive_turn(
             app,
             terminal,
+            input,
             keys,
             &mut received,
             &turn,
@@ -575,6 +650,7 @@ async fn run_wake<B: Backend>(
 async fn run_compact<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
+    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -593,6 +669,7 @@ async fn run_compact<B: Backend>(
         drive_turn(
             app,
             terminal,
+            input,
             keys,
             &mut received,
             &turn,
@@ -794,6 +871,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mouse_policy_captures_only_while_transcript_is_pinned() {
+        assert_eq!(mouse_policy_for_scroll(None), MousePolicy::NativeSelection);
+        assert_eq!(mouse_policy_for_scroll(Some(0)), MousePolicy::Capture);
+        assert_eq!(mouse_policy_for_scroll(Some(12)), MousePolicy::Capture);
+    }
+
+    #[test]
+    fn terminal_input_defaults_to_native_selection_and_toggles_capture_on_demand() {
+        let mut output = Vec::new();
+        let mut input = TerminalInput::new();
+
+        input
+            .configure_mouse(&mut output, MousePolicy::NativeSelection)
+            .expect("native selection");
+        assert!(
+            !String::from_utf8_lossy(&output).contains("\u{1b}[?1000h"),
+            "native-selection mode must not enable mouse capture"
+        );
+
+        input
+            .configure_mouse(&mut output, MousePolicy::Capture)
+            .expect("capture");
+        let captured = String::from_utf8_lossy(&output);
+        assert!(captured.contains("\u{1b}[?1000h"));
+        assert!(captured.contains("\u{1b}[?1006h"));
+
+        let len_after_capture = output.len();
+        input
+            .configure_mouse(&mut output, MousePolicy::Capture)
+            .expect("capture remains idempotent");
+        assert_eq!(output.len(), len_after_capture);
+
+        input
+            .configure_mouse(&mut output, MousePolicy::NativeSelection)
+            .expect("release capture");
+        let restored = String::from_utf8_lossy(&output);
+        assert!(restored.contains("\u{1b}[?1000l"));
+        assert!(restored.contains("\u{1b}[?1006l"));
+    }
+
+    #[test]
+    fn terminal_input_drop_restores_mouse_capture_only_if_it_was_enabled() {
+        let mut disabled = Vec::new();
+        {
+            let mut input = TerminalInput::new();
+            input
+                .restore_mouse(&mut disabled)
+                .expect("restore inactive");
+        }
+        assert!(!String::from_utf8_lossy(&disabled).contains("\u{1b}[?1000l"));
+
+        let mut enabled = Vec::new();
+        let mut input = TerminalInput::new();
+        input
+            .configure_mouse(&mut enabled, MousePolicy::Capture)
+            .expect("capture");
+        input.restore_mouse(&mut enabled).expect("restore active");
+        assert!(String::from_utf8_lossy(&enabled).contains("\u{1b}[?1000l"));
+    }
+
+    #[test]
     fn image_path_becomes_a_valid_image_block() {
         use std::io::Write as _;
 
@@ -991,8 +1129,9 @@ mod tests {
                 .expect("the pending notification did not trigger a wake turn");
             cancel.cancel();
         };
+        let mut input = TerminalInput::new();
         let (result, ()) = tokio::join!(
-            run_app(&mut terminal, &controller, &cancel, &mut keys),
+            run_app(&mut terminal, &mut input, &controller, &cancel, &mut keys),
             driver
         );
 

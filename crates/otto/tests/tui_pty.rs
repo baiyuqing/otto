@@ -20,8 +20,8 @@
 //! rather than assumed, and no `vt100`/`vte`/terminal-emulator crate is in
 //! `Cargo.lock`. [`Screen`] below implements exactly the vocabulary that
 //! output can contain: `CSI r;cH`/`f` (cursor position), `CSI ?25h`/`l`
-//! (cursor visibility, no grid effect), optional `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
-//! (mouse capture in transcript-browsing mode only, no grid effect), `CSI ?1049h`/`l` (alt screen; enter
+//! (cursor visibility, no grid effect), `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
+//! (mouse capture, no grid effect), `CSI ?1049h`/`l` (alt screen; enter
 //! resets the grid), `CSI ...m` (SGR, content-inert), CR/LF, and raw UTF-8 text. Any
 //! other control sequence is a bug (either in this scraper's assumptions or
 //! in the TUI emitting something unexpected) and fails the test loudly
@@ -176,8 +176,8 @@ impl Screen {
                 self.cursor_visible = false;
                 Ok(())
             }
-            // Mouse capture modes are content-inert when transcript-browsing
-            // mode enables them; startup stays in native-selection mode.
+            // Mouse capture modes are content-inert; raw output assertions
+            // verify that the TUI enables and restores them.
             (true, b'h') | (true, b'l')
                 if matches!(
                     numbers.as_slice(),
@@ -408,9 +408,15 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
 
     eprintln!("[tui_pty] waiting for startup marker {STARTUP_MARKER:?}");
     wait_for_screen_text(&shared, STARTUP_MARKER);
+    // Mouse reporting is on from the first frame: the alternate screen has no
+    // scrollback, so a wheel notch the terminal keeps to itself does nothing.
+    // `?1002` comes with it, because taking the terminal's drag away means
+    // Otto has to run the text selection itself.
+    wait_for_raw_bytes(&shared, b"\x1b[?1000h");
+    wait_for_raw_bytes(&shared, b"\x1b[?1002h");
     assert!(
-        !raw_contains(&shared, b"\x1b[?1000h"),
-        "the default TUI must leave mouse drags to the terminal for native text selection"
+        !raw_contains(&shared, b"\x1b[?1003h"),
+        "any-motion reporting would wake the event loop on every pointer move"
     );
     eprintln!("[tui_pty] saw startup marker; typing prompt");
 
@@ -446,10 +452,10 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     assert!(status.success(), "otto --ui tui exited with {status:?}");
 
     // A clean terminal restore leaves the alternate screen, matching Go's
-    // `waitForSubsequence(t, collector, 0, altScreenExitSeq)`. Mouse capture
-    // is not enabled in the default native-selection mode, so there is no
-    // startup capture sequence that would force users to hold Shift to select.
+    // `waitForSubsequence(t, collector, 0, altScreenExitSeq)`, and disables the
+    // mouse reporting enabled at startup.
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
-    assert!(!raw_contains(&shared, b"\x1b[?1000h"));
+    wait_for_raw_bytes(&shared, b"\x1b[?1002l");
+    wait_for_raw_bytes(&shared, b"\x1b[?1000l");
     eprintln!("[tui_pty] saw alt-screen exit sequence");
 }

@@ -69,6 +69,12 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     } else if let Some(picker) = &app.picker {
         draw_picker(frame, area, picker);
     }
+
+    // Last, over whatever ended up on screen: the selection is a property of
+    // the drawn cells, not of any one widget.
+    if let Some(selection) = &app.selection {
+        selection.highlight(frame.buffer_mut());
+    }
 }
 
 fn side_margin(area: Rect) -> Rect {

@@ -1,10 +1,10 @@
-//! The `edit` tool. Port of `internal/tool/edit.go`.
+//! The `edit` tool.
 //!
 //! Replaces one uniquely matching fragment per edit in a workspace file. A
 //! match is tried exactly first and then over a whitespace- and
-//! punctuation-normalized view of both sides, so text copied through a
-//! terminal or a chat client still applies. An inexact match rewrites only the
-//! span of `old_text` that `new_text` changes, so the file keeps the bytes the
+//! punctuation-normalized view of both sides, so text copied through a terminal
+//! or a chat client still applies. An inexact match rewrites only the span of
+//! `old_text` that `new_text` changes, so the file keeps the bytes the
 //! normalization folded away. An ambiguous or missing match is an error rather
 //! than a guess.
 //!
@@ -33,11 +33,11 @@ const DIFF_CONTEXT_LINES: usize = 3;
 /// The largest diff returned to the model before it is cut on a line boundary.
 const MAX_DIFF_BYTES: usize = 4096;
 
-/// The wire shape of edit arguments. Port of `editRequest`: optional fields
-/// distinguish an absent key from an empty string so that `"new_text": ""`
-/// stays a valid deletion. Exactly one of `old_text`/`new_text` or `edits`
-/// must be present; an empty `edits` array counts as absent, and so does a
-/// blank `old_text` and `new_text` pair.
+/// The wire shape of edit arguments. Optional fields distinguish an absent key
+/// from an empty string so that `"new_text": ""` stays a valid deletion.
+/// Exactly one of `old_text`/`new_text` or `edits` must be present; an empty
+/// `edits` array counts as absent, and so does a blank `old_text` and
+/// `new_text` pair.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditRequest {
@@ -51,7 +51,7 @@ struct EditRequest {
     edits: Option<Vec<EditRequestItem>>,
 }
 
-/// One entry of the `edits` array. Port of `editRequestItem`.
+/// One entry of the `edits` array.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditRequestItem {
@@ -67,9 +67,8 @@ struct EditReplacement {
     new_text: String,
 }
 
-/// A replacement located in the LF-normalized file content. `text` uses LF
-/// line endings; the file's own newline style is restored on write. Port of
-/// `resolvedEdit`.
+/// A replacement located in the LF-normalized file content. `text` uses LF line
+/// endings; the file's own newline style is restored on write.
 #[derive(Debug)]
 struct ResolvedEdit {
     start: usize,
@@ -78,7 +77,6 @@ struct ResolvedEdit {
 }
 
 impl EditRequest {
-    /// Port of `editRequest.replacements`.
     fn replacements(&self) -> Result<Vec<EditReplacement>, String> {
         // A blank string is the mirror of the empty `edits` array: models fill
         // the argument position they are not using beside the one they are.
@@ -108,7 +106,6 @@ impl EditRequest {
     }
 }
 
-/// Port of `editRequestItem.replacement`.
 fn replacement(old_text: Option<&str>, new_text: Option<&str>) -> Result<EditReplacement, String> {
     let old_text = match old_text {
         Some(text) if !text.is_empty() => text.to_owned(),
@@ -231,10 +228,9 @@ impl Tool for EditTool<'_> {
     }
 }
 
-/// Applies every replacement to `text` and renders the diff. Port of
-/// `applyTextEdits`: every `old_text` is matched against the original content,
-/// a leading byte-order mark and the file's newline style are preserved, and
-/// overlapping edits are refused.
+/// Applies every replacement to `text` and renders the diff. Every `old_text`
+/// is matched against the original content, a leading byte-order mark and the
+/// file's newline style are preserved, and overlapping edits are refused.
 fn apply_text_edits(
     text: &str,
     path: &str,
@@ -282,9 +278,8 @@ fn apply_text_edits(
     ))
 }
 
-/// Locates `old_text` in LF-normalized content. Port of `editMatcher`: the
-/// fuzzy view of the content is built on the first inexact lookup and reused
-/// for later edits.
+/// Locates `old_text` in LF-normalized content. The fuzzy view of the content
+/// is built on the first inexact lookup and reused for later edits.
 struct EditMatcher<'a> {
     content: &'a str,
     fuzzy: Option<(String, Vec<usize>)>,
@@ -298,7 +293,6 @@ impl<'a> EditMatcher<'a> {
         }
     }
 
-    /// Port of `editMatcher.resolve`.
     fn resolve(
         &mut self,
         old_text: &str,
@@ -365,14 +359,13 @@ fn rune_len(text: &str, offset: usize) -> usize {
     text[offset..].chars().next().map_or(1, char::len_utf8)
 }
 
-/// The smallest index whose value is at least `target`. Port of
-/// `sort.SearchInts` over a non-decreasing slice.
+/// The smallest index whose value is at least `target`.
 fn search_ints(values: &[usize], target: usize) -> usize {
     values.partition_point(|value| *value < target)
 }
 
-/// The byte lengths of the longest common prefix and suffix of `a` and `b`,
-/// cut at rune boundaries and never overlapping. Port of `commonAffixes`.
+/// The byte lengths of the longest common prefix and suffix of `a` and `b`, cut
+/// at rune boundaries and never overlapping.
 fn common_affixes(a: &str, b: &str) -> (usize, usize) {
     let (left, right) = (a.as_bytes(), b.as_bytes());
     let limit = left.len().min(right.len());
@@ -404,7 +397,7 @@ fn ambiguous(count: usize, path: &str) -> String {
     )
 }
 
-/// Prefixes `message` with the edit position. Port of `editMatchError`.
+/// Prefixes `message` with the edit position.
 fn match_error(index: usize, total: usize, message: &str) -> String {
     if total == 1 {
         format!("edit failed: {message}")
@@ -413,9 +406,9 @@ fn match_error(index: usize, total: usize, message: &str) -> String {
     }
 }
 
-/// Applies sorted, non-overlapping edits in one pass. Port of `spliceEdits`:
-/// edit offsets are in normalized content, `offsets` maps them to positions in
-/// `text` and is `None` when the two coincide.
+/// Applies sorted, non-overlapping edits in one pass. Edit offsets are in
+/// normalized content; `offsets` maps them to positions in `text` and is `None`
+/// when the two coincide.
 fn splice_edits(
     text: &str,
     edits: &[ResolvedEdit],
@@ -439,8 +432,8 @@ fn normalize_line_endings(text: &str) -> String {
 }
 
 /// Converts CRLF and CR to LF and records, for every normalized byte, the
-/// offset it came from. Port of `normalizeLineEndingsWithMap`: the map is
-/// `None` when `text` needs no change, meaning offsets are identical.
+/// offset it came from. The map is `None` when `text` needs no change, meaning
+/// offsets are identical.
 fn normalize_line_endings_with_map(text: &str) -> (String, Option<Vec<usize>>) {
     if !text.contains('\r') {
         return (text.to_owned(), None);
@@ -470,9 +463,8 @@ fn normalize_line_endings_with_map(text: &str) -> (String, Option<Vec<usize>>) {
     )
 }
 
-/// The file's line terminator. Port of `detectNewline`: a lone CR only counts
-/// when the file has no LF at all, so a stray CR inside a line does not change
-/// it.
+/// The file's line terminator. A lone CR only counts when the file has no LF at
+/// all, so a stray CR inside a line does not change it.
 fn detect_newline(text: &str) -> &'static str {
     if text.contains("\r\n") {
         "\r\n"
@@ -495,8 +487,7 @@ fn restore_line_endings(text: &str, newline: &str) -> String {
 
 /// Folds the characters a copy-paste round trip tends to change and drops
 /// trailing whitespace per line, recording the source offset of every output
-/// byte with one extra entry for the input length. Port of
-/// `normalizeForFuzzyMatchWithMap`.
+/// byte with one extra entry for the input length.
 fn normalize_for_fuzzy_match_with_map(text: &str) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(text.len());
     let mut offsets = Vec::with_capacity(text.len() + 1);
@@ -548,7 +539,7 @@ fn trim_trailing_fuzzy_whitespace(text: &str, start: usize, mut end: usize) -> u
 }
 
 /// The canonical form of one character in the fuzzy view, or `None` when the
-/// character is already canonical. Port of `fuzzyRune`.
+/// character is already canonical.
 fn fuzzy_char(character: char) -> Option<&'static str> {
     Some(match character {
         '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' => "'",
@@ -562,8 +553,7 @@ fn fuzzy_char(character: char) -> Option<&'static str> {
     })
 }
 
-/// One changed line range: `old_lines[old_start..old_end]` becomes
-/// `new_lines`. Port of `diffHunk`.
+/// One changed line range: `old_lines[old_start..old_end]` becomes `new_lines`.
 struct DiffHunk {
     old_start: usize,
     old_end: usize,
@@ -571,8 +561,8 @@ struct DiffHunk {
 }
 
 /// Renders unified-style hunks for sorted, non-overlapping edits in
-/// LF-normalized content. Port of `editDiff`: edits touching the same lines
-/// form one hunk, and hunks whose context lines meet are printed together.
+/// LF-normalized content. Edits touching the same lines form one hunk, and
+/// hunks whose context lines meet are printed together.
 fn edit_diff(content: &str, edits: &[ResolvedEdit]) -> String {
     let old_lines: Vec<&str> = content.split('\n').collect();
     let mut line_starts = vec![0usize];
@@ -681,8 +671,8 @@ fn edit_diff(content: &str, edits: &[ResolvedEdit]) -> String {
     if diff.len() <= MAX_DIFF_BYTES {
         return diff.to_owned();
     }
-    // Go slices raw bytes here; cutting on a rune boundary keeps the fallback
-    // valid UTF-8 when the budget lands mid-rune and no newline precedes it.
+    // Cutting on a rune boundary keeps the fallback valid UTF-8 when the budget
+    // lands mid-rune and no newline precedes it.
     let cut = diff.as_bytes()[..MAX_DIFF_BYTES]
         .iter()
         .rposition(|byte| *byte == b'\n')
@@ -703,8 +693,7 @@ fn write_diff_lines<S: AsRef<str>>(out: &mut String, marker: char, lines: &[S]) 
     }
 }
 
-/// The counts of equal leading and trailing lines, never overlapping. Port of
-/// `commonLines`.
+/// The counts of equal leading and trailing lines, never overlapping.
 fn common_lines(a: &[&str], b: &[&str]) -> (usize, usize) {
     let limit = a.len().min(b.len());
     let mut prefix = 0;
@@ -883,7 +872,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE\ntwo\nTHREE\n");
     }
 
-    /// Port of `TestEditRejectsUntypedEditShapes`.
     #[tokio::test]
     async fn untyped_edit_shapes_are_rejected() {
         let (root, path) = sample("a b c\n");
@@ -919,8 +907,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a b c\n");
     }
 
-    /// Port of `TestEditAllowsNullEditsWithSingleReplacement`, extended to the
-    /// empty array models send in the same placeholder position.
+    /// A null `edits` array with a single replacement, and the empty array
+    /// models send in the same placeholder position.
     #[tokio::test]
     async fn an_empty_edits_key_allows_a_single_replacement() {
         for edits in ["null", "[]"] {
@@ -971,7 +959,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestEditFuzzyMatchOnlyRewritesChangedSpan`.
     #[tokio::test]
     async fn a_fuzzy_match_rewrites_only_the_changed_span() {
         for (name, file, old_text, new_text, want) in [
@@ -1025,7 +1012,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestEditRejectsWhitespaceOnlyFuzzyOldText`.
     #[tokio::test]
     async fn whitespace_only_old_text_is_rejected() {
         let (root, path) = sample("abc  \n");
@@ -1042,7 +1028,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc  \n");
     }
 
-    /// Port of `TestEditMatchesBOMPrefixedOldText`.
     #[tokio::test]
     async fn a_bom_prefixed_old_text_matches() {
         for new_text in ["bye", "\u{feff}bye"] {
@@ -1064,7 +1049,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestEditKeepsLFWhenFileContainsStrayCR`.
     #[tokio::test]
     async fn a_stray_cr_does_not_change_the_detected_newline() {
         let (root, path) = sample("a\rb\nc\n");
@@ -1078,7 +1062,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\rb\nx\ny\n");
     }
 
-    /// Port of `TestEditDiffRendersOneHunkPerEdit`.
     #[tokio::test]
     async fn the_diff_renders_one_hunk_per_edit() {
         let lines: Vec<String> = (1..=200).map(|index| format!("line {index}")).collect();
@@ -1110,7 +1093,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestEditDiffMergesEditsOnOneLine`.
     #[tokio::test]
     async fn the_diff_merges_edits_on_one_line() {
         let (root, _) = sample("a b c\n");
@@ -1126,7 +1108,6 @@ mod tests {
         assert_eq!(result.content.matches("@@").count(), 2, "{result:?}");
     }
 
-    /// Port of `TestWriteAndEditShareFileLock`.
     #[tokio::test]
     async fn write_and_edit_share_the_file_lock() {
         let (root, path) = sample("a\n");

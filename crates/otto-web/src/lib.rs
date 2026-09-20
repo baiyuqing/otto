@@ -229,8 +229,8 @@ fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsValue> {
 
 /// Splits an SSE buffer into whole frames and the unparsed remainder.
 ///
-/// Port of `parseFrames` in `ui/src/sse.ts`. A chunk boundary inside a frame
-/// is safe: the partial frame comes back in `rest`.
+/// A chunk boundary inside a frame is safe: the partial frame comes back in
+/// `rest`.
 #[wasm_bindgen(js_name = parseFrames)]
 pub fn parse_frames(buf: &str) -> Result<ParsedFramesJs, JsValue> {
     Ok(to_js(&sse::parse_frames(buf))?.unchecked_into())

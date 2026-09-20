@@ -1,9 +1,9 @@
 //! Durable memory: the domain contracts, the policy and secret guards, the
 //! SQLite store, and the service the tools and REPL commands call.
 //!
-//! Ported from Go `internal/memory`. The store shares its database file with
-//! the Go binary, so the schema, pragmas, file location and on-disk encoding
-//! are byte-compatible rather than merely equivalent.
+//! The store keeps the schema, the pragmas, the file location and the on-disk
+//! encoding byte-compatible with what the previously released binary wrote, so
+//! an existing database file still opens.
 
 pub mod contracts;
 pub mod guard;

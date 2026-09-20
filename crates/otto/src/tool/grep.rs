@@ -1,7 +1,7 @@
-//! The `grep` tool. Port of `internal/tool/grep.go`.
+//! The `grep` tool.
 //!
-//! Searches file contents with a regular expression. Binary files, files with
-//! a line over 1 MiB, symbolic links, and `.git` subtrees are skipped, so the
+//! Searches file contents with a regular expression. Binary files, files with a
+//! line over 1 MiB, symbolic links, and `.git` subtrees are skipped, so the
 //! model never receives object-store contents or a multi-megabyte line. Both
 //! the match count and the byte count are bounded, and the marker says which
 //! limit stopped the search.
@@ -28,7 +28,7 @@ const DEFAULT_GREP_LIMIT: usize = 100;
 const MAXIMUM_GREP_LIMIT: usize = 1000;
 /// A file containing a longer line is treated as non-text and skipped.
 const MAXIMUM_GREP_LINE_BYTES: usize = 1 << 20;
-/// The read size Go's `bufio.NewReaderSize` uses for the same scan.
+/// The read size for one scan chunk.
 const READ_CHUNK_BYTES: usize = 64 << 10;
 
 #[derive(Debug, Default, Deserialize)]
@@ -72,7 +72,7 @@ pub fn grep_definition() -> ToolDefinition {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Go RE2 regular expression"
+                    "description": "RE2 regular expression"
                 },
                 "path": {
                     "type": "string",
@@ -220,8 +220,8 @@ struct GrepLine {
     text: String,
 }
 
-/// What one file scan produced. Port of `grepScanResult`; `text_file` is false
-/// for a file that must be skipped entirely.
+/// What one file scan produced. `text_file` is false for a file that must be
+/// skipped entirely.
 #[derive(Debug, Default)]
 struct GrepScanResult {
     matches: Vec<GrepLine>,
@@ -230,7 +230,7 @@ struct GrepScanResult {
     byte_overflow: bool,
 }
 
-/// Scans one file for matching lines. Port of `scanGrepReader`.
+/// Scans one file for matching lines.
 ///
 /// Cancellation is checked around every bounded read, so a large file stops
 /// promptly. A NUL byte, invalid UTF-8, or a line over
@@ -462,7 +462,7 @@ mod tests {
     }
 
     /// Cancels the token during its first read, so the scan must stop before
-    /// asking for more. Port of `cancelingReader`.
+    /// asking for more.
     struct CancellingReader {
         cancel: CancellationToken,
         content: Vec<u8>,

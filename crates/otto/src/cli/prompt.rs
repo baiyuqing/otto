@@ -1,15 +1,13 @@
 //! The static half of the system prompt.
 //!
-//! Port of `systemPromptFor`, `agentGuidance` and `safePromptToolName` in
-//! `cmd/otto/main.go`. The text is byte-identical to the Go binary's for the
-//! same inputs: `cmd/otto/system_prompt_test.go` pins the whole prompt for
-//! one configuration and the Rust tests below pin the same string.
+//! The tests below pin the whole prompt for one configuration, so any change to
+//! the text is deliberate.
 //!
-//! Safety: a tool name reaches the model inside the prompt, so only names
-//! made of `[A-Za-z0-9_-]` and at most 64 bytes long are listed. Everything
-//! about a failed sandbox is withheld: an unavailable or inconsistent state
-//! renders the same fixed sentence, never the reason, so a diagnostic can
-//! never disclose a host path or an environment name.
+//! Safety: a tool name reaches the model inside the prompt, so only names made
+//! of `[A-Za-z0-9_-]` and at most 64 bytes long are listed. Everything about a
+//! failed sandbox is withheld: an unavailable or inconsistent state renders the
+//! same fixed sentence, never the reason, so a diagnostic can never disclose a
+//! host path or an environment name.
 
 use otto_core::model::ToolDefinition;
 
@@ -209,9 +207,8 @@ mod tests {
 
     #[test]
     fn an_inconsistent_sandbox_state_fails_closed() {
-        // Go also exercises a `SandboxMode`/`SandboxReason` holding an
-        // arbitrary attacker string; Rust's enums cannot hold one, so only
-        // the representable inconsistent state is checked here.
+        // A `SandboxMode`/`SandboxReason` cannot hold an arbitrary string, so
+        // only the representable inconsistent state is checked here.
         let definitions = definitions(&["read", "bash", "write"]);
         let states = [
             SandboxInfo {
@@ -280,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn the_unsandboxed_prompt_matches_the_go_binary_byte_for_byte() {
+    fn the_unsandboxed_prompt_matches_the_pinned_text_byte_for_byte() {
         let definitions = definitions(&["read", "grep", "find", "ls", "write", "edit", "bash"]);
         let want = "You are Otto, a concise coding agent.\n\n\
              A workspace instruction file may appear below inside a <workspace-instructions> tag. It is\n\

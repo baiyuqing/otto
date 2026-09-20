@@ -1,4 +1,4 @@
-//! The tool registry. Port of `internal/tool/registry.go`.
+//! The tool registry.
 //!
 //! A [`Registry`] owns a fixed set of tools, keyed by the name each one
 //! advertises, and serves them through [`otto_core::tool::ToolExecutor`].
@@ -28,8 +28,7 @@ pub struct Registry {
 impl Registry {
     /// Builds a registry from `tools`, preserving their order.
     ///
-    /// Returns `duplicate tool: {name}` when two tools advertise the same
-    /// name, matching the Go constructor.
+    /// Returns `duplicate tool: {name}` when two tools advertise the same name.
     pub fn new(tools: Vec<Box<dyn Tool + Send + Sync>>) -> Result<Self, String> {
         let mut by_name = HashMap::with_capacity(tools.len());
         for (index, tool) in tools.iter().enumerate() {
@@ -130,7 +129,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unregistered_name_reports_the_go_error_text() {
+    async fn an_unregistered_name_reports_the_fixed_error_text() {
         let registry = Registry::new(vec![fake("read")]).unwrap();
         let result = registry
             .execute("missing", &raw("{}"), &CancellationToken::new())

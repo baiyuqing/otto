@@ -1,8 +1,8 @@
-//! The `find` tool. Port of `internal/tool/find.go`.
+//! The `find` tool.
 //!
-//! Lists workspace files whose path matches a relative glob. Symbolic links
-//! are reported but never followed, `.git` subtrees are skipped, and a search
-//! root that resolves into repository metadata returns nothing.
+//! Lists workspace files whose path matches a relative glob. Symbolic links are
+//! reported but never followed, `.git` subtrees are skipped, and a search root
+//! that resolves into repository metadata returns nothing.
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::ToolResult;

@@ -1,8 +1,8 @@
 //! The Seatbelt driver.
 //!
-//! Port of `internal/sandbox/seatbelt`. The driver confines each child with
-//! `/usr/bin/sandbox-exec` and a profile generated from the session's
-//! workspace, private state directories and reviewed read roots.
+//! The driver confines each child with `/usr/bin/sandbox-exec` and a profile
+//! generated from the session's workspace, private state directories and
+//! reviewed read roots.
 
 /// The immutable profile template, included byte for byte from the shared
 /// fixture at the repository root.
@@ -18,7 +18,7 @@ pub(crate) mod state;
 
 pub use driver::{Options, SeatbeltDriver};
 
-/// The identifier this driver reports, matching the Go `seatbelt.ID`.
+/// The identifier this driver reports.
 pub const ID: &str = "seatbelt";
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! The `SKILL.md` frontmatter parser. Port of `internal/skill/frontmatter.go`.
+//! The `SKILL.md` frontmatter parser.
 //!
 //! The grammar is a deliberate YAML subset: `---` delimiters, `key: value`
 //! lines with plain, single-quoted, double-quoted, literal (`|`) and folded
@@ -10,14 +10,13 @@ use std::collections::BTreeMap;
 
 /// The frontmatter fields of one `SKILL.md`, keyed by their top-level key.
 ///
-/// Go returns a `map[string]string`; a [`BTreeMap`] matches it and additionally
-/// fixes iteration order, which the callers rely on for stable warnings.
+/// A [`BTreeMap`] fixes iteration order, which the callers rely on for stable
+/// warnings.
 pub type Fields = BTreeMap<String, String>;
 
 /// Splits `data` into its frontmatter fields and the Markdown body.
 ///
-/// Errors carry Go's exact text, because they surface to the user as
-/// discovery warnings.
+/// The error texts surface to the user as discovery warnings.
 pub fn parse(data: &[u8]) -> Result<(Fields, String), String> {
     let text = String::from_utf8_lossy(data);
     let lines: Vec<&str> = text.split('\n').collect();
@@ -40,7 +39,7 @@ fn is_delimiter(line: &str) -> bool {
     line.strip_suffix('\r').unwrap_or(line) == "---"
 }
 
-/// Whether a key is Go's `^[A-Za-z0-9_-]+$`.
+/// Whether a key matches `^[A-Za-z0-9_-]+$`.
 fn is_key(key: &str) -> bool {
     !key.is_empty()
         && key
@@ -48,8 +47,8 @@ fn is_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-/// Whether a value indicator is Go's `^[|>][-+]?$`. The chomping indicator is
-/// accepted and ignored, as in Go.
+/// Whether a value indicator matches `^[|>][-+]?$`. The chomping indicator is
+/// accepted and ignored.
 fn is_block_scalar(rest: &str) -> bool {
     let mut bytes = rest.bytes();
     match bytes.next() {
@@ -251,8 +250,8 @@ fn parse_double_quoted(value: &str) -> Result<String, String> {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
                 Some(escaped) => out.push(escaped),
-                // Go's loop only consumes an escape when one byte follows, so
-                // a trailing backslash stays literal.
+                // An escape is consumed only when one byte follows, so a
+                // trailing backslash stays literal.
                 None => out.push('\\'),
             },
             _ => out.push(character),
@@ -287,7 +286,6 @@ mod tests {
         parse(data.as_bytes()).expect("the frontmatter parses").0
     }
 
-    /// Go's `TestParseFrontmatterPlainScalar`.
     #[test]
     fn a_plain_scalar_keeps_its_text_and_the_body_follows() {
         let (fields, body) =
@@ -298,7 +296,6 @@ mod tests {
         assert_eq!(body, "# PDF\n");
     }
 
-    /// Go's `TestParseFrontmatterPlainScalarMultiLine`.
     #[test]
     fn a_plain_scalar_folds_its_indented_continuation_lines() {
         let parsed = fields(
@@ -311,8 +308,6 @@ mod tests {
         assert_eq!(parsed["name"], "pdf");
     }
 
-    /// Go's `TestParseFrontmatterDoubleQuotedWithEscapes` and
-    /// `TestParseFrontmatterDoubleQuotedUnknownEscape`.
     #[test]
     fn a_double_quoted_scalar_resolves_its_escapes() {
         let parsed =
@@ -321,7 +316,6 @@ mod tests {
         assert_eq!(fields("---\nname: \"a\\qb\"\n---\nbody\n")["name"], "aqb");
     }
 
-    /// Go's `TestParseFrontmatterSingleQuotedEscape`.
     #[test]
     fn a_single_quoted_scalar_unescapes_a_doubled_quote() {
         assert_eq!(
@@ -330,8 +324,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestParseFrontmatterLiteralBlock` and
-    /// `TestParseFrontmatterLiteralBlockWithChompingIndicator`.
     #[test]
     fn a_literal_block_keeps_its_line_breaks_with_or_without_a_chomping_indicator() {
         for indicator in ["|", "|-"] {
@@ -342,7 +334,6 @@ mod tests {
         }
     }
 
-    /// Go's `TestParseFrontmatterFoldedBlockWithBlankLine`.
     #[test]
     fn a_folded_block_joins_lines_and_keeps_paragraph_breaks() {
         let parsed = fields(
@@ -354,8 +345,8 @@ mod tests {
         );
     }
 
-    /// Go's `TestParseFrontmatterNestedBlockSkipped`: a nested key must not
-    /// reach the top-level fields, where it could impersonate `name`.
+    /// A nested key must not reach the top-level fields, where it could
+    /// impersonate `name`.
     #[test]
     fn a_nested_block_is_skipped_rather_than_flattened() {
         let parsed = fields(
@@ -369,9 +360,9 @@ mod tests {
         assert_eq!(parsed["metadata"], "");
     }
 
-    /// Go's `TestParseFrontmatterCommentsIgnored`. The indented comment sits
-    /// after a double-quoted value, which never consumes continuation lines,
-    /// so it is a standalone comment rather than part of the scalar.
+    /// The indented comment sits after a double-quoted value, which never
+    /// consumes continuation lines, so it is a standalone comment rather than
+    /// part of the scalar.
     #[test]
     fn comments_are_ignored_at_any_indentation() {
         let parsed = fields(
@@ -383,7 +374,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestParseFrontmatterDuplicateKeyLastWins`.
     #[test]
     fn a_duplicate_key_takes_its_last_value() {
         assert_eq!(
@@ -392,11 +382,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestParseFrontmatterMissingFrontmatter`,
-    /// `TestParseFrontmatterUnterminated`,
-    /// `TestParseFrontmatterUnsupportedLine`,
-    /// `TestParseFrontmatterUnterminatedDoubleQuoted` and
-    /// `TestParseFrontmatterUnterminatedSingleQuoted`.
     #[test]
     fn malformed_frontmatter_is_reported_rather_than_guessed_at() {
         for (data, want) in [
@@ -419,13 +404,11 @@ mod tests {
         }
     }
 
-    /// Go's `TestParseFrontmatterDelimiterToleratesCR`.
     #[test]
     fn a_carriage_return_before_the_newline_is_tolerated() {
         assert_eq!(fields("---\r\nname: pdf\r\n---\r\nbody\r\n")["name"], "pdf");
     }
 
-    /// Go's `TestParseFrontmatterEmptyValue`.
     #[test]
     fn a_key_with_no_value_reads_as_empty() {
         assert_eq!(
@@ -434,7 +417,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestParseFrontmatterBodyLeadingNewlineRemovedOnce`.
     #[test]
     fn only_one_leading_newline_is_stripped_from_the_body() {
         let (_, body) =

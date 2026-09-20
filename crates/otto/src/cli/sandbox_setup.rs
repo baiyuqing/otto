@@ -1,10 +1,9 @@
 //! `otto sandbox setup`: the interactive sandbox permission editor.
 //!
-//! Port of `cmd/otto/sandbox_setup.go`. It is dispatched before the main flag
-//! set is parsed, because its argument grammar is its own, and it builds no
-//! provider, session or controller: it reads the configuration file, asks two
-//! questions, and rewrites only the `[sandbox]` table through
-//! [`otto_core::config::update_sandbox`].
+//! It is dispatched before the main flag set is parsed, because its argument
+//! grammar is its own, and it builds no provider, session or controller: it
+//! reads the configuration file, asks two questions, and rewrites only the
+//! `[sandbox]` table through [`otto_core::config::update_sandbox`].
 //!
 //! Safety: the file is written by rename from a sibling temporary file, and
 //! only when the bytes on disk still match what setup read. A configuration
@@ -29,24 +28,22 @@ use super::sandbox_runtime::{
 
 const USAGE: &str = "usage: otto sandbox setup [--config PATH] [--cwd PATH]";
 
-/// How long the optional `check` step may take. Port of Go's 15-second
-/// `context.WithTimeout`.
+/// How long the optional `check` step may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The probe `check` runs when GitHub CLI access was requested. The exit codes
 /// are the vocabulary [`report_check`] reads.
 const GH_PROBE: &str = r#"command -v gh >/dev/null || exit 20; test -d "$GH_CONFIG_DIR" && test -r "$GH_CONFIG_DIR" || exit 21; gh --version >/dev/null 2>&1 || exit 22"#;
 
-/// What the subcommand's own flags resolved to. Port of the `flag.FlagSet`
-/// in `runSandboxSetup`.
+/// What the subcommand's own flags resolved to.
 struct Flags {
     config_path: String,
     cwd: String,
 }
 
-/// Go's `flag` package for the two flags this command defines: `--name value`
-/// and `--name=value`, one leading dash or two, with `-h`/`-help` asking for
-/// the usage line and anything else rejected.
+/// The two flags this command defines: `--name value` and `--name=value`, one
+/// leading dash or two, with `-h`/`-help` asking for the usage line and
+/// anything else rejected.
 fn parse_flags(args: &[String]) -> Result<Option<Flags>, ()> {
     let mut flags = Flags {
         config_path: String::new(),
@@ -55,8 +52,8 @@ fn parse_flags(args: &[String]) -> Result<Option<Flags>, ()> {
     let mut index = 0;
     while index < args.len() {
         let argument = args[index].as_str();
-        // Go stops at the first non-flag argument and reports it through
-        // `NArg`, which this command rejects either way.
+        // Parsing stops at the first non-flag argument, which this command
+        // rejects either way.
         if !argument.starts_with('-') || argument == "-" || argument == "--" {
             return Err(());
         }
@@ -88,8 +85,7 @@ fn parse_flags(args: &[String]) -> Result<Option<Flags>, ()> {
     Ok(Some(flags))
 }
 
-/// Runs `otto sandbox ...` and returns its exit code. Port of
-/// `runSandboxSetup`.
+/// Runs `otto sandbox ...` and returns its exit code.
 pub async fn run(
     args: &[String],
     stdin: &mut (dyn BufRead + Send),
@@ -237,8 +233,8 @@ pub async fn run(
                     check_entries.retain(|entry| !entry.starts_with(b"GH_CONFIG_DIR="));
                     check_entries.push(format!("GH_CONFIG_DIR={gh_dir}").into_bytes());
                 }
-                // Go ignores this error: the same table already resolved
-                // above, so only a caller-visible change could fail here.
+                // This error is ignored: the same table already resolved above,
+                // so only a caller-visible change could fail here.
                 let Ok(resolved) = resolve_sandbox(&proposed, None) else {
                     continue;
                 };
@@ -274,8 +270,7 @@ pub async fn run(
     }
 }
 
-/// Prompts until the answer parses, returning `None` at end of input. Port of
-/// the `ask` closure.
+/// Prompts until the answer parses, returning `None` at end of input.
 fn ask(
     stdin: &mut dyn BufRead,
     stdout: &mut (dyn Write + Send),
@@ -296,9 +291,7 @@ fn ask(
     }
 }
 
-/// One lowercased, trimmed line, or `None` at end of input. Go's
-/// `bufio.Scanner` drops the line terminator; the callers all trim and
-/// lowercase what it produced.
+/// One lowercased, trimmed line, or `None` at end of input.
 fn read_line(stdin: &mut dyn BufRead) -> Option<String> {
     let mut line = String::new();
     match stdin.read_line(&mut line) {
@@ -308,10 +301,9 @@ fn read_line(stdin: &mut dyn BufRead) -> Option<String> {
 }
 
 /// Opens the proposed sandbox and reports whether a command runs inside it.
-/// Port of `checkSandboxSetup`.
 ///
-/// `open` is a parameter for the same reason Go takes one: the real opener
-/// starts Seatbelt, which no offline test may depend on.
+/// `open` is a parameter because the real opener starts Seatbelt, which no
+/// offline test may depend on.
 async fn check<F, Fut>(
     open: F,
     options: OpenOptions,
@@ -322,9 +314,8 @@ async fn check<F, Fut>(
     F: FnOnce(OpenOptions, CancellationToken) -> Fut,
     Fut: Future<Output = SandboxRuntime>,
 {
-    // Go bounds the whole check with one timeout context; the equivalent here
-    // is a child token a timer cancels, which the executor honours the same
-    // way it honours process cancellation.
+    // The whole check is bounded by a child token a timer cancels, which the
+    // executor honours the same way it honours process cancellation.
     let deadline = cancel.child_token();
     let timer = {
         let deadline = deadline.clone();
@@ -404,7 +395,7 @@ async fn report_check(
 }
 
 /// Replaces the configuration file, refusing anything that would lose a
-/// concurrent edit or follow a symlink. Port of `saveSandboxSetup`.
+/// concurrent edit or follow a symlink.
 fn save(path: &Path, original: &[u8], updated: &[u8]) -> Result<(), &'static str> {
     let current = match std::fs::read(path) {
         Ok(content) => content,
@@ -448,12 +439,10 @@ fn save(path: &Path, original: &[u8], updated: &[u8]) -> Result<(), &'static str
     result
 }
 
-/// Port of `shellQuoteSetup`.
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-/// Go's `%q` for one string.
 fn quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -478,7 +467,7 @@ fn quote(value: &str) -> String {
     out
 }
 
-/// Go's `%q` for a `[]string`: space separated inside brackets.
+/// Quoted values, space separated inside brackets.
 fn quote_list(values: &[String]) -> String {
     let quoted: Vec<String> = values.iter().map(|value| quote(value)).collect();
     format!("[{}]", quoted.join(" "))
@@ -493,8 +482,8 @@ mod tests {
 
     const PRESERVED: &str = "# preserved\n[profiles.demo]\nmodel = 'example'\n";
 
-    /// Port of `TestSandboxSetup`, driven through the process entry point so
-    /// the dispatch in [`super::super::run::run`] is covered too.
+    /// Drives the setup command through the process entry point so the dispatch
+    /// in [`super::super::run::run`] is covered too.
     #[tokio::test]
     async fn setup_writes_only_on_save() {
         for (name, input, saved) in [
@@ -641,9 +630,8 @@ mod tests {
         String::from_utf8_lossy(&stdout).into_owned()
     }
 
-    /// Port of `TestSandboxSetupCheck`. Go stubs the executor's exit code;
-    /// here the unconfined driver runs the real probe against a `gh` shim,
-    /// which pins the script and the exit codes together.
+    /// The unconfined driver runs the real probe against a `gh` shim, which
+    /// pins the script and the exit codes together.
     #[tokio::test]
     async fn check_reports_a_startup_failure() {
         let home = TempDir::new().expect("home");
@@ -722,7 +710,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestSandboxSetupSaveGuards`.
     #[test]
     fn save_refuses_a_concurrent_edit_and_a_symlink() {
         let directory = TempDir::new().expect("dir");
@@ -742,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn go_formatting_helpers_match_go() {
+    fn quoting_helpers_render_paths_lists_and_shell_words() {
         assert_eq!(quote("/tmp/a b"), "\"/tmp/a b\"");
         assert_eq!(quote("say \"hi\"\n"), "\"say \\\"hi\\\"\\n\"");
         assert_eq!(quote_list(&[]), "[]");

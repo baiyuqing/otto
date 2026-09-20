@@ -1,4 +1,4 @@
-//! The `[memory]` table and its resolution. Port of `internal/config/memory.go`.
+//! The `[memory]` table and its resolution.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,9 +11,9 @@ const DEFAULT_MEMORY_BACKEND: &str = "sqlite";
 const DEFAULT_MEMORY_RECALL_TOKENS: i64 = 2000;
 const DEFAULT_MEMORY_MAX_RESULTS: i64 = 12;
 
-/// Ceilings from `internal/memory` (Phase 7, not yet ported): the recall
-/// budget and page size a request may ask for. Hardcoded here rather than
-/// imported because otto-core cannot yet depend on that package.
+/// The recall budget and page size a request may ask for. Hardcoded rather
+/// than imported from `otto::memory` because otto-core cannot depend on the
+/// native crate.
 const MAX_TOKEN_BUDGET: i64 = 8192;
 const MAX_RECALL_RECORDS: i64 = 64;
 
@@ -65,10 +65,7 @@ pub struct MemoryRuntime {
 /// Resolves `[memory]`, defaulting the SQLite path to
 /// `$HOME/.otto/memory/memory.db`.
 ///
-/// ponytail: Go's `ResolveMemory` also takes an `Overrides` parameter that
-/// its body never reads (dead in the Go source too); omitted here rather
-/// than threading an unused argument across the wasm boundary. Add it back
-/// if a real memory override is introduced.
+/// Add it back if a real memory override is introduced.
 pub fn resolve_memory(
     file: &super::File,
     env: &HashMap<String, String>,
@@ -265,10 +262,8 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn rejects_invalid_busy_timeout() {
-        // ponytail: Go's equivalent test passes env=nil and still reaches
-        // this check because `homeFromEnv` falls back to the real
-        // `os.UserHomeDir()`. Core's `home_from_env` deliberately has no
-        // such fallback (core must never touch real env), so this test
+        // ponytail: core's `home_from_env` deliberately has no fallback to the
+        // real environment (core must never touch real env), so this test
         // injects HOME itself to reach the busy_timeout validation below.
         let mut file = File::default();
         file.memory.sqlite.busy_timeout = "not-a-duration".into();
@@ -280,7 +275,7 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn rejects_non_positive_busy_timeout() {
         // ponytail: see rejects_invalid_busy_timeout above for why HOME is
-        // injected rather than passing an empty env like the Go test does.
+        // injected rather than passing an empty env.
         let mut file = File::default();
         file.memory.sqlite.busy_timeout = "0s".into();
         let err = resolve_memory(&file, &env("/home/u")).unwrap_err();

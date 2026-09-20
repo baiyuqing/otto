@@ -1,11 +1,10 @@
 //! `otto serve`: the HTTP composition root.
 //!
-//! Port of `cmd/otto/serve.go`. Everything
-//! the REPL path builds is already in place when [`run`] is called; this
-//! module only picks the listener and wires one [`Factory`] over the shared
-//! [`Builder`]. The process sandbox arrives already behind the
-//! [`SandboxSwitch`](super::sandbox_switch::SandboxSwitch) that
-//! `POST /v1/sandbox/reload` replaces.
+//! Everything the REPL path builds is already in place when [`run`] is called;
+//! this module only picks the listener and wires one [`Factory`] over the
+//! shared [`Builder`]. The process sandbox arrives already behind the
+//! [`SandboxSwitch`](super::sandbox_switch::SandboxSwitch) that `POST
+//! /v1/sandbox/reload` replaces.
 
 use std::io::Write;
 use std::path::Path;
@@ -29,7 +28,7 @@ use super::info::SandboxInfo;
 use super::runtime_builder::Builder;
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 
-/// Writes `otto: {message}\n` and returns Go's exit code 1.
+/// Writes `otto: {message}\n` and returns exit code 1.
 fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     let _ = writeln!(stderr, "otto: {message}");
     1
@@ -38,8 +37,7 @@ fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
 // ---- the session factory ----
 
 /// Builds one [`Controller`] per server-side session on top of the same
-/// replacement plumbing the CLI's `/new` and `/resume` use. Port of
-/// `serveFactories`.
+/// replacement plumbing the CLI's `/new` and `/resume` use.
 struct ServeFactory {
     builder: Arc<Builder>,
     runtime: Runtime,
@@ -47,8 +45,8 @@ struct ServeFactory {
 }
 
 impl ServeFactory {
-    /// Go's `session.List(ctx, root, workspace, "", maxServeListSessions)`,
-    /// with a missing session root reported as no sessions.
+    /// The sessions for the workspace, with a missing session root reported as
+    /// no sessions.
     fn listed(&self) -> Result<ListResult, String> {
         if !self.builder.session_root.exists() {
             return Ok(ListResult::default());
@@ -128,15 +126,14 @@ pub struct ServeOptions {
     /// The process sandbox the composition root opened, already behind its
     /// switch. [`run`] owns closing it.
     pub control: Arc<SandboxSwitch>,
-    /// `None` when bash never came up, so `POST /v1/sandbox/reload` answers
-    /// 501 rather than a failure. Port of `runtimeBuilder.sandboxReload`.
+    /// `None` when bash never came up, so `POST /v1/sandbox/reload` answers 501
+    /// rather than a failure.
     pub reloader: Option<Arc<SandboxReloader>>,
     /// Open the printed TCP URL in the default browser. Unix listeners have
     /// no URL; [`run`] rejects that combination before bind.
     pub open: bool,
 }
 
-/// Port of `runtimeBuilder.runServe`.
 pub async fn run(
     options: ServeOptions,
     stdout: &mut (dyn Write + Send),
@@ -190,10 +187,9 @@ pub async fn run(
             sandbox: reloader,
         }),
         token,
-        // ponytail: Go threads the caller's stderr into the slog handler;
-        // `Logger` owns its sink, so the request log goes to the process
-        // stderr instead. Thread a shared writer through if a test ever has
-        // to read it.
+        // ponytail: `Logger` owns its sink, so the request log goes to the
+        // process stderr. Thread a shared writer through if a test ever has to
+        // read it.
         logger: None,
     });
     let inbound = inbound::maybe_start(Arc::clone(&server), feishu, serve_cancel.clone());
@@ -243,9 +239,8 @@ fn announce_listen(stdout: &mut (dyn Write + Send), address: &str, token: &str, 
     }
 }
 
-/// Go runs `exec.Command("open", url)`. The absolute path is used because
-/// `PATH` is attacker-influenced input at this point. A failed launch is not
-/// fatal: the URL was already printed.
+/// The absolute path is used because `PATH` is attacker-influenced input at
+/// this point. A failed launch is not fatal: the URL was already printed.
 #[cfg(not(test))]
 const OPEN_BINARY: &str = "/usr/bin/open";
 
@@ -293,9 +288,8 @@ fn bind(listen: &ServerRuntime) -> Result<(Listener, String), String> {
     Ok((listener, String::new()))
 }
 
-/// Cancels `token` on SIGTERM, ending when the token is cancelled from
-/// anywhere else. Port of `subscribeOSTerminate` plus the goroutine that
-/// watches it.
+/// Cancels `token` on SIGTERM, ending when the token is cancelled from anywhere
+/// else.
 fn spawn_terminate(token: CancellationToken) -> Option<tokio::task::JoinHandle<()>> {
     let mut signals =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()?;

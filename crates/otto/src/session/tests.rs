@@ -1,4 +1,4 @@
-//! Native session tests, ported from `internal/session/*_test.go`.
+//! Native session tests.
 //!
 //! Every test is offline and deterministic and works inside its own directory
 //! under [`std::env::temp_dir`], removed when the guard drops. No `tempfile`

@@ -1,14 +1,13 @@
 //! Rewriting the `[sandbox]` table in an existing `config.toml`.
 //!
-//! Port of `internal/config/sandbox_setup.go`. `otto sandbox setup` is the
-//! only writer of a user's configuration file, so it replaces exactly the
-//! `[sandbox]` block and leaves every other byte, including comments and
-//! formatting, where it was. Unusual layouts are rejected rather than
-//! rewritten destructively.
+//! `otto sandbox setup` is the only writer of a user's configuration file, so
+//! it replaces exactly the `[sandbox]` block and leaves every other byte,
+//! including comments and formatting, where it was. Unusual layouts are
+//! rejected rather than rewritten destructively.
 //!
-//! The emitted block is byte-identical to what go-toml v2 marshals for the
-//! same [`SandboxConfig`], so a Rust-written file and a Go-written one are
-//! the same file.
+//! The emitted block is byte-identical to what go-toml v2 marshals for the same
+//! [`SandboxConfig`], which is the encoding existing `config.toml` files were
+//! written with.
 
 use super::{ConfigError, SandboxConfig, resolve_sandbox};
 
@@ -66,8 +65,8 @@ struct Header<'a> {
 
 impl Header<'_> {
     /// Whether this is `[name]`: one key part, not `[[name]]` and not
-    /// `[name.sub]`. Go reads the parsed key nodes; parsing the header line
-    /// on its own gives the same answer, with quoted keys already decoded.
+    /// `[name.sub]`. Parsing the header line on its own gives the same answer
+    /// as reading the parsed key nodes, with quoted keys already decoded.
     fn single_table_named(&self, name: &str) -> bool {
         let Ok(table) = toml::from_str::<toml::Table>(self.text) else {
             return false;
@@ -133,8 +132,8 @@ fn encode_array(values: &[String]) -> String {
     format!("[{}]", items.join(", "))
 }
 
-/// Port of go-toml's `encodeString`: a literal string unless the value
-/// contains a quote, a line break or a control character.
+/// Follows go-toml's `encodeString`: a literal string unless the value contains
+/// a quote, a line break or a control character.
 fn encode_string(value: &str) -> String {
     if !needs_quoting(value) {
         return format!("'{value}'");
@@ -160,16 +159,15 @@ fn encode_string(value: &str) -> String {
     String::from_utf8(out).expect("only ASCII escapes were added")
 }
 
-/// Port of go-toml's `needsQuoting`.
 fn needs_quoting(value: &str) -> bool {
     value
         .bytes()
         .any(|byte| byte == b'\'' || byte == b'\r' || byte == b'\n' || invalid_ascii(byte))
 }
 
-/// Port of go-toml's `characters.InvalidAscii`: the control bytes that a
-/// literal string may not carry. Tab, line feed and carriage return are not
-/// in the table; `needs_quoting` rejects the two line breaks separately.
+/// Follows go-toml's `characters.InvalidAscii`: the control bytes that a
+/// literal string may not carry. Tab, line feed and carriage return are not in
+/// the table; `needs_quoting` rejects the two line breaks separately.
 fn invalid_ascii(byte: u8) -> bool {
     byte <= 0x08 || byte == 0x0b || byte == 0x0c || (0x0e..=0x1f).contains(&byte) || byte == 0x7f
 }
@@ -187,7 +185,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestUpdateSandbox`.
     #[test]
     fn update_sandbox_rewrites_only_the_sandbox_table() {
         let cases = [
@@ -219,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn update_sandbox_writes_the_go_toml_block() {
+    fn update_sandbox_writes_the_go_toml_compatible_block() {
         let settings = SandboxConfig {
             driver: Some("auto".to_string()),
             network: Some("allow".to_string()),

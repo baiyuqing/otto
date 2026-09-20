@@ -1,18 +1,15 @@
 //! Transcript data model: roles, content blocks, messages, tool definitions,
 //! and token usage.
 //!
-//! Port of `internal/model/types.go`. The serde field names, the omit-empty
-//! behavior, and every `validate` rule and error message match the Go types so
-//! that both implementations read and write the same session JSON.
+//! The serde field names, the omit-empty behavior, and every `validate` rule
+//! and error message are pinned by the session JSON format that stored sessions
+//! are written in.
 //!
-//! Ownership: every type here is a plain owned value and derives `Clone`. The
-//! Go `CloneMessage`/`CloneMessages`/`CloneUsage` helpers have no Rust
-//! equivalent because `Clone` already produces an independent value.
+//! Ownership: every type here is a plain owned value and derives `Clone`.
 //!
 //! Concurrency: these types hold no interior mutability and are `Send + Sync`.
 //!
-//! Errors: `validate` returns [`ValidationError`], which carries the same
-//! message text as the corresponding Go error.
+//! Errors: `validate` returns [`ValidationError`].
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -20,16 +17,15 @@ use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
-/// A rejected value at a trust boundary. The message is the same static text
-/// the Go implementation returns.
+/// A rejected value at a trust boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct ValidationError(pub &'static str);
 
-/// The timestamp Go writes for a zero `time.Time`, `0001-01-01T00:00:00Z`.
+/// The timestamp stored sessions carry for an unset time,
+/// `0001-01-01T00:00:00Z`.
 ///
-/// The agent loop uses it as the "not set" marker for
-/// [`Message::created_at`], matching Go's `CreatedAt.IsZero()` check.
+/// The agent loop uses it as the "not set" marker for [`Message::created_at`].
 pub fn zero_time() -> DateTime<Utc> {
     NaiveDate::from_ymd_opt(1, 1, 1)
         .expect("0001-01-01 is a valid date")
@@ -40,7 +36,7 @@ pub fn zero_time() -> DateTime<Utc> {
 /// Who produced a message.
 ///
 /// Unknown wire values decode into [`Role::Other`] instead of failing, so that
-/// [`Message::validate`] rejects them with the same error Go produces.
+/// [`Message::validate`] rejects them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum Role {
@@ -76,7 +72,7 @@ impl From<Role> for String {
 }
 
 impl Default for Role {
-    /// Matches Go's zero `Role`, the empty string, which `validate` rejects.
+    /// The empty string, which `validate` rejects.
     fn default() -> Self {
         Self::Other(String::new())
     }
@@ -128,8 +124,8 @@ impl Default for BlockType {
 
 /// Why the provider stopped generating.
 ///
-/// An absent reason is `None`; the Go zero value is the empty string and both
-/// are accepted by [`Message::validate`].
+/// An absent reason is `None`; both it and the empty string are accepted by
+/// [`Message::validate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum FinishReason {
@@ -167,8 +163,7 @@ impl From<FinishReason> for String {
 /// One piece of message content.
 ///
 /// `arguments` is provider JSON passed through verbatim. Keeping it as
-/// [`RawValue`] preserves number literals exactly, which removes the
-/// `json.Number` special case the Go decoder needs.
+/// [`RawValue`] preserves number literals exactly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Block {
     #[serde(rename = "type")]
@@ -548,7 +543,7 @@ impl Usage {
 }
 
 /// Reports whether `raw` is a JSON object. Number literals are not parsed, so
-/// values outside `f64` range are accepted, matching Go's `json.Valid`.
+/// values outside `f64` range are accepted.
 fn is_json_object(raw: Option<&RawValue>) -> bool {
     let Some(raw) = raw else { return false };
     serde_json::from_str::<std::collections::BTreeMap<String, &RawValue>>(raw.get()).is_ok()
@@ -562,13 +557,13 @@ fn is_zero(value: &i64) -> bool {
     *value == 0
 }
 
-/// Accepts a JSON `null` for `blocks` as an empty list, since Go encodes a nil
-/// slice as `null`.
+/// Accepts a JSON `null` for `blocks` as an empty list, which is how stored
+/// sessions encode an empty block list.
 fn deserialize_blocks<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Block>, D::Error> {
     Ok(Option::<Vec<Block>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-/// Maps Go's empty-string finish reason to `None`.
+/// Maps an empty-string finish reason to `None`.
 fn deserialize_finish_reason<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<FinishReason>, D::Error> {
@@ -949,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_time_matches_the_go_zero_timestamp() {
+    fn zero_time_encodes_as_the_pi_zero_timestamp() {
         assert_eq!(
             serde_json::to_string(&zero_time()).expect("encode"),
             "\"0001-01-01T00:00:00Z\""

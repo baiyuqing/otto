@@ -1,7 +1,6 @@
 //! The secret-redaction boundary the whole process is gated on.
 //!
-//! Port of the `boundary*` and `collect*SecretValues` half of
-//! `cmd/otto/runtime_builder.go`. Two questions are answered here:
+//! Two questions are answered here:
 //!
 //! 1. Which exact strings must never reach the model or the terminal.
 //! 2. Whether hiding them is provably complete.
@@ -17,11 +16,9 @@
 //! changes it, then the secret is a substring of text the model must see, and
 //! no redaction can separate the two.
 //!
-//! Divergence from Go: Go collects the four `otto login` credential values
-//! itself, between the profile base URLs and the session runtime. Here the
-//! caller captures them and passes them in as [`BoundaryInputs`]'s
-//! `sandbox_secrets`, which are collected first; the resulting set is the
-//! same.
+//! The four `otto login` credential values are captured by the caller and
+//! passed in as [`BoundaryInputs`]'s `sandbox_secrets`, which are collected
+//! first.
 
 use std::collections::HashMap;
 
@@ -166,8 +163,8 @@ pub fn boundary_redactor(
 #[derive(Default)]
 pub struct FixedText<'a> {
     pub workspace_path: &'a str,
-    /// `None` until the workspace exists; Go skips the definition and prompt
-    /// checks in that case, because neither can be built yet.
+    /// `None` until the workspace exists; the definition and prompt checks are
+    /// skipped in that case, because neither can be built yet.
     pub definitions: Option<&'a [ToolDefinition]>,
     pub system_prompt: Option<&'a str>,
 }
@@ -242,8 +239,8 @@ fn string_unchanged(redactor: &Redactor, value: &str) -> bool {
     redactor.redact_string(value) == value
 }
 
-/// Go walks the definition with reflection; the three fields it can reach are
-/// the name, the description, and the parameter schema's keys and strings.
+/// The three fields a definition exposes are the name, the description, and the
+/// parameter schema's keys and strings.
 fn definition_unchanged(redactor: &Redactor, definition: &ToolDefinition) -> bool {
     if !string_unchanged(redactor, &definition.name)
         || !string_unchanged(redactor, &definition.description)

@@ -1,14 +1,13 @@
 //! Composition of one runnable agent from resolved configuration.
 //!
-//! Port of the `buildRunner` half of `cmd/otto/runtime_builder.go`. Memory,
-//! skills, sub-agents, ChatGPT credentials, and the HTTP trace writer are
-//! phases 5 to 7; the seams for them are named below and nothing else about
+//! Memory, skills, sub-agents, ChatGPT credentials, and the HTTP trace writer
+//! are phases 5 to 7; the seams for them are named below and nothing else about
 //! the composition order changes when they arrive.
 //!
-//! Safety: the redaction boundary decides everything. `boundary_redactor`
-//! must leave the workspace path, the tool definitions, and the system prompt
-//! byte-identical, or the whole run degrades to a closed boundary: no
-//! provider client, no bash tool, no runtime identity in the status line.
+//! Safety: the redaction boundary decides everything. `boundary_redactor` must
+//! leave the workspace path, the tool definitions, and the system prompt
+//! byte-identical, or the whole run degrades to a closed boundary: no provider
+//! client, no bash tool, no runtime identity in the status line.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -46,11 +45,10 @@ use super::sandbox_runtime::canonical_directory;
 use super::workspace_context::workspace_context_for;
 
 /// Every failure here is already redacted text, so a `String` carries all a
-/// caller may show. Port of Go's `redactedErrorMessage` discipline.
+/// caller may show.
 pub type BuildError = String;
 
-/// Everything a frontend shows about the resolved runtime. Port of
-/// `app.RuntimeInfo`; `internal/app` itself is phase 6.
+/// Everything a frontend shows about the resolved runtime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeInfo {
     pub provider: String,
@@ -62,7 +60,6 @@ pub struct RuntimeInfo {
 }
 
 /// The session operations a frontend needs beyond the transcript itself.
-/// Port of the wider `session.Session` interface in Go.
 pub trait SessionHandle: Session + Send + Sync {
     fn header(&self) -> Header;
     fn name(&self) -> String;
@@ -71,9 +68,8 @@ pub trait SessionHandle: Session + Send + Sync {
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String>;
     fn close(&self) -> Result<(), String>;
 
-    /// The usage and context-window counters a frontend displays. A
-    /// transcript that keeps no counters reports zeroes, which is what Go's
-    /// `session.SnapshotProvider` type assertion yields when it fails.
+    /// The usage and context-window counters a frontend displays. A transcript
+    /// that keeps no counters reports zeroes.
     fn snapshot(&self) -> Snapshot {
         Snapshot::default()
     }
@@ -109,9 +105,9 @@ impl SessionHandle for Store {
     }
 }
 
-/// A transcript that is never written to disk. Port of `session.Memory`,
-/// which `--no-session` selects; `otto_core::session::MemorySession` carries
-/// the transcript and this wrapper carries the header and the name.
+/// A transcript that is never written to disk. It is what `--no-session`
+/// selects; `otto_core::session::MemorySession` carries the transcript and this
+/// wrapper carries the header and the name.
 pub struct MemoryHandle {
     inner: MemorySession,
     state: Mutex<MemoryState>,
@@ -170,7 +166,7 @@ impl SessionHandle for MemoryHandle {
         self.state().name.clone()
     }
 
-    /// An in-memory session has no file, matching Go's empty `Path`.
+    /// An in-memory session has no file.
     fn path(&self) -> String {
         String::new()
     }
@@ -272,18 +268,18 @@ impl Session for SharedSession {
     }
 }
 
-/// The provider an agent calls, or the refusal used when the redaction
-/// boundary is closed.
+/// The provider an agent calls, or the refusal used when the redaction boundary
+/// is closed.
 ///
-/// Go stores a nil `provider.Provider` there and the agent never reaches it,
-/// because `Run` checks the redactor first. This enum keeps that shape
-/// without an `Option`, so the agent's type parameter stays concrete.
+/// The agent never reaches the client when the boundary is closed, because
+/// `Run` checks the redactor first. This enum keeps the provider slot
+/// non-optional, so the agent's type parameter stays concrete.
 pub enum ProviderClient {
     Compat(Arc<Client>),
     ChatGpt(Arc<crate::provider::chatgpt::Client>),
     Unavailable,
-    /// Test seam. Go's server tests inject an `app.Runner` double; `Runner`
-    /// is a concrete struct here, so the seam sits one layer down.
+    /// Test seam. `Runner` is a concrete struct, so the seam sits one layer
+    /// down.
     #[cfg(test)]
     Scripted(Arc<dyn Provider + Send + Sync>),
 }
@@ -314,8 +310,8 @@ pub struct Runner {
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
     usage: Option<crate::usage::Collector>,
-    /// The sub-agent task registry, absent when sub-agents are off. Port of
-    /// Go's `taskOwner`: `/tasks` and `/task` read the active runner's.
+    /// The sub-agent task registry, absent when sub-agents are off. `/tasks`
+    /// and `/task` read the active runner's task registry.
     pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
     /// The timer registry, absent when the timer tools are not registered.
     /// `/timers` lists it and archiving the session clears it.
@@ -329,7 +325,7 @@ pub struct Runner {
 }
 
 impl Runner {
-    /// Runs one turn. Port of `app.Runner.Run`.
+    /// Runs one turn.
     pub async fn run(
         &self,
         user_text: &str,
@@ -353,7 +349,7 @@ impl Runner {
             .await
     }
 
-    /// Compacts the transcript. Port of `app.Runner.Compact`.
+    /// Compacts the transcript.
     pub async fn compact(
         &self,
         focus: &str,
@@ -435,8 +431,7 @@ impl Runner {
     }
 
     /// A runner with no tools whose provider the test supplies, carrying the
-    /// sub-agent registry the caller owns the way Go's test runners do. See
-    /// [`ProviderClient::Scripted`].
+    /// sub-agent registry the caller owns. See [`ProviderClient::Scripted`].
     ///
     /// `tasks` is wired to both [`Options::tasks`] and [`Options::inbox`], so
     /// an empty-text wake turn reaches the provider instead of being rejected
@@ -486,11 +481,11 @@ impl Runner {
     }
 }
 
-/// The composition root. Port of Go's `runtimeBuilder`.
+/// The composition root.
 ///
-/// Seams left for later phases: memory (`memory_*` fields in Go), skills,
-/// sub-agents, ChatGPT credentials, and the `OTTO_TRACE` writer. None of them
-/// changes the order below; each only appends tools or wraps the client.
+/// Optional seams: memory, skills, sub-agents, ChatGPT credentials, and the
+/// `OTTO_TRACE` writer. None of them changes the order below; each only appends
+/// tools or wraps the client.
 pub struct Builder {
     pub config_path: PathBuf,
     pub config: File,
@@ -512,14 +507,13 @@ pub struct Builder {
     pub sandbox_info: SandboxInfo,
     pub sandbox_secrets: Vec<String>,
     pub sandbox_secrets_complete: bool,
-    /// Go's `runtimeBuilder.authPath`: the captured `~/.otto/auth/chatgpt.json`.
+    /// The captured `~/.otto/auth/chatgpt.json`.
     pub auth_path: String,
-    /// Go's `runtimeBuilder.authCredentials`, valid only when loaded is true.
+    /// The captured credentials, valid only when loaded is true.
     pub auth_credentials: crate::auth::Credentials,
-    /// Go's `runtimeBuilder.authCredentialsLoaded`.
     pub auth_credentials_loaded: bool,
-    /// The process-wide memory service and its two scopes. Default is Go's
-    /// zero value: a null service reporting memory as disabled.
+    /// The process-wide memory service and its two scopes. The default is a
+    /// null service reporting memory as disabled.
     pub memory: super::wiring::MemoryWiring,
     /// Process-wide append-only token usage storage. `None` keeps usage
     /// collection from affecting an otherwise usable runtime.
@@ -584,9 +578,9 @@ impl Builder {
 
     /// The definitions the boundary check must leave unchanged.
     ///
-    /// Port of `boundaryToolDefinitions`: the built-ins, bash when it is
-    /// planned, the memory tools when memory is usable, and the skill and
-    /// sub-agent definitions `build_catalogs` would register.
+    /// The built-ins, bash when it is planned, the memory tools when memory is
+    /// usable, and the skill and sub-agent definitions `build_catalogs` would
+    /// register.
     fn boundary_tool_definitions(&self, runtime: Option<&Runtime>) -> Vec<ToolDefinition> {
         let max_output = match runtime {
             Some(runtime) if runtime.max_output_bytes > 0 => output_cap(runtime.max_output_bytes),
@@ -642,12 +636,12 @@ impl Builder {
         self.boundary_redactor(runtime).allows_dynamic_content()
     }
 
-    /// Every secret form the run must hide. Port of `secretValues`.
+    /// Every secret form the run must hide.
     pub fn secret_values(&self, runtime: Option<&Runtime>) -> Vec<String> {
         boundary::boundary_secret_values(&self.boundary_inputs(), runtime).0
     }
 
-    /// Whether a bash tool will actually be built. Port of `bashConfigured`.
+    /// Whether a bash tool will actually be built.
     pub fn bash_configured(&self) -> bool {
         self.boundary_allows_dynamic(None) && self.planned_bash_available()
     }
@@ -658,8 +652,8 @@ impl Builder {
             && self.command_executor.is_some()
     }
 
-    /// Port of `plannedSandboxInfo`: a sandbox that reported bash available
-    /// but left no executor behind is a runtime failure, not a usable one.
+    /// A sandbox that reported bash available but left no executor behind is a
+    /// runtime failure, not a usable one.
     pub fn planned_sandbox_info(&self) -> SandboxInfo {
         if self.sandbox_info.bash_available && !self.planned_bash_available() {
             return SandboxInfo {
@@ -672,8 +666,8 @@ impl Builder {
         self.sandbox_info
     }
 
-    /// Port of `effectiveSandboxInfo`: a closed boundary disables bash and
-    /// says only that the environment was rejected.
+    /// A closed boundary disables bash and says only that the environment was
+    /// rejected.
     pub fn effective_sandbox_info(&self) -> SandboxInfo {
         if !self.boundary_allows_dynamic(None) {
             return SandboxInfo {
@@ -686,8 +680,8 @@ impl Builder {
         self.planned_sandbox_info()
     }
 
-    /// Port of `runtimeInfo`: a closed boundary reports no runtime identity,
-    /// because provider, profile, and model are all model-visible text.
+    /// A closed boundary reports no runtime identity, because provider,
+    /// profile, and model are all model-visible text.
     pub fn runtime_info(&self, runtime: &Runtime) -> RuntimeInfo {
         let mut info = RuntimeInfo {
             provider: runtime.provider.clone(),
@@ -718,7 +712,7 @@ impl Builder {
         ]
     }
 
-    /// Composes one runnable agent. Port of `buildRunner`.
+    /// Composes one runnable agent.
     pub async fn build_runner(
         &self,
         session: &SharedSession,
@@ -868,11 +862,10 @@ impl Builder {
         })
     }
 
-    /// Port of `redactError`: the text a caller may print for `message`.
+    /// The text a caller may print for `message`.
     ///
-    /// A closed boundary yields the empty string, matching Go's
-    /// `errRedactedRuntimeBoundary`, whose `Error()` is deliberately empty so
-    /// no diagnostic escapes when the redaction set is incomplete.
+    /// A closed boundary yields the empty string, deliberately, so no
+    /// diagnostic escapes when the redaction set is incomplete.
     pub fn redact_error(&self, message: &str, runtime: Option<&Runtime>) -> String {
         let redactor = boundary::secret_redactor(&self.boundary_inputs(), runtime);
         if !redactor.allows_dynamic_content() {
@@ -881,8 +874,7 @@ impl Builder {
         redactor.redact_string(message)
     }
 
-    /// Port of `resolveSession`: resolves a replacement runtime from the
-    /// provenance a session carries.
+    /// Resolves a replacement runtime from the provenance a session carries.
     pub fn resolve_session(&self, metadata: &RuntimeMetadata) -> Result<Runtime, BuildError> {
         resolve_initial_runtime(
             &self.config,
@@ -893,8 +885,8 @@ impl Builder {
         .map_err(|error| self.redact_error(&error.to_string(), None))
     }
 
-    /// Port of `buildProfileReplacement`'s resolve step: the named profile is
-    /// an explicit override, so its own provider, model and base URL win.
+    /// The named profile is an explicit override, so its own provider, model
+    /// and base URL win.
     pub fn resolve_profile(&self, profile: &str) -> Result<Runtime, BuildError> {
         let overrides = Overrides {
             profile: profile.to_string(),
@@ -912,9 +904,8 @@ impl Builder {
         .map_err(|error| self.redact_error(&error.to_string(), None))
     }
 
-    /// Port of `updateSessionRuntime`: records the resolved provenance on the
-    /// session when it differs from the header's. A closed boundary writes
-    /// nothing, because the values would be blanked anyway.
+    /// Records the resolved provenance on the session when it differs from the
+    /// header's.
     pub fn update_session_runtime(
         &self,
         session: &SharedSession,
@@ -937,8 +928,6 @@ impl Builder {
         })
     }
 
-    /// Port of `newSession` in `cmd/otto/main.go`.
-    ///
     /// `Store::create_lazy` defers the file until the first user message, so
     /// starting Otto and quitting without a prompt leaves nothing behind.
     pub fn create_session(&self, runtime: &Runtime) -> Result<SharedSession, BuildError> {
@@ -961,10 +950,10 @@ impl Builder {
     }
 }
 
-/// Port of `resumeEnvironment`: the environment a session replacement
-/// resolves against. The four "pick a runtime" variables are dropped so a
-/// replacement keeps the session's own provider, profile and model instead of
-/// silently re-reading the process environment.
+/// The environment a session replacement resolves against. The four "pick a
+/// runtime" variables are dropped so a replacement keeps the session's own
+/// provider, profile and model instead of silently re-reading the process
+/// environment.
 pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<String, String> {
     environment
         .iter()
@@ -978,7 +967,7 @@ pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<Stri
         .collect()
 }
 
-/// 16 random bytes from `/dev/urandom`, hex encoded. Port of `randomID`.
+/// 16 random bytes from `/dev/urandom`, hex encoded.
 pub(super) fn random_id() -> std::io::Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
@@ -997,20 +986,20 @@ pub fn leaked_workspace(root: &Path) -> Result<&'static Workspace, std::io::Erro
     Ok(Box::leak(Box::new(Workspace::new(root)?)))
 }
 
-/// Go passes `int`; a negative or oversized cap is clamped rather than
-/// wrapped, and the tools reject zero themselves.
+/// A negative or oversized cap is clamped rather than wrapped, and the tools
+/// reject zero themselves.
 fn output_cap(max_output_bytes: i64) -> usize {
     usize::try_from(max_output_bytes).unwrap_or(0)
 }
 
-/// `BashTool::new` rejects a zero timeout; Go's `config.Resolve` never
-/// produces one, and a negative `Duration` cannot exist in Rust.
+/// `BashTool::new` rejects a zero timeout, which configuration resolution never
+/// produces, and a negative `Duration` cannot exist in Rust.
 pub(crate) fn shell_timeout(timeout: Duration) -> Duration {
     timeout
 }
 
-/// Port of `resolveInitialRuntime`: a resumed session's stored provider and
-/// model win over its profile's, unless `--profile` was given explicitly.
+/// A resumed session's stored provider and model win over its profile's, unless
+/// `--profile` was given explicitly.
 pub fn resolve_initial_runtime(
     file: &File,
     environment: &HashMap<String, String>,
@@ -1037,8 +1026,8 @@ pub fn resolve_initial_runtime(
     )
 }
 
-/// Port of `configForSessionRuntime`: selects the stored profile and blanks
-/// its provider and model so the session defaults are what fills them in.
+/// Selects the stored profile and blanks its provider and model so the session
+/// defaults are what fills them in.
 fn config_for_session_runtime(file: &File, stored_profile: &str, explicit_profile: bool) -> File {
     if explicit_profile {
         return file.clone();
@@ -1058,8 +1047,7 @@ fn config_for_session_runtime(file: &File, stored_profile: &str, explicit_profil
     copy
 }
 
-/// Port of `validateSessionWorkspace`: a session may only be resumed from the
-/// directory it was created in.
+/// A session may only be resumed from the directory it was created in.
 pub fn validate_session_workspace(session_workspace: &str, workspace: &str) -> Result<(), String> {
     let header_workspace = canonical_directory(Path::new(session_workspace))
         .map_err(|error| format!("resolve session workspace: {error}"))?;
@@ -1156,7 +1144,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_file_tools_are_registered_in_the_go_order() {
+    async fn builtin_file_tools_are_registered_in_a_fixed_order() {
         let dir = tempfile::tempdir().expect("temp dir");
         let builder = builder(dir.path());
         let session = SharedSession::memory(Header::default());

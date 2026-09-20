@@ -1,8 +1,8 @@
 //! Generation of the Seatbelt profile for one session.
 //!
-//! Port of `internal/sandbox/seatbelt/profile.go`. [`generate`] renders the
-//! four dynamic sections of [`super::TEMPLATE`] from a session's workspace,
-//! private state directories, shell and reviewed read roots.
+//! [`generate`] renders the four dynamic sections of [`super::TEMPLATE`] from a
+//! session's workspace, private state directories, shell and reviewed read
+//! roots.
 //!
 //! Ownership: every function here is pure with respect to the caller's data;
 //! the only side effects are the filesystem reads used to canonicalize paths.
@@ -11,12 +11,11 @@
 //! performs blocking filesystem work and belongs on a blocking task.
 //!
 //! Errors: every rejection is the single [`Rejected`] value. The generated
-//! profile reaches a child process description and the failure text reaches
-//! the model, so a rejection never says which path failed.
+//! profile reaches a child process description and the failure text reaches the
+//! model, so a rejection never says which path failed.
 //!
-//! Paths are handled as `String` rather than `Path`, matching the Go original:
-//! [`valid_path_text`] already requires valid UTF-8, and the rules are rendered
-//! as text.
+//! Paths are handled as `String` rather than `Path`: [`valid_path_text`]
+//! already requires valid UTF-8, and the rules are rendered as text.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -130,9 +129,6 @@ pub(crate) struct Options {
 }
 
 /// The filesystem facts generation depends on.
-///
-/// Go guards against nil function fields; a Rust reference cannot be null, so
-/// those checks have no counterpart.
 pub(crate) struct Dependencies<'a> {
     pub(crate) resolve: &'a dyn Fn(&str) -> Result<ResolvedPath, ResolveError>,
     pub(crate) fixed_paths: Vec<AutomaticPath>,
@@ -221,8 +217,8 @@ pub(crate) fn generate_with(
     ))
 }
 
-/// Go's `strings.NewReplacer`: the earliest match in the remaining input wins
-/// and the replacement is never reconsidered.
+/// Replacement scans left to right: the earliest match in the remaining input
+/// wins and the replacement is never reconsidered.
 fn replace_markers(template: &str, pairs: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -570,8 +566,7 @@ fn roots_within_limits(roots: &[ResolvedPath]) -> bool {
     }
     let mut bytes = 0usize;
     for root in roots {
-        // Go compares `len(path) > maxBytes-bytes` over signed ints; the same
-        // subtraction in `usize` would underflow, so it is rearranged.
+        // The same subtraction in `usize` would underflow, so it is rearranged.
         if root.path.len() + bytes > MAX_DYNAMIC_PATH_BYTES {
             return false;
         }
@@ -678,9 +673,9 @@ fn render_network_rules(network: NetworkMode) -> String {
             "(allow network-outbound",
             "  (remote ip)",
             "  (remote unix-socket (path \"/private/var/run/mDNSResponder\")))",
-            // Go's crypto/x509 verifier evaluates server certificates through
-            // the Security framework, which brokers to trustd. Without these
-            // exact services, every Go TLS client inside the sandbox fails with
+            // A TLS client inside the sandbox evaluates server certificates
+            // through the Security framework, which brokers to trustd. Without
+            // these exact services it fails with an opaque trust error such as
             // "x509: OSStatus -26276" even though the CA bundle is readable.
             "(allow mach-lookup",
             "  (global-name \"com.apple.trustd\")",
@@ -887,7 +882,6 @@ pub(crate) fn is_absolute(path: &str) -> bool {
     path.starts_with('/')
 }
 
-/// Go's `filepath.Clean`.
 pub(crate) fn clean(path: &str) -> String {
     if path.is_empty() {
         return ".".to_string();
@@ -919,7 +913,6 @@ pub(crate) fn clean(path: &str) -> String {
     }
 }
 
-/// Go's `filepath.Dir`.
 pub(crate) fn dir(path: &str) -> String {
     match path.rfind('/') {
         Some(index) => clean(&path[..index + 1]),
@@ -927,7 +920,6 @@ pub(crate) fn dir(path: &str) -> String {
     }
 }
 
-/// Go's `filepath.Join` for two elements.
 pub(crate) fn join(base: &str, element: &str) -> String {
     if base.is_empty() {
         return clean(element);
@@ -940,9 +932,9 @@ pub(crate) fn join(base: &str, element: &str) -> String {
 
 /// Whether `child` is `parent` or lies beneath it.
 ///
-/// Go computes `filepath.Rel` and rejects a `..` result. For the cleaned,
-/// absolute paths this module works with that is exactly a path-component
-/// prefix test, and a mixed absolute/relative pair is not within either way.
+/// For the cleaned, absolute paths this module works with, containment is
+/// exactly a path-component prefix test, and a mixed absolute/relative pair is
+/// not within either way.
 pub(crate) fn path_within(parent: &str, child: &str) -> bool {
     if is_absolute(parent) != is_absolute(child) {
         return false;
@@ -982,9 +974,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    /// Go's `profileDependencies` is a struct of function values that tests
-    /// mutate field by field. Rust's [`Dependencies`] borrows its callbacks, so
-    /// the fixture owns them here and hands out a borrowing view.
+    /// [`Dependencies`] borrows its callbacks, so the fixture owns them and
+    /// hands out a borrowing view.
     /// The fixture's owned resolver, matching [`Dependencies::resolve`].
     type ResolveFn = dyn Fn(&str) -> Result<ResolvedPath, ResolveError>;
 
@@ -1012,8 +1003,7 @@ mod tests {
         }
 
         /// Layers one lookup over the current resolver. `None` falls through to
-        /// the resolver that was installed before, matching how the Go tests
-        /// capture `baseResolve` and delegate to it.
+        /// the resolver that was installed before.
         fn override_resolve<F>(&mut self, lookup: F)
         where
             F: Fn(&str) -> Option<Result<ResolvedPath, ResolveError>> + 'static,
@@ -1022,7 +1012,6 @@ mod tests {
             self.resolve = Box::new(move |path| lookup(path).unwrap_or_else(|| base(path)));
         }
 
-        /// Go's `withSyntheticDirectories`.
         fn with_synthetic_directories(&mut self, paths: &[String]) {
             let mut resolved: HashMap<String, ResolvedPath> = HashMap::new();
             for path in paths {
@@ -1043,8 +1032,8 @@ mod tests {
         }
     }
 
-    /// Go's `profileFixture`. Dropping it closes the private state before the
-    /// temporary tree is removed, which is what `t.Cleanup` does there.
+    /// Dropping it closes the private state before the temporary tree is
+    /// removed, which is what `t.Cleanup` does there.
     struct Fixture {
         temp: Option<tempfile::TempDir>,
         base: String,
@@ -1122,7 +1111,6 @@ mod tests {
             .to_string()
     }
 
-    /// Go's `makeProfileTestDirectory`.
     fn make_directory(path: &str) -> String {
         std::fs::create_dir_all(path).expect("create directory");
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
@@ -1130,7 +1118,6 @@ mod tests {
         canonical(path)
     }
 
-    /// Go's `makeProfileTestFile`.
     fn make_file(path: &str, mode: u32) -> String {
         std::fs::create_dir_all(dir(path)).expect("create parent");
         std::fs::write(path, b"fixture").expect("write file");
@@ -1142,7 +1129,6 @@ mod tests {
         std::os::unix::fs::symlink(target, link).expect("symlink");
     }
 
-    /// Go's `profileTestSection`.
     fn section<'a>(profile: &'a str, name: &str) -> &'a str {
         let begin = format!("; OTTO-DYNAMIC-{name}-BEGIN");
         let end = format!("; OTTO-DYNAMIC-{name}-END");
@@ -1156,12 +1142,10 @@ mod tests {
         &profile[start..finish + end.len()]
     }
 
-    /// Go's `profileTestQuote`.
     fn quote(path: &str) -> String {
         format!("\"{}\"", path.replace('\\', "\\\\").replace('"', "\\\""))
     }
 
-    /// Go's `profileTestFilter`.
     fn filter(kind: &str, path: &str) -> String {
         format!("({kind} {})", quote(path))
     }
@@ -1332,19 +1316,18 @@ mod tests {
             "NetworkDeny emitted an IP or mDNS broker grant"
         );
 
-        // Go passes `sandbox.NetworkMode(99)`. Rust's `NetworkMode` has exactly
-        // two variants, so the only unset network state is `None`, which is the
-        // state this rejection actually guards.
+        // [`NetworkMode`] has exactly two variants, so the only unset network
+        // state is `None`, which is what this rejection guards.
         fixture.options.network = None;
         fixture.assert_rejected("an unset network mode");
     }
 
     #[test]
-    fn grants_exact_go_runtime_page_size_sysctl() {
+    fn grants_the_exact_page_size_compat_sysctl() {
         let profile = new_fixture().render();
         assert!(
             profile.contains("(sysctl-name \"hw.pagesize_compat\")"),
-            "profile lacks the exact Darwin sysctl used by the Go runtime page-size MIB"
+            "profile lacks the exact Darwin page-size compatibility sysctl"
         );
         assert!(
             !profile.contains("sysctl-name-prefix") && !profile.contains("(allow sysctl-read)"),
@@ -1671,9 +1654,10 @@ mod tests {
         let missing = join(&fixture.base, "missing");
         drop(fixture);
 
-        // Go additionally passes `string([]byte{'/','b','a','d',0xff})`. Rust's
-        // `String` cannot hold invalid UTF-8, so that input is unrepresentable
-        // and the rejection it exercises is enforced by the type instead.
+        // `String` cannot hold invalid UTF-8, so a non-UTF-8 path is
+        // unrepresentable rather than rejected. Rust's `String` cannot hold
+        // invalid UTF-8, so that input is unrepresentable and the rejection it
+        // exercises is enforced by the type instead.
         for shell in [
             "relative-shell".to_string(),
             non_executable,
@@ -1813,8 +1797,9 @@ mod tests {
             "dynamic path injected an SBPL form"
         );
 
-        // Go additionally passes `string([]byte{'b','a','d',0xff})`. Rust's
-        // `String` cannot hold invalid UTF-8, so that input is unrepresentable.
+        // `String` cannot hold invalid UTF-8, so a non-UTF-8 value is
+        // unrepresentable rather than rejected. Rust's `String` cannot hold
+        // invalid UTF-8, so that input is unrepresentable.
         let base = fixture.base.clone();
         drop(fixture);
         let invalid = [

@@ -1,15 +1,14 @@
 //! Filesystem primitives the session store needs and `std` does not offer.
 //!
-//! Every attacker-controlled component below the session root is traversed
-//! with `openat` and `O_NOFOLLOW`, mirroring `internal/session/list.go`. macOS
-//! has no safe-wrapper crate for `renamex_np(RENAME_EXCL)`, `mkdirat`, or
-//! `fstatat(AT_SYMLINK_NOFOLLOW)`, so these are raw `libc` calls confined to
-//! this module.
+//! Every attacker-controlled component below the session root is traversed with
+//! `openat` and `O_NOFOLLOW`. macOS has no safe-wrapper crate for
+//! `renamex_np(RENAME_EXCL)`, `mkdirat`, or `fstatat(AT_SYMLINK_NOFOLLOW)`, so
+//! these are raw `libc` calls confined to this module.
 //!
 //! Ownership: [`Dir`] owns a directory descriptor and closes it on drop.
-//! Concurrency: every function is a single syscall or a short sequence of
-//! them; no shared state. Errors: `io::Error` carrying the raw `errno`, so
-//! callers can match `ErrorKind` or `raw_os_error`.
+//! Concurrency: every function is a single syscall or a short sequence of them;
+//! no shared state. Errors: `io::Error` carrying the raw `errno`, so callers
+//! can match `ErrorKind` or `raw_os_error`.
 
 #![allow(unsafe_code)]
 
@@ -126,7 +125,7 @@ pub fn mkdir_at(dir: &Dir, name: &str, mode: libc::mode_t) -> io::Result<()> {
 }
 
 /// True when `name` exists under `dir`, without following a symlink at the
-/// final component. Port of Go's `Fstatat(..., AT_SYMLINK_NOFOLLOW)` probe.
+/// final component. An `AT_SYMLINK_NOFOLLOW` stat probe.
 pub fn exists_at_no_follow(dir: &Dir, name: &str) -> io::Result<bool> {
     let c = c_name(name)?;
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -171,8 +170,8 @@ pub fn fchmod_dir(dir: &Dir) -> io::Result<()> {
     Ok(())
 }
 
-/// Four random bytes, hex encoded, avoiding any id in `seen`. Port of Go's
-/// `newPiEntryID`, including the 1024-attempt ceiling.
+/// Four random bytes, hex encoded, avoiding any id in `seen`. A fresh Pi entry
+/// id, including the 1024-attempt ceiling.
 pub fn new_pi_entry_id(seen: &std::collections::HashSet<String>) -> Result<String, PiError> {
     for _ in 0..1024 {
         let mut buffer = [0u8; 4];
@@ -194,14 +193,13 @@ pub fn new_pi_entry_id(seen: &std::collections::HashSet<String>) -> Result<Strin
     ))
 }
 
-/// The device and inode pair Go compares through `os.SameFile`.
+/// The device and inode pair that identifies a file.
 pub fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
 /// The absolute, symlink-resolved form of a workspace path. A path that does
-/// not exist yet is only made absolute and lexically cleaned, matching Go's
-/// `EvalSymlinks` fallback on `ErrNotExist`.
+/// not exist yet is only made absolute and lexically cleaned.
 pub fn canonical_workspace(path: &Path) -> Result<String, PiError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -239,9 +237,9 @@ fn hex_sha256(data: &[u8]) -> String {
         .collect()
 }
 
-/// Go's `filepath.Clean` for `/`-separated paths. Rust's `std::path` does not
-/// collapse `..` lexically, and the store's path comparisons depend on the Go
-/// result exactly.
+/// Go's `path/filepath.Clean` semantics, which the on-disk session paths are
+/// written with: `..` is collapsed lexically, which Rust's `std::path` does
+/// not do.
 pub fn clean_go_path(path: &str) -> String {
     if path.is_empty() {
         return ".".into();

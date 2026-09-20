@@ -1,5 +1,4 @@
-//! Test doubles shared by the sub-agent unit tests. Port of
-//! `internal/subagent/provider_test.go` and `helpers_test.go`.
+//! Test doubles shared by the sub-agent unit tests.
 //!
 //! [`FakeProvider`] is safe to call concurrently, as several children may run
 //! at once. Routes are matched in registration order and the first match wins;
@@ -32,7 +31,7 @@ type MatchFn = Box<dyn Fn(&Request) -> bool + Send + Sync>;
 
 /// A callback run before route resolution on every `complete` call, with that
 /// call's cancellation token, so a test can block a child, count concurrent
-/// calls, or record requests. Port of Go's `setHook`.
+/// calls, or record requests.
 pub(crate) type Hook =
     Arc<dyn for<'a> Fn(&'a CancellationToken, &'a Request) -> BoxFuture<'a, ()> + Send + Sync>;
 
@@ -131,8 +130,8 @@ impl Provider for FakeProvider {
         };
 
         match step {
-            // A matched route with no steps behaves like Go's zero routeStep:
-            // an empty response and no error.
+            // A matched route with no steps yields an empty response and no
+            // error.
             None => Ok(Response::default()),
             Some(RouteStep::Fail(error)) => Err(ProviderError::Other(error)),
             Some(RouteStep::Reply(response)) => {

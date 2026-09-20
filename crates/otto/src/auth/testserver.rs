@@ -1,9 +1,9 @@
 //! A minimal loopback HTTP origin for the auth and ChatGPT provider tests.
 //!
-//! Go's tests use `net/http/httptest`. There is no equivalent in this crate's
-//! dependency set, and adding an HTTP server for tests alone is not worth it,
-//! so the handful of bytes these tests need are written directly onto the
-//! socket. The server never leaves loopback and serves canned responses only.
+//! There is no equivalent in this crate's dependency set, and adding an HTTP
+//! server for tests alone is not worth it, so the handful of bytes these tests
+//! need are written directly onto the socket. The server never leaves loopback
+//! and serves canned responses only.
 
 use std::sync::{Arc, Mutex};
 

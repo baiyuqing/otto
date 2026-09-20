@@ -1,9 +1,8 @@
 //! HTTP transport for the ChatGPT backend Responses API.
 //!
-//! Port of `internal/provider/openairesponses/client.go` and its
-//! `redaction.go`. The wire codec lives in [`otto_core::openairesponses`];
-//! this module owns the parts that need the network: the OAuth access token,
-//! the connection settings, and credential redaction.
+//! The wire codec lives in [`otto_core::openairesponses`]; this module owns the
+//! parts that need the network: the OAuth access token, the connection
+//! settings, and credential redaction.
 //!
 //! Ownership: a [`Client`] owns its base URL, its [`TokenSource`], its account
 //! id, and its [`reqwest::Client`]. The request passed to `complete` is
@@ -21,13 +20,11 @@
 //! decoder failure carries the decoder's own message with the access token and
 //! the account id redacted.
 //!
-//! Divergences from Go, both deliberate:
-//!   - No retry, matching Go: a 429 or 5xx is returned on the first attempt.
-//!     The Go file records the same decision as `ponytail: no retry on
-//!     429/5xx`.
-//!   - Go sets `Transport.MaxResponseHeaderBytes` to 1 MiB. reqwest exposes no
-//!     cap on the size of a response header block, so that bound is not
-//!     enforced here. This matches the same gap in
+//! Two deliberate decisions:
+//!   - ponytail: no retry on 429/5xx, so the status is returned on the first
+//!     attempt.
+//!   - reqwest exposes no cap on the size of a response header block, so no
+//!     bound is enforced on it. The same gap exists in
 //!     [`crate::provider::openaicompat`].
 
 use std::collections::HashMap;
@@ -53,11 +50,11 @@ const ORIGINATOR: &str = "codex_cli_rs";
 
 /// Longest wait for the TCP connect and TLS handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// TCP keepalive interval, matching Go's `net.Dialer.KeepAlive`.
+/// TCP keepalive interval.
 const KEEPALIVE: Duration = Duration::from_secs(30);
-/// Longest wait for a single read from the socket. Go bounds only the response
-/// header (`ResponseHeaderTimeout`); reqwest has no header-only timeout, so the
-/// same 60 seconds is applied per read, which is stricter mid-body.
+/// Longest wait for a single read from the socket. reqwest has no header-only
+/// timeout, so 60 seconds is applied per read instead, which also bounds a
+/// stream that stalls mid-body.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Authorization is unusable, and the user has to sign in again.
@@ -73,9 +70,8 @@ pub struct Client {
     base_url: String,
     tokens: TokenSource,
     account_id: String,
-    /// `Err` records why the HTTP client could not be built. Like Go's `New`,
-    /// construction never fails; the message becomes the first `complete`
-    /// failure.
+    /// `Err` records why the HTTP client could not be built. Construction never
+    /// fails; the message becomes the first `complete` failure.
     http: Result<reqwest::Client, String>,
 }
 
@@ -102,8 +98,7 @@ impl Client {
 impl Provider for Client {
     /// Sends one request to the Responses backend and assembles the stream.
     ///
-    /// There is no retry: a 429 or a 5xx is reported on the first attempt,
-    /// matching the Go client.
+    /// There is no retry: a 429 or a 5xx is reported on the first attempt.
     async fn complete(
         &self,
         request: &Request,
@@ -175,8 +170,8 @@ impl Provider for Client {
                 None => return Err(ProviderError::Cancelled),
                 Some(Ok(Some(chunk))) => chunk,
                 Some(Ok(None)) => break Ok(()),
-                // A read failure is Go's `streamFailureRead`: the fixed
-                // request failure, never the transport's own text.
+                // A read failure reports the fixed request failure, never the
+                // transport's own text.
                 Some(Err(_)) => break Err(ProviderError::Other(REQUEST_FAILED.to_owned())),
             };
             if let Err(error) = assembler.push(&chunk, &mut |event| events.emit(event, &mut *emit))
@@ -216,8 +211,7 @@ impl RequestSizer for Client {
     }
 }
 
-/// Returns `message` with every text-bearing field redacted. Port of
-/// `requestRedactor.redactMessage`.
+/// Returns `message` with every text-bearing field redacted.
 fn redact_message(redactor: &Redactor, mut message: Message) -> Message {
     message.id = redactor.redact_string(&message.id);
     message.context_type = redactor.redact_string(&message.context_type);
@@ -240,11 +234,10 @@ struct ToolState<'a> {
     arguments: StreamRedactor<'a>,
 }
 
-/// Redacts stream events on their way to the caller's sink. Port of
-/// `streamEventRedactor`.
+/// Redacts stream events on their way to the caller's sink.
 ///
-/// Text and each tool call's arguments carry their own [`StreamRedactor`], so
-/// a secret split across two deltas is still caught: the tail that could still
+/// Text and each tool call's arguments carry their own [`StreamRedactor`], so a
+/// secret split across two deltas is still caught: the tail that could still
 /// become a secret is held back until the next delta or until [`Self::flush`].
 struct EventRedactor<'a> {
     redactor: &'a Redactor,
@@ -265,7 +258,7 @@ impl<'a> EventRedactor<'a> {
     }
 
     /// Forwards `event` with every field redacted. An event whose fields are
-    /// all empty afterwards is dropped, as Go drops it.
+    /// all empty afterwards is dropped.
     fn emit(&mut self, event: StreamEvent, sink: StreamSink<'_>) {
         match event {
             StreamEvent::TextDelta { text } => {
@@ -309,8 +302,7 @@ impl<'a> EventRedactor<'a> {
         }
     }
 
-    /// Emits whatever every stream held back. Port of
-    /// `streamEventRedactor.Flush`.
+    /// Emits whatever every stream held back.
     fn flush(&mut self, sink: StreamSink<'_>) {
         let text = self.text.flush();
         if !text.is_empty() {
@@ -348,10 +340,10 @@ async fn with_cancel<T>(
 /// The hardened client. Every redirect is refused rather than followed, so the
 /// `Authorization` header and the request body never reach another origin;
 /// reqwest returns the 3xx response itself, which becomes the status-only
-/// error, exactly as Go's `http.ErrUseLastResponse` does.
+/// error.
 ///
-/// There is deliberately no overall request timeout: a streaming completion
-/// may run for minutes and is bounded by the caller's cancellation token.
+/// There is deliberately no overall request timeout: a streaming completion may
+/// run for minutes and is bounded by the caller's cancellation token.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -442,8 +434,8 @@ mod tests {
         (result, events)
     }
 
-    /// Port of `TestCompleteParsesTextAndToolCall`, extended with the four
-    /// headers Go sets but that test does not assert.
+    /// Text and tool call are parsed, and the four request headers are
+    /// asserted.
     #[tokio::test]
     async fn sends_the_expected_request_and_parses_text_and_a_tool_call() {
         let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
@@ -495,7 +487,6 @@ mod tests {
         assert!(!events.is_empty());
     }
 
-    /// Port of `TestCompletePreservesUsagePresence`.
     #[tokio::test]
     async fn preserves_usage_presence() {
         for (name, body, want) in [
@@ -517,7 +508,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestCompleteSuccessfulStreamAndResponseRedactRotatedCredentials`.
     #[tokio::test]
     async fn a_rotated_token_and_account_id_are_redacted_from_the_stream_and_the_response() {
         let access_token = format!("rotated-token-{}", "a".repeat(1694));
@@ -602,9 +592,8 @@ mod tests {
         assert!(visible.contains(&marker), "no marker in {visible}");
     }
 
-    /// Port of `TestCompleteHTTPErrorReturnsFixedStatusOnlyError`, folded with
-    /// `TestCompleteNon2XXDoesNotInspectBodyReadError`: the error names only
-    /// the status, so no part of the body can reach it.
+    /// An HTTP error names only the status, so no part of the body can reach
+    /// it.
     #[tokio::test]
     async fn a_non_2xx_response_reports_only_the_status() {
         let access_token = "secret-abc";
@@ -621,7 +610,6 @@ mod tests {
         assert_eq!(error.to_string(), "chatgpt responses HTTP 401");
     }
 
-    /// Port of `TestCompleteDefaultClientBlocks307RedirectWithoutForwardingRequest`.
     #[tokio::test]
     async fn a_redirect_is_reported_as_its_status_without_forwarding_the_request() {
         let target = testserver::spawn(|_| testserver::status_response(500, "unreachable")).await;
@@ -643,12 +631,10 @@ mod tests {
         assert_eq!(target.count(), 0);
     }
 
-    /// Port of `TestCompleteTokenSourceFailuresReturnFixedAuthError` and
-    /// `TestCompleteTokenSourceFailureDoesNotInspectArbitraryError`.
     #[tokio::test]
     async fn an_unusable_token_source_reports_a_fixed_authorization_error() {
         // A refresh that cannot reach its endpoint, and a token source that
-        // holds no access token, are the two ways Go's source fails.
+        // holds no access token, are the two ways the token source fails.
         let unreachable = crate::auth::oauth::Endpoint {
             authorize_url: "http://127.0.0.1:1/authorize".to_owned(),
             token_url: "http://127.0.0.1:1/token".to_owned(),
@@ -690,7 +676,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestCompleteRejectsUnrepresentableRequestBoundaryBeforeHTTP`.
     #[tokio::test]
     async fn an_unrepresentable_redaction_boundary_is_rejected_before_any_request() {
         let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
@@ -703,8 +688,7 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    /// Port of `TestCompleteTransportFailureDoesNotInspectArbitraryError`: a
-    /// connection that is refused carries no provider text into the error.
+    /// A connection that is refused carries no provider text into the error.
     #[tokio::test]
     async fn a_transport_failure_reports_a_fixed_request_failure() {
         let client = Client::with_base_url("http://127.0.0.1:1", static_tokens("token"), "acct-1");
@@ -712,9 +696,8 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "chatgpt request failed");
     }
 
-    /// Port of `TestCompleteStreamReadErrorRedactsTokenAndAccountID` and
-    /// `TestCompleteBodyReadFailureDoesNotInspectArbitraryError`: a body cut
-    /// short reports the fixed request failure.
+    /// A body cut short reports the fixed request failure, with no token or
+    /// account id in it.
     #[tokio::test]
     async fn a_body_cut_short_reports_a_fixed_request_failure() {
         let prefix = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
@@ -748,8 +731,8 @@ mod tests {
         );
     }
 
-    /// Port of `TestCompleteUsesTurnContextAwareTokenSource`: the per-call
-    /// token, not a process-level one, decides that the turn is over.
+    /// The per-call token, not a process-level one, decides that the turn is
+    /// over.
     #[tokio::test]
     async fn a_cancelled_call_reports_cancellation() {
         let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;

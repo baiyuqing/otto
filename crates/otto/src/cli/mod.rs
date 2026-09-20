@@ -1,8 +1,7 @@
 //! The `otto` binary: flag parsing, runtime composition, and the frontends.
 //!
-//! Port of `cmd/otto`. The composition root lives here rather than in
-//! `main.rs` so the whole startup path is reachable from integration tests
-//! without spawning a process.
+//! The composition root lives here rather than in `main.rs` so the whole
+//! startup path is reachable from integration tests without spawning a process.
 
 pub mod boundary;
 /// The phase-4c seam is gone: `otto::app` is the real controller and every

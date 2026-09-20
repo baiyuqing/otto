@@ -1,11 +1,10 @@
 //! The sub-agent runner: it starts child agent loops, tracks them in the
-//! session's task registry, and renders their completion text. Port of
-//! `internal/subagent/runner.go`.
+//! session's task registry, and renders their completion text.
 //!
 //! Ownership: a [`Runner`] owns the child tool registry it builds from
 //! [`Config::tools`]. The task registry, the provider and the clock are shared
-//! with the parent through `Arc`. Each child owns its own in-memory
-//! transcript, which is never persisted.
+//! with the parent through `Arc`. Each child owns its own in-memory transcript,
+//! which is never persisted.
 //!
 //! Concurrency and cancellation: every child runs in its own Tokio task,
 //! admitted by a semaphore that caps [`Config::max_parallel`] concurrent
@@ -14,31 +13,28 @@
 //! running one mid-turn. [`Runner::start`] itself never blocks.
 //!
 //! Security: a child never receives the agent-control or memory tools, so it
-//! can neither start children of its own nor read or write long-term memory.
-//! It also never receives `remind`, which wakes the parent session.
-//! A definition's `tools` list can only narrow the set the runner already
-//! built, never widen it. Definition bodies are untrusted text, appended to
-//! the child's system prompt under a fixed `## Sub-agent role` heading.
+//! can neither start children of its own nor read or write long-term memory. It
+//! also never receives `remind`, which wakes the parent session. A definition's
+//! `tools` list can only narrow the set the runner already built, never widen
+//! it. Definition bodies are untrusted text, appended to the child's system
+//! prompt under a fixed `## Sub-agent role` heading.
 //!
-//! Divergences from Go, forced by the Rust contracts:
+//! Shapes forced by the ownership contracts:
 //!
-//! - Go copies an `agent.Options` template into every child. Rust's [`Options`]
-//!   holds boxed closures and is not `Clone`, so [`OptionsTemplate`] carries
-//!   the copyable settings plus the shared clock and id generator instead.
-//! - Go shares one `provider.Provider` interface value; here the provider sits
-//!   behind [`SharedProvider`], because [`Agent`] owns its provider.
-//! - Go builds one `tool.Registry` per definition. Rust's [`Registry`] owns
-//!   boxed tools and cannot be subset, so a child gets a [`ChildTools`] view
-//!   over one shared child registry plus an allowlist.
-//! - Go gives each child session a header with `ID = parent + "-" + taskID`.
-//!   [`MemorySession`] carries no header, so the child id has no equivalent;
-//!   nothing observable depends on it, because the transcript is never
-//!   persisted. That also removes Go's atomic-pointer handoff: the transcript
-//!   can be built before the task exists.
-//! - Go appends the inherited snapshot inside `Start` and can return its
-//!   error. `Session::append` is async, so the replay happens at the top of
-//!   the child task instead; an invalid snapshot still fails the task with the
-//!   same message, just asynchronously.
+//! - [`Options`] holds boxed closures and is not `Clone`, so
+//!   [`OptionsTemplate`] carries the copyable settings plus the shared clock
+//!   and id generator, and each child builds its own `Options` from it.
+//! - The provider sits behind [`SharedProvider`], because [`Agent`] owns its
+//!   provider.
+//! - [`Registry`] owns boxed tools and cannot be subset, so a child gets a
+//!   [`ChildTools`] view over one shared child registry plus an allowlist.
+//! - [`MemorySession`] carries no header, so a child session has no id;
+//!   nothing observable depends on one, because the transcript is never
+//!   persisted, and the transcript can therefore be built before the task
+//!   exists.
+//! - `Session::append` is async, so an inherited snapshot is replayed at the
+//!   top of the child task rather than inside `start`; an invalid snapshot
+//!   still fails the task with the same message, just asynchronously.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -689,8 +685,8 @@ pub fn completion_text(task: &Task, max_output_bytes: usize) -> String {
             "[task-notification] task {} {name} failed{model_segment} · {duration} · {calls}\n{}",
             task.id, task.error
         ),
-        // Go's switch renders every status but succeeded and failed this way;
-        // only a final task ever reaches this function.
+        // Every status but succeeded and failed renders this way; only a final
+        // task ever reaches this function.
         TaskStatus::Canceled | TaskStatus::Queued | TaskStatus::Running => format!(
             "[task-notification] task {} {name} canceled{model_segment} · {duration} · {calls}",
             task.id
@@ -790,7 +786,7 @@ pub(crate) fn cap_last_bytes(value: &str, max_bytes: usize) -> &str {
 }
 
 /// Raw JSON with its insignificant whitespace removed. Invalid JSON falls back
-/// to collapsing the raw text onto one line, as Go's does.
+/// to collapsing the raw text onto one line.
 pub(crate) fn compact_json(raw: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(raw)
         .ok()
@@ -829,11 +825,9 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Go's `TestHistoryIsSafeWhileStartPublishesTask` has no Rust equivalent:
-    /// it guards Go's `atomic.Pointer` handoff, which exists because the child
-    /// session needs an id derived from the task id. `MemorySession` carries
-    /// no header, so the transcript is created before `Tasks::add` publishes
-    /// the history closure and there is no publish window to race.
+    /// There is no publish window to race: `MemorySession` carries no header,
+    /// so the transcript is created before `Tasks::add` publishes the history
+    /// closure.
     const _: () = ();
 
     fn runner(config: Config) -> (Arc<Runner>, Vec<String>) {
@@ -1030,12 +1024,10 @@ mod tests {
         assert!(prompt.contains(GENERIC_SUBAGENT_INSTRUCTION), "{prompt}");
     }
 
-    /// Go's `TestSharedRedactorNotMutatedBySubagentRun` guards a mutable
-    /// shared `agent.Redactor`. Rust's [`Redactor`] is immutable and each
-    /// child builds its own from the configured values, so only the
-    /// observable half survives the port: a secret reaching the runner as the
-    /// parent model or as a per-call model is redacted before it leaves in a
-    /// provider request.
+    /// [`Redactor`] is immutable and each child builds its own from the
+    /// configured values, so what is checked here is the observable half: a
+    /// secret reaching the runner as the parent model or as a per-call model is
+    /// redacted before it leaves in a provider request.
     #[tokio::test]
     async fn subagent_run_redacts_the_model() {
         let secret = "sk-supersecret123";

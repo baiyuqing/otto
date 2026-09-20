@@ -1,22 +1,19 @@
 //! The transcript reducer: turns session history into renderable entries.
 //!
-//! Port of `internal/tui/entries.go`'s `EntriesFromHistory`. It operates on
-//! the same native `otto_core::model::{Message, Block}` types Go's version
-//! does (not the JSON-wire transcript in `otto_core::wire`), because that is
-//! what `Controller::history()` returns and what a live turn's `Event`
-//! stream describes incrementally.
+//! It operates on the native `otto_core::model::{Message, Block}` types rather
+//! than the JSON-wire transcript in `otto_core::wire`, because that is what
+//! `Controller::history()` returns and what a live turn's `Event` stream
+//! describes incrementally.
 //!
-//! ponytail: Go's `Entry` also carries `Rendered`/`RenderWidth`, a cache of
-//! the last string this entry was rendered to at a given terminal width.
-//! That cache exists because Bubble Tea re-renders lazily; ratatui redraws
-//! the whole frame every tick, so the cache has no reader and is dropped
-//! here. Upgrade path: reintroduce it if profiling shows markdown rendering
-//! is a hot path at large scrollback sizes.
+//! ponytail: an entry keeps no render cache: ratatui redraws the whole frame
+//! every tick, so a cached rendering would have no reader. Upgrade path:
+//! reintroduce it if profiling shows markdown rendering is a hot path at large
+//! scrollback sizes.
 
 use otto_core::model::{Block, BlockType, Message, Role, Usage};
 use otto_core::session::COMPACTION_CONTEXT_TYPE;
 
-/// What one transcript entry renders as. Port of Go's `EntryKind`.
+/// What one transcript entry renders as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     User,
@@ -27,8 +24,8 @@ pub enum EntryKind {
     System,
 }
 
-/// The prefix `internal/session/context.go` puts on a compaction summary's
-/// display text; entries strip it before showing the summary body.
+/// The prefix the session layer puts on a compaction summary's display text;
+/// entries strip it before showing the summary body.
 const COMPACTION_SUMMARY_DISPLAY_PREFIX: &str = "[Compaction summary]\n";
 
 const TASK_NOTIFICATION_CONTEXT_TYPE: &str = "task_notification";
@@ -37,8 +34,7 @@ const TASK_NOTIFICATION_CONTEXT_TYPE: &str = "task_notification";
 /// before the rest is truncated with a "/task <id>" hint.
 const NOTIFICATION_BODY_LINE_LIMIT: usize = 20;
 
-/// One transcript entry. Port of Go's `Entry` minus the render cache (see
-/// the module doc).
+/// One transcript entry. There is no render cache (see the module doc).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Entry {
     pub id: String,
@@ -65,7 +61,7 @@ impl Entry {
 }
 
 /// Reduces a session's whole history into transcript entries plus the total
-/// usage across every message. Port of `EntriesFromHistory`.
+/// usage across every message.
 pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
     let mut entries: Vec<Entry> = Vec::with_capacity(history.len());
     // Tool-call entry indexes awaiting their result, keyed by tool_call_id,
@@ -272,9 +268,8 @@ fn entry_kind_for_role(role: &Role) -> EntryKind {
     }
 }
 
-/// The wire label of an [`EntryKind`], matching Go's `EntryKind` (itself a
-/// `string` type) so a synthesized id such as `message-2-system` matches byte
-/// for byte.
+/// The wire label of an [`EntryKind`], used to synthesize ids such as
+/// `message-2-system`.
 fn entry_kind_label(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::User => "user",
@@ -286,10 +281,10 @@ fn entry_kind_label(kind: EntryKind) -> &'static str {
     }
 }
 
-/// Port of `messageEntryBaseID`. Note the fallback (no message id) formats
-/// with the message's *entry kind* label, not its role: a context message
-/// without an id falls back to `message-N-system`, not `message-N-context`,
-/// because `entryKindForRole` has no `Context` arm in Go either.
+/// Note the fallback (no message id) formats with the message's *entry kind*
+/// label, not its role: a context message without an id falls back to
+/// `message-N-system`, not `message-N-context`, because the kind-for-role
+/// mapping has no `Context` arm.
 fn message_entry_base_id(message: &Message, index: usize) -> String {
     if !message.id.is_empty() {
         return format!("message-{index}-{}", message.id);
@@ -349,9 +344,8 @@ fn pair_tool_result(
     true
 }
 
-/// Saturating, negative-clamped accumulation. Port of `addUsageTotals` /
-/// `saturatingAddNonNegative`, generalized to `i64` since
-/// `otto_core::model::Usage` uses `i64` rather than Go's platform `int`.
+/// Saturating, negative-clamped accumulation. Saturating, non-negative addition
+/// of usage totals, in the `i64` `otto_core::model::Usage` uses.
 fn add_usage_totals(total: Usage, usage: Option<&Usage>) -> Usage {
     let Some(usage) = usage else { return total };
     Usage {

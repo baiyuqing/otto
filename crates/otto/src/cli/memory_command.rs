@@ -1,12 +1,12 @@
 //! The standalone `otto memory status|forget <id>` CLI.
 //!
-//! Port of Go `cmd/otto/memory_command.go`. It is dispatched before the main
-//! flag set is parsed, because its argument grammar is its own, and it builds
-//! only the memory service: no provider, session, or controller.
+//! It is dispatched before the main flag set is parsed, because its argument
+//! grammar is its own, and it builds only the memory service: no provider,
+//! session, or controller.
 //!
-//! Like Go, it folds the credentials captured by `otto login` into the secret
-//! set before deciding whether redaction is complete, so a token never
-//! reaches the status output.
+//! It folds the credentials captured by `otto login` into the secret set before
+//! deciding whether redaction is complete, so a token never reaches the status
+//! output.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -35,8 +35,7 @@ struct Flags {
 }
 
 /// Parses `--config PATH` and `--cwd PATH` in either `--name value` or
-/// `--name=value` form, matching Go's `flag` package for the two flags this
-/// command defines.
+/// `--name=value` form.
 fn parse_flags(args: &[String]) -> Result<Flags, ()> {
     let mut flags = Flags {
         config_path: String::new(),
@@ -118,9 +117,8 @@ pub fn run(
             "load config: configuration is invalid or unavailable",
         );
     };
-    // Go passes the captured credentials to `boundarySecretValues` as its own
-    // input; here they ride in on `sandbox_secrets`, which that function adds
-    // first, for the same resulting set.
+    // The captured credentials ride in on `sandbox_secrets`, which the boundary
+    // collects first.
     let captured_auth =
         super::login::capture_auth_credentials(&crate::auth::path_for_home(Path::new(&home)));
     let mut environment = super::run::config_environment_for(&config_file, lookup);
@@ -331,8 +329,7 @@ mod tests {
         }
     }
 
-    /// Port of Go folding `captureAuthCredentials` into the secret set: a
-    /// captured token must not survive into the status output.
+    /// A captured token must not survive into the status output.
     #[test]
     fn status_redacts_captured_chatgpt_credentials() {
         let home = tempfile::tempdir().expect("home");
@@ -558,11 +555,8 @@ mod tests {
         );
     }
 
-    /// Folds Go's `TestRunMemoryCommandStatusRedactsConfiguredPathAndWarning`.
-    /// Go injects a stub opener through the `memoryOpenService` package
-    /// variable; Rust has no such seam, so the status writer is called
-    /// directly with a path that cannot be opened and a secret value that
-    /// covers the directory holding it.
+    /// The status writer is called directly with a path that cannot be opened
+    /// and a secret value that covers the directory holding it.
     #[test]
     fn status_redacts_the_configured_path_and_reports_the_warning() {
         let home = tempfile::tempdir().expect("home");

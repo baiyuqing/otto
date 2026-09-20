@@ -1,4 +1,4 @@
-//! Skill discovery and loading. Port of `internal/skill`.
+//! Skill discovery and loading.
 //!
 //! A skill is a directory holding a `SKILL.md` file with YAML frontmatter,
 //! following the Agent Skills format. Skills are discovered under
@@ -9,16 +9,15 @@
 //! I/O after [`Catalog::discover`] returns, so it is safe to share across
 //! tasks. Concurrency: every function here is free of shared mutable state.
 //!
-//! Security: every read goes through [`crate::tool::root::Root`], which pins
-//! an open directory file descriptor and resolves each component beneath it,
-//! so a path that escapes the skill directory is rejected after canonical-path
-//! and symlink validation rather than followed. Skill content is untrusted
-//! text: it cannot override the system prompt, the user's requests or the
-//! sandbox policy, and nothing here executes it.
+//! Security: every read goes through [`crate::tool::root::Root`], which pins an
+//! open directory file descriptor and resolves each component beneath it, so a
+//! path that escapes the skill directory is rejected after canonical-path and
+//! symlink validation rather than followed. Skill content is untrusted text: it
+//! cannot override the system prompt, the user's requests or the sandbox
+//! policy, and nothing here executes it.
 //!
-//! Scope: `allowed-tools` is parsed by neither this port nor its Go original
-//! into an enforcement decision; see the README for the features that are
-//! deliberately absent.
+//! Scope: `allowed-tools` is parsed but never turned into an enforcement
+//! decision; see the README for the features that are deliberately absent.
 
 pub mod frontmatter;
 pub mod prompt;
@@ -148,9 +147,9 @@ impl Catalog {
     }
 }
 
-/// The directories skills are discovered in, in Go's precedence order: the
-/// user's home directory first, then the workspace, so a workspace skill
-/// overrides a user skill of the same name.
+/// The directories skills are discovered in, in precedence order: the user's
+/// home directory first, then the workspace, so a workspace skill overrides a
+/// user skill of the same name.
 pub fn roots(home: Option<&Path>, workspace: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::with_capacity(2);
     if let Some(home) = home {
@@ -177,8 +176,8 @@ fn open_skill_dir(directory: &Path, canonical_root: &Path, entry: &root::DirEntr
     root::is_dir(&stat).then_some(directory_fs)
 }
 
-/// Parses and validates one skill directory, returning the warning string Go
-/// would have produced when the directory is not a usable skill.
+/// Parses and validates one skill directory, returning a warning string when
+/// the directory is not a usable skill.
 fn load_candidate(
     directory: &Path,
     skill_path: &Path,
@@ -215,7 +214,7 @@ fn validate_skill_name(fields: &Fields, directory_name: &str) -> Result<String, 
     Ok(raw.to_string())
 }
 
-/// Go's `^[a-z0-9]+(-[a-z0-9]+)*$`, spelled out to avoid a regex for one rule.
+/// `^[a-z0-9]+(-[a-z0-9]+)*$`, spelled out to avoid a regex for one rule.
 fn is_valid_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.split('-').all(|part| {
@@ -332,7 +331,6 @@ pub(crate) fn too_large(size: u64, maximum: u64) -> String {
 mod tests {
     use super::*;
 
-    /// Go's `writeSkill`.
     fn write_skill(root: &Path, name: &str, frontmatter_extra: &str, body: &str) -> PathBuf {
         let directory = root.join(name);
         std::fs::create_dir_all(&directory).expect("the skill directory is creatable");
@@ -350,7 +348,6 @@ mod tests {
         directory
     }
 
-    /// Go's `TestDiscoverFindsSkillsAcrossTwoRootsWithOverride`.
     #[test]
     fn discovery_merges_two_roots_and_the_later_root_wins() {
         let user = tempfile::tempdir().expect("a temporary directory");
@@ -378,8 +375,6 @@ mod tests {
         assert_eq!(names, ["pdf", "shared"]);
     }
 
-    /// Go's `TestDiscoverMissingRootIsSilent` and
-    /// `TestDiscoverDirectoryWithoutSkillMDIgnored`.
     #[test]
     fn a_missing_root_and_a_directory_without_a_skill_file_are_silent() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -391,11 +386,10 @@ mod tests {
         assert!(warnings.is_empty() && catalog.is_empty(), "{warnings:?}");
     }
 
-    /// Go's `TestDiscoverUnreadableRootWarns`.
     #[test]
     fn an_unreadable_root_produces_one_warning() {
         if nix::unistd::geteuid().is_root() {
-            // Go skips for the same reason: root ignores the mode bits.
+            // Skipped as root, which ignores the mode bits.
             return;
         }
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -420,7 +414,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestDiscoverInvalidSkillWarnsAndOthersStillLoad`.
     #[test]
     fn an_invalid_skill_warns_and_the_others_still_load() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -437,8 +430,8 @@ mod tests {
         );
     }
 
-    /// Go's `TestDiscoverSymlinkedSkillDirFollowed`: the link is followed but
-    /// the reported directory stays inside the skills root.
+    /// The link is followed but the reported directory stays inside the skills
+    /// root.
     #[test]
     fn a_symlinked_skill_directory_is_followed_without_rewriting_its_path() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -458,8 +451,8 @@ mod tests {
         );
     }
 
-    /// Go's `TestDiscoverRejectsSkillFileSymlinkEscape`: a `SKILL.md` that is a
-    /// symbolic link out of the skill directory is refused, not followed.
+    /// A `SKILL.md` that is a symbolic link out of the skill directory is
+    /// refused, not followed.
     #[test]
     fn a_skill_file_symlink_out_of_the_directory_is_rejected() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -480,7 +473,6 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
-    /// Go's `TestDiscoverNameValidation`.
     #[test]
     fn an_invalid_or_mismatched_name_is_rejected_with_a_reason() {
         let long = "a".repeat(65);
@@ -515,7 +507,6 @@ mod tests {
         }
     }
 
-    /// Go's `TestDiscoverDescriptionValidation`.
     #[test]
     fn a_description_must_be_present_bounded_and_trimmed() {
         for (content, reason) in [
@@ -553,7 +544,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestLoadStripsFrontmatter`.
     #[test]
     fn loading_a_skill_returns_the_body_without_the_frontmatter() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -569,8 +559,7 @@ mod tests {
         );
     }
 
-    /// Go's `TestLoadHonorsPathWithinSkillDirectory`: a path outside the skill
-    /// directory is refused rather than read.
+    /// A path outside the skill directory is refused rather than read.
     #[test]
     fn loading_honours_the_selected_path_and_refuses_one_outside_the_directory() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -597,8 +586,7 @@ mod tests {
         );
     }
 
-    /// Go's `TestLoadRejectsOversizedSkillFile`. The file is sparse, so it
-    /// costs no disk space.
+    /// The file is sparse, so it costs no disk space.
     #[test]
     fn an_oversized_skill_file_is_refused() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -621,8 +609,6 @@ mod tests {
         assert!(error.contains("too large"), "{error:?}");
     }
 
-    /// Go's `TestListFilesOrderingHiddenAndSymlinkSkip`, `...LimitAndTotal`
-    /// and `...Empty`.
     #[test]
     fn listing_sorts_skips_hidden_and_linked_entries_and_reports_the_total() {
         let root = tempfile::tempdir().expect("a temporary directory");

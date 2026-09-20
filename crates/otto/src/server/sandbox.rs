@@ -1,9 +1,8 @@
 //! `POST /v1/sandbox/reload`.
 //!
-//! Port of `internal/server/sandbox.go`. One sandbox serves every open
-//! session, so the reload is refused while any session has a turn in flight:
-//! replacing the executor while a `bash` command is using it would otherwise
-//! block until that command ends.
+//! One sandbox serves every open session, so the reload is refused while any
+//! session has a turn in flight: replacing the executor while a `bash` command
+//! is using it would otherwise block until that command ends.
 
 use std::sync::Arc;
 

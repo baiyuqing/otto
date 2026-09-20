@@ -1,4 +1,4 @@
-//! `AGENT.md` discovery. Port of `internal/subagent/definition.go`.
+//! `AGENT.md` discovery.
 //!
 //! A named sub-agent is a directory holding an `AGENT.md` file with the same
 //! YAML frontmatter dialect skills use. Definitions are discovered under
@@ -85,8 +85,8 @@ impl Catalog {
             };
             for entry in entries {
                 let directory = root_path.join(&entry.name);
-                // Go opens the candidate with os.OpenRoot, which follows a
-                // symbolic link to a directory and fails on anything else.
+                // Opening the candidate as a root follows a symbolic link to a
+                // directory and fails on anything else.
                 let Ok(directory_fs) = Root::open(&directory) else {
                     continue;
                 };
@@ -128,8 +128,7 @@ impl Catalog {
         &self.definitions
     }
 
-    /// A catalog holding exactly `definitions`. Tests build one directly; Go's
-    /// tests use the unexported field for the same purpose.
+    /// A catalog holding exactly `definitions`. Tests build one directly.
     #[cfg(test)]
     pub(crate) fn from_definitions(definitions: Vec<Definition>) -> Self {
         Self { definitions }
@@ -153,8 +152,8 @@ impl Catalog {
     }
 }
 
-/// The directories agent definitions are discovered in, in Go's precedence
-/// order: the user's home directory first, then the workspace.
+/// The directories agent definitions are discovered in, in precedence order:
+/// the user's home directory first, then the workspace.
 pub fn roots(home: Option<&Path>, workspace: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::with_capacity(2);
     if let Some(home) = home {
@@ -209,8 +208,8 @@ fn is_symlink(root_fs: &Root, name: &Path) -> bool {
     root_fs.lstat(name).as_ref().is_ok_and(root::is_symlink)
 }
 
-/// Parses and validates one agent directory, returning the warning string Go
-/// would have produced when it is not a usable definition.
+/// Parses and validates one agent directory, returning a warning string when it
+/// is not a usable definition.
 fn load_candidate(
     data: &[u8],
     directory: &Path,
@@ -255,7 +254,7 @@ fn validate_agent_name(fields: &Fields, directory_name: &str) -> Result<String, 
     Ok(raw.to_string())
 }
 
-/// Go's `^[a-z0-9]+(-[a-z0-9]+)*$`, spelled out to avoid a regex for one rule.
+/// `^[a-z0-9]+(-[a-z0-9]+)*$`, spelled out to avoid a regex for one rule.
 fn is_valid_agent_name(name: &str) -> bool {
     !name.is_empty()
         && name.split('-').all(|part| {
@@ -321,7 +320,6 @@ fn validate_agent_context(fields: &Fields) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// Go's `writeAgent`.
     fn write_agent(root: &Path, name: &str, frontmatter_extra: &str, body: &str) -> PathBuf {
         let directory = root.join(name);
         std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
@@ -339,7 +337,6 @@ mod tests {
         directory
     }
 
-    /// Go's `TestDiscoverValidDefinitionAllFields`.
     #[test]
     fn every_frontmatter_field_reaches_the_definition() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -368,13 +365,11 @@ mod tests {
         assert_eq!(definition.path, directory.join("AGENT.md"));
     }
 
-    /// Go's `TestDiscoverMissingName`, `TestDiscoverNameDirMismatch`,
-    /// `TestDiscoverInvalidNameChars`, `TestDiscoverMissingDescription`,
-    /// `TestDiscoverDescriptionTooLong`, `TestDiscoverToolsEmptyValueWarnsAndSkips`,
-    /// `TestDiscoverToolsOnlyCommasWarnsAndSkips`,
-    /// `TestDiscoverToolsInvalidItemSkipsWithWarning` and
-    /// `TestDiscoverContextInvalidWarnsAndSkips`, folded into one table: each
-    /// case is the same "skip the directory and emit one warning" contract.
+    /// A missing name, a name that disagrees with the directory, invalid name
+    /// characters, a missing or over-long description, an empty or malformed
+    /// `tools` value and an invalid `context` value, folded into one table:
+    /// each case is the same "skip the directory and emit one warning"
+    /// contract.
     #[test]
     fn an_invalid_definition_is_skipped_with_one_warning() {
         let long_description = "a".repeat(1025);
@@ -430,11 +425,9 @@ mod tests {
         }
     }
 
-    /// Go's `TestDiscoverToolsParsedWithSpaces`,
-    /// `TestDiscoverContextInheritAccepted`,
-    /// `TestDiscoverContextAbsentDefaultsToFresh`,
-    /// `TestDiscoverModelAbsentIsEmpty` and `TestDiscoverBodyTrimmed`: the
-    /// optional keys and their defaults.
+    /// The optional keys and their defaults: `tools` with spaces, `context:
+    /// inherit`, an absent `context` defaulting to fresh, an absent `model`,
+    /// and a trimmed body.
     #[test]
     fn optional_frontmatter_keys_take_their_defaults() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -456,7 +449,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestDiscoverLaterRootWins` and `TestDiscoverMissingRootSilent`.
     #[test]
     fn a_later_root_wins_and_a_missing_root_is_silent() {
         let user = tempfile::tempdir().expect("a temporary directory");
@@ -475,8 +467,8 @@ mod tests {
         assert_eq!(catalog.lookup("shared").expect("shared").body, "from b");
     }
 
-    /// Go's `TestDiscoverRejectsExternalAgentFileSymlink`: an AGENT.md link
-    /// pointing outside its definition directory is skipped, not followed.
+    /// An AGENT.md link pointing outside its definition directory is skipped,
+    /// not followed.
     #[test]
     fn an_agent_file_symlink_out_of_the_directory_is_skipped() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -498,8 +490,7 @@ mod tests {
         assert!(warnings.is_empty(), "warnings = {warnings:?}");
     }
 
-    /// Go's `TestDiscoverInternalAgentFileSymlink`: a relative link that stays
-    /// inside the definition directory is followed.
+    /// A relative link that stays inside the definition directory is followed.
     #[test]
     fn an_agent_file_symlink_inside_the_directory_is_followed() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -521,8 +512,8 @@ mod tests {
         assert_eq!(definition.body, "internal body");
     }
 
-    /// Go's `TestDiscoverSymlinkedDefinitionDirFollowed`: the definition
-    /// directory itself may be a link, and `directory` keeps the link path.
+    /// The definition directory itself may be a link, and `directory` keeps the
+    /// link path.
     #[test]
     fn a_symlinked_definition_directory_is_followed() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -539,8 +530,8 @@ mod tests {
         assert_eq!(definition.directory, root.path().join("linked"));
     }
 
-    /// Go's `TestDiscoverSkipsFIFOAgentFileWithoutBlocking`: the open must use
-    /// `O_NONBLOCK`, or a FIFO with no writer would hang discovery.
+    /// The open must use `O_NONBLOCK`, or a FIFO with no writer would hang
+    /// discovery.
     #[test]
     fn a_fifo_agent_file_is_skipped_without_blocking() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -558,7 +549,6 @@ mod tests {
         assert!(warnings.is_empty(), "warnings = {warnings:?}");
     }
 
-    /// Go's `TestDiscoverRejectsOversizedAgentFile`.
     #[test]
     fn an_oversized_agent_file_is_rejected() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -582,8 +572,6 @@ mod tests {
         assert!(warnings[0].contains("too large"), "{warnings:?}");
     }
 
-    /// Go's `TestDiscoverDirWithoutAgentMDIgnored` and
-    /// `TestDiscoverInvalidFrontmatterWarnsWithPath`.
     #[test]
     fn a_directory_without_agent_md_is_ignored_and_bad_frontmatter_names_its_path() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -601,7 +589,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestDefinitionsSorted` and `TestCatalogLookupHitAndMiss`.
     #[test]
     fn definitions_are_sorted_and_lookup_misses_an_unknown_name() {
         let root = tempfile::tempdir().expect("a temporary directory");

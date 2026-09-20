@@ -1,21 +1,19 @@
 //! The Pi v3 JSONL decoder and encoder.
 //!
-//! Port of `internal/session/pi_codec.go`. Every validation rule, every field
-//! path, and every error string matches the Go implementation byte for byte,
-//! because both read and write the same files.
+//! Every validation rule, every field path, and every error string is fixed by
+//! the Pi v3 files on disk.
 //!
 //! Ownership: decoding copies the bytes it keeps, so a decoded record does not
 //! borrow the input buffer. Encoding returns a fresh buffer.
 //!
 //! Concurrency: every function here is pure and takes no shared state.
 //!
-//! Errors: every failure is a [`PiError`] whose [`PiErrorKind`] mirrors one of
-//! the Go sentinel errors, so callers can branch on the kind the same way Go
-//! callers use `errors.Is`.
+//! Errors: every failure is a [`PiError`]; callers branch on its
+//! [`PiErrorKind`] rather than on the message text.
 //!
 //! Trust boundary: session files are read from disk and may have been written
-//! by another tool or corrupted. Nothing is accepted on shape alone; each
-//! field is checked against the type the domain expects before it is used.
+//! by another tool or corrupted. Nothing is accepted on shape alone; each field
+//! is checked against the type the domain expects before it is used.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +27,7 @@ use super::pi::{
 use super::{PiError, PiErrorKind};
 
 /// A JSON object kept as raw values, so unknown fields survive untouched.
-/// `BTreeMap` also gives the sorted key order Go's `map` marshaling produces.
+/// `BTreeMap` also gives the sorted key order the stored files are written in.
 pub(crate) type Object = BTreeMap<String, Box<RawValue>>;
 
 /// One record of a session file, for [`encode_pi_record`].
@@ -860,7 +858,7 @@ fn decode_bool(raw: &RawValue, path: &str) -> Result<bool, PiError> {
 }
 
 /// Decodes a non-null JSON scalar, returning `None` for `null` and for any
-/// value of the wrong type. Matches Go's `isJSONNull(raw) || Unmarshal != nil`.
+/// value of the wrong type.
 fn decode_scalar<T: serde::de::DeserializeOwned>(raw: &RawValue) -> Option<T> {
     if is_json_null(raw) {
         return None;
@@ -1329,10 +1327,9 @@ pub(crate) mod tests {
     });
 
     test!(decode_pi_v3_rejects_oversized_file, {
-        // The Go test proves the reader is never consumed when its declared
-        // length is over the cap. This port takes a byte slice, so the
-        // equivalent claim is that the length alone decides, before any record
-        // is parsed: the buffer below holds no valid JSON at all.
+        // The claim under test is that the declared length alone decides,
+        // before any record is parsed. The buffer below holds no valid JSON at
+        // all.
         let data = vec![0u8; MAX_SESSION_FILE_BYTES + 1];
         let error = decode_pi_file(&data).expect_err("oversized file accepted");
         assert_eq!(error.kind(), PiErrorKind::FileTooLarge);
@@ -1352,9 +1349,9 @@ pub(crate) mod tests {
     );
 
     test!(encode_pi_record_returns_error_for_invalid_typed_payload, {
-        // Go passes syntactically broken JSON in `content`. `RawValue` cannot
-        // hold invalid JSON, so this port uses the other way a typed payload
-        // fails its self-check: a user message with no content at all.
+        // A typed payload can fail its self-check in more than one way.
+        // `RawValue` cannot hold invalid JSON, so this case uses a user message
+        // with no content at all.
         let entry = PiEntry {
             type_name: "message".into(),
             id: "e0000001".into(),

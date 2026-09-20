@@ -36,8 +36,8 @@
   (sysctl-name "hw.memsize")
   (sysctl-name "hw.ncpu")
   (sysctl-name "hw.pagesize")
-  ; Go's Darwin runtime numeric HW_PAGESIZE MIB is attributed to this exact
-  ; compatibility name on Apple Silicon.
+  ; The numeric HW_PAGESIZE MIB is attributed to this exact compatibility name
+  ; on Apple Silicon, so a sandboxed child that reads it by number needs it.
   (sysctl-name "hw.pagesize_compat")
   (sysctl-name "hw.physicalcpu")
   (sysctl-name "hw.physicalcpu_max")

@@ -39,9 +39,8 @@ async fn async_main() -> i32 {
     let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     let cancel = CancellationToken::new();
-    // Go interrupts the running turn on the first SIGINT and cancels the
-    // process only when no turn is active; the REPL port has no per-turn
-    // interrupt yet, so every SIGINT cancels the process token.
+    // The REPL has no per-turn interrupt yet, so every SIGINT cancels the
+    // process token.
     let signal_cancel = cancel.clone();
     tokio::spawn(async move {
         while tokio::signal::ctrl_c().await.is_ok() {

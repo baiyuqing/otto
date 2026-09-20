@@ -1,12 +1,11 @@
 //! The queue of notifications delivered into the next provider request.
 //!
-//! Port of `internal/agent/inbox.go`. A subagent task pushes its terminal
-//! result or a progress report here; a parent pushes a message for a child.
-//! The agent drains the queue at the top of each turn and turns every item
-//! into one context message.
+//! A subagent task pushes its terminal result or a progress report here; a
+//! parent pushes a message for a child. The agent drains the queue at the top
+//! of each turn and turns every item into one context message.
 //!
-//! Ownership: the queue is shared. Producers hold an `Arc<Inbox>` and the
-//! agent holds another. Nothing takes ownership of the items until `drain`.
+//! Ownership: the queue is shared. Producers hold an `Arc<Inbox>` and the agent
+//! holds another. Nothing takes ownership of the items until `drain`.
 //!
 //! Concurrency: every method locks an internal mutex and is safe to call from
 //! any task. The change callback runs after the lock is released, so it may
@@ -33,7 +32,7 @@ pub enum NotificationKind {
 }
 
 impl NotificationKind {
-    /// The Go `NotificationKind` string, as it appears in persisted sessions.
+    /// The `NotificationKind` string, as it appears in persisted sessions.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TaskFinished => "task_finished",

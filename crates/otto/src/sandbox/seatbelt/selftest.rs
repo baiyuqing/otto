@@ -1,9 +1,8 @@
 //! Host-side fixtures for the Seatbelt startup self-test.
 //!
-//! Port of `internal/sandbox/seatbelt/selftest_fixture_darwin.go`. The driver
-//! proves, before it accepts any caller work, that the generated profile
-//! actually allows the reads and writes it promises and actually denies the
-//! ones it forbids. Doing that needs real files, and those files are the
+//! The driver proves, before it accepts any caller work, that the generated
+//! profile actually allows the reads and writes it promises and actually denies
+//! the ones it forbids. Doing that needs real files, and those files are the
 //! attack surface of the check itself: a fixture that another process can swap
 //! for a symlink would turn the proof into its opposite.
 //!

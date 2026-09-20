@@ -1,8 +1,7 @@
 //! Server-Sent Events framing.
 //!
 //! One frame is `id: <seq>\nevent: <type>\ndata: <json>\n\n`, written by
-//! `writeSSEFrame` in `internal/server/server.go` and read by `parseFrames`
-//! in `ui/src/sse.ts`.
+//! [`format_frame`] and read by `parseFrames` in `ui/src/sse.ts`.
 
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +21,7 @@ pub struct ParsedFrames {
     pub rest: String,
 }
 
-/// Writes one frame exactly as the Go server does.
+/// Writes one frame.
 pub fn format_frame(seq: i64, event: &str, data: &str) -> String {
     format!("id: {seq}\nevent: {event}\ndata: {data}\n\n")
 }
@@ -104,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn format_frame_matches_the_go_writer() {
+    fn format_frame_writes_id_event_and_data() {
         assert_eq!(
             format_frame(3, "text_delta", "{\"text\":\"hi\"}"),
             "id: 3\nevent: text_delta\ndata: {\"text\":\"hi\"}\n\n"

@@ -1,14 +1,12 @@
-//! The transcript prefix a `context: inherit` child receives. Port of
-//! `internal/subagent/inherit.go`.
+//! The transcript prefix a `context: inherit` child receives.
 
 use otto_core::model::{Message, Role};
 
 /// The prefix of `messages` a child with `context: "inherit"` receives:
 /// everything before the last assistant message, which is the one carrying the
-/// pending `agent` tool calls. Tool results appended after it for sibling
-/// calls are cut too. `None` when there is no assistant message at all, which
-/// Go signals by returning a nil slice; an empty `Vec` means "an assistant
-/// message was found and nothing precedes it".
+/// pending `agent` tool calls. Tool results appended after it for sibling calls
+/// are cut too. `None` when there is no assistant message at all; an empty
+/// `Vec` means "an assistant message was found and nothing precedes it".
 pub fn inherit_snapshot(messages: &[Message]) -> Option<Vec<Message>> {
     let last_assistant = messages
         .iter()
@@ -83,8 +81,8 @@ mod tests {
         messages.iter().map(|message| message.id.as_str()).collect()
     }
 
-    /// Go's `TestInheritSnapshot`. The copy `TestInheritSnapshotReturnsACopy`
-    /// checks is unconditional here: the slice is cloned into a new `Vec`.
+    /// The copy `TestInheritSnapshotReturnsACopy` checks is unconditional here:
+    /// the slice is cloned into a new `Vec`.
     #[test]
     fn the_snapshot_ends_before_the_last_assistant_message() {
         assert!(inherit_snapshot(&[]).is_none());

@@ -1,10 +1,9 @@
-//! Memory domain contracts ported from Go `internal/memory` (`types.go`,
-//! `limits.go`, `errors.go`, `id.go`).
+//! Memory domain contracts: the request and record types, the size limits, the
+//! error kinds and the ID rules.
 //!
 //! The types stay value-only so the store, the service, and the tools can all
-//! agree on one shape. Every size ceiling is the Go constant with the same
-//! name; the SQLite store depends on them to build its defensive projections,
-//! so they must not drift.
+//! agree on one shape. The SQLite store depends on the size ceilings to build
+//! its defensive projections, so they must not drift.
 
 use std::fmt;
 
@@ -52,8 +51,7 @@ pub const MAX_DUPLICATE_ID_RETRIES: usize = 8;
 pub const NAMESPACE_USER: &str = "user";
 pub const NAMESPACE_WORKSPACE: &str = "workspace";
 
-/// Sentinel category. Mirrors the `Err*` package variables in Go; `errors.Is`
-/// becomes a `kind` comparison here.
+/// Sentinel category. Errors are compared by `kind`, never by message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     Disabled,
@@ -74,7 +72,7 @@ pub enum ErrorKind {
     InvalidCursor,
     IncompleteForget,
     Canceled,
-    /// Go's `PolicyDecisionError`. It carries the decision as its detail.
+    /// It carries the decision as its detail.
     PolicyDecision,
 }
 
@@ -106,8 +104,8 @@ impl ErrorKind {
     }
 }
 
-/// One memory error. `detail` reproduces Go's `fmt.Errorf("%w: detail", ...)`
-/// suffix so operator-facing messages stay byte-identical.
+/// One memory error. `detail` is appended after the category as
+/// `category: detail`, so operator-facing messages stay byte-identical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
@@ -491,9 +489,8 @@ pub struct ReviewResult {
     pub tombstone: Option<Tombstone>,
 }
 
-/// Counts the tokens one candidate would cost. Go carries a `func(string) int`
-/// on the request; a plain function pointer keeps the request `Clone` and
-/// `Debug` without an allocation.
+/// Counts the tokens one candidate would cost. A plain function pointer keeps
+/// the request `Clone` and `Debug` without an allocation.
 pub type TokenEstimator = fn(&str) -> usize;
 
 #[derive(Debug, Clone)]
@@ -671,9 +668,8 @@ pub struct RecallResult {
 
 /// What one [`crate::memory::Binding`] reads and writes.
 ///
-/// Go also carries an `Extractor` and a `ContentGuard` here. Both serve
-/// automatic extraction, which this port does not implement, so the binding
-/// takes neither.
+/// Both serve automatic extraction, which this port does not implement, so the
+/// binding takes neither.
 #[derive(Debug, Clone, Default)]
 pub struct BindOptions {
     pub scopes: Vec<Scope>,
@@ -777,7 +773,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_display_matches_go_wrapping() {
+    fn error_display_appends_the_detail_after_the_category() {
         assert_eq!(
             Error::new(ErrorKind::Disabled).to_string(),
             "memory is disabled"
@@ -789,7 +785,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_ids_accept_the_go_alphabet() {
+    fn opaque_ids_accept_only_the_id_alphabet() {
         assert!(valid_opaque_id("abc.DEF_09:-", MAX_ID_BYTES));
         assert!(!valid_opaque_id("", MAX_ID_BYTES));
         assert!(!valid_opaque_id("has space", MAX_ID_BYTES));
@@ -800,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_matches_go_rules() {
+    fn the_default_policy_carries_the_documented_rules() {
         let base = PolicyRequest {
             origin: Some(Origin::Human),
             action: CandidateAction::Create,

@@ -1,12 +1,8 @@
-//! OAuth endpoints, PKCE material and the token calls. Port of
-//! `internal/auth/oauth.go` plus the `golang.org/x/oauth2` behaviour Go relies
-//! on for the code exchange and the refresh.
+//! OAuth endpoints, PKCE material and the token calls.
 //!
-//! Divergence from Go: `golang.org/x/oauth2` probes the token endpoint with
-//! HTTP Basic auth first and only retries with the client id in the form body.
-//! This port always sends `client_id` in the body (`AuthStyleInParams`), which
-//! is what the endpoint accepts and what the Codex CLI sends, so there is no
-//! probe request.
+//! `client_id` is always sent in the form body rather than as HTTP Basic auth,
+//! which is what the endpoint accepts and what the Codex CLI sends, so there is
+//! no probe request.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -26,11 +22,11 @@ pub const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub const SCOPES: &str = "openid profile email offline_access";
 
 /// The redirect ports tried in order; matches the Codex CLI default and its
-/// fallback. Port of `loopbackPorts`.
+/// fallback.
 pub const LOOPBACK_PORTS: [u16; 2] = [1455, 1457];
 
-/// Port of `oauth2.Endpoint` for the two URLs this flow uses. Tests point it
-/// at a local server; [`Endpoint::production`] is the only other constructor.
+/// The two URLs this flow uses. Tests point it at a local server;
+/// [`Endpoint::production`] is the only other constructor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub authorize_url: String,
@@ -38,7 +34,6 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Port of `productionEndpoint`.
     pub fn production() -> Self {
         Self {
             authorize_url: AUTHORIZE_URL.to_owned(),
@@ -47,28 +42,25 @@ impl Endpoint {
     }
 }
 
-/// Port of `randomState`: 32 random bytes, base64url without padding.
+/// 32 random bytes, base64url without padding.
 pub fn random_state() -> Result<String, String> {
     let bytes = random_bytes::<32>().map_err(|_| "generate state".to_owned())?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Port of `oauth2.GenerateVerifier`: 32 random bytes, base64url without
-/// padding, which lands inside RFC 7636's 43..128 character range.
+/// 32 random bytes, base64url without padding, which lands inside RFC 7636's
+/// 43..128 character range.
 pub fn generate_verifier() -> Result<String, String> {
     let bytes = random_bytes::<32>().map_err(|_| "generate code verifier".to_owned())?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Port of `oauth2.S256ChallengeFromVerifier`.
 pub fn s256_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-/// Port of `oauth2.Config.AuthCodeURL` with `AccessTypeOffline` and
-/// `S256ChallengeOption`. Go encodes the parameters through
-/// `url.Values.Encode`, which sorts keys, so they are appended sorted here and
-/// the two binaries produce the same URL for the same inputs.
+/// The authorization URL, with offline access and an S256 PKCE challenge. The
+/// parameters are appended in sorted key order.
 pub fn authorize_url(
     endpoint: &Endpoint,
     redirect_uri: &str,
@@ -89,9 +81,8 @@ pub fn authorize_url(
     Ok(url.into())
 }
 
-/// The token endpoint client. Port of `oauthHTTPClient`: every redirect is
-/// refused so a 3xx from the token endpoint cannot move the client credentials
-/// to another origin.
+/// The token endpoint client. Every redirect is refused so a 3xx from the token
+/// endpoint cannot move the client credentials to another origin.
 pub fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -112,8 +103,8 @@ struct TokenResponse {
     expires_in: Option<serde_json::Number>,
 }
 
-/// A token endpoint result. `expiry` is already absolute; Go's oauth2 does the
-/// same conversion from `expires_in` at the moment the response is parsed.
+/// A token endpoint result. `expiry` is already absolute: `expires_in` is
+/// converted at the moment the response is parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub access_token: String,
@@ -125,8 +116,7 @@ pub struct Token {
 /// Posts `form` to the token endpoint and parses the response.
 ///
 /// The error is a fixed string in every case. The token endpoint's body can
-/// echo the credential that was sent (Go's own test asserts exactly that), so
-/// it is never read into an error.
+/// echo the credential that was sent, so it is never read into an error.
 async fn post_token(
     client: &reqwest::Client,
     token_url: &str,
@@ -160,8 +150,8 @@ async fn post_token(
         Some(seconds) if seconds > 0 => {
             Utc::now().fixed_offset() + chrono::TimeDelta::seconds(seconds)
         }
-        // Go leaves `Token.Expiry` zero when the response omits `expires_in`,
-        // and a zero expiry means "never expires".
+        // A response that omits `expires_in` leaves the expiry zero, which
+        // means "never expires".
         _ => super::go_time::zero(),
     };
     Ok(Token {
@@ -172,7 +162,7 @@ async fn post_token(
     })
 }
 
-/// Port of `oauth2.Config.Exchange` with `VerifierOption`.
+/// The code exchange, with the PKCE verifier.
 #[allow(clippy::result_unit_err)] // The unit error is the point: no
 // endpoint body, status or transport detail may reach a caller.
 pub async fn exchange_code(
@@ -196,7 +186,6 @@ pub async fn exchange_code(
     .await
 }
 
-/// Port of the refresh half of `oauth2.Config.TokenSource`.
 #[allow(clippy::result_unit_err)] // The unit error is the point: no
 // endpoint body, status or transport detail may reach a caller.
 pub async fn refresh_token(
@@ -216,9 +205,9 @@ pub async fn refresh_token(
     .await
 }
 
-/// Binds the first available port from `ports` on loopback. Port of
-/// `listenLoopback`; port 0 asks the kernel for an ephemeral port, which is
-/// what the tests use so they never depend on 1455 being free.
+/// Binds the first available port from `ports` on loopback. Port 0 asks the
+/// kernel for an ephemeral port, which is what the tests use so they never
+/// depend on 1455 being free.
 pub async fn listen_loopback(ports: &[u16]) -> Result<(tokio::net::TcpListener, u16), String> {
     for port in ports {
         if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", *port)).await {

@@ -7,6 +7,27 @@ import { Footer } from './Footer'
 describe('Footer usage history', () => {
   afterEach(cleanup)
 
+  it('shows process reasoning effort when present', () => {
+    render(
+      createElement(Footer, {
+        info: {
+          workspace: '/tmp/otto',
+          provider: 'openai-compatible',
+          profile: 'default',
+          model: 'test',
+          thinking: 'high',
+          sandbox: 'seatbelt',
+          profiles: ['default'],
+        },
+        session: null,
+        turnUsage: null,
+        recordedUsage: null,
+      }),
+    )
+
+    expect(screen.getByText('openai-compatible · test · thinking high · seatbelt')).toBeTruthy()
+  })
+
   it('shows persisted token totals and the weighted cache hit rate', () => {
     render(
       createElement(Footer, {

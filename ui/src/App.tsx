@@ -28,6 +28,7 @@ const sessionText = (s: Session) =>
     `Profile: ${s.profile}`,
     `Provider: ${s.provider}`,
     `Model: ${s.model}`,
+    `Thinking: ${s.thinking || 'default'}`,
     `Sandbox: ${s.sandbox.summary}`,
     `Context: ${s.context_input_tokens} / ${s.context_window} tokens`,
     `Usage: ${usageText(s.usage)}`,

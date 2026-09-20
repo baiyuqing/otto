@@ -265,6 +265,26 @@ components:
           items:
             $ref: "#/components/schemas/Task"
       required: [tasks]
+    Timer:
+      type: object
+      description: tool::remind::StoredReminder; the record the session sidecar stores.
+      properties:
+        id:
+          type: string
+        fire_at:
+          type: string
+          format: date-time
+        message:
+          type: string
+      required: [id, fire_at, message]
+    TimerList:
+      type: object
+      properties:
+        timers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Timer"
+      required: [timers]
     McpServer:
       type: object
       description: server::mcp::McpServer; see crates/otto/src/server/mcp.rs for the full shape.
@@ -399,6 +419,13 @@ components:
       in: path
       required: true
       description: Task id or name.
+      schema:
+        type: string
+    timerID:
+      name: timer_id
+      in: path
+      required: true
+      description: Timer id, as `remind` and the list route report it.
       schema:
         type: string
     approvalID:
@@ -765,6 +792,43 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           description: Task already finished
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/timers:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: List the session's outstanding timers, soonest first
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TimerList"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/timers/{timer_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+      - $ref: "#/components/parameters/timerID"
+    post:
+      summary: Cancel an outstanding timer
+      responses:
+        "200":
+          description: Canceled; returns the timer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Timer"
+        "404":
+          description: Session or timer not found
           content:
             application/json:
               schema:

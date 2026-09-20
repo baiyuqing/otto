@@ -675,7 +675,9 @@ list and cancels that timer. Both answer `no timers in this session` and
 `unknown timer: <id>` respectively.
 
 In the REPL and the TUI, `/timers` prints the same list and
-`/timers cancel <id>` cancels one timer.
+`/timers cancel <id>` cancels one timer. `otto serve` exposes the same two
+operations as `GET /v1/sessions/{id}/timers` and
+`POST /v1/sessions/{id}/timers/{timer_id}/cancel`.
 
 File-backed sessions keep outstanding timers across a restart; opening that
 session restores them, and a timer that is already due fires as soon as Otto
@@ -945,6 +947,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
+| `GET /v1/sessions/{id}/timers` | List the session's outstanding timers, soonest first: `id`, `fire_at`, and `message`. |
+| `POST /v1/sessions/{id}/timers/{timer_id}/cancel` | Cancel one outstanding timer and return it. `404` if no timer has that id. |
 | `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |

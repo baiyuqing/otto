@@ -128,6 +128,28 @@ fn set_default_profile_file_impl(
     }
 }
 
+pub fn set_profile_thinking_file(
+    path: &Path,
+    profile: &str,
+    thinking: &str,
+) -> Result<(), NativeConfigError> {
+    if profile.is_empty() {
+        return Err(ConfigError::new("missing profile").into());
+    }
+    if !matches!(thinking, "" | "low" | "medium" | "high" | "xhigh" | "max") {
+        return Err(ConfigError::new(
+            "invalid thinking: must be one of low, medium, high, xhigh, max",
+        )
+        .into());
+    }
+    let mut file = load_impl(path, &default_path())?;
+    let Some(entry) = file.profiles.get_mut(profile) else {
+        return Err(ConfigError::new(format!("profile {profile:?} not found")).into());
+    };
+    entry.thinking = thinking.to_string();
+    save(path, &file)
+}
+
 /// The environment `otto_core::config::resolve` and `resolve_memory` may
 /// consult for `file`: a fixed set of `OTTO_*` overrides plus `HOME`, and
 /// each profile's `api_key_env`. Port of `cmd/otto/main.go`'s

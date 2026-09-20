@@ -59,6 +59,15 @@ pub const SESSION_RENAME_UNAVAILABLE: &str = "session rename is unavailable";
 /// Go's `session.ErrInvalidSession` text for a blank name.
 pub const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
 
+/// One configured profile row a frontend can display.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileSummary {
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub thinking: String,
+}
+
 /// What a frontend may display. Port of `app.Info`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Info {
@@ -69,6 +78,7 @@ pub struct Info {
     pub provider: String,
     pub profile: String,
     pub model: String,
+    pub thinking: String,
     pub usage: Usage,
     pub usage_present: bool,
     pub context_window: i64,
@@ -83,6 +93,23 @@ pub struct Info {
 pub struct ResumeResult {
     pub session_path: String,
     pub warnings: Vec<String>,
+}
+
+fn validate_thinking_arg(thinking: &str) -> Result<(), String> {
+    if matches!(
+        thinking,
+        "" | "unset" | "default" | "low" | "medium" | "high" | "xhigh" | "max"
+    ) {
+        return Ok(());
+    }
+    Err("thinking must be one of unset, low, medium, high, xhigh, max".to_string())
+}
+
+fn normalize_thinking_arg(thinking: &str) -> String {
+    match thinking {
+        "unset" | "default" => String::new(),
+        other => other.to_string(),
+    }
 }
 
 /// The session, runner and resolved runtime currently in force.
@@ -391,6 +418,7 @@ impl Controller {
             provider: current.info.provider.clone(),
             profile: current.info.profile.clone(),
             model: current.info.model.clone(),
+            thinking: current.info.thinking.clone(),
             usage: snapshot.aggregate_usage,
             usage_present: snapshot.aggregate_usage_present,
             context_window: current.info.context_window,
@@ -534,6 +562,35 @@ impl Controller {
         names
     }
 
+    pub fn profile_summaries(&self) -> Vec<ProfileSummary> {
+        if !self.dynamic_content_available() {
+            return Vec::new();
+        }
+        let current = self
+            .lock()
+            .current
+            .as_ref()
+            .map(|current| (current.info.profile.clone(), current.info.thinking.clone()));
+        let mut rows: Vec<ProfileSummary> = self
+            .builder
+            .config
+            .profiles
+            .iter()
+            .map(|(name, profile)| ProfileSummary {
+                name: name.clone(),
+                provider: profile.provider.clone(),
+                model: profile.model.clone(),
+                thinking: current
+                    .as_ref()
+                    .filter(|(current_name, _)| current_name == name)
+                    .map(|(_, thinking)| thinking.clone())
+                    .unwrap_or_else(|| profile.thinking.clone()),
+            })
+            .collect();
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
+    }
+
     /// Port of `Controller.SetDefaultProfile`.
     pub fn set_default_profile(&self, profile: &str) -> Result<(), String> {
         if self.lock().closed {
@@ -544,6 +601,69 @@ impl Controller {
         }
         crate::config::set_default_profile_file(&self.builder.config_path, profile)
             .map_err(|error| self.builder.redact_error(&error.to_string(), None))
+    }
+
+    pub fn profile_effective_thinking(&self, profile: &str) -> String {
+        if !self.dynamic_content_available() {
+            return String::new();
+        }
+        self.builder
+            .resolve_profile(profile)
+            .map(|runtime| runtime.thinking)
+            .unwrap_or_default()
+    }
+
+    pub async fn set_thinking(&self, thinking: &str) -> Result<(), String> {
+        validate_thinking_arg(thinking)?;
+        let admission = self.begin_replacement()?;
+        if !self.dynamic_content {
+            return Err(PROFILE_SWITCH_UNAVAILABLE.to_string());
+        }
+        let (session, runtime) = {
+            let state = self.lock();
+            let current = state.current.as_ref().ok_or_else(|| CLOSED.to_string())?;
+            let metadata = RuntimeMetadata {
+                profile: current.info.profile.clone(),
+                provider: current.info.provider.clone(),
+                model: current.info.model.clone(),
+            };
+            let mut runtime = self.replacement_runtime(&metadata)?;
+            runtime.profile = current.info.profile.clone();
+            runtime.provider = current.info.provider.clone();
+            runtime.model = current.info.model.clone();
+            runtime.thinking = normalize_thinking_arg(thinking);
+            (current.session.clone(), runtime)
+        };
+        let runner = Arc::new(self.builder.build_runner(&session, &runtime).await?);
+        {
+            let mut state = self.lock();
+            let current = state.current.as_mut().ok_or_else(|| CLOSED.to_string())?;
+            current.info = self.builder.runtime_info(&runtime);
+            let old = std::mem::replace(&mut current.runner, runner);
+            old.close();
+        }
+        drop(admission);
+        Ok(())
+    }
+
+    pub fn save_profile_thinking(&self, thinking: &str) -> Result<(), String> {
+        validate_thinking_arg(thinking)?;
+        if self.lock().closed {
+            return Err(CLOSED.to_string());
+        }
+        if !self.dynamic_content {
+            return Err(PROFILE_SWITCH_UNAVAILABLE.to_string());
+        }
+        let profile = self.info().profile;
+        if profile.is_empty() {
+            return Err("current profile is empty".to_string());
+        }
+        crate::config::set_profile_thinking_file(
+            &self.builder.config_path,
+            &profile,
+            &normalize_thinking_arg(thinking),
+        )
+        .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 
     // ---- session replacement ----

@@ -272,8 +272,13 @@ fn footer_text(app: &App) -> String {
         (true, true) => "unknown/unknown".to_string(),
         _ => format!("{profile}/{model}").trim_matches('/').to_string(),
     };
+    let thinking = if app.info.thinking.is_empty() {
+        "default".to_string()
+    } else {
+        escape_single_line_text(&app.info.thinking)
+    };
     let mut text = format!(
-        "{profile_model} | {} | {} | tokens {}/{}",
+        "{profile_model} | think {thinking} | {} | {} | tokens {}/{}",
         app.info.sandbox.badge(),
         escape_single_line_text(&footer_workspace(&app.info.workspace)),
         format_token_count(app.usage.input_tokens),
@@ -795,13 +800,14 @@ mod tests {
         let content = rendered(&app, 160, MIN_TERMINAL_HEIGHT);
 
         assert!(content.contains("alpha/gpt-alpha"), "{content}");
+        assert!(content.contains("think default"), "{content}");
         assert!(content.contains("no-bash"), "{content}");
         assert!(content.contains("tokens 0/0"), "{content}");
         assert!(content.contains(&session_id), "{content}");
 
         let narrow = rendered(&app, MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT);
         assert!(narrow.contains("alpha/gpt-alpha"), "{narrow}");
-        assert!(narrow.contains("no-bash"), "{narrow}");
+        assert!(narrow.contains("think default"), "{narrow}");
     }
 
     /// No-panic smoke test at Go's exact

@@ -146,6 +146,8 @@ components:
           type: string
         model:
           type: string
+        thinking:
+          type: string
         context_window:
           type: integer
         usage:
@@ -156,7 +158,7 @@ components:
           $ref: "#/components/schemas/Sandbox"
         turn:
           $ref: "#/components/schemas/SessionTurn"
-      required: [id, workspace, provider, model, sandbox, turn]
+      required: [id, workspace, provider, model, thinking, sandbox, turn]
     SessionListRow:
       type: object
       properties:
@@ -370,13 +372,15 @@ components:
           type: string
         model:
           type: string
+        thinking:
+          type: string
         sandbox:
           type: string
         profiles:
           type: array
           items:
             type: string
-      required: [workspace, provider, profile, model, sandbox, profiles]
+      required: [workspace, provider, profile, model, thinking, sandbox, profiles]
   parameters:
     sessionID:
       name: id

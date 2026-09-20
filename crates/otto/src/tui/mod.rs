@@ -4,10 +4,14 @@
 //! of the matching Go file(s) and says so in its own doc comment.
 //!
 //! [`run`] is the entry point `cli::run` dispatches to for `--ui tui` (or
-//! `--ui auto` on a terminal). It owns the alternate screen / raw mode
-//! lifecycle, reads keys on a background task the way `cli::repl`'s
-//! `spawn_reader` reads lines, and drives [`app::App`] against the same
-//! [`Controller`] the REPL uses.
+//! `--ui auto` on a terminal). It owns the raw-mode lifecycle, reads keys on
+//! a background task the way `cli::repl`'s `spawn_reader` reads lines, and
+//! drives [`app::App`] against the same [`Controller`] the REPL uses.
+//!
+//! Otto does not take the screen: finished transcript entries are written
+//! into the terminal's own scrollback and only a live region at the bottom is
+//! redrawn, which leaves scrolling and text selection to the terminal. See
+//! [`inline`].
 //!
 //! Sub-agent wake turns: the idle loop also selects on the task registry's
 //! update signal and runs an empty-text turn whenever a notification is
@@ -17,24 +21,20 @@
 mod app;
 mod commands;
 mod entries;
+mod inline;
 mod layout;
 mod markdown;
 mod render;
 
 use std::future::Future;
-use std::io;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEvent, KeyEventKind,
-    MouseEventKind,
-};
+use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind};
 use otto_core::agent::Event;
 use otto_core::model::{Block, MAX_IMAGE_BYTES};
-use ratatui::Terminal;
-use ratatui::backend::Backend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -45,126 +45,59 @@ use crate::cli::repl_commands;
 use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
+use inline::LiveRegion;
 
 /// Runs the terminal frontend to completion. Port of `internal/tui.Run`.
 ///
-/// Enters the alternate screen, raw mode, and mouse capture, all restored on
-/// return and panic.
+/// Enters raw mode, restored on return and panic. There is no alternate
+/// screen and no mouse capture: the transcript goes to the terminal's own
+/// scrollback (see [`inline`]), so the wheel and drag-selection stay the
+/// terminal's.
 pub(crate) async fn run(
     controller: &Controller,
     cancel: &CancellationToken,
 ) -> Result<(), ReplError> {
-    let mut terminal = ratatui::try_init().map_err(io_error)?;
-    let mut input = TerminalInput::new();
-    if let Err(error) = input.configure_mouse(std::io::stdout(), MousePolicy::NativeSelection) {
-        let _ = ratatui::try_restore();
-        return Err(io_error(error));
-    }
-    let mut keys = spawn_key_reader();
-    let result = run_app(&mut terminal, &mut input, controller, cancel, &mut keys).await;
-    let _ = input.restore_mouse(std::io::stdout());
-    let _ = ratatui::try_restore();
+    ratatui::crossterm::terminal::enable_raw_mode().map_err(io_error)?;
+    set_panic_hook();
+    // Sizing the region before the key reader starts keeps the one
+    // cursor-position query [`LiveRegion::new`] makes off the reader's stdin.
+    let region = LiveRegion::new(CrosstermBackend::new(std::io::stdout()), 1);
+    let result = match region {
+        Ok(mut live) => {
+            let mut keys = spawn_key_reader();
+            run_app(&mut live, controller, cancel, &mut keys).await
+        }
+        Err(error) => Err(io_error(error)),
+    };
+    let _ = ratatui::crossterm::terminal::disable_raw_mode();
     result
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MousePolicy {
-    /// Leave pointer drags to the terminal emulator so text selection works
-    /// normally, without the user holding Shift. This is Otto's default.
-    NativeSelection,
-    /// Ask the terminal to report mouse events to Otto. Use this only for
-    /// transcript-browsing mode, where the wheel keeps scrolling the pinned
-    /// transcript. While active, most terminal emulators reserve plain drag
-    /// for the application and require Shift for native selection.
-    Capture,
-}
-
-fn mouse_policy_for_scroll(scroll: Option<u16>) -> MousePolicy {
-    if scroll.is_some() {
-        MousePolicy::Capture
-    } else {
-        MousePolicy::NativeSelection
-    }
-}
-
-fn mouse_policy(app: &App) -> MousePolicy {
-    mouse_policy_for_scroll(app.scroll)
-}
-
-fn sync_mouse_policy(app: &App, input: &mut TerminalInput) -> Result<(), ReplError> {
-    input
-        .configure_mouse(std::io::stdout(), mouse_policy(app))
-        .map_err(io_error)
-}
-
-#[derive(Default)]
-struct TerminalInput {
-    mouse_active: bool,
-}
-
-impl TerminalInput {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn configure_mouse(
-        &mut self,
-        mut writer: impl io::Write,
-        policy: MousePolicy,
-    ) -> io::Result<()> {
-        match policy {
-            MousePolicy::NativeSelection => self.restore_mouse(writer),
-            MousePolicy::Capture if self.mouse_active => Ok(()),
-            MousePolicy::Capture => {
-                crossterm::execute!(writer, EnableMouseCapture)?;
-                self.mouse_active = true;
-                Ok(())
-            }
-        }
-    }
-
-    fn restore_mouse(&mut self, mut writer: impl io::Write) -> io::Result<()> {
-        if !self.mouse_active {
-            return Ok(());
-        }
-        crossterm::execute!(writer, DisableMouseCapture)?;
-        self.mouse_active = false;
-        Ok(())
-    }
-}
-
-impl Drop for TerminalInput {
-    fn drop(&mut self) {
-        let _ = self.restore_mouse(std::io::stdout());
-    }
+/// Leaves raw mode on the way out of a panic, so the backtrace is readable
+/// and the shell that follows is usable. Raw mode is the only terminal state
+/// Otto changes, so this is all `ratatui::try_init`'s own hook did for it.
+fn set_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+        previous(info);
+    }));
 }
 
 fn io_error(error: std::io::Error) -> ReplError {
     ReplError::Input(error.to_string())
 }
 
-/// One event [`spawn_key_reader`] forwards to the main loop: a keypress, one
-/// mouse-wheel notch, or a resize that only needs a redraw.
-///
-/// The wheel is its own variant rather than a synthesized `Up`/`Down` key,
-/// because the composer's own Up/Down recall prompt history
-/// ([`app::History`]); a wheel notch always scrolls the transcript.
+/// One event [`spawn_key_reader`] forwards to the main loop: a keypress, or a
+/// resize that only needs a redraw.
 enum TuiEvent {
     Key(KeyEvent),
-    Wheel { up: bool },
     Redraw,
 }
 
 fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
     match event {
         TermEvent::Key(key) if key.kind == KeyEventKind::Press => Some(TuiEvent::Key(key)),
-        TermEvent::Mouse(mouse) => Some(TuiEvent::Wheel {
-            up: match mouse.kind {
-                MouseEventKind::ScrollUp => true,
-                MouseEventKind::ScrollDown => false,
-                _ => return None,
-            },
-        }),
         TermEvent::Resize(_, _) => Some(TuiEvent::Redraw),
         _ => None,
     }
@@ -188,8 +121,8 @@ fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
     let (sender, receiver) = mpsc::channel(1);
     std::thread::spawn(move || {
         while let Ok(event) = crossterm::event::read() {
-            // ponytail: focus/paste/key-release and non-wheel mouse events
-            // have no behavior; drop them instead of redrawing.
+            // ponytail: focus/paste/key-release and mouse events have no
+            // behavior; drop them instead of redrawing.
             let Some(forwarded) = map_terminal_event(event) else {
                 continue;
             };
@@ -214,19 +147,30 @@ enum IdleEvent {
     Registry(bool),
 }
 
+/// Owns [`App`] for the whole session so that however [`run_loop`] ends, the
+/// transcript still in the live region is written out and the terminal is
+/// left with the cursor below it.
 async fn run_app<B: Backend>(
-    terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
+    live: &mut LiveRegion<B>,
     controller: &Controller,
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
 ) -> Result<(), ReplError> {
     let mut app = App::new(controller);
-    sync_mouse_policy(&app, input)?;
+    let result = run_loop(&mut app, live, controller, cancel, keys).await;
+    let _ = live.finish(&app);
+    result
+}
+
+async fn run_loop<B: Backend>(
+    app: &mut App,
+    live: &mut LiveRegion<B>,
+    controller: &Controller,
+    cancel: &CancellationToken,
+    keys: &mut mpsc::Receiver<TuiEvent>,
+) -> Result<(), ReplError> {
     let mut pending_image = None;
-    terminal
-        .draw(|frame| render::draw(frame, &app))
-        .map_err(draw_error)?;
+    live.present(app).map_err(draw_error)?;
 
     let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
     loop {
@@ -262,47 +206,30 @@ async fn run_app<B: Backend>(
                 continue;
             }
             IdleEvent::Registry(true) => {
-                if let Err(error) =
-                    run_wake(&mut app, terminal, input, keys, controller, cancel).await
-                {
+                if let Err(error) = run_wake(app, live, keys, controller, cancel).await {
                     propagate_turn_error(error)?;
                 }
                 app.refresh_info(controller);
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
+                live.present(app).map_err(draw_error)?;
                 continue;
             }
         };
         let Some(event) = event else { return Ok(()) };
         let key = match event {
             TuiEvent::Key(key) => key,
-            TuiEvent::Wheel { up } => {
-                app.scroll_wheel(up);
-                sync_mouse_policy(&app, input)?;
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
-                continue;
-            }
             TuiEvent::Redraw => {
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
+                live.present(app).map_err(draw_error)?;
                 continue;
             }
         };
 
-        let action = app.handle_key(key, controller, cancel);
-        sync_mouse_policy(&app, input)?;
-        match action {
+        match app.handle_key(key, controller, cancel) {
             None => {}
             Some(Action::Exit) => return Ok(()),
             Some(Action::Prompt(line)) => {
                 if let Err(error) = run_turn(
-                    &mut app,
-                    terminal,
-                    input,
+                    app,
+                    live,
                     keys,
                     controller,
                     cancel,
@@ -322,9 +249,7 @@ async fn run_app<B: Backend>(
                 Err(message) => app.push_system(format!("/image: {message}")),
             },
             Some(Action::Compact(focus)) => {
-                if let Err(error) =
-                    run_compact(&mut app, terminal, input, keys, controller, cancel, focus).await
-                {
+                if let Err(error) = run_compact(app, live, keys, controller, cancel, focus).await {
                     propagate_turn_error(error)?;
                 }
             }
@@ -333,14 +258,14 @@ async fn run_app<B: Backend>(
                 match controller.new_session().await {
                     Ok(()) => {
                         app.refresh(controller);
-                        push_session_id(&mut app, controller);
+                        push_session_id(app, controller);
                     }
                     Err(message) => app.push_system(format!("/new: {message}")),
                 }
             }
             Some(Action::SwitchProfile(profile)) => {
                 pending_image = None;
-                switch_profile(&mut app, controller, &profile).await;
+                switch_profile(app, controller, &profile).await;
             }
             Some(Action::SwitchProfileThinking {
                 profile,
@@ -348,11 +273,11 @@ async fn run_app<B: Backend>(
                 save,
             }) => {
                 pending_image = None;
-                switch_profile(&mut app, controller, &profile).await;
-                apply_thinking(&mut app, controller, &thinking, save).await;
+                switch_profile(app, controller, &profile).await;
+                apply_thinking(app, controller, &thinking, save).await;
             }
             Some(Action::SetThinking { thinking, save }) => {
-                apply_thinking(&mut app, controller, &thinking, save).await;
+                apply_thinking(app, controller, &thinking, save).await;
             }
             Some(Action::Resume(path)) => {
                 pending_image = None;
@@ -363,7 +288,7 @@ async fn run_app<B: Backend>(
                         for warning in &result.warnings {
                             app.push_system(warning.clone());
                         }
-                        push_session_id(&mut app, controller);
+                        push_session_id(app, controller);
                     }
                     Err(message) => app.push_system(format!("/resume: {message}")),
                 }
@@ -374,7 +299,7 @@ async fn run_app<B: Backend>(
                     Ok(result) => {
                         app.refresh(controller);
                         app.push_system(format!("Archived: {}", result.path));
-                        push_session_id(&mut app, controller);
+                        push_session_id(app, controller);
                     }
                     Err(message) => app.push_system(format!("/archive: {message}")),
                 }
@@ -386,10 +311,8 @@ async fn run_app<B: Backend>(
             Some(Action::Approve(id)) => match controller.approve_bash(&id) {
                 Ok(prompt) => {
                     app.push_system(format!("Approved {id} for one command."));
-                    if let Err(error) = run_turn(
-                        &mut app, terminal, input, keys, controller, cancel, prompt, None,
-                    )
-                    .await
+                    if let Err(error) =
+                        run_turn(app, live, keys, controller, cancel, prompt, None).await
                     {
                         propagate_turn_error(error)?;
                     }
@@ -397,18 +320,15 @@ async fn run_app<B: Backend>(
                 Err(message) => app.push_system(format!("/approve: {message}")),
             },
             Some(Action::Login(args)) => {
-                login_dispatch(&mut app, controller, &args, cancel).await;
+                login_dispatch(app, controller, &args, cancel).await;
             }
             Some(Action::McpLogin(name)) => {
-                mcp_login_dispatch(&mut app, controller, &name, cancel).await;
+                mcp_login_dispatch(app, controller, &name, cancel).await;
             }
         }
 
         app.refresh_info(controller);
-        sync_mouse_policy(&app, input)?;
-        terminal
-            .draw(|frame| render::draw(frame, &app))
-            .map_err(draw_error)?;
+        live.present(app).map_err(draw_error)?;
     }
 }
 
@@ -431,15 +351,14 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 /// interrupt it with anyway.
 ///
 /// The call's sink cannot draw for itself, because it would have to hold
-/// `app` and `terminal` borrowed for the whole turn, leaving nothing here to
-/// redraw with. So the sink only forwards each [`Event`] down `events`, and
+/// `app` and the live region borrowed for the whole turn, leaving nothing
+/// here to redraw with. So the sink only forwards each [`Event`] down `events`, and
 /// this loop applies it, letting the same loop also redraw on a key, a
 /// resize, and every [`render::SPINNER_FRAME`] so the thinking indicator
 /// animates while nothing is streaming.
 async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
-    terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
+    live: &mut LiveRegion<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     events: &mut mpsc::UnboundedReceiver<Event>,
     turn: &CancellationToken,
@@ -460,35 +379,22 @@ async fn drive_turn<B: Backend, T, E>(
                 return result;
             }
             Some(event) = events.recv() => apply(app, event),
-            Some(event) = keys.recv() => {
-                apply_turn_key(app, event, turn);
-                let _ = sync_mouse_policy(app, input);
-            }
+            Some(event) = keys.recv() => apply_turn_key(app, event, turn),
             _ = frames.tick() => {}
         }
-        let _ = terminal.draw(|frame| render::draw(frame, app));
+        let _ = live.present(app);
     }
 }
 
 /// Handles one key delivered while a turn is running: the interrupt keys
-/// cancel it, the scroll keys move the transcript, and everything else is
-/// dropped the way [`App::handle_key`]'s `busy()` branch drops it.
-///
-/// Scrolling has to work here and not only between turns: a streaming turn
-/// is when there is most output to read back through.
-fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
-    let key = match event {
-        TuiEvent::Key(key) => key,
-        TuiEvent::Wheel { up } => {
-            app.scroll_wheel(up);
-            return;
-        }
-        TuiEvent::Redraw => return,
-    };
-    if App::is_interrupt_key(&key) {
+/// cancel it, and everything else is dropped the way [`App::handle_key`]'s
+/// `busy()` branch drops it.
+fn apply_turn_key(app: &App, event: TuiEvent, turn: &CancellationToken) {
+    let _ = app;
+    if let TuiEvent::Key(key) = event
+        && App::is_interrupt_key(&key)
+    {
         turn.cancel();
-    } else {
-        app.handle_scroll_key(&key);
     }
 }
 
@@ -498,8 +404,7 @@ fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
 /// [`is_fatal_persistence`] check.
 async fn run_turn<B: Backend>(
     app: &mut App,
-    terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
+    live: &mut LiveRegion<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -516,8 +421,7 @@ async fn run_turn<B: Backend>(
         };
         drive_turn(
             app,
-            terminal,
-            input,
+            live,
             keys,
             &mut received,
             &turn,
@@ -581,8 +485,7 @@ fn image_block_from_path(path: &str) -> Result<Block, String> {
 /// so Esc still cancels and the thinking line still animates.
 async fn run_wake<B: Backend>(
     app: &mut App,
-    terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
+    live: &mut LiveRegion<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -612,8 +515,7 @@ async fn run_wake<B: Backend>(
         };
         drive_turn(
             app,
-            terminal,
-            input,
+            live,
             keys,
             &mut received,
             &turn,
@@ -649,8 +551,7 @@ async fn run_wake<B: Backend>(
 /// compaction).
 async fn run_compact<B: Backend>(
     app: &mut App,
-    terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
+    live: &mut LiveRegion<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -668,8 +569,7 @@ async fn run_compact<B: Backend>(
         };
         drive_turn(
             app,
-            terminal,
-            input,
+            live,
             keys,
             &mut received,
             &turn,
@@ -870,65 +770,24 @@ mod tests {
 
     use super::*;
 
+    /// Otto asks for no mouse reporting, so the terminal keeps doing native
+    /// drag-selection and the wheel keeps scrolling the terminal's own
+    /// scrollback. A mouse event arriving anyway is not Otto's to act on.
     #[test]
-    fn mouse_policy_captures_only_while_transcript_is_pinned() {
-        assert_eq!(mouse_policy_for_scroll(None), MousePolicy::NativeSelection);
-        assert_eq!(mouse_policy_for_scroll(Some(0)), MousePolicy::Capture);
-        assert_eq!(mouse_policy_for_scroll(Some(12)), MousePolicy::Capture);
-    }
+    fn mouse_events_are_dropped_rather_than_acted_on() {
+        let mouse = |kind| {
+            map_terminal_event(TermEvent::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .is_none()
+        };
 
-    #[test]
-    fn terminal_input_defaults_to_native_selection_and_toggles_capture_on_demand() {
-        let mut output = Vec::new();
-        let mut input = TerminalInput::new();
-
-        input
-            .configure_mouse(&mut output, MousePolicy::NativeSelection)
-            .expect("native selection");
-        assert!(
-            !String::from_utf8_lossy(&output).contains("\u{1b}[?1000h"),
-            "native-selection mode must not enable mouse capture"
-        );
-
-        input
-            .configure_mouse(&mut output, MousePolicy::Capture)
-            .expect("capture");
-        let captured = String::from_utf8_lossy(&output);
-        assert!(captured.contains("\u{1b}[?1000h"));
-        assert!(captured.contains("\u{1b}[?1006h"));
-
-        let len_after_capture = output.len();
-        input
-            .configure_mouse(&mut output, MousePolicy::Capture)
-            .expect("capture remains idempotent");
-        assert_eq!(output.len(), len_after_capture);
-
-        input
-            .configure_mouse(&mut output, MousePolicy::NativeSelection)
-            .expect("release capture");
-        let restored = String::from_utf8_lossy(&output);
-        assert!(restored.contains("\u{1b}[?1000l"));
-        assert!(restored.contains("\u{1b}[?1006l"));
-    }
-
-    #[test]
-    fn terminal_input_drop_restores_mouse_capture_only_if_it_was_enabled() {
-        let mut disabled = Vec::new();
-        {
-            let mut input = TerminalInput::new();
-            input
-                .restore_mouse(&mut disabled)
-                .expect("restore inactive");
-        }
-        assert!(!String::from_utf8_lossy(&disabled).contains("\u{1b}[?1000l"));
-
-        let mut enabled = Vec::new();
-        let mut input = TerminalInput::new();
-        input
-            .configure_mouse(&mut enabled, MousePolicy::Capture)
-            .expect("capture");
-        input.restore_mouse(&mut enabled).expect("restore active");
-        assert!(String::from_utf8_lossy(&enabled).contains("\u{1b}[?1000l"));
+        assert!(mouse(MouseEventKind::ScrollUp));
+        assert!(mouse(MouseEventKind::ScrollDown));
+        assert!(mouse(MouseEventKind::Moved));
     }
 
     #[test]
@@ -947,55 +806,23 @@ mod tests {
         assert_eq!(image.data, "iVBORw0KGgo=");
     }
 
-    /// The wheel must not reach the composer's keys: Up/Down there recall
-    /// prompt history, so a wheel notch mapped onto them would scroll the
-    /// history instead of the transcript.
-    #[test]
-    fn mouse_wheel_scrolls_without_becoming_a_composer_key() {
-        let wheel = |kind| {
-            let event = TermEvent::Mouse(MouseEvent {
-                kind,
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            });
-            match map_terminal_event(event) {
-                Some(TuiEvent::Wheel { up }) => Some(up),
-                _ => None,
-            }
-        };
-
-        assert_eq!(wheel(MouseEventKind::ScrollUp), Some(true));
-        assert_eq!(wheel(MouseEventKind::ScrollDown), Some(false));
-        assert!(wheel(MouseEventKind::Moved).is_none());
-    }
-
-    /// The reported bad experience: while a turn streamed, every key but the
-    /// interrupt keys was dropped, so the wheel did nothing at exactly the
-    /// moment there was output to scroll back through.
+    /// While a turn runs, the interrupt keys cancel it and every other key
+    /// is dropped, the same way [`App::handle_key`]'s `busy()` branch drops
+    /// them.
     #[tokio::test]
-    async fn a_turn_scrolls_on_the_wheel_and_still_cancels_on_esc() {
+    async fn a_running_turn_cancels_on_esc_and_ignores_other_keys() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
-        app.max_scroll.set(10);
         app.start_turn();
         let turn = CancellationToken::new();
 
-        let wheel_up = map_terminal_event(TermEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        }))
-        .expect("wheel event");
-        apply_turn_key(&mut app, wheel_up, &turn);
-
-        assert_eq!(app.scroll, Some(9));
+        apply_turn_key(&app, TuiEvent::Key(KeyCode::Char('x').into()), &turn);
+        apply_turn_key(&app, TuiEvent::Redraw, &turn);
         assert!(!turn.is_cancelled());
 
-        apply_turn_key(&mut app, TuiEvent::Key(KeyCode::Esc.into()), &turn);
+        apply_turn_key(&app, TuiEvent::Key(KeyCode::Esc.into()), &turn);
         assert!(turn.is_cancelled());
     }
 
@@ -1104,7 +931,7 @@ mod tests {
         );
         let controller = Controller::new(builder, true, session, runner, info);
 
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let mut live = LiveRegion::new(TestBackend::new(80, 24), 1).expect("live region");
         let (_keys_tx, mut keys) = mpsc::channel(1);
         let cancel = CancellationToken::new();
 
@@ -1129,11 +956,8 @@ mod tests {
                 .expect("the pending notification did not trigger a wake turn");
             cancel.cancel();
         };
-        let mut input = TerminalInput::new();
-        let (result, ()) = tokio::join!(
-            run_app(&mut terminal, &mut input, &controller, &cancel, &mut keys),
-            driver
-        );
+        let (result, ()) =
+            tokio::join!(run_app(&mut live, &controller, &cancel, &mut keys), driver);
 
         match result {
             Err(ReplError::Cancelled) => {}

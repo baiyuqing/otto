@@ -317,6 +317,9 @@ pub struct Runner {
     /// The sub-agent task registry, absent when sub-agents are off. Port of
     /// Go's `taskOwner`: `/tasks` and `/task` read the active runner's.
     pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
+    /// The timer registry, absent when the timer tools are not registered.
+    /// `/timers` lists it and archiving the session clears it.
+    pub(crate) reminders: Option<Arc<crate::tool::remind::Reminders>>,
     /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
     pub(crate) skills: Catalog,
     /// The MCP servers connected for this runner. `/mcp` reads its status
@@ -464,6 +467,9 @@ impl Runner {
             system_prompt: String::new(),
             definitions,
             usage: None,
+            reminders: Some(Arc::new(crate::tool::remind::Reminders::new(Arc::clone(
+                tasks.notifications(),
+            )))),
             tasks: Some(tasks),
             skills: Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
@@ -856,6 +862,7 @@ impl Builder {
             definitions,
             usage: self.usage_collector(session, runtime),
             tasks: subagents.tasks,
+            reminders: subagents.reminders,
             skills: catalogs.skills.clone(),
             mcp: mcp_servers,
         })
@@ -1169,7 +1176,9 @@ mod tests {
                 "agent",
                 "agent_wait",
                 "agent_status",
-                "remind"
+                "remind",
+                "remind_status",
+                "remind_cancel"
             ]
         );
     }
@@ -1304,7 +1313,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("You are Otto, a concise coding agent."));
         assert!(prompt.contains(
-            "Usable tools: read, grep, find, ls, write, edit, agent, agent_wait, agent_status, remind."
+            "Usable tools: read, grep, find, ls, write, edit, agent, agent_wait, agent_status, remind, remind_status, remind_cancel."
         ));
         assert!(prompt.contains("<workspace-instructions"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");

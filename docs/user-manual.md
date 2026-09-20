@@ -662,14 +662,28 @@ initial workspace.
 
 ### `remind`
 
-`remind` schedules a later wake. It returns immediately. When the delay
+`remind` schedules a later wake. It returns immediately and reports the id
+it assigned, such as `scheduled r1 in 10s: check the build`. When the delay
 elapses, Otto delivers a `[timer]` notification and the idle wake loop
 starts a turn, the same way a finished sub-agent does. At most eight timers
-can be outstanding. Each delay is 1 to 3600 seconds. File-backed sessions
-keep outstanding timers across a restart; opening that session restores
-them, and a timer that is already due fires as soon as Otto is idle. `/new`
-starts a different session without them. `--no-session` timers live only in
-the current process. Child agents do not get this tool.
+can be outstanding. Each delay is 1 to 3600 seconds.
+
+`remind_status` lists the outstanding timers of the current session, one per
+line, sorted by fire time: the id, the remaining time (`due` once the fire
+time has passed), and the message. `remind_cancel` takes an `id` from that
+list and cancels that timer. Both answer `no timers in this session` and
+`unknown timer: <id>` respectively.
+
+In the REPL and the TUI, `/timers` prints the same list and
+`/timers cancel <id>` cancels one timer.
+
+File-backed sessions keep outstanding timers across a restart; opening that
+session restores them, and a timer that is already due fires as soon as Otto
+is idle. `/new` starts a different session without them. `--no-session`
+timers live only in the current process. Archiving a session cancels its
+outstanding timers permanently: the stored timers are deleted with the
+archive, so resuming the archived session does not bring them back. Child
+agents do not get these tools.
 
 ### Interactive sandbox setup
 

@@ -64,8 +64,8 @@ use crate::tool::result::capped_text_result;
 
 /// Tools a child never receives: the agent-control tools, because delegation
 /// depth is fixed at one; the memory tools, because a child gets no memory
-/// binding; and `remind`, which wakes the parent session.
-pub const EXCLUDED_CHILD_TOOLS: [&str; 9] = [
+/// binding; and the timer tools, which read and wake the parent session.
+pub const EXCLUDED_CHILD_TOOLS: [&str; 11] = [
     "agent",
     "agent_wait",
     "agent_status",
@@ -75,6 +75,8 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 9] = [
     "forget",
     "memory_search",
     "remind",
+    "remind_status",
+    "remind_cancel",
 ];
 
 /// Appended to a child's system prompt under `## Sub-agent role` when it has

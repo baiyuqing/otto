@@ -207,10 +207,10 @@ export interface ParsedFrames {
 }
 
 export type Item =
-  | { kind: 'user'; text: string }
-  | { kind: 'image'; data: string; mime_type: string }
-  | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; id: string; name: string; args: string; result?: string; isError?: boolean }
+  | { kind: 'user'; text: string; created_at?: string }
+  | { kind: 'image'; data: string; mime_type: string; created_at?: string }
+  | { kind: 'assistant'; text: string; created_at?: string }
+  | { kind: 'tool'; id: string; name: string; args: string; result?: string; isError?: boolean; created_at?: string }
   | { kind: 'notice'; text: string }
   | { kind: 'error'; text: string }
 "#;
@@ -309,7 +309,8 @@ mod tests {
         assert_eq!(
             items,
             vec![Item::Assistant {
-                text: "hello".into()
+                text: "hello".into(),
+                created_at: String::new(),
             }]
         );
     }
@@ -329,6 +330,7 @@ mod tests {
                 args: "{\n  \"command\": \"ls\"\n}".into(),
                 result: Some("a.go".into()),
                 is_error: Some(false),
+                created_at: String::new(),
             }]
         );
     }

@@ -48,6 +48,39 @@ describe('TranscriptView empty state', () => {
   })
 })
 
+describe('TranscriptView item metadata', () => {
+  it('renders request and response timestamps', () => {
+    const items: Item[] = [
+      { kind: 'user', text: 'hi', created_at: '2026-09-20T08:15:30Z' },
+      { kind: 'assistant', text: 'hello', created_at: '2026-09-20T08:15:45Z' },
+    ]
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items }))
+
+    expect(container.querySelectorAll('time')).toHaveLength(2)
+    expect(container.textContent).toContain('08:15:30')
+    expect(container.textContent).toContain('08:15:45')
+  })
+
+  it('summarizes structured tool arguments instead of only showing the tool name', () => {
+    const items: Item[] = [
+      {
+        kind: 'tool',
+        id: 'call-1',
+        name: 'edit',
+        args: JSON.stringify({ path: 'src/app.rs', old_text: 'let old = true;', new_text: 'let new = true;' }),
+        result: 'ok',
+        isError: false,
+      },
+    ]
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items }))
+
+    const summary = container.querySelector('summary')
+    expect(summary?.textContent).toContain('edit src/app.rs')
+    expect(summary?.textContent).toContain('- let old = true;')
+    expect(summary?.textContent).toContain('+ let new = true;')
+  })
+})
+
 describe('TranscriptView images', () => {
   it('renders a sent image from its stored data', () => {
     const image: Item = { kind: 'image', data: 'iVBORw0KGgo=', mime_type: 'image/png' }

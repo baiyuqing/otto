@@ -348,8 +348,9 @@ export function App() {
       setTurnId(s.turn?.id ?? null)
       setItems((prev) => {
         const next: Item[] = [...prev]
-        if (text) next.push({ kind: 'user', text })
-        if (image) next.push({ kind: 'image', data: image.data, mime_type: image.mime_type })
+        const created_at = new Date().toISOString()
+        if (text) next.push({ kind: 'user', text, created_at })
+        if (image) next.push({ kind: 'image', data: image.data, mime_type: image.mime_type, created_at })
         return next
       })
       await consume(session.id, res)

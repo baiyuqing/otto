@@ -20,8 +20,8 @@
 //! rather than assumed, and no `vt100`/`vte`/terminal-emulator crate is in
 //! `Cargo.lock`. [`Screen`] below implements exactly the vocabulary that
 //! output can contain: `CSI r;cH`/`f` (cursor position), `CSI ?25h`/`l`
-//! (cursor visibility, no grid effect), `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
-//! (mouse capture, no grid effect), `CSI ?1049h`/`l` (alt screen; enter
+//! (cursor visibility, no grid effect), optional `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
+//! (mouse capture in transcript-browsing mode only, no grid effect), `CSI ?1049h`/`l` (alt screen; enter
 //! resets the grid), `CSI ...m` (SGR, content-inert), CR/LF, and raw UTF-8 text. Any
 //! other control sequence is a bug (either in this scraper's assumptions or
 //! in the TUI emitting something unexpected) and fails the test loudly
@@ -176,8 +176,8 @@ impl Screen {
                 self.cursor_visible = false;
                 Ok(())
             }
-            // Mouse capture modes are content-inert; raw output assertions
-            // verify that the TUI enables and restores them.
+            // Mouse capture modes are content-inert when transcript-browsing
+            // mode enables them; startup stays in native-selection mode.
             (true, b'h') | (true, b'l')
                 if matches!(
                     numbers.as_slice(),
@@ -285,14 +285,16 @@ fn wait_for_screen_text_gone(shared: &Shared, needle: &str) {
     );
 }
 
+fn raw_contains(shared: &Shared, needle: &[u8]) -> bool {
+    let raw = shared.raw.lock().unwrap();
+    raw.windows(needle.len()).any(|window| window == needle)
+}
+
 fn wait_for_raw_bytes(shared: &Shared, needle: &[u8]) {
     wait_until(
         shared,
         &format!("raw bytes {:?}", String::from_utf8_lossy(needle)),
-        |shared| {
-            let raw = shared.raw.lock().unwrap();
-            raw.windows(needle.len()).any(|window| window == needle)
-        },
+        |shared| raw_contains(shared, needle),
     );
 }
 
@@ -314,14 +316,10 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         .prefix("otto-pty-workspace-")
         .tempdir()
         .expect("workspace");
-    // The last path component is what `footer_workspace` shows, so it
-    // doubles as this test's "initial render is up" synchronization marker.
-    let workspace_marker = workspace
-        .path()
-        .file_name()
-        .expect("workspace has a name")
-        .to_string_lossy()
-        .into_owned();
+    // The composer border is the first stable visible marker that a full TUI
+    // frame reached the PTY. The footer is allowed to omit or truncate fields,
+    // so don't synchronize on workspace text here.
+    const STARTUP_MARKER: &str = "└";
 
     let served = Arc::new(AtomicUsize::new(0));
     const PROMPT: &str = "send the scripted prompt";
@@ -408,10 +406,13 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
         }
     });
 
-    eprintln!("[tui_pty] waiting for workspace marker {workspace_marker:?}");
-    wait_for_screen_text(&shared, &workspace_marker);
-    wait_for_raw_bytes(&shared, b"\x1b[?1000h");
-    eprintln!("[tui_pty] saw workspace marker; typing prompt");
+    eprintln!("[tui_pty] waiting for startup marker {STARTUP_MARKER:?}");
+    wait_for_screen_text(&shared, STARTUP_MARKER);
+    assert!(
+        !raw_contains(&shared, b"\x1b[?1000h"),
+        "the default TUI must leave mouse drags to the terminal for native text selection"
+    );
+    eprintln!("[tui_pty] saw startup marker; typing prompt");
 
     master
         .write_all(format!("{PROMPT}\r").as_bytes())
@@ -445,8 +446,10 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     assert!(status.success(), "otto --ui tui exited with {status:?}");
 
     // A clean terminal restore leaves the alternate screen, matching Go's
-    // `waitForSubsequence(t, collector, 0, altScreenExitSeq)`.
+    // `waitForSubsequence(t, collector, 0, altScreenExitSeq)`. Mouse capture
+    // is not enabled in the default native-selection mode, so there is no
+    // startup capture sequence that would force users to hold Shift to select.
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
-    wait_for_raw_bytes(&shared, b"\x1b[?1000l");
+    assert!(!raw_contains(&shared, b"\x1b[?1000h"));
     eprintln!("[tui_pty] saw alt-screen exit sequence");
 }

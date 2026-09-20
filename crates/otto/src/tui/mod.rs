@@ -278,6 +278,18 @@ async fn run_app<B: Backend>(
                 pending_image = None;
                 switch_profile(&mut app, controller, &profile).await;
             }
+            Some(Action::SwitchProfileThinking {
+                profile,
+                thinking,
+                save,
+            }) => {
+                pending_image = None;
+                switch_profile(&mut app, controller, &profile).await;
+                apply_thinking(&mut app, controller, &thinking, save).await;
+            }
+            Some(Action::SetThinking { thinking, save }) => {
+                apply_thinking(&mut app, controller, &thinking, save).await;
+            }
             Some(Action::Resume(path)) => {
                 pending_image = None;
                 match controller.resume_session(&path).await {
@@ -698,6 +710,43 @@ async fn login_dispatch(
             }
         }
         Err(error) => app.push_system(format!("/login: {error}")),
+    }
+}
+
+async fn apply_thinking(app: &mut App, controller: &Controller, thinking: &str, save: bool) {
+    if thinking.is_empty() {
+        let info = controller.info();
+        app.push_system(format!(
+            "Thinking: {}",
+            if info.thinking.is_empty() {
+                "default"
+            } else {
+                &info.thinking
+            }
+        ));
+        return;
+    }
+    match controller.set_thinking(thinking).await {
+        Ok(()) => {
+            app.refresh_info(controller);
+            let info = controller.info();
+            let display = if info.thinking.is_empty() {
+                "default"
+            } else {
+                &info.thinking
+            };
+            if save {
+                match controller.save_profile_thinking(thinking) {
+                    Ok(()) => app.push_system(format!("Thinking: {display}. Saved to profile.")),
+                    Err(message) => app.push_system(format!(
+                        "Thinking: {display}, but the profile was not saved: {message}"
+                    )),
+                }
+            } else {
+                app.push_system(format!("Thinking: {display}"));
+            }
+        }
+        Err(message) => app.push_system(format!("/thinking: {message}")),
     }
 }
 

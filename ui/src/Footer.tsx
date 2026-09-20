@@ -17,7 +17,7 @@ export function Footer(props: {
     <div className="footer">
       {info && (
         <span>
-          {info.provider} · {info.model} · {info.sandbox}
+          {info.provider} · {info.model} · thinking {info.thinking || 'default'} · {info.sandbox}
         </span>
       )}
       {session && (

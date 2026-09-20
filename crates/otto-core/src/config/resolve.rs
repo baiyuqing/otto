@@ -105,6 +105,7 @@ pub fn resolve(
 
     let mut provider = String::new();
     let mut model = String::new();
+    let mut thinking = String::new();
     let mut base_url = String::new();
     let mut api_key_env = String::new();
     let mut profile_config = Profile::default();
@@ -118,6 +119,7 @@ pub fn resolve(
         profile_config = profile.clone();
         provider = profile.provider.clone();
         model = profile.model.clone();
+        thinking = profile.thinking.clone();
         base_url = profile.base_url.clone();
         api_key_env = profile.api_key_env.clone();
     }
@@ -145,6 +147,9 @@ pub fn resolve(
     if !overrides.model.is_empty() {
         model = overrides.model.clone();
     }
+    if !overrides.thinking.is_empty() {
+        thinking = overrides.thinking.clone();
+    }
     if !overrides.base_url.is_empty() {
         base_url = overrides.base_url.clone();
     }
@@ -160,6 +165,7 @@ pub fn resolve(
     if model.is_empty() {
         return Err(ConfigError::new("missing model"));
     }
+    validate_thinking(&thinking)?;
 
     if provider == super::PROVIDER_OPENAI_COMPATIBLE {
         if base_url.is_empty() {
@@ -208,13 +214,22 @@ pub fn resolve(
         provider,
         base_url,
         model,
-        thinking: overrides.thinking.clone(),
+        thinking,
         api_key,
         api_key_env,
         shell_timeout,
         max_output_bytes,
         compaction,
     })
+}
+
+fn validate_thinking(thinking: &str) -> Result<(), ConfigError> {
+    if matches!(thinking, "" | "low" | "medium" | "high" | "xhigh" | "max") {
+        return Ok(());
+    }
+    Err(ConfigError::new(
+        "invalid thinking: must be one of low, medium, high, xhigh, max",
+    ))
 }
 
 fn resolve_compaction(
@@ -544,6 +559,43 @@ mod tests {
                 ),
             )],
         );
+        let runtime = resolve(
+            &file,
+            &env_map(&[("PROFILE_KEY", "secret")]),
+            &SessionDefaults::default(),
+            &Overrides {
+                profile: "local".into(),
+                thinking: "max".into(),
+                ..Default::default()
+            },
+        )
+        .expect("resolve");
+        assert_eq!(runtime.thinking, "max");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn profile_thinking_is_used_and_cli_override_wins() {
+        let mut local = profile(
+            "openai-compatible",
+            "profile-model",
+            "https://example.com/v1",
+            "PROFILE_KEY",
+        );
+        local.thinking = "low".into();
+        let file = file_with_profiles("", &[("local", local)]);
+        let runtime = resolve(
+            &file,
+            &env_map(&[("PROFILE_KEY", "secret")]),
+            &SessionDefaults::default(),
+            &Overrides {
+                profile: "local".into(),
+                ..Default::default()
+            },
+        )
+        .expect("resolve");
+        assert_eq!(runtime.thinking, "low");
+
         let runtime = resolve(
             &file,
             &env_map(&[("PROFILE_KEY", "secret")]),

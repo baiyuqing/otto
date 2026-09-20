@@ -143,6 +143,8 @@ pub struct Profile {
     #[serde(default)]
     pub model: String,
     #[serde(default)]
+    pub thinking: String,
+    #[serde(default)]
     pub api_key_env: String,
     pub context_window: Option<i64>,
     pub compaction_window: Option<i64>,
@@ -234,6 +236,7 @@ mod tests {
 [profiles.local]
 provider = "openai-compatible"
 model = "test-model"
+thinking = "high"
 base_url = "http://localhost:8080/v1"
 api_key_env = "TEST_KEY"
 "#,
@@ -243,6 +246,7 @@ api_key_env = "TEST_KEY"
         let profile = &file.profiles["local"];
         assert_eq!(profile.provider, "openai-compatible");
         assert_eq!(profile.model, "test-model");
+        assert_eq!(profile.thinking, "high");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

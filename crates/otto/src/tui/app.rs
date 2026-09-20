@@ -59,6 +59,7 @@ pub(crate) enum PickerKind {
     Resume,
     Archive,
     Profile,
+    Effort,
 }
 
 impl PickerKind {
@@ -67,6 +68,7 @@ impl PickerKind {
             Self::Resume => "Resume session (enter to select, esc to cancel)",
             Self::Archive => "Archive session (enter to select, esc to cancel)",
             Self::Profile => "Switch profile (enter to select, esc to cancel)",
+            Self::Effort => "Reasoning effort (enter to use, s to save, esc to cancel)",
         }
     }
 }
@@ -110,6 +112,15 @@ pub(crate) enum Action {
     Compact(String),
     NewSession,
     SwitchProfile(String),
+    SwitchProfileThinking {
+        profile: String,
+        thinking: String,
+        save: bool,
+    },
+    SetThinking {
+        thinking: String,
+        save: bool,
+    },
     Resume(String),
     Archive(String),
     SandboxReload,
@@ -438,14 +449,35 @@ impl App {
                 KeyCode::Down => picker.move_selection(1),
                 KeyCode::PageUp => picker.move_selection(-10),
                 KeyCode::PageDown => picker.move_selection(10),
+                KeyCode::Char('s') if picker.kind == PickerKind::Effort => {
+                    let picker = self.picker.take()?;
+                    let row = picker.rows.into_iter().nth(picker.selected)?;
+                    let (profile, thinking) = split_effort_value(&row.value);
+                    return Some(Action::SwitchProfileThinking {
+                        profile,
+                        thinking,
+                        save: true,
+                    });
+                }
                 KeyCode::Enter => {
                     let picker = self.picker.take()?;
                     let row = picker.rows.into_iter().nth(picker.selected)?;
-                    return Some(match picker.kind {
-                        PickerKind::Resume => Action::Resume(row.value),
-                        PickerKind::Archive => Action::Archive(row.value),
-                        PickerKind::Profile => Action::SwitchProfile(row.value),
-                    });
+                    return match picker.kind {
+                        PickerKind::Resume => Some(Action::Resume(row.value)),
+                        PickerKind::Archive => Some(Action::Archive(row.value)),
+                        PickerKind::Profile => {
+                            self.picker = Some(effort_picker(&row.value, controller));
+                            None
+                        }
+                        PickerKind::Effort => {
+                            let (profile, thinking) = split_effort_value(&row.value);
+                            Some(Action::SwitchProfileThinking {
+                                profile,
+                                thinking,
+                                save: false,
+                            })
+                        }
+                    };
                 }
                 _ => {}
             }
@@ -710,7 +742,7 @@ impl App {
                     return None;
                 }
                 if args.is_empty() {
-                    let profiles = controller.profiles();
+                    let profiles = controller.profile_summaries();
                     if profiles.is_empty() {
                         self.push_system(model_report(controller));
                         return None;
@@ -718,8 +750,14 @@ impl App {
                     let rows = profiles
                         .into_iter()
                         .map(|profile| PickerRow {
-                            label: profile.clone(),
-                            value: profile,
+                            label: format!(
+                                "{}  {}/{}  think {}",
+                                profile.name,
+                                profile.provider,
+                                profile.model,
+                                display_thinking(&profile.thinking)
+                            ),
+                            value: profile.name,
                         })
                         .collect();
                     self.picker = Some(Picker::new(PickerKind::Profile, rows));
@@ -728,6 +766,7 @@ impl App {
                     Some(Action::SwitchProfile(args))
                 }
             }
+            SlashCommandKind::Thinking => Some(parse_thinking_action(args, false)),
             SlashCommandKind::Resume => {
                 self.open_session_picker(PickerKind::Resume, controller);
                 None
@@ -975,6 +1014,7 @@ fn picker_command_name(kind: PickerKind) -> &'static str {
         PickerKind::Resume => "resume",
         PickerKind::Archive => "archive",
         PickerKind::Profile => "model",
+        PickerKind::Effort => "model",
     }
 }
 
@@ -991,15 +1031,72 @@ fn session_row(session: &SessionInfo) -> PickerRow {
     }
 }
 
+fn effort_picker(profile: &str, controller: &Controller) -> Picker {
+    let target = controller.profile_effective_thinking(profile);
+    let current = if target.is_empty() { "unset" } else { &target };
+    let rows: Vec<PickerRow> = ["unset", "low", "medium", "high", "xhigh", "max"]
+        .into_iter()
+        .map(|thinking| PickerRow {
+            label: format!(
+                "{}{}",
+                if thinking == current { "* " } else { "  " },
+                display_thinking_choice(thinking)
+            ),
+            value: format!("{profile}\t{thinking}"),
+        })
+        .collect();
+    let selected = rows
+        .iter()
+        .position(|row| row.value.ends_with(&format!("\t{current}")))
+        .unwrap_or(0);
+    Picker {
+        kind: PickerKind::Effort,
+        rows,
+        selected,
+    }
+}
+
+fn split_effort_value(value: &str) -> (String, String) {
+    let Some((profile, thinking)) = value.split_once('\t') else {
+        return (String::new(), value.to_string());
+    };
+    (profile.to_string(), thinking.to_string())
+}
+
+fn display_thinking_choice(thinking: &str) -> &str {
+    if thinking == "unset" {
+        "default"
+    } else {
+        thinking
+    }
+}
+
+fn parse_thinking_action(args: String, save_default: bool) -> Action {
+    let mut save = save_default;
+    let mut level = "";
+    for part in args.split_whitespace() {
+        if part == "--save" {
+            save = true;
+        } else {
+            level = part;
+        }
+    }
+    Action::SetThinking {
+        thinking: level.to_string(),
+        save,
+    }
+}
+
 /// Port of `internal/repl`'s `/session` output.
 fn session_report(controller: &Controller) -> String {
     let info = controller.info();
     let mut text = format!(
-        "ID: {}\nPath: {}\nProvider: {}\nModel: {}\nSandbox: {}",
+        "ID: {}\nPath: {}\nProvider: {}\nModel: {}\nThinking: {}\nSandbox: {}",
         info.session_id,
         info.session_path,
         info.provider,
         info.model,
+        display_thinking(&info.thinking),
         info.sandbox.summary()
     );
     if !info.session_name.is_empty() {
@@ -1016,11 +1113,22 @@ fn session_report(controller: &Controller) -> String {
 fn model_report(controller: &Controller) -> String {
     let info = controller.info();
     let mut text = format!(
-        "Current: profile {} (provider {}, model {})",
-        info.profile, info.provider, info.model
+        "Current: profile {} (provider {}, model {}, thinking {})",
+        info.profile,
+        info.provider,
+        info.model,
+        display_thinking(&info.thinking)
     );
     text.push_str("\nNo profiles configured.");
     text
+}
+
+fn display_thinking(thinking: &str) -> &str {
+    if thinking.is_empty() {
+        "default"
+    } else {
+        thinking
+    }
 }
 
 /// Port of `internal/repl`'s `/compact`'s `compactionLine`. `pub(super)`

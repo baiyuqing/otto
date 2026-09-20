@@ -16,11 +16,10 @@
 use std::time::Duration;
 
 use ratatui::Frame;
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect, Size};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 use super::app::App;
@@ -32,25 +31,14 @@ use super::layout::{
 };
 use super::markdown;
 
-/// Draws one frame of the live region: the rows at the bottom of the screen
-/// Otto still owns. Port of `Model.View`, minus the transcript the terminal
-/// has taken over (see [`super::inline`]).
-///
-/// `screen` is the whole terminal; `frame.area()` is only the live region cut
-/// out of its bottom, so the minimum-size guard reads the terminal rather
-/// than the slice.
-pub(crate) fn draw(frame: &mut Frame, app: &App, screen: Size) {
+/// Draws one frame. Port of `Model.View`.
+pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    if too_small(screen) {
+    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         let message = format!(
             "Terminal too small: resize to at least {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}."
         );
-        frame.render_widget(
-            Paragraph::new(message)
-                .wrap(Wrap { trim: false })
-                .alignment(Alignment::Center),
-            area,
-        );
+        frame.render_widget(Paragraph::new(message).alignment(Alignment::Center), area);
         return;
     }
 
@@ -71,89 +59,16 @@ pub(crate) fn draw(frame: &mut Frame, app: &App, screen: Size) {
         ])
         .split(content_area);
 
-    // An overlay takes the live region's body rather than floating over the
-    // whole screen: the rows above the region belong to the terminal now, and
-    // painting over them would destroy scrollback Otto cannot repaint.
-    if app.show_help {
-        draw_help(frame, chunks[0]);
-    } else if let Some(picker) = &app.picker {
-        draw_picker(frame, chunks[0], picker);
-    } else {
-        draw_transcript(frame, app, chunks[0]);
-    }
+    draw_transcript(frame, app, chunks[0]);
     draw_footer(frame, app, chunks[1]);
     draw_suggestions(frame, app, &suggestions, chunks[2]);
     draw_composer(frame, app, chunks[3]);
-}
 
-fn too_small(screen: Size) -> bool {
-    screen.width < MIN_TERMINAL_WIDTH || screen.height < MIN_TERMINAL_HEIGHT
-}
-
-/// The rows the live region needs on a `screen`-sized terminal: its body (the
-/// live entries, or an open overlay) plus the footer, the suggestions, and the
-/// composer, capped at the screen. [`super::inline::LiveRegion`] sizes itself
-/// from this every frame, so the region is only ever as tall as what Otto
-/// still has to redraw.
-pub(super) fn live_height(app: &App, screen: Size) -> u16 {
-    if too_small(screen) {
-        return screen.height.clamp(1, 2);
-    }
-    let width = side_margin(Rect::new(0, 0, screen.width, screen.height)).width;
-    let body = match overlay_height(app) {
-        Some(height) => height,
-        None => live_paragraph(app).line_count(width) as u16,
-    };
-    body.saturating_add(1)
-        .saturating_add(app.suggestions().len() as u16)
-        .saturating_add(composer_height(app, width))
-        .clamp(1, screen.height)
-}
-
-/// The rows an open overlay asks for: its rows plus the block's borders.
-fn overlay_height(app: &App) -> Option<u16> {
     if app.show_help {
-        return Some(SLASH_COMMANDS.len() as u16 + 2);
+        draw_help(frame, area);
+    } else if let Some(picker) = &app.picker {
+        draw_picker(frame, area, picker);
     }
-    app.picker
-        .as_ref()
-        .map(|picker| picker.rows.len() as u16 + 2)
-}
-
-/// The entries leaving the live region, wrapped and styled exactly as the
-/// live region would have drawn them, ready for
-/// [`super::inline::LiveRegion`] to write into the terminal's scrollback.
-/// `None` when there is nothing to write.
-pub(super) fn committed_buffer(entries: &[Entry], details: bool, width: u16) -> Option<Buffer> {
-    if entries.is_empty() {
-        return None;
-    }
-    let inner = side_margin(Rect::new(0, 0, width, 1));
-    if inner.width == 0 {
-        return None;
-    }
-    let paragraph =
-        Paragraph::new(Text::from(committed_lines(entries, details))).wrap(Wrap { trim: false });
-    let height = u16::try_from(paragraph.line_count(inner.width)).unwrap_or(u16::MAX);
-    if height == 0 {
-        return None;
-    }
-    let mut buffer = Buffer::empty(Rect::new(0, 0, width, height));
-    paragraph.render(Rect::new(inner.x, 0, inner.width, height), &mut buffer);
-    Some(buffer)
-}
-
-/// Committed entries, each followed by the blank line that separates it from
-/// whatever is printed next. [`transcript_lines`] puts the separator *between*
-/// entries instead, which cannot work once the entries are written out in
-/// batches: the entry after the batch is not there yet.
-fn committed_lines(entries: &[Entry], details: bool) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for entry in entries {
-        lines.extend(entry_lines(entry, details));
-        lines.push(Line::default());
-    }
-    lines
 }
 
 fn side_margin(area: Rect) -> Rect {
@@ -179,25 +94,23 @@ fn composer_height(app: &App, width: u16) -> u16 {
 }
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let paragraph = live_paragraph(app);
-    // The region is normally sized to fit this exactly; it is taller only when
-    // the content outgrew the screen, and then the tail is the part worth
-    // showing.
-    let scroll = (paragraph.line_count(area.width) as u16).saturating_sub(area.height);
-    frame.render_widget(paragraph.scroll((scroll, 0)), area);
-}
-
-/// What the live region still has to redraw: the entries Otto has not written
-/// into scrollback yet, plus the thinking line.
-fn live_paragraph(app: &App) -> Paragraph<'static> {
-    let mut lines = transcript_lines(app.live_entries(), app.show_details);
+    let mut lines = transcript_lines(&app.entries, app.show_details);
     if let Some(elapsed) = app.thinking() {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
         lines.push(thinking_line(elapsed));
     }
-    Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false })
+
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    let total_lines = paragraph.line_count(area.width) as u16;
+    let bottom = total_lines.saturating_sub(area.height);
+    // The scroll keys need the bottom this layout produced to turn
+    // "following" into an absolute offset; nothing outside the renderer
+    // knows how the entries wrap at this width.
+    app.max_scroll.set(bottom);
+    let scroll = app.scroll.map_or(bottom, |top| top.min(bottom));
+    frame.render_widget(paragraph.scroll((scroll, 0)), area);
 }
 
 /// The whole transcript, one blank line between entries so a prompt, a
@@ -515,6 +428,7 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
+    let popup = centered_rect(70, 70, area);
     let items: Vec<ListItem> = SLASH_COMMANDS
         .iter()
         .map(|command| ListItem::new(format!("{:<12} {}", command.name, command.description)))
@@ -524,10 +438,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             .borders(Borders::ALL)
             .title("Help (Esc to close)"),
     );
-    frame.render_widget(list, area);
+    frame.render_widget(list, popup);
 }
 
 fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
+    let popup = centered_rect(80, 70, area);
     let items: Vec<ListItem> = picker
         .rows
         .iter()
@@ -544,8 +459,31 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(picker.selected));
-    frame.render_widget(Clear, area);
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_widget(Clear, popup);
+    frame.render_stateful_widget(list, popup, &mut state);
+}
+
+/// A centered `percent_x` by `percent_y` rectangle within `area`. Standard
+/// ratatui popup-centering helper (from the project's own examples), not a
+/// Go port: `internal/tui`'s overlays are Bubble Tea sub-models with their
+/// own full-screen layout, which ratatui has no equivalent for.
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
 
 /// Port of `internal/tui/responsive_test.go` and `clarity_test.go`'s
@@ -601,6 +539,8 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
 ///   view with no manual clamping logic to port.
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyCode;
+    use otto_core::agent::Event;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
 
@@ -616,15 +556,10 @@ mod tests {
         (workspace, sessions, app)
     }
 
-    /// One frame on a terminal that is all live region: `height` rows of
-    /// [`draw`] with nothing committed, which is what the region looks like
-    /// before anything has been written to scrollback.
     fn rendered(app: &App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw(frame, app, Size::new(width, height)))
-            .expect("draw");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
         format!("{}", terminal.backend())
     }
 
@@ -807,12 +742,15 @@ mod tests {
         assert_eq!(lines[1].style.fg, Some(Color::Red));
     }
 
-    /// The overlay owns the live region's body, so the transcript it
-    /// replaced is not on screen behind it.
     #[tokio::test]
-    async fn a_picker_replaces_the_transcript_in_the_live_region() {
+    async fn picker_clears_the_transcript_beneath_it() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.push_system("transcript-marker");
+        app.push_system(
+            (0..40)
+                .map(|_| "X".repeat(100))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         app.picker = Some(Picker {
             kind: PickerKind::Resume,
             rows: vec![PickerRow {
@@ -822,10 +760,22 @@ mod tests {
             selected: 0,
         });
 
-        let content = rendered(&app, 100, 30);
+        let width = 100;
+        let height = 30;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw");
+        let popup = centered_rect(80, 70, Rect::new(0, 0, width, height));
 
-        assert!(content.contains("session"), "{content}");
-        assert!(!content.contains("transcript-marker"), "{content}");
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((popup.x + 1, popup.y + 2))
+                .expect("popup cell")
+                .symbol(),
+            " "
+        );
     }
 
     /// Port of the guard half of Go's `calculateLayout`/`smallTerminalView`:
@@ -865,9 +815,7 @@ mod tests {
         let height = 20;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw(frame, &app, Size::new(width, height)))
-            .expect("draw");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw");
         let buffer = terminal.backend().buffer();
 
         for y in 0..height {
@@ -915,7 +863,7 @@ mod tests {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).expect("terminal");
             terminal
-                .draw(|frame| draw(frame, &app, Size::new(width, height)))
+                .draw(|frame| draw(frame, &app))
                 .expect("draw at extreme size");
         }
     }
@@ -936,15 +884,12 @@ mod tests {
         let backend = TestBackend::new(MIN_TERMINAL_WIDTH, 20);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
-            .draw(|frame| draw(frame, &app, Size::new(MIN_TERMINAL_WIDTH, 20)))
+            .draw(|frame| draw(frame, &app))
             .expect("draw with wide/unbroken content");
     }
 
-    /// The live region is sized to its content, so the frame follows the
-    /// newest output; when the content outgrows the screen the region is
-    /// clamped and shows the tail.
     #[tokio::test]
-    async fn the_live_region_follows_the_newest_output() {
+    async fn manual_scroll_moves_up_from_the_bottom() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
         app.push_system(
             (0..20)
@@ -953,55 +898,40 @@ mod tests {
                 .join("\n\n"),
         );
 
-        let content = rendered(&app, MIN_TERMINAL_WIDTH, 12);
-
-        assert!(content.contains("line 19"), "{content}");
-        assert!(!content.contains("line 00"), "{content}");
+        assert!(rendered(&app, MIN_TERMINAL_WIDTH, 12).contains("line 19"));
+        app.scroll = Some(3);
+        let scrolled = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        assert!(!scrolled.contains("line 19"), "{scrolled}");
     }
 
-    /// [`live_height`] is what [`super::inline::LiveRegion`] resizes to, so
-    /// it has to agree with what [`draw`] actually lays out: the body plus
-    /// the footer, the suggestions, and the composer, never past the screen.
+    /// A manual scroll is an absolute top offset, so streamed output
+    /// appended below it leaves the rows being read exactly where they are
+    /// instead of pushing them off the top.
     #[tokio::test]
-    async fn the_live_region_height_covers_its_content_and_stops_at_the_screen() {
+    async fn a_scrolled_view_stays_put_while_output_streams_in() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
-        let screen = Size::new(80, 24);
-        let empty = live_height(&app, screen);
-
-        app.push_system("one");
-        let filled = live_height(&app, screen);
-
-        app.push_system("x\n\n".repeat(200));
-        let overflowing = live_height(&app, screen);
-
-        assert_eq!(filled, empty + 1, "one more row of transcript");
-        assert_eq!(overflowing, screen.height, "clamped to the screen");
-    }
-
-    /// Committed entries are wrapped and styled exactly as the live region
-    /// drew them, inside the same side margins, and each is followed by the
-    /// blank line that separates it from what is printed next.
-    #[tokio::test]
-    async fn committed_entries_wrap_inside_the_side_margins() {
-        let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.push_system("x".repeat(50));
-
-        let buffer = committed_buffer(&app.entries, false, 40).expect("committed rows");
-
-        assert_eq!(
-            buffer.area,
-            Rect::new(0, 0, 40, 3),
-            "two wrapped rows + blank"
+        app.push_system(
+            (0..20)
+                .map(|line| format!("line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
-        assert_eq!(buffer.cell((0, 0)).expect("left margin").symbol(), " ");
-        assert_eq!(buffer.cell((39, 0)).expect("right margin").symbol(), " ");
-        assert_eq!(buffer.cell((1, 0)).expect("first cell").symbol(), "x");
-        assert_eq!(buffer.cell((1, 2)).expect("separator").symbol(), " ");
-    }
 
-    #[test]
-    fn nothing_to_commit_produces_no_rows() {
-        assert!(committed_buffer(&[], false, 80).is_none());
+        // Lays out `max_scroll`, which the first scroll key reads.
+        let _ = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        app.handle_scroll_key(&KeyCode::PageUp.into());
+        let before = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        assert!(before.contains("line 05"), "{before}");
+
+        for index in 0..10 {
+            app.apply_event(Event::TextDelta {
+                text: format!("streamed {index}\n"),
+            });
+        }
+
+        let after = rendered(&app, MIN_TERMINAL_WIDTH, 12);
+        assert!(after.contains("line 05"), "{after}");
+        assert!(!after.contains("streamed 9"), "{after}");
     }
 
     /// Port of the view half of Go's `TestCommandSuggestionsMatchPrefix` in
@@ -1025,9 +955,7 @@ mod tests {
     fn highlighted_rows(app: &App, width: u16, height: u16) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw(frame, app, Size::new(width, height)))
-            .expect("draw");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
         let buffer = terminal.backend().buffer();
         (0..height)
             .filter_map(|y| {
@@ -1104,9 +1032,7 @@ mod tests {
     fn cursor(app: &App, width: u16, height: u16) -> (u16, u16) {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        terminal
-            .draw(|frame| draw(frame, app, Size::new(width, height)))
-            .expect("draw");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
         let position = terminal
             .backend_mut()
             .get_cursor_position()

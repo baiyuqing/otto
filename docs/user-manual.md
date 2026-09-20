@@ -448,6 +448,8 @@ Shared commands:
 - `/session` shows session details (ID, path, provider, profile, model, and
   thinking effort).
 - `/new` closes the current session and starts a fresh one in the same process.
+- `/clear` is an alias for `/new`: it starts a fresh session, so the transcript,
+  context counter, and per-session usage reset together.
 - `/rename <name>` renames the current session. The new name is written as
   append-only session metadata and is shown in session lists. It is rejected
   while a turn is in flight.
@@ -859,7 +861,7 @@ the transcript, and a composer:
 - Typing `/` in the composer shows local suggestions for supported Web slash
   commands; Tab or click completes the highlighted command. Web commands backed
   by existing server APIs run locally instead of starting a provider turn:
-  `/help`, `/session`, `/new`, `/resume`, `/model`, `/rename <name>`,
+  `/help`, `/session`, `/new`, `/clear`, `/resume`, `/model`, `/rename <name>`,
   `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/tasks`,
   `/task <id|name>`, `/task cancel <id|name>`, `/mcp`, and `/exit`. `/resume`
   asks you to choose a session from the picker; `/exit` asks you to close the

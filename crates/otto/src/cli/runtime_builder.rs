@@ -56,6 +56,7 @@ pub struct RuntimeInfo {
     pub provider: String,
     pub profile: String,
     pub model: String,
+    pub thinking: String,
     pub context_window: i64,
     pub sandbox: SandboxInfo,
 }
@@ -686,6 +687,7 @@ impl Builder {
             provider: runtime.provider.clone(),
             profile: runtime.profile.clone(),
             model: runtime.model.clone(),
+            thinking: runtime.thinking.clone(),
             context_window: runtime.compaction.context_window,
             sandbox: self.effective_sandbox_info(),
         };
@@ -693,6 +695,7 @@ impl Builder {
             info.provider = String::new();
             info.profile = String::new();
             info.model = String::new();
+            info.thinking = String::new();
             info.context_window = 0;
         }
         info

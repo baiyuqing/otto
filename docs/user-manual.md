@@ -250,6 +250,7 @@ enabled = false
 provider = "openai-compatible"
 base_url = "https://example.invalid/v1"
 model = "gpt-5.6"
+thinking = "high"
 api_key_env = "EXAMPLE_API_KEY"
 context_window = 1050000
 compaction_window = 272000
@@ -301,8 +302,10 @@ Key points:
   fail config load. A missing binary logs an error and disables inbound;
   serve keeps running. The TUI and REPL do not spawn this consumer.
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
-  `api_key_env`. Optional `context_window` and `compaction_window` size
-  proactive compaction for private or unknown model IDs.
+  `api_key_env`. Optional `thinking` sets that profile's default reasoning
+  effort (`low`, `medium`, `high`, `xhigh`, or `max`); omit it to let the
+  provider/model choose its default. Optional `context_window` and
+  `compaction_window` size proactive compaction for private or unknown model IDs.
 - A `provider = "chatgpt"` profile needs only `model`; it ignores `base_url`
   and `api_key_env` and authorizes with the credentials from `otto login`. See
   [ChatGPT subscription](#chatgpt-subscription).
@@ -331,9 +334,12 @@ Startup resolution is field-specific:
   otherwise `[sandbox].driver` overrides the built-in `auto`. `network`,
   `read_paths`, and `allow_env` come from `[sandbox]` only. The effective
   sandbox is process-wide and does not change on startup resume or `/new`.
-- **Thinking effort:** `--thinking` is sent as `reasoning_effort` on
-  OpenAI-compatible requests. It has no environment variable or TOML key and is
-  omitted when unset. It stays in effect across `/resume` and `/new`.
+- **Thinking effort:** `--thinking` overrides `[profiles.NAME].thinking`; when
+  neither is set, Otto omits the provider reasoning-effort field. In the TUI,
+  `/model` opens a profile picker followed by an effort picker; `Enter` applies
+  the selected effort for this process and `s` also saves it to the profile.
+  `/thinking LEVEL` changes the current session's effort for later requests, and
+  `/thinking LEVEL --save` writes it back to the current profile.
 - **Agent server listener:** `--listen` > `--socket` > `[server].listen` >
   `[server].socket` > the built-in default `~/.otto/otto.sock`. A `listen`
   value at any level selects TCP and no socket is created. There is no
@@ -405,8 +411,8 @@ OTTO_UI=repl otto
   image.
 - Mouse-wheel transcript scrolling is enabled. Hold `Shift` while dragging to
   select visible terminal text.
-- The footer shows workspace/profile/model, token totals, and session ID when
-  space allows.
+- The footer shows workspace/profile/model, reasoning effort, token totals, and
+  session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys
@@ -439,11 +445,19 @@ an exact command. In the REPL, type the command and press `Enter`.
 Shared commands:
 
 - `/help` shows command help.
-- `/session` shows session details (ID, path, provider, profile, model).
+- `/session` shows session details (ID, path, provider, profile, model, and
+  thinking effort).
 - `/new` closes the current session and starts a fresh one in the same process.
 - `/rename <name>` renames the current session. The new name is written as
   append-only session metadata and is shown in session lists. It is rejected
   while a turn is in flight.
+- `/model` shows the current profile/model and effort. In the TUI, bare
+  `/model` opens a profile picker followed by a reasoning-effort picker whose
+  default selection is the current effective effort; `Enter` applies it for the
+  process and `s` saves it to the profile. In the REPL, use
+  `/model PROFILE --thinking LEVEL [--save]`.
+- `/thinking [LEVEL] [--save]` shows or changes the current reasoning effort.
+  Use `unset` or `default` to omit the provider reasoning-effort field.
 - `/compact [focus]` creates a manual context checkpoint, or reports
   `[context] no-op` when nothing can be compacted.
 - `/sandbox` shows the sandbox state now in effect. `/sandbox reload` re-reads

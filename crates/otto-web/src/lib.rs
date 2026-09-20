@@ -72,6 +72,7 @@ export interface Session {
   provider: string
   profile: string
   model: string
+  thinking: string
   context_window: number
   usage: Usage
   context_input_tokens: number
@@ -189,6 +190,7 @@ export interface Info {
   provider: string
   profile: string
   model: string
+  thinking: string
   sandbox: string
   profiles: string[]
 }

@@ -33,7 +33,7 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] show current model, or switch profiles in a fresh session\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
+const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
 /// Commands `internal/repl` has that this phase does not.
 const UNPORTED: [&str; 0] = [];
@@ -345,11 +345,12 @@ impl<'a> Repl<'a> {
                     let info = self.controller.info();
                     let _ = writeln!(
                         self.stdout,
-                        "ID: {}\nPath: {}\nProvider: {}\nModel: {}\nSandbox: {}",
+                        "ID: {}\nPath: {}\nProvider: {}\nModel: {}\nThinking: {}\nSandbox: {}",
                         info.session_id,
                         info.session_path,
                         info.provider,
                         info.model,
+                        display_thinking(&info.thinking),
                         info.sandbox.summary()
                     );
                     if !info.session_name.is_empty() {
@@ -380,6 +381,10 @@ impl<'a> Repl<'a> {
                 }
                 "model" => {
                     self.model(args).await?;
+                    Some(false)
+                }
+                "thinking" => {
+                    self.thinking(args).await?;
                     Some(false)
                 }
                 "sandbox" => self.sandbox(args).await?.then_some(false),
@@ -470,7 +475,7 @@ impl<'a> Repl<'a> {
         }
     }
 
-    /// Port of `modelCommand`.
+    /// Port of `modelCommand` plus Otto's reasoning-effort extension.
     async fn model(&mut self, args: &str) -> Result<(), Error> {
         let unavailable = || Error::Command {
             command: "/model".to_string(),
@@ -479,48 +484,136 @@ impl<'a> Repl<'a> {
         if !self.controller.dynamic_content() {
             return Err(unavailable());
         }
-        if args.is_empty() {
+        let parsed = parse_model_args(args).map_err(|message| Error::Command {
+            command: "/model".to_string(),
+            message,
+        })?;
+        if parsed.profile.is_empty() {
             let info = self.controller.info();
             let _ = writeln!(
                 self.stdout,
-                "Current: profile {} (provider {}, model {})",
-                info.profile, info.provider, info.model
+                "Current: profile {} (provider {}, model {}, thinking {})",
+                info.profile,
+                info.provider,
+                info.model,
+                display_thinking(&info.thinking)
             );
-            let profiles = self.controller.profiles();
+            let profiles = self.controller.profile_summaries();
             if profiles.is_empty() {
                 let _ = writeln!(self.stdout, "No profiles configured.");
             } else {
-                let _ = writeln!(self.stdout, "Profiles: {}", profiles.join(", "));
+                let list = profiles
+                    .iter()
+                    .map(|profile| {
+                        format!(
+                            "{} ({}/{}, thinking {})",
+                            profile.name,
+                            profile.provider,
+                            profile.model,
+                            display_thinking(&profile.thinking)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(self.stdout, "Profiles: {list}");
             }
             return Ok(());
         }
         self.controller
-            .switch_profile(args)
+            .switch_profile(&parsed.profile)
             .await
             .map_err(|message| Error::Command {
                 command: "/model".to_string(),
                 message,
             })?;
-        let saved = self.controller.set_default_profile(args);
+        if !parsed.thinking.is_empty() {
+            self.controller
+                .set_thinking(&parsed.thinking)
+                .await
+                .map_err(|message| Error::Command {
+                    command: "/model".to_string(),
+                    message,
+                })?;
+        }
+        let saved = self.controller.set_default_profile(&parsed.profile);
+        if parsed.save && !parsed.thinking.is_empty() {
+            self.controller
+                .save_profile_thinking(&parsed.thinking)
+                .map_err(|message| Error::Command {
+                    command: "/model".to_string(),
+                    message,
+                })?;
+        }
         let info = self.controller.info();
         match saved {
             Ok(()) => {
                 let _ = writeln!(
                     self.stdout,
-                    "Switched to profile {} (provider {}, model {}). Set as default profile.",
-                    info.profile, info.provider, info.model
+                    "Switched to profile {} (provider {}, model {}, thinking {}). Set as default profile.",
+                    info.profile,
+                    info.provider,
+                    info.model,
+                    display_thinking(&info.thinking)
                 );
             }
             Err(message) => {
                 let _ = writeln!(
                     self.stdout,
-                    "Switched to profile {} (provider {}, model {}), but the default profile was not saved: {}",
-                    info.profile, info.provider, info.model, message
+                    "Switched to profile {} (provider {}, model {}, thinking {}), but the default profile was not saved: {}",
+                    info.profile,
+                    info.provider,
+                    info.model,
+                    display_thinking(&info.thinking),
+                    message
                 );
             }
         }
+        if parsed.save && !parsed.thinking.is_empty() {
+            let _ = writeln!(self.stdout, "Saved thinking to profile.");
+        }
         if !info.session_id.is_empty() {
             let _ = writeln!(self.stdout, "Session: {}", info.session_id);
+        }
+        Ok(())
+    }
+
+    async fn thinking(&mut self, args: &str) -> Result<(), Error> {
+        let parsed = parse_thinking_args(args).map_err(|message| Error::Command {
+            command: "/thinking".to_string(),
+            message,
+        })?;
+        if parsed.thinking.is_empty() {
+            let info = self.controller.info();
+            let _ = writeln!(
+                self.stdout,
+                "Thinking: {}",
+                display_thinking(&info.thinking)
+            );
+            return Ok(());
+        }
+        self.controller
+            .set_thinking(&parsed.thinking)
+            .await
+            .map_err(|message| Error::Command {
+                command: "/thinking".to_string(),
+                message,
+            })?;
+        if parsed.save {
+            self.controller
+                .save_profile_thinking(&parsed.thinking)
+                .map_err(|message| Error::Command {
+                    command: "/thinking".to_string(),
+                    message,
+                })?;
+        }
+        let info = self.controller.info();
+        let _ = writeln!(
+            self.stdout,
+            "Thinking: {}",
+            display_thinking(&info.thinking)
+        );
+        if parsed.save {
+            let _ = writeln!(self.stdout, "Saved thinking to profile.");
         }
         Ok(())
     }
@@ -689,6 +782,60 @@ fn format_token_count(tokens: i64) -> String {
         return tokens.to_string();
     }
     format!("{}k", tokens / 1000)
+}
+
+fn display_thinking(thinking: &str) -> &str {
+    if thinking.is_empty() {
+        "default"
+    } else {
+        thinking
+    }
+}
+
+#[derive(Default)]
+struct ParsedThinkingArgs {
+    thinking: String,
+    save: bool,
+}
+
+#[derive(Default)]
+struct ParsedModelArgs {
+    profile: String,
+    thinking: String,
+    save: bool,
+}
+
+fn parse_thinking_args(args: &str) -> Result<ParsedThinkingArgs, String> {
+    let mut parsed = ParsedThinkingArgs::default();
+    for part in args.split_whitespace() {
+        if part == "--save" {
+            parsed.save = true;
+        } else if parsed.thinking.is_empty() {
+            parsed.thinking = part.to_string();
+        } else {
+            return Err("usage: /thinking [LEVEL] [--save]".to_string());
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_model_args(args: &str) -> Result<ParsedModelArgs, String> {
+    let mut parsed = ParsedModelArgs::default();
+    let mut parts = args.split_whitespace();
+    while let Some(part) = parts.next() {
+        match part {
+            "--save" => parsed.save = true,
+            "--thinking" => {
+                let Some(level) = parts.next() else {
+                    return Err("--thinking requires a level".to_string());
+                };
+                parsed.thinking = level.to_string();
+            }
+            value if parsed.profile.is_empty() => parsed.profile = value.to_string(),
+            _ => return Err("usage: /model [profile] [--thinking LEVEL] [--save]".to_string()),
+        }
+    }
+    Ok(parsed)
 }
 
 /// Port of `splitCommand`: the name and the trimmed remainder, or `None` when
@@ -949,7 +1096,7 @@ mod tests {
         }
         assert!(
             stdout.contains(&format!(
-                "ID: {}\nPath: {}\nProvider: openai-compatible\nModel: gpt-alpha\nSandbox: {}\n",
+                "ID: {}\nPath: {}\nProvider: openai-compatible\nModel: gpt-alpha\nThinking: default\nSandbox: {}\n",
                 info.session_id,
                 info.session_path,
                 info.sandbox.summary()
@@ -1045,13 +1192,13 @@ mod tests {
         assert_eq!(stderr, "");
         assert!(
             stdout
-                .contains("Current: profile alpha (provider openai-compatible, model gpt-alpha)\n"),
+                .contains("Current: profile alpha (provider openai-compatible, model gpt-alpha, thinking default)\n"),
             "{stdout}"
         );
-        assert!(stdout.contains("Profiles: alpha, beta\n"), "{stdout}");
+        assert!(stdout.contains("Profiles: alpha (openai-compatible/gpt-alpha, thinking default), beta (openai-compatible/gpt-beta, thinking default)\n"), "{stdout}");
         assert!(
             stdout.contains(
-                "Switched to profile beta (provider openai-compatible, model gpt-beta). Set as default profile.\n"
+                "Switched to profile beta (provider openai-compatible, model gpt-beta, thinking default). Set as default profile.\n"
             ),
             "{stdout}"
         );

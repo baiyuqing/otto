@@ -39,6 +39,7 @@ const idle: Session = {
   provider: 'openai-compatible',
   profile: 'default',
   model: 'test',
+  thinking: 'high',
   context_window: 128000,
   usage: { input_tokens: 0, output_tokens: 0 },
   context_input_tokens: 0,
@@ -51,6 +52,7 @@ const info: Info = {
   provider: 'openai-compatible',
   profile: 'default',
   model: 'test',
+  thinking: 'high',
   sandbox: 'seatbelt',
   profiles: ['default'],
 }

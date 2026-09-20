@@ -20,6 +20,7 @@ pub enum SlashCommandKind {
     Session,
     New,
     Model,
+    Thinking,
     Resume,
     Archive,
     Rename,
@@ -61,6 +62,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/model",
         description: "show current model, or switch profiles (fresh session)",
         kind: SlashCommandKind::Model,
+    },
+    SlashCommand {
+        name: "/thinking",
+        description: "show or set reasoning effort",
+        kind: SlashCommandKind::Thinking,
     },
     SlashCommand {
         name: "/resume",

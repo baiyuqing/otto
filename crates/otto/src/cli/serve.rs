@@ -180,6 +180,7 @@ pub async fn run(
             provider: info.provider.clone(),
             profile: info.profile.clone(),
             model: info.model.clone(),
+            thinking: info.thinking.clone(),
             sandbox: info.sandbox.summary().to_string(),
             profiles,
         },

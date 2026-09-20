@@ -1,17 +1,16 @@
-//! Resolution of the `[sandbox]` table into validated, sorted settings. Port
-//! of `internal/config/resolve.go`'s `ResolveSandbox`.
+//! Resolution of the `[sandbox]` table into validated, sorted settings.
 //!
-//! ponytail: these types mirror `internal/sandbox.{DriverMode,NetworkMode,
-//! Settings}` field-for-field rather than reusing them, because otto-core
-//! cannot depend on the native `otto` crate that owns the real sandbox
-//! executor. The native `otto::sandbox` layer converts a [`SandboxSettings`]
-//! into its own `sandbox::Settings` at the call site.
+//! ponytail: these types mirror `otto::sandbox`'s own `DriverMode`,
+//! `NetworkMode` and `Settings` field for field rather than reusing them,
+//! because otto-core cannot depend on the native `otto` crate that owns the
+//! sandbox executor. The native layer converts a [`SandboxSettings`] into its
+//! own `sandbox::Settings` at the call site.
 
 use super::{ConfigError, SandboxConfig};
 
 const MAX_SANDBOX_READ_PATH_BYTES: usize = 32 * 1024;
 
-/// Mirrors `internal/sandbox.DriverMode`'s three values.
+/// Mirrors `otto::sandbox`'s three driver modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxDriverMode {
     Auto,
@@ -19,7 +18,7 @@ pub enum SandboxDriverMode {
     Off,
 }
 
-/// Mirrors `internal/sandbox.NetworkMode`'s two values.
+/// Mirrors `otto::sandbox`'s two network modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxNetworkMode {
     Deny,

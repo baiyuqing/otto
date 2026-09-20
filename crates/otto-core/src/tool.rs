@@ -1,8 +1,7 @@
 //! The tool execution contract.
 //!
-//! Port of the `Tool`/`Registry`/`Result` contract in `internal/tool`. Phase 0
-//! carries only the parts the agent loop depends on; the concrete tools and
-//! the registry arrive in phase 3.
+//! Phase 0 carries only the parts the agent loop depends on; the concrete tools
+//! and the registry arrive in phase 3.
 //!
 //! Ownership: `arguments` is borrowed read-only for the duration of the call
 //! and must not be retained or mutated. The returned [`ToolResult`] belongs to
@@ -13,8 +12,8 @@
 //! should stop and return an error result rather than block.
 //!
 //! Errors: tool failures are reported in band as a [`ToolResult`] with
-//! `is_error` set, never as a `Result`, because the failure text is fed back
-//! to the model as the tool result.
+//! `is_error` set, never as a `Result`, because the failure text is fed back to
+//! the model as the tool result.
 
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
@@ -34,8 +33,7 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    /// The result an executor returns for a name it does not serve. The text
-    /// matches `Registry.Execute` in the Go implementation.
+    /// The result an executor returns for a name it does not serve.
     pub fn unknown_tool(name: &str) -> Self {
         Self {
             content: format!("unknown tool: {name}"),
@@ -84,7 +82,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_tool_result_matches_the_go_text() {
+    fn unknown_tool_result_names_the_tool() {
         let result = ToolResult::unknown_tool("nope");
         assert_eq!(result.content, "unknown tool: nope");
         assert!(result.is_error);

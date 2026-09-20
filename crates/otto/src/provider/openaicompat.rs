@@ -1,9 +1,8 @@
 //! HTTP transport for the OpenAI-compatible Chat Completions API.
 //!
-//! Port of `internal/provider/openaicompat/client.go`. The wire codec lives in
-//! [`otto_core::openaicompat`]; this module owns only the parts that need the
-//! network: base-URL validation, connection settings, the retry policy, the
-//! bounded error-body reader, and API-key redaction.
+//! The wire codec lives in [`otto_core::openaicompat`]; this module owns only
+//! the parts that need the network: base-URL validation, connection settings,
+//! the retry policy, the bounded error-body reader, and API-key redaction.
 //!
 //! Ownership: a [`Client`] owns its base URL, its API key, and its
 //! [`reqwest::Client`]. The request passed to `complete` is borrowed and never
@@ -41,16 +40,15 @@ use crate::gourl::{self, Encoding};
 
 /// Longest wait for the TCP connect and TLS handshake of one attempt.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// TCP keepalive interval, matching Go's `net.Dialer.KeepAlive`.
+/// TCP keepalive interval.
 const KEEPALIVE: Duration = Duration::from_secs(30);
 /// Longest wait for a single read from the socket.
 ///
-/// This stands in for Go's `Transport.ResponseHeaderTimeout`: reqwest has no
-/// header-only timeout, so the bound is applied per read instead. Go applies
-/// no timeout at all once the body starts, so this is stricter than the Go
-/// client for a stream that stalls mid-body. A streaming chat completion sends
-/// something well inside 60 seconds, and there is deliberately no overall
-/// request timeout, because a long completion may legitimately take minutes.
+/// reqwest has no header-only timeout, so the bound is applied per read
+/// instead. It therefore also bounds a stream that stalls mid-body. A streaming
+/// chat completion sends something well inside 60 seconds, and there is
+/// deliberately no overall request timeout, because a long completion may
+/// legitimately take minutes.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Largest number of redirect hops followed before the policy stops.
 const MAX_REDIRECTS: usize = 3;
@@ -77,8 +75,8 @@ struct Ready {
 /// and error rules.
 pub struct Client {
     api_key: String,
-    /// `Err` records why the client is unusable. Like Go's `New`, construction
-    /// never fails; the stored message is returned from the first `complete`.
+    /// `Err` records why the client is unusable. Construction never fails; the
+    /// stored message is returned from the first `complete`.
     state: Result<Ready, String>,
     sleep: Sleeper,
 }
@@ -88,7 +86,7 @@ impl Client {
     ///
     /// Never fails. An invalid base URL, or a TLS stack that refuses to
     /// initialize, is recorded and returned as an error from the first
-    /// [`Provider::complete`] call, matching Go's `New`.
+    /// [`Provider::complete`] call.
     pub fn new(base_url: &str, api_key: &str) -> Self {
         let state = match default_http_client() {
             Ok(http) => Self::ready(base_url, http),
@@ -209,8 +207,8 @@ impl Client {
         response: reqwest::Response,
         cancel: &CancellationToken,
     ) -> Failure {
-        // Go captures the header on every non-2xx status, retryable or not,
-        // and only consults it when it decides to retry.
+        // The header is captured on every non-2xx status, retryable or not, and
+        // consulted only when a retry is decided on.
         let retry_after = response
             .headers()
             .get(reqwest::header::RETRY_AFTER)
@@ -418,8 +416,8 @@ async fn with_cancel<T>(cancel: &CancellationToken, future: impl Future<Output =
     }
 }
 
-/// Joins an error with its causes, so a wrapped transport error reads like
-/// Go's `%w` chain instead of hiding the reason behind a generic summary.
+/// Joins an error with its causes, so a wrapped transport error names the
+/// reason instead of hiding it behind a generic summary.
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
@@ -477,9 +475,9 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
 /// deliberately no overall request timeout: a streaming completion may run for
 /// minutes and is bounded by the caller's cancellation token instead.
 ///
-/// One Go setting has no reqwest equivalent and is therefore not enforced
-/// here: `Transport.MaxResponseHeaderBytes`. reqwest exposes no cap on the
-/// size of a response header block.
+/// reqwest exposes no cap on the size of a response header block, so none is
+/// enforced here. reqwest exposes no cap on the size of a response header
+/// block.
 fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -506,17 +504,16 @@ fn default_http_client() -> Result<reqwest::Client, reqwest::Error> {
 
 /// Normalizes and validates a provider base URL.
 ///
-/// Port of Go `NormalizeBaseURL`. Returns `None` for every URL Go rejects:
-/// unparsable, a scheme other than `http` or `https`, no host, embedded
-/// userinfo, any query (including a bare `?`), or a fragment. One trailing
-/// `/` is trimmed from the path so that `{base}/chat/completions` never
-/// doubles the separator.
+/// Returns `None` for an unparsable URL, a scheme other than `http` or `https`,
+/// no host, embedded userinfo, any query (including a bare `?`), or a fragment.
+/// One trailing `/` is trimmed from the path so that `{base}/chat/completions`
+/// never doubles the separator.
 ///
 /// This is a pure function over borrowed input with no shared state.
 fn normalize_base_url(base_url: &str) -> Option<String> {
     let raw = base_url.as_bytes();
-    // Go splits the fragment off first, then the query, so `ForceQuery` (a
-    // bare `?` with nothing after it) is exactly "a `?` before the `#`".
+    // The fragment is split off first, then the query, so a bare `?` with
+    // nothing after it is exactly "a `?` before the `#`".
     let before_fragment = match raw.iter().position(|&byte| byte == b'#') {
         Some(hash) => &raw[..hash],
         None => raw,
@@ -559,7 +556,7 @@ mod tests {
     const DONE_STREAM: &str =
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
-    /// A loopback HTTP/1.1 origin server, the replacement for Go's `httptest`.
+    /// A loopback HTTP/1.1 origin server.
     ///
     /// The accept loop is aborted when the guard is dropped, so a test never
     /// leaks a listener. Handlers return the exact bytes to write, which lets

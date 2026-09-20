@@ -1,4 +1,4 @@
-//! The `[server]` table and its resolution. Port of `internal/config/server.go`.
+//! The `[server]` table and its resolution.
 
 use std::collections::HashMap;
 

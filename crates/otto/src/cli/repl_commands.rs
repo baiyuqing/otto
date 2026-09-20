@@ -1,21 +1,15 @@
 //! The REPL's memory and sub-agent commands.
 //!
-//! Port of `internal/repl/memory.go` and `internal/repl/tasks.go`, plus the
-//! `internal/app` helpers they call (`MemoryManagerAndScopes`,
-//! `ParseRememberArgument`, `RenderMemorySearchResult`) and the
-//! `Controller` memory accessors in `internal/app/controller.go`.
-//!
-//! Divergence from Go: `/memory review` reviews extraction candidates, and
-//! automatic memory extraction is not ported, so the subcommand falls through
-//! to the usage line instead of reaching a reviewer. The usage text still
-//! names it, because it is Go's and the frontend output is pinned byte for
-//! byte.
+//! `/memory review` would review extraction candidates, but automatic memory
+//! extraction is not implemented, so the subcommand falls through to the usage
+//! line instead of reaching a reviewer. The usage text still names it, because
+//! the frontend output is pinned byte for byte.
 //!
 //! [`repl_memory_command`] and [`repl_remember_command`] are free functions,
 //! not [`Repl`] methods, so `tui::app`'s `/memory`/`/remember` dispatch can
-//! call them directly against its own captured-output buffers; [`Repl`]'s
-//! own `memory_command`/`remember_command` are thin wrappers over the same
-//! two functions.
+//! call them directly against its own captured-output buffers; [`Repl`]'s own
+//! `memory_command`/`remember_command` are thin wrappers over the same two
+//! functions.
 
 use std::fmt::Write as _;
 use std::io::Write;
@@ -39,22 +33,18 @@ use super::controller::Controller;
 use super::login::{SharedWriter, browser_opener};
 use super::repl::{Error, Repl};
 
-/// Go's `app.MemorySearchLimit` and `app.MemorySearchTokenBudget`.
 const SEARCH_LIMIT: usize = 20;
 const SEARCH_TOKEN_BUDGET: usize = 4000;
-/// Go's `app.MemoryDefaultKind`.
 const DEFAULT_KIND: &str = "note";
-/// Go's `app.MemoryUsage` and `app.RememberUsage`. `pub(crate)` so the TUI's
-/// `tui::app` dispatch can assert on the exact usage text it reuses via
-/// [`repl_memory_command`]/[`repl_remember_command`] instead of duplicating
-/// the literal.
+/// `pub(crate)` so the TUI's `tui::app` dispatch can assert on the exact usage
+/// text it reuses via [`repl_memory_command`]/[`repl_remember_command`] instead
+/// of duplicating the literal.
 pub(crate) const MEMORY_USAGE: &str =
     "usage: /memory search <query> | /memory forget <id> | /memory review <id> accept|reject";
 pub(crate) const REMEMBER_USAGE: &str =
     "usage: /remember [--scope user|workspace] [--kind K] [--key K] <text>";
-/// Go's `app.ErrMemoryUnavailable`.
 pub(crate) const MEMORY_UNAVAILABLE: &str = "memory is not available";
-/// Go's `repl.tasksCommand` message when no runner carries a registry.
+/// The message printed when no runner carries a registry.
 const SUBAGENTS_UNAVAILABLE: &str = "sub-agents are not available";
 /// The `/task` argument forms, as the README and the user manual document
 /// them. [`super::super::tui`] prints the same line for the same input.
@@ -68,9 +58,8 @@ pub(crate) const SKILL_USAGE: &str = "usage: /skill <name>";
 pub(crate) const MCP_USAGE: &str = "usage: /mcp | /mcp login <server>";
 
 impl Controller {
-    /// Port of `app.MemoryManagerAndScopes`: the bound service and its two
-    /// scopes, or `None` when memory is unusable or the redaction boundary is
-    /// closed.
+    /// The bound service and its two scopes, or `None` when memory is unusable
+    /// or the redaction boundary is closed.
     pub(crate) fn memory_manager(&self) -> Option<(Arc<Service>, Scope, Scope)> {
         let wiring = self.memory_wiring();
         match self.dynamic_content() && wiring.usable {
@@ -83,13 +72,13 @@ impl Controller {
         }
     }
 
-    /// Port of Go's `taskOwner`: the active runner's task registry.
+    /// The active runner's task registry.
     ///
     /// The REPL reads the concrete registry rather than
     /// [`crate::app::Controller::tasks`], because that view carries the
     /// server's wire record: it omits `prompt`, which
-    /// [`crate::subagent::format::task_label`] falls back to when a task has
-    /// no description, and `wait`/`updates`, which the wake path needs.
+    /// [`crate::subagent::format::task_label`] falls back to when a task has no
+    /// description, and `wait`/`updates`, which the wake path needs.
     pub(crate) fn subagent_tasks(&self) -> Option<Arc<Tasks>> {
         self.current_runner()?.tasks.clone()
     }
@@ -123,7 +112,6 @@ pub(crate) fn timers_report(controller: &Controller, args: &str) -> Result<Strin
     }
 }
 
-/// Port of `app.SplitFirstToken`.
 fn split_first_token(value: &str) -> (&str, &str) {
     let value = value.trim();
     match value.find(char::is_whitespace) {
@@ -132,8 +120,7 @@ fn split_first_token(value: &str) -> (&str, &str) {
     }
 }
 
-/// Port of `app.ParseRememberArgument`: the `--scope`/`--kind`/`--key` flags
-/// and the trailing free text.
+/// The `--scope`/`--kind`/`--key` flags and the trailing free text.
 fn parse_remember_argument(argument: &str) -> (&str, &str, &str, &str) {
     let (mut scope, mut kind, mut key) = ("", DEFAULT_KIND, "");
     let mut remaining = argument;
@@ -151,7 +138,6 @@ fn parse_remember_argument(argument: &str) -> (&str, &str, &str, &str) {
     }
 }
 
-/// Port of `app.RenderMemorySearchResult`.
 fn render_search_result(result: &SearchResult) -> String {
     if result.records.is_empty() {
         return "no matching records".to_string();
@@ -207,7 +193,7 @@ pub(crate) fn skill_report(controller: &Controller, args: &str) -> String {
     }
 }
 
-/// Port of `/mcp`: one line per configured server, in configuration order.
+/// One line per configured server, in configuration order.
 pub(crate) fn mcp_report(controller: &Controller) -> String {
     format_mcp_report(&controller.mcp())
 }
@@ -241,8 +227,7 @@ fn format_mcp_report(servers: &[crate::mcp::ServerStatus]) -> String {
     out
 }
 
-/// Runs the OAuth flow for one configured HTTP server and persists its
-/// token. Port of `/mcp login <server>`.
+/// Runs the OAuth flow for one configured HTTP server and persists its token.
 async fn mcp_login(
     controller: &Controller,
     name: &str,
@@ -310,8 +295,8 @@ async fn mcp_login(
     }
 }
 
-/// Port of `/mcp` / `/mcp login <server>`. A free function, rather than a
-/// `Repl` method, for the same reason as [`repl_memory_command`].
+/// A free function, rather than a `Repl` method, for the same reason as
+/// [`repl_memory_command`].
 pub(crate) async fn repl_mcp_command(
     controller: &Controller,
     args: &str,
@@ -340,10 +325,9 @@ fn command_error(command: &str, message: impl std::fmt::Display) -> Error {
     }
 }
 
-/// Port of `REPL.memoryCommand`. A free function, rather than a `Repl`
-/// method, so `tui::app`'s `/memory` dispatch can reuse it against its own
-/// captured-output buffers instead of a line-oriented `Repl`'s stdout/
-/// stderr.
+/// A free function, rather than a `Repl` method, so `tui::app`'s `/memory`
+/// dispatch can reuse it against its own captured-output buffers instead of a
+/// line-oriented `Repl`'s stdout/ stderr.
 pub(crate) fn repl_memory_command(
     controller: &Controller,
     args: &str,
@@ -419,8 +403,7 @@ pub(crate) fn repl_memory_command(
     Ok(())
 }
 
-/// Port of `REPL.rememberCommand`. See [`repl_memory_command`] for why this
-/// is a free function.
+/// See [`repl_memory_command`] for why this is a free function.
 pub(crate) fn repl_remember_command(
     controller: &Controller,
     args: &str,
@@ -461,12 +444,10 @@ pub(crate) fn repl_remember_command(
 }
 
 impl Repl<'_> {
-    /// Port of `REPL.memoryCommand`.
     pub(super) fn memory_command(&mut self, args: &str) -> Result<(), Error> {
         repl_memory_command(self.controller, args, &mut *self.stdout, &mut *self.stderr)
     }
 
-    /// Port of `REPL.rememberCommand`.
     pub(super) fn remember_command(&mut self, args: &str) -> Result<(), Error> {
         repl_remember_command(self.controller, args, &mut *self.stdout, &mut *self.stderr)
     }
@@ -484,7 +465,6 @@ impl Repl<'_> {
         }
     }
 
-    /// Port of `REPL.tasksCommand`.
     pub(super) fn tasks_command(&mut self) {
         let Some(tasks) = self.controller.subagent_tasks() else {
             let _ = writeln!(self.stderr, "{SUBAGENTS_UNAVAILABLE}");
@@ -513,7 +493,6 @@ impl Repl<'_> {
         }
     }
 
-    /// Port of `REPL.taskCommand`.
     pub(super) fn task_command(&mut self, args: &str) {
         let Some(tasks) = self.controller.subagent_tasks() else {
             let _ = writeln!(self.stderr, "{SUBAGENTS_UNAVAILABLE}");
@@ -1067,9 +1046,8 @@ mod tests {
         assert!(reminders.list().is_empty());
     }
 
-    /// Ports Go's `/task <id>` detail rendering without a provider: the
-    /// registry is written directly, as `internal/repl/tasks_test.go` does
-    /// through its fake task view.
+    /// Renders `/task <id>` detail without a provider: the registry is written
+    /// directly.
     #[tokio::test]
     async fn task_detail_prints_the_line_model_and_result() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1127,9 +1105,8 @@ mod tests {
         assert!(!stderr.is_empty(), "an unknown id must report an error");
     }
 
-    /// Port of `TestTasksCommandListsTasks`. The column spellings themselves
-    /// are `subagent::format`'s tests; what the REPL owns is one line per
-    /// task, in registry order.
+    /// The column spellings themselves are `subagent::format`'s tests; what the
+    /// REPL owns is one line per task, in registry order.
     #[tokio::test]
     async fn the_task_list_prints_one_line_per_task() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1205,9 +1182,8 @@ mod tests {
         assert_eq!(stderr, "");
     }
 
-    /// Port of `TestTaskCommandShowsStepsAndResult`. The step spellings are
-    /// `subagent::format`'s tests; what the REPL owns is the order of the
-    /// task line, the model line, the steps and the result.
+    /// The step spellings are `subagent::format`'s tests; what the REPL owns is
+    /// the order of the task line, the model line, the steps and the result.
     #[tokio::test]
     async fn task_detail_prints_the_child_steps_between_the_model_and_the_result() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1293,8 +1269,7 @@ mod tests {
         );
     }
 
-    /// Port of `TestTaskCommandByName`: both `/task` and `/task cancel`
-    /// resolve a task name as well as an id.
+    /// Both `/task` and `/task cancel` resolve a task name as well as an id.
     #[tokio::test]
     async fn the_task_commands_resolve_a_task_name() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1326,8 +1301,8 @@ mod tests {
         assert_eq!(stderr, "");
     }
 
-    /// Port of `TestTasksCommandWithoutTaskLister`: with `[agents]` off the
-    /// runner registers no registry, and both commands say so.
+    /// With `[agents]` off the runner registers no registry, and both commands
+    /// say so.
     #[tokio::test]
     async fn the_task_commands_without_a_registry_report_it_once_each() {
         let workspace = tempfile::tempdir().expect("workspace");

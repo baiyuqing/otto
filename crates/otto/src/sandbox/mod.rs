@@ -1,22 +1,21 @@
 //! Sandboxed command execution.
 //!
-//! Port of the Go package `internal/sandbox`. A [`Driver`] confines one child
-//! process; [`Executor`] validates every request against a [`Policy`] and the
-//! driver's [`Capabilities`] before the driver ever sees it.
+//! A [`Driver`] confines one child process; [`Executor`] validates every
+//! request against a [`Policy`] and the driver's [`Capabilities`] before the
+//! driver ever sees it.
 //!
 //! Ownership: a [`Request`] is moved into the executor and cloned once for the
 //! driver, so the caller's copy is never observed after the call starts. The
 //! writers in [`Streams`] stay borrowed for the duration of one execution.
 //!
 //! Concurrency and cancellation: [`Executor`] is `Send + Sync` and its methods
-//! take `&self`; several executions may run at once. Go's `context.Context`
-//! becomes a [`CancellationToken`]: a token cancelled before or during an
-//! execution produces [`Error::Cancelled`] and the child's whole process group
-//! is killed.
+//! take `&self`; several executions may run at once. Cancellation is a
+//! [`CancellationToken`]: a token cancelled before or during an execution
+//! produces [`Error::Cancelled`] and the child's whole process group is killed.
 //!
 //! Errors: every failure is one [`Error`] variant and carries no detail beyond
-//! its kind, matching the Go sentinels, so a sandbox failure can never leak
-//! host paths or environment values into model-visible text.
+//! its kind, so a sandbox failure can never leak host paths or environment
+//! values into model-visible text.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,9 +151,8 @@ impl std::fmt::Debug for Streams<'_> {
     }
 }
 
-/// How the child finished. `code` is `-1` whenever `signaled` is set, matching
-/// the Go executor, and `signal` is the Go `syscall.Signal` description such
-/// as `killed` or `terminated`.
+/// How the child finished. `code` is `-1` whenever `signaled` is set, and
+/// `signal` is the signal description such as `killed` or `terminated`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExitStatus {
     pub code: i32,
@@ -166,7 +164,7 @@ pub struct ExitStatus {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     pub driver: DriverMode,
-    /// `None` keeps the driver's default, matching Go's zero `NetworkMode`.
+    /// `None` keeps the driver's default.
     pub network: Option<NetworkMode>,
     #[serde(default)]
     pub read_paths: Vec<String>,
@@ -240,14 +238,13 @@ pub enum Error {
     ChildWait,
     #[error("sandbox child termination failed")]
     ChildTerminate,
-    /// The caller's [`CancellationToken`] fired. Replaces Go's
-    /// `context.Canceled`.
+    /// The caller's [`CancellationToken`] fired.
     #[error("sandbox execution was cancelled")]
     Cancelled,
 }
 
 impl Error {
-    /// The Go constructor `&UnavailableError{Reason: reason}`.
+    /// [`Error::Unavailable`] carrying `reason`.
     pub fn unavailable(reason: UnavailableReason) -> Self {
         Self::Unavailable(reason)
     }
@@ -265,10 +262,9 @@ pub trait Driver: Send + Sync {
     /// Runs `request`, returning how the child finished alongside whether the
     /// execution itself failed.
     ///
-    /// The two values are independent, matching Go's `(ExitStatus, error)`: a
-    /// cancelled execution still reports the signal that killed the child, and
-    /// the `bash` tool prints both. A failure before any child existed pairs
-    /// the error with a default [`ExitStatus`].
+    /// The two values are independent: a cancelled execution still reports the
+    /// signal that killed the child, and the `bash` tool prints both. A failure
+    /// before any child existed pairs the error with a default [`ExitStatus`].
     async fn execute(
         &self,
         request: Request,
@@ -492,10 +488,8 @@ fn supports_policy(capabilities: Capabilities, policy: Policy) -> bool {
 
 #[cfg(test)]
 mod tests {
-    // Go's `TestNewExecutorRejectsNilAndTypedNilDriver` and the typed-nil
-    // writer half of `TestExecutorBuildsFreshDriverRequest` have no Rust
-    // counterpart: `Arc<dyn Driver>` and `&mut dyn Write` cannot be null, so
-    // the states those cases guard against are unrepresentable. The defensive
+    // `Arc<dyn Driver>` and `&mut dyn Write` cannot be null, so an invalid
+    // driver or writer is unrepresentable rather than rejected. The defensive
     // copy checks are likewise inherent: an owned `Request` is moved.
     use super::*;
     use std::sync::Mutex;
@@ -630,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_error_text_matches_go() {
+    fn every_error_renders_its_fixed_text() {
         assert_eq!(
             Error::unavailable(UnavailableReason::SeatbeltMissing).to_string(),
             "sandbox driver is unavailable: seatbelt-missing"
@@ -671,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_id_validation_matches_go() {
+    fn driver_ids_are_lowercase_ascii_up_to_32_bytes() {
         for invalid in ["", "UPPER", "has_underscore", "has space", &"a".repeat(33)] {
             assert!(!DriverId::new(invalid).is_valid(), "{invalid:?}");
         }

@@ -1,10 +1,8 @@
 //! The sandbox status a frontend and the system prompt both read.
 //!
-//! Port of `app.SandboxInfo` in `internal/app/controller.go`. The rest of
-//! `internal/app` (the controller, the backend contract, session replacement)
-//! is phase 6; this type is carried here because the system prompt and the
-//! REPL status line already need it, and it is a plain value with no
-//! dependency on the lifecycle it will eventually live beside.
+//! It lives here rather than beside the lifecycle in [`crate::app`] because
+//! the system prompt and the REPL status line both need it, and it is a plain
+//! value with no dependency on that lifecycle.
 
 /// Which confinement the process actually got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,7 +15,7 @@ pub enum SandboxMode {
 }
 
 impl SandboxMode {
-    /// The wire string, matching Go's `SandboxMode` constants.
+    /// The wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Seatbelt => "seatbelt",
@@ -38,7 +36,7 @@ pub enum SandboxNetwork {
 }
 
 impl SandboxNetwork {
-    /// The wire string, matching Go's `SandboxNetwork` constants.
+    /// The wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Allowed => "allowed",
@@ -64,7 +62,7 @@ pub enum SandboxReason {
 }
 
 impl SandboxReason {
-    /// The wire string, matching Go's `SandboxReason` constants.
+    /// The wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "",
@@ -104,7 +102,7 @@ pub struct SandboxInfo {
 }
 
 impl SandboxInfo {
-    /// The status line a frontend prints. Port of `SandboxInfo.Summary`.
+    /// The status line a frontend prints.
     pub fn summary(&self) -> &'static str {
         match (self.mode, self.network, self.bash_available) {
             (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true) => {
@@ -120,7 +118,7 @@ impl SandboxInfo {
         }
     }
 
-    /// The short badge a status bar shows. Port of `SandboxInfo.Badge`.
+    /// The short badge a status bar shows.
     pub fn badge(&self) -> &'static str {
         match (self.mode, self.bash_available) {
             (SandboxMode::Seatbelt, true) => "sb",
@@ -130,7 +128,6 @@ impl SandboxInfo {
     }
 
     /// The machine-readable reason, empty unless the sandbox is unavailable.
-    /// Port of `SandboxInfo.ReasonCode`.
     pub fn reason_code(&self) -> &'static str {
         if self.mode != SandboxMode::Unavailable {
             return "";
@@ -157,7 +154,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn summaries_match_the_go_controller() {
+    fn every_sandbox_state_has_its_own_summary() {
         let seatbelt_allowed = SandboxInfo {
             mode: SandboxMode::Seatbelt,
             network: SandboxNetwork::Allowed,

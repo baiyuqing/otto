@@ -1,4 +1,4 @@
-//! The `[agents]` table and its resolution. Port of `internal/config/agents.go`.
+//! The `[agents]` table and its resolution.
 
 use std::collections::HashMap;
 
@@ -170,7 +170,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn max_parallel_error_message_matches_go() {
+    fn max_parallel_error_message_names_the_allowed_range() {
         let mut file = File::default();
         file.agents.max_parallel = Some(0);
         let err = resolve_agents(&file, &env("/home/u"), "/work").unwrap_err();

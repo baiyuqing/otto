@@ -18,7 +18,7 @@ const AGENTS_HEADER: &str = concat!(
     "<available_agents>\n",
 );
 
-/// No trailing newline: Go's footer ends the section exactly here.
+/// No trailing newline: the footer ends the section exactly here.
 const AGENTS_FOOTER: &str = "</available_agents>";
 
 /// Renders the section, or `""` when `catalog` is empty. Entries that would
@@ -67,8 +67,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// Go's `writeAgentDescription`: a YAML literal block so the description
-    /// can carry newlines.
+    /// A YAML literal block, so the description can carry newlines.
     fn write_agent_description(root: &Path, name: &str, description: &str) -> PathBuf {
         let directory = root.join(name);
         std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
@@ -105,7 +104,6 @@ mod tests {
         .expect("AGENT.md is writable");
     }
 
-    /// Go's `TestPromptSectionEmptyCatalog`.
     #[test]
     fn an_empty_catalog_renders_nothing() {
         assert_eq!(
@@ -114,9 +112,8 @@ mod tests {
         );
     }
 
-    /// Go's `TestPromptSectionTwoDefinitionsExactString`.
     #[test]
-    fn two_definitions_render_the_exact_go_string() {
+    fn two_definitions_render_the_exact_pinned_string() {
         let root = tempfile::tempdir().expect("a temporary directory");
         write_agent(root.path(), "alpha");
         write_agent(root.path(), "beta");
@@ -166,8 +163,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestPromptSectionEscapesHTML` and
-    /// `TestPromptSectionCollapsesWhitespace`.
     #[test]
     fn a_description_is_escaped_and_its_whitespace_collapsed() {
         let root = tempfile::tempdir().expect("a temporary directory");
@@ -191,7 +186,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestPromptSectionByteCapDropsLaterDefinition`.
     #[test]
     fn the_byte_cap_drops_later_definitions_with_one_warning_each() {
         let root = tempfile::tempdir().expect("a temporary directory");

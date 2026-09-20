@@ -1,14 +1,11 @@
 //! Bearer-token gating for the `/v1/` routes.
 //!
-//! Port of `internal/server/auth.go`.
-//!
 //! Any web page a browser has open can send requests to a loopback port, but
 //! the browser never attaches our `Authorization` header on behalf of another
-//! origin. Only the page that received the token from the `otto serve`
-//! startup URL can therefore reach `/v1/`, which covers both CSRF and DNS
-//! rebinding without CORS or `Origin` checks. The token is accepted from the
-//! header only: a query parameter would end up in proxy access logs and
-//! `Referer` headers.
+//! origin. Only the page that received the token from the `otto serve` startup
+//! URL can therefore reach `/v1/`, which covers both CSRF and DNS rebinding
+//! without CORS or `Origin` checks. The token is accepted from the header only:
+//! a query parameter would end up in proxy access logs and `Referer` headers.
 
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
@@ -29,7 +26,8 @@ pub fn authorized(token: &str, headers: &HeaderMap) -> bool {
     constant_time_eq(presented.as_bytes(), token.as_bytes())
 }
 
-/// The 401 Go's `requireToken` writes, including `WWW-Authenticate: Bearer`.
+/// The 401 an unauthenticated request gets, including `WWW-Authenticate:
+/// Bearer`.
 pub fn unauthorized() -> Response {
     let mut response = error_response(
         StatusCode::UNAUTHORIZED,
@@ -42,9 +40,9 @@ pub fn unauthorized() -> Response {
     response
 }
 
-/// Port of `crypto/subtle.ConstantTimeCompare`: unequal lengths are rejected
-/// without comparing, and equal lengths are compared with no early exit, so
-/// the comparison time does not depend on how many leading bytes matched.
+/// Constant-time comparison: unequal lengths are rejected without comparing,
+/// and equal lengths are compared with no early exit, so the comparison time
+/// does not depend on how many leading bytes matched.
 fn constant_time_eq(presented: &[u8], expected: &[u8]) -> bool {
     if presented.len() != expected.len() {
         return false;

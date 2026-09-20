@@ -1,11 +1,10 @@
 //! The event set, the compaction value types, and the turn settings.
 //!
-//! Port of `internal/agent/events.go`. Go models an event as one struct with
-//! a type tag and a union of unused fields; Rust models it as an enum, so a
-//! consumer cannot read a field that the event does not carry.
+//! An event is an enum rather than one struct with a type tag and a union of
+//! unused fields, so a consumer cannot read a field the event does not carry.
 //!
-//! Ownership: every value here is plain owned data with no interior
-//! mutability. Events are handed to the sink by value.
+//! Ownership: every value here is plain owned data with no interior mutability.
+//! Events are handed to the sink by value.
 //!
 //! Errors: [`AgentError`] is what [`super::Agent::run`] returns and what
 //! [`Event::AgentError`] reports. The two always agree.
@@ -24,7 +23,7 @@ pub enum ApiStatus {
 }
 
 impl ApiStatus {
-    /// The `APIStatus` string the Go agent puts on the event.
+    /// The `APIStatus` string carried on the event.
     pub fn name(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -73,8 +72,7 @@ impl CompactionMode {
 }
 
 /// What one completed compaction did. Also the payload of
-/// [`Event::CompactionStarted`] and [`Event::CompactionCompleted`], which is
-/// Go's `CompactionEvent` alias.
+/// [`Event::CompactionStarted`] and [`Event::CompactionCompleted`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactionResult {
     pub checkpoint_id: String,
@@ -186,8 +184,8 @@ pub enum Event {
 }
 
 impl Event {
-    /// The Go `EventType` string for this event, so a frontend port can key
-    /// off the same names.
+    /// The wire `EventType` string for this event; frontends key off these
+    /// names.
     pub fn name(&self) -> &'static str {
         match self {
             Self::AgentStarted => "agent_started",
@@ -219,8 +217,7 @@ pub type EventSink<'a> = &'a mut dyn FnMut(Event);
 
 /// Why a turn stopped early.
 ///
-/// The `Display` text of each variant matches the Go error string, because
-/// frontends surface it verbatim.
+/// Frontends surface the `Display` text of each variant verbatim.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error("user text is required")]
@@ -235,17 +232,15 @@ pub enum AgentError {
     },
     #[error("invalid provider response: {0}")]
     InvalidResponse(String),
-    /// There was no safe historic prefix to summarize. Go's
-    /// `ErrNothingToCompact`; a successful no-op for a manual compaction.
+    /// There was no safe historic prefix to summarize. A successful no-op for a
+    /// manual compaction.
     #[error("nothing to compact")]
     NothingToCompact,
-    /// The messages that must stay verbatim already exceed the retained
-    /// budget. Go's `ErrCurrentTurnTooLarge`.
+    /// The messages that must stay verbatim already exceed the retained budget.
     #[error("current turn exceeds the retained input budget")]
     CurrentTurnTooLarge,
-    /// The summary request or its response failed validation. Go's
-    /// `ErrInvalidCompactionSummary`, with the cause appended the way
-    /// `invalidCompactionSummaryError` formats it.
+    /// The summary request or its response failed validation. The cause is
+    /// appended to the message.
     #[error("invalid compaction summary{}", detail(.0))]
     InvalidCompactionSummary(String),
     /// A compaction step failed at a boundary the agent does not own: the
@@ -262,8 +257,7 @@ pub enum AgentError {
     /// An error whose message went through [`super::redactor::Redactor`].
     ///
     /// The original variant is gone, so the classification callers need is
-    /// carried as flags. Go does the same with `redactedBoundaryError` and its
-    /// `Is` method.
+    /// carried as flags.
     #[error("{message}")]
     Redacted {
         message: String,
@@ -271,7 +265,7 @@ pub enum AgentError {
         empty_user_text: bool,
         invalid_compaction_summary: bool,
     },
-    /// Everything else, carrying the Go error text.
+    /// Everything else, carrying the error text.
     #[error("{0}")]
     Other(String),
 }
@@ -285,8 +279,7 @@ fn detail(cause: &str) -> String {
 }
 
 impl AgentError {
-    /// Whether this error is, or wraps, cancellation. The dispatch paths use
-    /// it where Go uses `errors.Is(err, context.Canceled)`.
+    /// Whether this error is, or wraps, cancellation.
     pub fn is_cancelled(&self) -> bool {
         matches!(
             self,
@@ -298,12 +291,12 @@ impl AgentError {
         )
     }
 
-    /// Whether this is Go's `ErrNothingToCompact`.
+    /// Whether this is [`AgentError::NothingToCompact`].
     pub fn is_nothing_to_compact(&self) -> bool {
         matches!(self, Self::NothingToCompact)
     }
 
-    /// Whether this is, or wraps, Go's `ErrEmptyUserText`.
+    /// Whether this is, or wraps, [`AgentError::EmptyUserText`].
     pub fn is_empty_user_text(&self) -> bool {
         matches!(
             self,
@@ -315,7 +308,7 @@ impl AgentError {
         )
     }
 
-    /// Whether this is, or wraps, Go's `ErrInvalidCompactionSummary`.
+    /// Whether this is, or wraps, [`AgentError::InvalidCompactionSummary`].
     pub fn is_invalid_compaction_summary(&self) -> bool {
         matches!(
             self,
@@ -333,7 +326,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_names_match_the_go_event_type_constants() {
+    fn event_names_match_the_wire_type_constants() {
         let names = [
             Event::AgentStarted.name(),
             Event::AgentFinished.name(),
@@ -427,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn error_text_matches_the_go_sentinel_strings() {
+    fn error_text_matches_the_sentinel_strings() {
         assert_eq!(
             AgentError::EmptyUserText.to_string(),
             "user text is required"
@@ -451,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn compaction_names_match_the_go_constants() {
+    fn compaction_names_match_the_wire_constants() {
         assert_eq!(CompactionReason::Manual.name(), "manual");
         assert_eq!(CompactionReason::Threshold.name(), "threshold");
         assert_eq!(CompactionReason::Overflow.name(), "overflow");

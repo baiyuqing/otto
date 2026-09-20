@@ -1,15 +1,11 @@
-//! Turns [`super::app::App`] state into ratatui widgets. Port of the `View`
-//! half of `internal/tui/model.go` plus `internal/tui/{resume,archive,
-//! profile,session,sandbox}.go`'s picker/overlay rendering.
+//! Turns [`super::app::App`] state into ratatui widgets.
 //!
-//! ponytail: Go gives `/resume`, `/archive`, `/model`, `/session`,
-//! `/sandbox`, `/tasks`, and `/task` each their own full-screen Bubble Tea
-//! view. Only `/resume`, `/archive`, and `/model`'s profile choice are
+//! ponytail: only `/resume`, `/archive`, and `/model`'s profile choice are
 //! genuinely a *selection*; the rest are a fixed block of text with no
 //! interaction, so those render as ordinary transcript entries (see
 //! [`super::app`]'s module doc) drawn by the same transcript paragraph as
 //! everything else. `/resume`, `/archive`, and `/model` share one
-//! [`super::app::Picker`] overlay instead of three near-identical Bubble Tea
+//! [`super::app::Picker`] overlay rather than three near-identical dedicated
 //! screens. Upgrade path: give any of these a dedicated layout if a user
 //! reports the shared one as confusing.
 
@@ -31,7 +27,7 @@ use super::layout::{
 };
 use super::markdown;
 
-/// Draws one frame. Port of `Model.View`.
+/// Draws one frame.
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
@@ -45,8 +41,8 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     let content_area = side_margin(area);
     let composer_height = composer_height(app, content_area.width);
     let suggestions = app.suggestions();
-    // Go's `calculateLayout` clamps the panel the same way: it may take every
-    // row the composer and footer leave except one, which the transcript keeps.
+    // The panel may take every row the composer and footer leave except one,
+    // which the transcript keeps.
     let suggestion_height =
         (suggestions.len() as u16).min(content_area.height.saturating_sub(composer_height + 2));
     let chunks = Layout::default()
@@ -88,10 +84,8 @@ fn side_margin(area: Rect) -> Rect {
     }
 }
 
-/// Port of the editor-height growth Go's `handleCtrlC`/layout code reference
-/// via `previousEditorHeight`: a one-line composer grows to fit wrapped
-/// input up to [`INPUT_BOX_THRESHOLD`] lines before it stops growing and
-/// scrolls instead.
+/// A one-line composer grows to fit wrapped input up to [`INPUT_BOX_THRESHOLD`]
+/// lines before it stops growing and scrolls instead.
 fn composer_height(app: &App, width: u16) -> u16 {
     // `width - 2` is the box's inner width, so this sizes the box from
     // exactly the rows [`draw_composer`] will put in it.
@@ -133,7 +127,7 @@ fn transcript_lines(entries: &[Entry], details: bool) -> Vec<Line<'static>> {
     lines
 }
 
-/// Spinner frames, in order. Same braille set Go's Bubble Tea spinner uses.
+/// Spinner frames, in order.
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// How long one [`SPINNER_FRAMES`] frame is held. [`super::drive_turn`]
@@ -161,15 +155,14 @@ fn thinking_line(elapsed: Duration) -> Line<'static> {
 const USER_PREFIX: &str = "> ";
 
 /// Renders one transcript entry. Assistant/system/compaction/error text is
-/// markdown; tool call/result bodies are plain, pre-escaped text (Go never
-/// runs tool output through the markdown renderer either), and so is a user
-/// prompt, which is typed as literal text rather than authored as markdown.
+/// markdown; tool call/result bodies are plain, pre-escaped text, and so is a
+/// user prompt, which is typed as literal text rather than authored as
+/// markdown.
 ///
-/// ponytail: the prefix is part of the line's text, so `Paragraph::wrap`
-/// puts no marker on the continuation rows of a prompt wider than the
-/// terminal. Upgrade path: wrap user text here (as `composer_lines` already
-/// does for the composer) and prefix every row if that is reported as
-/// confusing.
+/// ponytail: the prefix is part of the line's text, so `Paragraph::wrap` puts
+/// no marker on the continuation rows of a prompt wider than the terminal.
+/// Upgrade path: wrap user text here (as `composer_lines` already does for the
+/// composer) and prefix every row if that is reported as confusing.
 fn entry_lines(entry: &Entry, details: bool) -> Vec<Line<'static>> {
     match entry.kind {
         Some(EntryKind::User) => escape_plain_text(&entry.raw)
@@ -328,11 +321,11 @@ fn footer_text(app: &App) -> String {
 
 /// The command list drawn directly above the composer while the value being
 /// typed is a command prefix, with [`super::app::App::suggestion`]'s row
-/// highlighted. Port of `renderCommandSuggestions`.
+/// highlighted.
 ///
-/// A [`List`] rather than a [`Paragraph`] so that ratatui's own
-/// [`ListState`] scrolls the selected row into view when the match list is
-/// longer than the rows [`draw`] could give the panel.
+/// A [`List`] rather than a [`Paragraph`] so that ratatui's own [`ListState`]
+/// scrolls the selected row into view when the match list is longer than the
+/// rows [`draw`] could give the panel.
 fn draw_suggestions(frame: &mut Frame, app: &App, suggestions: &[SlashCommand], area: Rect) {
     if area.height == 0 || suggestions.is_empty() {
         return;
@@ -454,9 +447,8 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
         .iter()
         .map(|row| ListItem::new(row.label.clone()))
         .collect();
-    // Stateful so that ratatui windows the list around the selection, the way
-    // Go's `resumeVisibleRange` does: a picker lists up to
-    // `PICKER_LIST_LIMIT` sessions, more than the popup can show.
+    // Stateful so that ratatui windows the list around the selection: a picker
+    // lists up to `PICKER_LIST_LIMIT` sessions, more than the popup can show.
     let list = List::new(items)
         .block(
             Block::default()
@@ -470,9 +462,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
 }
 
 /// A centered `percent_x` by `percent_y` rectangle within `area`. Standard
-/// ratatui popup-centering helper (from the project's own examples), not a
-/// Go port: `internal/tui`'s overlays are Bubble Tea sub-models with their
-/// own full-screen layout, which ratatui has no equivalent for.
+/// ratatui popup-centering helper, from the project's own examples.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -492,57 +482,16 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-/// Port of `internal/tui/responsive_test.go` and `clarity_test.go`'s
-/// terminal-size/wrapping cases, against ratatui's own render loop rather
-/// than Go's `View()` string plumbing.
+/// Terminal-size and wrapping cases, against ratatui's own render loop.
 ///
-/// Go's `View()` returns a raw string with no automatic clipping: every
-/// hand-rolled renderer (`renderToolBlock`, `renderUserBlock`,
-/// `emptyTranscriptHint`, `renderCompactionBlock`, `renderFooter`'s
-/// width-based field-dropping, `resumeVisibleRange`'s manual windowing, ...)
-/// has to clip and wrap itself via `lipgloss.MaxWidth`/`MaxHeight`,
-/// `wrapAndClip`, and `fitToBounds`, and `responsive_test.go`/
-/// `clarity_test.go` exist to guard those hand-rolled functions against
-/// overflow bugs. Ratatui instead renders each widget into a `Rect`/`Buffer`
-/// that the framework itself always clips to (see this module's own doc
-/// comment above [`draw`], and `layout.rs`'s: "ratatui's own `Paragraph::wrap`
-/// and `Layout` constraints already do line-wrapping and area-fitting").
-/// None of those Go functions exist here to test.
+/// Ratatui renders each widget into a `Rect`/`Buffer` that the framework itself
+/// always clips to (see this module's own doc comment above [`draw`], and
+/// `layout.rs`'s: "ratatui's own `Paragraph::wrap` and `Layout` constraints
+/// already do line-wrapping and area-fitting").
 ///
-/// What *does* port over is the one static guard both sides share
+/// What is left to test is the one static guard
 /// ([`MIN_TERMINAL_WIDTH`]/[`MIN_TERMINAL_HEIGHT`], below) and a no-panic
-/// guarantee at extreme sizes, which is what's left here.
-///
-/// Skipped as Bubble Tea plumbing (Go source, not ported):
-/// - `TestToolSummaryUsesLeadingStatesAndDecodedBashCommand`,
-///   `TestToolSummaryWithoutPreviewPadsToWidth`,
-///   `TestToolArgumentPreviewExtractsHumanReadableSummary`,
-///   `TestExpandedToolWrapsIndentedDetailsWithoutDroppingTail`,
-///   `TestIndentedToolSummaryFitsTerminalAnd120CellLimit`,
-///   `TestAssistantTurnShowsOttoOnceAcrossTool`,
-///   `TestAssistantTitleJoinsFirstTextWithoutBlankLine`,
-///   `TestEmptyTranscriptHintIncludesLogo`,
-///   `TestUserBlockFillsBandAndKeepsRailAcrossThemes`,
-///   `TestAssistantProseMaxWidthButCompactionUsesAvailableWidth` — all
-///   exercise Go's hand-rolled string-building renderers listed above, which
-///   ratatui's widget model replaces wholesale.
-/// - `TestHelpOverlayAtMinimumTerminalShowsEveryControlWithinBounds` — Go's
-///   help overlay hard-codes a keybinding list; [`draw_help`] here is a
-///   generic list built from [`SLASH_COMMANDS`] with no keybinding text at
-///   all (this frontend's overlays are deliberately simpler, see
-///   `super::app`'s module doc "Not ported" note), so there is no matching
-///   content to assert on without adding production content nobody asked
-///   for.
-/// - `TestLongSessionOverlayAndFooterStayWithinBounds` — ratatui clips the
-///   fixed footer to its `Rect`; the session overlay itself is not ported.
-/// - `TestCompactionResponsiveCollapsedCheckpointStaysWithinBounds` — tests
-///   `renderCompactionBlock`; compaction entries here fall through the
-///   generic [`markdown::render`] path in [`entry_lines`], which has no
-///   compaction-specific layout to test.
-/// - `TestResumePickerResizeClampsSelectionAndRestoresTranscriptOnClose` —
-///   tests Go's manual `resumeVisibleRange` windowing; [`draw_picker`]
-///   renders into a ratatui `List`, which scrolls its own selection into
-///   view with no manual clamping logic to port.
+/// guarantee at extreme sizes.
 #[cfg(test)]
 mod tests {
     use crossterm::event::KeyCode;
@@ -784,12 +733,9 @@ mod tests {
         );
     }
 
-    /// Port of the guard half of Go's `calculateLayout`/`smallTerminalView`:
-    /// below the static minimum on either axis, the frame is just the
-    /// resize message (Go's dynamic second guard, triggered when a
-    /// computed transcript height is `<= 0` even above the static minimum,
-    /// has no Rust equivalent since this layout is purely static — see
-    /// [`composer_height`]).
+    /// Below the static minimum on either axis, the frame is just the resize
+    /// message; this layout is purely static (see [`composer_height`]), so
+    /// there is no second, dynamic guard.
     #[tokio::test]
     async fn narrower_or_shorter_than_the_minimum_shows_the_resize_message() {
         let (_workspace, _sessions, app) = app_fixture().await;
@@ -856,13 +802,12 @@ mod tests {
         assert!(narrow.contains("think default"), "{narrow}");
     }
 
-    /// No-panic smoke test at Go's exact
-    /// `TestVerySmallTerminalViewsStayWithinBounds` sizes. Go asserts every
-    /// rendered line stays within bounds; ratatui's `Buffer` makes that
-    /// structurally true (see this test module's doc comment above), so
-    /// what is left to check is that drawing at these sizes does not panic.
+    /// No-panic smoke test at extreme terminal sizes. Ratatui's `Buffer` makes
+    /// staying within bounds structurally true (see this test module's doc
+    /// comment above), so what is left to check is that drawing at these sizes
+    /// does not panic.
     #[tokio::test]
-    async fn draw_does_not_panic_at_go_s_extreme_terminal_sizes() {
+    async fn draw_does_not_panic_at_extreme_terminal_sizes() {
         let (_workspace, _sessions, app) = app_fixture().await;
 
         for (width, height) in [(1u16, 1u16), (2, 1), (10, 3), (39, 7)] {
@@ -874,13 +819,11 @@ mod tests {
         }
     }
 
-    /// Diluted port of `TestUserBlockWrapsWideCharactersWithinAvailableWidth`
-    /// and `TestIndentedToolSummaryFitsTerminalAnd120CellLimit` (its intent,
-    /// not Go's cell-accounting): confirms Otto's own transcript
-    /// text — a run of wide (CJK/emoji) characters and a long unbroken
-    /// ASCII token with no wrap points — feeds into `Paragraph::wrap`
-    /// without panicking at a narrow width. This does not re-test ratatui's
-    /// own wrapping algorithm, only that Otto's text reaches it intact.
+    /// Confirms Otto's own transcript text — a run of wide (CJK/emoji)
+    /// characters and a long unbroken ASCII token with no wrap points — feeds
+    /// into `Paragraph::wrap` without panicking at a narrow width. This does
+    /// not re-test ratatui's own wrapping algorithm, only that Otto's text
+    /// reaches it intact.
     #[tokio::test]
     async fn wide_characters_and_unbroken_tokens_wrap_without_panicking() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
@@ -940,8 +883,7 @@ mod tests {
         assert!(!after.contains("streamed 9"), "{after}");
     }
 
-    /// Port of the view half of Go's `TestCommandSuggestionsMatchPrefix` in
-    /// `internal/tui/completion_test.go`: a `/` prefix lists the matching
+    /// The view half of command completion: a `/` prefix lists the matching
     /// commands with their descriptions and leaves the others out.
     #[tokio::test]
     async fn a_slash_prefix_lists_matching_commands_with_descriptions() {
@@ -992,7 +934,6 @@ mod tests {
         );
     }
 
-    /// Go's `resumeVisibleRange` windows the session list around its cursor.
     /// A picker holds up to `PICKER_LIST_LIMIT` (50) rows, more than a popup
     /// ever shows, so a selection below the fold has to scroll into view.
     #[tokio::test]

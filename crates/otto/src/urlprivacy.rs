@@ -1,11 +1,11 @@
 //! Conservative extraction of URL userinfo that must be treated as private at
 //! process and provider boundaries.
 //!
-//! Port of Go's `internal/urlprivacy`. A proxy environment variable such as
-//! `HTTPS_PROXY=http://user:pass@host` embeds a credential that has to be
-//! redacted from transcripts and withheld from sandboxed children. This module
-//! answers two questions about one value: which byte sequences are credential
-//! material, and whether that extraction can be proven complete.
+//! A proxy environment variable such as `HTTPS_PROXY=http://user:pass@host`
+//! embeds a credential that has to be redacted from transcripts and withheld
+//! from sandboxed children. This module answers two questions about one value:
+//! which byte sequences are credential material, and whether that extraction
+//! can be proven complete.
 //!
 //! Everything here is a pure function over borrowed bytes. There is no shared
 //! state, no I/O, and nothing to cancel. Bytes rather than `str` because
@@ -297,7 +297,7 @@ impl UserinfoCollector {
         true
     }
 
-    /// Records the forms Go's URL parser produced, including its re-encoded
+    /// Records the forms the parser produced, including its re-encoded
     /// `username:password` rendering.
     fn add_parsed_userinfo_forms(&mut self, user: Option<&gourl::Userinfo>) -> bool {
         let Some(user) = user else {
@@ -356,8 +356,8 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::userinfo_forms;
 
-    /// Runs one case of Go's
-    /// `TestUserinfoFormsDistinguishesAuthorityFromPathQueryAndFragment`.
+    /// Runs one case: userinfo in the authority is distinguished from a `@`
+    /// in the path, query, or fragment.
     #[track_caller]
     fn check(raw: &str, want: &[&str], want_ambiguous: bool) {
         let (values, ambiguous) = userinfo_forms(raw.as_bytes());

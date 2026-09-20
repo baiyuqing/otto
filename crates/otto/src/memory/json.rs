@@ -3,8 +3,8 @@
 //! `serde_json` is not interchangeable here: Go's `encoding/json` escapes `<`,
 //! `>`, `&`, U+2028 and U+2029 by default, so the same map produces different
 //! bytes. The store compares a decoded blob against its re-encoded form to
-//! detect corruption, and the Go and Rust binaries share one database file, so
-//! the encoder has to agree byte for byte.
+//! detect corruption, and an existing database file may have been written by
+//! the previously released binary, so the encoder has to agree byte for byte.
 
 use std::collections::BTreeMap;
 
@@ -95,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn html_characters_use_go_escapes() {
+    fn html_characters_use_encoding_json_escapes() {
         let encoded = encode_string_slice(&["a<b>c&d".to_string()]);
         assert_eq!(encoded, r#"["a\u003cb\u003ec\u0026d"]"#);
     }

@@ -1,8 +1,8 @@
 //! `POST /v1/sessions/{id}/compact`.
 //!
-//! Port of `internal/server/compact.go`. Refused with 409 `turn_active`
-//! while a turn or another compaction runs on the same session;
-//! [`super::Server::start_turn`] refuses turns for the same window.
+//! Refused with 409 `turn_active` while a turn or another compaction runs on
+//! the same session; [`super::Server::start_turn`] refuses turns for the same
+//! window.
 
 use std::sync::Arc;
 
@@ -51,10 +51,10 @@ pub async fn handle(
         cancel
     };
 
-    // ponytail: Go also cancels on client disconnect via
-    // context.AfterFunc(r.Context(), cancel). axum gives a handler no
-    // disconnect signal, so only shutdown cancels. Add a disconnect watcher
-    // if a hung compaction after a dropped client is ever observed.
+    // ponytail: axum gives a handler no client-disconnect signal, so only
+    // shutdown cancels. axum gives a handler no disconnect signal, so only
+    // shutdown cancels. Add a disconnect watcher if a hung compaction after a
+    // dropped client is ever observed.
     let result = {
         let mut emit = |_event| {};
         session

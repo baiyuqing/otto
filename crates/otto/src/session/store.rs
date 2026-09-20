@@ -1,18 +1,17 @@
 //! The native, file-backed session store.
 //!
-//! Port of `internal/session/store.go`. One [`Store`] owns one Pi v3 JSONL
-//! file: line 1 is the session header, every later line is one entry.
+//! One [`Store`] owns one Pi v3 JSONL file: line 1 is the session header, every
+//! later line is one entry.
 //!
 //! Ownership: a `Store` owns its file descriptor and closes it in
 //! [`Store::close`] or on drop. Concurrency: all mutable state sits behind one
-//! mutex, so a `Store` is `Send + Sync` and every method may be called from
-//! any thread. Errors: every failure is a [`PiError`]; a failed durable write
+//! mutex, so a `Store` is `Send + Sync` and every method may be called from any
+//! thread. Errors: every failure is a [`PiError`]; a failed durable write
 //! poisons the store with [`PiErrorKind::FatalPersistence`] and every later
 //! write returns that same error.
 //!
-//! Divergence from Go: the Go methods take a `context.Context` and check for
-//! cancellation at each step. The Rust rewrite has no cancellation plumbing
-//! yet, so these methods are synchronous and take no context.
+//! These methods are synchronous and take no cancellation token; there is no
+//! cancellation plumbing here yet.
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -657,7 +656,7 @@ fn raw_value(text: String) -> Result<Box<serde_json::value::RawValue>, PiError> 
         .map_err(|error| PiError::other(format!("encode JSON payload: {error}")))
 }
 
-/// The domain-level header checks Go runs before a session file is created.
+/// The domain-level header checks that run before a session file is created.
 pub(crate) fn validate_domain_header(header: &Header) -> Result<String, PiError> {
     if header.id.trim().is_empty()
         || header.id.contains('/')

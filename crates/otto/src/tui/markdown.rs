@@ -1,39 +1,25 @@
 //! Markdown -> ratatui `Text` renderer, built on `pulldown_cmark`.
 //!
-//! Port of `internal/tui/markdown.go`. Go's own file does no formatting: it
-//! escapes untrusted input, hands it to the external `charm.land/glamour/v2`
-//! library for the actual rendering, and filters glamour's ANSI output down
-//! to a safe SGR allowlist before printing it (`filterTerminalOutput`). There
-//! is no Go *algorithm* to port for the visual formatting itself, only
-//! glamour's own opaque behavior, which has no Rust equivalent to bind to.
-//!
-//! This renderer instead walks `pulldown_cmark::Event`s and builds
+//! This renderer walks `pulldown_cmark::Event`s and builds
 //! `ratatui::text::{Line, Span}` values directly, so there is no ANSI string
-//! for a hostile document to smuggle codes through: a `Span`'s content is
-//! never interpreted as an escape sequence by ratatui, only printed
-//! literally by the crossterm backend. That output-side safety net
-//! (`filterTerminalOutput` / the SGR allowlist) has nothing to filter here
-//! and is not ported.
+//! for a hostile document to smuggle codes through: a `Span`'s content is never
+//! interpreted as an escape sequence by ratatui, only printed literally by the
+//! crossterm backend. An output-side SGR allowlist would have nothing to filter
+//! here, so there is none.
 //!
-//! What *is* ported, because it is a real, tested Go security control rather
-//! than an output-format choice: every literal piece of text (paragraph
-//! text, code spans, and raw HTML, which is treated as literal text rather
-//! than interpreted) is run through [`super::layout::escape_plain_text`]
-//! before it becomes a `Span`, so a raw control byte embedded in model or
-//! tool output can never reach the terminal as a real escape sequence via
-//! `crossterm::style::Print`. See `tests::malicious_documents_lose_no_raw_controls`
-//! for the parity check this replaces `TestMarkdownRecoversFromExactUnterminatedEntityAttack` /
-//! `TestMarkdownFiltersControlsSynthesizedByFormatting` / `TestMarkdownPreservesEntityCodeAndLinkSemantics`
-//! with, adapted to this architecture (no ANSI is ever produced, so there is
-//! nothing for an SGR allowlist to protect).
+//! Every literal piece of text (paragraph text, code spans, and raw HTML, which
+//! is treated as literal text rather than interpreted) is run through
+//! [`super::layout::escape_plain_text`] before it becomes a `Span`, so a raw
+//! control byte embedded in model or tool output can never reach the terminal
+//! as a real escape sequence via `crossterm::style::Print`. See
+//! `tests::malicious_documents_lose_no_raw_controls` for that check.
 //!
 //! ponytail: no syntax highlighting for fenced code blocks (language tag is
-//! shown as a dim label above the block, content is a flat color), no
-//! hanging indent for a list item's second line, and heading levels collapse
-//! to two colors instead of glamour's full per-level theme. All three are
-//! cosmetic; upgrade path is widening `heading_color`/`code_style` or adding
-//! a real highlighter crate if a user reports the plain output as hard to
-//! scan.
+//! shown as a dim label above the block, content is a flat color), no hanging
+//! indent for a list item's second line, and heading levels collapse to two
+//! colors instead of a full per-level theme. All three are cosmetic;
+//! upgrade path is widening `heading_color`/`code_style` or adding a real
+//! highlighter crate if a user reports the plain output as hard to scan.
 
 use std::mem;
 
@@ -576,14 +562,10 @@ mod tests {
         assert!(flat_text(&text).contains("> quoted"));
     }
 
-    // Parity replacement for `TestMarkdownRecoversFromExactUnterminatedEntityAttack`,
-    // `TestMarkdownFiltersControlsSynthesizedByFormatting`, and
-    // `TestMarkdownPreservesEntityCodeAndLinkSemantics`: those Go tests drive a
-    // real glamour render and then check `filterTerminalOutput` let only safe
-    // SGR sequences through. This renderer never produces ANSI in the first
-    // place, so the equivalent, architecture-appropriate property is that no
-    // raw control byte from a hostile document ever reaches a `Span`'s text,
-    // while ordinary visible content and link/code semantics survive intact.
+    // This renderer never produces ANSI in the first place, so the property
+    // checked here is that no raw control byte from a hostile document ever
+    // reaches a `Span`'s text, while ordinary visible content and link/code
+    // semantics survive intact.
     #[test]
     fn malicious_documents_lose_no_raw_controls_but_keep_their_visible_content() {
         let input = "safe bold **text**\n\

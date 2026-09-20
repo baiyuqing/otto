@@ -1,8 +1,6 @@
 //! A directory handle that confines every operation to one directory tree.
 //!
-//! Port of Go's `os.Root` (`$GOROOT/src/os/root_openat.go`), which
-//! `internal/tool/workspace.go` relies on for the workspace boundary. The
-//! resolution rules reproduced here are the security contract:
+//! The resolution rules are the security contract:
 //!
 //! - every component is opened with `openat` relative to the previous one, so
 //!   renaming or replacing the root after [`Root::open`] cannot redirect an
@@ -22,7 +20,7 @@
 //!
 //! Errors: all failures are `std::io::Error`. A path that would leave the root
 //! fails with [`ErrorKind::InvalidInput`] and the text `path escapes from
-//! parent`, matching Go's `errPathEscapes`.
+//! parent`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -37,11 +35,10 @@ use nix::libc;
 use nix::sys::stat::{FileStat, Mode, SFlag, fstatat};
 use nix::unistd::{UnlinkatFlags, unlinkat};
 
-/// Maximum number of symbolic links followed while resolving one path, the
-/// value Go uses (`rootMaxSymlinks`).
+/// Maximum number of symbolic links followed while resolving one path.
 const MAX_SYMLINKS: usize = 8;
-/// Step and restart limits from Go's `doInRoot`; both must be exceeded before
-/// a path is rejected as too long.
+/// Step and restart limits; both must be exceeded before a path is rejected as
+/// too long.
 const MAX_STEPS: usize = 255;
 const MAX_RESTARTS: usize = 8;
 
@@ -76,7 +73,7 @@ fn nix_error(error: nix::Error) -> io::Error {
 }
 
 /// The error an operation returns to tell the walker that the component is a
-/// symbolic link that must be followed. Go signals this with `errSymlink`.
+/// symbolic link that must be followed.
 fn symlink_signal() -> io::Error {
     io::Error::from_raw_os_error(libc::ELOOP)
 }
@@ -94,7 +91,7 @@ pub fn is_symlink(stat: &FileStat) -> bool {
 }
 
 /// Splits `path` into components, dropping `.`, keeping `..`, and framing the
-/// result with `prefix` and `suffix`. Port of Go's `splitPathInRoot`.
+/// result with `prefix` and `suffix`.
 ///
 /// An empty path, or one starting at the filesystem root, is rejected: an
 /// absolute symbolic-link target must never be followed.
@@ -136,7 +133,7 @@ fn open_dir_at(dirfd: BorrowedFd<'_>, name: &OsStr) -> io::Result<OwnedFd> {
 
 impl Root {
     /// Opens `path` as the root of the tree. Symbolic links in `path` itself
-    /// are followed, as in Go's `os.OpenRoot`.
+    /// are followed.
     pub fn open(path: &Path) -> io::Result<Self> {
         let directory = File::open(path)?;
         let stat = nix::sys::stat::fstat(&directory).map_err(nix_error)?;

@@ -1,16 +1,15 @@
 //! The on-disk encoding of a record's columns.
 //!
-//! Ported from Go `internal/memory/sqlite/codec.go`. Every blob is written in
-//! Go's canonical `encoding/json` form and, on read, re-encoded and compared
-//! byte for byte: a row whose stored bytes are not exactly what this encoder
-//! would produce is corrupt, not merely unusual.
+//! Every blob is written in Go's canonical `encoding/json` form and, on read,
+//! re-encoded and compared byte for byte: a row whose stored bytes are not
+//! exactly what this encoder would produce is corrupt, not merely unusual.
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 
 use crate::memory::json;
 use crate::memory::{Error, ErrorKind, MAX_METADATA_BYTES, Origin, Provenance, Record, Result};
 
-/// Go's `timestampLayout`, `"2006-01-02T15:04:05.000000000Z"`. Exactly 30
+/// The stored timestamp layout, `"2006-01-02T15:04:05.000000000Z"`. Exactly 30
 /// bytes, which the schema's `length(...) = 30` checks depend on.
 pub const TIMESTAMP_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.9fZ";
 /// Byte length of a value in [`TIMESTAMP_FORMAT`].
@@ -38,7 +37,6 @@ fn origin_text(origin: Option<Origin>) -> &'static str {
     origin.map_or("", Origin::as_str)
 }
 
-/// Go's `provenanceJSON`, written in struct-field order.
 pub fn encode_provenance(source: &Provenance) -> String {
     let mut out = String::from("{\"origin\":");
     json::encode_string(origin_text(source.origin), &mut out);
@@ -168,7 +166,7 @@ pub fn fts_labels(labels: &[String]) -> String {
     sorted.join("\n")
 }
 
-/// Go's `validStoredFloat`: finite and inside `[0, 1]`.
+/// A valid stored float: finite and inside `[0, 1]`.
 pub fn valid_stored_float(value: f64) -> bool {
     value.is_finite() && (0.0..=1.0).contains(&value)
 }

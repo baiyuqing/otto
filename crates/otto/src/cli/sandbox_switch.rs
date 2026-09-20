@@ -1,10 +1,9 @@
 //! The process sandbox switch and the `[sandbox]` reloader.
 //!
-//! Port of `cmd/otto/sandbox_reload.go`. The composition root in
-//! [`super::run`] opens one sandbox and hands it to a [`SandboxSwitch`]; the
-//! bash tool captures the switch as its executor, so `/sandbox reload`,
-//! `POST /v1/sandbox/reload` and the TUI all replace the runtime underneath
-//! a live session instead of restarting the process.
+//! The composition root in [`super::run`] opens one sandbox and hands it to a
+//! [`SandboxSwitch`]; the bash tool captures the switch as its executor, so
+//! `/sandbox reload`, `POST /v1/sandbox/reload` and the TUI all replace the
+//! runtime underneath a live session instead of restarting the process.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,11 +22,8 @@ use super::sandbox_runtime::{
     settings_from_config,
 };
 
-/// Go's `errSandboxReloadUnavailable`.
 const RELOAD_UNAVAILABLE: &str = "sandbox reload requires a usable sandbox; restart otto";
-/// Go's `errSandboxReloadEnvironment`.
 const RELOAD_ENVIRONMENT: &str = "sandbox reload cannot apply allow_env changes; restart otto";
-/// Go's `errSandboxReloadFailed`.
 const RELOAD_FAILED: &str = "sandbox reload failed";
 
 // ---- the sandbox switch ----
@@ -58,7 +54,7 @@ impl SandboxSwitch {
         })
     }
 
-    /// The sandbox state now in effect. Port of `sandboxSwitch.Info`.
+    /// The sandbox state now in effect.
     pub fn info(&self) -> SandboxInfo {
         *self
             .info
@@ -67,9 +63,8 @@ impl SandboxSwitch {
     }
 
     /// Installs `next` when it can replace the current runtime in place. The
-    /// rejected runtime is always closed and the current one left untouched,
-    /// so a failed reload leaves bash working exactly as it did before. Port
-    /// of `sandboxSwitch.reload` and `replaceLocked`.
+    /// rejected runtime is always closed and the current one left untouched, so
+    /// a failed reload leaves bash working exactly as it did before.
     pub async fn reload(&self, next: SandboxRuntime) -> Result<SandboxInfo, String> {
         let mut guard = self.current.write().await;
         let rejected = match guard.as_ref() {
@@ -102,8 +97,7 @@ impl SandboxSwitch {
         Ok(info)
     }
 
-    /// Shuts the current runtime down. Idempotent. Port of
-    /// `sandboxSwitch.Close`.
+    /// Shuts the current runtime down. Idempotent.
     pub async fn close(&self) -> Result<(), CloseError> {
         match self.current.write().await.take() {
             Some(runtime) => runtime.close(),
@@ -122,16 +116,14 @@ impl CommandExecutor for SandboxSwitch {
     ) -> (ExitStatus, Result<(), SandboxError>) {
         let guard = self.current.read().await;
         let Some(executor) = guard.as_ref().and_then(|runtime| runtime.executor.as_ref()) else {
-            // ponytail: Go raises its own `errSandboxExecutionUnavailable`;
-            // reusing `Error::Closed` keeps the shared sandbox error set
-            // untouched for one unreachable-in-practice branch.
+            // ponytail: reusing `Error::Closed` keeps the shared sandbox error
+            // set untouched for one unreachable-in-practice branch.
             return (ExitStatus::default(), Err(SandboxError::Closed));
         };
         executor.execute(request, streams, cancel).await
     }
 }
 
-/// Port of `usableSandboxRuntime`.
 fn usable(runtime: &SandboxRuntime) -> bool {
     runtime.info.bash_available
         && runtime.executor.is_some()
@@ -139,9 +131,9 @@ fn usable(runtime: &SandboxRuntime) -> bool {
         && runtime.redactions_complete
 }
 
-/// Names why a replacement runtime is unusable. An otherwise-available
-/// runtime only reaches here with incomplete redactions, which the reason
-/// codes report as a runtime failure. Port of `sandboxReloadReason`.
+/// Names why a replacement runtime is unusable. An otherwise-available runtime
+/// only reaches here with incomplete redactions, which the reason codes report
+/// as a runtime failure.
 fn reload_reason(info: &SandboxInfo) -> &'static str {
     match info.reason_code() {
         "" => super::info::SandboxReason::RuntimeFailure.as_str(),
@@ -154,7 +146,7 @@ fn reload_reason(info: &SandboxInfo) -> &'static str {
 /// Re-reads the configuration file and replaces the process sandbox with the
 /// result. Everything except the `[sandbox]` table is fixed at startup: the
 /// workspace, shell, home, host environment, and the provider key name the
-/// sandbox environment was resolved from. Port of `sandboxReloader`.
+/// sandbox environment was resolved from.
 pub struct SandboxReloader {
     pub(super) control: Arc<SandboxSwitch>,
     pub(super) config_path: PathBuf,
@@ -304,10 +296,10 @@ mod tests {
         control.close().await.expect("close");
     }
 
-    /// Go splits this into an `allow_env` case and a redaction-value case.
-    /// They share one rejection, and through the real open path one input
-    /// moves both: a name the child gains is also a value the redactor must
-    /// learn, so a single test covers the pair.
+    /// The `allow_env` case and the redaction-value case share one rejection,
+    /// and through the real open path one input moves both: a name the child
+    /// gains is also a value the redactor must learn, so a single test covers
+    /// the pair.
     #[tokio::test]
     async fn a_replacement_that_changes_the_child_environment_is_refused() {
         let home = TempDir::new().expect("home");

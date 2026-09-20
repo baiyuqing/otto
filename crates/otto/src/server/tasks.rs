@@ -1,11 +1,10 @@
 //! The sub-agent task routes.
 //!
-//! Port of `internal/server/tasks.go`. The wire record itself lives in
-//! [`crate::app::tasks::Task`], whose field order matches Go's `taskWire`.
+//! The wire record itself lives in [`crate::app::tasks::Task`].
 //!
-//! [`crate::app::tasks::task_view`] answers `None` for a runner that tracks
-//! no tasks, in which case `GET .../tasks` returns an empty list and the two
-//! per-task routes answer 404 — exactly what Go does.
+//! [`crate::app::tasks::task_view`] answers `None` for a runner that tracks no
+//! tasks, in which case `GET .../tasks` returns an empty list and the two
+//! per-task routes answer 404.
 
 use std::sync::Arc;
 
@@ -58,8 +57,7 @@ pub async fn get(
         StatusCode::OK,
         &TaskDetail {
             task,
-            // An empty Vec serializes as "[]", which is what Go's nil guard
-            // achieves.
+            // An empty Vec serializes as "[]".
             history: tasks.history(&task_id).unwrap_or_default(),
         },
     )

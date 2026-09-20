@@ -1,18 +1,15 @@
 //! Validation of the summary text a provider returned.
 //!
-//! Port of `internal/agent/summary_validate.go`. A summary is untrusted model
-//! output that is about to become the head of the transcript, so it is bounded
-//! in bytes, checked for the exact set of headings the prompt asked for, and
-//! for the turn-prefix mode stripped of any heading markers the model added
-//! anyway.
+//! A summary is untrusted model output that is about to become the head of the
+//! transcript, so it is bounded in bytes, checked for the exact set of headings
+//! the prompt asked for, and for the turn-prefix mode stripped of any heading
+//! markers the model added anyway.
 //!
 //! Ownership: every function takes borrowed input and returns owned text.
 //!
-//! Errors: the `Err` string is the Go error text verbatim. The caller wraps it
-//! in [`crate::agent::AgentError::InvalidCompactionSummary`].
+//! Errors: the `Err` string is the message the caller surfaces. The caller
+//! wraps it in [`crate::agent::AgentError::InvalidCompactionSummary`].
 //!
-//! Deviation from Go: the three `utf8.ValidString` checks are gone, because a
-//! Rust `&str` cannot hold invalid UTF-8.
 
 use crate::model::{BlockType, FinishReason, Message};
 

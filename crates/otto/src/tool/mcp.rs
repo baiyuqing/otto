@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancelled_call_error_is_the_go_context_canceled_text() {
+    async fn a_cancelled_call_error_is_the_fixed_cancellation_text() {
         let server = FakeServer::new("s", Err(CallError::Cancelled));
         let tool = tool(server, &info("t"), 1024);
         let result = run(&tool, "{}").await;

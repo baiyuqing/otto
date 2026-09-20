@@ -1,14 +1,11 @@
 //! `otto login`, `otto logout`, and the REPL's `/login` and `/logout`.
 //!
-//! Port of `cmd/otto/login_command.go`, `internal/repl/login.go`, the
-//! `captureAuthCredentials` helper in `cmd/otto/runtime_builder.go` and the
-//! `chatgpt` branch of `runtimeBuilder.buildProvider`. All of it lives in one
-//! file because every piece reads or writes the same credential file and
-//! nothing else in `cli` touches it.
+//! All of it lives in one file because every piece reads or writes the same
+//! credential file and nothing else in `cli` touches it.
 //!
-//! Safety: no failure path formats an underlying cause. Every diagnostic is
-//! one of the fixed `auth::AuthError` strings, so a callback query value, a
-//! token endpoint body or a host path can never reach stdout or stderr.
+//! Safety: no failure path formats an underlying cause. Every diagnostic is one
+//! of the fixed `auth::AuthError` strings, so a callback query value, a token
+//! endpoint body or a host path can never reach stdout or stderr.
 //! `capture_auth_credentials` is the only reader of token material here and it
 //! returns the values solely so the redaction boundary can mask them.
 
@@ -26,8 +23,8 @@ use super::controller::Controller;
 use super::repl::Error as ReplError;
 use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 
-/// Go runs `exec.Command("open", url)`, a `PATH` lookup. The absolute path is
-/// used here because `PATH` is attacker-influenced input at this point.
+/// The absolute path is used here because `PATH` is attacker-influenced input
+/// at this point.
 #[cfg(not(test))]
 const OPEN_BINARY: &str = "/usr/bin/open";
 
@@ -48,7 +45,6 @@ pub struct CapturedAuth {
     pub redaction_values: Vec<String>,
 }
 
-/// Port of `captureAuthCredentials`.
 pub fn capture_auth_credentials(path: &Path) -> CapturedAuth {
     let mut capture = CapturedAuth {
         path: path.to_string_lossy().into_owned(),
@@ -99,9 +95,8 @@ pub fn capture_auth_credentials(path: &Path) -> CapturedAuth {
     capture
 }
 
-/// Records what the browser launcher was asked to open. Go swaps the
-/// `replOpenBrowser` package variable; a compile-time seam is used here so no
-/// test can reach `/usr/bin/open`.
+/// Records what the browser launcher was asked to open. A compile-time seam is
+/// used so no test can reach `/usr/bin/open`.
 #[cfg(test)]
 static LAUNCHES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
@@ -123,7 +118,7 @@ fn launch_browser(url: &str) {
 }
 
 /// A failed launch is not fatal: the URL was already printed, so the callback
-/// flow can still complete. Go ignores the `Start` error for the same reason.
+/// flow can still complete.
 #[cfg(not(test))]
 fn launch_browser(url: &str) {
     let _ = std::process::Command::new(OPEN_BINARY).arg(url).spawn();
@@ -137,9 +132,8 @@ fn launch_browser(url: &str) {
 /// URL-printing convention instead of duplicating it.
 pub(crate) type SharedWriter<'a> = Mutex<&'a mut (dyn Write + Send)>;
 
-/// Port of `browserOpener`: print the URL, which is the reliable path, then
-/// also try to launch the default browser. `pub(crate)` for the same reason
-/// as [`SharedWriter`].
+/// Print the URL, which is the reliable path, then also try to launch the
+/// default browser. `pub(crate)` for the same reason as [`SharedWriter`].
 pub(crate) fn browser_opener<'a, 'w: 'a>(
     stdout: &'a SharedWriter<'w>,
 ) -> impl Fn(&str) -> Result<(), String> + Send + Sync + 'a {
@@ -153,7 +147,6 @@ pub(crate) fn browser_opener<'a, 'w: 'a>(
     }
 }
 
-/// Port of the `chatgpt` branch of `runtimeBuilder.buildProvider`.
 pub fn chatgpt_client(
     path: &str,
     credentials: &Credentials,
@@ -166,10 +159,9 @@ pub fn chatgpt_client(
     if path.is_empty() {
         return Err(AuthError::CredentialsUnavailable.to_string());
     }
-    // Divergence from Go: `Credentials.TokenSource(ctx, path)` carries the
-    // process context. `build_runner` has no token to pass, so the source gets
-    // a fresh never-cancelled base and every request still aborts on the
-    // per-call token the agent hands `Provider::complete`.
+    // `build_runner` has no token to pass, so the source gets a fresh
+    // never-cancelled base and every request still aborts on the per-call token
+    // the agent hands `Provider::complete`.
     let tokens = crate::auth::token::TokenSource::new(
         credentials.clone(),
         PathBuf::from(path),
@@ -181,13 +173,13 @@ pub fn chatgpt_client(
     ))
 }
 
-/// Writes `otto: {message}\n` and returns Go's exit code 1.
+/// Writes `otto: {message}\n` and returns exit code 1.
 fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     let _ = writeln!(stderr, "otto: {message}");
     1
 }
 
-/// Port of `runAuthCommand`: `otto login [--status]` and `otto logout`.
+/// `otto login [--status]` and `otto logout`.
 pub async fn run_auth_command(
     args: &[String],
     stdout: &mut (dyn Write + Send),
@@ -210,7 +202,7 @@ async fn auth_command(
     for argument in &args[1..] {
         match argument.as_str() {
             "--status" | "-status" => status = true,
-            // Go's `flag` stops at the first non-flag argument and ignores the
+            // Parsing stops at the first non-flag argument and ignores the
             // rest; only an unknown flag is a parse failure.
             _ if argument.starts_with('-') => {
                 let _ = writeln!(stderr, "flag provided but not defined: {argument}");
@@ -220,8 +212,8 @@ async fn auth_command(
         }
     }
     let service = build(auth::path_for_home(Path::new(home)));
-    // Go passes `context.Background()` to Status and Logout so that reading or
-    // clearing the file still works after the process context is cancelled.
+    // Status and Logout use an uncancelled token so that reading or clearing
+    // the file still works after the process context is cancelled.
     let uncancelled = CancellationToken::new();
     match args[0].as_str() {
         "logout" => match service.logout(&uncancelled) {
@@ -245,7 +237,6 @@ async fn auth_command(
     }
 }
 
-/// Port of `runLogin`.
 async fn run_login(
     service: &Service,
     stdout: &mut (dyn Write + Send),
@@ -273,8 +264,7 @@ async fn run_login(
 }
 
 /// The service the REPL commands act on, or `None` when the boundary is closed
-/// or no credential path was captured. Port of the `dynamicContent` and
-/// `authentication == nil` guards in `app.Controller`.
+/// or no credential path was captured.
 fn repl_service(
     controller: &Controller,
     build: &(dyn Fn(PathBuf) -> Service + Sync),
@@ -283,7 +273,6 @@ fn repl_service(
     (controller.dynamic_content() && !path.is_empty()).then(|| build(PathBuf::from(path)))
 }
 
-/// Port of `REPL.loginCommand`.
 pub async fn repl_login(
     controller: &Controller,
     stdout: &mut (dyn Write + Send),
@@ -313,9 +302,8 @@ async fn repl_login_with(
             Ok(())
         }
         "" => {
-            // Go reaches this as `app.ErrAuthenticationUnsupported` from
-            // `Controller.Login`; the provider is checked here instead so the
-            // controller keeps no authentication state.
+            // The provider is checked here rather than in the controller, so
+            // the controller keeps no authentication state.
             let provider = controller.info().provider;
             if provider != otto_core::config::PROVIDER_CHATGPT {
                 let _ = writeln!(
@@ -349,7 +337,6 @@ async fn repl_login_with(
     }
 }
 
-/// Port of `REPL.logoutCommand`.
 pub fn repl_logout(
     controller: &Controller,
     stdout: &mut (dyn Write + Send),
@@ -383,7 +370,7 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     /// Builds a service whose sign-in flow returns `credentials` after calling
-    /// the opener once, the Rust form of Go's `authLogin` test seam.
+    /// the opener once.
     fn flow_returning(credentials: Credentials, url: &'static str) -> impl Fn(PathBuf) -> Service {
         move |path| {
             let credentials = credentials.clone();
@@ -478,7 +465,6 @@ mod tests {
         )
     }
 
-    /// Port of `TestLoginStatusNotSignedIn`.
     #[tokio::test]
     async fn login_status_reports_that_no_credentials_are_stored() {
         let home = tempfile::tempdir().expect("home");
@@ -487,7 +473,6 @@ mod tests {
         assert!(stdout.contains("Not signed in"), "{stdout}");
     }
 
-    /// Port of `TestLoginStatusSignedIn`.
     #[tokio::test]
     async fn login_status_reports_a_stored_credential_without_the_account_id() {
         let home = tempfile::tempdir().expect("home");
@@ -500,7 +485,6 @@ mod tests {
         assert!(!stdout.contains("acct-xyz"), "{stdout}");
     }
 
-    /// Port of `TestLogoutRemovesCredentials`.
     #[tokio::test]
     async fn logout_removes_the_credential_file() {
         let home = tempfile::tempdir().expect("home");
@@ -512,7 +496,6 @@ mod tests {
         assert!(!path.exists(), "credential file still present");
     }
 
-    /// Port of `TestLogoutWhenNotSignedIn`.
     #[tokio::test]
     async fn logout_without_credentials_reports_that_none_were_stored() {
         let home = tempfile::tempdir().expect("home");
@@ -521,7 +504,6 @@ mod tests {
         assert!(stdout.contains(NOT_SIGNED_IN), "{stdout}");
     }
 
-    /// Port of `TestLoginSavesCredentials`.
     #[tokio::test]
     async fn login_saves_the_credentials_the_flow_returned() {
         let home = tempfile::tempdir().expect("home");
@@ -543,7 +525,6 @@ mod tests {
         assert!(!stdout.contains("tok\n"), "{stdout}");
     }
 
-    /// Port of `TestLoginFailureIsBounded`.
     #[tokio::test]
     async fn a_login_failure_reports_only_the_fixed_message() {
         let home = tempfile::tempdir().expect("home");
@@ -557,9 +538,8 @@ mod tests {
         assert!(!stderr.contains("exchange"), "{stderr}");
     }
 
-    /// Port of `TestLogoutFailureIsBounded`: the credential path is a
-    /// non-empty directory, so removal fails with an OS error that must not
-    /// reach stderr.
+    /// The credential path is a non-empty directory, so removal fails with an
+    /// OS error that must not reach stderr.
     #[tokio::test]
     async fn a_logout_failure_reports_only_the_fixed_message() {
         let home = tempfile::tempdir().expect("home");
@@ -579,7 +559,7 @@ mod tests {
         );
     }
 
-    /// Go's `flag.ContinueOnError` returns exit code 2 for an unknown flag.
+    /// An unknown flag returns exit code 2.
     #[tokio::test]
     async fn an_unknown_flag_exits_two() {
         let home = tempfile::tempdir().expect("home");
@@ -588,7 +568,6 @@ mod tests {
         assert!(stderr.contains("--nope"), "{stderr}");
     }
 
-    /// Port of `TestREPLLoginStatusReportsNotSignedIn`.
     #[tokio::test]
     async fn the_repl_reports_no_stored_credential() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -602,7 +581,6 @@ mod tests {
         assert!(stdout.contains("Not signed in"), "{stdout}");
     }
 
-    /// Port of `TestREPLLoginStatusReportsSignedIn`.
     #[tokio::test]
     async fn the_repl_reports_a_stored_credential_without_the_account_id() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -618,7 +596,6 @@ mod tests {
         assert!(!stdout.contains("acct-9"), "{stdout}");
     }
 
-    /// Port of `TestREPLLoginSavesCredentials`.
     #[tokio::test]
     async fn the_repl_login_saves_credentials_and_shows_the_url() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -644,7 +621,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestREPLLoginNonChatGPTProviderExplainsAPIKey`.
     #[tokio::test]
     async fn the_repl_explains_that_a_non_chatgpt_provider_uses_an_api_key() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -665,7 +641,6 @@ mod tests {
         assert!(!path.exists(), "the refused command still wrote a file");
     }
 
-    /// Port of `TestREPLLogoutRemovesCredentials`.
     #[tokio::test]
     async fn the_repl_logout_removes_credentials() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -688,7 +663,6 @@ mod tests {
         assert!(matches!(auth::load(&path), Err(AuthError::NoCredentials)));
     }
 
-    /// Port of `TestREPLLogoutWhenNotSignedIn`.
     #[tokio::test]
     async fn the_repl_logout_without_credentials_reports_none() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -713,7 +687,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestREPLLoginFailureIsBounded`.
     #[tokio::test]
     async fn a_repl_login_failure_reports_only_the_fixed_message() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -728,8 +701,6 @@ mod tests {
         assert_eq!(error.to_string(), AuthError::LoginFailed.to_string());
     }
 
-    /// Port of `TestREPLLoginCommandsUnavailableWhenDynamicContentIsSuppressed`
-    /// and of `TestRunSuppressedREPLAuthCommandsStayUnavailable`.
     #[tokio::test]
     async fn a_closed_boundary_makes_every_repl_auth_command_unavailable() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -754,7 +725,7 @@ mod tests {
         assert!(auth::load(&path).is_ok(), "credentials were mutated");
     }
 
-    /// Go prints the usage line for any other `/login` argument.
+    /// Any other `/login` argument prints the usage line.
     #[tokio::test]
     async fn an_unexpected_login_argument_prints_the_usage_line() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -811,9 +782,7 @@ mod tests {
         assert!(out.contains(NOT_SIGNED_IN), "{out}");
     }
 
-    /// Port of the credential half of
-    /// `TestRunTypicalOAuthCredentialsKeepSandboxAndSessionPersistenceEnabled`:
-    /// a real-sized credential set keeps the boundary open and supplies four
+    /// A real-sized credential set keeps the boundary open and supplies four
     /// redaction values.
     #[test]
     fn captured_credentials_supply_the_redaction_values() {

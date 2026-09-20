@@ -1,8 +1,8 @@
-//! Process composition: the port of `run`/`runWithDependencies` in
-//! `cmd/otto/main.go`.
+//! Process composition: the entry point `main` calls, from flag parsing to the
+//! exit code.
 //!
-//! The order of operations, the exact stderr text and the exit codes match
-//! Go, because `cmd/otto/main_test.go` pins them.
+//! The tests pin the order of operations, the exact stderr text and the exit
+//! codes.
 //!
 //! The composition root opens one process sandbox and hands it to a
 //! [`SandboxSwitch`], so `/sandbox reload`, `POST /v1/sandbox/reload` and the
@@ -12,12 +12,12 @@
 //! because their argument grammars are their own; nothing is left unported.
 //!
 //! The TUI (`--ui tui`, or `--ui auto` on a terminal) dispatches to
-//! [`crate::tui::run`], the phase 8 port of `internal/tui`.
+//! [`crate::tui::run`].
 //!
 //! Safety: every diagnostic that could carry a host path, an environment name
-//! or a provider URL goes through the redaction boundary before it is
-//! written. A boundary that cannot prove it collected every secret renders
-//! the empty string, exactly as Go's `errRedactedRuntimeBoundary` does.
+//! or a provider URL goes through the redaction boundary before it is written.
+//! A boundary that cannot prove it collected every secret renders the empty
+//! string.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Write};
@@ -51,7 +51,6 @@ use super::sandbox_runtime::{
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use super::serve;
 
-/// Go's `maxApprovePromptBytes`.
 const MAX_APPROVE_PROMPT_BYTES: usize = 1 << 20;
 
 /// Darwin's process argument/environment budget is about 1 MiB. These
@@ -65,7 +64,7 @@ const MAX_CAPTURED_ENVIRONMENT_BYTES: usize = 16 << 20;
 
 const ENVIRONMENT_SNAPSHOT_TOO_LARGE: &str = "process environment snapshot is too large";
 
-/// Which frontend the resolved UI mode selected. Port of `frontendKind`.
+/// Which frontend the resolved UI mode selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frontend {
     Repl,
@@ -76,7 +75,7 @@ pub enum Frontend {
 /// The process environment, parsed into names and values.
 type EnvironmentLookup = HashMap<String, String>;
 
-/// Writes `otto: {message}\n` and returns Go's exit code 1.
+/// Writes `otto: {message}\n` and returns exit code 1.
 pub(crate) fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     let _ = writeln!(stderr, "otto: {message}");
     1
@@ -97,8 +96,8 @@ pub async fn run(
     terminal: bool,
     cancel: &CancellationToken,
 ) -> i32 {
-    // Go dispatches these before flag parsing, because their argument
-    // grammars are their own.
+    // These dispatch before flag parsing, because their argument grammars are
+    // their own.
     if let Some(first) = args.first()
         && matches!(first.as_str(), "sandbox" | "memory")
     {
@@ -428,9 +427,8 @@ pub async fn run(
     };
     let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
     // The bash tool captures its executor when a runner is built, so the
-    // process sandbox lives behind a switch that `/sandbox reload` can
-    // replace without rebuilding the session or the runner. Port of
-    // `newSandboxSwitch` at `cmd/otto/main.go`.
+    // process sandbox lives behind a switch that `/sandbox reload` can replace
+    // without rebuilding the session or the runner.
     let had_executor = sandbox.executor.is_some();
     let sandbox_environment = sandbox.environment.clone();
     let sandbox_info = sandbox.info;
@@ -489,8 +487,8 @@ pub async fn run(
     if let Some(warning) = sandbox_runtime_warning(builder.effective_sandbox_info()) {
         let _ = stderr.write_all(warning.as_bytes());
     }
-    // Port of `runtimeBuilder.sandboxReload`: no reloader at all without a
-    // usable sandbox, because there is then nothing to re-point.
+    // No reloader at all without a usable sandbox, because there is then
+    // nothing to re-point.
     let reloader = (had_executor && builder.effective_sandbox_info().bash_available).then(|| {
         Arc::new(SandboxReloader {
             control: Arc::clone(&control),
@@ -625,9 +623,8 @@ pub async fn run(
     let tail_redactor = boundary::secret_redactor(&builder.boundary_inputs(), Some(&resolved));
     let info = builder.runtime_info(&resolved);
     let controller = Controller::new(builder, dynamic_content, initial_session, runner, info);
-    // One process sandbox serves every controller, so each one reports the
-    // live state rather than the value captured when it was built. Port of
-    // `app.WithSandboxControl`.
+    // One process sandbox serves every controller, so each one reports the live
+    // state rather than the value captured when it was built.
     let controller = match &reloader {
         Some(reloader) => controller
             .with_sandbox_control(Arc::clone(reloader) as Arc<dyn crate::app::SandboxControl>),
@@ -688,8 +685,7 @@ pub async fn run(
     )
 }
 
-/// Port of `prepareSession`: a directly named session file must belong to the
-/// current workspace.
+/// A directly named session file must belong to the current workspace.
 fn prepare_session(path: &Path, workspace: &str) -> Result<session::Prepared, String> {
     let prepared = session::Prepared::prepare(path).map_err(|error| error.to_string())?;
     match validate_session_workspace(&prepared.info().cwd, workspace) {
@@ -701,7 +697,6 @@ fn prepare_session(path: &Path, workspace: &str) -> Result<session::Prepared, St
     }
 }
 
-/// Port of the `activatePrepared` / `newSession` / `session.NewMemory` fork.
 fn activate_initial_session(
     builder: &Builder,
     prepared: Option<session::Prepared>,
@@ -742,8 +737,7 @@ fn overrides_from(options: &CliOptions) -> Overrides {
     }
 }
 
-/// The boundary that exists before a profile is resolved. Port of Go's
-/// `startupBoundary` `runtimeBuilder` value.
+/// The boundary that exists before a profile is resolved.
 struct StartupBoundary {
     sandbox_secrets: Vec<String>,
     complete: bool,
@@ -776,8 +770,8 @@ impl StartupBoundary {
     }
 }
 
-/// A closed boundary renders nothing at all, matching Go's deliberately
-/// empty `errRedactedRuntimeBoundary.Error()`.
+/// A closed boundary renders nothing at all, deliberately: an incomplete
+/// redaction set must not let a diagnostic escape.
 fn redact_with(redactor: &otto_core::agent::redactor::Redactor, message: &str) -> String {
     if !redactor.allows_dynamic_content() {
         return String::new();
@@ -785,7 +779,6 @@ fn redact_with(redactor: &otto_core::agent::redactor::Redactor, message: &str) -
     redactor.redact_string(message)
 }
 
-/// Port of `mergeSandboxRuntimeRedactions` for two groups.
 fn merge_redactions(first: &[String], second: &[String]) -> (Vec<String>, bool) {
     let mut collector = otto_core::safetext::SecretCollector::new();
     for group in [first, second] {
@@ -813,7 +806,7 @@ fn environment_snapshot(
     }
 }
 
-/// Port of `captureEnvironment`: bounds the snapshot before anything reads it.
+/// Bounds the snapshot before anything reads it.
 fn capture_environment(entries: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, String> {
     if entries.len() > MAX_CAPTURED_ENVIRONMENT_ENTRIES {
         return Err(ENVIRONMENT_SNAPSHOT_TOO_LARGE.to_string());
@@ -828,8 +821,8 @@ fn capture_environment(entries: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, String> {
     Ok(entries)
 }
 
-/// Port of `newEnvironmentLookup`: parses `KEY=VALUE` entries, skipping every
-/// malformed one and refusing an oversized set outright.
+/// Parses `KEY=VALUE` entries, skipping every malformed one and refusing an
+/// oversized set outright.
 fn environment_lookup(entries: &[Vec<u8>]) -> Result<EnvironmentLookup, String> {
     let mut parsed: EnvironmentLookup = HashMap::new();
     let mut total = 0usize;
@@ -874,7 +867,7 @@ fn valid_environment_name(name: &str) -> bool {
     bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
-/// Port of `resolveHome`: `$HOME`, else the passwd entry, made absolute.
+/// `$HOME`, else the passwd entry, made absolute.
 pub(crate) fn resolve_home_for(lookup: &EnvironmentLookup) -> Result<String, String> {
     resolve_home(lookup)
 }
@@ -923,15 +916,14 @@ fn resolve_home(lookup: &EnvironmentLookup) -> Result<String, String> {
     Ok(absolute.to_string_lossy().into_owned())
 }
 
-/// The current user's home directory from the passwd database. Go reads the
-/// same source through `os/user`.
+/// The current user's home directory from the passwd database.
 fn current_user_home() -> Option<String> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid()).ok()??;
     let home = user.dir.to_string_lossy().into_owned();
     (!home.is_empty()).then_some(home)
 }
 
-/// Port of `loadConfig`: a missing file at an implicit path is an empty one.
+/// A missing file at an implicit path is an empty one.
 fn load_config(options: &CliOptions, home: &str) -> Result<(String, File), ()> {
     let path: PathBuf = if options.config_path.is_empty() {
         [home, ".config", "otto", "config.toml"].iter().collect()
@@ -947,11 +939,9 @@ fn load_config(options: &CliOptions, home: &str) -> Result<(String, File), ()> {
     }
 }
 
-/// Port of `configEnvironment`.
-///
 /// Unlike `crate::config::resolution_environment`, every fixed key is always
-/// present, even when the process has no such variable: Go inserts the empty
-/// string, and resolution distinguishes "absent" from "empty" nowhere.
+/// present, even when the process has no such variable: the empty string is
+/// inserted, and resolution distinguishes "absent" from "empty" nowhere.
 fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String, String> {
     const FIXED_KEYS: [&str; 7] = [
         "HOME",
@@ -978,8 +968,8 @@ fn config_environment(file: &File, lookup: &EnvironmentLookup) -> HashMap<String
         .collect()
 }
 
-/// Port of `sandboxProviderEnvironmentNames`: `OTTO_API_KEY`, the selected
-/// key name and every configured one, deduplicated and sorted.
+/// `OTTO_API_KEY`, the selected key name and every configured one, deduplicated
+/// and sorted.
 pub(super) fn sandbox_provider_environment_names(file: &File, selected: &str) -> Vec<String> {
     let mut names: BTreeSet<String> = BTreeSet::new();
     names.insert("OTTO_API_KEY".to_string());
@@ -994,8 +984,8 @@ pub(super) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
     names.into_iter().collect()
 }
 
-/// Port of `resolveSandboxSettings`: existing skill and agent roots become
-/// read paths so discovery can reach them from inside the sandbox.
+/// Existing skill and agent roots become read paths so discovery can reach them
+/// from inside the sandbox.
 pub(super) fn resolve_sandbox_settings(
     file: &File,
     environment: &HashMap<String, String>,
@@ -1017,7 +1007,6 @@ pub(super) fn resolve_sandbox_settings(
     resolve_sandbox(&raw, driver_override).map_err(|error| error.to_string())
 }
 
-/// Port of `selectFrontend`.
 fn select_frontend(mode: UiMode, terminal: bool) -> Result<Frontend, String> {
     match mode {
         UiMode::Auto if terminal => Ok(Frontend::Tui),

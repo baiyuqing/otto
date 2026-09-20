@@ -1,10 +1,8 @@
-//! The PKCE sign-in flow and its loopback callback listener. Port of
-//! `internal/auth/login.go`.
+//! The PKCE sign-in flow and its loopback callback listener.
 //!
-//! Divergence from Go: Go serves the callback with `net/http`. This port reads
-//! the request line off the accepted socket and writes a fixed response,
-//! because the crate has no HTTP server dependency and the listener answers
-//! exactly one path with one of four fixed bodies.
+//! The listener reads the request line off the accepted socket and writes a
+//! fixed response, because the crate has no HTTP server dependency and it
+//! answers exactly one path with one of four fixed bodies.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -29,7 +27,6 @@ pub enum LoginError {
     StateMismatch,
     #[error("callback missing authorization code")]
     MissingCode,
-    /// Port of `errAuthorizationCodeExchangeFailed`.
     #[error("chatgpt authorization code exchange failed")]
     ExchangeFailed,
     #[error("token response missing id_token")]
@@ -40,8 +37,7 @@ pub enum LoginError {
     Cancelled,
 }
 
-/// What the flow calls to put the authorization URL in front of the user. Go
-/// passes `func(url string) error`.
+/// What the flow calls to put the authorization URL in front of the user.
 pub type Opener<'a> = dyn Fn(&str) -> Result<(), String> + Send + Sync + 'a;
 
 /// The largest request head the callback listener will buffer. A browser's
@@ -50,7 +46,7 @@ pub type Opener<'a> = dyn Fn(&str) -> Result<(), String> + Send + Sync + 'a;
 const MAX_REQUEST_HEAD_BYTES: usize = 8 * 1024;
 
 /// Runs the "Sign in with ChatGPT" OAuth PKCE flow against the production
-/// endpoint. Port of `auth.Login`. The caller persists the result.
+/// endpoint. The caller persists the result.
 pub async fn login(
     cancel: &CancellationToken,
     open: &Opener<'_>,
@@ -64,8 +60,7 @@ pub async fn login(
     .await
 }
 
-/// Port of the unexported `login`, with the endpoint and the candidate ports
-/// injected the way Go's tests replace `loopbackPorts`.
+/// The endpoint and the candidate ports are injected so tests can replace them.
 pub(crate) async fn login_with(
     endpoint: &Endpoint,
     ports: &[u16],
@@ -122,8 +117,8 @@ pub(crate) async fn login_with(
 }
 
 /// Accepts loopback connections until one requests `/auth/callback`, then
-/// applies Go's `callbackHandler` checks in the same order: `error` parameter,
-/// then `state` equality, then a non-empty `code`.
+/// applies the callback checks in order: `error` parameter, then `state`
+/// equality, then a non-empty `code`.
 ///
 /// `pub(crate)`: `mcp::oauth`'s login flow reuses this listener rather than
 /// duplicating the callback HTTP handling.
@@ -149,8 +144,8 @@ pub(crate) async fn serve_callback(
             continue;
         };
         if url.path() != "/auth/callback" {
-            // Go's ServeMux answers any other path with 404 and the flow keeps
-            // waiting; a browser's favicon request must not end sign-in.
+            // Any other path is answered with 404 and the flow keeps waiting; a
+            // browser's favicon request must not end sign-in.
             let _ = write_browser_message(&mut stream, 404, "Not found.").await;
             continue;
         }
@@ -213,8 +208,8 @@ async fn read_request_target(stream: &mut tokio::net::TcpStream) -> Option<Strin
     }
 }
 
-/// Port of `writeBrowserMessage`. The four messages are compile-time constants,
-/// so nothing user-controlled reaches the HTML.
+/// The four messages are compile-time constants, so nothing user-controlled
+/// reaches the HTML.
 async fn write_browser_message(
     stream: &mut tokio::net::TcpStream,
     status: u16,
@@ -264,7 +259,6 @@ mod tests {
         })
     }
 
-    /// Port of `TestLoginExchangesCodeAndExtractsAccountID`.
     #[tokio::test]
     async fn login_exchanges_the_code_and_extracts_the_account_id() {
         let id_token = fake_id_token(json!({
@@ -317,8 +311,7 @@ mod tests {
         );
     }
 
-    /// Port of `TestLoginRejectsStateMismatch`: the token endpoint is never
-    /// reached.
+    /// The token endpoint is never reached.
     #[tokio::test]
     async fn login_rejects_a_state_mismatch_without_calling_the_token_endpoint() {
         let server = testserver::spawn(|_| json_response("{}")).await;
@@ -338,7 +331,6 @@ mod tests {
         assert_eq!(server.count(), 0);
     }
 
-    /// Port of `TestLoginExchangeBlocksAllRedirects`.
     #[tokio::test]
     async fn login_exchange_blocks_every_redirect_status() {
         for status in [301u16, 302, 303, 307, 308] {
@@ -404,8 +396,8 @@ mod tests {
         }
     }
 
-    /// A request to any other path is answered with 404 and sign-in continues,
-    /// which is what Go's `ServeMux` does for e.g. `/favicon.ico`.
+    /// A request to any other path, e.g. `/favicon.ico`, is answered with 404
+    /// and sign-in continues.
     #[tokio::test]
     async fn an_unrelated_path_does_not_end_the_flow() {
         let id_token = fake_id_token(json!({"chatgpt_account_id": "acct-1"}));
@@ -439,7 +431,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(credentials.account_id, "acct-1");
-        // No `expires_in` in the response, so the expiry stays Go's zero time.
+        // No `expires_in` in the response, so the expiry stays the zero time.
         assert_eq!(credentials.expiry, super::super::go_time::zero());
     }
 

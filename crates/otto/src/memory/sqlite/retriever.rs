@@ -1,10 +1,10 @@
 //! Ranked retrieval.
 //!
-//! Ported from Go `internal/memory/sqlite/retriever.go`. One request reads a
-//! single snapshot: an optional baseline set, the FTS matches, and the
-//! workspace records that override user records with the same `(kind, key)`.
-//! The result is ranked in Rust rather than in SQL, so the page cursor carries
-//! an ordinal into that snapshot and is invalidated by any write.
+//! One request reads a single snapshot: an optional baseline set, the FTS
+//! matches, and the workspace records that override user records with the same
+//! `(kind, key)`. The result is ranked in Rust rather than in SQL, so the page
+//! cursor carries an ordinal into that snapshot and is invalidated by any
+//! write.
 
 use rusqlite::{Connection, Row, params_from_iter};
 use sha2::{Digest, Sha256};
@@ -269,8 +269,8 @@ fn better_dedupe_winner(left: &RetrievalCandidate, right: &RetrievalCandidate) -
     left.record.id < right.record.id
 }
 
-/// The text a record's token cost is measured against. Go marshals a struct
-/// with sorted labels; the field order here is that struct's field order.
+/// The text a record's token cost is measured against, with sorted labels and
+/// the record's own field order.
 fn budget_text(record: &Record) -> String {
     let mut labels: Vec<&str> = record.labels.iter().map(String::as_str).collect();
     labels.sort_unstable();
@@ -565,12 +565,12 @@ mod tests {
     }
 
     #[test]
-    fn the_default_estimator_matches_gos_three_bytes_per_token_rule() {
+    fn the_default_estimator_uses_three_bytes_per_token() {
         assert_eq!(estimate_tokens(None, ""), 0);
         assert_eq!(estimate_tokens(None, "a"), 1);
         assert_eq!(estimate_tokens(None, "abc"), 1);
         assert_eq!(estimate_tokens(None, "abcd"), 2);
-        // Go clamps a custom estimator's non-positive answer up to one token.
+        // A custom estimator's non-positive answer is clamped up to one token.
         assert_eq!(estimate_tokens(Some(|_| 0), "abcd"), 1);
     }
 }

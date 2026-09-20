@@ -1,9 +1,8 @@
 //! `otto serve` over a real loopback listener.
 //!
-//! Port of `cmd/otto/serve_listen_test.go`. The whole startup path runs
-//! in-process, exactly as Go's `runWithDependencies` does, so the listener,
-//! the token gate, the session factory and the embedded UI are all exercised
-//! against a bound socket rather than a `oneshot` service.
+//! The whole startup path runs in-process, so the listener, the token gate,
+//! the session factory and the embedded UI are all exercised against a bound
+//! socket rather than a `oneshot` service.
 
 use std::io::Write;
 use std::sync::atomic::AtomicUsize;
@@ -119,7 +118,7 @@ async fn run_serve(
 }
 
 /// Waits for the `otto serve:` startup line and returns the base URL and the
-/// token parsed from it. Port of `startTCPServe`.
+/// token parsed from it.
 async fn await_startup(stdout: &LockedBuffer, stderr: &LockedBuffer) -> (String, String) {
     for _ in 0..400 {
         let text = stdout.text();

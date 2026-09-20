@@ -1,19 +1,18 @@
 //! Shared session lifecycle and the capability contracts every frontend uses.
 //!
-//! Port of `internal/app`. The REPL, `otto serve`, and a later TUI all drive
-//! one [`Controller`]: it owns the current session, the runner built for it,
-//! and the admission rule that lets exactly one operation touch them at a
-//! time.
+//! The REPL, `otto serve`, and a later TUI all drive one [`Controller`]: it
+//! owns the current session, the runner built for it, and the admission rule
+//! that lets exactly one operation touch them at a time.
 //!
 //! Concurrency: one `Mutex<State>` guards everything. Admission is an RAII
 //! guard ([`Admission`]), so a dropped future releases the claim. No lock is
 //! held across an `await`.
 //!
-//! Close: [`Controller::request_close`] never blocks and never closes, which
-//! is what a callback running inside an operation needs.
-//! [`Controller::close`] completes the close, waiting on a condition variable
-//! when an operation is still in flight. It blocks a thread, so an async
-//! caller cancels the in-flight work and awaits it before calling `close`.
+//! Close: [`Controller::request_close`] never blocks and never closes, which is
+//! what a callback running inside an operation needs. [`Controller::close`]
+//! completes the close, waiting on a condition variable when an operation is
+//! still in flight. It blocks a thread, so an async caller cancels the
+//! in-flight work and awaits it before calling `close`.
 //!
 //! Errors: every failure is already-redacted text, matching
 //! [`Builder::redact_error`]. Callers that must distinguish a cause compare
@@ -43,21 +42,14 @@ pub use sandbox::SandboxControl;
 pub use tasks::{Task, TaskStatus, TaskView};
 pub use wake::WakeOperation;
 
-/// Go's `app.ErrPersistenceDisabled`.
 pub const PERSISTENCE_DISABLED: &str = "session persistence is disabled";
-/// Go's `app.ErrProfileSwitchUnavailable`.
 pub const PROFILE_SWITCH_UNAVAILABLE: &str = "profile switching is not available";
-/// Go's `app.ErrSandboxReloadUnavailable`.
 pub const SANDBOX_RELOAD_UNAVAILABLE: &str = "sandbox reload is not available";
-/// Go's `errSessionOperationUnavailable` in `cmd/otto/runtime_builder.go`.
 pub const SESSION_OPERATION_UNAVAILABLE: &str = "session operation is unavailable";
-/// Go's `app.ErrPromptActive`. The server answers it with 409 `turn_active`.
+/// The server answers it with 409 `turn_active`.
 pub const PROMPT_ACTIVE: &str = "a prompt is already active";
-/// Go's `app.ErrClosed`.
 pub const CLOSED: &str = "controller is closed";
-/// Go's `app.ErrSessionRenameUnavailable`.
 pub const SESSION_RENAME_UNAVAILABLE: &str = "session rename is unavailable";
-/// Go's `session.ErrInvalidSession` text for a blank name.
 pub const INVALID_SESSION_NAME: &str = "session is invalid: session name is required";
 
 /// One configured profile row a frontend can display.
@@ -69,7 +61,7 @@ pub struct ProfileSummary {
     pub thinking: String,
 }
 
-/// What a frontend may display. Port of `app.Info`.
+/// What a frontend may display.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Info {
     pub session_id: String,
@@ -89,7 +81,7 @@ pub struct Info {
     pub sandbox: SandboxInfo,
 }
 
-/// What a completed session replacement reports. Port of `app.ResumeResult`.
+/// What a completed session replacement reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeResult {
     pub session_path: String,
@@ -141,7 +133,7 @@ impl Current {
     }
 
     /// The same path, symlink-resolved, for comparing two references to one
-    /// file. Port of `canonicalSessionPath` applied to `currentPath`.
+    /// file.
     fn canonical_path(&self) -> String {
         canonical_session_path(&self.session.path())
     }
@@ -155,14 +147,14 @@ impl Current {
 #[derive(Default)]
 struct State {
     current: Option<Current>,
-    /// An operation holds admission. Covers Go's `active` and `replace` both,
-    /// because every caller treats them identically.
+    /// An operation holds admission. Covers both the active and the replacing
+    /// state, because every caller treats them identically.
     busy: bool,
     /// Bumped on every admission so a stale [`Admission`] guard is a no-op
     /// after [`Controller::request_close`] releases an unstarted wake.
     generation: u64,
-    /// A wake claim that has not run yet. `request_close` releases it
-    /// instead of waiting, matching Go's `RequestClose`.
+    /// A wake claim that has not run yet. `request_close` releases it instead
+    /// of waiting.
     wake_unstarted: bool,
     closed: bool,
     close_pending: bool,
@@ -173,9 +165,8 @@ struct State {
 
 pub struct Controller {
     builder: Arc<Builder>,
-    /// False when the redaction boundary is closed. Every operation that
-    /// would persist or display provider identity is then refused, matching
-    /// Go's `dynamicContent` gate.
+    /// False when the redaction boundary is closed. Every operation that would
+    /// persist or display provider identity is then refused.
     dynamic_content: bool,
     sandbox: Option<Arc<dyn SandboxControl>>,
     state: Mutex<State>,
@@ -237,9 +228,9 @@ impl Controller {
         }
     }
 
-    /// Wires the process sandbox. Port of `app.WithSandboxControl`: the
-    /// control reports the state now in effect, so every controller built
-    /// from one composition root agrees after a reload.
+    /// Wires the process sandbox. The control reports the state now in effect,
+    /// so every controller built from one composition root agrees after a
+    /// reload.
     pub fn with_sandbox_control(mut self, control: Arc<dyn SandboxControl>) -> Self {
         self.sandbox = Some(control);
         self
@@ -257,7 +248,6 @@ impl Controller {
 
     // ---- admission ----
 
-    /// Port of `beginOperation`.
     pub fn begin_operation(&self) -> Result<Admission<'_>, String> {
         let mut state = self.lock();
         if state.closed {
@@ -274,7 +264,6 @@ impl Controller {
         })
     }
 
-    /// Port of `endOperation`.
     fn release(&self, generation: u64) {
         let victim = {
             let mut state = self.lock();
@@ -306,14 +295,14 @@ impl Controller {
 
     /// Rejects new work and hands the close to whichever operation is in
     /// flight. Never waits and never closes, so a callback running inside an
-    /// operation may call it. Port of `Controller.RequestClose`.
+    /// operation may call it.
     pub fn request_close(&self) {
         let mut state = self.lock();
         state.closed = true;
         if state.busy {
             if state.wake_claim_is_unstarted() {
-                // Release the claim the way Go does, so the close need not
-                // wait for a wake turn that will now never run.
+                // Release the claim, so the close need not wait for a wake turn
+                // that will now never run.
                 state.busy = false;
                 state.generation += 1;
                 state.wake_unstarted = false;
@@ -324,8 +313,7 @@ impl Controller {
     }
 
     /// Completes the close, waiting for an in-flight operation to finish.
-    /// Port of `Controller.Close`. Blocking: an async caller must cancel and
-    /// await its own work first.
+    /// Blocking: an async caller must cancel and await its own work first.
     pub fn close(&self) -> Result<(), String> {
         self.request_close();
         let victim = {
@@ -361,7 +349,7 @@ impl Controller {
     }
 
     /// The runner currently in force. `/tasks` and `/task` read its sub-agent
-    /// task registry, Go's `taskOwner`.
+    /// task registry.
     pub(crate) fn current_runner(&self) -> Option<Arc<Runner>> {
         self.runner().ok()
     }
@@ -371,8 +359,7 @@ impl Controller {
     }
 
     /// The sandbox state now in effect: the live process sandbox when one is
-    /// wired, otherwise what the builder resolved at startup. Port of
-    /// `currentSandboxInfoLocked`.
+    /// wired, otherwise what the builder resolved at startup.
     pub fn sandbox_info(&self) -> SandboxInfo {
         match &self.sandbox {
             Some(control) => control.info(),
@@ -384,7 +371,6 @@ impl Controller {
         self.dynamic_content
     }
 
-    /// Port of `Controller.DynamicContentAvailable`.
     pub fn dynamic_content_available(&self) -> bool {
         !self.lock().closed && self.dynamic_content
     }
@@ -393,7 +379,7 @@ impl Controller {
         &self.builder.workspace_path
     }
 
-    /// Port of `Controller.Info`. A closed boundary reports the sandbox only.
+    /// A closed boundary reports the sandbox only.
     pub fn info(&self) -> Info {
         let sandbox = self.sandbox_info();
         if !self.dynamic_content {
@@ -430,7 +416,6 @@ impl Controller {
         }
     }
 
-    /// Port of `Controller.History`.
     pub fn history(&self) -> Vec<Message> {
         if !self.dynamic_content {
             return Vec::new();
@@ -515,7 +500,6 @@ impl Controller {
 
     // ---- turns ----
 
-    /// Port of `Controller.Prompt`.
     pub async fn prompt(
         &self,
         text: &str,
@@ -539,7 +523,6 @@ impl Controller {
         runner.run_with_image(text, image, emit, cancel).await
     }
 
-    /// Port of `Controller.Compact`.
     pub async fn compact(
         &self,
         focus: &str,
@@ -553,7 +536,7 @@ impl Controller {
 
     // ---- profiles ----
 
-    /// The configured profile names, sorted. Port of `Controller.Profiles`.
+    /// The configured profile names, sorted.
     pub fn profiles(&self) -> Vec<String> {
         if !self.dynamic_content_available() {
             return Vec::new();
@@ -592,7 +575,6 @@ impl Controller {
         rows
     }
 
-    /// Port of `Controller.SetDefaultProfile`.
     pub fn set_default_profile(&self, profile: &str) -> Result<(), String> {
         if self.lock().closed {
             return Err(CLOSED.to_string());
@@ -669,7 +651,6 @@ impl Controller {
 
     // ---- session replacement ----
 
-    /// Port of `Controller.RenameSession`.
     pub fn rename_session(&self, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
@@ -690,8 +671,8 @@ impl Controller {
             .map_err(|error| self.builder.redact_error(&error, None))
     }
 
-    /// Admission for an operation that replaces the session. Ordering matches
-    /// Go: closed first, then the capability gate, then the active check.
+    /// Admission for an operation that replaces the session. Ordering: closed
+    /// first, then the capability gate, then the active check.
     fn begin_replacement(&self) -> Result<Admission<'_>, String> {
         let mut state = self.lock();
         if state.closed {
@@ -708,7 +689,6 @@ impl Controller {
         })
     }
 
-    /// Port of `Controller.NewSession`.
     pub async fn new_session(&self) -> Result<(), String> {
         let admission = self.begin_replacement()?;
         let runtime = self.current_runtime()?;
@@ -717,8 +697,7 @@ impl Controller {
         Ok(())
     }
 
-    /// Port of `Controller.SwitchProfile`, discarding the resume result the
-    /// line frontend does not use.
+    /// Discards the resume result the line frontend does not use.
     pub async fn switch_profile(&self, profile: &str) -> Result<(), String> {
         self.switch_profile_result(profile).await.map(|_| ())
     }
@@ -758,8 +737,7 @@ impl Controller {
         })
     }
 
-    /// Port of `Controller.ListSessions`. Rows carry `current` for the file
-    /// already open.
+    /// Rows carry `current` for the file already open.
     pub fn list_sessions(&self, limit: usize) -> Result<ListResult, String> {
         if self.lock().closed {
             return Err(CLOSED.to_string());
@@ -783,8 +761,7 @@ impl Controller {
         .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 
-    /// Port of `Controller.ResumeSession`. Resuming the session already in
-    /// force is a no-op that reports its path.
+    /// Resuming the session already in force is a no-op that reports its path.
     pub async fn resume_session(&self, path: &str) -> Result<ResumeResult, String> {
         let requested = canonical_session_path(path);
         let admission = self.begin_replacement()?;
@@ -827,8 +804,8 @@ impl Controller {
         })
     }
 
-    /// Port of `Controller.ArchiveSession`: archiving the current session
-    /// delegates so a picker row behaves like `/archive`.
+    /// Archiving the current session delegates so a picker row behaves like
+    /// `/archive`.
     pub async fn archive_session(&self, path: &str) -> Result<ArchiveResult, String> {
         let requested = canonical_session_path(path);
         let is_current = {
@@ -857,18 +834,16 @@ impl Controller {
         .map_err(|error| self.builder.redact_error(&error.to_string(), None))
     }
 
-    /// Port of `Controller.ArchiveCurrentSession`.
-    ///
-    /// The replacement is built before the archive move, so every failure
-    /// path leaves the current session intact. The move is the last and only
+    /// The replacement is built before the archive move, so every failure path
+    /// leaves the current session intact. The move is the last and only
     /// committed state change.
     ///
     /// Archiving ends the session, so its outstanding timers end with it:
     /// `sessionfs::archive` removes the sidecar and the registry is cleared
     /// here. The clear runs only after the move succeeds, because a refused
-    /// archive leaves the session running and its timers must survive. It
-    /// also runs before the swap, so a timer that fires between the two
-    /// cannot write the sidecar back.
+    /// archive leaves the session running and its timers must survive. It also
+    /// runs before the swap, so a timer that fires between the two cannot write
+    /// the sidecar back.
     pub async fn archive_current_session(&self) -> Result<ArchiveResult, String> {
         let admission = self.begin_replacement()?;
         let (path, info) = {
@@ -904,8 +879,8 @@ impl Controller {
 
     // ---- tasks and wake ----
 
-    /// The current runner's task registry, or `None` when it tracks none or
-    /// the controller is closed. Port of `Controller.Tasks`.
+    /// The current runner's task registry, or `None` when it tracks none or the
+    /// controller is closed.
     pub fn tasks(&self) -> Option<Arc<dyn TaskView>> {
         let state = self.lock();
         if state.closed {
@@ -926,7 +901,6 @@ impl Controller {
     }
 
     /// Claims a turn only when the runner has pending task notifications.
-    /// Port of `Controller.PrepareWake`.
     pub fn prepare_wake(&self) -> Result<Option<WakeOperation<'_>>, String> {
         let pending = {
             let state = self.lock();
@@ -973,7 +947,6 @@ impl Controller {
         true
     }
 
-    /// Port of `Controller.ReloadSandbox`.
     pub async fn reload_sandbox(&self) -> Result<SandboxInfo, String> {
         let control = {
             let state = self.lock();
@@ -1038,8 +1011,8 @@ impl Controller {
         Ok(runtime)
     }
 
-    /// The two gates Go applies before every replacement: persistence must be
-    /// enabled, and the boundary must be open both before and after resolving.
+    /// The two gates before every replacement: persistence must be enabled, and
+    /// the boundary must be open both before and after resolving.
     fn replacement_runtime(&self, metadata: &RuntimeMetadata) -> Result<Runtime, String> {
         if !self.dynamic_content {
             return Err(PERSISTENCE_DISABLED.to_string());
@@ -1047,8 +1020,8 @@ impl Controller {
         resolve_replacement(&self.builder, metadata)
     }
 
-    /// Port of `freshReplacement`: a new session and runner for an
-    /// already-resolved runtime. Every failure closes what it built.
+    /// A new session and runner for an already-resolved runtime. Every failure
+    /// closes what it built.
     async fn fresh_replacement(&self, runtime: &Runtime) -> Result<Current, String> {
         let session = self.builder.create_session(runtime)?;
         attach_runner(&self.builder, session, runtime).await
@@ -1064,8 +1037,7 @@ impl Controller {
     }
 
     /// Installs the replacement and closes what it displaced. A close that
-    /// arrived while the replacement was building closes the replacement too,
-    /// which is Go's deferred-close branch in `runReplacement`.
+    /// arrived while the replacement was building closes the replacement too.
     fn commit(&self, replacement: Current, admission: Admission<'_>) -> Result<String, String> {
         let path = replacement.path();
         let (displaced, deferred) = {
@@ -1089,13 +1061,11 @@ impl Controller {
 
     // ---- the `otto serve` factories ----
 
-    /// A controller over a brand new session. Port of `serveFactories.create`
-    /// together with `controllerFromReplacement`: there is nothing to
-    /// replace, so the built session and runner become the controller's
-    /// first [`Current`] directly.
+    /// A controller over a brand new session. There is nothing to replace, so
+    /// the built session and runner become the controller's first [`Current`]
+    /// directly.
     ///
-    /// The caller has already confirmed the redaction boundary is open (Go
-    /// does it in `runWithDependencies` before dispatching to `runServe`), so
+    /// The caller has already confirmed the redaction boundary is open, so
     /// `dynamic_content` is true for every controller built this way.
     pub async fn create(builder: Arc<Builder>, runtime: &Runtime) -> Result<Self, String> {
         let session = builder.create_session(runtime)?;
@@ -1104,7 +1074,7 @@ impl Controller {
     }
 
     /// A controller over the session file at `path`, with the repair warnings
-    /// activating it produced. Port of `serveFactories.open`.
+    /// activating it produced.
     pub async fn open(builder: Arc<Builder>, path: &Path) -> Result<(Self, Vec<String>), String> {
         let (current, warnings) = open_current(&builder, path).await?;
         Ok((Self::from_current(builder, current), warnings))
@@ -1165,7 +1135,7 @@ async fn attach_runner(
 }
 
 /// Pins the session file at `path`, activates it, and builds a runner for the
-/// runtime its header records. Port of `openReplacement`.
+/// runtime its header records.
 async fn open_current(
     builder: &Arc<Builder>,
     path: &Path,
@@ -1212,8 +1182,8 @@ fn metadata_of(info: &RuntimeInfo) -> RuntimeMetadata {
     }
 }
 
-/// Port of `canonicalSessionPath`: absolute, then symlink-resolved, then
-/// lexically cleaned, falling back a step at a time.
+/// Absolute, then symlink-resolved, then lexically cleaned, falling back a step
+/// at a time.
 pub fn canonical_session_path(path: &str) -> String {
     if path.is_empty() {
         return String::new();
@@ -1692,7 +1662,6 @@ mod tests {
 
     // ---- tasks and wake ----
 
-    /// Port of `TestControllerTasksNilWhenRunnerLacksTaskLister`.
     #[tokio::test]
     async fn a_runner_without_a_registry_reports_no_tasks_and_no_wake() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1715,7 +1684,7 @@ mod tests {
     }
 
     /// The registry is reachable through the view, and an empty inbox still
-    /// admits no wake turn. Port of `TestPrepareWakeNoPendingNotifications`.
+    /// admits no wake turn.
     #[tokio::test]
     async fn a_runner_with_an_empty_registry_exposes_it_but_admits_no_wake() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1730,7 +1699,7 @@ mod tests {
     }
 
     /// A pending notification claims a turn, and dropping the claim without
-    /// running it releases it. Port of `TestPrepareWakeClaimsTurn`.
+    /// running it releases it.
     #[tokio::test]
     async fn a_pending_notification_claims_a_wake_turn() {
         let workspace = tempfile::tempdir().expect("workspace");

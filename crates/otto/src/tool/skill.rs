@@ -1,4 +1,4 @@
-//! The `skill` tool. Port of `internal/tool/skill.go`.
+//! The `skill` tool.
 //!
 //! The tool answers with a skill's Markdown body, headed by its name, location
 //! and file listing, or with one file from inside the same skill directory.

@@ -1,18 +1,15 @@
 //! The compaction summary request.
 //!
-//! Port of `internal/agent/summary.go`. The transcript that is about to be
-//! discarded is serialized into one user message, wrapped in tags that mark it
-//! as untrusted data, and sent with a system prompt that forbids acting on it.
+//! The transcript that is about to be discarded is serialized into one user
+//! message, wrapped in tags that mark it as untrusted data, and sent with a
+//! system prompt that forbids acting on it.
 //!
 //! Ownership: the builder borrows the selection and returns an owned request.
 //! Nothing here touches the session.
 //!
-//! Errors: every `Err` value is the Go error text, which the caller wraps in
+//! Errors: every `Err` value is a message the caller wraps in
 //! [`crate::agent::AgentError::InvalidCompactionSummary`].
 //!
-//! Deviation from Go: the `utf8.ValidString` checks on the focus, the previous
-//! summary, and every block field are gone, because Rust strings cannot hold
-//! invalid UTF-8.
 
 use crate::model::{Block, BlockType, Message, Role};
 use crate::provider::Request;
@@ -98,9 +95,9 @@ fn is_compaction_control(character: char) -> bool {
 /// Chooses the structured mode when there is a historical prefix to summarize
 /// and the turn-prefix mode otherwise.
 ///
-/// Errors are the Go error texts. The caller wraps every one of them in
-/// [`AgentError::InvalidCompactionSummary`], including the `nothing to
-/// compact` case, which Go also reports as an invalid summary here.
+/// The caller wraps every one of them in
+/// [`AgentError::InvalidCompactionSummary`], including the `nothing to compact`
+/// case, which is also reported as an invalid summary here.
 pub fn build_summary_request(
     options: &Options,
     selection: &CompactionSelection,

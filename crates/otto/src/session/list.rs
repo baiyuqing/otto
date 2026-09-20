@@ -1,11 +1,9 @@
 //! Listing and inspecting session files.
 //!
-//! Port of `internal/session/list.go`.
-//!
-//! Ownership: every function opens and closes its own descriptors.
-//! Concurrency: stateless, safe to call from any thread. Errors: a candidate
-//! that cannot be read is counted in [`ListResult::skipped`] and never
-//! surfaced; only a failure of the listing itself is returned.
+//! Ownership: every function opens and closes its own descriptors. Concurrency:
+//! stateless, safe to call from any thread. Errors: a candidate that cannot be
+//! read is counted in [`ListResult::skipped`] and never surfaced; only a
+//! failure of the listing itself is returned.
 
 use std::fs::{File, Metadata};
 use std::path::{Path, PathBuf};
@@ -127,10 +125,10 @@ pub fn list(
 
 /// The names in `directory`, unsorted.
 ///
-/// Divergence from Go, which reads the directory through the descriptor it
-/// already holds. Names are only a work list here: every file is still opened
-/// with `openat` on the no-follow descriptor, so a directory swapped between
-/// the two steps yields opens that fail and rows that are skipped.
+/// The directory is read by path rather than through the no-follow descriptor.
+/// Names are only a work list: every file is still opened with `openat` on
+/// that descriptor, so a directory swapped between the two steps yields opens
+/// that fail and rows that are skipped.
 fn read_directory_names(directory: &str) -> Result<Vec<String>, PiError> {
     let entries = std::fs::read_dir(directory)
         .map_err(|error| PiError::other(format!("read session directory: {error}")))?;
@@ -271,7 +269,7 @@ pub(crate) fn modified_time(metadata: &Metadata) -> DateTime<Utc> {
         .unwrap_or_else(otto_core::model::zero_time)
 }
 
-/// Go's `sameListCandidateMetadata`: identity, mode, size and mtime all match.
+/// Identity, mode, size and mtime all match.
 pub(crate) fn same_list_candidate_metadata(expected: &Metadata, current: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     fsops::file_identity(expected) == fsops::file_identity(current)

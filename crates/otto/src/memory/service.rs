@@ -39,11 +39,12 @@ use super::validate::{
 };
 use super::{
     BindOptions, Candidate, CandidateAction, CandidateListRequest, CandidateState, Error,
-    ErrorKind, ForgetRequest, ForgetResult, ListRequest, Origin, PolicyDecision, PolicyRequest,
-    ProposeRequest, Provenance, RecallRequest, RecallResult, Record, RecordKey, RecordRef,
-    RememberRequest, Result, RetrievalRequest, ReviewDecision, ReviewRequest, ReviewResult, Scope,
-    SearchRequest, SearchResult, StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone,
-    UpsertRequest, decide_default_policy, new_id,
+    ErrorKind, ForgetRequest, ForgetResult, ListRequest, MAX_FTS_TERM_BYTES, MAX_FTS_TERMS,
+    MAX_QUERY_BYTES, Origin, PolicyDecision, PolicyRequest, ProposeRequest, Provenance,
+    RecallRequest, RecallResult, Record, RecordKey, RecordRef, RememberRequest, Result,
+    RetrievalRequest, ReviewDecision, ReviewRequest, ReviewResult, Scope, SearchRequest,
+    SearchResult, StoreForgetRequest, StoreReviewRequest, TokenEstimator, Tombstone, UpsertRequest,
+    decide_default_policy, new_id,
 };
 
 /// Go's `nowUTC`.
@@ -56,6 +57,34 @@ fn now_utc() -> DateTime<Utc> {
 /// return has no source other than a cancelled context, which does not exist
 /// here.
 pub type Policy = fn(&PolicyRequest) -> PolicyDecision;
+
+/// Turns one turn's user text into a query the store accepts.
+///
+/// The caller's text is whatever the user typed: multiple lines, leading and
+/// trailing space, and no length bound, while a query must be trimmed,
+/// control-character free, at most [`MAX_QUERY_BYTES`] and at most
+/// [`MAX_FTS_TERMS`] terms of [`MAX_FTS_TERM_BYTES`]. Recall is best effort,
+/// so the surplus is dropped rather than failing the turn. Terms are counted
+/// the way `build_fts_literal_expression` splits them, and a term over the
+/// byte bound is dropped whole because truncating it would match nothing.
+fn normalize_query(query: &str) -> String {
+    let mut normalized = String::new();
+    for term in query
+        .split(|character: char| character.is_whitespace() || character.is_control())
+        .filter(|term| !term.is_empty() && term.len() <= MAX_FTS_TERM_BYTES)
+        .take(MAX_FTS_TERMS)
+    {
+        let separator = usize::from(!normalized.is_empty());
+        if normalized.len() + separator + term.len() > MAX_QUERY_BYTES {
+            break;
+        }
+        if separator == 1 {
+            normalized.push(' ');
+        }
+        normalized.push_str(term);
+    }
+    normalized
+}
 
 /// The working memory service, or the no-resource stand-in for disabled or
 /// unavailable memory when built with [`Service::null`].
@@ -427,9 +456,13 @@ impl Binding {
         let Some(store) = self.service.store.as_ref() else {
             return Ok(RecallResult::default());
         };
-        validate_recall_request(request)?;
+        let query = normalize_query(&request.query);
+        validate_recall_request(&RecallRequest {
+            query: query.clone(),
+            ..request.clone()
+        })?;
         let result = store.retrieve(&RetrievalRequest {
-            query: request.query.clone(),
+            query,
             scopes: self.scopes.clone(),
             kinds: request.kinds.clone(),
             labels: Vec::new(),
@@ -878,6 +911,37 @@ mod tests {
         assert_eq!(through_agent.records.len(), 1);
         assert_eq!(through_agent.records[0].id, created.id);
         assert_eq!(through_agent.records[0].scope.namespace, NAMESPACE_USER);
+    }
+
+    /// Turn text is raw user input: multi-line, untrimmed and unbounded,
+    /// while the store's query is single-line, trimmed and bounded. The
+    /// binding normalizes instead of failing the recall.
+    #[tokio::test]
+    async fn a_binding_normalizes_raw_turn_text_into_a_query() {
+        let (_directory, service) = service();
+        let scope = user_scope();
+        let created = service
+            .remember(&remember(&scope, "editor", "prefers vim for editing code"))
+            .expect("create");
+        let binding = service
+            .bind(BindOptions {
+                scopes: vec![scope.clone()],
+                default_write_scope: scope,
+                ..BindOptions::default()
+            })
+            .expect("bind");
+
+        let query = format!("  vim\n{}\n", "padding ".repeat(2000));
+        let result = binding
+            .recall(&RecallRequest {
+                query,
+                limit: 10,
+                token_budget: 1000,
+                ..RecallRequest::default()
+            })
+            .expect("recall");
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].id, created.id);
     }
 
     /// Go's `TestServiceCloseClosesStoreAndInvalidatesBindings`.

@@ -309,7 +309,8 @@ mod tests {
         assert_eq!(
             items,
             vec![Item::Assistant {
-                text: "hello".into()
+                text: "hello".into(),
+                created_at: String::new(),
             }]
         );
     }
@@ -329,6 +330,7 @@ mod tests {
                 args: "{\n  \"command\": \"ls\"\n}".into(),
                 result: Some("a.go".into()),
                 is_error: Some(false),
+                created_at: String::new(),
             }]
         );
     }

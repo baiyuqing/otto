@@ -20,6 +20,7 @@ mod entries;
 mod layout;
 mod markdown;
 mod render;
+mod selection;
 
 use std::future::Future;
 use std::io;
@@ -27,10 +28,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEvent, KeyEventKind,
-    MouseEventKind,
-};
+use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
 use otto_core::agent::Event;
 use otto_core::model::{Block, MAX_IMAGE_BYTES};
 use ratatui::Terminal;
@@ -45,6 +43,7 @@ use crate::cli::repl_commands;
 use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
+use selection::{DragPhase, Selection};
 
 /// Runs the terminal frontend to completion. Port of `internal/tui.Run`.
 ///
@@ -56,45 +55,15 @@ pub(crate) async fn run(
 ) -> Result<(), ReplError> {
     let mut terminal = ratatui::try_init().map_err(io_error)?;
     let mut input = TerminalInput::new();
-    if let Err(error) = input.configure_mouse(std::io::stdout(), MousePolicy::NativeSelection) {
+    if let Err(error) = input.enable_mouse(std::io::stdout()) {
         let _ = ratatui::try_restore();
         return Err(io_error(error));
     }
     let mut keys = spawn_key_reader();
-    let result = run_app(&mut terminal, &mut input, controller, cancel, &mut keys).await;
+    let result = run_app(&mut terminal, controller, cancel, &mut keys).await;
     let _ = input.restore_mouse(std::io::stdout());
     let _ = ratatui::try_restore();
     result
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MousePolicy {
-    /// Leave pointer drags to the terminal emulator so text selection works
-    /// normally, without the user holding Shift. This is Otto's default.
-    NativeSelection,
-    /// Ask the terminal to report mouse events to Otto. Use this only for
-    /// transcript-browsing mode, where the wheel keeps scrolling the pinned
-    /// transcript. While active, most terminal emulators reserve plain drag
-    /// for the application and require Shift for native selection.
-    Capture,
-}
-
-fn mouse_policy_for_scroll(scroll: Option<u16>) -> MousePolicy {
-    if scroll.is_some() {
-        MousePolicy::Capture
-    } else {
-        MousePolicy::NativeSelection
-    }
-}
-
-fn mouse_policy(app: &App) -> MousePolicy {
-    mouse_policy_for_scroll(app.scroll)
-}
-
-fn sync_mouse_policy(app: &App, input: &mut TerminalInput) -> Result<(), ReplError> {
-    input
-        .configure_mouse(std::io::stdout(), mouse_policy(app))
-        .map_err(io_error)
 }
 
 #[derive(Default)]
@@ -107,27 +76,38 @@ impl TerminalInput {
         Self::default()
     }
 
-    fn configure_mouse(
-        &mut self,
-        mut writer: impl io::Write,
-        policy: MousePolicy,
-    ) -> io::Result<()> {
-        match policy {
-            MousePolicy::NativeSelection => self.restore_mouse(writer),
-            MousePolicy::Capture if self.mouse_active => Ok(()),
-            MousePolicy::Capture => {
-                crossterm::execute!(writer, EnableMouseCapture)?;
-                self.mouse_active = true;
-                Ok(())
-            }
+    /// Asks the terminal to report button events for the whole session.
+    ///
+    /// This is what makes the wheel scroll the transcript: the TUI runs on
+    /// the alternate screen, which has no scrollback, so a notch the
+    /// terminal keeps to itself has nowhere to go.
+    ///
+    /// The terminal then hands Otto plain click-drag instead of selecting
+    /// text with it, which is why [`selection`] exists.
+    ///
+    /// Deliberately not `crossterm::event::EnableMouseCapture`, which also
+    /// sets `?1003` (report every motion, button or not). Otto only ever
+    /// reads motion while the left button is held, and `?1003` would wake
+    /// the event loop on every pointer move across the window. `?1000`
+    /// (button press/release, which is how the wheel arrives), `?1002`
+    /// (motion while a button is held) and `?1006` (SGR encoding, needed
+    /// past column 223) are the modes it actually uses.
+    fn enable_mouse(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        if self.mouse_active {
+            return Ok(());
         }
+        writer.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h")?;
+        writer.flush()?;
+        self.mouse_active = true;
+        Ok(())
     }
 
     fn restore_mouse(&mut self, mut writer: impl io::Write) -> io::Result<()> {
         if !self.mouse_active {
             return Ok(());
         }
-        crossterm::execute!(writer, DisableMouseCapture)?;
+        writer.write_all(b"\x1b[?1006l\x1b[?1002l\x1b[?1000l")?;
+        writer.flush()?;
         self.mouse_active = false;
         Ok(())
     }
@@ -151,20 +131,38 @@ fn io_error(error: std::io::Error) -> ReplError {
 /// ([`app::History`]); a wheel notch always scrolls the transcript.
 enum TuiEvent {
     Key(KeyEvent),
-    Wheel { up: bool },
+    Wheel {
+        up: bool,
+    },
+    /// One end of a left-button drag, in terminal cells. Otto draws its own
+    /// selection because asking for mouse reporting takes the terminal's
+    /// away; see [`selection`].
+    Select {
+        phase: DragPhase,
+        col: u16,
+        row: u16,
+    },
     Redraw,
 }
 
 fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
     match event {
         TermEvent::Key(key) if key.kind == KeyEventKind::Press => Some(TuiEvent::Key(key)),
-        TermEvent::Mouse(mouse) => Some(TuiEvent::Wheel {
-            up: match mouse.kind {
-                MouseEventKind::ScrollUp => true,
-                MouseEventKind::ScrollDown => false,
+        TermEvent::Mouse(mouse) => {
+            let phase = match mouse.kind {
+                MouseEventKind::ScrollUp => return Some(TuiEvent::Wheel { up: true }),
+                MouseEventKind::ScrollDown => return Some(TuiEvent::Wheel { up: false }),
+                MouseEventKind::Down(MouseButton::Left) => DragPhase::Start,
+                MouseEventKind::Drag(MouseButton::Left) => DragPhase::Extend,
+                MouseEventKind::Up(MouseButton::Left) => DragPhase::End,
                 _ => return None,
-            },
-        }),
+            };
+            Some(TuiEvent::Select {
+                phase,
+                col: mouse.column,
+                row: mouse.row,
+            })
+        }
         TermEvent::Resize(_, _) => Some(TuiEvent::Redraw),
         _ => None,
     }
@@ -188,8 +186,8 @@ fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
     let (sender, receiver) = mpsc::channel(1);
     std::thread::spawn(move || {
         while let Ok(event) = crossterm::event::read() {
-            // ponytail: focus/paste/key-release and non-wheel mouse events
-            // have no behavior; drop them instead of redrawing.
+            // ponytail: focus/paste/key-release and right/middle-button
+            // events have no behavior; drop them instead of redrawing.
             let Some(forwarded) = map_terminal_event(event) else {
                 continue;
             };
@@ -199,6 +197,51 @@ fn spawn_key_reader() -> mpsc::Receiver<TuiEvent> {
         }
     });
     receiver
+}
+
+/// Applies one end of a left-button drag, redraws, and returns the text to
+/// put on the clipboard when the drag ended on something.
+///
+/// The text is read inside the draw closure, from the buffer the frame is
+/// being rendered into. It cannot be read afterwards from
+/// `Terminal::current_buffer_mut`: `Terminal::draw` finishes by calling
+/// `swap_buffers`, which resets the other buffer and then makes it current,
+/// so after a draw that accessor returns a blank screen.
+///
+/// A press without movement is a plain click, which clears the previous
+/// selection and copies nothing.
+fn apply_selection<B: Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    phase: DragPhase,
+    col: u16,
+    row: u16,
+) -> Result<Option<String>, ReplError> {
+    match phase {
+        DragPhase::Start => app.selection = Some(Selection::new(col, row)),
+        // A drag that started before Otto was listening has no anchor.
+        DragPhase::Extend | DragPhase::End => match app.selection.as_mut() {
+            Some(selection) => selection.extend(col, row),
+            None => return Ok(None),
+        },
+    }
+    // Only a release decides a selection was a plain click: a press always
+    // starts out empty, and so does a drag that has not left its anchor yet.
+    if phase == DragPhase::End && app.selection.is_some_and(|it| it.is_empty()) {
+        app.selection = None;
+    }
+    let copying = phase == DragPhase::End && app.selection.is_some();
+
+    let mut text = None;
+    terminal
+        .draw(|frame| {
+            render::draw(frame, app);
+            if copying && let Some(selection) = &app.selection {
+                text = Some(selection.text(frame.buffer_mut()));
+            }
+        })
+        .map_err(draw_error)?;
+    Ok(text)
 }
 
 fn draw_error<E: std::fmt::Display>(error: E) -> ReplError {
@@ -216,13 +259,11 @@ enum IdleEvent {
 
 async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
     controller: &Controller,
     cancel: &CancellationToken,
     keys: &mut mpsc::Receiver<TuiEvent>,
 ) -> Result<(), ReplError> {
     let mut app = App::new(controller);
-    sync_mouse_policy(&app, input)?;
     let mut pending_image = None;
     terminal
         .draw(|frame| render::draw(frame, &app))
@@ -262,9 +303,7 @@ async fn run_app<B: Backend>(
                 continue;
             }
             IdleEvent::Registry(true) => {
-                if let Err(error) =
-                    run_wake(&mut app, terminal, input, keys, controller, cancel).await
-                {
+                if let Err(error) = run_wake(&mut app, terminal, keys, controller, cancel).await {
                     propagate_turn_error(error)?;
                 }
                 app.refresh_info(controller);
@@ -279,10 +318,20 @@ async fn run_app<B: Backend>(
             TuiEvent::Key(key) => key,
             TuiEvent::Wheel { up } => {
                 app.scroll_wheel(up);
-                sync_mouse_policy(&app, input)?;
                 terminal
                     .draw(|frame| render::draw(frame, &app))
                     .map_err(draw_error)?;
+                continue;
+            }
+            TuiEvent::Select { phase, col, row } => {
+                if let Some(text) = apply_selection(&mut app, terminal, phase, col, row)?
+                    && let Err(error) = selection::copy(&text)
+                {
+                    app.push_system(format!("copy: {error}"));
+                    terminal
+                        .draw(|frame| render::draw(frame, &app))
+                        .map_err(draw_error)?;
+                }
                 continue;
             }
             TuiEvent::Redraw => {
@@ -293,8 +342,9 @@ async fn run_app<B: Backend>(
             }
         };
 
+        // Any key moves the composer or the transcript under the highlight.
+        app.selection = None;
         let action = app.handle_key(key, controller, cancel);
-        sync_mouse_policy(&app, input)?;
         match action {
             None => {}
             Some(Action::Exit) => return Ok(()),
@@ -302,7 +352,6 @@ async fn run_app<B: Backend>(
                 if let Err(error) = run_turn(
                     &mut app,
                     terminal,
-                    input,
                     keys,
                     controller,
                     cancel,
@@ -323,7 +372,7 @@ async fn run_app<B: Backend>(
             },
             Some(Action::Compact(focus)) => {
                 if let Err(error) =
-                    run_compact(&mut app, terminal, input, keys, controller, cancel, focus).await
+                    run_compact(&mut app, terminal, keys, controller, cancel, focus).await
                 {
                     propagate_turn_error(error)?;
                 }
@@ -386,10 +435,8 @@ async fn run_app<B: Backend>(
             Some(Action::Approve(id)) => match controller.approve_bash(&id) {
                 Ok(prompt) => {
                     app.push_system(format!("Approved {id} for one command."));
-                    if let Err(error) = run_turn(
-                        &mut app, terminal, input, keys, controller, cancel, prompt, None,
-                    )
-                    .await
+                    if let Err(error) =
+                        run_turn(&mut app, terminal, keys, controller, cancel, prompt, None).await
                     {
                         propagate_turn_error(error)?;
                     }
@@ -405,7 +452,6 @@ async fn run_app<B: Backend>(
         }
 
         app.refresh_info(controller);
-        sync_mouse_policy(&app, input)?;
         terminal
             .draw(|frame| render::draw(frame, &app))
             .map_err(draw_error)?;
@@ -439,7 +485,6 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
     terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     events: &mut mpsc::UnboundedReceiver<Event>,
     turn: &CancellationToken,
@@ -461,8 +506,7 @@ async fn drive_turn<B: Backend, T, E>(
             }
             Some(event) = events.recv() => apply(app, event),
             Some(event) = keys.recv() => {
-                apply_turn_key(app, event, turn);
-                let _ = sync_mouse_policy(app, input);
+                apply_turn_key(app, terminal, event, turn);
             }
             _ = frames.tick() => {}
         }
@@ -470,21 +514,38 @@ async fn drive_turn<B: Backend, T, E>(
     }
 }
 
-/// Handles one key delivered while a turn is running: the interrupt keys
-/// cancel it, the scroll keys move the transcript, and everything else is
-/// dropped the way [`App::handle_key`]'s `busy()` branch drops it.
+/// Handles one event delivered while a turn is running: the interrupt keys
+/// cancel it, the scroll keys and the wheel move the transcript, a drag
+/// selects, and everything else is dropped the way [`App::handle_key`]'s
+/// `busy()` branch drops it.
 ///
 /// Scrolling has to work here and not only between turns: a streaming turn
 /// is when there is most output to read back through.
-fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
+fn apply_turn_key<B: Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    event: TuiEvent,
+    turn: &CancellationToken,
+) {
     let key = match event {
         TuiEvent::Key(key) => key,
         TuiEvent::Wheel { up } => {
             app.scroll_wheel(up);
             return;
         }
+        TuiEvent::Select { phase, col, row } => {
+            // The turn loop redraws on every tick anyway, so a failed draw
+            // here is not worth ending the turn over.
+            if let Ok(Some(text)) = apply_selection(app, terminal, phase, col, row)
+                && let Err(error) = selection::copy(&text)
+            {
+                app.push_system(format!("copy: {error}"));
+            }
+            return;
+        }
         TuiEvent::Redraw => return,
     };
+    app.selection = None;
     if App::is_interrupt_key(&key) {
         turn.cancel();
     } else {
@@ -499,7 +560,6 @@ fn apply_turn_key(app: &mut App, event: TuiEvent, turn: &CancellationToken) {
 async fn run_turn<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -517,7 +577,6 @@ async fn run_turn<B: Backend>(
         drive_turn(
             app,
             terminal,
-            input,
             keys,
             &mut received,
             &turn,
@@ -582,7 +641,6 @@ fn image_block_from_path(path: &str) -> Result<Block, String> {
 async fn run_wake<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -613,7 +671,6 @@ async fn run_wake<B: Backend>(
         drive_turn(
             app,
             terminal,
-            input,
             keys,
             &mut received,
             &turn,
@@ -650,7 +707,6 @@ async fn run_wake<B: Backend>(
 async fn run_compact<B: Backend>(
     app: &mut App,
     terminal: &mut Terminal<B>,
-    input: &mut TerminalInput,
     keys: &mut mpsc::Receiver<TuiEvent>,
     controller: &Controller,
     cancel: &CancellationToken,
@@ -669,7 +725,6 @@ async fn run_compact<B: Backend>(
         drive_turn(
             app,
             terminal,
-            input,
             keys,
             &mut received,
             &turn,
@@ -870,42 +925,161 @@ mod tests {
 
     use super::*;
 
+    /// The drag phases have to survive the mapping intact: a selection that
+    /// loses its `Down` never gets an anchor, and one that loses its `Up`
+    /// never copies.
     #[test]
-    fn mouse_policy_captures_only_while_transcript_is_pinned() {
-        assert_eq!(mouse_policy_for_scroll(None), MousePolicy::NativeSelection);
-        assert_eq!(mouse_policy_for_scroll(Some(0)), MousePolicy::Capture);
-        assert_eq!(mouse_policy_for_scroll(Some(12)), MousePolicy::Capture);
+    fn a_left_button_drag_maps_to_the_three_selection_phases() {
+        let at = |kind| {
+            map_terminal_event(TermEvent::Mouse(MouseEvent {
+                kind,
+                column: 7,
+                row: 3,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        let phase = |kind| match at(kind) {
+            Some(TuiEvent::Select { phase, col, row }) => {
+                assert_eq!((col, row), (7, 3));
+                Some(phase)
+            }
+            _ => None,
+        };
+        assert_eq!(
+            phase(MouseEventKind::Down(MouseButton::Left)),
+            Some(DragPhase::Start)
+        );
+        assert_eq!(
+            phase(MouseEventKind::Drag(MouseButton::Left)),
+            Some(DragPhase::Extend)
+        );
+        assert_eq!(
+            phase(MouseEventKind::Up(MouseButton::Left)),
+            Some(DragPhase::End)
+        );
+        assert!(
+            at(MouseEventKind::Down(MouseButton::Right)).is_none(),
+            "only the left button selects"
+        );
+        assert!(
+            at(MouseEventKind::Moved).is_none(),
+            "pointer motion with no button held has no behavior"
+        );
+    }
+
+    /// The release has to read the frame that is on screen.
+    ///
+    /// Regression: the first version read `Terminal::current_buffer_mut()`
+    /// after the draw, but `swap_buffers` resets that buffer and flips to
+    /// it, so the release copied a blank screen while the highlight (drawn
+    /// inside the draw closure) looked correct.
+    #[tokio::test]
+    async fn releasing_a_drag_copies_the_text_that_is_on_screen() {
+        const WIDTH: u16 = 60;
+        const HEIGHT: u16 = 20;
+        const NEEDLE: &str = "selectable transcript text";
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.push_system(NEEDLE.to_string());
+
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(WIDTH, HEIGHT)).expect("terminal");
+        terminal
+            .draw(|frame| render::draw(frame, &app))
+            .expect("draw");
+
+        // Find the needle on screen rather than assuming a layout.
+        let buffer = terminal.backend().buffer().clone();
+        let (col, row) = (0..HEIGHT)
+            .find_map(|y| {
+                let line: String = (0..WIDTH)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect();
+                line.find(NEEDLE).map(|at| (at as u16, y))
+            })
+            .expect("the transcript shows the pushed line");
+
+        assert_eq!(
+            apply_selection(&mut app, &mut terminal, DragPhase::Start, col, row).expect("draw"),
+            None
+        );
+        assert_eq!(
+            apply_selection(
+                &mut app,
+                &mut terminal,
+                DragPhase::Extend,
+                col + NEEDLE.len() as u16 - 1,
+                row,
+            )
+            .expect("draw"),
+            None
+        );
+        assert_eq!(
+            apply_selection(
+                &mut app,
+                &mut terminal,
+                DragPhase::End,
+                col + NEEDLE.len() as u16 - 1,
+                row,
+            )
+            .expect("draw")
+            .as_deref(),
+            Some(NEEDLE)
+        );
+    }
+
+    /// A press replaces whatever was selected; a release that never moved is
+    /// a plain click, so it clears the highlight rather than copying a cell.
+    #[tokio::test]
+    async fn a_click_without_a_drag_clears_the_selection_and_copies_nothing() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = crate::cli::testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.selection = Some(Selection::new(1, 1));
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(40, 10)).expect("terminal");
+
+        apply_selection(&mut app, &mut terminal, DragPhase::Start, 2, 0).expect("draw");
+        assert_eq!(app.selection, Some(Selection::new(2, 0)));
+
+        assert_eq!(
+            apply_selection(&mut app, &mut terminal, DragPhase::End, 2, 0).expect("draw"),
+            None,
+            "a click copies nothing"
+        );
+        assert_eq!(app.selection, None);
     }
 
     #[test]
-    fn terminal_input_defaults_to_native_selection_and_toggles_capture_on_demand() {
+    fn mouse_reporting_is_enabled_once_for_the_whole_session() {
         let mut output = Vec::new();
         let mut input = TerminalInput::new();
 
-        input
-            .configure_mouse(&mut output, MousePolicy::NativeSelection)
-            .expect("native selection");
-        assert!(
-            !String::from_utf8_lossy(&output).contains("\u{1b}[?1000h"),
-            "native-selection mode must not enable mouse capture"
-        );
-
-        input
-            .configure_mouse(&mut output, MousePolicy::Capture)
-            .expect("capture");
+        input.enable_mouse(&mut output).expect("capture");
         let captured = String::from_utf8_lossy(&output);
         assert!(captured.contains("\u{1b}[?1000h"));
         assert!(captured.contains("\u{1b}[?1006h"));
+        assert!(
+            captured.contains("\u{1b}[?1002h"),
+            "drag drives the selection"
+        );
+        assert!(
+            !captured.contains("\u{1b}[?1003h"),
+            "Otto reads no motion outside a drag, so do not wake on every pointer move"
+        );
 
         let len_after_capture = output.len();
         input
-            .configure_mouse(&mut output, MousePolicy::Capture)
-            .expect("capture remains idempotent");
+            .enable_mouse(&mut output)
+            .expect("capture is idempotent");
         assert_eq!(output.len(), len_after_capture);
 
-        input
-            .configure_mouse(&mut output, MousePolicy::NativeSelection)
-            .expect("release capture");
+        input.restore_mouse(&mut output).expect("release capture");
         let restored = String::from_utf8_lossy(&output);
         assert!(restored.contains("\u{1b}[?1000l"));
         assert!(restored.contains("\u{1b}[?1006l"));
@@ -924,9 +1098,7 @@ mod tests {
 
         let mut enabled = Vec::new();
         let mut input = TerminalInput::new();
-        input
-            .configure_mouse(&mut enabled, MousePolicy::Capture)
-            .expect("capture");
+        input.enable_mouse(&mut enabled).expect("capture");
         input.restore_mouse(&mut enabled).expect("restore active");
         assert!(String::from_utf8_lossy(&enabled).contains("\u{1b}[?1000l"));
     }
@@ -990,12 +1162,19 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         }))
         .expect("wheel event");
-        apply_turn_key(&mut app, wheel_up, &turn);
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(40, 10)).expect("terminal");
+        apply_turn_key(&mut app, &mut terminal, wheel_up, &turn);
 
         assert_eq!(app.scroll, Some(9));
         assert!(!turn.is_cancelled());
 
-        apply_turn_key(&mut app, TuiEvent::Key(KeyCode::Esc.into()), &turn);
+        apply_turn_key(
+            &mut app,
+            &mut terminal,
+            TuiEvent::Key(KeyCode::Esc.into()),
+            &turn,
+        );
         assert!(turn.is_cancelled());
     }
 
@@ -1129,9 +1308,8 @@ mod tests {
                 .expect("the pending notification did not trigger a wake turn");
             cancel.cancel();
         };
-        let mut input = TerminalInput::new();
         let (result, ()) = tokio::join!(
-            run_app(&mut terminal, &mut input, &controller, &cancel, &mut keys),
+            run_app(&mut terminal, &controller, &cancel, &mut keys),
             driver
         );
 

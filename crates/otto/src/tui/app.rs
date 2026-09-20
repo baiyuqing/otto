@@ -35,6 +35,7 @@ use crate::cli::repl_commands;
 use super::commands::{self, SlashCommand, SlashCommandKind};
 use super::entries::{self, Entry, EntryKind};
 use super::layout;
+use super::selection::Selection;
 
 /// Go's `ctrlCArmWindow`: the time a first Ctrl+C stays armed for a
 /// confirming second press.
@@ -243,6 +244,13 @@ pub(crate) struct App {
     /// since only the renderer knows how the entries wrap at the current
     /// width.
     pub max_scroll: Cell<u16>,
+    /// The in-progress or last-finished mouse selection, in screen cells.
+    ///
+    /// Frontend-only view state, like [`App::scroll`]: asking the terminal
+    /// for mouse reporting takes its own drag-selection away, so Otto draws
+    /// and copies the selection itself ([`super::selection`]). Any key or
+    /// wheel notch clears it, because both move the text out from under it.
+    pub selection: Option<Selection>,
     pub picker: Option<Picker>,
     /// The highlighted row of the slash-command suggestion panel (see
     /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
@@ -271,6 +279,7 @@ impl App {
             history,
             scroll: None,
             max_scroll: Cell::new(0),
+            selection: None,
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -356,11 +365,13 @@ impl App {
     }
 
     fn scroll_up(&mut self, lines: u16) {
+        self.selection = None;
         let top = self.scroll.unwrap_or_else(|| self.max_scroll.get());
         self.scroll = Some(top.saturating_sub(lines));
     }
 
     fn scroll_down(&mut self, lines: u16) {
+        self.selection = None;
         let Some(top) = self.scroll else { return };
         let bottom = self.max_scroll.get();
         let next = top.saturating_add(lines);
@@ -1262,6 +1273,7 @@ mod tests {
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
+            selection: None,
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -1286,6 +1298,7 @@ mod tests {
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
+            selection: None,
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -1310,6 +1323,7 @@ mod tests {
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
+            selection: None,
             picker: None,
             suggestion: 0,
             show_help: false,

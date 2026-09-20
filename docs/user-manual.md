@@ -409,8 +409,16 @@ OTTO_UI=repl otto
 - `/image <path>` attaches one PNG, JPEG, or WebP image to the next ordinary
   prompt. The path may contain spaces. A later `/image` replaces the pending
   image.
-- Mouse-wheel transcript scrolling is enabled. Hold `Shift` while dragging to
-  select visible terminal text.
+- Finished transcript entries are written into the terminal's own scrollback;
+  Otto redraws only the bottom rows (the current turn, the footer, and the
+  composer). Scrolling and text selection are therefore the terminal's own:
+  the wheel, its scrollbar, and an unmodified drag all work as they do in any
+  other command. Otto does not scroll the transcript itself.
+- Because the terminal owns the lines already written, `Ctrl+O` re-folds only
+  entries Otto has not written out yet, `/new` does not clear the scrollback,
+  and resizing the window reflows earlier lines however the terminal chooses.
+- On exit the last transcript stays on screen and the shell prompt continues
+  below it.
 - The footer shows workspace/profile/model, reasoning effort, token totals, and
   session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
@@ -425,8 +433,6 @@ OTTO_UI=repl otto
 | `Shift+Enter` / `Alt+Enter` | Insert a newline in the composer |
 | `?` | Open the help overlay when the composer is empty |
 | `Ctrl+O` | Toggle a tool call between its folded summary and full arguments/output |
-| `Shift`+drag | Select visible terminal text while mouse reporting is active |
-| Mouse wheel, `PgUp` / `PgDn` | Scroll the transcript |
 | `Home` / `End` | Move the cursor to the start or end of the composer |
 | `Esc` | Cancel the active turn or close the current overlay |
 | `Ctrl+C` | Cancel; a second press within one second clears and quits |

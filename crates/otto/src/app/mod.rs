@@ -731,8 +731,26 @@ impl Controller {
         if !self.builder.boundary_allows_dynamic(Some(&runtime)) {
             return Err(SESSION_OPERATION_UNAVAILABLE.to_string());
         }
-        let replacement = self.fresh_replacement(&runtime).await?;
-        let path = self.commit(replacement, admission)?;
+        let session = self
+            .lock()
+            .current
+            .as_ref()
+            .map(|current| current.session.clone())
+            .ok_or_else(|| CLOSED.to_string())?;
+        let runner = Arc::new(self.builder.build_runner(&session, &runtime).await?);
+        if let Err(error) = self.builder.update_session_runtime(&session, &runtime) {
+            runner.close();
+            return Err(error);
+        }
+        let path = session.path();
+        {
+            let mut state = self.lock();
+            let current = state.current.as_mut().ok_or_else(|| CLOSED.to_string())?;
+            current.info = self.builder.runtime_info(&runtime);
+            let old = std::mem::replace(&mut current.runner, runner);
+            old.close();
+        }
+        drop(admission);
         Ok(ResumeResult {
             session_path: path,
             warnings: Vec::new(),
@@ -1286,12 +1304,14 @@ mod tests {
         let controller = controller(workspace.path(), sessions.path()).await;
         assert_eq!(controller.profiles(), vec!["alpha", "beta"]);
 
+        let before = controller.info();
+
         controller.switch_profile("beta").await.expect("switch");
 
         let info = controller.info();
+        assert_eq!(info.session_id, before.session_id);
         assert_eq!(info.profile, "beta");
         assert_eq!(info.model, "gpt-beta");
-        assert_ne!(info.session_id, "");
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ use super::app::App;
 use super::commands::{SLASH_COMMANDS, SlashCommand};
 use super::entries::{Entry, EntryKind};
 use super::layout::{
-    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, escape_plain_text,
+    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN, escape_plain_text,
     escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
 };
 use super::markdown;
@@ -42,12 +42,13 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
-    let composer_height = composer_height(app, area.width);
+    let content_area = side_margin(area);
+    let composer_height = composer_height(app, content_area.width);
     let suggestions = app.suggestions();
     // Go's `calculateLayout` clamps the panel the same way: it may take every
     // row the composer and footer leave except one, which the transcript keeps.
     let suggestion_height =
-        (suggestions.len() as u16).min(area.height.saturating_sub(composer_height + 2));
+        (suggestions.len() as u16).min(content_area.height.saturating_sub(composer_height + 2));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -56,7 +57,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
             Constraint::Length(suggestion_height),
             Constraint::Length(composer_height),
         ])
-        .split(area);
+        .split(content_area);
 
     draw_transcript(frame, app, chunks[0]);
     draw_footer(frame, app, chunks[1]);
@@ -67,6 +68,17 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         draw_help(frame, area);
     } else if let Some(picker) = &app.picker {
         draw_picker(frame, area, picker);
+    }
+}
+
+fn side_margin(area: Rect) -> Rect {
+    if area.width <= SIDE_MARGIN.saturating_mul(2) {
+        return area;
+    }
+    Rect {
+        x: area.x + SIDE_MARGIN,
+        width: area.width - SIDE_MARGIN * 2,
+        ..area
     }
 }
 
@@ -793,6 +805,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_layout_leaves_side_margins() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.push_system("hello from otto");
+        app.input = "draft".chars().collect();
+        app.cursor = app.input.len();
+
+        let width = 80;
+        let height = 20;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, &app)).expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        for y in 0..height {
+            assert_eq!(
+                buffer.cell((0, y)).expect("left margin").symbol(),
+                " ",
+                "row {y} should leave the left edge empty"
+            );
+            assert_eq!(
+                buffer.cell((width - 1, y)).expect("right margin").symbol(),
+                " ",
+                "row {y} should leave the right edge empty"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn footer_shows_runtime_and_session_status() {
         let (_workspace, _sessions, app) = app_fixture().await;
         let session_id = app.info.session_id.clone();
@@ -940,7 +980,10 @@ mod tests {
         let highlighted = highlighted_rows(&app, 100, 20);
 
         assert_eq!(highlighted.len(), 1, "{highlighted:?}");
-        assert!(highlighted[0].starts_with("/sandbox"), "{highlighted:?}");
+        assert!(
+            highlighted[0].trim_start().starts_with("/sandbox"),
+            "{highlighted:?}"
+        );
     }
 
     /// Go's `resumeVisibleRange` windows the session list around its cursor.
@@ -1007,7 +1050,7 @@ mod tests {
 
         let (x, y) = cursor(&app, 100, 20);
 
-        assert_eq!((x, y), (1 + 6, 20 - 2));
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 6, 20 - 2));
     }
 
     /// A hard line break moves the caret to the next composer row.
@@ -1019,7 +1062,7 @@ mod tests {
 
         let (x, y) = cursor(&app, 100, 20);
 
-        assert_eq!((x, y), (1 + 2, 20 - 2));
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 2, 20 - 2));
     }
 
     /// Past [`INPUT_BOX_THRESHOLD`] rows the composer stops growing, so it
@@ -1029,7 +1072,7 @@ mod tests {
     #[tokio::test]
     async fn a_value_taller_than_the_composer_scrolls_its_tail_into_view() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
-        app.input = format!("{}END", "x".repeat(98 * 13)).chars().collect();
+        app.input = format!("{}END", "x".repeat(96 * 13)).chars().collect();
         app.cursor = app.input.len();
 
         let height = 30;
@@ -1039,6 +1082,6 @@ mod tests {
         assert!(content.contains("END"), "{content}");
         // The box is `INPUT_BOX_THRESHOLD` text rows plus two borders, so
         // its last text row is the second-to-last row of the frame.
-        assert_eq!((x, y), (1 + 3, height - 2));
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 3, height - 2));
     }
 }

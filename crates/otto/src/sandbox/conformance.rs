@@ -1,27 +1,25 @@
 //! The shared driver conformance suite.
 //!
-//! Port of the Go package `internal/sandbox/sandboxtest`. Every [`Driver`]
-//! implementation runs the same checks through a [`Contract`] adapter, so a
-//! new driver cannot advertise a capability it does not enforce.
+//! Every [`Driver`] implementation runs the same checks through a [`Contract`]
+//! adapter, so a new driver cannot advertise a capability it does not enforce.
 //!
-//! Ownership: [`Fixture`] owns a temporary tree that lives until the last
-//! clone is dropped, which also removes the workspace on a panicking check.
+//! Ownership: [`Fixture`] owns a temporary tree that lives until the last clone
+//! is dropped, which also removes the workspace on a panicking check.
 //!
-//! Concurrency: the checks drive an [`Executor`] from several tasks and
-//! threads at once and require a multi-threaded Tokio runtime, because
+//! Concurrency: the checks drive an [`Executor`] from several tasks and threads
+//! at once and require a multi-threaded Tokio runtime, because
 //! [`Driver::close`] blocks until active executions finish.
 //!
-//! Divergences from the Go suite, each unrepresentable rather than skipped:
+//! Shapes the checks are forced into:
 //!
-//! * Go's `t.Setenv` half of the environment check is dropped. Rust's
+//! * The host environment is proved absent by the exact-match assertion alone;
 //!   `std::env::set_var` is `unsafe` and this workspace denies `unsafe_code`.
-//!   The exact-match assertion already proves the host environment is absent.
 //! * `std::process::Command` keeps the child environment in a `BTreeMap`, so
 //!   the dump arrives name-sorted. The check compares sorted vectors and still
 //!   requires the exact set.
-//! * Go mutates the caller's `Request` after `Execute` starts. A `Request` is
-//!   moved into [`CommandExecutor::execute`] here, so the caller holds no
-//!   alias; the clone check keeps only the observable half.
+//! * A `Request` is moved into [`CommandExecutor::execute`], so the caller
+//!   holds no alias to mutate after the execution starts; the clone check
+//!   keeps only the observable half.
 //! * The TCP and Unix clients are `/usr/bin/nc` rather than a re-exec of the
 //!   test binary, which removes the helper-process gate and keeps the client
 //!   inside the reviewed `/usr/bin` root.
@@ -42,7 +40,7 @@ use super::{
     NetworkMode, Policy, Request, Streams,
 };
 
-/// How long any wait may take before the check fails, matching Go's 10s.
+/// How long any wait may take before the check fails.
 const AWAIT: Duration = Duration::from_secs(10);
 
 /// The temporary tree every check runs against.
@@ -91,8 +89,8 @@ pub(crate) trait Contract: Send + Sync {
         None
     }
 
-    /// Opens a driver for `fixture`. Panics rather than returning an error,
-    /// matching Go's `testing.TB.Fatal`.
+    /// Opens a driver for `fixture`. Panics rather than returning an error, so
+    /// a failed check fails the test.
     async fn new_driver(&self, fixture: &Fixture) -> Arc<dyn Driver>;
 
     fn request(&self, fixture: &Fixture, argv: Vec<String>) -> Request;
@@ -110,9 +108,9 @@ pub(crate) trait Contract: Send + Sync {
 }
 
 fn new_fixture() -> Fixture {
-    // Go pins the tree to `/tmp` for the same reason: the Unix socket below
-    // must stay inside the 104-byte `sun_path`, which a `$TMPDIR` under
-    // `/var/folders` exhausts on its own.
+    // The tree is pinned to `/tmp`: the Unix socket below must stay inside the
+    // 104-byte `sun_path`, which a `$TMPDIR` under `/var/folders` exhausts on
+    // its own.
     let root = tempfile::Builder::new()
         .prefix("otto-sandbox-contract-")
         .tempdir_in("/tmp")
@@ -158,7 +156,7 @@ fn write_private(path: &Path, contents: &str) {
 }
 
 /// Builds the fixture and reads the driver's capabilities from a probe driver
-/// that is closed again, matching Go's `RunDriverContract` preamble.
+/// that is closed again.
 async fn setup(case: &dyn Contract) -> (Fixture, Capabilities) {
     let mut fixture = new_fixture();
     let probe = case.new_driver(&fixture).await;
@@ -279,7 +277,7 @@ impl std::io::Write for Recorder {
     }
 }
 
-/// A one-way latch two threads use to hand off, replacing Go's closed channel.
+/// A one-way latch two threads use to hand off.
 #[derive(Debug, Default)]
 struct Gate {
     opened: Mutex<bool>,
@@ -317,7 +315,7 @@ impl Gate {
 }
 
 /// A [`Recorder`] whose first write blocks until `release` opens, holding the
-/// driver inside its own stream work. Port of Go's `driverWorkBarrierWriter`.
+/// driver inside its own stream work.
 #[derive(Clone)]
 struct BarrierRecorder {
     recorder: Recorder,
@@ -370,7 +368,7 @@ impl Counter {
     }
 }
 
-/// What one `Close` caller observed. Port of Go's `closeDrainObservation`.
+/// What one `Close` caller observed.
 #[derive(Debug)]
 struct Observation {
     error: Option<Error>,

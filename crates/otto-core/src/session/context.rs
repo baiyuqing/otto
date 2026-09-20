@@ -1,15 +1,12 @@
 //! Resolution of a Pi v3 entry tree into Otto's message list, and the
 //! model-to-entry direction used when appending.
 //!
-//! Port of `internal/session/context.go` plus the pure conversion helpers that
-//! live in `internal/session/store.go`, `snapshot.go` and `list.go`. Nothing
-//! here touches the filesystem, the clock, or randomness, so the whole module
-//! builds for `wasm32-unknown-unknown`.
+//! Nothing here touches the filesystem, the clock, or randomness, so the whole
+//! module builds for `wasm32-unknown-unknown`.
 //!
 //! Ownership: every function takes borrowed input and returns owned values.
-//! Concurrency: no shared state. Errors: every failure is a [`PiError`] whose
-//! rendered text matches the Go error byte for byte; [`PiError::kind`]
-//! replaces Go's `errors.Is(err, ErrInvalidSession)` style checks.
+//! Concurrency: no shared state. Errors: every failure is a [`PiError`],
+//! classified by [`PiError::kind`].
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -43,9 +40,9 @@ pub const OTTO_RUNTIME_CUSTOM_TYPE: &str = "otto.runtime";
 const MAX_CONTEXT_WARNINGS: usize = 32;
 const MAX_WARNING_TYPE_BYTES: usize = 32;
 
-// Otto's own context message types (see internal/agent's sub-agent
-// notifications). They round-trip without the "[Custom context: ...]"
-// decoration applied to custom types written by other Pi-compatible tools.
+// Otto's own context message types, used for sub-agent notifications. They
+// round-trip without the "[Custom context: ...]" decoration applied to custom
+// types written by other Pi-compatible tools.
 const TASK_NOTIFICATION_CONTEXT_TYPE: &str = "task_notification";
 const PARENT_MESSAGE_CONTEXT_TYPE: &str = "parent_message";
 
@@ -1046,8 +1043,8 @@ fn model_finish_reason_to_pi(reason: Option<FinishReason>) -> Result<String, PiE
     }
 }
 
-/// Converts Otto usage into the Pi wire shape. `None` becomes an all-zero
-/// usage object, matching Go's `&piUsage{}`.
+/// Converts Otto usage into the Pi wire shape. `None` becomes an all-zero usage
+/// object.
 pub fn model_usage_to_pi(usage: Option<&Usage>) -> Result<Option<PiUsage>, PiError> {
     let Some(usage) = usage else {
         return Ok(Some(PiUsage::default()));
@@ -1209,13 +1206,14 @@ pub fn valid_tool_arguments(arguments: Option<&RawValue>) -> bool {
 // timestamps
 // ---------------------------------------------------------------------------
 
-/// Parses Go's `time.RFC3339Nano`.
+/// Parses the RFC 3339 timestamps stored sessions use, with nanosecond
+/// precision.
 pub fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value).ok().map(Into::into)
 }
 
-/// Formats like Go's `time.RFC3339Nano`: fractional seconds are written only
-/// when nonzero, with trailing zeros removed.
+/// Formats as RFC 3339 with nanosecond precision: fractional seconds are
+/// written only when nonzero, with trailing zeros removed.
 pub fn format_rfc3339_nano(timestamp: DateTime<Utc>) -> String {
     let formatted = timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true);
     let Some((head, rest)) = formatted.split_once('.') else {
@@ -1382,7 +1380,7 @@ fn write_preview_rune(builder: &mut String, character: char) {
     builder.push(character);
 }
 
-/// Go's `unicode.IsControl`: the C0 and C1 ranges only.
+/// The C0 and C1 control ranges only.
 fn is_go_control(character: char) -> bool {
     let value = character as u32;
     value < 0x20 || (0x7f..=0x9f).contains(&value)
@@ -2208,11 +2206,11 @@ mod tests {
         );
     });
 
-    // Every fixture under `internal/session/testdata/pi-v3` resolves to the
-    // message sequence the Go tests assert. `unknown-entry.jsonl` carries no
-    // Go `buildContext` expectation (its Go test covers raw-JSON
-    // preservation only), so the roles and count are snapshotted here.
-    test!(every_fixture_resolves_to_the_go_message_sequence {
+    // Every fixture under `testdata/session/pi-v3` resolves to the message
+    // sequence below. `unknown-entry.jsonl` has no resolution expectation of
+    // its own (its codec test covers raw-JSON preservation only), so the roles
+    // and count are snapshotted here.
+    test!(every_fixture_resolves_to_the_expected_message_sequence {
         let cases: &[(&str, &[(Role, &str)])] = &[
             (
                 "linear.jsonl",

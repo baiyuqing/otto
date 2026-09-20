@@ -1,12 +1,12 @@
 //! Lexical path helpers shared by `skills`, `agents`, `server`, and `memory`
-//! resolution, matching Go's `path/filepath` on the forward-slash paths Otto
-//! resolves against (Otto runs on macOS only).
+//! resolution, on the forward-slash paths Otto resolves against (Otto runs on
+//! macOS only).
 //!
-//! These duplicate a subset of the byte-exact algorithm in
-//! `otto::tool::gopath` rather than reusing it: this crate cannot depend on
-//! the native `otto` crate, and only `Clean`/`Join`'s ordinary behavior is
-//! needed here (no `..`-traversal security checks, which stay owned by the
-//! workspace-boundary tool code).
+//! These duplicate a subset of the byte-exact algorithm in `otto::tool::gopath`
+//! rather than reusing it: this crate cannot depend on the native `otto` crate,
+//! and only `Clean`/`Join`'s ordinary behavior is needed here (no
+//! `..`-traversal security checks, which stay owned by the workspace-boundary
+//! tool code).
 
 /// Returns the shortest lexically equivalent path, like `filepath.Clean`.
 pub(crate) fn clean(path: &str) -> String {
@@ -82,9 +82,9 @@ pub(crate) fn is_abs(path: &str) -> bool {
     path.starts_with('/')
 }
 
-/// Resolves `env`'s home directory, matching Go's `homeFromEnv`: the native
-/// layer is responsible for falling back to the real process `HOME` before
-/// calling in, so this only reads the injected value.
+/// Resolves `env`'s home directory: the native layer is responsible for falling
+/// back to the real process `HOME` before calling in, so this only reads the
+/// injected value.
 pub(crate) fn home_from_env(env: &std::collections::HashMap<String, String>) -> &str {
     env.get("HOME").map(String::as_str).unwrap_or("")
 }

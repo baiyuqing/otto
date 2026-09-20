@@ -1,14 +1,13 @@
 //! `otto serve`: the HTTP+JSON+SSE frontend.
 //!
-//! Port of `internal/server`. One [`app::Controller`] per session, a turn
-//! event buffer decoupled from the agent's synchronous emit callback
-//! ([`turn::Turn`]), Prometheus metrics ([`metrics::Metrics`]), and
-//! structured request logging. See
+//! One [`app::Controller`] per session, a turn event buffer decoupled from the
+//! agent's synchronous emit callback ([`turn::Turn`]), Prometheus metrics
+//! ([`metrics::Metrics`]), and structured request logging. See
 //! `docs/specs/2026-09-03-agent-server-design.md`.
 //!
 //! Concurrency: `sessions` is a plain `Mutex<HashMap>` held only for map
 //! operations. Each [`OpenSession`] has its own `Mutex` for the turn and
-//! compaction slots, matching Go's `openSession.mu`.
+//! compaction slots.
 
 pub mod approvals;
 pub mod auth;
@@ -45,8 +44,8 @@ use crate::cli::info::SandboxInfo;
 use metrics::{Metrics, SessionContext};
 use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 
-/// Go's `server.ErrSessionNotFound`. A [`Factory::open`] that answers with
-/// exactly this text produces 404 `not_found` instead of 500.
+/// A [`Factory::open`] that answers with exactly this text produces 404
+/// `not_found` instead of 500.
 pub const SESSION_NOT_FOUND: &str = "session not found";
 const IMAGE_TURN_BODY_MAX_BYTES: usize = MAX_IMAGE_BYTES * 4 / 3 + 4096;
 
@@ -60,8 +59,7 @@ pub const OPENAPI_YAML: &[u8] = include_bytes!(concat!(
 
 // ---- process-level info ----
 
-/// Process-level static info, unrelated to any session. Port of
-/// `server.Info`; field order matches, so the JSON bytes match.
+/// Process-level static info, unrelated to any session.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Info {
     pub workspace: String,
@@ -73,10 +71,10 @@ pub struct Info {
     pub profiles: Vec<String>,
 }
 
-/// What a [`Server`] needs from its composition root. Port of the four
-/// function fields on `server.Options`.
+/// What a [`Server`] needs from its composition root.
 ///
-/// `list` and `reload_sandbox` return `None` where Go leaves the field nil.
+/// `list` and `reload_sandbox` return `None` when the composition root wires no
+/// such capability.
 #[async_trait::async_trait]
 pub trait Factory: Send + Sync {
     /// A brand new session.
@@ -88,8 +86,8 @@ pub trait Factory: Send + Sync {
     fn list(&self) -> Option<Result<ListResult, String>> {
         None
     }
-    /// Whether `POST /v1/sandbox/reload` is wired at all. Checked before
-    /// the turn-active guard, matching Go's `reload == nil` first test.
+    /// Whether `POST /v1/sandbox/reload` is wired at all. Checked before the
+    /// turn-active guard.
     fn sandbox_reload_available(&self) -> bool {
         false
     }
@@ -111,7 +109,7 @@ pub trait Factory: Send + Sync {
     }
 }
 
-/// Configures a [`Server`]. Port of `server.Options`.
+/// Configures a [`Server`].
 pub struct Options {
     pub factory: Arc<dyn Factory>,
     pub info: Info,
@@ -124,8 +122,6 @@ pub struct Options {
 
 // ---- logging ----
 
-/// Go `slog` `TextHandler` output, hand-rolled.
-///
 /// ponytail: no logging crate is pinned and the server writes a handful of
 /// fixed lines, so a small formatter beats adding `tracing` plus a subscriber.
 /// Swap for `tracing` if any other crate needs structured logs.
@@ -180,9 +176,8 @@ impl Logger {
     }
 }
 
-/// Go `slog`'s `needsQuoting` rule: quote an empty value, and any value
-/// carrying a space, a quote, an equals sign, a backslash, or a control
-/// character.
+/// The log quoting rule: quote an empty value, and any value carrying a space,
+/// a quote, an equals sign, a backslash, or a control character.
 fn quote(value: &str) -> String {
     let unsafe_byte = value.is_empty()
         || value
@@ -198,20 +193,18 @@ fn quote(value: &str) -> String {
 // ---- registry ----
 
 /// One entry in the session registry: an open controller and its most recent
-/// turn, if any. Port of `server.openSession`.
+/// turn, if any.
 pub struct OpenSession {
     ctrl: Arc<Controller>,
     state: Mutex<SessionState>,
-    /// Signaled after every turn on this session finishes. The wake loop is
-    /// the only waiter. Port of `openSession.turnFinished`, a capacity-1
-    /// channel: `Notify::notify_one` stores exactly one permit the same way,
-    /// so an end-of-turn signal raised while the loop is busy is not lost.
+    /// Signaled after every turn on this session finishes. The wake loop is the
+    /// only waiter. `Notify::notify_one` stores exactly one permit, so an
+    /// end-of-turn signal raised while the loop is busy is not lost.
     turn_finished: tokio::sync::Notify,
-    /// Cancelled by [`OpenSession::cancel_work`], which every close path
-    /// calls before closing the controller. Go's wake loop instead ends when
-    /// `Tasks().Updates()` closes; the Rust registry's `watch` sender is
-    /// owned by the registry and outlives the controller, so the loop needs
-    /// its own stop signal.
+    /// Cancelled by [`OpenSession::cancel_work`], which every close path calls
+    /// before closing the controller. The registry's `watch` sender is owned by
+    /// the registry and outlives the controller, so the loop needs its own stop
+    /// signal.
     closed: CancellationToken,
 }
 
@@ -245,8 +238,7 @@ impl OpenSession {
     }
 
     /// Cancels the running turn or compaction so a following close does not
-    /// wait on a provider call, and stops the wake loop. Port of
-    /// `openSession.cancelWork`.
+    /// wait on a provider call, and stops the wake loop.
     fn cancel_work(&self) {
         self.closed.cancel();
         let state = self.lock();
@@ -271,11 +263,10 @@ pub struct Server {
     /// Serializes every `Factory::open`, so two concurrent resumes of one id
     /// cannot open the same session file twice (the store takes no flock).
     ///
-    /// ponytail: one gate for every id instead of Go's per-id placeholder.
-    /// Resuming is an admin-rate path; make it per-id if it ever contends.
+    /// ponytail: one gate for every id instead of a per-id gate. Resuming is an
+    /// admin-rate path; make it per-id if it ever contends.
     open_gate: tokio::sync::Mutex<()>,
-    /// One handle per running wake loop, awaited by [`Server::close`]. Port
-    /// of `Server.wakeWG`.
+    /// One handle per running wake loop, awaited by [`Server::close`].
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
 }
@@ -321,7 +312,6 @@ impl Server {
     }
 
     /// Cancels every in-flight turn, then closes every open controller.
-    /// Port of `Server.Close`.
     pub async fn close(&self) -> Result<(), String> {
         let sessions: Vec<Arc<OpenSession>> = {
             let mut map = self
@@ -349,8 +339,8 @@ impl Server {
             }
         }
         self.metrics.sessions_open(-(sessions.len() as i64));
-        // Go's `s.wakeWG.Wait()`: every loop was told to stop by
-        // `cancel_work` above, so this only waits out an in-flight wake turn.
+        // Every loop was told to stop by `cancel_work` above, so this only
+        // waits out an in-flight wake turn.
         let loops: Vec<_> = std::mem::take(
             &mut *self
                 .wake_loops
@@ -466,8 +456,8 @@ impl Server {
         session
     }
 
-    /// Port of `Server.resumeOrCreate`. A hit in the registry returns the
-    /// existing session without calling `open` again.
+    /// A hit in the registry returns the existing session without calling
+    /// `open` again.
     async fn resume_or_create(
         self: &Arc<Self>,
         id: &str,
@@ -535,8 +525,7 @@ impl Server {
             .collect()
     }
 
-    /// Whether any open session has a running turn. Port of
-    /// `Server.anyTurnActive`.
+    /// Whether any open session has a running turn.
     fn any_turn_active(&self) -> bool {
         self.all_sessions().iter().any(|session| {
             session
@@ -547,21 +536,20 @@ impl Server {
 
     // ---- turns ----
 
-    /// Drains `session`'s pending sub-agent notifications for as long as it
-    /// is open. Port of `Server.startWakeLoop`.
+    /// Drains `session`'s pending sub-agent notifications for as long as it is
+    /// open.
     ///
     /// It is the sole caller of [`Server::wake_turn`]: both a registry update
-    /// signal and the end of any turn on `session` route through this one
-    /// task, so every "is a notification pending and no turn active" check
-    /// happens one at a time and no two wake turns can start for the same
-    /// notification. On every update signal it also diffs the task list into
-    /// the task metrics. It does nothing when the runner tracks no tasks.
+    /// signal and the end of any turn on `session` route through this one task,
+    /// so every "is a notification pending and no turn active" check happens
+    /// one at a time and no two wake turns can start for the same notification.
+    /// On every update signal it also diffs the task list into the task
+    /// metrics. It does nothing when the runner tracks no tasks.
     ///
-    /// Divergence from Go, which starts the wake turn in its own goroutine
-    /// and re-checks through `turnFinished`: the turn is awaited here
-    /// instead. A notification pushed while it runs bumps the registry's
-    /// `watch` version, so the next `changed()` returns at once and the
-    /// re-check happens anyway, with one fewer moving part.
+    /// The turn is awaited here rather than started as its own task. A
+    /// notification pushed while it runs bumps the registry's `watch` version,
+    /// so the next `changed()` returns at once and the re-check happens anyway,
+    /// with one fewer moving part.
     fn start_wake_loop(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let Some(tasks) = session.ctrl.subagent_tasks() else {
             return;
@@ -592,19 +580,18 @@ impl Server {
             .wake_loops
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        // A deleted session's loop has already returned; Go's WaitGroup
-        // counter drops on its own, this list does not.
+        // A deleted session's loop has already returned; this list does not
+        // shrink on its own.
         loops.retain(|running| !running.is_finished());
         loops.push(handle);
     }
 
-    /// Runs one task-triggered turn on `session` when a notification is
-    /// pending and nothing else holds the session. Port of the `trigger ==
-    /// triggerTask` branch of `Server.startTurn`.
+    /// Runs one task-triggered turn on `session` when a notification is pending
+    /// and nothing else holds the session.
     ///
     /// The wake is prepared before the turn is published, so a no-op or busy
-    /// admission cannot leave a phantom turn visible on `GET /v1/sessions`.
-    /// A busy session is Go's `errTurnActive`, which its wake loop ignores.
+    /// admission cannot leave a phantom turn visible on `GET /v1/sessions`. A
+    /// busy session is left to the turn that holds it.
     async fn wake_turn(self: &Arc<Self>, session: &Arc<OpenSession>) {
         let prepared = {
             let mut state = session.lock();
@@ -623,8 +610,8 @@ impl Server {
                         }
                         Err(error) => Some(Err(error)),
                     },
-                    // A prompt or a close raced us; both are Go's ignored
-                    // `errTurnActive` and `ErrClosed` shutdown path.
+                    // A prompt or a close raced us; both are expected and
+                    // ignored here.
                     Err(message) if message == app::PROMPT_ACTIVE || message == app::CLOSED => None,
                     Err(message) => Some(Err(message)),
                 }
@@ -687,10 +674,9 @@ impl Server {
         );
     }
 
-    /// Starts a user turn on `session`. Port of `Server.startTurn`; the
-    /// `trigger == triggerTask` branch lives in [`Server::wake_turn`],
-    /// because a wake turn needs no HTTP reply and is awaited by the wake
-    /// loop that admitted it.
+    /// Starts a user turn on `session`. The `trigger == triggerTask` branch
+    /// lives in [`Server::wake_turn`], because a wake turn needs no HTTP reply
+    /// and is awaited by the wake loop that admitted it.
     fn start_turn(
         self: &Arc<Self>,
         session: &Arc<OpenSession>,
@@ -756,9 +742,8 @@ impl Server {
                     ("duration_ms", spawned.elapsed().as_millis().to_string()),
                 ],
             );
-            // Go's `os.turnFinished <- struct{}{}`: a notification that
-            // landed too late for this turn's own drain is caught by the
-            // wake loop's end-of-turn check.
+            // A notification that landed too late for this turn's own drain is
+            // caught by the wake loop's end-of-turn check.
             session.turn_finished.notify_one();
         });
 
@@ -773,11 +758,10 @@ impl Server {
     }
 }
 
-/// Go's `errTurnActive`.
 const TURN_ACTIVE: &str = "turn already active";
 
-/// 16 random bytes, hex encoded. Go duplicates `cmd/otto`'s `randomID` here
-/// for the same reason: the package boundary forbids the import.
+/// 16 random bytes, hex encoded. The same generator as `cmd`'s, duplicated
+/// because the package boundary forbids the import.
 fn new_id() -> Result<String, String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
@@ -790,9 +774,8 @@ fn new_id() -> Result<String, String> {
 // ---- middleware ----
 
 /// Request-ID handling, token gating, structured logging and HTTP metrics.
-/// Port of `Server.instrument`, with `requireToken` folded in so a 401 is
-/// still logged and measured under its real route, as Go's per-route wrap
-/// achieves.
+/// Token gating is folded in so a 401 is still logged and measured under its
+/// real route.
 async fn instrument(
     State(server): State<Arc<Server>>,
     request: axum::extract::Request,
@@ -848,9 +831,9 @@ async fn instrument(
     response
 }
 
-/// The metric and log label for one request. Go reads `r.Pattern`, which
-/// already carries the method; axum's [`MatchedPath`] carries only the path,
-/// and spells the two UI routes differently, so both are mapped back.
+/// The metric and log label for one request. axum's [`MatchedPath`] carries
+/// only the path, and spells the two UI routes differently, so both are mapped
+/// back and the method is prepended.
 fn route_label(method: &Method, matched: Option<&str>) -> String {
     match matched {
         None => "unmatched".to_string(),
@@ -883,11 +866,9 @@ struct ErrorBody {
     error: ApiError,
 }
 
-/// Port of `writeError`. `Content-Type: application/json`, no charset,
-/// matching Go byte for byte.
-/// Serves `router` on `listener` until `shutdown` fires. Port of
-/// `server.Serve`: a cancelled shutdown is a clean exit, so only a listener
-/// or protocol failure is an error.
+/// `Content-Type: application/json`, no charset. Serves `router` on `listener`
+/// until `shutdown` fires. A cancelled shutdown is a clean exit, so only a
+/// listener or protocol failure is an error.
 pub async fn serve(
     listener: listen::Listener,
     router: Router,
@@ -924,7 +905,6 @@ pub fn error_response(status: StatusCode, code: &str, message: &str) -> Response
         .expect("static header values")
 }
 
-/// Port of `writeJSON`.
 pub fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     match serde_json::to_vec(value) {
         Ok(body) => Response::builder()
@@ -940,8 +920,7 @@ pub fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
     }
 }
 
-/// Port of `internalError`: the fixed 500 body, with the real (already
-/// redacted) error only logged.
+/// The fixed 500 body, with the real (already redacted) error only logged.
 fn internal_error(log: &Logger, error: &str) -> Response {
     log.error("internal_error", &[("error", error.to_string())]);
     error_response(
@@ -1042,8 +1021,7 @@ struct CreateBody {
 }
 
 async fn create_session(State(server): State<Arc<Server>>, body: Bytes) -> Response {
-    // Go tolerates an empty body here (`ContentLength != 0` plus the io.EOF
-    // exemption); only malformed JSON is a 400.
+    // An empty body is tolerated here; only malformed JSON is a 400.
     let parsed: CreateBody = if body.iter().all(u8::is_ascii_whitespace) {
         CreateBody::default()
     } else {
@@ -1182,8 +1160,7 @@ async fn delete_session(State(server): State<Arc<Server>>, Path(id): Path<String
 
 async fn history(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
     match server.lookup(&id) {
-        // An empty Vec serializes as "[]", which is what Go's nil guard
-        // achieves.
+        // An empty Vec serializes as "[]".
         Some(session) => json_response::<Vec<Message>>(StatusCode::OK, &session.ctrl.history()),
         None => not_found("session not found"),
     }
@@ -1215,8 +1192,8 @@ async fn start_turn(
     let Some(session) = server.lookup(&id) else {
         return not_found("session not found");
     };
-    // Unlike create and rename, Go decodes unconditionally here, so an empty
-    // body is a 400.
+    // Unlike create and rename, the body is decoded unconditionally here, so an
+    // empty body is a 400.
     let parsed: StartTurnBody = match serde_json::from_slice(&body) {
         Ok(parsed) => parsed,
         Err(_) => return bad_request("invalid JSON body"),
@@ -1251,7 +1228,7 @@ async fn start_turn(
 }
 
 /// Blocks until the turn is done, riding the same version broadcast the SSE
-/// reader uses. Port of `waitDone`.
+/// reader uses.
 async fn wait_done(turn: &Arc<Turn>) {
     let mut changed = turn.subscribe();
     while !turn.is_done() {
@@ -1261,8 +1238,7 @@ async fn wait_done(turn: &Arc<Turn>) {
     }
 }
 
-/// The turn named by the path, or the 404 message to answer with. Port of
-/// the repeated `t == nil || t.id != r.PathValue("turn_id")` guard.
+/// The turn named by the path, or the 404 message to answer with.
 fn resolve_turn(server: &Server, id: &str, turn_id: &str) -> Result<Arc<Turn>, &'static str> {
     let Some(session) = server.lookup(id) else {
         return Err("session not found");
@@ -1423,9 +1399,7 @@ async fn asset(Path(path): Path<String>) -> Response {
 
 // ---- SSE streaming ----
 
-/// Decrements the stream-client gauge when the response body is dropped,
-/// which is what Go's `defer s.metrics.streamClients(-1)` does when the
-/// handler returns.
+/// Decrements the stream-client gauge when the response body is dropped.
 struct StreamClient(Arc<Metrics>);
 
 impl Drop for StreamClient {
@@ -1436,7 +1410,7 @@ impl Drop for StreamClient {
 
 /// Writes turn events from sequence `after` onward as SSE frames, then waits
 /// for more until the turn finishes or the client disconnects. Disconnecting
-/// never cancels the turn. Port of `Server.streamSSE`.
+/// never cancels the turn.
 fn stream_sse(metrics: &Arc<Metrics>, turn: Arc<Turn>, after: usize) -> Response {
     metrics.stream_clients(1);
     let guard = StreamClient(Arc::clone(metrics));
@@ -1513,9 +1487,8 @@ mod tests {
 
     // ---- the provider double ----
 
-    /// What one turn does. Go injects a `runnerFunc` implementing
-    /// `app.Runner`; `Runner` is a concrete struct here, so the script sits
-    /// one layer down, at the provider.
+    /// What one turn does. `Runner` is a concrete struct here, so the script
+    /// sits one layer down, at the provider.
     #[derive(Default)]
     struct Script {
         /// Streamed as text deltas and returned as the assistant text.
@@ -1529,9 +1502,8 @@ mod tests {
         /// Held after the deltas until cancelled, so the turn stays running.
         /// Cancelling the turn wins the race and yields `Cancelled`.
         gate: Option<CancellationToken>,
-        /// Runs at the top of every call with the 1-based call index, the way
-        /// Go's fake runner body does. The wake tests push a notification
-        /// from it.
+        /// Runs at the top of every call with the 1-based call index. The wake
+        /// tests push a notification from it.
         on_call: Option<Box<dyn Fn(usize) + Send + Sync>>,
     }
 
@@ -1540,8 +1512,7 @@ mod tests {
         started: watch::Sender<usize>,
         /// The role of each call's last request message, in call order. A
         /// prompt turn ends in [`Role::User`]; a wake turn ends in the
-        /// delivered notification's [`Role::Context`]. Go asserts on the
-        /// `Prompt` text instead, which a provider-level double never sees.
+        /// delivered notification's [`Role::Context`].
         roles: Mutex<Vec<Role>>,
     }
 
@@ -1648,8 +1619,7 @@ mod tests {
         /// Held before `open` returns, so a test can pile up concurrent
         /// resumes of one id.
         open_gate: Option<CancellationToken>,
-        /// Every controller shares this registry, the way Go's wake tests
-        /// share one `agent.Tasks`. `None` gives each its own.
+        /// Every controller shares this registry. `None` gives each its own.
         tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
         list: Option<ListResult>,
         create_calls: AtomicUsize,
@@ -1868,7 +1838,7 @@ mod tests {
             self.send("GET", "/metrics", None).await.body
         }
 
-        /// Polls the turn until it leaves `running`. Port of `waitTurnDone`.
+        /// Polls the turn until it leaves `running`.
         async fn wait_turn_done(&self, session: &str, turn_id: &str) -> Value {
             for _ in 0..600 {
                 let body = self
@@ -2804,9 +2774,8 @@ mod tests {
 
     /// Every API path the router serves.
     ///
-    /// ponytail: axum exposes no route table, so this list is written out
-    /// once and checked against both the router and `openapi.yaml`. Go reads
-    /// `http.ServeMux`'s patterns instead.
+    /// ponytail: axum exposes no route table, so this list is written out once
+    /// and checked against both the router and `openapi.yaml`.
     const ROUTES: &[&str] = &[
         "/v1/sessions",
         "/v1/sessions/{id}",
@@ -3004,10 +2973,9 @@ mod tests {
         assert_eq!(reply.json()["error"]["code"], "not_found");
     }
 
-    /// The routes read the runner's real registry. Port of
-    /// `TestTaskRoutes`'s list and detail assertions in
-    /// `internal/server/tasks_test.go`, driven through the registry rather
-    /// than through a scripted `agent` tool call.
+    /// The routes read the runner's real registry. The list and detail task
+    /// routes, driven through the registry rather than through a scripted
+    /// `agent` tool call.
     #[tokio::test]
     async fn the_task_routes_list_and_detail_a_real_task() {
         let harness = Harness::new();
@@ -3134,7 +3102,6 @@ mod tests {
     // ---- wake turns ----
 
     /// A harness whose every controller shares `tasks`, plus the registry.
-    /// Port of `newTaskTestController`'s shared `agent.Tasks`.
     fn wake_harness(script: Script) -> (Harness, Arc<crate::subagent::tasks::Tasks>) {
         let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
         let harness = Harness::with(HarnessOptions {
@@ -3154,7 +3121,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestWakeTurnStartsOnPendingNotificationWhenIdle`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_pending_notification_starts_a_wake_turn_while_idle() {
         let (harness, tasks) = wake_harness(Script {
@@ -3229,7 +3195,6 @@ mod tests {
         assert!(log.contains("inbox_kind=message"), "{log}");
     }
 
-    /// Port of `TestWakeTurnSkippedWhileUserTurnActive`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_notification_during_a_user_turn_waits_for_it_to_finish() {
         let gate = CancellationToken::new();
@@ -3259,7 +3224,6 @@ mod tests {
         assert_eq!(harness.provider.roles(), vec![Role::User, Role::Context]);
     }
 
-    /// Port of `TestWakeTurnFollowsUserTurnFinishingWithPendingNotification`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_notification_landing_as_a_user_turn_ends_starts_one_wake_turn() {
         let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
@@ -3305,7 +3269,6 @@ mod tests {
         assert_eq!(harness.provider.roles(), vec![Role::User, Role::Context]);
     }
 
-    /// Port of `TestServerCloseEndsWakeLoop`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn closing_the_server_ends_the_wake_loop() {
         let (harness, _tasks) = wake_harness(Script::default());

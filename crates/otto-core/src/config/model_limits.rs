@@ -1,5 +1,4 @@
-//! The context-window catalog and lookup. Port of
-//! `internal/config/model_limits.go`.
+//! The context-window catalog and lookup.
 
 const OPENAI_MODEL_SOURCE_URL: &str = "https://developers.openai.com/api/docs/models/all";
 const ANTHROPIC_MODEL_SOURCE_URL: &str = "https://platform.claude.com/docs/en/models/overview";
@@ -44,7 +43,7 @@ pub struct ModelLimits {
 
 /// Looks up `model`'s context-window limits. Unknown models (including
 /// ambiguous namespace prefixes and malformed `:batch` suffixes) return a
-/// zeroed, `known: false` [`ModelLimits`], matching Go's `resolveModelLimits`.
+/// zeroed, `known: false` [`ModelLimits`].
 pub(super) fn resolve_model_limits(model: &str) -> ModelLimits {
     let Some((model, namespace)) = unwrap_model_id(model) else {
         return ModelLimits::default();

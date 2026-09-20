@@ -1,22 +1,16 @@
-//! Application state, key handling, and command dispatch. Port of the
-//! non-rendering parts of `internal/tui/model.go`, `resume.go`, and
-//! `archive.go`.
+//! Application state, key handling, and command dispatch.
 //!
-//! ponytail: Go's `Model` is a single Bubble Tea state machine that also
-//! owns rendering (`View`). Ratatui redraws the whole frame every tick from
-//! plain state instead of an Elm-style message loop, so this module owns
-//! only state and key handling; [`super::render`] turns that state into
-//! widgets.
+//! Ratatui redraws the whole frame every tick from plain state instead of an
+//! Elm-style message loop, so this module owns only state and key handling;
+//! [`super::render`] turns that state into widgets.
 //!
-//! Not ported: Go's `overlayHelp`/`overlaySession`/etc. are separate Bubble
-//! Tea "screens" with their own key maps. Command output that Go shows in an
-//! overlay (`/session`, `/model` with no argument, `/sandbox`, `/tasks`,
-//! `/task`) is appended to the transcript as a system entry here instead,
-//! matching the text `internal/repl` already prints for the same commands.
-//! Only `/resume`, `/archive`, and `/model <profile>`'s profile picker are
-//! genuinely interactive, so those get a real picker overlay (below).
-//! Upgrade path: split these into dedicated overlays if a user reports the
-//! inline transcript entries as hard to scan.
+//! ponytail: command output for `/session`, `/model` with no argument,
+//! `/sandbox`, `/tasks` and `/task` is appended to the transcript as a system
+//! entry rather than shown in an overlay, reusing the text the line frontend
+//! prints for the same commands. Only `/resume`, `/archive`, and `/model
+//! <profile>`'s profile picker are genuinely interactive, so those get a real
+//! picker overlay (below). Upgrade path: split these into dedicated overlays if
+//! a user reports the inline transcript entries as hard to scan.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -37,15 +31,13 @@ use super::entries::{self, Entry, EntryKind};
 use super::layout;
 use super::selection::Selection;
 
-/// Go's `ctrlCArmWindow`: the time a first Ctrl+C stays armed for a
-/// confirming second press.
+/// The time a first Ctrl+C stays armed for a confirming second press.
 const CTRL_C_ARM_WINDOW: Duration = Duration::from_secs(1);
 
-/// Go's `ctrlCExitStatus`.
 const CTRL_C_EXIT_STATUS: &str = "press Ctrl+C again to exit";
 
-/// How many sessions a `/resume` or `/archive` picker lists. Port of Go's
-/// `resumeListLimit`/`archiveListLimit` (both `50` in `internal/tui`).
+/// How many sessions a `/resume` or `/archive` picker lists. How many sessions
+/// a `/resume` or `/archive` picker lists.
 const PICKER_LIST_LIMIT: usize = 50;
 
 /// One row of a resume/archive/profile picker.
@@ -74,8 +66,7 @@ impl PickerKind {
     }
 }
 
-/// An open list picker. Port of the shared shape of Go's
-/// `resumePickerState`/`archivePickerState` (and `profile.go`'s picker).
+/// An open list picker.
 #[derive(Debug, Clone)]
 pub(crate) struct Picker {
     pub kind: PickerKind,
@@ -130,13 +121,12 @@ pub(crate) enum Action {
     McpLogin(String),
 }
 
-/// The composer's bash-style prompt history: the prompts the transcript
-/// already held when Otto started, then every line submitted since, plus
-/// the draft a recall interrupted.
+/// The composer's bash-style prompt history: the prompts the transcript already
+/// held when Otto started, then every line submitted since, plus the draft a
+/// recall interrupted.
 ///
-/// ponytail: in-process only. Go's TUI has no prompt history at all and
-/// nothing persists one across runs. Upgrade path: write the lines to a
-/// history file if recall across runs is asked for.
+/// ponytail: in-process only. Upgrade path: write the lines to a history file
+/// if recall across runs is asked for.
 #[derive(Default)]
 pub(crate) struct History {
     lines: Vec<String>,
@@ -218,8 +208,7 @@ fn prompt_history(entries: &[Entry]) -> Vec<String> {
         .collect()
 }
 
-/// The terminal frontend's whole state. Port of the non-view fields of
-/// `internal/tui/model.go`'s `Model`.
+/// The terminal frontend's whole state.
 pub(crate) struct App {
     pub entries: Vec<Entry>,
     pub usage: Usage,
@@ -228,10 +217,8 @@ pub(crate) struct App {
     pub cursor: usize,
     /// Bash-style prompt history for the composer's Up/Down keys.
     history: History,
-    /// `None` follows the bottom of the transcript; `Some(top)` pins the
-    /// view to that absolute wrapped-line offset from the top. Port of Go's
-    /// `autoFollow` (inverted: Go stores a bool and the last offset
-    /// separately, this folds both into one field).
+    /// `None` follows the bottom of the transcript; `Some(top)` pins the view
+    /// to that absolute wrapped-line offset from the top.
     ///
     /// The offset is absolute rather than measured from the bottom so that
     /// output appended during a turn extends the transcript below the pinned
@@ -316,11 +303,10 @@ impl App {
     /// session (`/new`, `/resume`, `/archive`, switching profiles) so the
     /// transcript can never drift from `Controller::history`.
     ///
-    /// A completed prompt or `/compact` does *not* call this: like Go's
-    /// Bubble Tea model, the transcript is append-only during a turn
-    /// ([`App::apply_event`] is the sole writer), so an in-progress or
-    /// just-finished turn's entries are never rebuilt out from under a
-    /// still-visible scrollback.
+    /// A completed prompt or `/compact` does *not* call this: the transcript is
+    /// append-only during a turn ([`App::apply_event`] is the sole writer), so
+    /// an in-progress or just-finished turn's entries are never rebuilt out
+    /// from under a still-visible scrollback.
     pub fn refresh(&mut self, controller: &Controller) {
         let (entries, usage) = entries::entries_from_history(&controller.history());
         self.entries = entries;
@@ -409,13 +395,11 @@ impl App {
         true
     }
 
-    /// Port of `handleCtrlC`'s idle branch: a lone Ctrl+C clears the composer
-    /// and arms a second press; a confirming press within
-    /// [`CTRL_C_ARM_WINDOW`] exits. While a turn is running, [`super::run`]
-    /// intercepts Ctrl+C before it reaches [`App::handle_key`] at all (see
-    /// [`is_interrupt_key`]) and cancels the turn directly instead of
-    /// arming, matching Go's per-turn-interrupt-then-exit-prompt SIGINT
-    /// semantics; [`App::busy`] is therefore always false here.
+    /// A lone Ctrl+C clears the composer and arms a second press; a confirming
+    /// press within [`CTRL_C_ARM_WINDOW`] exits. While a turn is running,
+    /// [`super::run`] intercepts Ctrl+C before it reaches [`App::handle_key`]
+    /// at all (see [`is_interrupt_key`]) and cancels the turn directly instead
+    /// of arming; [`App::busy`] is therefore always false here.
     fn handle_ctrl_c(&mut self) -> Option<Action> {
         let now = Instant::now();
         if self.ctrl_c_armed(now) {
@@ -500,8 +484,8 @@ impl App {
             return None;
         }
         if self.busy() {
-            // Go ignores most keys while a turn runs; Esc (Cancel) is
-            // handled by the caller, which cancels the turn's child token.
+            // Most keys are ignored while a turn runs; Esc (Cancel) is handled
+            // by the caller, which cancels the turn's child token.
             return None;
         }
         if key.code == KeyCode::Char('?') && self.input.is_empty() {
@@ -512,7 +496,7 @@ impl App {
         // While the suggestion panel is open it owns the keys that would
         // otherwise scroll the transcript or complete a prefix: up/down move
         // the highlighted row, Tab accepts it, and Enter runs it rather than
-        // the typed prefix. Port of Go's `commandSuggestions` cursor.
+        // the typed prefix.
         let suggestions = self.suggestions();
         if !suggestions.is_empty() {
             let selected = self.suggestion.min(suggestions.len() - 1);
@@ -621,20 +605,18 @@ impl App {
         }
     }
 
-    /// Esc or Ctrl+C while a turn is running cancels it, matching Go's
-    /// per-turn SIGINT/interrupt semantics; the caller (which holds the
-    /// turn's `CancellationToken`) checks this before calling
-    /// [`App::handle_key`] and cancels the turn directly instead of
-    /// forwarding the key.
+    /// Esc or Ctrl+C while a turn is running cancels it; the caller (which
+    /// holds the turn's `CancellationToken`) checks this before calling
+    /// [`App::handle_key`] and cancels the turn directly instead of forwarding
+    /// the key.
     pub fn is_interrupt_key(key: &KeyEvent) -> bool {
         key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
     }
 
     /// The slash commands the composer's current value is a prefix of, with
-    /// [`App::suggestion`] indexing the highlighted one. Port of
-    /// `Model.commandSuggestions`: an open overlay hides the panel.
-    /// [`super::render`] draws exactly this list.
+    /// [`App::suggestion`] indexing the highlighted one. An open overlay hides
+    /// the panel. [`super::render`] draws exactly this list.
     pub(super) fn suggestions(&self) -> Vec<SlashCommand> {
         if self.show_help || self.picker.is_some() {
             return Vec::new();
@@ -659,11 +641,11 @@ impl App {
         self.suggestion = 0;
     }
 
-    /// Parses and dispatches one submitted line. Port of `internal/repl`'s
-    /// `command()` dispatch table, reusing its exact output text for every
-    /// command whose semantics match; `/resume`, `/archive`, and `/model`
-    /// with no argument open a picker instead of printing text, since a
-    /// picker is the TUI-native form of the same command.
+    /// Parses and dispatches one submitted line. Parses and dispatches one
+    /// submitted line, reusing the line frontend's exact output text for every
+    /// command whose semantics match; `/resume`, `/archive`, and `/model` with
+    /// no argument open a picker instead of printing text, since a picker is
+    /// the TUI-native form of the same command.
     fn dispatch_line(
         &mut self,
         line: &str,
@@ -920,9 +902,8 @@ impl App {
         }
     }
 
-    /// Port of `runSessionListCommand`/`runArchiveListCommand`:
-    /// `list_sessions` is synchronous, so the picker opens with no
-    /// intermediate loading state.
+    /// `list_sessions` is synchronous, so the picker opens with no intermediate
+    /// loading state.
     fn open_session_picker(&mut self, kind: PickerKind, controller: &Controller) {
         match controller.list_sessions(PICKER_LIST_LIMIT) {
             Ok(result) => {
@@ -937,23 +918,20 @@ impl App {
         }
     }
 
-    /// Applies one streamed turn event to the transcript. Port of the
-    /// relevant arms of `Model.applyEvent`.
+    /// Applies one streamed turn event to the transcript.
     ///
-    /// ponytail: Go incrementally patches the streaming assistant entry in
-    /// place and keeps a separate "dirty" flag to re-wrap only what
-    /// changed. This instead appends one system line per event, matching
-    /// the append-only shape of Go's own Bubble Tea transcript (this is the
-    /// sole writer during a turn; [`App::refresh`] is never called
-    /// mid-turn, so nothing here is later discarded). The live view is
-    /// coarser (no character-by-character growth of the assistant bubble)
-    /// but the content is the same once the turn ends. Upgrade path: keep a
-    /// dedicated in-progress entry and append text deltas into it if
-    /// scrollback churn during streaming turns is reported as noisy.
+    /// ponytail: one system line is appended per event rather than patching a
+    /// streaming assistant entry in place (this is the sole writer during a
+    /// turn; [`App::refresh`] is never called mid-turn, so nothing here is
+    /// later discarded). The live view is coarser (no character-by-character
+    /// growth of the assistant bubble) but the content is the same once the
+    /// turn ends. Upgrade path: keep a dedicated in-progress entry and append
+    /// text deltas into it if scrollback churn during streaming turns is
+    /// reported as noisy.
     ///
-    /// Returns `true` for an [`Event::AgentError`], mirroring `internal/
-    /// repl`'s `renderEvent` so [`super::run`] does not also print a turn's
-    /// final `Err` when the same failure already appeared as an event.
+    /// Returns `true` for an [`Event::AgentError`], so [`super::run`] does not
+    /// also print a turn's final `Err` when the same failure already appeared
+    /// as an event.
     pub fn apply_event(&mut self, event: Event) -> bool {
         match event {
             Event::TextDelta { text } => {
@@ -1105,7 +1083,6 @@ fn parse_thinking_action(args: String, save_default: bool) -> Action {
     }
 }
 
-/// Port of `internal/repl`'s `/session` output.
 fn session_report(controller: &Controller) -> String {
     let info = controller.info();
     let mut text = format!(
@@ -1127,7 +1104,7 @@ fn session_report(controller: &Controller) -> String {
     text
 }
 
-/// Port of `internal/repl`'s `/model` (no-argument) output.
+/// The `/model` (no-argument) output, matching the line frontend's.
 fn model_report(controller: &Controller) -> String {
     let info = controller.info();
     let mut text = format!(
@@ -1149,11 +1126,9 @@ fn display_thinking(thinking: &str) -> &str {
     }
 }
 
-/// Port of `internal/repl`'s `/compact`'s `compactionLine`. `pub(super)`
-/// because [`super::run`] also needs it for a `/compact` call's final
-/// [`otto_core::agent::CompactionResult`] (as opposed to a streamed
-/// [`Event::CompactionCompleted`], which [`App::apply_event`] handles
-/// itself).
+/// `pub(super)` because [`super::run`] also needs it for a `/compact` call's
+/// final [`otto_core::agent::CompactionResult`] (as opposed to a streamed
+/// [`Event::CompactionCompleted`], which [`App::apply_event`] handles itself).
 pub(super) fn compaction_line(result: &CompactionResult) -> String {
     if result.noop {
         return "[context] no-op".to_string();
@@ -1461,14 +1436,11 @@ mod tests {
         assert!(!app.handle_scroll_key(&key(KeyCode::Char('x'), KeyModifiers::NONE)));
     }
 
-    // Port of `internal/tui/memory_test.go` against this module's own unit
-    // seams (`dispatch_line`/`handle_key`) rather than Go's Bubble Tea
-    // `Update`/status-text plumbing: every command result here lands as one
+    // Memory command coverage through this module's own unit seams
+    // (`dispatch_line`/`handle_key`): every command result lands as one
     // transcript entry via `push_system`/`push_command_result`, since this
-    // frontend has no separate status bar (see the module doc's "Not
-    // ported" note). `TestMemoryWarningEventSetsStatusDuringPrompt` is not
-    // ported here: it exercises `apply_event`'s existing `MemoryWarning`
-    // arm, unrelated to command dispatch.
+    // frontend has no separate status bar. A `MemoryWarning` event is covered
+    // by `apply_event`'s own arm, unrelated to command dispatch.
 
     use crate::cli::testutil;
     use crate::memory::RememberRequest;
@@ -1642,15 +1614,12 @@ mod tests {
         );
     }
 
-    /// Documents the pre-existing divergence recorded in
-    /// `repl_commands.rs`'s module doc: `/memory review` reaches candidate
-    /// review and automatic extraction, neither of which is ported, so the
-    /// subcommand always falls through to the same usage line as an unknown
-    /// one, regardless of whether the decision word is valid. This merges
-    /// Go's `TestMemoryReviewCommandTriesScopesAndAppliesDecision` and
-    /// `TestMemoryReviewCommandRejectsInvalidDecision`, which differ only in
-    /// whether the decision is valid — a distinction this frontend can't yet
-    /// observe.
+    /// Documents the pre-existing divergence recorded in `repl_commands.rs`'s
+    /// module doc: `/memory review` reaches candidate review and automatic
+    /// extraction, neither of which is ported, so the subcommand always falls
+    /// through to the same usage line as an unknown one, regardless of whether
+    /// the decision word is valid. A valid and an invalid decision word are
+    /// therefore indistinguishable here, so one test covers both.
     #[tokio::test]
     async fn memory_review_falls_through_to_the_usage_line_pending_the_reviewer_port() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1803,14 +1772,11 @@ mod tests {
         );
     }
 
-    /// Port of `TestMemoryAndRememberCommandsRejectedWhileTurnActive`.
-    /// Divergence: Go's per-command guard sets `statusText` to
-    /// `app.ErrPromptActive`; this frontend has no per-command guard or
-    /// status bar, so [`App::handle_key`]'s single [`App::busy`] check
-    /// (shared by every slash command, not memory-specific) silently
-    /// declines to dispatch instead of pushing a rejection message. What's
-    /// verified here is the same observable guarantee Go's test checks: the
-    /// command never runs while a turn is active.
+    /// This frontend has no per-command guard or status bar, so
+    /// [`App::handle_key`]'s single [`App::busy`] check (shared by every slash
+    /// command, not memory-specific) silently declines to dispatch instead of
+    /// pushing a rejection message. What is verified here is the observable
+    /// guarantee: the command never runs while a turn is active.
     #[tokio::test]
     async fn busy_guard_rejects_slash_commands_while_a_turn_is_active() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1838,9 +1804,8 @@ mod tests {
         );
     }
 
-    /// Port of the completion half of
-    /// `TestMemoryCommandRegistryCompletionAndHelp`; the help-overlay text
-    /// containment half is `super::render`'s concern, not this module's.
+    /// The completion half; the help-overlay text containment half is
+    /// `super::render`'s concern, not this module's.
     #[tokio::test]
     async fn tab_completes_a_memory_prefix_to_the_full_command() {
         let workspace = tempfile::tempdir().expect("workspace");

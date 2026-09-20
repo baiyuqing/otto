@@ -1,10 +1,10 @@
-//! Content guards ported from Go `internal/memory/guard.go`.
+//! The content guards every write passes through.
 //!
 //! Nothing the guards reject is ever written to the store. `DefaultGuard`
 //! recognises credential shapes; `ExactGuard` recognises the literal secret
 //! values the process already holds (API keys, tokens) without keeping them in
-//! memory as plaintext. `CompositeGuard` runs both and collapses the error to
-//! a sentinel so no rejected span leaks through the message.
+//! memory as plaintext. `CompositeGuard` runs both and collapses the error to a
+//! sentinel so no rejected span leaks through the message.
 
 use std::sync::LazyLock;
 
@@ -128,9 +128,9 @@ fn trim_uri_trailing_punctuation(candidate: &str) -> &str {
 }
 
 /// True when the authority component of a hierarchical URI carries userinfo.
-/// Go reaches the same answer through `url.Parse`; the authority runs from
-/// after `//` to the first `/`, `?` or `#`, and userinfo is whatever precedes
-/// an `@` inside it.
+/// The authority runs from after `//` to the first `/`, `?` or `#`, and
+/// userinfo is whatever precedes an `@` inside it. or `#`, and userinfo is
+/// whatever precedes an `@` inside it.
 fn has_uri_userinfo(value: &str) -> bool {
     hierarchical_uri_spans(value).iter().any(|span| {
         let Some(position) = span.find("//") else {

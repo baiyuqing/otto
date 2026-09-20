@@ -1,13 +1,13 @@
 //! ChatGPT credential storage and the "Sign in with ChatGPT" OAuth flow.
 //!
-//! Port of `internal/auth`. The credential file at `~/.otto/auth/chatgpt.json`
-//! keeps the byte layout Go writes, so a file produced by either binary loads
-//! in the other: `encoding/json`'s `MarshalIndent(c, "", "  ")` field order and
-//! two-space indent, and `time.RFC3339Nano` for the expiry (see [`go_time`]).
+//! The credential file at `~/.otto/auth/chatgpt.json` keeps the byte layout the
+//! previously released binary wrote, so an existing file still loads:
+//! `encoding/json`'s `MarshalIndent(c, "", " ")` field order and two-space
+//! indent, and `time.RFC3339Nano` for the expiry (see [`go_time`]).
 //!
-//! Every error is a fieldless [`AuthError`] variant. That is the Rust form of
-//! Go's `boundedAuthError`: the cause is dropped rather than wrapped, so no
-//! token, path, or upstream message can reach a log or a terminal.
+//! Every error is a fieldless [`AuthError`] variant. The cause is dropped
+//! rather than wrapped, so no token, path, or upstream message can reach a log
+//! or a terminal.
 
 pub mod claims;
 pub mod login;
@@ -25,53 +25,45 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
-/// Port of `maxCredentialFileBytes`.
 pub const MAX_CREDENTIAL_FILE_BYTES: usize = 1 << 20;
 
-/// The `internal/auth` sentinel errors. The variants carry no data: a cause
-/// would be the only way a secret could escape, and Go drops it too.
+/// The sentinel errors this module reports. The variants carry no data: a
+/// cause would be the only way a secret could escape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthError {
-    /// Port of `ErrNoCredentials`.
     #[error("no chatgpt credentials; run 'otto login'")]
     NoCredentials,
-    /// Port of `ErrCredentialsUnavailable`.
     #[error("chatgpt credentials are unavailable; run 'otto login'")]
     CredentialsUnavailable,
-    /// Port of `ErrCredentialsPersistence`.
     #[error("chatgpt credentials could not be saved")]
     CredentialsPersistence,
-    /// Port of `ErrAccessTokenRefreshFailed`.
     #[error("chatgpt access token refresh failed; run 'otto login'")]
     AccessTokenRefreshFailed,
-    /// Port of `ErrInteractiveUnavailable`.
     #[error("chatgpt sign-in is unavailable in this session")]
     InteractiveUnavailable,
-    /// Port of `ErrLoginFailed`.
     #[error("chatgpt sign-in failed")]
     LoginFailed,
-    /// Port of `ErrCredentialsRemoval`.
     #[error("stored chatgpt credentials could not be removed")]
     CredentialsRemoval,
-    /// Go returns `ctx.Err()` here; the Rust flows carry a
-    /// [`tokio_util::sync::CancellationToken`] instead, so cancellation is a
-    /// variant rather than a separate error type.
+    /// The flows carry a [`tokio_util::sync::CancellationToken`], so
+    /// cancellation is a variant rather than a separate error type.
     #[error("context canceled")]
     Cancelled,
 }
 
-/// Go's `time.RFC3339Nano` encoding for `time.Time`, which is what
-/// `encoding/json` writes for [`Credentials::expiry`].
+/// The `time.RFC3339Nano` encoding the stored credential file uses for
+/// [`Credentials::expiry`].
 ///
 /// chrono's own serde impl always prints a fixed number of fractional digits;
-/// Go trims trailing zeros and omits the fraction entirely when it is zero, and
-/// writes `Z` rather than `+00:00` for a zero offset. The credential file has
-/// to match byte for byte, so the format is written out here.
+/// the stored format trims trailing zeros, omits the fraction entirely when it
+/// is zero, and writes `Z` rather than `+00:00` for a zero offset. The
+/// credential file has to match byte for byte, so the format is written out
+/// here.
 pub mod go_time {
     use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone, Timelike};
     use serde::{Deserialize, Deserializer, Serializer};
 
-    /// Go's zero `time.Time`, which marshals as `0001-01-01T00:00:00Z`.
+    /// The zero time, which the stored format writes as `0001-01-01T00:00:00Z`.
     pub fn zero() -> DateTime<FixedOffset> {
         FixedOffset::east_opt(0)
             .expect("UTC is a valid fixed offset")
@@ -83,7 +75,8 @@ pub mod go_time {
             )
     }
 
-    /// Formats `value` exactly as Go's `time.Time.MarshalJSON` does.
+    /// Formats `value` as `time.RFC3339Nano`, the encoding the credential file
+    /// uses.
     pub fn format(value: &DateTime<FixedOffset>) -> String {
         let mut text = value.format("%Y-%m-%dT%H:%M:%S").to_string();
         let nanosecond = value.nanosecond();
@@ -106,8 +99,7 @@ pub mod go_time {
         serializer.serialize_str(&format(value))
     }
 
-    /// Accepts RFC 3339 and, like Go's `time.Time.UnmarshalJSON`, treats an
-    /// explicit `null` as the zero time.
+    /// Accepts RFC 3339 and treats an explicit `null` as the zero time.
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<DateTime<FixedOffset>, D::Error> {
@@ -118,8 +110,8 @@ pub mod go_time {
     }
 }
 
-/// Port of `auth.Credentials`. Persisted with 0600 permissions and never
-/// logged; the [`std::fmt::Debug`] impl below prints no token material.
+/// Persisted with 0600 permissions and never logged; the [`std::fmt::Debug`]
+/// impl below prints no token material.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credentials {
     #[serde(default)]
@@ -146,8 +138,8 @@ impl Default for Credentials {
     }
 }
 
-/// Prints lengths, never values. Go never formats `Credentials` at all; a
-/// derived `Debug` here would put three tokens into any `{:?}` or test failure.
+/// Prints lengths, never values. A derived `Debug` would put three tokens into
+/// any `{:?}` or test failure.
 impl std::fmt::Debug for Credentials {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -166,8 +158,8 @@ impl std::fmt::Debug for Credentials {
 const EXPIRY_DELTA: chrono::TimeDelta = chrono::TimeDelta::seconds(10);
 
 impl Credentials {
-    /// Port of `oauth2.Token.Valid`: a non-empty access token that is not
-    /// within [`EXPIRY_DELTA`] of expiring. A zero expiry never expires.
+    /// A non-empty access token that is not within [`EXPIRY_DELTA`] of
+    /// expiring. A zero expiry never expires.
     pub fn token_valid(&self, now: DateTime<FixedOffset>) -> bool {
         if self.access_token.is_empty() {
             return false;
@@ -176,7 +168,7 @@ impl Credentials {
     }
 
     /// Writes the credentials to `path` atomically with 0600 permissions,
-    /// creating parent directories with 0700. Port of `Credentials.Save`.
+    /// creating parent directories with 0700.
     pub fn save(&self, path: &Path) -> Result<(), AuthError> {
         if !self.within_bounds() {
             return Err(AuthError::CredentialsPersistence);
@@ -186,7 +178,6 @@ impl Credentials {
         write_secret_file(path, &data)
     }
 
-    /// Port of `credentialsWithinBounds`.
     fn within_bounds(&self) -> bool {
         let mut total = 0usize;
         for value in [
@@ -233,8 +224,8 @@ pub(crate) fn write_secret_file(path: &Path, data: &[u8]) -> Result<(), AuthErro
 }
 
 /// Creates an exclusive `.otto-secret-*.tmp` file in `directory` with mode
-/// 0600, mirroring `os.CreateTemp` plus the `Chmod(0o600)` Go applies to it.
-/// The suffix comes from `/dev/urandom` so the name cannot be pre-created.
+/// 0600. The suffix comes from `/dev/urandom` so the name cannot be
+/// pre-created.
 fn create_temp(directory: &Path) -> Result<(PathBuf, File), AuthError> {
     for _ in 0..100 {
         let suffix = random_hex::<8>().map_err(|_| AuthError::CredentialsPersistence)?;
@@ -268,19 +259,18 @@ pub(crate) fn random_bytes<const N: usize>() -> std::io::Result<[u8; N]> {
     Ok(bytes)
 }
 
-/// Port of `DefaultPath`: `~/.otto/auth/chatgpt.json`.
+/// The default path: `~/.otto/auth/chatgpt.json`.
 pub fn default_path() -> Result<PathBuf, AuthError> {
     let home = std::env::var_os("HOME").ok_or(AuthError::CredentialsUnavailable)?;
     Ok(path_for_home(Path::new(&home)))
 }
 
-/// Port of `PathForHome`.
 pub fn path_for_home(home: &Path) -> PathBuf {
     home.join(".otto").join("auth").join("chatgpt.json")
 }
 
-/// Port of `Load`. A missing file is [`AuthError::NoCredentials`]; every other
-/// failure collapses to [`AuthError::CredentialsUnavailable`] with no detail.
+/// A missing file is [`AuthError::NoCredentials`]; every other failure
+/// collapses to [`AuthError::CredentialsUnavailable`] with no detail.
 pub fn load(path: &Path) -> Result<Credentials, AuthError> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -302,8 +292,8 @@ pub fn load(path: &Path) -> Result<Credentials, AuthError> {
     Ok(credentials)
 }
 
-/// Port of `StatusLine`. Reports presence only; no token value is ever part of
-/// the line, and the account id is not either.
+/// Reports presence only; no token value is ever part of the line, and the
+/// account id is not either.
 pub fn status_line(path: &Path) -> (String, bool) {
     match load(path) {
         Err(AuthError::NoCredentials) => (
@@ -317,8 +307,8 @@ pub fn status_line(path: &Path) -> (String, bool) {
         Ok(credentials) => {
             let mut line = "Signed in to ChatGPT.".to_owned();
             if credentials.expiry != go_time::zero() {
-                // Go formats with "2006-01-02 15:04:05 MST"; chrono has no
-                // abbreviation for a fixed offset, so it prints the offset.
+                // chrono has no abbreviation for a fixed offset, so the format
+                // prints the offset.
                 line.push_str(&format!(
                     " Access token expires {}.",
                     credentials.expiry.format("%Y-%m-%d %H:%M:%S %Z")
@@ -339,8 +329,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    /// The bytes Go's `json.MarshalIndent(Credentials{...}, "", "  ")` writes
-    /// for the struct in `internal/auth/store.go`: field order as declared,
+    /// The exact bytes of a stored credential file: field order as declared,
     /// two-space indent, `": "` after each key, no trailing newline, and
     /// `time.RFC3339Nano` for the expiry. Values are placeholders; no real
     /// credential appears here.
@@ -369,10 +358,10 @@ mod tests {
         assert_eq!(load(&path).unwrap(), want);
     }
 
-    /// Exit criterion: a Go-shaped credential file survives load and save
+    /// Exit criterion: an existing credential file survives load and save
     /// unchanged, byte for byte.
     #[test]
-    fn a_go_written_credential_file_round_trips_byte_for_byte() {
+    fn a_previously_written_credential_file_round_trips_byte_for_byte() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("chatgpt.json");
         std::fs::write(&path, GO_FIXTURE).unwrap();
@@ -411,8 +400,7 @@ mod tests {
         assert_eq!(go_time::format(&go_time::zero()), "0001-01-01T00:00:00Z");
     }
 
-    /// Port of `TestSaveUsesOwnerOnlyPermissions`, extended to the directory
-    /// mode Go passes to `os.MkdirAll`.
+    /// Covers the file mode and the directory mode.
     #[test]
     fn save_uses_owner_only_permissions_on_the_file_and_the_directory() {
         let directory = tempfile::tempdir().unwrap();
@@ -433,8 +421,8 @@ mod tests {
         assert_eq!(directory_mode, 0o700, "directory mode {directory_mode:o}");
     }
 
-    /// Port of `TestSaveUsesOwnerOnlyPermissions` for the rewrite case: the
-    /// rename must not inherit a wider mode from an existing file.
+    /// The rewrite case: the rename must not inherit a wider mode from an
+    /// existing file.
     #[test]
     fn no_temporary_file_survives_a_save() {
         let directory = tempfile::tempdir().unwrap();
@@ -468,7 +456,6 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
     }
 
-    /// Port of `TestLoadMissingReturnsErrNoCredentials`.
     #[test]
     fn load_missing_returns_no_credentials() {
         let directory = tempfile::tempdir().unwrap();
@@ -478,9 +465,8 @@ mod tests {
         );
     }
 
-    /// Port of `TestLoadMalformedReturnsFixedUnavailableError` and
-    /// `TestBoundedAuthErrorsDoNotExposeWrappedCause`: the variant is fieldless,
-    /// so the rendered message cannot contain the payload or the path.
+    /// The variant is fieldless, so the rendered message cannot contain the
+    /// payload or the path.
     #[test]
     fn load_malformed_returns_a_fixed_unavailable_error() {
         const SECRET: &str = "credential-parse-secret";
@@ -499,7 +485,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestSaveFailureReturnsFixedPersistenceError`.
     #[test]
     fn save_failure_returns_a_fixed_persistence_error() {
         const SECRET: &str = "credentials-path-secret";
@@ -519,7 +504,6 @@ mod tests {
         assert!(!rendered.contains(SECRET), "{rendered}");
     }
 
-    /// Port of `TestLoadOversizedCredentialFileReturnsFixedUnavailableError`.
     #[test]
     fn load_rejects_a_file_over_the_size_limit() {
         let directory = tempfile::tempdir().unwrap();
@@ -528,7 +512,6 @@ mod tests {
         assert_eq!(load(&path), Err(AuthError::CredentialsUnavailable));
     }
 
-    /// Port of `TestSaveOversizedCredentialsReturnsFixedPersistenceError`.
     #[test]
     fn save_rejects_oversized_credentials_without_creating_the_file() {
         let directory = tempfile::tempdir().unwrap();
@@ -543,15 +526,12 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Port of `TestDefaultPathEndsWithExpectedSuffix`. Go reads
-    /// `os.UserHomeDir`, which on macOS is `$HOME`.
     #[test]
     fn path_for_home_has_the_expected_suffix() {
         let path = path_for_home(Path::new("/home/user"));
         assert_eq!(path, Path::new("/home/user/.otto/auth/chatgpt.json"));
     }
 
-    /// Port of `TestStatusLineNotSignedIn` and `TestStatusLineSignedIn`.
     #[test]
     fn status_line_reports_presence_without_naming_the_account() {
         let directory = tempfile::tempdir().unwrap();
@@ -574,7 +554,7 @@ mod tests {
         assert!(line.contains("expires"), "{line}");
         assert!(!line.contains("acct-123"), "{line}");
 
-        // A zero expiry adds no clause, as in Go's `Expiry.IsZero()` branch.
+        // A zero expiry adds no clause.
         Credentials::default().save(&path).unwrap();
         assert_eq!(status_line(&path).0, "Signed in to ChatGPT.");
     }
@@ -613,7 +593,6 @@ mod tests {
         }
     }
 
-    /// Port of `oauth2.Token.Valid`'s three cases.
     #[test]
     fn token_validity_follows_the_oauth2_expiry_delta() {
         let now = expiry("2030-01-02T03:04:05Z");

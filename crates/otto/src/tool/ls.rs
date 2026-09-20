@@ -1,9 +1,8 @@
-//! The `ls` tool. Port of `internal/tool/ls.go`.
+//! The `ls` tool.
 //!
-//! Lists one level of a workspace directory. Entries are sorted by name;
-//! a symbolic link is suffixed with `@` and a directory with `/`, and the link
-//! is never followed, so the listing cannot reveal a target outside the
-//! workspace.
+//! Lists one level of a workspace directory. Entries are sorted by name; a
+//! symbolic link is suffixed with `@` and a directory with `/`, and the link is
+//! never followed, so the listing cannot reveal a target outside the workspace.
 
 use std::path::Path;
 

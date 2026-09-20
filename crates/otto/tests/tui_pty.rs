@@ -1,19 +1,14 @@
-//! PTY smoke test for the terminal frontend (`--ui tui`). Port of the intent
-//! of `cmd/otto/tui_pty_test.go` (Go opens a real PTY and drives
-//! `internal/tui` end to end); the two are structurally different because
-//! Go's tests call `tui.Run` in-process against a fake backend, while this
-//! test spawns the built `otto` binary against the same scripted loopback
-//! server the other binary tests use (see `crates/otto/tests/common`), since
-//! there is no way to hand an external integration test a fake
-//! `otto::app::Controller`.
+//! PTY smoke test for the terminal frontend (`--ui tui`). The test opens a
+//! real PTY and spawns the built `otto` binary against the same scripted
+//! loopback server the other binary tests use (see
+//! `crates/otto/tests/common`), because there is no way to hand an external
+//! integration test a fake `otto::app::Controller`.
 //!
-//! ## Why the screen scraper here is much smaller than Go's
+//! ## Why the screen scraper is small
 //!
-//! `cmd/otto/pty_terminal_screen_test.go` (664 lines) interprets Bubble
-//! Tea's *inline* renderer, which relies on scroll regions (`CSI r`),
-//! insert/delete line/character (`CSI L`/`M`/`@`/`P`), character repeat
-//! (`CSI b`), reverse index (`ESC M`), and OSC sequences. ratatui's
-//! crossterm backend, on an alternate screen, never emits any of those: it
+//! ratatui's crossterm backend, on an alternate screen, emits no scroll
+//! regions (`CSI r`), insert/delete line/character (`CSI L`/`M`/`@`/`P`),
+//! character repeat (`CSI b`), reverse index (`ESC M`), or OSC sequences: it
 //! redraws the whole frame every tick with only cursor moves, SGR, and raw
 //! text. This was confirmed by reading the exact pinned dependency sources
 //! (`ratatui-crossterm-0.1.2`, `ratatui-core-0.1.2`, `crossterm-0.29.0`)
@@ -44,8 +39,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// A minimal terminal screen, built only for the ANSI vocabulary ratatui's
 /// crossterm backend can emit (see the module doc). Fragmentation-tolerant:
 /// `feed` buffers an incomplete escape sequence or a multi-byte UTF-8
-/// character split across two reads, mirroring Go's `Write`/`consume`
-/// pattern in `ptyTerminalScreen`.
+/// character split across two reads.
 struct Screen {
     width: usize,
     height: usize,
@@ -451,8 +445,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     eprintln!("[tui_pty] child exited: {status:?}");
     assert!(status.success(), "otto --ui tui exited with {status:?}");
 
-    // A clean terminal restore leaves the alternate screen, matching Go's
-    // `waitForSubsequence(t, collector, 0, altScreenExitSeq)`, and disables the
+    // A clean terminal restore leaves the alternate screen and disables the
     // mouse reporting enabled at startup.
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
     wait_for_raw_bytes(&shared, b"\x1b[?1002l");

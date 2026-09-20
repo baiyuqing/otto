@@ -1,5 +1,4 @@
 //! The parent-facing sub-agent tools: `agent`, `agent_wait`, `agent_status`.
-//! Port of `internal/subagent/tools.go`.
 //!
 //! Ownership: each tool holds an `Arc` to the session's [`Runner`] and owns
 //! nothing else. Concurrency and cancellation: `agent` returns as soon as the

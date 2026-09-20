@@ -1,18 +1,17 @@
 //! Configuration schema, parsing, and resolution.
 //!
-//! Port of `internal/config`. This module is pure: it has no filesystem or
-//! environment access. [`parse`] turns TOML text into a [`File`], and
-//! [`set_default_profile`] rewrites the `default_profile` line in already-read
-//! text. The native crate's `otto::config` reads and writes the files, reads
-//! the environment, and calls back into this module for the schema and the
-//! resolution logic in [`resolve`].
+//! This module is pure: it has no filesystem or environment access. [`parse`]
+//! turns TOML text into a [`File`], and [`set_default_profile`] rewrites the
+//! `default_profile` line in already-read text. The native crate's
+//! `otto::config` reads and writes the files, reads the environment, and calls
+//! back into this module for the schema and the resolution logic in
+//! [`resolve`].
 //!
 //! Ownership: every type here is owned data; nothing borrows from the input
 //! text after parsing.
 //!
-//! Errors: every [`ConfigError`] message matches the Go `internal/config`
-//! wording byte for byte where a Go test asserts on it, so the CLI's error
-//! output does not change during the rewrite.
+//! Errors: every [`ConfigError`] message is the text the CLI prints, and the
+//! tests assert on that wording.
 
 pub mod agents;
 pub mod duration;
@@ -50,15 +49,13 @@ pub const PROVIDER_OPENAI_COMPATIBLE: &str = "openai-compatible";
 /// Provider identifier for a ChatGPT subscription via OAuth credentials.
 pub const PROVIDER_CHATGPT: &str = "chatgpt";
 
-/// A configuration error. The message matches the corresponding Go
-/// `internal/config` error text.
+/// A configuration error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct ConfigError(String);
 
 impl ConfigError {
-    /// Builds an error carrying `message` verbatim, matching a Go
-    /// `fmt.Errorf` call with the same text.
+    /// Builds an error carrying `message` verbatim.
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
@@ -123,7 +120,7 @@ pub struct Agent {
 }
 
 /// The `[agent.compaction]` table. Every field is optional so absent and
-/// explicit-zero/negative stay distinguishable, matching Go's `*bool`/`*int`.
+/// explicit-zero/negative stay distinguishable.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionConfig {
@@ -150,8 +147,8 @@ pub struct Profile {
     pub compaction_window: Option<i64>,
 }
 
-/// Parses `text` as a `config.toml` document, rejecting unknown fields at
-/// every table the same way Go's `toml.DisallowUnknownFields()` does.
+/// Parses `text` as a `config.toml` document, rejecting unknown fields at every
+/// table.
 pub fn parse(text: &str) -> Result<File, ConfigError> {
     match toml::from_str::<File>(text) {
         Ok(file) => Ok(file),
@@ -166,9 +163,8 @@ pub fn parse(text: &str) -> Result<File, ConfigError> {
     }
 }
 
-/// Serializes `file` back to TOML text, for `Save`. Native-only in Go
-/// (`os.WriteFile`); here the text production is pure and the native crate
-/// writes it to disk.
+/// Serializes `file` back to TOML text, for `Save`. The text production is
+/// pure; the native crate writes it to disk.
 pub fn to_toml_string(file: &File) -> Result<String, ConfigError> {
     toml::to_string(file).map_err(|err| ConfigError::new(err.to_string()))
 }
@@ -179,9 +175,8 @@ static DEFAULT_PROFILE_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::n
 });
 
 /// Rewrites the `default_profile` line of `content` to name `profile`,
-/// preserving every other line and its comments. Inserts a new line at the
-/// top when no `default_profile` line exists. Port of Go's
-/// `replaceDefaultProfile`.
+/// preserving every other line and its comments. Inserts a new line at the top
+/// when no `default_profile` line exists.
 pub fn set_default_profile(content: &str, profile: &str) -> String {
     let line = format!("default_profile = {}", go_quote(profile));
     if DEFAULT_PROFILE_LINE.is_match(content) {
@@ -199,13 +194,13 @@ pub fn set_default_profile(content: &str, profile: &str) -> String {
     }
 }
 
-/// Renders `value` as a double-quoted Go string literal, matching
-/// `strconv.Quote` for the identifier-like profile names Otto accepts.
+/// Renders `value` as a double-quoted string literal for the identifier-like
+/// profile names Otto accepts.
 ///
 /// ponytail: escapes backslash, double quote, and ASCII control characters
 /// (`\n`, `\t`, `\r`, `\xNN`) but passes non-ASCII text through unescaped
-/// rather than reproducing `strconv.Quote`'s full Unicode-printability
-/// table. Upgrade if a profile name with exotic Unicode ever needs it.
+/// rather than reproducing `strconv.Quote`'s full Unicode-printability table.
+/// Upgrade if a profile name with exotic Unicode ever needs it.
 fn go_quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');

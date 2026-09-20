@@ -1,9 +1,9 @@
 //! The unconfined driver.
 //!
-//! Port of `internal/sandbox/direct`. It runs the child with no confinement at
-//! all, so it advertises only [`Capabilities::network_allow`] and the executor
-//! accepts it exclusively for the unconfined/allow policy. Process-group
-//! containment still applies: see [`super::process`].
+//! It runs the child with no confinement at all, so it advertises only
+//! [`Capabilities::network_allow`] and the executor accepts it exclusively for
+//! the unconfined/allow policy. Process-group containment still applies: see
+//! [`super::process`].
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use super::process::{Manager, Spec};
 use super::{Capabilities, Driver, DriverId, Error, ExitStatus, Request, Streams};
 
-/// The identifier this driver reports, matching the Go `direct.ID`.
+/// The identifier this driver reports.
 pub const ID: &str = "direct";
 
 /// Runs commands without any sandbox.
@@ -70,19 +70,18 @@ impl Driver for DirectDriver {
 
 #[cfg(test)]
 mod tests {
-    // Go's `TestDirectDoesNotRetainRequestOrWriters` mutates the caller's argv
-    // and env after the call to prove the driver kept no alias. Half of that is
-    // unrepresentable here: `Request` is moved into `execute`, so the caller has
-    // no copy left to mutate. The writer half survives as an output assertion.
+    // The driver keeps no alias to the caller's argv and env: `Request` is
+    // moved into `execute`, so the caller has no copy left to mutate. The
+    // writer half is checked as an output assertion.
     use super::*;
     use std::io::Write as _;
     use std::sync::Arc;
 
     use crate::sandbox::{CommandExecutor, Executor, FilesystemMode, NetworkMode, Policy};
 
-    /// A temporary directory resolved through symlinks, matching Go's
-    /// `canonicalTempDir`. macOS puts `t.TempDir()` under `/var`, which is a
-    /// symlink, and the executor only accepts canonical directories.
+    /// A temporary directory resolved through symlinks. macOS puts
+    /// `t.TempDir()` under `/var`, which is a symlink, and the executor only
+    /// accepts canonical directories.
     fn canonical_temp_dir() -> (tempfile::TempDir, std::path::PathBuf) {
         let directory = tempfile::tempdir().expect("temp dir");
         let canonical = std::fs::canonicalize(directory.path()).expect("canonicalize");
@@ -314,9 +313,7 @@ mod tests {
 
 /// The shared driver contract, run against the unconfined driver.
 ///
-/// Port of Go's `TestDirectDriverContract`. The Go case re-execs the test
-/// binary for the network clients; `/usr/bin/nc` does the same job without a
-/// helper-process gate.
+/// The network clients are `/usr/bin/nc`, which needs no helper-process gate.
 #[cfg(test)]
 mod contract {
     use std::path::Path;

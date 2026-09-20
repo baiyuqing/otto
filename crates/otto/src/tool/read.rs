@@ -1,4 +1,4 @@
-//! The `read` tool. Port of `internal/tool/read.go`.
+//! The `read` tool.
 //!
 //! Reads a UTF-8 text file from the workspace. A file that is not regular, is
 //! larger than 64 MiB, contains a NUL byte, or is not valid UTF-8 is rejected
@@ -127,8 +127,7 @@ impl Tool for ReadTool<'_> {
 }
 
 /// Reads `file` as text, rejecting anything the model must not be shown as a
-/// string. Port of `readValidatedTextFile`; the messages are the ones the model
-/// sees.
+/// string. The messages are the ones the model sees.
 pub(crate) fn read_validated_text_file(file: std::fs::File, path: &str) -> Result<String, String> {
     let metadata = file.metadata().map_err(|error| error.to_string())?;
     if !metadata.is_file() {
@@ -157,7 +156,7 @@ fn too_large(size: u64) -> String {
 }
 
 /// Returns `limit` lines starting at the one-based `offset`, keeping each
-/// line's terminator. Port of `selectLines`.
+/// line's terminator.
 fn select_lines(text: &str, offset: i64, limit: i64) -> String {
     let lines = split_lines_preserving_newlines(text);
     let offset = if offset <= 0 { 1 } else { offset };
@@ -217,8 +216,9 @@ mod execute_tests {
         let tool = ReadTool::new(&workspace, MAX_OUTPUT_BYTES);
 
         // Malformed JSON and trailing tokens cannot reach a tool: the stream
-        // decoder rejects them before a `RawValue` exists. Their Go cases are
-        // covered by `result::tests::strict_decoding_reports_the_go_error_text`.
+        // decoder rejects them before a `RawValue` exists. Those cases are
+        // covered by
+        // `result::tests::strict_decoding_reports_the_go_error_text`.
         let unknown = run(&tool, r#"{"path":"sample.txt","extra":true}"#).await;
         assert!(
             unknown.is_error && unknown.content.contains("unknown field"),

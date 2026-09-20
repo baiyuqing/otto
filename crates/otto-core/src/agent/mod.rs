@@ -1,20 +1,18 @@
 //! The provider/tool turn loop.
 //!
-//! Port of `Agent.Run` in `internal/agent/agent.go`: one user message, then
-//! provider calls alternating with tool calls until the model stops asking
-//! for tools, wrapped in proactive and overflow-triggered compaction, memory
-//! recall, inbox notifications, the secret redactor, and the tool-result
-//! overlay.
+//! One user message, then provider calls alternating with tool calls until the
+//! model stops asking for tools, wrapped in proactive and overflow-triggered
+//! compaction, memory recall, inbox notifications, the secret redactor, and the
+//! tool-result overlay.
 //!
 //! Ownership: the agent owns its provider, tool executor, and session. The
 //! caller owns the event sink and the cancellation token.
 //!
 //! Concurrency and cancellation: `run` takes `&self` but a single agent is
-//! meant to serve one turn at a time. The Go implementation serializes `Run`
-//! and `Compact` with a mutex; `otto-core` has no async mutex on the wasm
-//! target, so the caller must not overlap the two. Cancelling the token stops
-//! the provider call, skips the remaining tool calls, and ends the run with an
-//! error.
+//! meant to serve one turn at a time. `otto-core` has no async mutex on the
+//! wasm target, so the caller must not overlap `run` and `compact`. Cancelling
+//! the token stops the provider call, skips the remaining tool calls, and ends
+//! the run with an error.
 //!
 //! Errors: every failure path emits [`Event::AgentError`] and returns the same
 //! error, so a frontend that only watches events sees every failure.
@@ -120,8 +118,7 @@ impl Default for Options {
 /// Runs provider and tool turns against one session.
 ///
 /// The caller must serialize calls: `run` and `compact` both mutate the
-/// session, and neither takes a lock. The Go implementation guards them with
-/// one mutex because its agent is shared across goroutines.
+/// session, and neither takes a lock.
 pub struct Agent<P, T, S> {
     provider: P,
     tools: T,
@@ -375,8 +372,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     }],
                     ..Message::default()
                 };
-                // The Go loop persists tool results on a non-cancellable
-                // context. `Session::append` is likewise not cancellable.
+                // `Session::append` is likewise not cancellable.
                 if let Err(source) = self.session.append(stored).await {
                     return Err(self.fail(
                         emit,
@@ -763,20 +759,17 @@ fn boundary_unchanged(
             return false;
         }
     }
-    // Go walks the definitions with reflection over every string field. The
-    // serialized form contains exactly those strings, so redacting it is the
+    // The serialized form contains every string field, so redacting it is the
     // same check.
     let serialized = serde_json::to_string(definitions).unwrap_or_default();
     redactor.redact_string(&serialized) == serialized
 }
 
-/// Go's `%q` for the tool-call id in a persist error.
 fn quote_go(value: &str) -> String {
     serde_json::to_string(value).expect("a string always encodes")
 }
 
-/// Trims exactly the bytes Go's agent trims: space, tab, newline, carriage
-/// return.
+/// Trims exactly these bytes: space, tab, newline, carriage return.
 fn trim_go_space(text: &str) -> &str {
     text.trim_matches(|character| matches!(character, ' ' | '\t' | '\n' | '\r'))
 }

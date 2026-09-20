@@ -1,11 +1,10 @@
-//! ID token claim extraction. Port of `internal/auth/claims.go`.
+//! ID token claim extraction.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
-/// The namespaced claim object OpenAI embeds in the ID token. Port of
-/// `openaiAuthClaim`.
+/// The namespaced claim object OpenAI embeds in the ID token.
 const OPENAI_AUTH_CLAIM: &str = "https://api.openai.com/auth";
 
 /// Extracts `chatgpt_account_id` from an OpenAI ID token.
@@ -58,7 +57,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Port of `TestAccountIDFromIDTokenNestedClaim`.
     #[test]
     fn the_namespaced_claim_supplies_the_account_id() {
         let token = fake_id_token(json!({
@@ -70,16 +68,13 @@ mod tests {
         assert_eq!(account_id_from_id_token(&token).unwrap(), "acct-123");
     }
 
-    /// Port of `TestAccountIDFromIDTokenTopLevelFallback`.
     #[test]
     fn a_top_level_claim_is_the_fallback() {
         let token = fake_id_token(json!({"chatgpt_account_id": "top-999"}));
         assert_eq!(account_id_from_id_token(&token).unwrap(), "top-999");
     }
 
-    /// Port of `TestAccountIDFromIDTokenMissing` and
-    /// `TestAccountIDFromIDTokenMalformed`, plus the empty-value and
-    /// wrong-type cases Go's `json.Unmarshal` into a typed struct rejects.
+    /// Covers the missing, malformed, empty-value and wrong-type cases.
     #[test]
     fn absent_empty_or_malformed_claims_are_errors() {
         for token in [
@@ -95,8 +90,8 @@ mod tests {
         }
     }
 
-    /// An empty namespaced claim must not shadow a usable top-level one, which
-    /// is what Go's "try nested, then top level" order gives.
+    /// An empty namespaced claim must not shadow a usable top-level one: the
+    /// nested claim is tried first, then the top-level one.
     #[test]
     fn an_unusable_namespaced_claim_falls_through_to_the_top_level() {
         let token = fake_id_token(json!({

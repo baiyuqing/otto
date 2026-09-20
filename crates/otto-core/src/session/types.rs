@@ -1,7 +1,7 @@
 //! Session domain types.
 //!
-//! Port of `internal/session/types.go`. These are Otto's own view of a
-//! session, independent of the Pi v3 wire format in [`super::pi`].
+//! These are Otto's own view of a session, independent of the Pi v3 wire format
+//! in [`super::pi`].
 //!
 //! Ownership: every value is owned and `Clone`; nothing here is shared or
 //! mutated behind a handle. Concurrency: plain data. Errors: none of these

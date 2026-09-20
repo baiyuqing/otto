@@ -1,18 +1,14 @@
 //! Chat Completions wire types, request translation, and response decoding.
 //!
-//! Port of `internal/provider/openaicompat/protocol.go`. Field names, field
-//! order, and the omit-empty rules reproduce Go's `encoding/json` output for
-//! the same structs, so a request serialized here is byte-identical to the Go
-//! request for the same [`Request`].
+//! Field names, field order, and the omit-empty rules are fixed by what the
+//! Chat Completions endpoint accepts.
 //!
-//! Two differences are unavoidable and deliberate:
+//! Two encoding choices are deliberate:
 //!
-//! - Go sorts the keys of `parameters` because it holds them in a `map`. Here
-//!   the tool schema is raw JSON passed through verbatim, so its keys keep the
-//!   order the caller supplied.
-//! - Go writes `"messages":null` for a nil slice. [`serialize_messages`]
-//!   reproduces that for an empty vector, because Go only ever produces a nil
-//!   or a non-empty slice at that field.
+//! - A tool's `parameters` is raw JSON passed through verbatim, so its keys
+//!   keep the order the caller supplied rather than being sorted.
+//! - [`serialize_messages`] writes `"messages":null` for an empty vector
+//!   rather than `[]`.
 //!
 //! Ownership: [`build_request`] borrows the request and returns an owned wire
 //! value. Decoding types own their data.
@@ -154,7 +150,7 @@ pub struct WireChunk {
 }
 
 /// One choice of a chunk. Otto reads only the first stream of a response, but
-/// iterates every choice the way Go does.
+/// iterates every choice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct WireChoice {
     #[serde(default)]
@@ -298,8 +294,7 @@ pub fn serialized_request_size(request: &Request) -> Result<usize, serde_json::E
     Ok(serde_json::to_vec(&build_request(request))?.len())
 }
 
-/// Reports whether the accumulated argument text is a complete JSON value,
-/// the equivalent of Go's `json.Valid`.
+/// Reports whether the accumulated argument text is a complete JSON value.
 pub fn valid_arguments(arguments: &str) -> bool {
     serde_json::from_str::<serde::de::IgnoredAny>(arguments).is_ok()
 }
@@ -349,8 +344,7 @@ fn user_wire_message(message: &Message) -> WireMessage {
     }
 }
 
-/// Writes `null` for an empty message list, which is what Go's `encoding/json`
-/// produces for the nil slice it builds in that case.
+/// Writes `null` for an empty message list rather than `[]`.
 fn serialize_messages<S: Serializer>(
     messages: &[WireMessage],
     serializer: S,
@@ -361,9 +355,8 @@ fn serialize_messages<S: Serializer>(
     messages.serialize(serializer)
 }
 
-/// Accepts JSON `null` for any field, the way Go leaves the zero value in
-/// place. Providers send `"content":null` and `"finish_reason":null` on most
-/// chunks.
+/// Accepts JSON `null` for any field, leaving the default value in place.
+/// Providers send `"content":null` and `"finish_reason":null` on most chunks.
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -392,7 +385,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn empty_request_matches_go_encoding() {
+    fn empty_request_encodes_only_the_required_fields() {
         let request = Request {
             model: "m".into(),
             ..Request::default()
@@ -405,7 +398,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn full_request_matches_go_encoding() {
+    fn full_request_encodes_every_field() {
         let request = Request {
             model: "test-model".into(),
             system_prompt: "sys".into(),

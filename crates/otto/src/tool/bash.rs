@@ -1,4 +1,4 @@
-//! The `bash` tool. Port of `internal/tool/bash.go`.
+//! The `bash` tool.
 //!
 //! Runs one shell command through a [`CommandExecutor`], starting in the
 //! workspace root. The tool never reports a `Result`: every failure is an
@@ -11,11 +11,10 @@
 //! executed. Concurrency: [`Tool::execute`] takes `&self` and builds fresh
 //! collectors per call, so concurrent calls share no output or redaction state.
 //! Cancellation: an already-cancelled token reports `status: cancelled` without
-//! starting a child; a token cancelled during the call kills the child's process
-//! group and still reports the partial output and the signal. The configured
-//! timeout cancels a private child token and reports
-//! `status: timed out after <duration>`; a parent cancellation observed at the
-//! same time wins.
+//! starting a child; a token cancelled during the call kills the child's
+//! process group and still reports the partial output and the signal. The
+//! configured timeout cancels a private child token and reports `status: timed
+//! out after <duration>`; a parent cancellation observed at the same time wins.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -165,9 +164,8 @@ impl BashApprovals {
 
 /// The single error [`BashTool::new`] reports.
 ///
-/// Every rejected boundary produces this one value, matching Go's
-/// `errInvalidSandboxedBashConfiguration`, so the text can never describe which
-/// host path or setting was wrong.
+/// Every rejected boundary produces this one value, so the text can never
+/// describe which host path or setting was wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("invalid sandboxed bash configuration")]
 pub struct InvalidConfiguration;
@@ -194,7 +192,7 @@ impl BashTool {
     /// hide from every model-visible byte; each is canonicalized into its
     /// literal and JSON-decoded forms. When no collision-safe marker exists for
     /// that set the tool suppresses all result text rather than approximating
-    /// the redaction, matching Go.
+    /// the redaction.
     ///
     /// Errors: [`InvalidConfiguration`] when the workspace root no longer
     /// resolves to itself as a directory, the shell is blank or contains NUL,
@@ -516,9 +514,8 @@ fn format_stream(name: &str, collector: &CappedByteCollector) -> String {
 
 /// Revalidates the workspace root at construction time.
 ///
-/// Go re-checks the struct because a caller could forge one; here the type is
-/// already validated, so this only catches a root that was removed or replaced
-/// between opening the workspace and building the tool.
+/// The type is already validated, so this only catches a root that was removed
+/// or replaced between opening the workspace and building the tool.
 fn valid_workspace(workspace: &Workspace) -> bool {
     let root = workspace.root();
     root.is_absolute()
@@ -532,7 +529,7 @@ fn resolves_to(path: &Path, expected: &Path) -> bool {
 }
 
 /// Expands each configured secret into its canonical forms, preserving order
-/// and dropping duplicates. Port of `canonicalizeSandboxedBashRedactions`.
+/// and dropping duplicates.
 fn canonical_redactions(values: &[String]) -> Vec<String> {
     let mut canonical: Vec<String> = Vec::with_capacity(values.len());
     for value in values {
@@ -546,7 +543,7 @@ fn canonical_redactions(values: &[String]) -> Vec<String> {
 }
 
 /// Formats a duration the way Go's `time.Duration.String` does, because the
-/// timeout text is model-visible and the Go tests pin it.
+/// timeout text is model-visible and the tests pin it.
 fn go_duration(duration: Duration) -> String {
     let nanos = duration.as_nanos();
     if nanos == 0 {
@@ -589,35 +586,28 @@ fn fraction(value: u128, scale: u128) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! Port of `internal/tool/bash_test.go` and the bash cases in
-    //! `internal/tool/registry_test.go`.
     //!
-    //! Documented divergences:
+    //! Cases the Rust contracts make unreachable, and what stands in for them:
     //!
-    //! 1. Go's caller-mutation checks (`unsafe.String` storage rewritten after
-    //!    construction, `mutateRetainedRequest`) are unrepresentable: the
-    //!    constructor takes an owned `Vec<String>` and a `&str` it copies, and
-    //!    the executor receives an owned [`Request`], so no caller or callee
-    //!    holds storage the tool still reads. The delegation check keeps the
-    //!    exact-request half.
-    //! 2. Go's writer-identity assertions compare `io.Writer` interface values;
-    //!    per-call independence is checked behaviourally instead, by the
-    //!    concurrent-calls test.
-    //! 3. Go injects `deadlineContext` to fire the timeout deterministically.
-    //!    Here the timeout is a real `tokio::time::sleep` driven by a paused
-    //!    test clock, so no production seam is needed.
-    //! 4. Go's "capture failure is fixed and safe" case sets an error on the
-    //!    redacting writer. Writes into [`RedactingCollector`] cannot fail, so
-    //!    that outcome does not exist.
-    //! 5. Go's `testing.AllocsPerRun` bound on the suppressed path has no
-    //!    stable equivalent; the test keeps the observable half, that the
-    //!    command still runs exactly once and the result stays empty.
-    //! 6. Go's raw, wrapped, and joined executor errors are unrepresentable:
+    //! 1. Caller mutation of a retained request: the constructor takes an owned
+    //!    `Vec<String>` and a `&str` it copies, and the executor receives an
+    //!    owned [`Request`], so no caller or callee holds storage the tool
+    //!    still reads. The delegation check keeps the exact-request half.
+    //! 2. Per-call writer independence is checked behaviourally, by the
+    //!    concurrent-calls test, rather than by comparing writer identities.
+    //! 3. The timeout is a real `tokio::time::sleep` driven by a paused test
+    //!    clock, so it fires deterministically with no production seam.
+    //! 4. Writes into [`RedactingCollector`] cannot fail, so a capture failure
+    //!    has no outcome to test.
+    //! 5. Allocation counting on the suppressed path has no stable equivalent;
+    //!    the test keeps the observable half, that the command still runs
+    //!    exactly once and the result stays empty.
+    //! 6. Raw, wrapped and joined executor errors are unrepresentable:
     //!    [`Error`] is a closed enum whose variants carry no text.
-    //! 7. Go's syntactically invalid argument payloads (`{"command":"true"}X`,
-    //!    an unterminated object) cannot reach a tool: [`RawValue`] is
-    //!    validated at the trust boundary, so only well-formed JSON with the
-    //!    wrong shape is representable.
+    //! 7. Syntactically invalid argument payloads (`{"command":"true"}X`, an
+    //!    unterminated object) cannot reach a tool: [`RawValue`] is validated
+    //!    at the trust boundary, so only well-formed JSON with the wrong shape
+    //!    is representable.
 
     use super::*;
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy, UnavailableReason};
@@ -831,7 +821,7 @@ mod tests {
         );
     }
 
-    /// The captured stdout body, mirroring Go's `sandboxedBashStdout`.
+    /// The captured stdout body.
     fn stdout_body(content: &str) -> String {
         let rest = content
             .strip_prefix("stdout:\n")

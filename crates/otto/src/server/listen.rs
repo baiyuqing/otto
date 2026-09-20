@@ -1,11 +1,9 @@
 //! The two listeners `otto serve` can bind.
 //!
-//! Port of `internal/server/listen.go` and `internal/server/listen_tcp.go`.
-//!
-//! A Unix socket is the default because file modes alone keep other local
-//! users out. A TCP port is reachable by every local user and every page open
-//! in a browser, so it is restricted to loopback and gated by the per-process
-//! token in [`Options::token`](super::Options).
+//! A Unix socket is the default because file modes alone keep other local users
+//! out. A TCP port is reachable by every local user and every page open in a
+//! browser, so it is restricted to loopback and gated by the per-process token
+//! in [`Options::token`](super::Options).
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
@@ -20,8 +18,7 @@ pub enum Listener {
 }
 
 impl Listener {
-    /// How the address prints in the `otto serve:` startup line. Go uses
-    /// `net.Listener.Addr().String()`.
+    /// How the address prints in the `otto serve:` startup line.
     pub fn address(&self) -> String {
         match self {
             Self::Tcp(listener) => listener
@@ -140,7 +137,7 @@ pub fn listen_tcp(address: &str) -> Result<Listener, String> {
     Ok(Listener::Tcp(listener))
 }
 
-/// Port of `net.SplitHostPort` for the forms an address may take here.
+/// Splits host and port for the forms an address may take here.
 fn split_host_port(address: &str) -> Option<(&str, &str)> {
     if let Some(rest) = address.strip_prefix('[') {
         let (host, tail) = rest.split_once(']')?;

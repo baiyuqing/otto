@@ -1,13 +1,13 @@
 //! Record reads and mutations.
 //!
-//! Ported from Go `internal/memory/sqlite/records.go`. Every read decodes
-//! through the gated projection in [`super::query`], so a row whose stored
-//! shape is wrong becomes [`ErrorKind::Corrupt`] instead of a plausible record.
+//! Every read decodes through the gated projection in [`super::query`], so a
+//! row whose stored shape is wrong becomes [`ErrorKind::Corrupt`] instead of a
+//! plausible record.
 //!
-//! Divergence from Go: the compare-and-swap that protects a mutation against a
-//! concurrent writer compares the decoded record rather than a SHA-256 digest
-//! of its canonical JSON. The digest never leaves the process in Go either, so
-//! the two detect exactly the same changes.
+//! The compare-and-swap that protects a mutation against a concurrent writer
+//! compares the decoded record rather than a SHA-256 digest of its canonical
+//! JSON. The digest would never leave the process, and the two detect exactly
+//! the same changes.
 
 use rusqlite::{Connection, Row, params, params_from_iter};
 
@@ -635,9 +635,8 @@ impl Store {
     }
 
     pub fn upsert(&self, request: &UpsertRequest) -> Result<Record> {
-        // Go's `normalizeRecordCollections` replaces nil slices and maps with
-        // empty ones so the encoded JSON is `[]`/`{}`; Rust's collections are
-        // already non-null, so there is nothing to normalize.
+        // The encoded JSON must spell an empty collection `[]`/`{}`; Rust's
+        // collections are already non-null, so there is nothing to normalize.
         let request = request.clone();
         validate_upsert_request(&request)?;
         guard_record(self.guard(), &request.record)?;

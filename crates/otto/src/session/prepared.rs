@@ -1,7 +1,5 @@
 //! Preparing a session for activation, and archiving one.
 //!
-//! Port of `internal/session/prepared.go` and `internal/session/archive.go`.
-//!
 //! Ownership: a [`Prepared`] owns one verified descriptor until
 //! [`Prepared::activate`] transfers it to a [`Store`] or [`Prepared::close`]
 //! releases it; both are idempotent and neither leaks the descriptor on
@@ -318,7 +316,7 @@ fn validate_listed_candidate_path(
     Ok((root_path, workspace_canonical, basename, candidate_path))
 }
 
-/// Go's `filepath.Abs`: the path joined to the working directory when relative.
+/// The path joined to the working directory when relative.
 fn absolute(path: &Path) -> Result<String, PiError> {
     if path.is_absolute() {
         return Ok(path.to_string_lossy().into_owned());

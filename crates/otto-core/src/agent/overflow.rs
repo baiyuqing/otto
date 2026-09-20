@@ -1,9 +1,8 @@
 //! Automatic compaction triggers and the turn-scoped dispatch state.
 //!
-//! Port of `internal/agent/overflow.go`. The agent compacts on its own in two
-//! situations: before a request whose estimate crosses the soft trigger, and
-//! after a request the provider rejected for context overflow. Both are
-//! attempted at most once per turn.
+//! The agent compacts on its own in two situations: before a request whose
+//! estimate crosses the soft trigger, and after a request the provider rejected
+//! for context overflow. Both are attempted at most once per turn.
 //!
 //! Ownership: [`RunDispatchState`] lives for one `Agent::run` call and is
 //! dropped with it, so the tool-result overlay never outlives the turn.
@@ -61,7 +60,7 @@ pub fn automatic_dispatch_error(message: &str, causes: Vec<String>) -> AgentErro
 }
 
 /// Returns the cancellation to report instead of `error`, if the turn was
-/// cancelled. Go checks `ctx.Err()` first and then unwraps the error.
+/// cancelled.
 pub fn automatic_cancellation(cancelled: bool, error: &AgentError) -> Option<AgentError> {
     if cancelled {
         return Some(AgentError::Provider(ProviderError::Cancelled));

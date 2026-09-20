@@ -1,17 +1,15 @@
 //! Opening the process sandbox and classifying the result.
 //!
-//! Port of `cmd/otto/sandbox_runtime.go`. Everything the rest of the binary
-//! needs to know about confinement is decided here: which driver ran, whether
-//! `bash` may be offered at all, which values the redactor must hide, and
-//! whether that redaction set is provably complete.
+//! Everything the rest of the binary needs to know about confinement is decided
+//! here: which driver ran, whether `bash` may be offered at all, which values
+//! the redactor must hide, and whether that redaction set is provably complete.
 //!
-//! Fail-closed is the rule. Every failure path produces an unavailable
-//! runtime with no executor and no environment rather than a usable one with
-//! a warning, and [`normalize_sandbox_runtime`] re-checks that invariant so a
-//! runtime can never claim `bash` it cannot actually run safely.
+//! Fail-closed is the rule. Every failure path produces an unavailable runtime
+//! with no executor and no environment rather than a usable one with a warning,
+//! and [`normalize_sandbox_runtime`] re-checks that invariant so a runtime can
+//! never claim `bash` it cannot actually run safely.
 //!
-//! ponytail: Go's `sandboxRuntimeDependencies` injection struct is not ported.
-//! It exists so Go's tests can substitute the Seatbelt driver; the Rust tests
+//! ponytail: there is no dependency-injection struct for the driver. The tests
 //! exercise the same paths with the real `direct` driver (offline, no child
 //! process at open time) and the end-to-end test covers Seatbelt for real.
 
@@ -33,9 +31,9 @@ use crate::sandbox::{
 
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
-/// A sandbox that could not be shut down cleanly. Go's
-/// `errSandboxRuntimeClose`: the specific cause is deliberately not carried,
-/// because it can name host paths the model must never see.
+/// A sandbox that could not be shut down cleanly. The specific cause is
+/// deliberately not carried, because it can name host paths the model must
+/// never see.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("sandbox runtime cleanup failed")]
 pub struct CloseError;
@@ -116,8 +114,7 @@ pub fn settings_from_config(resolved: &CoreSettings) -> Settings {
 ///
 /// Never returns an error: an unopenable sandbox is a runtime with
 /// `bash_available` false and a reason, so the binary keeps running with file
-/// tools only. That mirrors Go, where the caller prints a warning and
-/// continues.
+/// tools only. The caller prints a warning and continues.
 pub async fn open_sandbox_runtime(
     options: &OpenOptions,
     cancel: &CancellationToken,

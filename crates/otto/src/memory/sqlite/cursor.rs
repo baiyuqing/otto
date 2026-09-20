@@ -1,9 +1,8 @@
 //! Opaque list cursors.
 //!
-//! Ported from Go `internal/memory/sqlite/cursor.go`. A cursor carries the
-//! fingerprint of the query that produced it and the store generation at that
-//! moment, so resuming a list with changed filters, or across a write, is
-//! rejected instead of silently skipping or repeating rows.
+//! A cursor carries the fingerprint of the query that produced it and the store
+//! generation at that moment, so resuming a list with changed filters, or
+//! across a write, is rejected instead of silently skipping or repeating rows.
 
 use std::collections::BTreeSet;
 
@@ -32,7 +31,7 @@ fn invalid() -> Error {
     Error::new(ErrorKind::InvalidCursor)
 }
 
-/// Go marshals a nil slice as `null`, and the fingerprint is a digest over
+/// An absent slice is encoded as `null`, and the fingerprint is a digest over
 /// those exact bytes.
 fn encode_scopes(scopes: &[Scope]) -> String {
     if scopes.is_empty() {
@@ -79,8 +78,8 @@ fn digest(canonical: &str) -> String {
         .collect()
 }
 
-/// Go's `fingerprintList`. `now` participates only when expired records are
-/// excluded, because that is the only case where it changes the result set.
+/// `now` participates only when expired records are excluded, because that is
+/// the only case where it changes the result set.
 pub fn fingerprint_list(request: &ListRequest) -> String {
     let mut canonical = String::from("{\"domain\":\"records\",\"scopes\":");
     canonical.push_str(&encode_scopes(&request.scopes));
@@ -102,7 +101,6 @@ pub fn fingerprint_list(request: &ListRequest) -> String {
     digest(&canonical)
 }
 
-/// Go's `fingerprintCandidates`.
 pub fn fingerprint_candidates(request: &CandidateListRequest) -> String {
     let states: BTreeSet<&'static str> = request.states.iter().map(|s| s.as_str()).collect();
     let mut canonical = String::from("{\"domain\":\"candidates\",\"scopes\":");
@@ -188,8 +186,8 @@ pub fn decode_record_cursor(value: &str, fingerprint: &str) -> Result<Option<Rec
         updated_at: wire.updated_at,
         id: wire.id,
     };
-    // Go re-marshals the decoded payload and rejects anything that is not
-    // byte-identical, which is what makes the cursor genuinely opaque.
+    // The decoded payload is re-encoded and anything not byte-identical is
+    // rejected, which is what makes the cursor genuinely opaque.
     let canonical = encode_record_cursor(
         &cursor.fingerprint,
         cursor.generation,
@@ -213,7 +211,6 @@ pub struct RetrievalCursor {
     pub id: String,
 }
 
-/// Go's `fingerprintRetrieval`.
 pub fn fingerprint_retrieval(request: &RetrievalRequest) -> String {
     let mut canonical = String::from("{\"domain\":\"retrieval\",\"query_hash\":");
     encode_string(&digest(&request.query), &mut canonical);

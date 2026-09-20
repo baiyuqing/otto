@@ -1,18 +1,17 @@
 //! Choosing what a compaction summarizes and what it keeps verbatim.
 //!
-//! Port of `internal/agent/compaction_select.go`. The transcript is grouped
-//! into turns, the most recent turns are kept, and everything before them
-//! becomes the summary source. A retained tail must start on a protocol-safe
-//! boundary, so an assistant tool call is never separated from its results.
+//! The transcript is grouped into turns, the most recent turns are kept, and
+//! everything before them becomes the summary source. A retained tail must
+//! start on a protocol-safe boundary, so an assistant tool call is never
+//! separated from its results.
 //!
 //! Ownership: the selector borrows the transcript and returns owned clones, so
 //! the caller may redact them without touching the session.
 //!
 //! Errors: [`crate::agent::AgentError::NothingToCompact`] when no safe prefix
 //! exists, [`crate::agent::AgentError::CurrentTurnTooLarge`] when what must be
-//! kept already exceeds the budget, and
-//! [`crate::agent::AgentError::Other`] with the Go text for a malformed
-//! transcript.
+//! kept already exceeds the budget, and [`crate::agent::AgentError::Other`] for
+//! a malformed transcript.
 
 use std::collections::HashMap;
 
@@ -444,7 +443,6 @@ pub fn validate_retained_tool_pairs(messages: &[Message]) -> Result<(), String> 
     Ok(())
 }
 
-/// Go's `%q` for the identifiers these messages quote.
 fn quote_go(value: &str) -> String {
     serde_json::to_string(value).expect("a string always encodes")
 }

@@ -1,8 +1,7 @@
 //! The transcript store contract and an in-memory implementation.
 //!
-//! Port of the append-only `Session` contract in `internal/session`. Phase 0
-//! carries the two operations the agent loop needs; the Pi v3 JSONL store
-//! arrives in phase 2.
+//! Phase 0 carries the two operations the agent loop needs; the Pi v3 JSONL
+//! store arrives in phase 2.
 //!
 //! Ownership: `append` takes the message by value and the session owns it
 //! afterwards. `messages` returns an independent copy of the transcript.
@@ -42,11 +41,11 @@ pub use types::{
     ListResult, RuntimeMetadata, SessionInfo, Snapshot, Warning,
 };
 
-/// Which of the Go sentinel errors a [`PiError`] corresponds to.
+/// Which error class a [`PiError`] corresponds to.
 ///
-/// Callers branch on the kind the way Go callers use `errors.Is`: the kind
-/// survives every `context` prefix, so the classification of a failure deep
-/// inside a file survives being reported as "session line 7: ...".
+/// Callers branch on the kind rather than on the message: the kind survives
+/// every `context` prefix, so the classification of a failure deep inside a
+/// file survives being reported as "session line 7: ...".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PiErrorKind {
     /// The record is not a Pi v3 session, or carries an unsupported version.
@@ -59,17 +58,17 @@ pub enum PiErrorKind {
     FileTooLarge,
     /// The record is valid Pi but carries content Otto cannot represent.
     UnsupportedContent,
-    /// The session has been closed; Go's `errSessionClosed`.
+    /// The session has been closed.
     Closed,
-    /// A durable write failed. Go poisons the store with
-    /// `ErrFatalPersistence` and refuses every later write.
+    /// A durable write failed. The store is poisoned and refuses every later
+    /// write.
     FatalPersistence,
-    /// Anything with no Go sentinel, such as an encoding failure.
+    /// Anything with no dedicated kind, such as an encoding failure.
     Other,
 }
 
 impl PiErrorKind {
-    /// The Go sentinel error text this kind prefixes its message with.
+    /// The error text this kind prefixes its message with.
     fn text(self) -> &'static str {
         match self {
             Self::UnsupportedFormat => "unsupported session format",
@@ -85,10 +84,6 @@ impl PiErrorKind {
 }
 
 /// A session codec or store failure.
-///
-/// The rendered message matches the Go error text exactly, including any
-/// wrapping prefixes, so operators reading a log see the same string from
-/// either implementation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct PiError {
@@ -110,7 +105,7 @@ impl PiError {
         Self::new(PiErrorKind::Invalid, detail)
     }
 
-    /// An error with no Go sentinel; the message is used verbatim.
+    /// An error with no dedicated kind; the message is used verbatim.
     pub fn other(message: impl fmt::Display) -> Self {
         Self {
             kind: PiErrorKind::Other,
@@ -118,7 +113,7 @@ impl PiError {
         }
     }
 
-    /// The closed-session error. Go's `errSessionClosed` carries no detail.
+    /// The closed-session error. It carries no detail.
     pub fn closed() -> Self {
         Self {
             kind: PiErrorKind::Closed,
@@ -137,8 +132,7 @@ impl PiError {
         Self::new(kind, format!("maximum is {limit} bytes"))
     }
 
-    /// Prefixes the message, keeping the kind. The Go equivalent is
-    /// `fmt.Errorf("%s: %w", prefix, err)`.
+    /// Prefixes the message, keeping the kind.
     #[must_use]
     pub fn context(self, prefix: impl fmt::Display) -> Self {
         Self {
@@ -179,14 +173,14 @@ pub trait Session {
     /// rule. Nothing is stored when the call returns an error.
     async fn append(&self, message: Message) -> Result<(), SessionError>;
 
-    /// The compaction checkpoint currently in force, or `None` when the
-    /// session has never been compacted. Port of `LatestCompaction`.
+    /// The compaction checkpoint currently in force, or `None` when the session
+    /// has never been compacted.
     fn latest_compaction(&self) -> Option<CompactionMetadata>;
 
     /// Records a compaction checkpoint: the transcript becomes the summary
     /// context message followed by the messages from
     /// `checkpoint.first_kept_entry_id` onward. Nothing changes when the call
-    /// returns an error. Port of `AppendCompaction`.
+    /// returns an error.
     async fn append_compaction(
         &self,
         checkpoint: CompactionCheckpoint,
@@ -204,18 +198,16 @@ struct State {
     /// Every message id seen in this session, to reject reuse.
     seen_ids: HashSet<String>,
     latest_compaction: Option<CompactionMetadata>,
-    /// Numbers the synthetic checkpoint ids and the ids generated for
-    /// messages appended without one. Go draws a random Pi entry id; an
-    /// in-memory session has no file to share ids with, so a counter is
-    /// enough and keeps tests deterministic.
+    /// Numbers the synthetic checkpoint ids and the ids generated for messages
+    /// appended without one. An in-memory session has no file to share ids
+    /// with, so a counter is enough and keeps tests deterministic.
     checkpoint_counter: u64,
 }
 
 impl State {
-    /// The ordering rule ported from `pendingToolCalls` in
-    /// `internal/session/store.go`, applied incrementally: a tool-result
-    /// message must resolve a call from the immediately preceding assistant
-    /// message, and no other message may come between the two.
+    /// The ordering rule, applied incrementally: a tool-result message must
+    /// resolve a call from the immediately preceding assistant message, and no
+    /// other message may come between the two.
     fn check_sequence(&self, message: &Message) -> Result<(), SessionError> {
         const UNRESOLVED: &str = "unresolved tool calls must be followed by tool results";
         match message.role {
@@ -263,8 +255,8 @@ impl State {
         }
     }
 
-    /// Replays `messages` through the sequence rule from an empty state, the
-    /// way Go's `pendingToolCalls` validates a whole candidate slice.
+    /// Replays `messages` through the sequence rule from an empty state,
+    /// validating a whole candidate slice.
     fn replay(messages: &[Message]) -> Result<State, SessionError> {
         let mut state = State::default();
         for message in messages {
@@ -274,8 +266,8 @@ impl State {
         Ok(state)
     }
 
-    /// A fresh identifier for a message appended without one, matching Go's
-    /// blank-id fallback. The counter is bumped until the id is unused.
+    /// A fresh identifier for a message appended without one. The counter is
+    /// bumped until the id is unused.
     fn generate_id(&mut self) -> String {
         loop {
             self.checkpoint_counter += 1;

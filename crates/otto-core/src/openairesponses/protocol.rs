@@ -1,14 +1,11 @@
 //! Responses API wire types and request translation.
 //!
-//! Port of `internal/provider/openairesponses/protocol.go`. Field names, field
-//! order, and the omit-empty rules reproduce Go's `encoding/json` output for
-//! the same structs, so a request serialized here is byte-identical to the Go
-//! request for the same [`Request`].
+//! Field names, field order, and the omit-empty rules are fixed by what the
+//! Responses endpoint accepts.
 //!
-//! One difference is deliberate: Go holds a tool's `parameters` in a
-//! `map[string]any` and therefore sorts its keys, while here the schema is raw
-//! JSON passed through verbatim and keeps the caller's key order. This matches
-//! the same decision in [`crate::openaicompat::protocol`].
+//! A tool's schema is raw JSON passed through verbatim and keeps the caller's
+//! key order rather than being re-sorted, the same decision as in
+//! [`crate::openaicompat::protocol`].
 //!
 //! Ownership: [`build_request`] borrows the request and returns an owned wire
 //! value. Decoding types own their data.
@@ -273,8 +270,7 @@ pub fn serialized_request_size(request: &Request) -> Result<usize, serde_json::E
     Ok(serde_json::to_vec(&build_request(request))?.len())
 }
 
-/// Reports whether the accumulated argument text is a complete JSON value,
-/// the equivalent of Go's `json.Valid`.
+/// Reports whether the accumulated argument text is a complete JSON value.
 pub fn valid_arguments(arguments: &str) -> bool {
     serde_json::from_str::<serde::de::IgnoredAny>(arguments).is_ok()
 }
@@ -321,8 +317,7 @@ fn user_message_item(message: &Message) -> WireItem {
     }
 }
 
-/// Writes `null` for an empty input list, which is what Go's `encoding/json`
-/// produces for the nil slice it builds in that case. The field has no
+/// Writes `null` for an empty input list rather than `[]`. The field has no
 /// omit-empty tag, so it is always present.
 fn serialize_input<S: Serializer>(input: &[WireItem], serializer: S) -> Result<S::Ok, S::Error> {
     if input.is_empty() {
@@ -331,8 +326,7 @@ fn serialize_input<S: Serializer>(input: &[WireItem], serializer: S) -> Result<S
     input.serialize(serializer)
 }
 
-/// Accepts JSON `null` for any field, the way Go leaves the zero value in
-/// place.
+/// Accepts JSON `null` for any field, leaving the default value in place.
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
@@ -355,10 +349,9 @@ mod tests {
         serde_json::to_string(&build_request(request)).expect("request serializes")
     }
 
-    /// Port of `TestTranslateRequestEmptyToolResultKeepsOutput`. The Responses
-    /// API requires every `function_call_output` item to carry an `output`
-    /// field, even when the tool produced no text; dropping it yields HTTP 400
-    /// "Missing required parameter: 'input[N].output'".
+    /// The Responses API requires every `function_call_output` item to carry an
+    /// `output` field, even when the tool produced no text; dropping it yields
+    /// HTTP 400 "Missing required parameter: 'input[N].output'".
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn empty_tool_result_keeps_the_output_field() {
@@ -385,7 +378,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn empty_request_matches_go_encoding() {
+    fn empty_request_encodes_only_the_required_fields() {
         let request = Request {
             model: "m".into(),
             ..Request::default()
@@ -398,7 +391,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn full_request_matches_go_encoding() {
+    fn full_request_encodes_every_field() {
         let request = Request {
             model: "test-model".into(),
             system_prompt: "sys".into(),

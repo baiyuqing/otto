@@ -1,12 +1,11 @@
 //! Compaction checkpoints: validation, boundary resolution, and the
 //! compaction-aware view of an active path.
 //!
-//! Port of the pure functions in `internal/session/compaction.go`. The store
-//! methods that append a checkpoint live with the native store; everything
-//! here is filesystem-free and builds for `wasm32-unknown-unknown`.
+//! The store methods that append a checkpoint live with the native store;
+//! everything here is filesystem-free and builds for `wasm32-unknown-unknown`.
 //!
 //! Ownership: input is borrowed, results are owned. Concurrency: no shared
-//! state. Errors: [`PiError`] with the Go message text, byte for byte.
+//! state. Errors: every failure is a [`PiError`].
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -30,8 +29,8 @@ pub const COMPACTION_DETAILS_MAXIMUM_PATHS: usize = 1_024;
 /// Largest total path length a checkpoint may carry, in bytes.
 pub const COMPACTION_DETAILS_MAXIMUM_BYTES: usize = 64 * 1024;
 
-/// Rejects a checkpoint that cannot be persisted. The checks run in the Go
-/// order so the first failure reported is the same one.
+/// Rejects a checkpoint that cannot be persisted. The checks run in a fixed
+/// order so the first failure reported is stable.
 pub fn validate_compaction_checkpoint(checkpoint: &CompactionCheckpoint) -> Result<(), PiError> {
     if checkpoint.summary.trim().is_empty() {
         return Err(PiError::invalid(
@@ -102,8 +101,8 @@ pub fn validate_compaction_details(details: &CompactionDetails) -> Result<(), Pi
 }
 
 /// True for a nonempty path that is already in cleaned form and carries no
-/// control characters. `&str` is UTF-8 by construction, which covers Go's
-/// `utf8.ValidString` check.
+/// control characters. `&str` is UTF-8 by construction, so no encoding check is
+/// needed.
 pub fn valid_compaction_detail_path(path: &str) -> bool {
     if path.is_empty() || clean_path(path) != path {
         return false;
@@ -113,8 +112,8 @@ pub fn valid_compaction_detail_path(path: &str) -> bool {
         .any(|character| character <= '\u{1f}' || ('\u{7f}'..='\u{9f}').contains(&character))
 }
 
-/// Port of Go's `filepath.Clean` for the `/` separator. Used only to decide
-/// whether a path is already clean, so the exact Go result matters.
+/// Used only to decide whether a path is already clean, so the exact result
+/// matters.
 fn clean_path(path: &str) -> String {
     if path.is_empty() {
         return ".".into();
@@ -402,8 +401,8 @@ pub fn sanitize_compaction_details(details: &CompactionDetails) -> CompactionDet
 }
 
 /// True when `text` is one JSON object and no object in it, at any depth,
-/// repeats a key. Go's decoder rejects duplicates here; `serde_json` keeps the
-/// last value, so the check is explicit.
+/// repeats a key. `serde_json` keeps the last value for a duplicate key, so the
+/// rejection is checked explicitly.
 fn unique_json_object(text: &str) -> bool {
     text.trim_start().starts_with('{') && serde_json::from_str::<UniqueJson>(text).is_ok()
 }
@@ -481,9 +480,6 @@ mod tests {
         format!("{prefix}{index:04}-{}", "x".repeat(58))
     }
 
-    /// Port of `TestAppendCompactionEnforcesSummaryAndDetailsBoundsBeforeMutation`.
-    /// The Go cases that mutate the summary or a path into invalid UTF-8 have no
-    /// Rust equivalent: `String` is UTF-8 by construction.
     #[test]
     fn validate_compaction_checkpoint_enforces_bounds() {
         type Case = (
@@ -601,7 +597,6 @@ mod tests {
         }
     }
 
-    /// Port of `TestAppendCompactionAcceptsExactSummaryAndDetailsBounds`.
     #[test]
     fn validate_compaction_checkpoint_accepts_exact_bounds() {
         let mut checkpoint = valid_checkpoint();
@@ -617,7 +612,6 @@ mod tests {
         validate_compaction_checkpoint(&checkpoint).expect("exact bounds must be accepted");
     }
 
-    /// Port of `TestOpenCompactionDetailsRejectsDuplicateKeysAndMalformedKnownFieldsLazily`.
     #[test]
     fn decode_compaction_details_is_lenient() {
         let cases = [
@@ -643,7 +637,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestOpenCompactionDetailsSanitizesPathsAndClonesMetadata`.
     #[test]
     fn decode_compaction_details_sanitizes_paths() {
         let raw = RawValue::from_string(
@@ -670,7 +663,6 @@ mod tests {
         );
     }
 
-    /// Port of `TestOpenCompactionDetailsBoundsOversizedExternalMetadata`.
     #[test]
     fn decode_compaction_details_bounds_oversized_metadata() {
         let modified: Vec<String> = (0..1_100)

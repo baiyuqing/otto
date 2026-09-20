@@ -29,7 +29,7 @@ pub fn dist_file(path: &str) -> Option<&'static [u8]> {
     DIST.get_file(path).map(|file| file.contents())
 }
 
-/// `GET /`. `Cache-Control: no-cache` is set on both branches, matching Go.
+/// `GET /`. `Cache-Control: no-cache` is set on both branches.
 pub fn index_response(page: Option<&[u8]>) -> Response {
     let (content_type, body) = match page {
         Some(page) => ("text/html; charset=utf-8", page.to_vec()),
@@ -60,9 +60,9 @@ pub fn asset_response(path: &str, body: Option<&[u8]>) -> Response {
         .expect("static header values")
 }
 
-/// The media type Go's `mime.TypeByExtension` returns for the extensions a
-/// Vite bundle actually emits. Anything else falls back to the type Go's
-/// content sniffer reports for text, which is what the remaining files are.
+/// The media type for the extensions a Vite bundle actually emits. Anything
+/// else falls back to the plain-text type, which is what the remaining files
+/// are.
 pub fn content_type(path: &str) -> &'static str {
     let extension = path.rsplit_once('.').map(|(_, tail)| tail).unwrap_or("");
     match extension {

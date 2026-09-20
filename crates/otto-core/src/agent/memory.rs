@@ -1,9 +1,7 @@
 //! Long-term memory recall for one turn.
 //!
-//! Port of `internal/agent/memory_context.go` plus the slice of
-//! `internal/memory` the agent depends on. The agent asks for records once per
-//! turn, renders them into a request-local message, and never persists that
-//! message.
+//! The agent asks for records once per turn, renders them into a request-local
+//! message, and never persists that message.
 //!
 //! Ownership: the agent borrows a [`MemoryRecall`] implementation through
 //! `Options`. It does not own the backing store and closes it only through
@@ -17,9 +15,7 @@
 
 use tokio_util::sync::CancellationToken;
 
-/// Go's `defaultMemoryRecallLimit`.
 pub const DEFAULT_RECALL_LIMIT: i64 = 12;
-/// Go's `defaultMemoryRecallTokenBudget`.
 pub const DEFAULT_RECALL_TOKEN_BUDGET: i64 = 2000;
 
 /// The header the rendered block always starts with, warning the model that
@@ -127,14 +123,13 @@ pub fn render_memory_context(records: &[Record]) -> String {
     rendered
 }
 
-/// Go's `%q`. JSON quoting agrees with Go's quoting for every printable ASCII
-/// string and, like it, always produces a closed quoted token.
+/// Always produces a closed quoted token.
 fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("a string always encodes")
 }
 
-/// Go's `html.EscapeString`, which escapes the same five characters in the
-/// same order.
+/// Escapes the five HTML metacharacters, `&` first so the later replacements
+/// are not escaped again.
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")

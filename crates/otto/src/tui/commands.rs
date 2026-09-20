@@ -1,10 +1,9 @@
-//! The slash-command table and completion logic. Port of
-//! `internal/tui/commands.go`.
+//! The slash-command table and completion logic.
 //!
-//! `/memory` and `/remember` are listed here matching Go's table exactly,
-//! including the `/task` singular quirk noted below. `tui::app`'s dispatcher
-//! backs both with `cli::repl_commands`'s free functions, the same code the
-//! line-oriented REPL uses.
+//! `/memory` and `/remember` are listed here, including the `/task` singular
+//! quirk noted below. `tui::app`'s dispatcher backs both with
+//! `cli::repl_commands`'s free functions, the same code the line-oriented REPL
+//! uses.
 
 /// One entry in the slash-command table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,8 +41,8 @@ pub enum SlashCommandKind {
     Mcp,
 }
 
-/// The command table used by completion and `/help`. The inherited commands
-/// keep Go's order; `/approve` sits beside the sandbox command it controls.
+/// The command table used by completion and `/help`. `/approve` sits beside the
+/// sandbox command it controls.
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -167,9 +166,9 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
-/// Every table entry whose name starts with `value`. Port of
-/// `matchingSlashCommands`: `value` must start with `/` and contain no CR/LF
-/// (a pasted multi-line value is never a command prefix).
+/// Every table entry whose name starts with `value`. `value` must start with
+/// `/` and contain no CR/LF (a pasted multi-line value is never a command
+/// prefix).
 pub fn matching_slash_commands(value: &str) -> Vec<SlashCommand> {
     if !value.starts_with('/') || value.contains(['\r', '\n']) {
         return Vec::new();
@@ -189,8 +188,8 @@ pub fn find_slash_command(name: &str) -> Option<SlashCommand> {
         .find(|command| command.name == name)
 }
 
-/// Splits `value` into a command name and the rest of the line, then looks
-/// the name up. Port of `parseSlashCommand`.
+/// Splits `value` into a command name and the rest of the line, then looks the
+/// name up.
 pub fn parse_slash_command(value: &str) -> Option<(SlashCommand, String)> {
     let value = value.trim();
     let index = value.find(char::is_whitespace);
@@ -238,8 +237,6 @@ mod tests {
         assert!(matching_slash_commands("").is_empty());
     }
 
-    /// Port of the completion half of Go's
-    /// `TestMemoryCommandRegistryCompletionAndHelp`.
     #[test]
     fn a_prefix_matches_only_the_memory_command() {
         let names: Vec<&str> = matching_slash_commands("/mem")

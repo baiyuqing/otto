@@ -1,14 +1,13 @@
-//! Minimal Go-`time.ParseDuration`-compatible parser for the duration
-//! strings Otto accepts in `shell_timeout` and `sqlite.busy_timeout`.
+//! Minimal Go-`time.ParseDuration`-compatible parser for the duration strings
+//! Otto accepts in `shell_timeout` and `sqlite.busy_timeout`.
 //!
-//! ponytail: supports the sign + `{number}{unit}` sequence Go accepts (unit
-//! one of ns/us/µs/ms/s/m/h, decimal magnitudes, multiple terms like
-//! "1h30m"). Returns nanoseconds as `i64`. Callers only need the failure to
-//! be *an* error (Go's own error text is never asserted on directly — every
-//! caller wraps it in a message like "invalid shell_timeout: ..." and only
-//! that wrapper text is checked), so the message here is descriptive but not
-//! byte-matched to Go. Doesn't reproduce Go's arbitrary-precision overflow
-//! handling: config timeouts never approach `i64::MAX` nanoseconds.
+//! ponytail: supports the sign + `{number}{unit}` sequence `time.ParseDuration`
+//! accepts (unit one of ns/us/µs/ms/s/m/h, decimal magnitudes, multiple terms
+//! like "1h30m"). Returns nanoseconds as `i64`. Callers only need the failure
+//! to be *an* error: every caller wraps it in a message like "invalid
+//! shell_timeout: ...", and only that wrapper text is checked. Doesn't
+//! reproduce the reference parser's arbitrary-precision overflow handling:
+//! config timeouts never approach `i64::MAX` nanoseconds.
 
 pub fn parse_go_duration(input: &str) -> Result<i64, String> {
     let invalid = || format!("time: invalid duration {input:?}");

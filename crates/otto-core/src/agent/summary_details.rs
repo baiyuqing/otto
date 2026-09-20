@@ -1,20 +1,17 @@
 //! The file lists a compaction checkpoint carries forward.
 //!
-//! Port of `internal/agent/summary_details.go`. A summary loses the tool calls
-//! that read and wrote files, so the paths are extracted from the discarded
-//! transcript and appended to the summary as two tagged blocks. The blocks are
-//! also parsed back off an existing summary, so a second compaction does not
-//! duplicate them.
+//! A summary loses the tool calls that read and wrote files, so the paths are
+//! extracted from the discarded transcript and appended to the summary as two
+//! tagged blocks. The blocks are also parsed back off an existing summary, so a
+//! second compaction does not duplicate them.
 //!
 //! Ownership: every function takes borrowed input and returns owned data.
 //!
-//! Errors: only [`append_compaction_file_blocks`] can fail, with the Go error
-//! text, which the caller wraps in
-//! [`crate::agent::AgentError::InvalidCompactionSummary`].
+//! Errors: only [`append_compaction_file_blocks`] can fail, with a message the
+//! caller wraps in [`crate::agent::AgentError::InvalidCompactionSummary`].
 //!
-//! Deviations from Go, both because a Rust `&str` cannot hold invalid UTF-8:
-//! the `utf8.ValidString` checks are gone, and `normalize_detail_path` only
-//! rejects empty and control-bearing paths.
+//! `normalize_detail_path` only rejects empty and control-bearing paths; a Rust
+//! `&str` cannot hold invalid UTF-8, so there is no encoding check.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -292,8 +289,8 @@ pub fn normalize_detail_path(path: &str) -> Option<String> {
     Some(cleaned)
 }
 
-/// Port of Go's `filepath.Clean` for slash-separated paths, which is the only
-/// separator Otto's file tools accept.
+/// Go's `path/filepath.Clean` semantics for slash-separated paths, which is
+/// the only separator Otto's file tools accept.
 fn clean_path(path: &str) -> String {
     let rooted = path.starts_with('/');
     let mut segments: Vec<&str> = Vec::new();
@@ -569,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn path_cleaning_matches_go() {
+    fn path_cleaning_matches_go_filepath_clean() {
         for (input, expected) in [
             ("a/./b", "a/b"),
             ("a//b", "a/b"),

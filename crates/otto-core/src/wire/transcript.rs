@@ -1,9 +1,8 @@
 //! The browser transcript reducer.
 //!
-//! Port of `ui/src/transcript.ts`. `from_history` renders stored session
-//! history and `reduce` folds one live turn event into the rendered list.
-//! Both take JSON text rather than decoded values so provider argument JSON
-//! keeps its original key order.
+//! `from_history` renders stored session history and `reduce` folds one live
+//! turn event into the rendered list. Both take JSON text rather than decoded
+//! values so provider argument JSON keeps its original key order.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;

@@ -1,21 +1,16 @@
 //! Memory, skill and sub-agent wiring for one runner build.
 //!
-//! Port of Go `cmd/otto/memory_wiring.go` plus the memory, skill and sub-agent
-//! blocks of `cmd/otto/runtime_builder.go`'s `buildRunner` and
-//! `boundaryToolDefinitions`. The substantive code lives here so the shared
-//! composition root only gains call sites.
+//! The substantive code lives here so the shared composition root only gains
+//! call sites.
 //!
-//! Divergences from Go, each unobservable:
+//! Three properties of this wiring:
 //!
-//! - Go asks the store factory for `Capabilities.EncryptionAtRest`. The SQLite
-//!   store is the only backend and never encrypts at rest, so
-//!   `require_encryption` always fails startup here.
-//! - Go creates the memory binding before building the provider client and
-//!   releases it on every later failure. Here the binding is created last, so
-//!   there is no failure left to unwind.
-//! - Go shares one tool slice between the parent registry and the sub-agent
-//!   runner. Rust tools are boxed and cannot be cloned, so the children get
-//!   their own instances of the same tools, built the same way.
+//! - The SQLite store is the only backend and never encrypts at rest, so
+//!   `require_encryption` always fails startup.
+//! - The memory binding is created last, after the provider client, so there
+//!   is no failure left to unwind.
+//! - Tools are boxed and cannot be cloned, so the sub-agent runner gets its
+//!   own instances of the same tools, built the same way.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -61,12 +56,12 @@ const SECRETS_EXCEED_REDACTION_LIMITS: &str =
 
 /// The process-wide memory service and the two scopes one session reads.
 ///
-/// The default is Go's zero `runtimeBuilder`: a null service reporting memory
-/// as disabled, which every operation answers without touching a store.
+/// The default is a null service reporting memory as disabled, which every
+/// operation answers without touching a store.
 pub struct MemoryWiring {
     pub service: Arc<Service>,
     /// Whether the service is backed by a live store, and so worth exposing to
-    /// the agent. Go's `memoryUsable`.
+    /// the agent.
     pub usable: bool,
     pub user_scope: Scope,
     pub workspace_scope: Scope,
@@ -87,9 +82,8 @@ impl Default for MemoryWiring {
     }
 }
 
-/// Port of `openMemoryService`. Disabled config, or an open failure when
-/// `required` is false, degrades to a null service with a stderr warning
-/// rather than failing startup.
+/// Disabled config, or an open failure when `required` is false, degrades to a
+/// null service with a stderr warning rather than failing startup.
 pub fn open_memory_service(
     config: &MemoryRuntime,
     secret_values: &[String],
@@ -174,8 +168,7 @@ pub fn open_memory_service(
     Ok((Arc::new(service), identity.user_scope, true))
 }
 
-/// Port of `workspaceMemoryScope`: a configured stable id keeps a moved
-/// workspace's records reachable.
+/// A configured stable id keeps a moved workspace's records reachable.
 pub fn workspace_memory_scope(
     config: &MemoryRuntime,
     canonical_path: &str,
@@ -309,7 +302,7 @@ fn failure_message(error: &mcp::CallError, secrets: &[String], marker: &str) -> 
 }
 
 impl Builder {
-    /// The memory tools, in Go's `memoryTools` order.
+    /// The memory tools, in the order they are registered.
     pub fn memory_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
         let scopes = vec![
             self.memory.user_scope.clone(),
@@ -329,16 +322,14 @@ impl Builder {
         ]
     }
 
-    /// Whether memory tools belong in this build. Go's `b.memoryUsable &&
-    /// b.boundaryAllowsDynamic(&runtime)` at the `buildRunner` call site; the
-    /// boundary half is checked by the caller that already knows it.
+    /// Whether memory tools belong in this build. The boundary half of the
+    /// decision is checked by the caller that already knows it.
     pub fn memory_usable(&self) -> bool {
         self.memory.usable
     }
 
     /// Discovers skills and agent definitions, prints their warnings, and
-    /// appends the skill tool to `tools`. Port of the two discovery blocks in
-    /// `buildRunner`.
+    /// appends the skill tool to `tools`.
     pub fn build_catalogs(
         &self,
         tools: &mut Vec<Box<dyn Tool + Send + Sync>>,
@@ -379,7 +370,6 @@ impl Builder {
     }
 
     /// Builds the sub-agent runner and appends the agent tools and `remind`.
-    /// Port of `buildRunner`'s `if client != nil && agents.Enabled` block.
     #[allow(clippy::too_many_arguments)]
     pub fn build_subagents(
         &self,
@@ -472,8 +462,8 @@ impl Builder {
         )
     }
 
-    /// A second set of the parent's non-memory tools, for the children.
-    /// Go shares one slice; boxed Rust tools cannot be cloned.
+    /// A second set of the parent's non-memory tools, for the children. Boxed
+    /// tools cannot be cloned, so the children get their own.
     pub fn child_tools(
         &self,
         runtime: &Runtime,
@@ -749,8 +739,7 @@ impl Builder {
         })
     }
 
-    /// Binds the memory service for one session. Port of `buildRunner`'s
-    /// `memoryService.Bind`.
+    /// Binds the memory service for one session.
     pub fn bind_memory(&self) -> Result<Binding, BuildError> {
         self.memory
             .service
@@ -765,8 +754,8 @@ impl Builder {
             .map_err(|error| format!("bind memory: {error}"))
     }
 
-    /// The memory, skill and sub-agent halves of `boundaryToolDefinitions`.
-    /// The caller splices them around the bash definition, in Go's order.
+    /// The memory, skill and sub-agent halves of `boundaryToolDefinitions`. The
+    /// caller splices them around the bash definition.
     pub fn boundary_memory_definitions(&self, max_output: usize) -> Vec<ToolDefinition> {
         if !self.memory.usable {
             return Vec::new();
@@ -778,8 +767,7 @@ impl Builder {
     }
 
     /// The skill and sub-agent definitions the boundary check must see.
-    /// `dynamic` is Go's non-recursive `secretRedactor(runtime).
-    /// AllowsDynamicContent()` gate on the sub-agent tools.
+    /// `dynamic` is the redaction-boundary gate on the sub-agent tools.
     pub fn boundary_catalog_definitions(
         &self,
         max_output: usize,
@@ -803,11 +791,10 @@ impl Builder {
     }
 }
 
-/// Port of the `connect_mcp` half of `docs/specs/2026-09-19-mcp-design.md`.
 /// Only the outcomes reachable without a real MCP server are covered: a
-/// disabled server is never dialed, and an unspawnable command reports
-/// `Failed` with one warning. A working stdio/HTTP connection would need a
-/// real server process or socket, which the offline test rule forbids;
+/// disabled server is never dialed, and an unspawnable command reports `Failed`
+/// with one warning. A working stdio/HTTP connection would need a real server
+/// process or socket, which the offline test rule forbids;
 /// `crates/otto/tests/mcp_stdio.rs` covers the transport itself with a fake
 /// server subprocess.
 #[cfg(test)]
@@ -1036,7 +1023,7 @@ mod tests {
     use crate::memory::{NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest, SearchRequest};
 
     /// A database path whose parent is a regular file, so every open fails
-    /// deterministically. Port of Go's `unopenableMemoryPath`.
+    /// deterministically.
     fn unopenable_path(directory: &std::path::Path) -> String {
         let blocker = directory.join("blocker-file");
         std::fs::write(&blocker, b"not a directory").expect("write blocker");
@@ -1198,27 +1185,21 @@ mod tests {
     }
 }
 
-/// Port of `cmd/otto/skills_wiring_test.go` and `cmd/otto/agents_wiring_test.go`.
-///
-/// Go drives those cases end to end through `runForTest` against an
-/// `httptest` provider, which the offline rule forbids here, so each one is
-/// folded onto the composition seam it exercises: [`Builder::build_catalogs`]
-/// for the prompt sections, the tool list and the warnings,
-/// [`Builder::boundary_catalog_definitions`] for the redaction boundary, and
-/// `resolve_sandbox_settings` for the Seatbelt read paths. Go's
-/// `TestRunSkillListingAndToolRoundTrip` also asserts a full `skill` tool
-/// call/result round trip and the section's position after `## Environment`;
-/// the round trip belongs to `skill::tool`'s own tests and the ordering to
-/// `system_prompt_for`, so neither is repeated.
+/// Each case is folded onto the composition seam it exercises:
+/// [`Builder::build_catalogs`] for the prompt sections, the tool list and the
+/// warnings, [`Builder::boundary_catalog_definitions`] for the redaction
+/// boundary, and `resolve_sandbox_settings` for the Seatbelt read paths. A full
+/// `skill` tool call/result round trip belongs to `skill::tool`'s own tests and
+/// the section's position after `## Environment` to `system_prompt_for`, so
+/// neither is repeated here.
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
     use crate::cli::testutil;
     use std::path::{Path, PathBuf};
 
-    /// Writes `<root>/<directory>/<file>` with Go's frontmatter shape and
-    /// returns the definition directory. Port of `writeSkillFileForTest` and
-    /// `writeAgentFileForTest`, which differ only in the file name.
+    /// Writes `<root>/<directory>/<file>` with the standard frontmatter shape
+    /// and returns the definition directory.
     fn write_definition(
         root: &Path,
         file: &str,
@@ -1485,9 +1466,9 @@ mod catalog_tests {
         }
     }
 
-    /// Go's `TestRuntimeBuilderBoundaryToolDefinitionsIncludesAgentToolsWhenDynamicAllowed`
-    /// reaches the second half through a provider secret that exhausts the
-    /// redaction marker; here the caller passes the same decision directly.
+    /// The caller passes the dynamic-content decision directly rather than
+    /// reaching it through a provider secret that exhausts the redaction
+    /// marker.
     #[test]
     fn a_closed_redaction_boundary_drops_the_agent_definitions() {
         let fixture = fixture();
@@ -1513,8 +1494,8 @@ mod catalog_tests {
         );
     }
 
-    /// Port of `TestRunSkillsSandboxReadPaths` and `TestRunAgentsSandboxReadPaths`,
-    /// folded into one table because both roots travel the same code path.
+    /// Skill and agent sandbox read paths, folded into one table because both
+    /// roots travel the same code path.
     #[test]
     fn sandbox_read_paths_pick_up_only_existing_enabled_roots() {
         for (name, make_directories, disabled, want) in [

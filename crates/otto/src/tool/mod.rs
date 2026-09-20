@@ -1,16 +1,16 @@
 //! Workspace-confined file tools, plus in-process `remind`.
 //!
-//! Port of `internal/tool`. Every filesystem tool resolves paths through
-//! [`workspace::Workspace`], which rejects escapes from the selected workspace
-//! after canonical-path and symlink validation, and every tool caps its output
-//! and reports failures in band as an error `ToolResult` rather than as a
-//! `Result`, because the text is fed back to the model.
+//! Every filesystem tool resolves paths through [`workspace::Workspace`], which
+//! rejects escapes from the selected workspace after canonical-path and symlink
+//! validation, and every tool caps its output and reports failures in band as
+//! an error `ToolResult` rather than as a `Result`, because the text is fed
+//! back to the model.
 //!
 //! Ownership: a tool borrows its workspace and owns nothing the caller can
 //! observe. Concurrency: [`Tool::execute`] takes `&self` and may run
 //! concurrently; the edit tool serializes writes to one path itself.
 //! Cancellation: long-running tools check the token between filesystem steps
-//! and return the Go `context canceled` text.
+//! and return the `context canceled` text.
 
 pub mod bash;
 pub mod edit;
@@ -36,11 +36,10 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
-/// The text Go reports when the request context is already cancelled.
+/// The text reported when the request is already cancelled.
 pub(crate) const CONTEXT_CANCELED: &str = "context canceled";
 
-/// One callable tool. Port of the `Tool` interface in
-/// `internal/tool/registry.go`.
+/// One callable tool.
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     /// The schema advertised to the provider. The returned value is owned by
@@ -101,7 +100,7 @@ pub(crate) mod testutil {
     use super::*;
     use std::path::Path;
 
-    /// The default output cap the Go tests pass to every tool constructor.
+    /// The default output cap every tool constructor is given.
     pub(crate) const MAX_OUTPUT_BYTES: usize = 51200;
 
     pub(crate) fn raw(json: &str) -> Box<RawValue> {
@@ -121,8 +120,7 @@ pub(crate) mod testutil {
         tool.execute(&raw(arguments), &cancel).await
     }
 
-    /// Creates a file and its parent directories under `root`. Port of the
-    /// `writeSearchFile` helper in `search_tools_test.go`.
+    /// Creates a file and its parent directories under `root`.
     pub(crate) fn write_search_file(root: &Path, name: &str, contents: &str) {
         let path = root.join(name);
         std::fs::create_dir_all(path.parent().expect("the path has a parent"))

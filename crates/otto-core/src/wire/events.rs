@@ -1,8 +1,5 @@
 //! The JSON shape of one turn event.
 //!
-//! Port of `internal/server/events.go`. Field order in each struct is the
-//! order Go declares, so `serde_json` emits the same byte sequence the Go
-//! server does.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -36,8 +33,7 @@ pub struct WireCompaction {
     pub estimated_tokens_after: i64,
     #[serde(default)]
     pub automatic: bool,
-    /// Present only when the summary call reported usage, matching Go's
-    /// `if c.UsagePresent`.
+    /// Present only when the summary call reported usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     #[serde(default)]

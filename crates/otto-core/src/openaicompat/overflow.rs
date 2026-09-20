@@ -1,18 +1,17 @@
-//! Classifier for provider responses that reject a request as too large for
-//! the context window.
+//! Classifier for provider responses that reject a request as too large for the
+//! context window.
 //!
-//! Port of `internal/provider/openaicompat/overflow.go`. The classifier is
-//! deliberately narrow: it accepts an allowlisted error code, or a message
-//! matching one of three phrase patterns, and nothing else. A response that
-//! only complains about `max_tokens` describes the output budget, not the
-//! context window, and is not an overflow.
+//! The classifier is deliberately narrow: it accepts an allowlisted error code,
+//! or a message matching one of three phrase patterns, and nothing else. A
+//! response that only complains about `max_tokens` describes the output budget,
+//! not the context window, and is not an overflow.
 //!
 //! Ownership: the body is borrowed and never retained. The returned
-//! [`ContextOverflowError`] carries only a status, an allowlisted code, and
-//! two token counts, so no provider text can reach a log through it.
+//! [`ContextOverflowError`] carries only a status, an allowlisted code, and two
+//! token counts, so no provider text can reach a log through it.
 //!
-//! Errors: this module reports "not an overflow" as `None`; a malformed body
-//! is not an error, it is simply not classified.
+//! Errors: this module reports "not an overflow" as `None`; a malformed body is
+//! not an error, it is simply not classified.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;

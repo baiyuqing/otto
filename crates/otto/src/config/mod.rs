@@ -1,18 +1,14 @@
 //! Native filesystem and environment layer for configuration.
 //!
-//! Port of the file- and environment-touching half of `internal/config`
-//! (`config.go`'s `Load`, `LoadRequired`, `Save`, `DefaultPath`,
-//! `SetDefaultProfile`, and `main.go`'s `configEnvironment`). The pure
-//! schema, parsing, and resolution logic lives in `otto_core::config` and is
-//! reused here unchanged.
+//! Loading, saving, and the default path; the pure schema, parsing, and
+//! resolution logic lives in `otto_core::config`.
 //!
 //! ponytail: `default_path`, `load`, and `set_default_profile_file` each
 //! have a private `_for_home`/`_impl` twin that takes the otherwise-implicit
-//! `HOME` value or default path as an explicit argument. Go's tests reach
-//! these paths with `t.Setenv("HOME", ...)`; this workspace's `unsafe_code`
-//! lint (denied by `make rust-lint`'s `-D warnings`) forbids the
-//! `std::env::set_var` edition-2024 needs for the same trick, so tests call
-//! the `_for_home`/`_impl` twin directly instead of mutating real env.
+//! `HOME` value or default path as an explicit argument. This workspace's
+//! `unsafe_code` lint (denied by `make rust-lint`'s `-D warnings`) forbids the
+//! `std::env::set_var` edition 2024 needs, so tests call the `_for_home`/
+//! `_impl` twin directly instead of mutating the real environment.
 
 use std::collections::HashMap;
 use std::fs;
@@ -24,10 +20,9 @@ use otto_core::config::{ConfigError, File};
 
 /// An error from the native config layer: either an I/O failure opening,
 /// reading, or writing the file, or a [`ConfigError`] from otto-core's pure
-/// parsing/resolution logic. Mirrors Go's plain `error`, which callers there
-/// inspect with `os.IsNotExist` or a substring check on `Error()`;
-/// [`NativeConfigError::is_not_found`] covers the former, and `Display`
-/// (via `thiserror`) covers the latter.
+/// parsing/resolution logic. Callers distinguish a missing file with
+/// [`NativeConfigError::is_not_found`] and read everything else from
+/// `Display`.
 #[derive(Debug, thiserror::Error)]
 pub enum NativeConfigError {
     #[error(transparent)]
@@ -37,16 +32,15 @@ pub enum NativeConfigError {
 }
 
 impl NativeConfigError {
-    /// Mirrors Go's `os.IsNotExist(err)`.
+    /// Whether the failure was a missing file.
     pub fn is_not_found(&self) -> bool {
         matches!(self, NativeConfigError::Io(err) if err.kind() == io::ErrorKind::NotFound)
     }
 }
 
 /// The default config file path: `$HOME/.config/otto/config.toml`, or the
-/// literal path `~/.config/otto/config.toml` if `HOME` is unset or empty.
-/// Port of Go's `DefaultPath`, including its unexpanded `~` fallback (Go's
-/// `os.UserHomeDir()` reads `$HOME` on macOS, same as here).
+/// literal path `~/.config/otto/config.toml`, left unexpanded, if `HOME` is
+/// unset or empty.
 pub fn default_path() -> PathBuf {
     default_path_for_home(std::env::var("HOME").ok().as_deref())
 }
@@ -59,15 +53,15 @@ fn default_path_for_home(home: Option<&str>) -> PathBuf {
     [base, ".config", "otto", "config.toml"].iter().collect()
 }
 
-/// Reads and parses `path`. Unlike [`load`], a missing file is always an
-/// error, even at the default path. Port of Go's `LoadRequired`.
+/// Reads and parses `path`. Unlike [`load`], a missing file is always an error,
+/// even at the default path.
 pub fn load_required(path: &Path) -> Result<File, NativeConfigError> {
     let text = fs::read_to_string(path)?;
     Ok(otto_core::config::parse(&text)?)
 }
 
-/// Reads and parses `path`, treating a missing file at the default config
-/// path as an empty [`File`] rather than an error. Port of Go's `Load`.
+/// Reads and parses `path`, treating a missing file at the default config path
+/// as an empty [`File`] rather than an error.
 pub fn load(path: &Path) -> Result<File, NativeConfigError> {
     load_impl(path, &default_path())
 }
@@ -80,7 +74,7 @@ fn load_impl(path: &Path, default_path: &Path) -> Result<File, NativeConfigError
 }
 
 /// Serializes and writes `file` to `path`, creating parent directories and
-/// restricting the file to owner read/write (`0o600`). Port of Go's `Save`.
+/// restricting the file to owner read/write (`0o600`).
 pub fn save(path: &Path, file: &File) -> Result<(), NativeConfigError> {
     let text = otto_core::config::to_toml_string(file)?;
     if let Some(dir) = path.parent() {
@@ -91,8 +85,8 @@ pub fn save(path: &Path, file: &File) -> Result<(), NativeConfigError> {
     Ok(())
 }
 
-/// Rewrites `path`'s `default_profile` line to name `profile`, after
-/// checking the profile exists in the file. Port of Go's `SetDefaultProfile`.
+/// Rewrites `path`'s `default_profile` line to name `profile`, after checking
+/// the profile exists in the file.
 pub fn set_default_profile_file(path: &Path, profile: &str) -> Result<(), NativeConfigError> {
     set_default_profile_file_impl(path, &default_path(), profile)
 }
@@ -152,9 +146,8 @@ pub fn set_profile_thinking_file(
 
 /// The environment `otto_core::config::resolve` and `resolve_memory` may
 /// consult for `file`: a fixed set of `OTTO_*` overrides plus `HOME`, and
-/// each profile's `api_key_env`. Port of `cmd/otto/main.go`'s
-/// `configEnvironment`, which reads exactly these names (never the whole
-/// process environment) so that resolution can never be influenced by an
+/// each profile's `api_key_env`. Exactly these names are read, never the whole
+/// process environment, so that resolution can never be influenced by an
 /// unrelated or oversized environment, and so a key value never has to be
 /// logged or matched against a name pattern to redact it.
 pub fn resolution_environment(file: &File) -> HashMap<String, String> {

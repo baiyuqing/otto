@@ -1,8 +1,8 @@
 //! The dynamic `## Environment` section appended to the system prompt.
 //!
-//! Port of `cmd/otto/workspace_context.go`. It embeds content the workspace
-//! owner wrote, so the caller must pass the result through the secret
-//! redactor before it reaches a provider, exactly as `runtimeBuilder` does.
+//! It embeds content the workspace owner wrote, so the caller must pass the
+//! result through the secret redactor before it reaches a provider, exactly as
+//! `runtimeBuilder` does.
 
 use std::io::Read;
 use std::path::Path;
@@ -42,7 +42,7 @@ pub async fn workspace_context_for(
     text.push_str(&format!("cwd: {workspace_path}\n"));
     text.push_str(&format!(
         "platform: {}, date: {}\n",
-        go_os(),
+        platform_name(),
         now.format("%Y-%m-%d")
     ));
     if let Some(line) = git_status_line(workspace_path, executor, environment).await {
@@ -66,8 +66,8 @@ pub async fn workspace_context_for(
     text
 }
 
-/// Go's `runtime.GOOS` for the platforms Otto builds on.
-fn go_os() -> &'static str {
+/// The platform name the workspace context reports; macOS is `darwin`.
+fn platform_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "darwin"
     } else {
@@ -75,8 +75,8 @@ fn go_os() -> &'static str {
     }
 }
 
-/// Go's `%q` for a file name, which is JSON string syntax for the names Otto
-/// embeds (both are ASCII literals).
+/// Quotes a file name with JSON string syntax, which is what the embedded names
+/// need (both are ASCII literals).
 fn quote_go(value: &str) -> String {
     serde_json::to_string(value).expect("a string always encodes")
 }

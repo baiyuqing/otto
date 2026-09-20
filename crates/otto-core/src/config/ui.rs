@@ -1,4 +1,4 @@
-//! The `[ui]` table and its resolution. Port of `internal/config/ui.go`.
+//! The `[ui]` table and its resolution.
 
 use serde::{Deserialize, Serialize};
 

@@ -1,14 +1,13 @@
 //! Deterministic text canonicalization for security boundaries.
-//! Port of `internal/safetext`.
 //!
-//! Scope: the agent's secret redactor, the sandbox environment classifier,
-//! and the `bash` tool all need this, so it lives in the shared crate. It is
-//! pure string manipulation with no I/O, so it builds for wasm32.
+//! Scope: the agent's secret redactor, the sandbox environment classifier, and
+//! the `bash` tool all need this, so it lives in the shared crate. It is pure
+//! string manipulation with no I/O, so it builds for wasm32.
 //!
-//! Ownership: every function returns owned data. [`SecretCollector`] is a
-//! plain owned value with no interior mutability, so callers serialize access
-//! through `&mut` as usual. No function performs I/O, blocks, or fails
-//! partially: a rejected value leaves the collector unchanged.
+//! Ownership: every function returns owned data. [`SecretCollector`] is a plain
+//! owned value with no interior mutability, so callers serialize access through
+//! `&mut` as usual. No function performs I/O, blocks, or fails partially: a
+//! rejected value leaves the collector unchanged.
 
 pub const MAX_SECRET_VALUES: usize = 512;
 pub const MAX_SECRET_BYTES: usize = 1 << 20;
@@ -22,8 +21,8 @@ const DYNAMIC_MARKER_COUNT: u32 = 64;
 
 /// Replaces each invalid UTF-8 byte with `U+FFFD`, leaving valid input alone.
 ///
-/// Go stores strings as bytes, so this takes bytes and returns a `String`.
-/// Callers that already hold a `&str` get their input back unchanged.
+/// This takes bytes and returns a `String`; callers that already hold a `&str`
+/// get their input back unchanged.
 pub fn canonicalize_utf8(value: &[u8]) -> String {
     String::from_utf8_lossy(value).into_owned()
 }
@@ -78,7 +77,7 @@ pub fn shared_redaction_marker(values: &[String]) -> Option<String> {
         }
         let marker = candidate.to_string();
         let encoded = serde_json::to_string(&marker).ok()?;
-        // Strip the surrounding quotes to get the escaped body, as Go does.
+        // Strip the surrounding quotes to get the escaped body.
         let serialized = &encoded[1..encoded.len() - 1];
         if contains_retained_form(&marker, values) || contains_retained_form(serialized, values) {
             continue;
@@ -149,9 +148,9 @@ impl SecretCollector {
         if value.is_empty() || self.seen.contains(&value) {
             return true;
         }
-        // Go writes `bytes > maxSecretBytes-len(value)` over signed ints; the
-        // same comparison in `usize` underflows for a value larger than the
-        // whole budget, so it is rearranged instead of negated.
+        // The budget check is written as an addition because `bytes >
+        // MAX_SECRET_BYTES - value.len()` underflows in `usize` for a value
+        // larger than the whole budget.
         if self.seen.len() >= MAX_SECRET_VALUES || self.bytes + value.len() > MAX_SECRET_BYTES {
             return false;
         }

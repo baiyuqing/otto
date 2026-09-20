@@ -1,20 +1,20 @@
 //! The neutral provider contract.
 //!
-//! Port of `internal/provider`. A [`Provider`] implementation may be shared by
-//! a parent agent and its sub-agents, so `complete` takes `&self` and must be
-//! safe to call concurrently.
+//! A [`Provider`] implementation may be shared by a parent agent and its
+//! sub-agents, so `complete` takes `&self` and must be safe to call
+//! concurrently.
 //!
 //! Ownership: the request is borrowed read-only for the duration of the call
 //! and must not be retained. The returned [`Response`] belongs to the caller.
 //!
 //! Concurrency and cancellation: the `emit` callback is called synchronously
-//! and in order from inside `complete`, and must not be called after
-//! `complete` returns. When the token is cancelled, an implementation stops
-//! the call and returns [`ProviderError::Cancelled`].
+//! and in order from inside `complete`, and must not be called after `complete`
+//! returns. When the token is cancelled, an implementation stops the call and
+//! returns [`ProviderError::Cancelled`].
 //!
 //! Errors: every failure is a [`ProviderError`]. A context-window rejection is
-//! [`ProviderError::Overflow`] so the agent can distinguish it from a
-//! transport failure.
+//! [`ProviderError::Overflow`] so the agent can distinguish it from a transport
+//! failure.
 
 use tokio_util::sync::CancellationToken;
 

@@ -1,8 +1,8 @@
-//! Scope derivation ported from Go `internal/memory/scope.go`.
+//! How a record's scope ID is derived.
 //!
 //! The workspace scope ID is a digest of the physical workspace path, so the
-//! Go and Rust binaries derive the same ID for the same directory and share
-//! the rows in one database file.
+//! same directory always derives the same ID and keeps its rows in an existing
+//! database file.
 
 use sha2::{Digest, Sha256};
 

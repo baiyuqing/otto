@@ -1,6 +1,5 @@
-//! Run-loop tests ported from `internal/agent/agent_test.go`,
-//! `overflow_test.go`, `compaction_test.go`, `memory_context_test.go`, and
-//! `tasks_test.go`.
+//! Run-loop tests: the turn loop, overflow, compaction, memory context, and
+//! tasks.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1709,7 +1708,7 @@ async fn a_response_without_usage_still_emits_the_event_marked_absent() {
         )
         .await
         .expect("run");
-    // Go always emits the event and marks the absence with `present`.
+    // The event is always emitted, with the absence marked by `present`.
     assert!(collect(&events).contains(&Event::ProviderUsage {
         usage: Usage::default(),
         present: false,

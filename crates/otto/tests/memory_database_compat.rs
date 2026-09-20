@@ -1,18 +1,15 @@
-//! Database compatibility with the Go binary.
+//! Schema compatibility for `~/.otto/memory/memory.db`.
 //!
-//! The two binaries open the same `~/.otto/memory/memory.db`, so a database
-//! the Rust store creates must carry exactly the schema the Go migration
-//! writes. The expected SQL below is copied verbatim from the Go source,
-//! `internal/memory/sqlite/schema.go`, including the FTS5 shadow tables SQLite
-//! derives from the virtual-table definition.
+//! A database file written by the previously released binary must still open,
+//! so the store has to create exactly the schema below, including the FTS5
+//! shadow tables SQLite derives from the virtual-table definition.
 
 use std::collections::BTreeMap;
 
 use otto::memory::sqlite::{Options, Store};
 use otto::memory::{ListRequest, NAMESPACE_USER, Origin, Provenance, Record, Scope, UpsertRequest};
 
-/// Every object `sqlite_master` must hold, as `(type, name, sql)`. Copied from
-/// the Go migration statements.
+/// Every object `sqlite_master` must hold, as `(type, name, sql)`.
 const EXPECTED_OBJECTS: &[(&str, &str, &str)] = &[
     (
         "table",
@@ -212,7 +209,7 @@ fn sample(id: &str, scope: &Scope, key: &str, text: &str) -> Record {
 }
 
 #[test]
-fn a_rust_written_database_carries_the_go_schema() {
+fn a_new_database_carries_the_expected_schema() {
     let directory = tempfile::tempdir().expect("temp dir");
     let path = directory.path().join("memory.db");
     let store = Store::open(&path, Options::default()).expect("open");
@@ -237,7 +234,7 @@ fn a_rust_written_database_carries_the_go_schema() {
         assert_eq!(
             found.2.as_deref(),
             Some(*sql),
-            "object {name} does not match the Go migration SQL"
+            "object {name} does not match the expected SQL"
         );
     }
     for name in EXPECTED_AUTOINDEXES {
@@ -267,7 +264,7 @@ fn a_rust_written_database_carries_the_go_schema() {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("user_version");
-    assert_eq!(version, 1, "the Go migration stamps user_version 1");
+    assert_eq!(version, 1, "the schema stamps user_version 1");
 }
 
 #[test]

@@ -1,14 +1,14 @@
 //! The SQLite FTS5 memory store.
 //!
-//! Ported from Go `internal/memory/sqlite`. The Go and Rust binaries open the
-//! same database file, so the schema, the pragmas, the timestamp format and
-//! every stored JSON blob are byte-compatible rather than merely equivalent.
+//! An existing database file written by the previously released binary still
+//! opens, so the schema, the pragmas, the timestamp format and every stored
+//! JSON blob are byte-compatible rather than merely equivalent.
 //!
-//! Divergences from Go, all in hardening rather than on the wire: one
-//! mutex-guarded connection instead of a four-connection retained pool, no
-//! file-descriptor delta proofs around driver opens, no `securePath` inode
-//! retention, no poisoning or quarantine state machine, and no retry-backoff
-//! loop above SQLite's own `busy_timeout`.
+//! Hardening left out, none of it on the wire: one mutex-guarded connection
+//! rather than a four-connection retained pool, no file-descriptor delta proofs
+//! around driver opens, no inode retention for the database path, no poisoning
+//! or quarantine state machine, and no retry-backoff loop above SQLite's own
+//! `busy_timeout`.
 
 pub mod candidates;
 pub mod codec;
@@ -41,9 +41,9 @@ const SQLITE_CONSTRAINT_NOTNULL: i32 = 1299;
 const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
 const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 
-/// Go's `safeSQLiteError`. A driver error never crosses the adapter boundary:
-/// it becomes one of the domain errors, so SQLite diagnostics (which can echo
-/// row content or file paths) stay inside the store.
+/// A driver error never crosses the adapter boundary: it becomes one of the
+/// domain errors, so SQLite diagnostics (which can echo row content or file
+/// paths) stay inside the store.
 pub fn map_sqlite_error(error: rusqlite::Error) -> Error {
     let code = match &error {
         rusqlite::Error::SqliteFailure(failure, _) => failure.extended_code,
@@ -298,9 +298,9 @@ fn configure_connection(connection: &Connection, busy_timeout: Duration) -> Resu
     Ok(())
 }
 
-/// Go's `verifyFTS5Integrity`. A store whose FTS5 index disagrees with its
-/// content table would silently lose search results, so the failure is fatal
-/// at open time rather than at query time.
+/// A store whose FTS5 index disagrees with its content table would silently
+/// lose search results, so the failure is fatal at open time rather than at
+/// query time.
 fn verify_fts_integrity(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(

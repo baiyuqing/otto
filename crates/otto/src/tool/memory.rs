@@ -1,4 +1,4 @@
-//! The memory tools. Port of `internal/tool/{memory_search,remember,forget}.go`.
+//! The memory tools.
 //!
 //! `memory_search` reads; `remember` and `forget` only ever queue a candidate
 //! for human review, because the model's origin never carries write authority
@@ -6,8 +6,8 @@
 //!
 //! Ownership: each tool holds an `Arc` of the shared service, which stays open
 //! for the life of the session. Concurrency and cancellation follow the tool
-//! contract: `execute` takes `&self`, and a cancelled token yields the Go
-//! `context canceled` text before any store call.
+//! contract: `execute` takes `&self`, and a cancelled token yields the `context
+//! canceled` text before any store call.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -370,10 +370,8 @@ mod tests {
             .unwrap_or_else(|| panic!("unexpected content {content:?}"))
     }
 
-    /// Go's `TestMemorySearchToolRendersRecordsAndPlaceholder`. Go injects a
-    /// fake reader to fix the record IDs; here the real store mints them, so
-    /// the placeholder is checked by count and membership instead of by a
-    /// literal string.
+    /// The real store mints the record IDs, so the placeholder is checked by
+    /// count and membership instead of by a literal string.
     #[tokio::test]
     async fn search_renders_one_line_per_record_and_a_bounded_placeholder() {
         let (_directory, service) = service();
@@ -406,7 +404,6 @@ mod tests {
         );
     }
 
-    /// Go's `TestMemorySearchToolHandlesNoMatches`.
     #[tokio::test]
     async fn search_with_no_matches_reports_zero_records() {
         let (_directory, service) = service();
@@ -418,8 +415,7 @@ mod tests {
         assert_eq!(result.persisted_content.as_deref(), Some("0 records"));
     }
 
-    /// Go's `TestMemorySearchToolSurfacesReaderError`, with a closed service
-    /// standing in for the fake reader that returns an error.
+    /// A closed service stands in for a reader that returns an error.
     #[tokio::test]
     async fn search_surfaces_a_service_error() {
         let (_directory, service) = service();
@@ -431,7 +427,6 @@ mod tests {
         assert!(result.content.contains("closed"), "{result:?}");
     }
 
-    /// Go's `TestRememberToolProposesCreateCandidate`.
     #[tokio::test]
     async fn remember_queues_a_create_candidate_for_human_review() {
         let (_directory, service) = service();
@@ -459,7 +454,6 @@ mod tests {
         assert_eq!(candidate.proposed.source.origin, Some(Origin::Model));
     }
 
-    /// Go's `TestRememberToolProposesUpdateCandidateWhenTargetIDSet`.
     #[tokio::test]
     async fn remember_queues_an_update_candidate_when_a_target_id_is_given() {
         let (_directory, service) = service();
@@ -483,7 +477,6 @@ mod tests {
         assert_eq!(candidate.base_revision, 1);
     }
 
-    /// Go's `TestRememberToolRequiresKindAndText`.
     #[tokio::test]
     async fn remember_requires_a_kind_and_a_text() {
         let (_directory, service) = service();
@@ -494,7 +487,6 @@ mod tests {
         assert!(result.content.contains("text"), "{result:?}");
     }
 
-    /// Go's `TestForgetToolProposesForgetCandidate`.
     #[tokio::test]
     async fn forget_queues_a_forget_candidate_for_human_review() {
         let (_directory, service) = service();
@@ -519,7 +511,6 @@ mod tests {
         assert_eq!(candidate.proposed.source.origin, Some(Origin::Model));
     }
 
-    /// Go's `TestForgetToolRequiresIdentifyingFields`.
     #[tokio::test]
     async fn forget_requires_the_identifying_fields() {
         let (_directory, service) = service();
@@ -529,9 +520,8 @@ mod tests {
         assert!(result.is_error, "{result:?}");
     }
 
-    /// Go's `TestForgetToolRejectsScopeOutsideBoundScopes`. The rejection must
-    /// happen before the service is asked, so an unbound scope leaves no
-    /// candidate behind.
+    /// The rejection must happen before the service is asked, so an unbound
+    /// scope leaves no candidate behind.
     #[tokio::test]
     async fn forget_rejects_a_scope_outside_the_bound_scopes() {
         let (_directory, service) = service();

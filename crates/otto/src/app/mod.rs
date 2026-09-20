@@ -710,8 +710,7 @@ impl Controller {
     /// Port of `Controller.NewSession`.
     pub async fn new_session(&self) -> Result<(), String> {
         let admission = self.begin_replacement()?;
-        let metadata = self.current_metadata()?;
-        let runtime = self.replacement_runtime(&metadata)?;
+        let runtime = self.current_runtime()?;
         let replacement = self.fresh_replacement(&runtime).await?;
         self.commit(replacement, admission)?;
         Ok(())
@@ -846,15 +845,15 @@ impl Controller {
     /// committed state change.
     pub async fn archive_current_session(&self) -> Result<ArchiveResult, String> {
         let admission = self.begin_replacement()?;
-        let (path, metadata) = {
+        let (path, info) = {
             let state = self.lock();
             let current = state.current.as_ref().ok_or_else(|| CLOSED.to_string())?;
-            (current.session.path(), metadata_of(&current.info))
+            (current.session.path(), current.info.clone())
         };
         if path.is_empty() {
             return Err(PERSISTENCE_DISABLED.to_string());
         }
-        let runtime = self.replacement_runtime(&metadata)?;
+        let runtime = self.current_runtime_from_info(info)?;
         let replacement = self.fresh_replacement(&runtime).await?;
         match sessionfs::archive(
             &self.builder.session_root,
@@ -983,12 +982,20 @@ impl Controller {
 
     // ---- replacement helpers ----
 
-    fn current_metadata(&self) -> Result<RuntimeMetadata, String> {
-        self.lock()
+    fn current_runtime(&self) -> Result<Runtime, String> {
+        let info = self
+            .lock()
             .current
             .as_ref()
-            .map(|current| metadata_of(&current.info))
-            .ok_or_else(|| CLOSED.to_string())
+            .map(|current| current.info.clone())
+            .ok_or_else(|| CLOSED.to_string())?;
+        self.current_runtime_from_info(info)
+    }
+
+    fn current_runtime_from_info(&self, info: RuntimeInfo) -> Result<Runtime, String> {
+        let mut runtime = self.replacement_runtime(&metadata_of(&info))?;
+        runtime.thinking = info.thinking;
+        Ok(runtime)
     }
 
     /// The two gates Go applies before every replacement: persistence must be
@@ -1251,6 +1258,25 @@ mod tests {
         assert_ne!(after.session_id, before.session_id);
         assert_eq!(after.model, "gpt-alpha");
         assert_eq!(after.profile, "alpha");
+    }
+
+    #[tokio::test]
+    async fn new_session_keeps_runtime_changed_in_the_current_session() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+
+        controller.switch_profile("beta").await.expect("switch");
+        controller.set_thinking("high").await.expect("thinking");
+        let before = controller.info();
+
+        controller.new_session().await.expect("new session");
+
+        let after = controller.info();
+        assert_ne!(after.session_id, before.session_id);
+        assert_eq!(after.profile, "beta");
+        assert_eq!(after.model, "gpt-beta");
+        assert_eq!(after.thinking, "high");
     }
 
     #[tokio::test]

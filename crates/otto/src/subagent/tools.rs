@@ -31,11 +31,13 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 const DEFAULT_WAIT_TIMEOUT_SECONDS: i64 = 600;
 const MAX_WAIT_TIMEOUT_SECONDS: i64 = 3600;
 
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and cannot see this conversation. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress. Put everything the sub-agent needs into prompt: goal, relevant paths, what to report back. Pass agent to use a named definition from the Agents list.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and never sees what you do after this call. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress. Put everything the sub-agent needs into prompt: goal, relevant paths, what to report back. Pass agent to use a named definition from the Agents list.";
 
 const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown.";
 
 const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error.";
+
+const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): it sees only prompt. inherit: it also receives a copy of this conversation up to this call. Prefer, in order: (1) fresh with a self-contained prompt: goal, paths, constraints, what to report back; (2) fresh, with the context you already obtained pasted into prompt (file excerpts, tool output, decisions), so the sub-agent skips the tool calls that produced it; (3) inherit, when that context is too large or too scattered to paste and the sub-agent would otherwise repeat expensive tool calls. A sub-agent never shares your prompt cache, so inherit costs one full uncached pass over this conversation per sub-agent, and everything irrelevant to the task goes in with it.";
 
 const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task id in agent_wait, agent_status, and /task. 1 to 64 letters, digits, '_' or '-'.";
 
@@ -100,7 +102,7 @@ fn agent_definition() -> ToolDefinition {
                 "context": {
                     "type": "string",
                     "enum": ["fresh", "inherit"],
-                    "description": "fresh (default, or the definition's setting): the sub-agent starts with only prompt. inherit: it also receives a copy of this conversation up to this call; every one of its steps resends that copy, so a 60,000-token conversation costs about 480,000 input tokens over 8 steps. Prefer fresh and put what matters in prompt."
+                    "description": AGENT_CONTEXT_DESCRIPTION
                 }
             },
             "required": ["prompt"]

@@ -1,11 +1,9 @@
-//! Tool schema parity with the Go implementation.
+//! Tool schema regression pins.
 //!
-//! `testdata/go_tool_definitions.jsonl` holds one JSON object per tool,
-//! produced by marshalling `Definition()` for every tool in `internal/tool`
-//! through `encoding/json`. Go marshals maps with sorted keys and
-//! `serde_json::Value` is a `BTreeMap`, so the two encodings compare directly
-//! once both are parsed. Regenerate the golden file with a scratch program
-//! that prints `json.Marshal(tool.Definition())` for each tool.
+//! `testdata/tool_definitions.jsonl` holds one JSON object per tool, in the
+//! encoding the provider wire format produces. Both sides are parsed before
+//! they are compared, so only the decoded schema has to match, not the bytes.
+//! A schema change is deliberate: edit the matching line in the same commit.
 
 use std::collections::BTreeMap;
 
@@ -21,11 +19,11 @@ use otto::tool::skill::skill_definition;
 use otto::tool::write::write_definition;
 use otto_core::model::ToolDefinition;
 
-const GO_DEFINITIONS: &str = include_str!("testdata/go_tool_definitions.jsonl");
+const RECORDED_DEFINITIONS: &str = include_str!("testdata/tool_definitions.jsonl");
 
-/// Parses the golden file into a name-keyed map of Go schemas.
-fn go_definitions() -> BTreeMap<String, serde_json::Value> {
-    GO_DEFINITIONS
+/// Parses the golden file into a name-keyed map of recorded schemas.
+fn recorded_definitions() -> BTreeMap<String, serde_json::Value> {
+    RECORDED_DEFINITIONS
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
@@ -46,8 +44,8 @@ fn rust_definition(definition: &ToolDefinition) -> serde_json::Value {
 }
 
 #[test]
-fn every_rust_tool_schema_matches_the_go_schema() {
-    let go = go_definitions();
+fn every_tool_schema_matches_the_recorded_schema() {
+    let recorded = recorded_definitions();
     let mut rust = vec![
         read_definition(),
         write_definition(),
@@ -63,9 +61,9 @@ fn every_rust_tool_schema_matches_the_go_schema() {
     ];
     rust.extend(agent_tool_definitions());
     for definition in &rust {
-        let expected = go
+        let expected = recorded
             .get(&definition.name)
-            .unwrap_or_else(|| panic!("no Go schema recorded for {}", definition.name));
+            .unwrap_or_else(|| panic!("no schema recorded for {}", definition.name));
         assert_eq!(
             &rust_definition(definition),
             expected,
@@ -77,10 +75,10 @@ fn every_rust_tool_schema_matches_the_go_schema() {
         .iter()
         .map(|definition| (definition.name.as_str(), ()))
         .collect();
-    for name in go.keys() {
+    for name in recorded.keys() {
         assert!(
             covered.contains_key(name.as_str()),
-            "no Rust tool advertises the recorded Go schema for {name}"
+            "no tool advertises the recorded schema for {name}"
         );
     }
 }

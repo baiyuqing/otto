@@ -18,6 +18,7 @@
 //! Upgrade path: split these into dedicated overlays if a user reports the
 //! inline transcript entries as hard to scan.
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -226,11 +227,22 @@ pub(crate) struct App {
     pub cursor: usize,
     /// Bash-style prompt history for the composer's Up/Down keys.
     history: History,
-    /// How many leading [`App::entries`] have been printed into the
-    /// terminal's own scrollback and are therefore no longer Otto's to
-    /// redraw. [`App::take_committable`] is the sole writer; everything
-    /// from there on is the live region [`super::render::draw`] paints.
-    committed: usize,
+    /// `None` follows the bottom of the transcript; `Some(top)` pins the
+    /// view to that absolute wrapped-line offset from the top. Port of Go's
+    /// `autoFollow` (inverted: Go stores a bool and the last offset
+    /// separately, this folds both into one field).
+    ///
+    /// The offset is absolute rather than measured from the bottom so that
+    /// output appended during a turn extends the transcript below the pinned
+    /// rows instead of pushing them off the top.
+    pub scroll: Option<u16>,
+    /// The largest offset the last drawn frame could scroll to (its total
+    /// wrapped line count minus the transcript height), or `0` before the
+    /// first frame. [`super::render::draw`] is the sole writer; the scroll
+    /// keys read it to turn "following the bottom" into an absolute offset,
+    /// since only the renderer knows how the entries wrap at the current
+    /// width.
+    pub max_scroll: Cell<u16>,
     pub picker: Option<Picker>,
     /// The highlighted row of the slash-command suggestion panel (see
     /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
@@ -257,7 +269,8 @@ impl App {
             input: Vec::new(),
             cursor: 0,
             history,
-            committed: 0,
+            scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -304,7 +317,7 @@ impl App {
         self.entries = entries;
         self.usage = usage;
         self.info = controller.info();
-        self.committed = 0;
+        self.scroll = None;
     }
 
     pub fn refresh_info(&mut self, controller: &Controller) {
@@ -322,6 +335,7 @@ impl App {
             raw: text.into(),
             ..Entry::default()
         });
+        self.scroll = None;
     }
 
     fn ctrl_c_armed(&self, now: Instant) -> bool {
@@ -341,35 +355,47 @@ impl App {
         self.status = Some(CTRL_C_EXIT_STATUS.to_string());
     }
 
-    /// The entries that can be printed into the terminal's scrollback:
-    /// the longest run, from the commit mark, of entries nothing can still
-    /// change. An entry is still open while it is the last one of a running
-    /// turn (more text can be appended to it) or a tool call whose result
-    /// has not arrived. A pending tool call therefore holds back the
-    /// entries behind it, so what is printed stays in transcript order.
-    ///
-    /// Advances the mark past what it returns: an entry is printed once.
-    pub fn take_committable(&mut self) -> &[Entry] {
-        let busy = self.busy();
-        let start = self.committed;
-        let mut end = start;
-        while end < self.entries.len() {
-            let entry = &self.entries[end];
-            let open = (busy && end + 1 == self.entries.len())
-                || (entry.kind == Some(EntryKind::Tool) && !entry.tool_done);
-            if open {
-                break;
-            }
-            end += 1;
-        }
-        self.committed = end;
-        &self.entries[start..end]
+    fn scroll_up(&mut self, lines: u16) {
+        let top = self.scroll.unwrap_or_else(|| self.max_scroll.get());
+        self.scroll = Some(top.saturating_sub(lines));
     }
 
-    /// The entries Otto still owns on screen: everything after the commit
-    /// mark. [`super::render::draw`] paints exactly these.
-    pub fn live_entries(&self) -> &[Entry] {
-        &self.entries[self.committed.min(self.entries.len())..]
+    fn scroll_down(&mut self, lines: u16) {
+        let Some(top) = self.scroll else { return };
+        let bottom = self.max_scroll.get();
+        let next = top.saturating_add(lines);
+        self.scroll = (next < bottom).then_some(next);
+    }
+
+    /// Scrolls the transcript by one mouse-wheel notch. The wheel is its own
+    /// event rather than a synthesized key ([`super::TuiEvent::Wheel`]),
+    /// because an idle composer's Up/Down recall prompt history.
+    pub fn scroll_wheel(&mut self, up: bool) {
+        if up {
+            self.scroll_up(1);
+        } else {
+            self.scroll_down(1);
+        }
+    }
+
+    /// Applies one transcript scroll key, reporting whether `key` was one.
+    ///
+    /// Split out of [`App::handle_key`] because [`super::drive_turn`] has to
+    /// call it directly: `handle_key` drops every key while a turn is
+    /// running, and scrolling back through output as it arrives is the one
+    /// thing that still has to work then. Up/Down scroll here but not in an
+    /// idle composer, where they recall prompt history ([`History`]); the
+    /// mouse wheel arrives as [`super::TuiEvent::Wheel`] and is routed here
+    /// in both states.
+    pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up => self.scroll_up(1),
+            KeyCode::Down => self.scroll_down(1),
+            KeyCode::PageUp => self.scroll_up(10),
+            KeyCode::PageDown => self.scroll_down(10),
+            _ => return false,
+        }
+        true
     }
 
     /// Port of `handleCtrlC`'s idle branch: a lone Ctrl+C clears the composer
@@ -570,6 +596,10 @@ impl App {
                 }
                 None
             }
+            KeyCode::PageUp | KeyCode::PageDown => {
+                self.handle_scroll_key(&key);
+                None
+            }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.insert(self.cursor, ch);
                 self.cursor += 1;
@@ -644,6 +674,7 @@ impl App {
                 raw: line.to_string(),
                 ..Entry::default()
             });
+            self.scroll = None;
             return Some(Action::Prompt(line.to_string()));
         };
         if rest.is_empty() {
@@ -1229,7 +1260,8 @@ mod tests {
             input: Vec::new(),
             cursor: 0,
             history: History::default(),
-            committed: 0,
+            scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -1252,7 +1284,8 @@ mod tests {
             input: "hello".chars().collect(),
             cursor: 5,
             history: History::default(),
-            committed: 0,
+            scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -1275,7 +1308,8 @@ mod tests {
             input: "abc".chars().collect(),
             cursor: 3,
             history: History::default(),
-            committed: 0,
+            scroll: None,
+            max_scroll: Cell::new(0),
             picker: None,
             suggestion: 0,
             show_help: false,
@@ -1328,97 +1362,82 @@ mod tests {
         );
     }
 
-    /// The commit rule: an entry may be printed into the terminal's
-    /// scrollback only once nothing can still change it. That is every
-    /// entry except the last one of a running turn (still streaming) and a
-    /// tool call whose result has not arrived.
+    /// [`App::scroll`] is an absolute top offset, so a scroll key starts
+    /// from the bottom the last frame laid out and returns to following the
+    /// bottom once it reaches it again. The composer's own Up/Down recall
+    /// prompt history, so the keys that scroll an idle transcript are
+    /// PgUp/PgDn and the wheel.
     #[tokio::test]
-    async fn only_entries_that_can_no_longer_change_are_committed() {
+    async fn scroll_keys_move_an_absolute_top_offset() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.max_scroll.set(10);
+
+        app.handle_key(
+            key(KeyCode::PageUp, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(app.scroll, Some(0));
+        app.handle_key(
+            key(KeyCode::PageDown, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(app.scroll, None);
+
+        app.scroll_wheel(true);
+        assert_eq!(app.scroll, Some(9), "one wheel notch is one line");
+        app.scroll_wheel(false);
+        assert_eq!(app.scroll, None);
+    }
+
+    /// The reported bad experience: scrolling up during a streaming turn was
+    /// undone by the next delta, so the transcript snapped back to the
+    /// bottom. Following the bottom stays the default; a manual offset is
+    /// only left by a scroll key or a new prompt.
+    #[tokio::test]
+    async fn streamed_events_keep_a_manual_scroll_offset() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
 
-        app.start_turn();
         app.apply_event(Event::TextDelta {
-            text: "hello".to_string(),
+            text: "first".to_string(),
         });
-        assert!(
-            app.take_committable().is_empty(),
-            "the streaming entry can still grow"
-        );
+        assert_eq!(app.scroll, None, "an unscrolled transcript keeps following");
 
+        app.scroll = Some(4);
+        app.apply_event(Event::TextDelta {
+            text: "second".to_string(),
+        });
         app.apply_event(Event::ToolCallStarted {
             tool_name: "bash".to_string(),
             tool_call_id: "call-1".to_string(),
-            arguments: "ls".to_string(),
+            arguments: String::new(),
         });
-        let taken: Vec<String> = app
-            .take_committable()
-            .iter()
-            .map(|entry| entry.raw.clone())
-            .collect();
-        assert_eq!(
-            taken,
-            vec!["hello".to_string()],
-            "the reply is final once the tool call follows it"
-        );
-
-        app.apply_event(Event::TextDelta {
-            text: "after".to_string(),
-        });
-        assert!(
-            app.take_committable().is_empty(),
-            "the pending tool call holds back the entries behind it"
-        );
-
-        app.apply_event(Event::ToolCallFinished {
-            tool_call_id: "call-1".to_string(),
-            tool_name: "bash".to_string(),
-            result: otto_core::tool::ToolResult {
-                content: "out".to_string(),
-                ..otto_core::tool::ToolResult::default()
-            },
-        });
-        assert_eq!(
-            app.take_committable().len(),
-            1,
-            "the finished tool call commits, the streaming reply after it does not"
-        );
-
-        app.end_turn();
-        assert_eq!(
-            app.take_committable().len(),
-            1,
-            "the last entry is final once the turn ends"
-        );
-        assert!(
-            app.take_committable().is_empty(),
-            "nothing is committed twice"
-        );
+        assert_eq!(app.scroll, Some(4));
     }
 
-    /// [`App::refresh`] replaces the whole transcript (`/new`, `/resume`,
-    /// `/archive`, a profile switch), so the loaded history has to print
-    /// from the start rather than resume the previous session's mark.
+    /// A turn ignores every other key ([`App::handle_key`] returns early
+    /// while busy), but the scroll keys have to keep working so the output
+    /// arriving can be read from where the reader left off.
     #[tokio::test]
-    async fn refresh_reprints_the_transcript_from_the_start() {
+    async fn scroll_keys_work_while_a_turn_is_running() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
         let mut app = App::new(&controller);
+        app.max_scroll.set(10);
+        app.start_turn();
 
-        app.push_system("one");
-        assert_eq!(app.take_committable().len(), 1);
-
-        app.refresh(&controller);
-        app.push_system("two");
-        let taken: Vec<String> = app
-            .take_committable()
-            .iter()
-            .map(|entry| entry.raw.clone())
-            .collect();
-        assert_eq!(taken, vec!["two".to_string()]);
+        assert!(app.handle_scroll_key(&key(KeyCode::PageUp, KeyModifiers::NONE)));
+        assert_eq!(app.scroll, Some(0));
+        assert!(!app.handle_scroll_key(&key(KeyCode::Char('x'), KeyModifiers::NONE)));
     }
 
     // Port of `internal/tui/memory_test.go` against this module's own unit
@@ -1880,6 +1899,7 @@ mod tests {
         app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
         assert_eq!(app.input.iter().collect::<String>(), "/model");
         assert_eq!(app.cursor, app.input.len());
+        assert_eq!(app.scroll, None, "the transcript must not scroll");
         assert!(!app.suggestions().is_empty(), "the panel is open on /model");
 
         app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
@@ -1934,6 +1954,7 @@ mod tests {
 
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
         assert_eq!(app.suggestion, 1, "/skill then /skills");
+        assert_eq!(app.scroll, None, "the transcript must not scroll");
         app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
         assert_eq!(app.suggestion, 0, "selection wraps");
         app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);

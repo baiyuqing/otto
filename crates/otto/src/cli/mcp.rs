@@ -5,21 +5,42 @@
 //! It resolves `[mcp]` on its own and never builds a runner or controller;
 //! restarting Otto is what picks up a token this command wrote or removed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use otto_core::config::{McpAuth, McpTransport, resolve_mcp};
+use otto_core::config::{McpAuth, McpServer, McpTransport, resolve_mcp};
 use tokio_util::sync::CancellationToken;
 
 use super::login::{SharedWriter, browser_opener};
 use super::run::fail;
 
-const USAGE: &str = "usage: otto mcp login <server> | otto mcp logout <server>";
+const USAGE: &str = "usage: otto mcp login <server> | otto mcp logout <server> | otto mcp list | otto mcp add <server> --transport stdio --command CMD [--arg ARG...] [--env KEY=ENVVAR...] [--cwd DIR] | otto mcp add <server> --transport http --url URL [--header KEY=VALUE...] [--auth none|oauth] [--oauth-client-id ID] [--scope SCOPE...] | otto mcp remove <server> | otto mcp enable <server> | otto mcp disable <server>";
 
 /// Runs `otto mcp ...` and returns its exit code.
 pub async fn run(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    lookup: &HashMap<String, String>,
+    cancel: &CancellationToken,
+) -> i32 {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        return fail(stderr, USAGE);
+    };
+    match subcommand {
+        "login" | "logout" => run_login_logout(args, stdout, stderr, lookup, cancel).await,
+        "list" => run_list(args, stdout, stderr, lookup),
+        "add" => run_add(args, stdout, stderr, lookup),
+        "remove" => run_remove(args, stdout, stderr, lookup),
+        "enable" => run_enabled(args, stdout, stderr, lookup, true),
+        "disable" => run_enabled(args, stdout, stderr, lookup, false),
+        _ => fail(stderr, USAGE),
+    }
+}
+
+async fn run_login_logout(
     args: &[String],
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
@@ -111,6 +132,265 @@ pub async fn run(
         }
         Err(error) => fail(stderr, &error.to_string()),
     }
+}
+
+fn config_path_for(lookup: &HashMap<String, String>) -> Result<PathBuf, String> {
+    let home = super::run::resolve_home_for(lookup)?;
+    Ok([home.as_str(), ".config", "otto", "config.toml"]
+        .iter()
+        .collect())
+}
+
+fn load_editable_config(
+    lookup: &HashMap<String, String>,
+) -> Result<(PathBuf, otto_core::config::File), String> {
+    let path = config_path_for(lookup)?;
+    match crate::config::load_required(&path) {
+        Ok(file) => Ok((path, file)),
+        Err(error) if error.is_not_found() => Ok((path, otto_core::config::File::default())),
+        Err(_) => Err("load config: configuration is invalid or unavailable".to_string()),
+    }
+}
+
+fn save_editable_config(path: &Path, file: &otto_core::config::File) -> Result<(), String> {
+    crate::config::save(path, file)
+        .map_err(|_| "write config: configuration could not be saved".to_string())
+}
+
+fn valid_server_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn run_list(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    lookup: &HashMap<String, String>,
+) -> i32 {
+    if args.len() != 1 {
+        return fail(stderr, USAGE);
+    }
+    let Ok((_, file)) = load_editable_config(lookup) else {
+        return fail(
+            stderr,
+            "load config: configuration is invalid or unavailable",
+        );
+    };
+    if file.mcp.servers.is_empty() {
+        let _ = writeln!(stdout, "no MCP servers configured");
+        return 0;
+    }
+    for (name, server) in &file.mcp.servers {
+        let enabled = if server.enabled.unwrap_or(true) {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let auth = if server.auth.as_deref() == Some("oauth") {
+            "oauth"
+        } else {
+            "none"
+        };
+        let _ = writeln!(stdout, "{name}\t{}\t{enabled}\t{auth}", server.transport);
+    }
+    0
+}
+
+#[derive(Default)]
+struct AddArgs {
+    name: String,
+    transport: String,
+    command: Option<String>,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    cwd: Option<String>,
+    url: Option<String>,
+    headers: BTreeMap<String, String>,
+    auth: Option<String>,
+    oauth_client_id: Option<String>,
+    oauth_scopes: Vec<String>,
+}
+
+fn parse_add(args: &[String]) -> Result<AddArgs, String> {
+    let [_, name, rest @ ..] = args else {
+        return Err(USAGE.to_string());
+    };
+    if !valid_server_name(name) {
+        return Err("invalid MCP server name: allowed [A-Za-z0-9_-], 1..32 bytes".to_string());
+    }
+    let mut parsed = AddArgs {
+        name: name.clone(),
+        ..AddArgs::default()
+    };
+    let mut index = 0;
+    while index < rest.len() {
+        let flag = rest[index].as_str();
+        let Some(value) = rest.get(index + 1) else {
+            return Err(USAGE.to_string());
+        };
+        match flag {
+            "--transport" => parsed.transport = value.clone(),
+            "--command" => parsed.command = Some(value.clone()),
+            "--arg" => parsed.args.push(value.clone()),
+            "--env" => {
+                let Some((key, var)) = value.split_once('=') else {
+                    return Err("--env must be KEY=ENVVAR".to_string());
+                };
+                parsed.env.insert(key.to_string(), format!("${{{var}}}"));
+            }
+            "--cwd" => parsed.cwd = Some(value.clone()),
+            "--url" => parsed.url = Some(value.clone()),
+            "--header" => {
+                let Some((key, header_value)) = value.split_once('=') else {
+                    return Err("--header must be KEY=VALUE".to_string());
+                };
+                parsed
+                    .headers
+                    .insert(key.to_string(), header_value.to_string());
+            }
+            "--auth" => parsed.auth = Some(value.clone()),
+            "--oauth-client-id" => parsed.oauth_client_id = Some(value.clone()),
+            "--scope" => parsed.oauth_scopes.push(value.clone()),
+            _ => return Err(USAGE.to_string()),
+        }
+        index += 2;
+    }
+    match parsed.transport.as_str() {
+        "stdio" if parsed.command.is_some() => Ok(parsed),
+        "stdio" => Err("--command is required for stdio MCP servers".to_string()),
+        "http" if parsed.url.is_some() => Ok(parsed),
+        "http" => Err("--url is required for HTTP MCP servers".to_string()),
+        _ => Err("--transport must be stdio or http".to_string()),
+    }
+}
+
+fn server_from_add(parsed: AddArgs) -> McpServer {
+    match parsed.transport.as_str() {
+        "stdio" => McpServer {
+            transport: "stdio".to_string(),
+            command: parsed.command,
+            args: (!parsed.args.is_empty()).then_some(parsed.args),
+            env: (!parsed.env.is_empty()).then_some(parsed.env),
+            cwd: parsed.cwd,
+            ..McpServer::default()
+        },
+        "http" => McpServer {
+            transport: "http".to_string(),
+            url: parsed.url,
+            headers: (!parsed.headers.is_empty()).then_some(parsed.headers),
+            auth: parsed.auth,
+            oauth_client_id: parsed.oauth_client_id,
+            oauth_scopes: (!parsed.oauth_scopes.is_empty()).then_some(parsed.oauth_scopes),
+            ..McpServer::default()
+        },
+        _ => McpServer::default(),
+    }
+}
+
+fn run_add(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    lookup: &HashMap<String, String>,
+) -> i32 {
+    let parsed = match parse_add(args) {
+        Ok(parsed) => parsed,
+        Err(message) => return fail(stderr, &message),
+    };
+    let Ok((path, mut file)) = load_editable_config(lookup) else {
+        return fail(
+            stderr,
+            "load config: configuration is invalid or unavailable",
+        );
+    };
+    if file.mcp.servers.contains_key(&parsed.name) {
+        return fail(
+            stderr,
+            &format!("MCP server already exists: {}", parsed.name),
+        );
+    }
+    let name = parsed.name.clone();
+    let uses_oauth = parsed.transport == "http" && parsed.auth.as_deref() == Some("oauth");
+    file.mcp
+        .servers
+        .insert(name.clone(), server_from_add(parsed));
+    if let Err(message) = save_editable_config(&path, &file) {
+        return fail(stderr, &message);
+    }
+    let _ = writeln!(
+        stdout,
+        "added MCP server {name}; restart Otto to connect it"
+    );
+    if uses_oauth {
+        let _ = writeln!(
+            stdout,
+            "run 'otto mcp login {name}' before restarting if this server needs OAuth"
+        );
+    }
+    0
+}
+
+fn run_remove(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    lookup: &HashMap<String, String>,
+) -> i32 {
+    let [_, name] = args else {
+        return fail(stderr, USAGE);
+    };
+    let Ok((path, mut file)) = load_editable_config(lookup) else {
+        return fail(
+            stderr,
+            "load config: configuration is invalid or unavailable",
+        );
+    };
+    if file.mcp.servers.remove(name).is_none() {
+        return fail(stderr, &format!("unknown MCP server: {name}"));
+    }
+    if let Err(message) = save_editable_config(&path, &file) {
+        return fail(stderr, &message);
+    }
+    let _ = writeln!(
+        stdout,
+        "removed MCP server {name}; restart Otto to apply changes"
+    );
+    0
+}
+
+fn run_enabled(
+    args: &[String],
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut (dyn Write + Send),
+    lookup: &HashMap<String, String>,
+    enabled: bool,
+) -> i32 {
+    let [_, name] = args else {
+        return fail(stderr, USAGE);
+    };
+    let Ok((path, mut file)) = load_editable_config(lookup) else {
+        return fail(
+            stderr,
+            "load config: configuration is invalid or unavailable",
+        );
+    };
+    let Some(server) = file.mcp.servers.get_mut(name) else {
+        return fail(stderr, &format!("unknown MCP server: {name}"));
+    };
+    server.enabled = Some(enabled);
+    if let Err(message) = save_editable_config(&path, &file) {
+        return fail(stderr, &message);
+    }
+    let verb = if enabled { "enabled" } else { "disabled" };
+    let _ = writeln!(
+        stdout,
+        "{verb} MCP server {name}; restart Otto to apply changes"
+    );
+    0
 }
 
 #[cfg(test)]
@@ -249,5 +529,161 @@ mod tests {
         let (code, stdout, stderr) = mcp(&["logout", "docs"], &lookup).await;
         assert_eq!(code, 0, "stderr = {stderr}");
         assert!(stdout.contains("no token stored for docs"), "{stdout}");
+    }
+
+    #[tokio::test]
+    async fn add_stdio_server_creates_config_without_literal_secret() {
+        let home = tempfile::tempdir().expect("home");
+        let lookup = HashMap::from([(
+            "HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+
+        let (code, stdout, stderr) = mcp(
+            &[
+                "add",
+                "github",
+                "--transport",
+                "stdio",
+                "--command",
+                "npx",
+                "--arg",
+                "-y",
+                "--arg",
+                "@modelcontextprotocol/server-github",
+                "--env",
+                "GITHUB_TOKEN=GITHUB_TOKEN",
+            ],
+            &lookup,
+        )
+        .await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(stdout.contains("added MCP server github"), "{stdout}");
+        assert!(stdout.contains("restart Otto"), "{stdout}");
+
+        let path = home.path().join(".config/otto/config.toml");
+        let text = std::fs::read_to_string(path).expect("config");
+        assert!(text.contains("[mcp.servers.github]"), "{text}");
+        assert!(text.contains("transport = \"stdio\""), "{text}");
+        assert!(text.contains("command = \"npx\""), "{text}");
+        assert!(
+            text.contains("args = [\"-y\", \"@modelcontextprotocol/server-github\"]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("GITHUB_TOKEN = \"${GITHUB_TOKEN}\""),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_http_oauth_server_and_list_it() {
+        let home = tempfile::tempdir().expect("home");
+        let lookup = HashMap::from([(
+            "HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+
+        let (code, stdout, stderr) = mcp(
+            &[
+                "add",
+                "docs",
+                "--transport",
+                "http",
+                "--url",
+                "https://mcp.example.com/mcp",
+                "--auth",
+                "oauth",
+                "--scope",
+                "mcp:tools",
+            ],
+            &lookup,
+        )
+        .await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(stdout.contains("run 'otto mcp login docs'"), "{stdout}");
+
+        let (code, stdout, stderr) = mcp(&["list"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(stdout.contains("docs\thttp\tenabled\toauth"), "{stdout}");
+
+        let text =
+            std::fs::read_to_string(home.path().join(".config/otto/config.toml")).expect("config");
+        assert!(text.contains("auth = \"oauth\""), "{text}");
+        assert!(text.contains("oauth_scopes = [\"mcp:tools\"]"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn remove_enable_and_disable_update_existing_server() {
+        let home = tempfile::tempdir().expect("home");
+        let lookup = config_with_server(
+            home.path(),
+            "docs",
+            "transport = \"http\"\nurl = \"https://mcp.example.com\"\n",
+        );
+
+        let (code, stdout, stderr) = mcp(&["disable", "docs"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(stdout.contains("disabled MCP server docs"), "{stdout}");
+        let text =
+            std::fs::read_to_string(home.path().join(".config/otto/config.toml")).expect("config");
+        assert!(text.contains("enabled = false"), "{text}");
+
+        let (code, stdout, stderr) = mcp(&["enable", "docs"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(stdout.contains("enabled MCP server docs"), "{stdout}");
+        let text =
+            std::fs::read_to_string(home.path().join(".config/otto/config.toml")).expect("config");
+        assert!(text.contains("enabled = true"), "{text}");
+
+        let (code, stdout, stderr) = mcp(&["remove", "docs"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert!(stdout.contains("removed MCP server docs"), "{stdout}");
+        let text =
+            std::fs::read_to_string(home.path().join(".config/otto/config.toml")).expect("config");
+        assert!(!text.contains("mcp.servers.docs"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn add_rejects_existing_server_and_bad_names() {
+        let home = tempfile::tempdir().expect("home");
+        let lookup = config_with_server(
+            home.path(),
+            "docs",
+            "transport = \"http\"\nurl = \"https://mcp.example.com\"\n",
+        );
+
+        let (code, _, stderr) = mcp(
+            &[
+                "add",
+                "docs",
+                "--transport",
+                "http",
+                "--url",
+                "https://other.example.com/mcp",
+            ],
+            &lookup,
+        )
+        .await;
+        assert_ne!(code, 0);
+        assert!(
+            stderr.contains("MCP server already exists: docs"),
+            "{stderr}"
+        );
+
+        let (code, _, stderr) = mcp(
+            &[
+                "add",
+                "bad.name",
+                "--transport",
+                "stdio",
+                "--command",
+                "true",
+            ],
+            &lookup,
+        )
+        .await;
+        assert_ne!(code, 0);
+        assert!(stderr.contains("invalid MCP server name"), "{stderr}");
     }
 }

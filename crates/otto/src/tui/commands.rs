@@ -19,6 +19,7 @@ pub enum SlashCommandKind {
     Help,
     Session,
     New,
+    Clear,
     Model,
     Resume,
     Archive,
@@ -56,6 +57,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/new",
         description: "start a new session",
         kind: SlashCommandKind::New,
+    },
+    SlashCommand {
+        name: "/clear",
+        description: "start a new session",
+        kind: SlashCommandKind::Clear,
     },
     SlashCommand {
         name: "/model",
@@ -194,6 +200,15 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, ["/session", "/sandbox", "/skill", "/skills"]);
+    }
+
+    #[test]
+    fn a_prefix_matches_the_clear_command() {
+        let names: Vec<&str> = matching_slash_commands("/cl")
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["/clear"]);
     }
 
     #[test]

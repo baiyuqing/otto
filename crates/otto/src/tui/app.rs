@@ -669,7 +669,7 @@ impl App {
                 }
                 Some(Action::Exit)
             }
-            SlashCommandKind::New => {
+            SlashCommandKind::New | SlashCommandKind::Clear => {
                 if !args.is_empty() {
                     self.push_system(format!("unknown command: {line}"));
                     return None;
@@ -1343,6 +1343,29 @@ mod tests {
 
     use crate::cli::testutil;
     use crate::memory::RememberRequest;
+
+    #[tokio::test]
+    async fn clear_dispatches_like_new_and_rejects_arguments() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        assert!(matches!(
+            app.dispatch_line("/clear", &controller, &cancel),
+            Some(Action::NewSession)
+        ));
+
+        assert!(
+            app.dispatch_line("/clear now", &controller, &cancel)
+                .is_none()
+        );
+        assert_eq!(
+            app.entries.last().expect("entry").raw,
+            "unknown command: /clear now"
+        );
+    }
 
     #[tokio::test]
     async fn skill_commands_push_the_catalog_and_skill_body() {

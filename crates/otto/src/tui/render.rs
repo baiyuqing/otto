@@ -290,7 +290,7 @@ fn footer_text(app: &App) -> String {
     };
     let mut text = format!(
         "{profile_model} | think {thinking} | {} | {} | tokens {}/{}",
-        app.info.sandbox.badge(),
+        app.info.sandbox.summary(),
         escape_single_line_text(&footer_workspace(&app.info.workspace)),
         format_token_count(app.usage.input_tokens),
         format_token_count(app.usage.output_tokens)
@@ -793,7 +793,10 @@ mod tests {
 
         assert!(content.contains("alpha/gpt-alpha"), "{content}");
         assert!(content.contains("think default"), "{content}");
-        assert!(content.contains("no-bash"), "{content}");
+        assert!(
+            content.contains("bash disabled · sandbox unavailable"),
+            "{content}"
+        );
         assert!(content.contains("tokens 0/0"), "{content}");
         assert!(content.contains(&session_id), "{content}");
 

@@ -31,6 +31,10 @@ pub enum Command {
         run_id: String,
         retry: Option<String>,
     },
+    Fork {
+        run_id: String,
+        after_step: String,
+    },
     Approve {
         request_id: String,
     },
@@ -45,7 +49,7 @@ pub enum Command {
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let Some(action) = args.first().map(String::as_str) else {
         return Err(
-            "otto: workflow requires run, status, resume, approve, reject, or cancel".into(),
+            "otto: workflow requires run, status, resume, fork, approve, reject, or cancel".into(),
         );
     };
     match action {
@@ -98,6 +102,17 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             };
             Ok(Command::Resume { run_id, retry })
         }
+        "fork" => {
+            let run_id = args
+                .get(1)
+                .cloned()
+                .ok_or_else(|| "otto: workflow fork requires a run id".to_string())?;
+            let after_step = match &args[2..] {
+                [flag, step] if flag == "--after-step" => step.clone(),
+                _ => return Err("otto: invalid workflow fork arguments".to_string()),
+            };
+            Ok(Command::Fork { run_id, after_step })
+        }
         _ => Err(format!("otto: unknown workflow command {action:?}")),
     }
 }
@@ -121,6 +136,14 @@ pub async fn run_command(
         Command::Status { run_id } => controller.get(&run_id)?,
         Command::Resume { run_id, retry } => {
             let run = controller.resume(&run_id, retry.as_deref()).await?;
+            if run.status == RunStatus::Running {
+                controller.wait(&run.id).await?
+            } else {
+                run
+            }
+        }
+        Command::Fork { run_id, after_step } => {
+            let run = controller.fork(&run_id, &after_step).await?;
             if run.status == RunStatus::Running {
                 controller.wait(&run.id).await?
             } else {
@@ -359,6 +382,18 @@ mod tests {
             Ok(Command::Resume {
                 run_id: "run-1".into(),
                 retry: Some("step".into()),
+            })
+        );
+        assert_eq!(
+            parse(&[
+                "fork".into(),
+                "run-1".into(),
+                "--after-step".into(),
+                "review".into(),
+            ]),
+            Ok(Command::Fork {
+                run_id: "run-1".into(),
+                after_step: "review".into(),
             })
         );
         assert!(parse(&["run".into()]).is_err());

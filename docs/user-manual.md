@@ -170,6 +170,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `otto workflow run <name> [--input TEXT]` | Start a durable workflow and wait until it finishes or needs approval. |
 | `otto workflow status <run-id>` | Print one workflow run and its approval requests as JSON. |
 | `otto workflow resume <run-id> [--retry <step-id>]` | Resume safe pending work, or explicitly retry one interrupted step. |
+| `otto workflow fork <run-id> --after-step <step-id>` | Create a new run from that step's committed success boundary. |
 | `otto workflow approve\|reject <request-id>` | Resolve one persisted workflow approval gate. |
 | `otto workflow cancel <run-id>` | Stop active attempts, then mark the run canceled. |
 | `otto mcp list` | List MCP servers declared in the configuration file. See [MCP servers](#mcp-servers). |
@@ -1277,10 +1278,16 @@ Recovery is deliberately conservative:
   `otto workflow resume <run-id> --retry <step-id>` only after considering
   whether its last tool call may already have caused an external effect.
 
+Time travel is an explicit fork, not rewind. `otto workflow fork <run-id>
+--after-step <step-id>` creates a new run from that step's committed success
+event. Steps already succeeded by that event are copied as immutable references
+to the source run's attempts; later steps are scheduled normally. The original
+run is unchanged, and Otto does not roll back external side effects.
+
 The workflow runtime is fail-fast and supports agent, static handoff, and
 boolean approval steps. It does not implement loops, conditions, group chat,
-nested workflows, time travel, free-form human input, automatic retry, or
-OpenTelemetry export.
+nested workflows, free-form human input, automatic retry, or OpenTelemetry
+export.
 
 ## Memory
 

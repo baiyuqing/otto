@@ -2077,6 +2077,7 @@ mod tests {
             .into_iter()
             .map(|name| AgentSnapshot {
                 name,
+                write_policy: SnapshotWritePolicy::ReadOnly,
                 ..AgentSnapshot::default()
             })
             .collect();

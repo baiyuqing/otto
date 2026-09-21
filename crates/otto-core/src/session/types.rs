@@ -135,6 +135,7 @@ pub struct SessionInfo {
     pub profile: String,
     pub provider: String,
     pub model: String,
+    pub thinking: String,
     pub current: bool,
 }
 
@@ -152,6 +153,7 @@ impl Default for SessionInfo {
             profile: String::new(),
             provider: String::new(),
             model: String::new(),
+            thinking: String::new(),
             current: false,
         }
     }

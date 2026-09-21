@@ -10,6 +10,7 @@ import { Tasks } from './Tasks'
 import { UsageView } from './UsageView'
 import { mcpServerLine, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
+import logo from '../logo.svg'
 
 setToken(loadToken())
 
@@ -415,7 +416,7 @@ export function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand" aria-label="Otto Web UI">
-          <span className="brand-mark">O</span>
+          <img className="brand-mark" src={logo} alt="" />
           <div>
             <div className="brand-name">Otto</div>
             <div className="brand-subtitle">local agent</div>

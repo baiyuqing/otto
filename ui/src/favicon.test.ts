@@ -13,6 +13,7 @@ describe('web UI page icon', () => {
     // Vite only rewrites a relative href into the hashed assets/ output the
     // server routes; a root-relative one would 404 behind /assets/{*path}.
     expect(icon?.[1]).toMatch(/^\.\//)
+    expect(icon?.[1]).toMatch(/\.svg$/)
     expect(existsSync(join(root, icon![1]))).toBe(true)
   })
 })

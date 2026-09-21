@@ -171,6 +171,14 @@ describe('idle wake follow', () => {
     expect(api.usageDaily).toHaveBeenCalledWith(30)
   })
 
+  it('shows the Otto logo in the header', async () => {
+    await openIdleSession()
+
+    const mark = document.querySelector('.brand-mark')
+    expect(mark?.tagName).toBe('IMG')
+    expect(mark?.getAttribute('alt')).toBe('')
+  })
+
   it('lists MCP servers for the /mcp command', async () => {
     await openIdleSession()
     api.listMcp.mockResolvedValue({

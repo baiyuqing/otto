@@ -24,4 +24,5 @@ pub mod serve;
 #[cfg(test)]
 pub mod testutil;
 pub mod wiring;
+pub mod workflow;
 pub mod workspace_context;

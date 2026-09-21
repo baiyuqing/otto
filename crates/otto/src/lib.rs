@@ -19,3 +19,4 @@ pub mod tool;
 pub mod tui;
 pub mod urlprivacy;
 pub mod usage;
+pub mod workflow;

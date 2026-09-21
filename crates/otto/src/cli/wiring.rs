@@ -198,6 +198,7 @@ pub struct CatalogWiring {
 /// What the sub-agent runner contributes to the parent's agent options.
 #[derive(Default)]
 pub struct SubagentWiring {
+    pub runner: Option<Arc<SubagentRunner>>,
     pub tasks: Option<Arc<Tasks>>,
     pub inbox: Option<Arc<Inbox>>,
     /// The session's timer registry, absent when the timer tools are not
@@ -432,8 +433,9 @@ impl Builder {
             let _ = writeln!(stderr, "warning: {warning}");
         }
 
+        let runner = Arc::new(runner);
         let inbox = Arc::clone(tasks.notifications());
-        tools.extend(subagent::tools::tools(&Arc::new(runner)));
+        tools.extend(subagent::tools::tools(&runner));
         // Parent-only; the child registry drops the timer tools by name.
         let reminders = Arc::new(match persist {
             Some(path) => Reminders::with_persist(Arc::clone(&inbox), path),
@@ -441,6 +443,7 @@ impl Builder {
         });
         tools.extend(remind::tools(&reminders));
         Ok(SubagentWiring {
+            runner: Some(runner),
             tasks: Some(tasks),
             inbox: Some(inbox),
             reminders: Some(reminders),

@@ -32,6 +32,44 @@ export interface McpServer {
   error: string | null
 }
 
+export interface WorkflowStep {
+  id: string
+  kind: 'agent' | 'approval'
+  agent: string
+  prompt: string
+  needs: string[]
+  status: 'pending' | 'ready' | 'running' | 'waiting' | 'succeeded' | 'failed' | 'canceled' | 'interrupted'
+  attempt: number
+  result: string
+  error: string
+  transcript_path: string
+}
+
+export interface WorkflowRun {
+  id: string
+  workflow: string
+  workspace: string
+  profile: string
+  provider: string
+  model: string
+  input: string
+  status: 'running' | 'waiting' | 'paused' | 'succeeded' | 'failed' | 'canceled'
+  steps: WorkflowStep[]
+}
+
+export interface WorkflowRequest {
+  id: string
+  run_id: string
+  step_id: string
+  prompt: string
+  status: 'pending' | 'approved' | 'rejected' | 'canceled'
+}
+
+export interface WorkflowView {
+  run: WorkflowRun
+  requests: WorkflowRequest[]
+}
+
 const TOKEN_KEY = 'otto.token'
 
 // loadToken takes the token from the startup URL's query string, keeps it
@@ -113,6 +151,18 @@ export const api = {
     json<{ prompt: string }>(`/v1/sessions/${id}/approvals/${approvalId}`, { method: 'POST' }),
   compact: (id: string, focus: string, signal?: AbortSignal) =>
     json<Compaction>(`/v1/sessions/${id}/compact`, { method: 'POST', body: JSON.stringify({ focus }), signal }),
+  listWorkflows: () => json<{ runs: WorkflowRun[] }>('/v1/workflows'),
+  startWorkflow: (name: string, input: string) =>
+    json<WorkflowView>('/v1/workflows', { method: 'POST', body: JSON.stringify({ name, input }) }),
+  getWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/${id}`),
+  resumeWorkflow: (id: string, retry?: string) =>
+    json<WorkflowView>(`/v1/workflows/${id}/resume`, {
+      method: 'POST',
+      body: JSON.stringify(retry ? { retry } : {}),
+    }),
+  cancelWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/${id}/cancel`, { method: 'POST' }),
+  approveWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/requests/${id}/approve`, { method: 'POST' }),
+  rejectWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/requests/${id}/reject`, { method: 'POST' }),
 
   // startTurn opens the turn's event stream from sequence 0.
   startTurn: (id: string, text: string, image?: { data: string; mime_type: string }) =>

@@ -24,9 +24,11 @@ what the CLI actually does today.
 11. [Tools and safety](#tools-and-safety)
 12. [Headless mode](#headless-mode)
 13. [Agent server](#agent-server)
-14. [Memory](#memory)
-15. [Skills](#skills)
-16. [Troubleshooting](#troubleshooting)
+14. [Durable workflows](#durable-workflows)
+15. [Memory](#memory)
+16. [Skills](#skills)
+17. [MCP servers](#mcp-servers)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -165,6 +167,11 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
 | `otto logout` | Remove stored ChatGPT credentials. |
 | `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
+| `otto workflow run <name> [--input TEXT]` | Start a durable workflow and wait until it finishes or needs approval. |
+| `otto workflow status <run-id>` | Print one workflow run and its approval requests as JSON. |
+| `otto workflow resume <run-id> [--retry <step-id>]` | Resume safe pending work, or explicitly retry one interrupted step. |
+| `otto workflow approve\|reject <request-id>` | Resolve one persisted workflow approval gate. |
+| `otto workflow cancel <run-id>` | Stop active attempts, then mark the run canceled. |
 | `otto mcp list` | List MCP servers declared in the configuration file. See [MCP servers](#mcp-servers). |
 | `otto mcp add <server> ...` | Add an MCP server to `~/.config/otto/config.toml`. |
 | `otto mcp remove <server>` | Remove one configured MCP server. |
@@ -998,6 +1005,13 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/timers` | List the session's outstanding timers, soonest first: `id`, `fire_at`, and `message`. |
 | `POST /v1/sessions/{id}/timers/{timer_id}/cancel` | Cancel one outstanding timer and return it. `404` if no timer has that id. |
 | `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
+| `GET/POST /v1/workflows` | List workspace workflow runs, or start one with `{"name":"...","input":"..."}`. |
+| `GET /v1/workflows/{id}` | Return a run, its steps, and its approval requests. |
+| `GET /v1/workflows/{id}/events?after=N` | Replay durable workflow SSE events after sequence `N`; unlike turn events, replay survives process restart. |
+| `POST /v1/workflows/{id}/resume` | Resume a run; `{"retry":"step-id"}` explicitly retries one interrupted step. |
+| `POST /v1/workflows/{id}/cancel` | Cancel a run after its active attempts stop. |
+| `POST /v1/workflows/requests/{id}/approve` | Approve a durable workflow gate. |
+| `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate and cancel the run. |
 | `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
 | `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |
@@ -1111,7 +1125,8 @@ backend is involved.
 `otto_session_context_input_tokens_pending{session_id,provider,model}`,
 `otto_turns_total{status}`, `otto_turns_active`, `otto_turn_duration_seconds`,
 `otto_tool_calls_total{tool,status}`, `otto_tool_call_duration_seconds{tool}`,
-`otto_provider_tokens_total{kind}`, and `otto_event_stream_clients`.
+`otto_provider_tokens_total{kind}`, `otto_event_stream_clients`,
+`otto_workflow_runs{status}`, and `otto_workflow_steps{status}`.
 
 Otto logs one line per HTTP request (method, route, status, duration, request
 ID) and one line per turn start and finish (session ID, turn ID, status,
@@ -1144,10 +1159,81 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessi
   directory and socket modes); there is no peer-uid check. Token persistence
   or rotation on the TCP listener.
 - Streaming compaction progress; `POST .../compact` returns only the result.
-- Event replay across turns; only the most recent turn per session is
-  readable.
+- Event replay across turns; only the most recent turn per session is readable.
+  Workflow events are separate and durable.
 - Idle session eviction or a limit on how many sessions can stay open.
 - SSE heartbeats.
+
+## Durable workflows
+
+Durable workflows are explicit DAGs for work whose order, concurrency, human
+gates, and restart behavior must not depend on the parent model improvising a
+plan. They are separate from the interactive session and continue to be
+inspectable after `/new`, `/resume`, or process restart.
+
+Definitions are discovered from `~/.otto/workflows/<name>.toml` and
+`<workspace>/.otto/workflows/<name>.toml`; the workspace file wins. Agent steps
+reference named definitions from the existing `AGENT.md` catalog:
+
+```toml
+version = 1
+description = "Research, review, then ask before delivery."
+
+[[steps]]
+id = "research"
+agent = "researcher"
+prompt = "Collect evidence and report it."
+
+[[steps]]
+id = "review"
+agent = "reviewer"
+prompt = "Review the evidence."
+needs = ["research"]
+
+[[steps]]
+id = "approve"
+kind = "approval"
+prompt = "Approve delivery?"
+needs = ["review"]
+
+[[steps]]
+id = "deliver"
+agent = "executor"
+prompt = "Deliver the approved result."
+needs = ["approve"]
+```
+
+Root steps run concurrently up to `[agents].max_parallel`; a dependent becomes
+ready only after every named predecessor succeeds. Each agent step receives the
+run input and the successful results of its direct predecessors under fixed
+headings. There is no template language. Definitions have at most 32 steps,
+must be acyclic, and are validated completely before the run is stored.
+
+When a run starts, Otto snapshots the workflow plus each referenced agent's
+instructions, model choice, and tool allowlist. Editing the source files affects
+new runs only. The current sandbox remains authoritative and a tool that no
+longer exists fails closed.
+
+State is stored in `~/.otto/workflows.db` with mode `0600`; attempt transcripts
+are append-only Pi v3 files under `~/.otto/workflow-sessions`. Only one Otto
+process may mutate workflows for one workspace at a time. `otto serve` exposes
+the same controller through the Web UI and `/v1/workflows` routes. While the
+server owns the workspace lock, use those surfaces rather than a second
+`otto workflow` CLI process.
+
+Recovery is deliberately conservative:
+
+- Completed steps stay completed.
+- Unstarted ready steps may run after an explicit `resume`.
+- Pending approval requests keep the same request ID.
+- A step that was running becomes `interrupted` and the run becomes `paused`.
+- Interrupted steps are never retried automatically. Use
+  `otto workflow resume <run-id> --retry <step-id>` only after considering
+  whether its last tool call may already have caused an external effect.
+
+The first version is fail-fast and supports agent and boolean approval steps.
+It does not implement loops, conditions, handoff, group chat, nested workflows,
+time travel, free-form human input, automatic retry, or OpenTelemetry export.
 
 ## Memory
 

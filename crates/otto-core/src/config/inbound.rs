@@ -19,14 +19,16 @@ impl Inbound {
 }
 
 /// The `[inbound.feishu]` table. Secrets stay in `lark-cli`'s own store, not
-/// here. `enabled` defaults to off.
+/// here. `enabled` defaults to off, and stays off in effect until `chat_ids`
+/// lists at least one chat.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Feishu {
     pub enabled: Option<bool>,
     /// `lark-cli` by default. An empty string is treated as absent.
     pub binary: Option<String>,
-    /// Restrict delivery to these `chat_id` values. Empty means every chat.
+    /// Allowlist of `chat_id` values that may deliver. Empty admits nothing,
+    /// so inbound stays off until at least one chat is listed.
     #[serde(default)]
     pub chat_ids: Vec<String>,
 }

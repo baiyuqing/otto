@@ -2,6 +2,10 @@
 
 Status: **approved** 2026-09-16. This change implements the contract below.
 
+Superseded on 2026-09-21: `chat_ids` is an allowlist, not an optional
+filter. An empty list admits nothing and `otto serve` starts no consumer.
+The "empty → do not filter by chat" behavior described below is historical.
+
 Otto's turn loop, inbox, and idle wake already accept later messages. The
 missing piece is a host-side producer that pushes work-context into the
 inbox. The first producer is Feishu. This is not a new Provider, skill, or

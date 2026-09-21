@@ -251,7 +251,7 @@ socket = "~/.otto/otto.sock"
 [inbound.feishu]
 enabled = false
 # binary = "lark-cli"
-# chat_ids = ["oc_xxx"]
+# chat_ids = ["oc_xxx"]         # required for inbound to start
 
 [profiles.example]
 provider = "openai-compatible"
@@ -303,8 +303,13 @@ Key points:
 - `[inbound.feishu]` is off by default. When `enabled = true`, `otto serve`
   spawns `lark-cli event consume im.message.receive_v1 --as bot` and delivers
   each text message to every open session inbox, which starts a wake turn
-  when the session is idle. `binary` defaults to `lark-cli`. `chat_ids`
-  restricts delivery to those chats; empty means every chat. Credentials stay
+  when the session is idle. `binary` defaults to `lark-cli`. `chat_ids` is
+  the allowlist of chats that may deliver, and it is the only authorization
+  an inbound message passes before it drives a turn that runs tools in the
+  workspace, so an empty list disables inbound: `enabled = true` with no
+  `chat_ids` logs an error and starts nothing. Anyone in a listed chat can
+  drive that session, so list chats whose membership you control.
+  Credentials stay
   in `lark-cli`'s own store, not in Otto config: unknown keys such as `token`
   fail config load. A missing binary logs an error and disables inbound;
   serve keeps running. The TUI and REPL do not spawn this consumer.
@@ -819,7 +824,8 @@ socket from config or the default path.
 
 ### Feishu inbound
 
-When `[inbound.feishu].enabled` is true, the serve process consumes Feishu
+When `[inbound.feishu].enabled` is true and `chat_ids` lists at least one
+chat, the serve process consumes Feishu
 `im.message.receive_v1` events through `lark-cli` and pushes them as
 `[feishu]` inbox messages. Open sessions receive a copy; an idle session
 starts a wake turn with HTTP `trigger` still `task`. An open Web UI follows

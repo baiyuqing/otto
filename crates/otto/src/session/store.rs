@@ -29,7 +29,9 @@ use otto_core::session::context::{
     add_resolved_usage, format_persisted_timestamp, format_rfc3339_nano, model_message_to_pi_entry,
     parse_rfc3339, pending_tool_calls, snapshot_from_state,
 };
-use otto_core::session::pi::{PiCompaction, PiCustom, PiEntry, PiFile, PiSessionInfo};
+use otto_core::session::pi::{
+    PiCompaction, PiCustom, PiEntry, PiFile, PiSessionInfo, PiThinkingLevelChange,
+};
 use otto_core::session::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, MAX_SESSION_ENTRY_BYTES,
     MAX_SESSION_FILE_BYTES, OTTO_RUNTIME_CUSTOM_TYPE, PiError, PiErrorKind, PiRecord,
@@ -48,6 +50,7 @@ pub(crate) struct StoreState {
     pub(crate) aggregate_usage: Usage,
     pub(crate) usage_present: bool,
     pub(crate) latest_compaction: Option<CompactionMetadata>,
+    pub(crate) thinking_level: String,
     pub(crate) session_name: Option<String>,
     pub(crate) entries: Vec<PiEntry>,
     pub(crate) entry_ids: HashSet<String>,
@@ -90,6 +93,7 @@ impl Store {
                 aggregate_usage: Usage::default(),
                 usage_present: false,
                 latest_compaction: None,
+                thinking_level: String::new(),
                 session_name: None,
                 entries: Vec::new(),
                 entry_ids: HashSet::new(),
@@ -141,6 +145,7 @@ impl Store {
                 aggregate_usage: state.aggregate_usage,
                 usage_present: state.usage_present,
                 latest_compaction: state.latest_compaction,
+                thinking_level: state.thinking_level,
                 session_name: state.session_name,
                 entries: decoded.entries.clone(),
                 entry_ids: state.entry_ids,
@@ -218,6 +223,40 @@ impl Store {
             .expect("session mutex")
             .latest_compaction
             .clone()
+    }
+
+    /// The model thinking effort recorded on this session, empty for the
+    /// provider default.
+    pub fn thinking_level(&self) -> String {
+        self.lock().expect("session mutex").thinking_level.clone()
+    }
+
+    /// Records the thinking effort for this session. A no-op when unchanged;
+    /// the file is created on the first real change so the level survives
+    /// resuming the session without requiring a profile-level default.
+    pub fn update_thinking_level(&self, thinking: &str) -> Result<(), PiError> {
+        let mut state = self.lock()?;
+        state.writable()?;
+        let thinking = normalize_session_thinking(thinking)?;
+        if state.thinking_level == thinking {
+            return Ok(());
+        }
+        state.ensure_file_fatal()?;
+
+        let timestamp = format_persisted_timestamp(Utc::now(), "thinking level update")?;
+        let entry_id = state.new_entry_id("thinking level")?;
+        let mut entry = PiEntry::new(
+            "thinking_level_change",
+            &entry_id,
+            state.leaf_id.clone(),
+            &timestamp,
+        );
+        entry.thinking_level_change = Some(PiThinkingLevelChange {
+            thinking_level: thinking_to_pi_level(&thinking),
+        });
+        state.append_entry(entry, entry_id)?;
+        state.thinking_level = thinking;
+        Ok(())
     }
 
     /// Records a provider, model or profile change. A no-op when nothing
@@ -685,6 +724,7 @@ pub(crate) struct ResolvedStoreState {
     pub(crate) aggregate_usage: Usage,
     pub(crate) usage_present: bool,
     pub(crate) latest_compaction: Option<CompactionMetadata>,
+    pub(crate) thinking_level: String,
     pub(crate) session_name: Option<String>,
     pub(crate) entry_ids: HashSet<String>,
     pub(crate) leaf_id: Option<String>,
@@ -703,6 +743,7 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
     let (resolved, warnings) = build_context(&decoded.entries, &leaf)?;
     let latest_compaction = latest_compaction_metadata(&decoded.entries, &leaf)?;
     let session_name = (!resolved.session_name.is_empty()).then(|| resolved.session_name.clone());
+    let thinking_level = pi_level_to_thinking(&resolved.thinking_level)?;
     Ok(ResolvedStoreState {
         header: Header {
             version: CURRENT_VERSION,
@@ -717,6 +758,7 @@ pub(crate) fn resolve_pi_store_state(decoded: &PiFile) -> Result<ResolvedStoreSt
         aggregate_usage: resolved.usage,
         usage_present: resolved.usage_present,
         latest_compaction,
+        thinking_level,
         session_name,
         entry_ids,
         leaf_id,
@@ -735,6 +777,33 @@ pub(crate) fn validate_pi_header(
     }
     parse_rfc3339(&header.timestamp)
         .ok_or_else(|| PiError::invalid("session header timestamp is invalid"))
+}
+
+fn normalize_session_thinking(thinking: &str) -> Result<String, PiError> {
+    match thinking {
+        "" | "low" | "medium" | "high" | "xhigh" | "max" => Ok(thinking.to_string()),
+        _ => Err(PiError::invalid(
+            "invalid thinking: must be one of low, medium, high, xhigh, max",
+        )),
+    }
+}
+
+fn thinking_to_pi_level(thinking: &str) -> String {
+    if thinking.is_empty() {
+        "off".to_string()
+    } else {
+        thinking.to_string()
+    }
+}
+
+fn pi_level_to_thinking(thinking: &str) -> Result<String, PiError> {
+    match thinking {
+        "" | "off" => Ok(String::new()),
+        "low" | "medium" | "high" | "xhigh" | "max" => Ok(thinking.to_string()),
+        _ => Err(PiError::invalid(
+            "invalid thinking level: must be one of off, low, medium, high, xhigh, max",
+        )),
+    }
 }
 
 /// Rejects a file above [`MAX_SESSION_FILE_BYTES`] before any of it is read.

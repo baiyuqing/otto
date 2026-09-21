@@ -618,6 +618,9 @@ impl Controller {
             (current.session.clone(), runtime)
         };
         let runner = Arc::new(self.builder.build_runner(&session, &runtime).await?);
+        session
+            .update_thinking_level(&runtime.thinking)
+            .map_err(|error| self.builder.redact_error(&error, Some(&runtime)))?;
         {
             let mut state = self.lock();
             let current = state.current.as_mut().ok_or_else(|| CLOSED.to_string())?;
@@ -1149,13 +1152,17 @@ async fn open_current(
         provider: info.provider.clone(),
         model: info.model.clone(),
     };
-    let runtime = match resolve_replacement(builder, &metadata) {
+    let session_thinking = prepared.info().thinking.clone();
+    let mut runtime = match resolve_replacement(builder, &metadata) {
         Ok(runtime) => runtime,
         Err(message) => {
             let _ = prepared.close();
             return Err(message);
         }
     };
+    if !session_thinking.is_empty() {
+        runtime.thinking = session_thinking;
+    }
     let (store, warnings) = prepared
         .activate()
         .map_err(|error| builder.redact_error(&error.to_string(), Some(&runtime)))?;
@@ -1287,6 +1294,31 @@ mod tests {
         assert_eq!(after.profile, "beta");
         assert_eq!(after.model, "gpt-beta");
         assert_eq!(after.thinking, "high");
+    }
+
+    #[tokio::test]
+    async fn resuming_a_session_keeps_the_session_thinking_level() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        controller
+            .current_session()
+            .append(user("hello"))
+            .await
+            .expect("append");
+
+        controller.set_thinking("high").await.expect("thinking");
+        let path = controller.info().session_path;
+        assert!(!path.is_empty());
+        controller.close().expect("close");
+
+        let builder = builder(workspace.path(), sessions.path());
+        let (reopened, warnings) = Controller::open(Arc::new(builder), Path::new(&path))
+            .await
+            .expect("open");
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(reopened.info().thinking, "high");
     }
 
     #[tokio::test]

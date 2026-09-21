@@ -37,6 +37,12 @@ pub struct ResumeRequest {
     retry: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForkRequest {
+    after_step: String,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventsQuery {
@@ -122,6 +128,24 @@ pub async fn resume(
     match controller.resume(&id, request.retry.as_deref()).await {
         Ok(_) => match view(controller, &id) {
             Ok(view) => json_response(StatusCode::OK, &view),
+            Err(error) => map_error(error),
+        },
+        Err(error) => map_error(error),
+    }
+}
+
+pub async fn fork(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<String>,
+    Json(request): Json<ForkRequest>,
+) -> Response {
+    let controller = match controller(&server) {
+        Some(controller) => controller,
+        None => return unavailable(),
+    };
+    match controller.fork(&id, &request.after_step).await {
+        Ok(run) => match controller.requests(&run.id) {
+            Ok(requests) => json_response(StatusCode::CREATED, &View { run, requests }),
             Err(error) => map_error(error),
         },
         Err(error) => map_error(error),

@@ -418,7 +418,10 @@ components:
         result: {type: string}
         error: {type: string}
         transcript_path: {type: string}
-      required: [id, kind, agent, prompt, needs, status, attempt, result, error, transcript_path]
+        source_run_id: {type: string, nullable: true}
+        source_step_id: {type: string, nullable: true}
+        source_attempt: {type: integer, nullable: true}
+      required: [id, kind, agent, prompt, needs, status, attempt, result, error, transcript_path, source_run_id, source_step_id, source_attempt]
     WorkflowRun:
       type: object
       properties:
@@ -429,6 +432,9 @@ components:
         provider: {type: string}
         model: {type: string}
         input: {type: string}
+        forked_from_run_id: {type: string, nullable: true}
+        forked_from_event_seq: {type: integer, nullable: true}
+        forked_from_step_id: {type: string, nullable: true}
         status:
           type: string
           enum: [running, waiting, paused, succeeded, failed, canceled]
@@ -436,7 +442,7 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/WorkflowStep"
-      required: [id, workflow, workspace, profile, provider, model, input, status, steps]
+      required: [id, workflow, workspace, profile, provider, model, input, forked_from_run_id, forked_from_event_seq, forked_from_step_id, status, steps]
     WorkflowRequest:
       type: object
       properties:
@@ -1097,6 +1103,29 @@ paths:
                 $ref: "#/components/schemas/WorkflowView"
         "409":
           description: Run cannot be resumed
+  /v1/workflows/{id}/fork:
+    parameters:
+      - $ref: "#/components/parameters/workflowID"
+    post:
+      summary: Fork a durable workflow run from a committed step boundary
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                after_step: {type: string}
+              required: [after_step]
+      responses:
+        "201":
+          description: Fork created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+        "409":
+          description: Step is not a committed success boundary
   /v1/workflows/{id}/cancel:
     parameters:
       - $ref: "#/components/parameters/workflowID"

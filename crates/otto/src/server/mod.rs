@@ -410,6 +410,7 @@ impl Server {
             .route("/v1/workflows/{id}", get(workflows::get))
             .route("/v1/workflows/{id}/events", get(workflows::events))
             .route("/v1/workflows/{id}/resume", post(workflows::resume))
+            .route("/v1/workflows/{id}/fork", post(workflows::fork))
             .route("/v1/workflows/{id}/cancel", post(workflows::cancel))
             .route(
                 "/v1/workflows/requests/{id}/approve",
@@ -2880,6 +2881,24 @@ mod tests {
         assert_eq!(events.status, StatusCode::OK);
         assert_eq!(events.header("content-type"), "text/event-stream");
         assert!(events.body.contains("step_succeeded"), "{}", events.body);
+
+        let fork = harness
+            .send_with(
+                "POST",
+                &format!("/v1/workflows/{id}/fork"),
+                Some(r#"{"after_step":"work"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(fork.status, StatusCode::CREATED, "{}", fork.body);
+        assert_eq!(
+            fork.json()["run"]["forked_from_run_id"].as_str(),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            fork.json()["run"]["forked_from_step_id"].as_str(),
+            Some("work")
+        );
     }
 
     /// Every API path the router serves.
@@ -2907,6 +2926,7 @@ mod tests {
         "/v1/workflows/{id}",
         "/v1/workflows/{id}/events",
         "/v1/workflows/{id}/resume",
+        "/v1/workflows/{id}/fork",
         "/v1/workflows/{id}/cancel",
         "/v1/workflows/requests/{id}/approve",
         "/v1/workflows/requests/{id}/reject",

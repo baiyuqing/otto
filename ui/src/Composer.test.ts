@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createElement } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Composer } from './Composer'
 
 const props = () => ({
@@ -14,6 +14,27 @@ const props = () => ({
 })
 
 afterEach(cleanup)
+
+describe('Composer text input', () => {
+  beforeEach(() => {
+    Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get() {
+        return 24 + this.value.split('\n').length * 20
+      },
+    })
+  })
+
+  it('auto-grows to fit pasted multi-line text', async () => {
+    const p = props()
+    render(createElement(Composer, p))
+    const composer = screen.getByPlaceholderText('Message Otto…') as HTMLTextAreaElement
+
+    fireEvent.change(composer, { target: { value: 'one\ntwo\nthree' } })
+
+    await waitFor(() => expect(composer.style.height).toBe('84px'))
+  })
+})
 
 describe('Composer image input', () => {
   it('sends one selected image with the prompt', async () => {

@@ -13,8 +13,11 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+
+use chrono::Utc;
 
 use otto_core::config::{ConfigError, File};
 
@@ -67,22 +70,188 @@ pub fn load(path: &Path) -> Result<File, NativeConfigError> {
 }
 
 fn load_impl(path: &Path, default_path: &Path) -> Result<File, NativeConfigError> {
-    match load_required(path) {
-        Err(err) if err.is_not_found() && path == default_path => Ok(File::default()),
-        other => other,
+    load_with_bytes(path, default_path).map(|(_, file)| file)
+}
+
+/// Reads and parses `path` like [`load_impl`], also returning the exact bytes
+/// the parse came from.
+///
+/// Those bytes are what a later write passes as `replacing`, so that a change
+/// another process made in between is detected instead of overwritten. Reading
+/// the file a second time to obtain them would reopen that window, so every
+/// read-modify-write keeps the bytes from this one read.
+fn load_with_bytes(path: &Path, default_path: &Path) -> Result<(Vec<u8>, File), NativeConfigError> {
+    match fs::read_to_string(path) {
+        Ok(text) => {
+            let file = otto_core::config::parse(&text)?;
+            Ok((text.into_bytes(), file))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound && path == default_path => {
+            Ok((Vec::new(), File::default()))
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
-/// Serializes and writes `file` to `path`, creating parent directories and
-/// restricting the file to owner read/write (`0o600`).
-pub fn save(path: &Path, file: &File) -> Result<(), NativeConfigError> {
+/// How many replaced versions of the configuration [`write_bytes`] keeps in
+/// the `backups` directory beside it.
+const BACKUP_LIMIT: usize = 10;
+
+/// Serializes and writes `file` to `path` through [`write_bytes`], replacing
+/// `replacing` — the bytes the caller read `file` from, empty for a file that
+/// did not exist.
+///
+/// Serialization is a full round trip through the schema, so comments and
+/// formatting in a hand-edited file are not preserved; the backup
+/// [`write_bytes`] takes is what the previous contents can be recovered from.
+pub fn save(path: &Path, file: &File, replacing: &[u8]) -> Result<(), NativeConfigError> {
     let text = otto_core::config::to_toml_string(file)?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+    write_bytes(path, replacing, text.as_bytes()).map_err(io_error)
+}
+
+/// Replaces `path` with `updated`, after copying the contents it replaces into
+/// `backups` beside it.
+///
+/// The write is a compare-and-swap: `replacing` is the file's contents as the
+/// caller read them (empty for a file that did not exist), and a mismatch
+/// means another process wrote the file in between, so the write is refused
+/// rather than overwriting that change. Several Otto processes can run at
+/// once, and each one reads, edits, and writes the whole file, so without this
+/// check the last writer would silently drop the others' edits. The check is
+/// not atomic against the rename below — a write landing inside that
+/// millisecond-scale window is still lost — but it turns the common case
+/// (two commands seconds apart) from silent loss into a reported error.
+///
+/// The write is atomic and never follows a symlink: a `0o600` temporary file
+/// in the same directory is written, synced, and renamed over `path`, so an
+/// interrupted write leaves the previous file intact. A backup that cannot be
+/// written fails the whole call, because the previous version would otherwise
+/// be lost exactly when it is needed.
+pub(crate) fn write_bytes(
+    path: &Path,
+    replacing: &[u8],
+    updated: &[u8],
+) -> Result<(), &'static str> {
+    let current = match fs::read(path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return Err("cannot read current file"),
+    };
+    if current.as_deref().unwrap_or_default() != replacing {
+        return Err("the configuration changed on disk; rerun to apply this change");
     }
-    fs::write(path, text)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    if fs::symlink_metadata(path).is_ok_and(|info| !info.file_type().is_file()) {
+        return Err("configuration must be a regular file, not a symlink");
+    }
+    let directory = parent_directory(path);
+    if fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .is_err()
+    {
+        return Err("cannot create configuration directory");
+    }
+    if let Some(current) = current {
+        back_up(directory, &current)?;
+    }
+    let suffix = crate::cli::runtime_builder::random_id()
+        .map_err(|_| "cannot create temporary configuration")?;
+    let temp = directory.join(format!(".otto-config-{suffix}"));
+    let write = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .map_err(|_| "cannot create temporary configuration")
+        .and_then(|mut file| {
+            file.write_all(updated)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| "cannot write configuration")
+        });
+    let result =
+        write.and_then(|()| fs::rename(&temp, path).map_err(|_| "cannot replace configuration"));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// The directory `path` lives in: the working directory for a bare file name,
+/// which [`Path::parent`] reports as an empty path rather than `None`.
+fn parent_directory(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Copies `current` into `<directory>/backups/config-<UTC timestamp>.toml`
+/// and drops all but the most recent [`BACKUP_LIMIT`] of them.
+///
+/// The timestamp is millisecond-resolution UTC in a fixed-width basic format,
+/// so the names sort chronologically; a name already taken (two writes within
+/// the same millisecond) gets a `-N` suffix, which orders arbitrarily within
+/// that millisecond and correctly against every other one.
+fn back_up(directory: &Path, current: &[u8]) -> Result<(), &'static str> {
+    let backups = directory.join("backups");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&backups)
+        .map_err(|_| "cannot create configuration backup directory")?;
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let mut attempt = 0;
+    let mut file = loop {
+        let name = match attempt {
+            0 => format!("config-{stamp}.toml"),
+            taken => format!("config-{stamp}-{taken}.toml"),
+        };
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(backups.join(name))
+        {
+            Ok(file) => break file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt < 99 => {
+                attempt += 1;
+            }
+            Err(_) => return Err("cannot write configuration backup"),
+        }
+    };
+    file.write_all(current)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "cannot write configuration backup")?;
+    prune(&backups);
     Ok(())
+}
+
+/// Removes all but the newest [`BACKUP_LIMIT`] backups, by name.
+///
+/// Best effort: a copy that cannot be removed is left behind rather than
+/// failing a write whose backup already succeeded.
+fn prune(backups: &Path) {
+    let Ok(entries) = fs::read_dir(backups) else {
+        return;
+    };
+    let mut names: Vec<_> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name())
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("config-") && name.ends_with(".toml")
+        })
+        .collect();
+    names.sort();
+    let excess = names.len().saturating_sub(BACKUP_LIMIT);
+    for name in names.into_iter().take(excess) {
+        let _ = fs::remove_file(backups.join(name));
+    }
+}
+
+fn io_error(message: &'static str) -> NativeConfigError {
+    NativeConfigError::Io(io::Error::other(message))
 }
 
 /// Rewrites `path`'s `default_profile` line to name `profile`, after checking
@@ -99,27 +268,17 @@ fn set_default_profile_file_impl(
     if profile.is_empty() {
         return Err(ConfigError::new("missing profile").into());
     }
-    let file = load_impl(path, default_path)?;
+    let (original, mut file) = load_with_bytes(path, default_path)?;
     if !file.profiles.contains_key(profile) {
         return Err(ConfigError::new(format!("profile {profile:?} not found")).into());
     }
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            let updated = otto_core::config::set_default_profile(&content, profile);
-            if let Some(dir) = path.parent() {
-                fs::create_dir_all(dir)?;
-            }
-            fs::write(path, &updated)?;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-            Ok(())
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound && path == default_path => {
-            let mut file = file;
-            file.default_profile = profile.to_string();
-            save(path, &file)
-        }
-        Err(err) => Err(err.into()),
+    if original.is_empty() {
+        file.default_profile = profile.to_string();
+        return save(path, &file, &original);
     }
+    let content = String::from_utf8_lossy(&original);
+    let updated = otto_core::config::set_default_profile(&content, profile);
+    write_bytes(path, &original, updated.as_bytes()).map_err(io_error)
 }
 
 pub fn set_profile_thinking_file(
@@ -136,12 +295,12 @@ pub fn set_profile_thinking_file(
         )
         .into());
     }
-    let mut file = load_impl(path, &default_path())?;
+    let (original, mut file) = load_with_bytes(path, &default_path())?;
     let Some(entry) = file.profiles.get_mut(profile) else {
         return Err(ConfigError::new(format!("profile {profile:?} not found")).into());
     };
     entry.thinking = thinking.to_string();
-    save(path, &file)
+    save(path, &file, &original)
 }
 
 /// The environment `otto_core::config::resolve` and `resolve_memory` may
@@ -179,12 +338,119 @@ pub fn resolution_environment(file: &File) -> HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, content).expect("write fixture");
         path
+    }
+
+    fn backups(dir: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = match fs::read_dir(dir.join("backups")) {
+            Ok(entries) => entries.map(|entry| entry.expect("entry").path()).collect(),
+            Err(_) => Vec::new(),
+        };
+        paths.sort();
+        paths
+    }
+
+    fn profile_file(name: &str) -> File {
+        File {
+            default_profile: name.into(),
+            ..File::default()
+        }
+    }
+
+    #[test]
+    fn parent_directory_of_a_bare_file_name_is_the_working_directory() {
+        assert_eq!(parent_directory(Path::new("config.toml")), Path::new("."));
+        assert_eq!(
+            parent_directory(Path::new("/home/u/.config/otto/config.toml")),
+            Path::new("/home/u/.config/otto")
+        );
+    }
+
+    #[test]
+    fn save_refuses_a_write_when_the_file_changed_since_it_was_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let concurrent = "default_profile = \"written by another otto\"\n";
+        let path = write(dir.path(), "config.toml", concurrent);
+
+        let error =
+            save(&path, &profile_file("mine"), b"what this process read").expect_err("stale write");
+
+        assert!(error.to_string().contains("changed on disk"), "{error}");
+        assert_eq!(fs::read_to_string(&path).expect("read"), concurrent);
+        assert!(backups(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn save_backs_up_the_replaced_contents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = "default_profile = \"old\"\n# a comment worth recovering\n";
+        let path = write(dir.path(), "config.toml", original);
+
+        save(&path, &profile_file("new"), original.as_bytes()).expect("save");
+
+        let backups = backups(dir.path());
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        assert_eq!(
+            fs::read_to_string(&backups[0]).expect("read backup"),
+            original
+        );
+        let mode = fs::metadata(&backups[0])
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "mode = {mode:#o}");
+    }
+
+    #[test]
+    fn save_writes_no_backup_when_there_was_no_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        save(&path, &profile_file("first"), b"").expect("save");
+
+        assert!(backups(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn save_keeps_only_the_most_recent_backups() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        for index in 0..13 {
+            let current = fs::read(&path).unwrap_or_default();
+            save(&path, &profile_file(&format!("p{index}")), &current).expect("save");
+        }
+
+        let backups = backups(dir.path());
+        assert_eq!(backups.len(), 10, "{backups:?}");
+        let oldest = fs::read_to_string(&backups[0]).expect("read oldest");
+        let newest = fs::read_to_string(&backups[9]).expect("read newest");
+        assert!(oldest.contains("\"p2\""), "{oldest}");
+        assert!(newest.contains("\"p11\""), "{newest}");
+    }
+
+    #[test]
+    fn set_default_profile_backs_up_the_replaced_contents() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let default = dir.path().join("unrelated-default.toml");
+        let original = "default_profile = \"old\"\n[profiles.old]\nprovider = \"chatgpt\"\n[profiles.new]\nprovider = \"chatgpt\"\n";
+        let path = write(dir.path(), "config.toml", original);
+
+        set_default_profile_file_impl(&path, &default, "new").expect("set_default_profile_file");
+
+        let backups = backups(dir.path());
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        assert_eq!(
+            fs::read_to_string(&backups[0]).expect("read backup"),
+            original
+        );
     }
 
     #[test]
@@ -265,7 +531,7 @@ mod tests {
             default_profile: "local".into(),
             ..File::default()
         };
-        save(&path, &file).expect("save");
+        save(&path, &file, b"").expect("save");
 
         let reloaded = load_required(&path).expect("load_required");
         assert_eq!(reloaded.default_profile, "local");

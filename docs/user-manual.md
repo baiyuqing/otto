@@ -379,6 +379,31 @@ Sandbox-driver precedence:
 Future backend authors should also read the
 [Sandbox driver authoring guide](sandbox-driver-authoring.md).
 
+### Backups of the config file
+
+Commands that write the config file — `otto mcp add`/`remove`/`enable`/
+`disable`, `otto sandbox setup`, `/model --save`, `/thinking --save`,
+`/sandbox allow`, and `/sandbox network` — first copy the contents they
+replace into `backups/` beside the file, named `config-<UTC timestamp>.toml`.
+The ten most recent copies are kept; older ones are deleted. Restore one by
+copying it back:
+
+```bash
+ls ~/.config/otto/backups/
+cp ~/.config/otto/backups/config-20260921T143001.417Z.toml ~/.config/otto/config.toml
+```
+
+Writes go to a temporary file that is renamed over the config file, so an
+interrupted write leaves the previous file intact. Editing the file yourself is
+not backed up — Otto only sees the change when it next reads the file.
+
+Each of these commands reads the whole file, edits it, and writes it back, so
+two Otto processes writing at the same time could drop one another's edits. A
+write therefore checks that the file still holds what the command read; if
+something else changed it in between, the command fails with `the configuration
+changed on disk; rerun to apply this change` and the file is left as the other
+writer left it. Rerun the command to apply your change on top.
+
 ## Frontends
 
 Selection:

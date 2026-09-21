@@ -36,6 +36,7 @@ use crate::app::Controller;
 use crate::cli::login;
 use crate::cli::repl::{Error as ReplError, is_fatal_persistence};
 use crate::cli::repl_commands;
+use crate::cli::sandbox_setup::SandboxChange;
 use crate::subagent::tasks::Tasks;
 
 use app::{Action, App};
@@ -427,6 +428,34 @@ async fn run_app<B: Backend>(
                 Ok(info) => app.push_system(format!("Sandbox: {}", info.summary())),
                 Err(message) => app.push_system(format!("/sandbox reload: {message}")),
             },
+            Some(Action::SandboxAllow(path)) => {
+                if let Err(error) = amend_sandbox(
+                    &mut app,
+                    terminal,
+                    keys,
+                    controller,
+                    cancel,
+                    SandboxChange::AllowReadPath(path),
+                )
+                .await
+                {
+                    propagate_turn_error(error)?;
+                }
+            }
+            Some(Action::SandboxNetwork(mode)) => {
+                if let Err(error) = amend_sandbox(
+                    &mut app,
+                    terminal,
+                    keys,
+                    controller,
+                    cancel,
+                    SandboxChange::Network(mode),
+                )
+                .await
+                {
+                    propagate_turn_error(error)?;
+                }
+            }
             Some(Action::Approve(id)) => match controller.approve_bash(&id) {
                 Ok(prompt) => {
                     app.push_system(format!("Approved {id} for one command."));
@@ -783,6 +812,43 @@ fn push_session_id(app: &mut App, controller: &Controller) {
 
 /// The `/model <name>` branch: switch, try to persist as the default profile,
 /// and report either way.
+/// Writes one `[sandbox]` change and reloads the sandbox with it.
+///
+/// A change that widens what commands may do is followed by a turn, since the
+/// user reaches this from a command the old configuration denied; narrowing
+/// the sandbox reports the new state and stops there.
+async fn amend_sandbox<B: Backend>(
+    app: &mut App,
+    terminal: &mut Terminal<B>,
+    keys: &mut mpsc::Receiver<TuiEvent>,
+    controller: &Controller,
+    cancel: &CancellationToken,
+    change: SandboxChange,
+) -> Result<(), ReplError> {
+    let widens = match &change {
+        SandboxChange::AllowReadPath(_) => true,
+        SandboxChange::Network(mode) => mode == "allow",
+    };
+    let summary = change.summary();
+    let info = match controller.amend_sandbox(change).await {
+        Ok(info) => info,
+        Err(message) => {
+            app.push_system(format!("/sandbox: {message}"));
+            return Ok(());
+        }
+    };
+    app.push_system(format!("Sandbox: {} ({summary})", info.summary()));
+    if !widens {
+        return Ok(());
+    }
+    let line = format!(
+        "The user changed the sandbox configuration: {summary} is now allowed. \
+         Sandbox: {}. If a command failed because of the sandbox, retry it now.",
+        info.summary()
+    );
+    run_turn(app, terminal, keys, controller, cancel, line, None).await
+}
+
 async fn switch_profile(app: &mut App, controller: &Controller, profile: &str) {
     if let Err(message) = controller.switch_profile(profile).await {
         app.push_system(format!("/model: {message}"));

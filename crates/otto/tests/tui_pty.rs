@@ -16,11 +16,12 @@
 //! `Cargo.lock`. [`Screen`] below implements exactly the vocabulary that
 //! output can contain: `CSI r;cH`/`f` (cursor position), `CSI ?25h`/`l`
 //! (cursor visibility, no grid effect), `CSI ?1000`/`1002`/`1003`/`1015`/`1006h`/`l`
-//! (mouse capture, no grid effect), `CSI ?1049h`/`l` (alt screen; enter
-//! resets the grid), `CSI ...m` (SGR, content-inert), CR/LF, and raw UTF-8 text. Any
-//! other control sequence is a bug (either in this scraper's assumptions or
-//! in the TUI emitting something unexpected) and fails the test loudly
-//! rather than silently mis-rendering.
+//! (mouse capture, no grid effect), `CSI ?2004h`/`l` (bracketed paste, no grid
+//! effect), `CSI ?1049h`/`l` (alt screen; enter resets the grid), `CSI ...m`
+//! (SGR, content-inert), CR/LF, and raw UTF-8 text. Any other control sequence
+//! is a bug (either in this scraper's assumptions or in the TUI emitting
+//! something unexpected) and fails the test loudly rather than silently
+//! mis-rendering.
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -170,12 +171,12 @@ impl Screen {
                 self.cursor_visible = false;
                 Ok(())
             }
-            // Mouse capture modes are content-inert; raw output assertions
-            // verify that the TUI enables and restores them.
+            // Input modes are content-inert; raw output assertions verify
+            // that the TUI enables and restores them.
             (true, b'h') | (true, b'l')
                 if matches!(
                     numbers.as_slice(),
-                    [1000] | [1002] | [1003] | [1006] | [1015]
+                    [1000] | [1002] | [1003] | [1006] | [1015] | [2004]
                 ) =>
             {
                 Ok(())
@@ -408,6 +409,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     // Otto has to run the text selection itself.
     wait_for_raw_bytes(&shared, b"\x1b[?1000h");
     wait_for_raw_bytes(&shared, b"\x1b[?1002h");
+    wait_for_raw_bytes(&shared, b"\x1b[?2004h");
     assert!(
         !raw_contains(&shared, b"\x1b[?1003h"),
         "any-motion reporting would wake the event loop on every pointer move"
@@ -450,5 +452,6 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     wait_for_raw_bytes(&shared, b"\x1b[?1049l");
     wait_for_raw_bytes(&shared, b"\x1b[?1002l");
     wait_for_raw_bytes(&shared, b"\x1b[?1000l");
+    wait_for_raw_bytes(&shared, b"\x1b[?2004l");
     eprintln!("[tui_pty] saw alt-screen exit sequence");
 }

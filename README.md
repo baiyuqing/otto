@@ -30,15 +30,17 @@ install` picks it up from `rust-toolchain.toml`), **Node 24+**, `wasm-pack`
 ```bash
 git clone https://github.com/baiyuqing/otto.git
 cd otto
-make build
-./otto --help
+make install
+otto --help
 ```
 
-`make build` refreshes and embeds the Web UI before compiling Otto. A direct
-`cargo build` without a prior `make ui` embeds a one-line placeholder instead.
+`make install` refreshes and embeds the Web UI, builds the release binary, and
+installs it to `~/.local/bin/otto`. Make sure `~/.local/bin` is on your `PATH`.
+A direct `cargo build` without a prior `make ui` embeds a one-line placeholder
+instead.
 
-The examples below run `./otto` from this directory. Put the binary on your
-`PATH` to use `otto` from other directories.
+If you only want a local copy in the checkout, run `make build` and then
+`./otto --help`.
 
 ## Quick start
 

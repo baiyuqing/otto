@@ -188,6 +188,7 @@ needs = ["research"]
 ```text
 otto workflow run review --input "review the current change"
 otto workflow status <run-id>
+otto workflow fork <run-id> --after-step <step-id>
 otto workflow resume <run-id> --retry <interrupted-step>
 ```
 
@@ -212,8 +213,9 @@ never retried automatically.
 - No per-skill `allowed-tools` enforcement.
 - No nested sub-agent delegation; child transcripts are not persisted.
 - Durable workflows are acyclic: no loops, conditions, group chat, nested
-  workflows, time travel, or automatic retry. Static `handoff` steps can pass
-  control to a named next agent.
+  workflows, or automatic retry. Static `handoff` steps can pass control to a
+  named next agent; `fork` creates a new run from a committed step boundary
+  without rewinding external side effects.
 - MCP stdio servers run unsandboxed, with an explicit environment (`PATH`,
   `HOME`, `TMPDIR`, `LANG`, `TERM`, plus the configured `env` table only).
   An MCP server that exits stays disconnected until Otto restarts; Otto does

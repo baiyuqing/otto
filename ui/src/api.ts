@@ -43,6 +43,9 @@ export interface WorkflowStep {
   result: string
   error: string
   transcript_path: string
+  source_run_id: string | null
+  source_step_id: string | null
+  source_attempt: number | null
 }
 
 export interface WorkflowRun {
@@ -53,6 +56,9 @@ export interface WorkflowRun {
   provider: string
   model: string
   input: string
+  forked_from_run_id: string | null
+  forked_from_event_seq: number | null
+  forked_from_step_id: string | null
   status: 'running' | 'waiting' | 'paused' | 'succeeded' | 'failed' | 'canceled'
   steps: WorkflowStep[]
 }
@@ -160,6 +166,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(retry ? { retry } : {}),
     }),
+  forkWorkflow: (id: string, afterStep: string) =>
+    json<WorkflowView>(`/v1/workflows/${id}/fork`, { method: 'POST', body: JSON.stringify({ after_step: afterStep }) }),
   cancelWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/${id}/cancel`, { method: 'POST' }),
   approveWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/requests/${id}/approve`, { method: 'POST' }),
   rejectWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/requests/${id}/reject`, { method: 'POST' }),

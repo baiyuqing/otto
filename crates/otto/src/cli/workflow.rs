@@ -190,6 +190,8 @@ impl Executor for AgentExecutor {
             tools: attempt.agent_definition.tools,
             model: attempt.agent_definition.model,
             context: attempt.agent_definition.context,
+            write_policy: attempt.agent_definition.write_policy.as_subagent(),
+            write_paths: attempt.agent_definition.write_paths,
             body: attempt.agent_definition.body,
             directory: PathBuf::new(),
             path: PathBuf::new(),

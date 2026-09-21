@@ -1210,9 +1210,42 @@ headings. There is no template language. Definitions have at most 32 steps,
 must be acyclic, and are validated completely before the run is stored.
 
 When a run starts, Otto snapshots the workflow plus each referenced agent's
-instructions, model choice, and tool allowlist. Editing the source files affects
-new runs only. The current sandbox remains authoritative and a tool that no
-longer exists fails closed.
+instructions, model choice, tool allowlist, and write policy. Editing the
+source files affects new runs only. The current sandbox remains authoritative
+and a tool that no longer exists fails closed.
+
+Agent definitions may declare a workflow write policy in `AGENT.md`
+frontmatter:
+
+```markdown
+---
+name: planner
+description: Propose edits without changing files.
+tools: read, grep, find, ls
+write_policy: propose_only
+---
+```
+
+```markdown
+---
+name: executor
+description: Apply approved edits under owned paths.
+tools: read, grep, find, ls, edit, write, bash
+write_policy: owned_paths
+write_paths: crates/otto/**, docs/**
+---
+```
+
+Supported policies are `read_only`, `propose_only`, `single_writer` (the
+default), and `owned_paths`. `read_only` and `propose_only` deny workspace
+mutation tools even if `tools` lists `edit` or `write`; `owned_paths` allows
+`edit` and `write` only for paths matching its comma-separated ownership globs
+such as `crates/otto/**` or `docs/*.md`. Workflow validation rejects agent steps
+that may run concurrently when their write scopes overlap, unless they are
+ordered with `needs` or use disjoint `owned_paths`. This makes the recommended
+shape explicit: concurrent planner/reviewer steps produce proposals, an
+approval gate records the human decision, and one executor step applies the
+approved plan.
 
 State is stored in `~/.otto/workflows.db` with mode `0600`; attempt transcripts
 are append-only Pi v3 files under `~/.otto/workflow-sessions`. Only one Otto

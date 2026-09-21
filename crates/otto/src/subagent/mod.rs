@@ -20,7 +20,7 @@ pub mod tasks;
 pub(crate) mod testsupport;
 pub mod tools;
 
-pub use definition::{Catalog, Definition};
+pub use definition::{Catalog, Definition, WritePolicy};
 pub use inherit::inherit_snapshot;
 pub use prompt::prompt_section;
 pub use tasks::{Task, TaskError, TaskStatus, Tasks};

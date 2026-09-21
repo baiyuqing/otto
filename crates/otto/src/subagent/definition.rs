@@ -42,12 +42,55 @@ pub struct Definition {
     pub model: String,
     /// `"fresh"` (the default) or `"inherit"`.
     pub context: String,
+    /// Workflow write coordination policy. The default is `single_writer` for
+    /// backward compatibility; `read_only` and `propose_only` cannot use
+    /// workspace mutation tools.
+    pub write_policy: WritePolicy,
+    /// Workspace-relative write ownership globs for `owned_paths` agents.
+    pub write_paths: Vec<String>,
     /// The Markdown after the frontmatter, trimmed. May be empty.
     pub body: String,
     /// The absolute directory holding `AGENT.md`.
     pub directory: PathBuf,
     /// The absolute path of `AGENT.md`.
     pub path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WritePolicy {
+    ReadOnly,
+    ProposeOnly,
+    #[default]
+    SingleWriter,
+    OwnedPaths,
+}
+
+impl WritePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::ProposeOnly => "propose_only",
+            Self::SingleWriter => "single_writer",
+            Self::OwnedPaths => "owned_paths",
+        }
+    }
+}
+
+impl std::str::FromStr for WritePolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "read_only" => Ok(Self::ReadOnly),
+            "propose_only" => Ok(Self::ProposeOnly),
+            "single_writer" => Ok(Self::SingleWriter),
+            "owned_paths" => Ok(Self::OwnedPaths),
+            _ => Err(
+                r#"write_policy must be "read_only", "propose_only", "single_writer", or "owned_paths""#
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 /// The set of agent definitions discovered for one runner, sorted by name.
@@ -222,6 +265,8 @@ fn load_candidate(
     let description = validate_agent_description(&fields).map_err(describe)?;
     let tools = parse_agent_tools(&fields).map_err(describe)?;
     let context = validate_agent_context(&fields).map_err(describe)?;
+    let write_policy = validate_write_policy(&fields).map_err(describe)?;
+    let write_paths = parse_write_paths(&fields, write_policy).map_err(describe)?;
     Ok(Definition {
         name,
         description,
@@ -232,6 +277,8 @@ fn load_candidate(
             .trim()
             .to_string(),
         context,
+        write_policy,
+        write_paths,
         body: body.trim().to_string(),
         directory: directory.to_path_buf(),
         path: agent_path.to_path_buf(),
@@ -316,6 +363,45 @@ fn validate_agent_context(fields: &Fields) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn validate_write_policy(fields: &Fields) -> Result<WritePolicy, String> {
+    let trimmed = fields.get("write_policy").map_or("", String::as_str).trim();
+    if trimmed.is_empty() {
+        return Ok(WritePolicy::SingleWriter);
+    }
+    trimmed.parse()
+}
+
+fn parse_write_paths(fields: &Fields, write_policy: WritePolicy) -> Result<Vec<String>, String> {
+    let Some(raw) = fields.get("write_paths") else {
+        if write_policy == WritePolicy::OwnedPaths {
+            return Err("write_paths is required when write_policy is owned_paths".to_string());
+        }
+        return Ok(Vec::new());
+    };
+    let mut paths = Vec::new();
+    for item in raw.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if item.starts_with('/')
+            || item.contains("..")
+            || item.contains('\\')
+            || item.bytes().any(|byte| byte == 0)
+        {
+            return Err(format!("write_paths item {item:?} is invalid"));
+        }
+        paths.push(item.to_string());
+    }
+    if paths.is_empty() {
+        return Err("write_paths must be a comma-separated list".to_string());
+    }
+    if write_policy != WritePolicy::OwnedPaths {
+        return Err("write_paths requires write_policy owned_paths".to_string());
+    }
+    Ok(paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +446,8 @@ mod tests {
         );
         assert_eq!(definition.model, "gpt-4o-mini");
         assert_eq!(definition.context, "inherit");
+        assert_eq!(definition.write_policy, WritePolicy::SingleWriter);
+        assert!(definition.write_paths.is_empty());
         assert_eq!(definition.body, "Review the diff.");
         assert_eq!(definition.directory, directory);
         assert_eq!(definition.path, directory.join("AGENT.md"));
@@ -410,6 +498,26 @@ mod tests {
                 "x",
                 "---\nname: x\ndescription: d\ncontext: foo\n---\nbody\n",
                 r#"context must be "fresh" or "inherit""#,
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\nwrite_policy: later\n---\nbody\n",
+                "write_policy must be",
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\nwrite_policy: owned_paths\n---\nbody\n",
+                "write_paths is required",
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\nwrite_policy: read_only\nwrite_paths: crates/**\n---\nbody\n",
+                "write_paths requires write_policy owned_paths",
+            ),
+            (
+                "x",
+                "---\nname: x\ndescription: d\nwrite_policy: owned_paths\nwrite_paths: ../outside\n---\nbody\n",
+                "write_paths item",
             ),
         ];
 
@@ -465,6 +573,33 @@ mod tests {
         assert!(warnings.is_empty(), "warnings = {warnings:?}");
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog.lookup("shared").expect("shared").body, "from b");
+    }
+
+    #[test]
+    fn write_policy_frontmatter_is_loaded() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        write_agent(
+            root.path(),
+            "executor",
+            "write_policy: owned_paths\nwrite_paths: crates/otto/**, docs/*.md\n",
+            "body\n",
+        );
+        write_agent(
+            root.path(),
+            "planner",
+            "write_policy: propose_only\ntools: read, grep\n",
+            "body\n",
+        );
+
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+
+        assert!(warnings.is_empty(), "warnings = {warnings:?}");
+        let executor = catalog.lookup("executor").expect("executor");
+        assert_eq!(executor.write_policy, WritePolicy::OwnedPaths);
+        assert_eq!(executor.write_paths, ["crates/otto/**", "docs/*.md"]);
+        let planner = catalog.lookup("planner").expect("planner");
+        assert_eq!(planner.write_policy, WritePolicy::ProposeOnly);
+        assert!(planner.write_paths.is_empty());
     }
 
     /// An AGENT.md link pointing outside its definition directory is skipped,

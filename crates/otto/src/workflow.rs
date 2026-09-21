@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     run_id TEXT NOT NULL REFERENCES workflow_runs(id),
     id TEXT NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
-    kind TEXT NOT NULL CHECK (kind IN ('agent','approval')),
+    kind TEXT NOT NULL CHECK (kind IN ('agent','approval','handoff')),
     agent TEXT NOT NULL,
     prompt TEXT NOT NULL,
     needs_json TEXT NOT NULL,
@@ -161,7 +161,7 @@ impl Catalog {
                         let names: HashSet<String> = definition
                             .steps
                             .iter()
-                            .filter(|step| step.kind == StepKind::Agent)
+                            .filter(|step| matches!(step.kind, StepKind::Agent | StepKind::Handoff))
                             .map(|step| step.agent.clone())
                             .collect();
                         definition.agents = names
@@ -250,6 +250,7 @@ pub struct Step {
 pub enum StepKind {
     #[default]
     Agent,
+    Handoff,
     Approval,
 }
 
@@ -1370,7 +1371,7 @@ impl Controller {
                             random_id().map_err(|_| "generate workflow id failed".to_string())?;
                         self.store.request_approval(&request_id, run_id, &step.id)?;
                     }
-                    StepKind::Agent => agents.push(step),
+                    StepKind::Agent | StepKind::Handoff => agents.push(step),
                 }
             }
             if agents.is_empty() {
@@ -1475,6 +1476,10 @@ fn attempt_prompt(run: &Run, step: &StepRecord) -> Result<String, String> {
         prompt.push_str("\n\n## Workflow input\n");
         prompt.push_str(&run.input);
     }
+    if step.kind == StepKind::Handoff {
+        prompt.push_str("\n\n## Handoff\nYou are receiving control from: ");
+        prompt.push_str(&step.needs.join(", "));
+    }
     for dependency in &step.needs {
         let result = run
             .steps
@@ -1512,6 +1517,7 @@ impl StepKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Agent => "agent",
+            Self::Handoff => "handoff",
             Self::Approval => "approval",
         }
     }
@@ -1519,6 +1525,7 @@ impl StepKind {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "agent" => Ok(Self::Agent),
+            "handoff" => Ok(Self::Handoff),
             "approval" => Ok(Self::Approval),
             _ => Err(unavailable()),
         }
@@ -1786,11 +1793,17 @@ pub(crate) fn parse_definition(
             ));
         }
         match raw.kind {
-            StepKind::Agent => {
+            StepKind::Agent | StepKind::Handoff => {
                 if raw.agent.is_empty() || !has_agent(&raw.agent) {
                     return Err(format!(
                         "workflow {name} step {:?} references unknown agent {:?}",
                         raw.id, raw.agent
+                    ));
+                }
+                if raw.kind == StepKind::Handoff && raw.needs.is_empty() {
+                    return Err(format!(
+                        "workflow {name} handoff step {:?} requires a dependency",
+                        raw.id
                     ));
                 }
             }
@@ -1898,7 +1911,7 @@ mod tests {
         let names: HashSet<String> = definition
             .steps
             .iter()
-            .filter(|step| step.kind == StepKind::Agent)
+            .filter(|step| matches!(step.kind, StepKind::Agent | StepKind::Handoff))
             .map(|step| step.agent.clone())
             .collect();
         definition.agents = names
@@ -1945,6 +1958,54 @@ needs = ["review"]
         assert_eq!(definition.steps[2].kind, StepKind::Approval);
         assert_eq!(definition.steps[2].needs, ["review"]);
         assert_eq!(definition.hash.len(), 64);
+    }
+
+    #[test]
+    fn definition_accepts_handoff_to_a_known_agent() {
+        let definition = parse_definition(
+            "handoff-change",
+            br#"
+version = 1
+[[steps]]
+id = "research"
+agent = "researcher"
+prompt = "Collect evidence"
+[[steps]]
+id = "review"
+kind = "handoff"
+agent = "reviewer"
+prompt = "Take over and review it"
+needs = ["research"]
+"#,
+            &|name| matches!(name, "researcher" | "reviewer"),
+        )
+        .expect("definition");
+
+        assert_eq!(definition.steps[1].kind, StepKind::Handoff);
+        assert_eq!(definition.steps[1].agent, "reviewer");
+        assert_eq!(definition.steps[1].needs, ["research"]);
+    }
+
+    #[test]
+    fn definition_rejects_a_root_handoff() {
+        let error = parse_definition(
+            "handoff",
+            br#"
+version = 1
+[[steps]]
+id = "review"
+kind = "handoff"
+agent = "reviewer"
+prompt = "Take over"
+"#,
+            &|_| true,
+        )
+        .expect_err("root handoff");
+
+        assert_eq!(
+            error,
+            "workflow handoff handoff step \"review\" requires a dependency"
+        );
     }
 
     #[test]
@@ -2148,6 +2209,40 @@ prompt = "Ship?"
         );
     }
 
+    #[test]
+    fn handoff_prompt_marks_the_transfer() {
+        let store = Store::open_in_memory();
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "research"
+agent = "researcher"
+prompt = "research"
+[[steps]]
+id = "review"
+kind = "handoff"
+agent = "reviewer"
+prompt = "review"
+needs = ["research"]
+"#,
+        );
+        store
+            .create_run("run-1", &definition, "/w", "p", "provider", "m", "input")
+            .expect("create");
+        let attempt = store
+            .claim_ready("run-1", "research", "/tmp/research.jsonl")
+            .expect("claim");
+        store
+            .finish_attempt("run-1", "research", attempt, Ok("facts"))
+            .expect("finish");
+        let run = store.get_run("run-1").expect("get").expect("run");
+        let prompt = attempt_prompt(&run, &run.steps[1]).expect("prompt");
+
+        assert!(prompt.contains("## Handoff"));
+        assert!(prompt.contains("You are receiving control from: research"));
+    }
+
     struct FakeExecutor;
 
     #[async_trait::async_trait]
@@ -2200,6 +2295,42 @@ needs = ["first"]
         assert_eq!(completed.status, RunStatus::Succeeded);
         assert_eq!(completed.steps[0].result, "first complete");
         assert_eq!(completed.steps[1].result, "second complete");
+    }
+
+    #[tokio::test]
+    async fn controller_runs_handoff_steps_to_completion() {
+        let store = Arc::new(Store::open_in_memory());
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "research"
+agent = "researcher"
+prompt = "research"
+[[steps]]
+id = "review"
+kind = "handoff"
+agent = "reviewer"
+prompt = "review"
+needs = ["research"]
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new(
+            store,
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(FakeExecutor),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            2,
+        );
+
+        let run = controller.start("flow", "").await.expect("start");
+        let completed = controller.wait(&run.id).await.expect("wait");
+        assert_eq!(completed.status, RunStatus::Succeeded);
+        assert_eq!(completed.steps[1].kind, StepKind::Handoff);
+        assert_eq!(completed.steps[1].result, "review complete");
     }
 
     #[tokio::test]

@@ -1172,8 +1172,8 @@ plan. They are separate from the interactive session and continue to be
 inspectable after `/new`, `/resume`, or process restart.
 
 Definitions are discovered from `~/.otto/workflows/<name>.toml` and
-`<workspace>/.otto/workflows/<name>.toml`; the workspace file wins. Agent steps
-reference named definitions from the existing `AGENT.md` catalog:
+`<workspace>/.otto/workflows/<name>.toml`; the workspace file wins. Agent and
+handoff steps reference named definitions from the existing `AGENT.md` catalog:
 
 ```toml
 version = 1
@@ -1203,11 +1203,24 @@ prompt = "Deliver the approved result."
 needs = ["approve"]
 ```
 
+A handoff step makes a transfer explicit while using the same execution and
+recovery behavior as an agent step:
+
+```toml
+[[steps]]
+id = "review"
+kind = "handoff"
+agent = "reviewer"
+prompt = "Take over from research and review the result."
+needs = ["research"]
+```
+
 Root steps run concurrently up to `[agents].max_parallel`; a dependent becomes
-ready only after every named predecessor succeeds. Each agent step receives the
-run input and the successful results of its direct predecessors under fixed
-headings. There is no template language. Definitions have at most 32 steps,
-must be acyclic, and are validated completely before the run is stored.
+ready only after every named predecessor succeeds. Each agent or handoff step
+receives the run input and the successful results of its direct predecessors
+under fixed headings. There is no template language. Definitions have at most
+32 steps, must be acyclic, and are validated completely before the run is
+stored.
 
 When a run starts, Otto snapshots the workflow plus each referenced agent's
 instructions, model choice, and tool allowlist. Editing the source files affects
@@ -1231,9 +1244,10 @@ Recovery is deliberately conservative:
   `otto workflow resume <run-id> --retry <step-id>` only after considering
   whether its last tool call may already have caused an external effect.
 
-The first version is fail-fast and supports agent and boolean approval steps.
-It does not implement loops, conditions, handoff, group chat, nested workflows,
-time travel, free-form human input, automatic retry, or OpenTelemetry export.
+The workflow runtime is fail-fast and supports agent, static handoff, and
+boolean approval steps. It does not implement loops, conditions, group chat,
+nested workflows, time travel, free-form human input, automatic retry, or
+OpenTelemetry export.
 
 ## Memory
 

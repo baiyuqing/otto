@@ -2,14 +2,19 @@
 # Tests use no live provider credentials; tool/dependency setup may use network.
 
 BINARY := otto
+INSTALL_DIR ?= $(HOME)/.local/bin
 
-.PHONY: all build check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test test-tui clean help
+.PHONY: all build install check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test test-tui clean help
 
 all: build
 
 build: ui ## build the Web UI and compile the Rust binary (release) to ./$(BINARY)
 	cargo build --release
 	cp target/release/$(BINARY) ./$(BINARY)
+
+install: build ## install the Otto binary to $(INSTALL_DIR)
+	install -d "$(INSTALL_DIR)"
+	install -m 0755 ./$(BINARY) "$(INSTALL_DIR)/$(BINARY)"
 
 rust-fmt: ## fail if any Rust file is not rustfmt-formatted
 	cargo fmt --all -- --check

@@ -2,6 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, type WorkflowRun, type WorkflowView } from './api'
 
 const active = (status: WorkflowRun['status']) => status === 'running' || status === 'waiting' || status === 'paused'
+const stepLabel = (step: WorkflowRun['steps'][number]) => {
+  if (step.kind === 'approval') return 'human approval'
+  if (step.kind === 'handoff') return `handoff to ${step.agent}`
+  return step.agent
+}
 
 export function WorkflowsView({ onError }: { onError: (error: unknown) => void }) {
   const [runs, setRuns] = useState<WorkflowRun[]>([])
@@ -102,7 +107,7 @@ export function WorkflowsView({ onError }: { onError: (error: unknown) => void }
                   <li key={step.id} className={step.status}>
                     <div>
                       <strong>{step.id}</strong>
-                      <span>{step.kind === 'agent' ? step.agent : 'human approval'} · {step.status} · attempt {step.attempt}</span>
+                      <span>{stepLabel(step)} · {step.status} · attempt {step.attempt}</span>
                     </div>
                     {step.status === 'interrupted' && (
                       <button type="button" onClick={() => void update(api.resumeWorkflow(selected.run.id, step.id))}>Retry</button>

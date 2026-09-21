@@ -119,8 +119,8 @@ The selected model and OpenAI-compatible endpoint must support image input.
   for local provider token trends and cache hit rate, without prompt or tool
   content.
 - [Durable workflows](docs/user-manual.md#durable-workflows): versioned TOML
-  DAGs with sequential/concurrent agent steps, persisted approvals, restart
-  recovery, CLI control, and a Web UI inspector.
+  DAGs with sequential/concurrent agent and handoff steps, persisted approvals,
+  restart recovery, CLI control, and a Web UI inspector.
 - [Configuration](docs/user-manual.md#configuration),
   [CLI reference](docs/user-manual.md#command-line-reference), and
   [troubleshooting](docs/user-manual.md#troubleshooting).
@@ -211,8 +211,9 @@ never retried automatically.
 - No automatic memory extraction or memory backup/restore/verify commands.
 - No per-skill `allowed-tools` enforcement.
 - No nested sub-agent delegation; child transcripts are not persisted.
-- Durable workflows are acyclic: no loops, conditions, handoff, group chat,
-  nested workflows, time travel, or automatic retry.
+- Durable workflows are acyclic: no loops, conditions, group chat, nested
+  workflows, time travel, or automatic retry. Static `handoff` steps can pass
+  control to a named next agent.
 - MCP stdio servers run unsandboxed, with an explicit environment (`PATH`,
   `HOME`, `TMPDIR`, `LANG`, `TERM`, plus the configured `env` table only).
   An MCP server that exits stays disconnected until Otto restarts; Otto does

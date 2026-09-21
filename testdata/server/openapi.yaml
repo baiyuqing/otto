@@ -405,7 +405,7 @@ components:
       type: object
       properties:
         id: {type: string}
-        kind: {type: string, enum: [agent, approval]}
+        kind: {type: string, enum: [agent, approval, handoff]}
         agent: {type: string}
         prompt: {type: string}
         needs:

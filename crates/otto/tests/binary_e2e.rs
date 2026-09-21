@@ -181,7 +181,7 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
         output.status.code()
     );
     assert!(
-        stdout.contains("unsandboxed approval required: run /approve approval-1"),
+        stdout.contains("Only the user can approve it, by typing /approve approval-1 in Otto"),
         "stdout:\n{stdout}"
     );
     assert!(stdout.contains("done"), "stdout:\n{stdout}");

@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   startWorkflow: vi.fn(),
   approveWorkflow: vi.fn(),
   rejectWorkflow: vi.fn(),
+  forkWorkflow: vi.fn(),
   resumeWorkflow: vi.fn(),
   cancelWorkflow: vi.fn(),
 }))
@@ -25,6 +26,9 @@ const run = {
   provider: 'openai-compatible',
   model: 'test',
   input: 'change',
+  forked_from_run_id: null,
+  forked_from_event_seq: null,
+  forked_from_step_id: null,
   status: 'waiting' as const,
   steps: [
     {
@@ -38,6 +42,9 @@ const run = {
       result: 'looks good',
       error: '',
       transcript_path: '',
+      source_run_id: 'run-source',
+      source_step_id: 'review',
+      source_attempt: 1,
     },
     {
       id: 'approve',
@@ -50,6 +57,9 @@ const run = {
       result: '',
       error: '',
       transcript_path: '',
+      source_run_id: null,
+      source_step_id: null,
+      source_attempt: null,
     },
   ],
 }
@@ -64,6 +74,16 @@ describe('WorkflowsView', () => {
     api.listWorkflows.mockResolvedValue({ runs: [run] })
     api.getWorkflow.mockResolvedValue(view)
     api.approveWorkflow.mockResolvedValue({ ...view, requests: [] })
+    api.forkWorkflow.mockResolvedValue({
+      ...view,
+      run: {
+        ...run,
+        id: 'fork-12345678',
+        forked_from_run_id: run.id,
+        forked_from_event_seq: 4,
+        forked_from_step_id: 'review',
+      },
+    })
   })
 
   afterEach(() => {
@@ -76,6 +96,10 @@ describe('WorkflowsView', () => {
     const runButton = await screen.findByRole('button', { name: /review/ })
     fireEvent.click(runButton)
     expect(await screen.findByText(/handoff to reviewer/)).toBeTruthy()
+    expect(await screen.findByText(/Copied from run-sour/)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(api.forkWorkflow).toHaveBeenCalledWith(run.id, 'review'))
     expect(await screen.findByText('Approval required · approve')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))

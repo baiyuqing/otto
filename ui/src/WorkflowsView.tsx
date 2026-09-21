@@ -83,6 +83,9 @@ export function WorkflowsView({ onError }: { onError: (error: unknown) => void }
                 <div>
                   <h2>{selected.run.workflow}</h2>
                   <code>{selected.run.id}</code>
+                  {selected.run.forked_from_run_id && (
+                    <p>Forked from {selected.run.forked_from_run_id.slice(0, 8)} after {selected.run.forked_from_step_id}</p>
+                  )}
                 </div>
                 <span className={`workflow-status ${selected.run.status}`}>{selected.run.status}</span>
                 {selected.run.status === 'running' && (
@@ -112,6 +115,10 @@ export function WorkflowsView({ onError }: { onError: (error: unknown) => void }
                     {step.status === 'interrupted' && (
                       <button type="button" onClick={() => void update(api.resumeWorkflow(selected.run.id, step.id))}>Retry</button>
                     )}
+                    {step.status === 'succeeded' && (
+                      <button type="button" onClick={() => void update(api.forkWorkflow(selected.run.id, step.id))}>Fork</button>
+                    )}
+                    {step.source_run_id && <small>Copied from {step.source_run_id.slice(0, 8)} · attempt {step.source_attempt}</small>}
                     {(step.error || step.result) && <pre>{step.error || step.result}</pre>}
                   </li>
                 ))}

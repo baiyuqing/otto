@@ -875,6 +875,9 @@ mod tests {
             provider: "openai-compatible".into(),
             model: "model".into(),
             input: String::new(),
+            forked_from_run_id: None,
+            forked_from_event_seq: None,
+            forked_from_step_id: None,
             status: crate::workflow::RunStatus::Waiting,
             steps: vec![crate::workflow::StepRecord {
                 id: "approve".into(),
@@ -887,6 +890,9 @@ mod tests {
                 result: String::new(),
                 error: String::new(),
                 transcript_path: String::new(),
+                source_run_id: None,
+                source_step_id: None,
+                source_attempt: None,
             }],
             definition: crate::workflow::Definition {
                 name: "review".into(),

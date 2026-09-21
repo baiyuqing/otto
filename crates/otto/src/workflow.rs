@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     input TEXT NOT NULL,
+    forked_from_run_id TEXT,
+    forked_from_event_seq INTEGER,
+    forked_from_step_id TEXT,
     status TEXT NOT NULL CHECK (status IN (
         'running','waiting','paused','succeeded','failed','canceled'
     )),
@@ -54,6 +57,9 @@ CREATE TABLE IF NOT EXISTS workflow_steps (
     result TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
     transcript_path TEXT NOT NULL DEFAULT '',
+    source_run_id TEXT,
+    source_step_id TEXT,
+    source_attempt INTEGER,
     PRIMARY KEY (run_id, id)
 ) STRICT;
 CREATE TABLE IF NOT EXISTS workflow_attempts (
@@ -445,6 +451,9 @@ pub struct Run {
     pub provider: String,
     pub model: String,
     pub input: String,
+    pub forked_from_run_id: Option<String>,
+    pub forked_from_event_seq: Option<i64>,
+    pub forked_from_step_id: Option<String>,
     pub status: RunStatus,
     pub steps: Vec<StepRecord>,
     #[serde(skip_serializing)]
@@ -463,6 +472,9 @@ pub struct StepRecord {
     pub result: String,
     pub error: String,
     pub transcript_path: String,
+    pub source_run_id: Option<String>,
+    pub source_step_id: Option<String>,
+    pub source_attempt: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -486,6 +498,14 @@ pub struct EventRecord {
 
 pub struct Store {
     connection: Mutex<Connection>,
+}
+
+#[derive(Clone, Debug)]
+struct CopiedStep {
+    seq: i64,
+    attempt: i64,
+    result: String,
+    transcript_path: String,
 }
 
 impl Store {
@@ -524,6 +544,7 @@ impl Store {
         connection
             .execute_batch(SCHEMA)
             .map_err(|_| unavailable())?;
+        migrate_schema(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -604,8 +625,9 @@ impl Store {
         let connection = self.connection.lock().map_err(|_| unavailable())?;
         let header = connection
             .query_row(
-                "SELECT workflow, workspace, profile, provider, model, input, status,
-                        definition_json
+                "SELECT workflow, workspace, profile, provider, model, input,
+                        forked_from_run_id, forked_from_event_seq, forked_from_step_id,
+                        status, definition_json
                  FROM workflow_runs WHERE id = ?1",
                 [id],
                 |row| {
@@ -616,22 +638,37 @@ impl Store {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
             .optional()
             .map_err(|_| unavailable())?;
-        let Some((workflow, workspace, profile, provider, model, input, status, definition_json)) =
-            header
+        let Some((
+            workflow,
+            workspace,
+            profile,
+            provider,
+            model,
+            input,
+            forked_from_run_id,
+            forked_from_event_seq,
+            forked_from_step_id,
+            status,
+            definition_json,
+        )) = header
         else {
             return Ok(None);
         };
         let mut statement = connection
             .prepare(
                 "SELECT id, kind, agent, prompt, needs_json, status, attempt,
-                        result, error, transcript_path
+                        result, error, transcript_path, source_run_id, source_step_id,
+                        source_attempt
                  FROM workflow_steps WHERE run_id = ?1 ORDER BY position",
             )
             .map_err(|_| unavailable())?;
@@ -648,13 +685,29 @@ impl Store {
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
                 ))
             })
             .map_err(|_| unavailable())?;
         let mut steps = Vec::new();
         for row in rows {
-            let (step_id, kind, agent, prompt, needs, status, attempt, result, error, path) =
-                row.map_err(|_| unavailable())?;
+            let (
+                step_id,
+                kind,
+                agent,
+                prompt,
+                needs,
+                status,
+                attempt,
+                result,
+                error,
+                path,
+                source_run_id,
+                source_step_id,
+                source_attempt,
+            ) = row.map_err(|_| unavailable())?;
             steps.push(StepRecord {
                 id: step_id,
                 kind: StepKind::parse(&kind)?,
@@ -666,6 +719,12 @@ impl Store {
                 result,
                 error,
                 transcript_path: path,
+                source_run_id,
+                source_step_id,
+                source_attempt: source_attempt
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| unavailable())?,
             });
         }
         Ok(Some(Run {
@@ -676,10 +735,139 @@ impl Store {
             provider,
             model,
             input,
+            forked_from_run_id,
+            forked_from_event_seq,
+            forked_from_step_id,
             status: RunStatus::parse(&status)?,
             steps,
             definition: serde_json::from_str(&definition_json).map_err(|_| unavailable())?,
         }))
+    }
+
+    pub fn fork_run(&self, id: &str, source_run_id: &str, after_step: &str) -> Result<Run, String> {
+        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
+        let transaction = connection.transaction().map_err(|_| unavailable())?;
+        let source = transaction
+            .query_row(
+                "SELECT workflow, definition_json, definition_hash, workspace, profile,
+                        provider, model, input
+                 FROM workflow_runs WHERE id = ?1",
+                [source_run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| unavailable())?
+            .ok_or_else(|| "workflow run not found".to_string())?;
+        let boundary_seq: i64 = transaction
+            .query_row(
+                "SELECT seq FROM workflow_events
+                 WHERE run_id = ?1 AND step_id = ?2
+                   AND kind IN ('step_succeeded','approval_approved')
+                 ORDER BY seq DESC LIMIT 1",
+                params![source_run_id, after_step],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| unavailable())?
+            .ok_or_else(|| "workflow fork boundary is not a committed success".to_string())?;
+        let definition: Definition = serde_json::from_str(&source.1).map_err(|_| unavailable())?;
+        let copied = copied_steps_at(&transaction, source_run_id, boundary_seq)?;
+        let now = timestamp();
+        transaction
+            .execute(
+                "INSERT INTO workflow_runs (
+                    id, workflow, definition_json, definition_hash, workspace,
+                    profile, provider, model, input, forked_from_run_id,
+                    forked_from_event_seq, forked_from_step_id, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    'running', ?13, ?13)",
+                params![
+                    id,
+                    source.0,
+                    source.1,
+                    source.2,
+                    source.3,
+                    source.4,
+                    source.5,
+                    source.6,
+                    source.7,
+                    source_run_id,
+                    boundary_seq,
+                    after_step,
+                    now,
+                ],
+            )
+            .map_err(|_| unavailable())?;
+        event(&transaction, id, "run_forked", after_step, "running")?;
+        for (position, step) in definition.steps.iter().enumerate() {
+            let copied_step = copied.get(step.id.as_str());
+            let status = if copied_step.is_some() {
+                StepStatus::Succeeded
+            } else if step
+                .needs
+                .iter()
+                .all(|dependency| copied.contains_key(dependency.as_str()))
+            {
+                StepStatus::Ready
+            } else {
+                StepStatus::Pending
+            };
+            transaction
+                .execute(
+                    "INSERT INTO workflow_steps (
+                        run_id, id, position, kind, agent, prompt, needs_json, status,
+                        attempt, result, transcript_path, source_run_id, source_step_id,
+                        source_attempt
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                        ?12, ?13, ?14)",
+                    params![
+                        id,
+                        step.id,
+                        position as i64,
+                        step.kind.as_str(),
+                        step.agent,
+                        step.prompt,
+                        serde_json::to_string(&step.needs).map_err(|_| unavailable())?,
+                        status.as_str(),
+                        copied_step.map(|step| step.attempt).unwrap_or(0),
+                        copied_step.map(|step| step.result.as_str()).unwrap_or(""),
+                        copied_step
+                            .map(|step| step.transcript_path.as_str())
+                            .unwrap_or(""),
+                        copied_step.map(|_| source_run_id),
+                        copied_step.map(|_| step.id.as_str()),
+                        copied_step.map(|step| step.attempt),
+                    ],
+                )
+                .map_err(|_| unavailable())?;
+            if let Some(copied_step) = copied_step {
+                let kind = match step.kind {
+                    StepKind::Approval => "approval_approved",
+                    StepKind::Agent | StepKind::Handoff => "step_succeeded",
+                };
+                event(&transaction, id, kind, &step.id, "succeeded")?;
+                if copied_step.seq == boundary_seq {
+                    event(&transaction, id, "fork_boundary", &step.id, "succeeded")?;
+                }
+            } else if status == StepStatus::Ready {
+                event(&transaction, id, "step_ready", &step.id, status.as_str())?;
+            }
+        }
+        settle_run(&transaction, id)?;
+        transaction.commit().map_err(|_| unavailable())?;
+        drop(connection);
+        self.get_run(id)?.ok_or_else(unavailable)
     }
 
     pub fn claim_ready(
@@ -1416,6 +1604,22 @@ impl Controller {
         Ok(current)
     }
 
+    pub async fn fork(self: &Arc<Self>, run_id: &str, after_step: &str) -> Result<Run, String> {
+        let source = self.get(run_id)?;
+        if source.profile != self.runtime.profile
+            || source.provider != self.runtime.provider
+            || source.model != self.runtime.model
+        {
+            return Err("workflow runtime no longer matches the stored run".to_string());
+        }
+        let id = random_id().map_err(|_| "generate workflow id failed".to_string())?;
+        let fork = self.store.fork_run(&id, run_id, after_step)?;
+        if fork.status == RunStatus::Running {
+            self.launch(id)?;
+        }
+        Ok(fork)
+    }
+
     pub fn respond(self: &Arc<Self>, request_id: &str, approved: bool) -> Result<Run, String> {
         let request = self
             .store
@@ -1672,6 +1876,42 @@ fn secure_directory(path: &Path) -> Result<(), String> {
         .map_err(|_| "secure workflow transcript directory failed".to_string())
 }
 
+fn migrate_schema(connection: &Connection) -> Result<(), String> {
+    for (table, column, definition) in [
+        ("workflow_runs", "forked_from_run_id", "TEXT"),
+        ("workflow_runs", "forked_from_event_seq", "INTEGER"),
+        ("workflow_runs", "forked_from_step_id", "TEXT"),
+        ("workflow_steps", "source_run_id", "TEXT"),
+        ("workflow_steps", "source_step_id", "TEXT"),
+        ("workflow_steps", "source_attempt", "INTEGER"),
+    ] {
+        if !column_exists(connection, table, column)? {
+            connection
+                .execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                    [],
+                )
+                .map_err(|_| unavailable())?;
+        }
+    }
+    Ok(())
+}
+
+fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|_| unavailable())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| unavailable())?;
+    for name in rows {
+        if name.map_err(|_| unavailable())? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl StepKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -1798,6 +2038,38 @@ fn advance_ready(transaction: &Transaction<'_>, run_id: &str) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+fn copied_steps_at(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    boundary_seq: i64,
+) -> Result<HashMap<String, CopiedStep>, String> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT e.step_id, e.seq, s.attempt, s.result, s.transcript_path
+             FROM workflow_events e
+             JOIN workflow_steps s ON s.run_id = e.run_id AND s.id = e.step_id
+             WHERE e.run_id = ?1 AND e.seq <= ?2
+               AND e.kind IN ('step_succeeded','approval_approved')
+             ORDER BY e.seq",
+        )
+        .map_err(|_| unavailable())?;
+    let rows = statement
+        .query_map(params![run_id, boundary_seq], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CopiedStep {
+                    seq: row.get(1)?,
+                    attempt: row.get(2)?,
+                    result: row.get(3)?,
+                    transcript_path: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(|_| unavailable())?;
+    rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+        .map_err(|_| unavailable())
 }
 
 fn settle_run(transaction: &Transaction<'_>, run_id: &str) -> Result<(), String> {
@@ -2420,6 +2692,119 @@ needs = ["first"]
     }
 
     #[test]
+    fn fork_copies_the_committed_event_boundary_state() {
+        let store = Store::open_in_memory();
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "left"
+agent = "worker"
+prompt = "left"
+[[steps]]
+id = "right"
+agent = "worker"
+prompt = "right"
+[[steps]]
+id = "join"
+agent = "worker"
+prompt = "join"
+needs = ["left", "right"]
+"#,
+        );
+        store
+            .create_run("run-1", &definition, "/w", "p", "provider", "m", "input")
+            .expect("create");
+        let right = store
+            .claim_ready("run-1", "right", "/tmp/right.jsonl")
+            .expect("claim right");
+        store
+            .finish_attempt("run-1", "right", right, Ok("right done"))
+            .expect("finish right");
+        let left = store
+            .claim_ready("run-1", "left", "/tmp/left.jsonl")
+            .expect("claim left");
+        store
+            .finish_attempt("run-1", "left", left, Ok("left done"))
+            .expect("finish left");
+
+        let fork = store
+            .fork_run("fork-1", "run-1", "left")
+            .expect("fork after left");
+
+        assert_eq!(fork.status, RunStatus::Running);
+        assert_eq!(fork.forked_from_run_id.as_deref(), Some("run-1"));
+        assert_eq!(fork.forked_from_step_id.as_deref(), Some("left"));
+        assert!(fork.forked_from_event_seq.is_some());
+        assert_eq!(fork.steps[0].status, StepStatus::Succeeded);
+        assert_eq!(fork.steps[0].result, "left done");
+        assert_eq!(fork.steps[0].source_run_id.as_deref(), Some("run-1"));
+        assert_eq!(fork.steps[0].source_step_id.as_deref(), Some("left"));
+        assert_eq!(fork.steps[0].source_attempt, Some(1));
+        assert_eq!(fork.steps[1].status, StepStatus::Succeeded);
+        assert_eq!(fork.steps[2].status, StepStatus::Ready);
+    }
+
+    #[test]
+    fn fork_of_a_terminal_boundary_is_terminal() {
+        let store = Store::open_in_memory();
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "work"
+agent = "worker"
+prompt = "work"
+"#,
+        );
+        store
+            .create_run("run-1", &definition, "/w", "p", "provider", "m", "")
+            .expect("create");
+        let attempt = store
+            .claim_ready("run-1", "work", "/tmp/work.jsonl")
+            .expect("claim");
+        store
+            .finish_attempt("run-1", "work", attempt, Ok("done"))
+            .expect("finish");
+
+        let fork = store
+            .fork_run("fork-1", "run-1", "work")
+            .expect("fork terminal");
+
+        assert_eq!(fork.status, RunStatus::Succeeded);
+        assert_eq!(fork.steps[0].status, StepStatus::Succeeded);
+    }
+
+    #[test]
+    fn fork_requires_a_committed_success_boundary() {
+        let store = Store::open_in_memory();
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "first"
+agent = "worker"
+prompt = "first"
+[[steps]]
+id = "second"
+agent = "worker"
+prompt = "second"
+needs = ["first"]
+"#,
+        );
+        store
+            .create_run("run-1", &definition, "/w", "p", "provider", "m", "")
+            .expect("create");
+
+        assert_eq!(
+            store
+                .fork_run("fork-1", "run-1", "second")
+                .expect_err("pending step"),
+            "workflow fork boundary is not a committed success"
+        );
+    }
+
+    #[test]
     fn recovery_pauses_running_attempt_without_retrying_it() {
         let store = Store::open_in_memory();
         let definition = definition(
@@ -2654,6 +3039,52 @@ needs = ["research"]
         assert_eq!(completed.status, RunStatus::Succeeded);
         assert_eq!(completed.steps[1].kind, StepKind::Handoff);
         assert_eq!(completed.steps[1].result, "review complete");
+    }
+
+    #[tokio::test]
+    async fn controller_forks_and_runs_from_the_boundary() {
+        let store = Arc::new(Store::open_in_memory());
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "first"
+agent = "worker"
+prompt = "first"
+[[steps]]
+id = "second"
+agent = "worker"
+prompt = "second"
+needs = ["first"]
+"#,
+        );
+        store
+            .create_run("run-1", &definition, "/workspace", "", "", "", "")
+            .expect("create");
+        let attempt = store
+            .claim_ready("run-1", "first", "/tmp/first.jsonl")
+            .expect("claim");
+        store
+            .finish_attempt("run-1", "first", attempt, Ok("first done"))
+            .expect("finish");
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new(
+            store,
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(FakeExecutor),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            1,
+        );
+
+        let fork = controller.fork("run-1", "first").await.expect("fork");
+        let done = controller.wait(&fork.id).await.expect("wait");
+
+        assert_eq!(done.status, RunStatus::Succeeded);
+        assert_eq!(done.forked_from_run_id.as_deref(), Some("run-1"));
+        assert_eq!(done.steps[0].result, "first done");
+        assert_eq!(done.steps[1].result, "second complete");
     }
 
     #[tokio::test]

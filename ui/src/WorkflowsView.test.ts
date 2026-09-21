@@ -28,6 +28,18 @@ const run = {
   status: 'waiting' as const,
   steps: [
     {
+      id: 'review',
+      kind: 'handoff' as const,
+      agent: 'reviewer',
+      prompt: 'Review',
+      needs: ['research'],
+      status: 'succeeded' as const,
+      attempt: 1,
+      result: 'looks good',
+      error: '',
+      transcript_path: '',
+    },
+    {
       id: 'approve',
       kind: 'approval' as const,
       agent: '',
@@ -63,6 +75,7 @@ describe('WorkflowsView', () => {
     render(createElement(WorkflowsView, { onError: vi.fn() }))
     const runButton = await screen.findByRole('button', { name: /review/ })
     fireEvent.click(runButton)
+    expect(await screen.findByText(/handoff to reviewer/)).toBeTruthy()
     expect(await screen.findByText('Approval required · approve')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))

@@ -34,7 +34,7 @@ export interface McpServer {
 
 export interface WorkflowStep {
   id: string
-  kind: 'agent' | 'approval'
+  kind: 'agent' | 'approval' | 'handoff'
   agent: string
   prompt: string
   needs: string[]

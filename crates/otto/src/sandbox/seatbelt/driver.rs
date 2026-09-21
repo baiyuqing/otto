@@ -111,9 +111,11 @@ impl SeatbeltDriver {
     /// is not the root-owned executable it must be,
     /// [`UnavailableReason::InvalidShell`] for a shell that is not a canonical
     /// executable file, [`UnavailableReason::PolicyUnsupported`] for a
-    /// workspace, home or network mode the profile cannot express, and
-    /// [`UnavailableReason::SelfTestFailed`] when the state, the profile or any
-    /// startup probe fails. A cancelled token yields [`Error::Cancelled`].
+    /// workspace, home or network mode the profile cannot express, which
+    /// includes a workspace containing the cache base that holds the private
+    /// state tree, and [`UnavailableReason::SelfTestFailed`] when the state,
+    /// the profile or any startup probe fails. A cancelled token yields
+    /// [`Error::Cancelled`].
     pub async fn open(options: Options, cancel: &CancellationToken) -> Result<Self, Error> {
         check_cancelled(cancel)?;
         if !valid_sandbox_exec() {
@@ -154,6 +156,15 @@ impl SeatbeltDriver {
         } else {
             options.cache_base.clone()
         };
+        // `state::create` requires the cache base to lie outside the workspace
+        // so no workspace-relative symlink can reach the private state tree.
+        // A workspace that contains the cache base cannot satisfy that, which
+        // is the shape of `$HOME`: it contains `$HOME/Library/Caches`.
+        if resolve_directory(&cache_base)
+            .is_some_and(|cache| profile::path_within(&workspace, &cache))
+        {
+            return Err(Error::unavailable(UnavailableReason::PolicyUnsupported));
+        }
         check_cancelled(cancel)?;
 
         let private = state::create(&workspace, &cache_base)
@@ -1047,5 +1058,40 @@ mod contract {
         crate::sandbox::conformance::driver_contract!(SeatbeltContract {
             network: NetworkMode::Deny
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio_util::sync::CancellationToken;
+
+    use super::{Options, SeatbeltDriver};
+    use crate::sandbox::{Error, NetworkMode, UnavailableReason};
+
+    /// The shape a session has when it starts in `$HOME`, which contains
+    /// `$HOME/Library/Caches`.
+    #[tokio::test]
+    async fn workspace_containing_the_cache_base_is_policy_unsupported() {
+        let base = tempfile::TempDir::new().expect("temp base");
+        let cache = base.path().join("Caches");
+        std::fs::create_dir_all(&cache).expect("cache directory");
+        let workspace = base.path().to_str().expect("workspace text").to_string();
+        let options = Options {
+            workspace: workspace.clone(),
+            shell: "/bin/zsh".to_string(),
+            home: workspace,
+            cache_base: cache.to_str().expect("cache text").to_string(),
+            network: Some(NetworkMode::Deny),
+            ..Options::default()
+        };
+
+        let error = SeatbeltDriver::open(options, &CancellationToken::new())
+            .await
+            .expect_err("a workspace containing the cache base is refused");
+
+        assert_eq!(
+            error,
+            Error::unavailable(UnavailableReason::PolicyUnsupported)
+        );
     }
 }

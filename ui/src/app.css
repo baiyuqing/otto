@@ -37,6 +37,8 @@
     --code-bg: #241f1a;
     --code-fg: #e8e2d4;
   }
+
+  .brand-mark { filter: brightness(2.2); }
 }
 
 * { box-sizing: border-box; }
@@ -87,17 +89,10 @@ button.danger {
 .topbar .spacer { flex: 1; }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 9rem; }
 .brand-mark {
-  display: grid;
-  place-items: center;
+  display: block;
   width: 28px;
   height: 28px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 700;
+  flex: none;
 }
 .brand-name { font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; line-height: 1.1; font-size: 13px; }
 .brand-subtitle { color: var(--muted); font-size: 12px; line-height: 1.2; }

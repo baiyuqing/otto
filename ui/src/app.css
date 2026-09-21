@@ -358,7 +358,8 @@ button.danger {
   width: 100%;
   min-height: 5.5em;
   max-height: 40vh;
-  resize: vertical;
+  overflow-y: auto;
+  resize: none;
   border: 0;
   outline: none;
   color: var(--text);

@@ -24,7 +24,10 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use crossterm::event::{Event as TermEvent, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event as TermEvent, KeyEvent, KeyEventKind,
+    MouseButton, MouseEventKind,
+};
 use otto_core::agent::Event;
 use otto_core::model::{Block, MAX_IMAGE_BYTES};
 use ratatui::Terminal;
@@ -52,13 +55,13 @@ pub(crate) async fn run(
 ) -> Result<(), ReplError> {
     let mut terminal = ratatui::try_init().map_err(io_error)?;
     let mut input = TerminalInput::new();
-    if let Err(error) = input.enable_mouse(std::io::stdout()) {
+    if let Err(error) = input.enable(std::io::stdout()) {
         let _ = ratatui::try_restore();
         return Err(io_error(error));
     }
     let mut keys = spawn_key_reader();
     let result = run_app(&mut terminal, controller, cancel, &mut keys).await;
-    let _ = input.restore_mouse(std::io::stdout());
+    let _ = input.restore(std::io::stdout());
     let _ = ratatui::try_restore();
     result
 }
@@ -66,11 +69,23 @@ pub(crate) async fn run(
 #[derive(Default)]
 struct TerminalInput {
     mouse_active: bool,
+    paste_active: bool,
 }
 
 impl TerminalInput {
     fn new() -> Self {
         Self::default()
+    }
+
+    fn enable(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        self.enable_mouse(&mut writer)?;
+        self.enable_paste(&mut writer)
+    }
+
+    fn restore(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        let paste = self.restore_paste(&mut writer);
+        let mouse = self.restore_mouse(&mut writer);
+        paste.and(mouse)
     }
 
     /// Asks the terminal to report button events for the whole session.
@@ -108,11 +123,28 @@ impl TerminalInput {
         self.mouse_active = false;
         Ok(())
     }
+    fn enable_paste(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        if self.paste_active {
+            return Ok(());
+        }
+        crossterm::execute!(writer, EnableBracketedPaste)?;
+        self.paste_active = true;
+        Ok(())
+    }
+
+    fn restore_paste(&mut self, mut writer: impl io::Write) -> io::Result<()> {
+        if !self.paste_active {
+            return Ok(());
+        }
+        crossterm::execute!(writer, DisableBracketedPaste)?;
+        self.paste_active = false;
+        Ok(())
+    }
 }
 
 impl Drop for TerminalInput {
     fn drop(&mut self) {
-        let _ = self.restore_mouse(std::io::stdout());
+        let _ = self.restore(std::io::stdout());
     }
 }
 
@@ -128,6 +160,7 @@ fn io_error(error: std::io::Error) -> ReplError {
 /// ([`app::History`]); a wheel notch always scrolls the transcript.
 enum TuiEvent {
     Key(KeyEvent),
+    Paste(String),
     Wheel {
         up: bool,
     },
@@ -145,6 +178,7 @@ enum TuiEvent {
 fn map_terminal_event(event: TermEvent) -> Option<TuiEvent> {
     match event {
         TermEvent::Key(key) if key.kind == KeyEventKind::Press => Some(TuiEvent::Key(key)),
+        TermEvent::Paste(text) => Some(TuiEvent::Paste(text)),
         TermEvent::Mouse(mouse) => {
             let phase = match mouse.kind {
                 MouseEventKind::ScrollUp => return Some(TuiEvent::Wheel { up: true }),
@@ -312,6 +346,13 @@ async fn run_app<B: Backend>(
         let Some(event) = event else { return Ok(()) };
         let key = match event {
             TuiEvent::Key(key) => key,
+            TuiEvent::Paste(text) => {
+                app.insert_text(&text);
+                terminal
+                    .draw(|frame| render::draw(frame, &app))
+                    .map_err(draw_error)?;
+                continue;
+            }
             TuiEvent::Wheel { up } => {
                 app.scroll_wheel(up);
                 terminal
@@ -551,6 +592,7 @@ fn apply_turn_key<B: Backend>(
 ) {
     let key = match event {
         TuiEvent::Key(key) => key,
+        TuiEvent::Paste(_) => return,
         TuiEvent::Wheel { up } => {
             app.scroll_wheel(up);
             return;
@@ -1022,6 +1064,14 @@ mod tests {
             at(MouseEventKind::Moved).is_none(),
             "pointer motion with no button held has no behavior"
         );
+    }
+
+    #[test]
+    fn bracketed_paste_maps_to_composer_text() {
+        match map_terminal_event(TermEvent::Paste("one\ntwo".to_string())) {
+            Some(TuiEvent::Paste(text)) => assert_eq!(text, "one\ntwo"),
+            _ => panic!("paste should be forwarded to the composer"),
+        }
     }
 
     /// The release has to read the frame that is on screen.

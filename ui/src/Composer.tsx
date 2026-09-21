@@ -1,4 +1,4 @@
-import { useState, type ClipboardEvent, type KeyboardEvent } from 'react'
+import { useLayoutEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react'
 import { webCommandSuggestions } from './commands'
 import { sendHint } from './uiText'
 
@@ -13,8 +13,16 @@ export function Composer(props: {
 }) {
   const [text, setText] = useState('')
   const [image, setImage] = useState<{ name: string; data: string; mime_type: string } | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const hint = sendHint()
   const suggestions = props.disabled || props.running || props.compacting ? [] : webCommandSuggestions(text)
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${textarea.scrollHeight}px`
+  }, [text])
 
   const completeSuggestion = (command: string) => {
     setText(command + ' ')
@@ -74,6 +82,7 @@ export function Composer(props: {
           </div>
         )}
         <textarea
+          ref={textareaRef}
           value={text}
           placeholder={props.disabled ? 'Open or create a session first' : 'Message Otto…'}
           disabled={props.disabled || props.running || props.compacting}

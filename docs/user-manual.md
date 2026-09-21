@@ -183,7 +183,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `--base-url URL` | Provider base URL override. |
 | `--model NAME` | Model override. |
 | `--thinking LEVEL` | Model reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. |
-| `--approve PROMPT` | Run one prompt without interaction, then exit. `@FILE` reads the prompt from a file (bounded to 1 MiB). |
+| `--prompt PROMPT` | Run one prompt without interaction, then exit. `@FILE` reads the prompt from a file (bounded to 1 MiB). |
 | `--ui MODE` | Frontend mode: `auto`, `tui`, or `repl`. |
 | `--sandbox MODE` | Sandbox driver: `auto`, `seatbelt`, or `off`. `off` is unsafe. |
 | `--shell-timeout D` | Shell command timeout (for the `bash` tool). Must be greater than zero. |
@@ -191,7 +191,7 @@ Otto also has two subcommands that run before the flags below are parsed:
 | `--no-session` | Keep history in memory only; do not persist a session. Cannot be combined with `--continue`, `--resume`, or `--archive`. |
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
 | `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
-| `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--approve`. |
+| `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--prompt`. |
 | `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. Cannot be combined with `--listen`. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. Cannot be combined with `--socket`. |
 | `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open`). Requires a TCP listener (`--listen` or `[server].listen`). Cannot be combined with `--socket`. A failed launch is not fatal: the URL is still printed. |
@@ -591,7 +591,7 @@ Notes:
   ```
   `--archive PATH` archives one active session for the current `--cwd` and
   exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
-  or `--approve`.
+  or `--prompt`.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.
@@ -810,7 +810,7 @@ does not run the command; it returns an approval ID. Review the exact command
 and reason, then enter `/approve <id>`. The matching command runs once through
 the existing unconfined driver with the same filtered environment rules as
 other Bash commands. Approval is never automatic, is unavailable to child
-agents and one-shot `--approve` runs, expires after five minutes, and does not
+agents and one-shot `--prompt` runs, expires after five minutes, and does not
 modify sandbox configuration.
 
 ### Seatbelt limitations
@@ -827,17 +827,17 @@ Override them with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
 
 ## Headless mode
 
-`--approve` runs a single prompt without interaction and exits: `0` on success,
+`--prompt` runs a single prompt without interaction and exits: `0` on success,
 `1` on error, `130` on interrupt. The value is the prompt text, or `@PATH` to
 read the prompt from a file (bounded to 1 MiB).
 
 ```bash
-./otto --approve "summarize TODOs in this repo"
-./otto --approve @prompt.txt --no-session
-./otto --approve "explain main.go" --thinking max --continue
+./otto --prompt "summarize TODOs in this repo"
+./otto --prompt @prompt.txt --no-session
+./otto --prompt "explain main.go" --thinking max --continue
 ```
 
-`--approve` cannot be combined with `--ui tui` or `--archive`, and composes with
+`--prompt` cannot be combined with `--ui tui` or `--archive`, and composes with
 `--continue`, `--resume`, and `--no-session`.
 
 ## Agent server
@@ -856,7 +856,7 @@ otto serve [--socket PATH | --listen HOST:PORT [--open]]
 (`--config`, `--cwd`, `--profile`, `--provider`, `--base-url`, `--model`,
 `--thinking`, `--sandbox`, `--shell-timeout`, `--max-output-bytes`) plus
 `--socket` or `--listen`, and `--open` to launch the printed TCP URL in the
-default browser. It rejects `--ui`, `--approve`, `--resume`, `--continue`,
+default browser. It rejects `--ui`, `--prompt`, `--resume`, `--continue`,
 `--archive`, and `--no-session`. `--open` also rejects `--socket` and a Unix
 socket from config or the default path.
 

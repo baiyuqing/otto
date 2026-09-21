@@ -8,6 +8,7 @@ import { Composer } from './Composer'
 import { Footer } from './Footer'
 import { Tasks } from './Tasks'
 import { UsageView } from './UsageView'
+import { WorkflowsView } from './WorkflowsView'
 import { mcpServerLine, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
 import logo from '../logo.svg'
@@ -66,7 +67,7 @@ const taskText = (task: {
     .join('\n')
 
 export function App() {
-  const [view, setView] = useState<'chat' | 'usage'>('chat')
+  const [view, setView] = useState<'chat' | 'workflows' | 'usage'>('chat')
   const [info, setInfo] = useState<Info | null>(null)
   const [sessions, setSessions] = useState<SessionListRow[]>([])
   const [session, setSession] = useState<Session | null>(null)
@@ -429,6 +430,9 @@ export function App() {
           <button type="button" aria-pressed={view === 'usage'} onClick={() => setView('usage')}>
             Usage
           </button>
+          <button type="button" aria-pressed={view === 'workflows'} onClick={() => setView('workflows')}>
+            Workflows
+          </button>
         </nav>
         {view === 'chat' && (
           <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
@@ -453,7 +457,13 @@ export function App() {
         </div>
       )}
       <main className="workspace-shell">
-        {view === 'usage' ? <UsageView onError={fail} /> : <TranscriptView items={items} activeSession={session !== null} />}
+        {view === 'usage' ? (
+          <UsageView onError={fail} />
+        ) : view === 'workflows' ? (
+          <WorkflowsView onError={fail} />
+        ) : (
+          <TranscriptView items={items} activeSession={session !== null} />
+        )}
       </main>
       {view === 'chat' && session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
       {view === 'chat' && (

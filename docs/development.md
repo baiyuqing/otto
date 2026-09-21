@@ -36,6 +36,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `usage`: native collection of parent, sub-agent, and compaction token events; append-only SQLite storage; and total/daily aggregate queries consumed by the server
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
   - `subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status` tools, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
+  - `workflow`: workspace-scoped TOML DAG discovery, SQLite run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
   - `inbound`: host adapters that turn external event streams into session inbox notifications. Feishu inbound spawns `lark-cli event consume im.message.receive_v1 --as bot`, parses NDJSON, expands `merge_forward` via `lark-cli im +messages-mget --as bot`, and fans messages out through `Controller::notify`
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
   - `tui`: the terminal frontend on the alternate screen, transcript rendering, Markdown/tool presentation, key handling, and terminal lifecycle
@@ -73,6 +74,15 @@ tasks only through the shared task-lister facade; children never receive
 persisted. Definitions cannot add tools outside the child tool set; `tools`
 only narrows it. `[agents]` is TOML only, like `[skills]`. Do not document
 `agent_send`/`agent_cancel`/`agent_report` as working features.
+
+Keep durable workflows separate from ad-hoc sub-agent tasks. Workflow
+definitions snapshot their referenced `AGENT.md` bodies, model choices, and
+tool allowlists when a run is created; resume uses that snapshot and the
+current sandbox. Every attempt has its own append-only Pi v3 transcript.
+SQLite is the workflow state source of truth, and a per-workspace advisory
+lock permits only one scheduler process. A process loss changes running steps
+to `interrupted` and the run to `paused`; retry is always explicit because an
+external tool effect may already have happened.
 
 Keep `crates/otto`'s `mcp` module behind `crate::mcp`'s client, transport, and
 OAuth types; `crate::tool::mcp` (the model-facing tool adapter) and

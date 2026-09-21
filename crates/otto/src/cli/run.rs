@@ -154,7 +154,24 @@ pub async fn run(
         return super::login::run_auth_command(args, stdout, stderr, &home, cancel).await;
     }
 
-    let options = match parse_flags(args, stdout) {
+    let workflow_command = if args.first().is_some_and(|first| first == "workflow") {
+        match super::workflow::parse(&args[1..]) {
+            Ok(command) => Some(command),
+            Err(message) => {
+                let _ = writeln!(stderr, "{message}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
+    let flag_args = if workflow_command.is_some() {
+        &[]
+    } else {
+        args
+    };
+
+    let options = match parse_flags(flag_args, stdout) {
         Ok(Parsed::Help) => return 0,
         Ok(Parsed::Options(options)) => *options,
         Err(ParseFailure::Unsafe) => {
@@ -504,7 +521,9 @@ pub async fn run(
     }
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
-    if (prepared_initial.is_some() || options.serve) && !dynamic_content {
+    if (prepared_initial.is_some() || options.serve || workflow_command.is_some())
+        && !dynamic_content
+    {
         let _ = control.close().await;
         return fail(stderr, SESSION_OPERATION_UNAVAILABLE);
     }
@@ -535,6 +554,37 @@ pub async fn run(
     if cancel.is_cancelled() {
         let _ = control.close().await;
         return 130;
+    }
+
+    if let Some(command) = workflow_command {
+        let builder = Arc::new(builder);
+        let controller =
+            super::workflow::build_controller(Arc::clone(&builder), &resolved, stderr).await;
+        let result = match controller {
+            Ok(controller) => {
+                let result = super::workflow::run_command(command, &controller, stdout).await;
+                controller.close().await;
+                result
+            }
+            Err(error) => Err(error),
+        };
+        let sandbox_error = control.close().await;
+        let approval_error = approval_executor
+            .as_ref()
+            .map(|executor| executor.close())
+            .transpose()
+            .err();
+        let _ = memory_service.close();
+        if sandbox_error.is_err() || approval_error.is_some() {
+            return fail(stderr, "close sandbox: sandbox runtime close failed");
+        }
+        if cancel.is_cancelled() {
+            return 130;
+        }
+        return match result {
+            Ok(()) => 0,
+            Err(error) => fail(stderr, &builder.redact_error(&error, Some(&resolved))),
+        };
     }
 
     if options.serve {

@@ -17,6 +17,7 @@ mod store;
 mod tests;
 
 pub use fsops::clean_go_path;
+pub(crate) use fsops::workspace_key;
 pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
 pub use prepared::{ArchiveResult, Prepared, archive};
 pub use store::Store;

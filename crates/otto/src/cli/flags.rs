@@ -245,6 +245,7 @@ const USAGE: &str = r"Usage: otto [options]
        otto login [--status]   sign in with a ChatGPT subscription
        otto logout             remove stored ChatGPT credentials
        otto memory status|forget <id>
+       otto workflow run|status|resume|approve|reject|cancel ...
        otto sandbox setup [--config PATH] [--cwd PATH]
 
 Sandbox: on macOS, auto -> Seatbelt; if it cannot be established, bash is disabled.

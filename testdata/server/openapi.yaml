@@ -401,6 +401,79 @@ components:
           items:
             type: string
       required: [workspace, provider, profile, model, thinking, sandbox, profiles]
+    WorkflowStep:
+      type: object
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [agent, approval]}
+        agent: {type: string}
+        prompt: {type: string}
+        needs:
+          type: array
+          items: {type: string}
+        status:
+          type: string
+          enum: [pending, ready, running, waiting, succeeded, failed, canceled, interrupted]
+        attempt: {type: integer}
+        result: {type: string}
+        error: {type: string}
+        transcript_path: {type: string}
+      required: [id, kind, agent, prompt, needs, status, attempt, result, error, transcript_path]
+    WorkflowRun:
+      type: object
+      properties:
+        id: {type: string}
+        workflow: {type: string}
+        workspace: {type: string}
+        profile: {type: string}
+        provider: {type: string}
+        model: {type: string}
+        input: {type: string}
+        status:
+          type: string
+          enum: [running, waiting, paused, succeeded, failed, canceled]
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowStep"
+      required: [id, workflow, workspace, profile, provider, model, input, status, steps]
+    WorkflowRequest:
+      type: object
+      properties:
+        id: {type: string}
+        run_id: {type: string}
+        step_id: {type: string}
+        prompt: {type: string}
+        status: {type: string, enum: [pending, approved, rejected, canceled]}
+      required: [id, run_id, step_id, prompt, status]
+    WorkflowView:
+      type: object
+      properties:
+        run:
+          $ref: "#/components/schemas/WorkflowRun"
+        requests:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowRequest"
+      required: [run, requests]
+    WorkflowList:
+      type: object
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowRun"
+      required: [runs]
+    WorkflowEvent:
+      type: object
+      properties:
+        seq: {type: integer}
+        run_id: {type: string}
+        occurred_at: {type: string, format: date-time}
+        kind: {type: string}
+        step_id: {type: string}
+        status: {type: string}
+      required: [seq, run_id, occurred_at, kind, step_id, status]
   parameters:
     sessionID:
       name: id
@@ -430,6 +503,18 @@ components:
         type: string
     approvalID:
       name: approval_id
+      in: path
+      required: true
+      schema:
+        type: string
+    workflowID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    workflowRequestID:
+      name: id
       in: path
       required: true
       schema:
@@ -928,6 +1013,132 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/workflows:
+    get:
+      summary: List durable workflow runs for the workspace
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowList"
+        "501":
+          description: Workflow runtime unavailable
+    post:
+      summary: Start a durable workflow run
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+                input: {type: string}
+              required: [name]
+      responses:
+        "201":
+          description: Run started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+        "409":
+          description: Invalid definition or runtime conflict
+        "501":
+          description: Workflow runtime unavailable
+  /v1/workflows/{id}:
+    parameters:
+      - $ref: "#/components/parameters/workflowID"
+    get:
+      summary: Get one durable workflow run
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+        "404":
+          description: Run not found
+  /v1/workflows/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/workflowID"
+      - $ref: "#/components/parameters/after"
+    get:
+      summary: Replay durable workflow events after one sequence number
+      responses:
+        "200":
+          description: Current event suffix; reconnect with the last event id to poll again
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/WorkflowEvent"
+  /v1/workflows/{id}/resume:
+    parameters:
+      - $ref: "#/components/parameters/workflowID"
+    post:
+      summary: Resume a run, optionally retrying one interrupted step
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                retry: {type: string}
+      responses:
+        "200":
+          description: Resume accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+        "409":
+          description: Run cannot be resumed
+  /v1/workflows/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/workflowID"
+    post:
+      summary: Cancel a durable workflow run
+      responses:
+        "200":
+          description: Run canceled after active attempts stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+        "409":
+          description: Run already finished
+  /v1/workflows/requests/{id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/workflowRequestID"
+    post:
+      summary: Approve one durable workflow gate
+      responses:
+        "200":
+          description: Gate approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+        "409":
+          description: Request conflict
+  /v1/workflows/requests/{id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/workflowRequestID"
+    post:
+      summary: Reject one durable workflow gate
+      responses:
+        "200":
+          description: Gate rejected and run canceled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+        "409":
+          description: Request conflict
   /v1/info:
     get:
       summary: Process-level static info

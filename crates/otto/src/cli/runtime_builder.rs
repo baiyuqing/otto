@@ -347,11 +347,15 @@ pub struct Runner {
     /// The sub-agent task registry, absent when sub-agents are off. `/tasks`
     /// and `/task` read the active runner's task registry.
     pub(crate) tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
+    /// The child executor shared with durable workflows.
+    pub(crate) subagents: Option<Arc<crate::subagent::runner::Runner>>,
     /// The timer registry, absent when the timer tools are not registered.
     /// `/timers` lists it and archiving the session clears it.
     pub(crate) reminders: Option<Arc<crate::tool::remind::Reminders>>,
     /// The skills discovered for this runner. `/skills` and `/skill` display this fixed catalog.
     pub(crate) skills: Catalog,
+    /// Named child definitions used by durable workflow discovery.
+    pub(crate) agents: crate::subagent::Catalog,
     /// The MCP servers connected for this runner. `/mcp` reads its status
     /// rows; `Runner::close` (best-effort, backgrounded) and
     /// `Runner::close_mcp` (awaited, bounded) shut its clients down.
@@ -424,6 +428,14 @@ impl Runner {
 
     pub fn skills(&self) -> &Catalog {
         &self.skills
+    }
+
+    pub fn agents(&self) -> &crate::subagent::Catalog {
+        &self.agents
+    }
+
+    pub fn subagents(&self) -> Option<Arc<crate::subagent::runner::Runner>> {
+        self.subagents.clone()
     }
 
     /// Releases the agent's own resources and best-effort starts MCP
@@ -500,7 +512,9 @@ impl Runner {
                 tasks.notifications(),
             )))),
             tasks: Some(tasks),
+            subagents: None,
             skills: Catalog::default(),
+            agents: crate::subagent::Catalog::default(),
             mcp: Arc::new(crate::mcp::Servers::default()),
         }
     }
@@ -890,8 +904,10 @@ impl Builder {
             definitions,
             usage: self.usage_collector(session, runtime),
             tasks: subagents.tasks,
+            subagents: subagents.runner,
             reminders: subagents.reminders,
             skills: catalogs.skills.clone(),
+            agents: catalogs.agent_catalog.clone(),
             mcp: mcp_servers,
         })
     }

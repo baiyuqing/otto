@@ -108,6 +108,8 @@ struct State {
     tasks_started: u64,
     tasks_finished_total: BTreeMap<String, u64>,
     tasks_running: i64,
+    workflow_runs: BTreeMap<String, i64>,
+    workflow_steps: BTreeMap<String, i64>,
 }
 
 /// The whole metric registry. Every method is `&self`: one registry is shared
@@ -272,6 +274,24 @@ impl Metrics {
         }
     }
 
+    pub fn replace_workflows(&self, runs: &[crate::workflow::Run]) {
+        let mut run_statuses = BTreeMap::new();
+        let mut step_statuses = BTreeMap::new();
+        for run in runs {
+            *run_statuses
+                .entry(run.status.as_str().to_string())
+                .or_default() += 1;
+            for step in &run.steps {
+                *step_statuses
+                    .entry(step.status.as_str().to_string())
+                    .or_default() += 1;
+            }
+        }
+        let mut state = self.lock();
+        state.workflow_runs = run_statuses;
+        state.workflow_steps = step_statuses;
+    }
+
     /// The `text/plain; version=0.0.4` body.
     pub fn render(&self) -> String {
         let state = self.lock();
@@ -352,6 +372,20 @@ impl Metrics {
             "Number of sub-agent tasks currently running.",
             state.tasks_running,
         );
+        write_gauge_by_label(
+            &mut out,
+            "otto_workflow_runs",
+            "status",
+            "Durable workflow runs by current status.",
+            &state.workflow_runs,
+        );
+        write_gauge_by_label(
+            &mut out,
+            "otto_workflow_steps",
+            "status",
+            "Durable workflow steps by current status.",
+            &state.workflow_steps,
+        );
         out
     }
 }
@@ -408,6 +442,19 @@ fn write_counter_by_label(
     data: &BTreeMap<String, u64>,
 ) {
     write_help(out, name, "counter", help);
+    for (key, value) in data {
+        let _ = writeln!(out, "{name}{{{label_name}={}}} {value}", quote_label(key));
+    }
+}
+
+fn write_gauge_by_label(
+    out: &mut String,
+    name: &str,
+    label_name: &str,
+    help: &str,
+    data: &BTreeMap<String, i64>,
+) {
+    write_help(out, name, "gauge", help);
     for (key, value) in data {
         let _ = writeln!(out, "{name}{{{label_name}={}}} {value}", quote_label(key));
     }
@@ -814,6 +861,47 @@ mod tests {
         assert_lines(
             &metrics.render(),
             &[r#"otto_http_requests_total{route="/v1/sessions",method="POST",status="201"} 400"#],
+        );
+    }
+
+    #[test]
+    fn workflow_gauges_are_rebuilt_from_durable_state() {
+        let metrics = Metrics::new();
+        metrics.replace_workflows(&[crate::workflow::Run {
+            id: "run-1".into(),
+            workflow: "review".into(),
+            workspace: "/w".into(),
+            profile: "default".into(),
+            provider: "openai-compatible".into(),
+            model: "model".into(),
+            input: String::new(),
+            status: crate::workflow::RunStatus::Waiting,
+            steps: vec![crate::workflow::StepRecord {
+                id: "approve".into(),
+                kind: crate::workflow::StepKind::Approval,
+                agent: String::new(),
+                prompt: "Ship?".into(),
+                needs: Vec::new(),
+                status: crate::workflow::StepStatus::Waiting,
+                attempt: 0,
+                result: String::new(),
+                error: String::new(),
+                transcript_path: String::new(),
+            }],
+            definition: crate::workflow::Definition {
+                name: "review".into(),
+                description: String::new(),
+                steps: Vec::new(),
+                agents: Vec::new(),
+                hash: "0".repeat(64),
+            },
+        }]);
+        assert_lines(
+            &metrics.render(),
+            &[
+                r#"otto_workflow_runs{status="waiting"} 1"#,
+                r#"otto_workflow_steps{status="waiting"} 1"#,
+            ],
         );
     }
 }

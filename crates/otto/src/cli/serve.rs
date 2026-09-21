@@ -167,6 +167,18 @@ pub async fn run(
         announce_listen(stdout, &listener.address(), &token, open);
     }
 
+    let builder = Arc::new(builder);
+    let workflows =
+        match super::workflow::build_controller(Arc::clone(&builder), &runtime, stderr).await {
+            Ok(controller) => Some(controller),
+            Err(error) => {
+                let redacted = builder.redact_error(&error, Some(&runtime));
+                if !redacted.is_empty() {
+                    let _ = writeln!(stderr, "warning: workflows disabled: {redacted}");
+                }
+                None
+            }
+        };
     let info = builder.runtime_info(&runtime);
     let feishu = resolve_feishu(&builder.config);
     let mut profiles: Vec<String> = builder.config.profiles.keys().cloned().collect();
@@ -182,7 +194,7 @@ pub async fn run(
             profiles,
         },
         factory: Arc::new(ServeFactory {
-            builder: Arc::new(builder),
+            builder: Arc::clone(&builder),
             runtime: runtime.clone(),
             sandbox: reloader,
         }),
@@ -191,6 +203,7 @@ pub async fn run(
         // process stderr. Thread a shared writer through if a test ever has to
         // read it.
         logger: None,
+        workflows,
     });
     let inbound = inbound::maybe_start(Arc::clone(&server), feishu, serve_cancel.clone());
 

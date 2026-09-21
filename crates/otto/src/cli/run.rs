@@ -985,7 +985,11 @@ pub(super) fn sandbox_provider_environment_names(file: &File, selected: &str) ->
 }
 
 /// Existing skill and agent roots become read paths so discovery can reach them
-/// from inside the sandbox.
+/// from inside the sandbox. A root is only promoted when it is a real
+/// directory: `read_paths` are canonicalized into `(subpath <target>)` grants,
+/// so promoting a symlink would widen the sandbox to whatever the link points
+/// at, and the default roots include the workspace-relative `.otto/skills`,
+/// which anything that writes to the workspace controls.
 pub(super) fn resolve_sandbox_settings(
     file: &File,
     environment: &HashMap<String, String>,
@@ -1000,7 +1004,7 @@ pub(super) fn resolve_sandbox_settings(
         .into_iter()
         .chain(agents.roots);
     for root in roots {
-        if std::fs::metadata(&root).is_ok_and(|info| info.is_dir()) {
+        if std::fs::symlink_metadata(&root).is_ok_and(|info| info.is_dir()) {
             raw.read_paths.push(root);
         }
     }
@@ -1160,6 +1164,37 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(settings.read_paths.contains(&skills), "{settings:?}");
+    }
+
+    /// A workspace lives inside the sandbox's writable subtree, so anything
+    /// that clones or writes there controls `.otto/skills`. A symlinked root
+    /// would be canonicalized into an `(allow file-read* (subpath <target>))`
+    /// grant covering the link's target, which is how a cloned repository
+    /// could read `~/.ssh`. Existence is therefore checked without following
+    /// the link.
+    #[test]
+    fn a_symlinked_skill_root_is_not_promoted_to_a_sandbox_read_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let workspace = directory.path().to_string_lossy().to_string();
+        let secrets = directory.path().join("secrets");
+        std::fs::create_dir(&secrets).expect("secrets dir");
+        std::fs::create_dir(directory.path().join(".otto")).expect("otto dir");
+        std::os::unix::fs::symlink(&secrets, directory.path().join(".otto/skills"))
+            .expect("symlink");
+
+        let file = otto_core::config::File::default();
+        let settings =
+            resolve_sandbox_settings(&file, &HashMap::new(), &workspace, None).expect("settings");
+
+        let skills = directory
+            .path()
+            .join(".otto/skills")
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            !settings.read_paths.contains(&skills),
+            "a symlinked skill root reached the sandbox read paths: {settings:?}"
+        );
     }
 
     #[tokio::test]

@@ -25,9 +25,9 @@ struct FeishuMessage {
 
 /// Turns one NDJSON line from `lark-cli event consume im.message.receive_v1`
 /// into an inbox notification. Blank lines, invalid JSON, empty content,
-/// interactive cards, and chats outside `chat_ids` (when that filter is
-/// non-empty) are skipped. `merge_forward` bodies stay as-is unless the
-/// caller expands them first.
+/// interactive cards, and chats outside `chat_ids` are skipped. `chat_ids` is
+/// an allowlist: an empty one admits nothing. `merge_forward` bodies stay
+/// as-is unless the caller expands them first.
 #[cfg(test)]
 pub(crate) fn notification_from_ndjson(line: &str, chat_ids: &[String]) -> Option<Notification> {
     let event = parse_event(line, chat_ids)?;
@@ -43,11 +43,12 @@ fn parse_event(line: &str, chat_ids: &[String]) -> Option<FeishuMessage> {
     if event.message_type.as_deref() == Some("interactive") {
         return None;
     }
-    if !chat_ids.is_empty() {
-        let chat_id = event.chat_id.as_deref().unwrap_or("").trim();
-        if !chat_ids.iter().any(|id| id == chat_id) {
-            return None;
-        }
+    // A delivered message drives the agent turn loop, which runs tools in the
+    // operator's workspace, so the chat allowlist is the authorization check:
+    // no entry means no sender is authorized.
+    let chat_id = event.chat_id.as_deref().unwrap_or("").trim();
+    if !chat_ids.iter().any(|id| id == chat_id) {
+        return None;
     }
     Some(event)
 }
@@ -118,13 +119,17 @@ fn render_inbound(event: &FeishuMessage, content: &str) -> String {
 mod tests {
     use super::*;
 
+    fn allowed() -> Vec<String> {
+        vec!["oc_1".to_string()]
+    }
+
     fn line() -> &'static str {
         r#"{"chat_id":"oc_1","sender_id":"ou_1","message_id":"om_1","message_type":"text","chat_type":"group","content":"hello","extra":true}"#
     }
 
     #[test]
     fn a_text_event_becomes_a_message_notification() {
-        let notification = notification_from_ndjson(line(), &[]).expect("parsed");
+        let notification = notification_from_ndjson(line(), &allowed()).expect("parsed");
         assert_eq!(notification.kind, Some(NotificationKind::Message));
         assert!(notification.task_id.is_empty());
         assert_eq!(
@@ -136,13 +141,18 @@ mod tests {
 
     #[test]
     fn interactive_empty_and_invalid_lines_are_skipped() {
-        assert!(notification_from_ndjson("   ", &[]).is_none());
-        assert!(notification_from_ndjson("{", &[]).is_none());
+        assert!(notification_from_ndjson("   ", &allowed()).is_none());
+        assert!(notification_from_ndjson("{", &allowed()).is_none());
         assert!(
-            notification_from_ndjson(r#"{"message_type":"interactive","content":"card"}"#, &[])
-                .is_none()
+            notification_from_ndjson(
+                r#"{"chat_id":"oc_1","message_type":"interactive","content":"card"}"#,
+                &allowed()
+            )
+            .is_none()
         );
-        assert!(notification_from_ndjson(r#"{"content":"  "}"#, &[]).is_none());
+        assert!(
+            notification_from_ndjson(r#"{"chat_id":"oc_1","content":"  "}"#, &allowed()).is_none()
+        );
     }
 
     #[test]
@@ -152,10 +162,18 @@ mod tests {
         assert!(kept.text.contains("oc_1"));
     }
 
+    /// An inbound message reaches the agent turn loop, which runs tools in the
+    /// operator's workspace. `chat_ids` is the only authorization the consumer
+    /// has, so an empty list denies rather than admits.
+    #[test]
+    fn an_empty_chat_id_allowlist_accepts_nothing() {
+        assert!(notification_from_ndjson(line(), &[]).is_none());
+    }
+
     #[test]
     fn merge_forward_keeps_the_placeholder_without_expand() {
         let line = r#"{"chat_id":"oc_1","sender_id":"ou_1","message_id":"om_1","message_type":"merge_forward","chat_type":"p2p","content":"[Merged forward]"}"#;
-        let notification = notification_from_ndjson(line, &[]).expect("parsed");
+        let notification = notification_from_ndjson(line, &allowed()).expect("parsed");
         assert_eq!(
             notification.text,
             "[feishu] p2p oc_1 om_1 from ou_1\n[Merged forward]"

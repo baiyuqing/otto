@@ -53,7 +53,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::format::{comma_int, first_runes, one_line, round_to_seconds};
 use super::tasks::{Task, TaskError, TaskStatus, Tasks};
-use super::{Catalog, Definition, inherit_snapshot};
+use super::{Catalog, Definition, WritePolicy, inherit_snapshot};
 use crate::tool::Tool;
 use crate::tool::registry::Registry;
 use crate::tool::result::capped_text_result;
@@ -132,6 +132,8 @@ impl Session for SharedTranscript {
 pub struct ChildTools {
     registry: Arc<Registry>,
     allowed: Option<BTreeSet<String>>,
+    write_policy: WritePolicy,
+    write_paths: Vec<String>,
 }
 
 impl ChildTools {
@@ -140,6 +142,58 @@ impl ChildTools {
             .as_ref()
             .is_none_or(|allowed| allowed.contains(name))
     }
+
+    fn permits_write_tool(&self, name: &str, arguments: &RawValue) -> Result<(), String> {
+        if !matches!(name, "write" | "edit") {
+            return Ok(());
+        }
+        match self.write_policy {
+            WritePolicy::ReadOnly | WritePolicy::ProposeOnly => Err(format!(
+                "write_policy {} denies workspace mutation tool {name}",
+                self.write_policy.as_str()
+            )),
+            WritePolicy::SingleWriter => Ok(()),
+            WritePolicy::OwnedPaths => {
+                let path = mutation_path(arguments)?;
+                if self
+                    .write_paths
+                    .iter()
+                    .any(|pattern| path_matches(pattern, &path))
+                {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "write_policy owned_paths denies {name} for path {path:?}"
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn mutation_path(arguments: &RawValue) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(arguments.get())
+        .map_err(|_| "invalid tool arguments for write policy".to_string())?;
+    let path = value
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "missing required argument: path".to_string())?;
+    Ok(path.to_string())
+}
+
+fn path_matches(pattern: &str, path: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return path
+            .strip_prefix(&format!("{prefix}/"))
+            .is_some_and(|rest| !rest.contains('/'));
+    }
+    if let Some((prefix, suffix)) = pattern.split_once('*') {
+        return path.starts_with(prefix) && path.ends_with(suffix);
+    }
+    pattern == path
 }
 
 #[async_trait::async_trait]
@@ -160,6 +214,9 @@ impl ToolExecutor for ChildTools {
     ) -> ToolResult {
         if !self.permits(name) {
             return ToolResult::unknown_tool(name);
+        }
+        if let Err(message) = self.permits_write_tool(name, arguments) {
+            return crate::tool::error_result(message);
         }
         self.registry.execute(name, arguments, cancel).await
     }
@@ -536,6 +593,14 @@ impl Runner {
             allowed: definition
                 .as_ref()
                 .and_then(|definition| self.allowed_tools(definition)),
+            write_policy: definition
+                .as_ref()
+                .map_or(WritePolicy::SingleWriter, |definition| {
+                    definition.write_policy
+                }),
+            write_paths: definition
+                .as_ref()
+                .map_or_else(Vec::new, |definition| definition.write_paths.clone()),
         };
 
         let role_body = definition
@@ -1069,6 +1134,58 @@ mod tests {
             .remove("t1", NotificationKind::TaskFinished)
             .expect("a task_finished notification");
         assert_eq!(notification.usage, None);
+    }
+
+    #[tokio::test]
+    async fn write_policy_denies_mutation_tools_before_execution() {
+        let registry = Arc::new(Registry::new(vec![stub("read"), stub("write")]).unwrap());
+        let tools = ChildTools {
+            registry,
+            allowed: None,
+            write_policy: WritePolicy::ProposeOnly,
+            write_paths: Vec::new(),
+        };
+
+        let result = tools
+            .execute(
+                "write",
+                &raw(r#"{"path":"src/lib.rs","content":"x"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(result.is_error, "{result:?}");
+        assert!(result.content.contains("propose_only"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn owned_paths_allows_only_matching_mutations() {
+        let registry = Arc::new(Registry::new(vec![stub("write")]).unwrap());
+        let tools = ChildTools {
+            registry,
+            allowed: None,
+            write_policy: WritePolicy::OwnedPaths,
+            write_paths: vec!["crates/otto/**".to_string(), "docs/*.md".to_string()],
+        };
+
+        let allowed = tools
+            .execute(
+                "write",
+                &raw(r#"{"path":"crates/otto/src/lib.rs","content":"x"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(!allowed.is_error, "{allowed:?}");
+
+        let denied = tools
+            .execute(
+                "write",
+                &raw(r#"{"path":"crates/otto-core/src/lib.rs","content":"x"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(denied.is_error, "{denied:?}");
+        assert!(denied.content.contains("owned_paths"), "{denied:?}");
     }
 
     #[tokio::test]

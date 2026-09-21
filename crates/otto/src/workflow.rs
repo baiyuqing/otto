@@ -14,6 +14,8 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::subagent::WritePolicy;
+
 const MAX_DEFINITION_BYTES: usize = 1 << 20;
 const MAX_TEXT_BYTES: usize = 64 << 10;
 const MAX_DESCRIPTION_CHARS: usize = 1024;
@@ -108,7 +110,41 @@ pub struct AgentSnapshot {
     pub tools: Option<Vec<String>>,
     pub model: String,
     pub context: String,
+    #[serde(default)]
+    pub write_policy: SnapshotWritePolicy,
+    #[serde(default)]
+    pub write_paths: Vec<String>,
     pub body: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotWritePolicy {
+    ReadOnly,
+    ProposeOnly,
+    #[default]
+    SingleWriter,
+    OwnedPaths,
+}
+
+impl SnapshotWritePolicy {
+    fn from_subagent(policy: WritePolicy) -> Self {
+        match policy {
+            WritePolicy::ReadOnly => Self::ReadOnly,
+            WritePolicy::ProposeOnly => Self::ProposeOnly,
+            WritePolicy::SingleWriter => Self::SingleWriter,
+            WritePolicy::OwnedPaths => Self::OwnedPaths,
+        }
+    }
+
+    pub fn as_subagent(self) -> WritePolicy {
+        match self {
+            Self::ReadOnly => WritePolicy::ReadOnly,
+            Self::ProposeOnly => WritePolicy::ProposeOnly,
+            Self::SingleWriter => WritePolicy::SingleWriter,
+            Self::OwnedPaths => WritePolicy::OwnedPaths,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -173,12 +209,20 @@ impl Catalog {
                                 tools: agent.tools.clone(),
                                 model: agent.model.clone(),
                                 context: agent.context.clone(),
+                                write_policy: SnapshotWritePolicy::from_subagent(
+                                    agent.write_policy,
+                                ),
+                                write_paths: agent.write_paths.clone(),
                                 body: agent.body.clone(),
                             })
                             .collect();
                         definition
                             .agents
                             .sort_by(|left, right| left.name.cmp(&right.name));
+                        if let Err(error) = validate_write_coordination(&definition) {
+                            warnings.push(format!("workflow {}: {error}", path.display()));
+                            continue;
+                        }
                         definition.hash.clear();
                         definition.hash = format!(
                             "{:x}",
@@ -207,6 +251,120 @@ impl Catalog {
     pub fn definitions(&self) -> &[Definition] {
         &self.definitions
     }
+}
+
+pub(crate) fn validate_write_coordination(definition: &Definition) -> Result<(), String> {
+    let agents: HashMap<&str, &AgentSnapshot> = definition
+        .agents
+        .iter()
+        .map(|agent| (agent.name.as_str(), agent))
+        .collect();
+    for (left_index, left) in definition.steps.iter().enumerate() {
+        if left.kind != StepKind::Agent {
+            continue;
+        }
+        let Some(left_agent) = agents.get(left.agent.as_str()) else {
+            continue;
+        };
+        let Some(left_writer) = writer_scope(left_agent) else {
+            continue;
+        };
+        for right in definition.steps.iter().skip(left_index + 1) {
+            if right.kind != StepKind::Agent || ordered_by_dependency(definition, left, right) {
+                continue;
+            }
+            let Some(right_agent) = agents.get(right.agent.as_str()) else {
+                continue;
+            };
+            let Some(right_writer) = writer_scope(right_agent) else {
+                continue;
+            };
+            if writer_scopes_conflict(&left_writer, &right_writer) {
+                return Err(format!(
+                    "steps {:?} and {:?} may run concurrently and both can write; add a dependency or use disjoint owned_paths write policies",
+                    left.id, right.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WriterScope<'a> {
+    Global,
+    Owned(&'a [String]),
+}
+
+fn writer_scope(agent: &AgentSnapshot) -> Option<WriterScope<'_>> {
+    if !agent_can_mutate(agent) {
+        return None;
+    }
+    match agent.write_policy {
+        SnapshotWritePolicy::ReadOnly | SnapshotWritePolicy::ProposeOnly => None,
+        SnapshotWritePolicy::SingleWriter => Some(WriterScope::Global),
+        SnapshotWritePolicy::OwnedPaths => Some(WriterScope::Owned(&agent.write_paths)),
+    }
+}
+
+fn agent_can_mutate(agent: &AgentSnapshot) -> bool {
+    agent.tools.as_ref().is_none_or(|tools| {
+        tools
+            .iter()
+            .any(|tool| matches!(tool.as_str(), "write" | "edit"))
+    })
+}
+
+fn writer_scopes_conflict(left: &WriterScope<'_>, right: &WriterScope<'_>) -> bool {
+    match (left, right) {
+        (WriterScope::Global, _) | (_, WriterScope::Global) => true,
+        (WriterScope::Owned(left), WriterScope::Owned(right)) => left.iter().any(|left| {
+            right
+                .iter()
+                .any(|right| ownership_patterns_overlap(left, right))
+        }),
+    }
+}
+
+fn ownership_patterns_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || pattern_prefix(left).is_some_and(|prefix| right.starts_with(prefix))
+        || pattern_prefix(right).is_some_and(|prefix| left.starts_with(prefix))
+}
+
+fn pattern_prefix(pattern: &str) -> Option<&str> {
+    pattern
+        .strip_suffix("/**")
+        .or_else(|| pattern.strip_suffix("/*"))
+        .or_else(|| pattern.split_once('*').map(|(prefix, _)| prefix))
+}
+
+fn ordered_by_dependency(definition: &Definition, left: &Step, right: &Step) -> bool {
+    depends_on(definition, &left.id, &right.id) || depends_on(definition, &right.id, &left.id)
+}
+
+fn depends_on(definition: &Definition, step_id: &str, dependency_id: &str) -> bool {
+    let by_id: HashMap<&str, &Step> = definition
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step))
+        .collect();
+    let mut stack = vec![step_id];
+    let mut seen = HashSet::new();
+    while let Some(current) = stack.pop() {
+        let Some(step) = by_id.get(current) else {
+            continue;
+        };
+        for dependency in &step.needs {
+            if dependency == dependency_id {
+                return true;
+            }
+            if seen.insert(dependency.as_str()) {
+                stack.push(dependency);
+            }
+        }
+    }
+    false
 }
 
 fn read_definition_file(path: &Path) -> std::io::Result<Vec<u8>> {
@@ -1181,6 +1339,7 @@ impl Controller {
             .catalog
             .lookup(workflow)
             .ok_or_else(|| format!("workflow {workflow:?} not found"))?;
+        validate_write_coordination(definition)?;
         let id = random_id().map_err(|_| "generate workflow id failed".to_string())?;
         let run = self.store.create_run(
             &id,
@@ -1958,6 +2117,169 @@ needs = ["review"]
         assert_eq!(definition.steps[2].kind, StepKind::Approval);
         assert_eq!(definition.steps[2].needs, ["review"]);
         assert_eq!(definition.hash.len(), 64);
+    }
+
+    fn agent_snapshot(
+        name: &str,
+        tools: Option<&[&str]>,
+        write_policy: SnapshotWritePolicy,
+        write_paths: &[&str],
+    ) -> AgentSnapshot {
+        AgentSnapshot {
+            name: name.to_string(),
+            tools: tools.map(|tools| tools.iter().map(|tool| (*tool).to_string()).collect()),
+            write_policy,
+            write_paths: write_paths.iter().map(|path| (*path).to_string()).collect(),
+            ..AgentSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn write_coordination_rejects_parallel_global_writers() {
+        let mut definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "left"
+agent = "left"
+prompt = "left"
+[[steps]]
+id = "right"
+agent = "right"
+prompt = "right"
+"#,
+        );
+        definition.agents = vec![
+            agent_snapshot(
+                "left",
+                Some(&["read", "edit"]),
+                SnapshotWritePolicy::SingleWriter,
+                &[],
+            ),
+            agent_snapshot(
+                "right",
+                Some(&["write"]),
+                SnapshotWritePolicy::SingleWriter,
+                &[],
+            ),
+        ];
+
+        let error = validate_write_coordination(&definition).expect_err("parallel writers fail");
+
+        assert!(error.contains("may run concurrently"), "{error}");
+    }
+
+    #[test]
+    fn write_coordination_allows_readonly_parallel_and_serial_writers() {
+        let mut serial = definition(
+            br#"
+version = 1
+[[steps]]
+id = "left"
+agent = "left"
+prompt = "left"
+[[steps]]
+id = "right"
+agent = "right"
+prompt = "right"
+needs = ["left"]
+[[steps]]
+id = "plan"
+agent = "planner"
+prompt = "plan"
+"#,
+        );
+        serial.agents = vec![
+            agent_snapshot(
+                "left",
+                Some(&["edit"]),
+                SnapshotWritePolicy::SingleWriter,
+                &[],
+            ),
+            agent_snapshot(
+                "right",
+                Some(&["write"]),
+                SnapshotWritePolicy::SingleWriter,
+                &[],
+            ),
+            agent_snapshot(
+                "planner",
+                Some(&["read", "edit"]),
+                SnapshotWritePolicy::ProposeOnly,
+                &[],
+            ),
+        ];
+
+        validate_write_coordination(&serial)
+            .expect("serial writers and propose-only planner are ok");
+    }
+
+    #[test]
+    fn write_coordination_allows_disjoint_owned_paths() {
+        let mut definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "core"
+agent = "core"
+prompt = "core"
+[[steps]]
+id = "docs"
+agent = "docs"
+prompt = "docs"
+"#,
+        );
+        definition.agents = vec![
+            agent_snapshot(
+                "core",
+                Some(&["edit"]),
+                SnapshotWritePolicy::OwnedPaths,
+                &["crates/otto-core/**"],
+            ),
+            agent_snapshot(
+                "docs",
+                Some(&["write"]),
+                SnapshotWritePolicy::OwnedPaths,
+                &["docs/**"],
+            ),
+        ];
+
+        validate_write_coordination(&definition).expect("disjoint owned paths are ok");
+    }
+
+    #[test]
+    fn write_coordination_rejects_overlapping_owned_paths() {
+        let mut definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "a"
+agent = "a"
+prompt = "a"
+[[steps]]
+id = "b"
+agent = "b"
+prompt = "b"
+"#,
+        );
+        definition.agents = vec![
+            agent_snapshot(
+                "a",
+                Some(&["edit"]),
+                SnapshotWritePolicy::OwnedPaths,
+                &["crates/otto/**"],
+            ),
+            agent_snapshot(
+                "b",
+                Some(&["write"]),
+                SnapshotWritePolicy::OwnedPaths,
+                &["crates/otto/src/**"],
+            ),
+        ];
+
+        let error = validate_write_coordination(&definition).expect_err("overlap fails");
+
+        assert!(error.contains("may run concurrently"), "{error}");
     }
 
     #[test]

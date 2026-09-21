@@ -1,6 +1,6 @@
 //! End-to-end coverage of the built `otto` binary.
 //!
-//! One `--approve` run against a loopback OpenAI-compatible server, with
+//! One `--prompt` run against a loopback OpenAI-compatible server, with
 //! Seatbelt enabled, that makes the model issue a `bash` call and a `write`
 //! call. The assertions are on what the binary printed and on what it left in
 //! the workspace, so every layer between the flag parser and the sandbox is
@@ -42,7 +42,7 @@ fn configure(home: &std::path::Path, base_url: &str) {
 }
 
 #[test]
-fn the_binary_runs_one_approved_turn_with_bash_and_write_under_seatbelt() {
+fn the_binary_runs_one_prompt_turn_with_bash_and_write_under_seatbelt() {
     let home = tempfile::tempdir().expect("home");
     let workspace = tempfile::tempdir().expect("workspace");
     std::fs::write(workspace.path().join("README.md"), "# fixture\n").expect("seed README");
@@ -74,7 +74,7 @@ fn the_binary_runs_one_approved_turn_with_bash_and_write_under_seatbelt() {
         .arg(workspace.path())
         .arg("--sandbox")
         .arg("seatbelt")
-        .arg("--approve")
+        .arg("--prompt")
         .arg("run the two tool calls");
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
         command.env("TMPDIR", tmpdir);

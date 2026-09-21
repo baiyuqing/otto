@@ -5,7 +5,7 @@
 //! interchangeably, takes a value either as `-name=value` or as the next
 //! argument, stops at the first non-flag argument, and records which flags were
 //! actually written on the command line. Seven of Otto's behaviours
-//! (`--config`, `--shell-timeout`, `--max-output-bytes`, `--approve`,
+//! (`--config`, `--shell-timeout`, `--max-output-bytes`, `--prompt`,
 //! `--sandbox`, `--socket`, `--listen`) branch on that "explicitly set" set,
 //! and the tests pin the resulting stderr text and exit code 2 byte for byte.
 //! No general-purpose parser has those exact semantics, so matching them costs
@@ -33,7 +33,7 @@ pub struct CliOptions {
     pub base_url: String,
     pub model: String,
     pub thinking: String,
-    pub approve: String,
+    pub prompt: String,
     pub ui: String,
     pub sandbox: String,
     pub shell_timeout: Duration,
@@ -49,7 +49,7 @@ pub struct CliOptions {
     pub explicit_config: bool,
     pub shell_time_set: bool,
     pub max_output_set: bool,
-    pub approve_set: bool,
+    pub prompt_set: bool,
     pub sandbox_set: bool,
     pub socket_set: bool,
     pub listen_set: bool,
@@ -105,7 +105,7 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.base_url = set.string("base-url");
     options.model = set.string("model");
     options.thinking = set.string("thinking");
-    options.approve = set.string("approve");
+    options.prompt = set.string("prompt");
     options.ui = set.string("ui");
     options.sandbox = set.string("sandbox");
     options.shell_timeout = set.duration("shell-timeout");
@@ -121,10 +121,17 @@ pub fn parse_flags(args: &[String], stdout: &mut dyn Write) -> Result<Parsed, Pa
     options.explicit_config = set.visited("config");
     options.shell_time_set = set.visited("shell-timeout");
     options.max_output_set = set.visited("max-output-bytes");
-    options.approve_set = set.visited("approve");
+    options.prompt_set = set.visited("prompt");
     options.sandbox_set = set.visited("sandbox");
     options.socket_set = set.visited("socket");
     options.listen_set = set.visited("listen");
+
+    // `--approve` used to mean what `--prompt` means now, and `/approve`
+    // still grants one elevated Bash command. The retired name is declared
+    // only so the rejection can name its replacement.
+    if set.visited("approve") {
+        return Err(reject("otto: --approve was renamed to --prompt"));
+    }
 
     validate(&options, set.visited("ui"))?;
     Ok(Parsed::Options(Box::new(options)))
@@ -155,8 +162,8 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
             "--resume"
         } else if options.no_session {
             "--no-session"
-        } else if options.approve_set {
-            "--approve"
+        } else if options.prompt_set {
+            "--prompt"
         } else {
             ""
         };
@@ -169,8 +176,8 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
     if options.serve {
         let conflict = if ui_visited {
             "--ui"
-        } else if options.approve_set {
-            "--approve"
+        } else if options.prompt_set {
+            "--prompt"
         } else if !options.resume_path.is_empty() {
             "--resume"
         } else if options.continue_last {
@@ -219,11 +226,11 @@ fn validate(options: &CliOptions, ui_visited: bool) -> Result<(), ParseFailure> 
             "otto: --thinking must be one of low, medium, high, xhigh, max",
         ));
     }
-    if options.approve_set && options.approve.trim().is_empty() {
-        return Err(reject("otto: --approve requires a non-empty prompt"));
+    if options.prompt_set && options.prompt.trim().is_empty() {
+        return Err(reject("otto: --prompt requires a non-empty value"));
     }
-    if options.approve_set && options.ui == "tui" {
-        return Err(reject("otto: --approve cannot be used with --ui tui"));
+    if options.prompt_set && options.ui == "tui" {
+        return Err(reject("otto: --prompt cannot be used with --ui tui"));
     }
     Ok(())
 }
@@ -253,7 +260,7 @@ Options:
   --base-url URL         provider base URL override
   --model NAME           model override
   --thinking LEVEL       model thinking effort: low, medium, high, xhigh, or max
-  --approve PROMPT       run PROMPT (or @FILE) without interaction and exit
+  --prompt PROMPT        run PROMPT (or @FILE) without interaction and exit
   --ui MODE              frontend mode: auto, tui, or repl
   --sandbox MODE         sandbox mode: auto, seatbelt, or off (off is unsafe)
   --shell-timeout D      shell command timeout
@@ -292,6 +299,7 @@ const DECLARED: &[(&str, Kind)] = &[
     ("base-url", Kind::Str),
     ("model", Kind::Str),
     ("thinking", Kind::Str),
+    ("prompt", Kind::Str),
     ("approve", Kind::Str),
     ("ui", Kind::Str),
     ("sandbox", Kind::Str),
@@ -502,13 +510,13 @@ mod tests {
     #[test]
     fn records_which_options_were_written_explicitly() {
         let bare = options(&[]);
-        assert!(!bare.approve_set && !bare.sandbox_set && !bare.shell_time_set);
+        assert!(!bare.prompt_set && !bare.sandbox_set && !bare.shell_time_set);
         assert!(!bare.max_output_set && !bare.socket_set && !bare.listen_set);
 
         let explicit = options(&[
             "--config",
             "/tmp/config.toml",
-            "--approve",
+            "--prompt",
             "do it",
             "--sandbox",
             "off",
@@ -518,7 +526,7 @@ mod tests {
             "4096",
         ]);
         assert!(explicit.explicit_config);
-        assert!(explicit.approve_set);
+        assert!(explicit.prompt_set);
         assert!(explicit.sandbox_set);
         assert!(explicit.shell_time_set);
         assert!(explicit.max_output_set);
@@ -590,6 +598,14 @@ mod tests {
     }
 
     #[test]
+    fn the_retired_approve_flag_names_its_replacement() {
+        assert_eq!(
+            rejection(&["--approve", "x"]),
+            "otto: --approve was renamed to --prompt\n"
+        );
+    }
+
+    #[test]
     fn scanning_stops_at_the_first_positional_argument() {
         assert_eq!(
             rejection(&["extra"]),
@@ -630,16 +646,16 @@ mod tests {
                 "otto: --archive cannot be used with --no-session\n",
             ),
             (
-                &["--archive", "s.jsonl", "--approve", "x"],
-                "otto: --archive cannot be used with --approve\n",
+                &["--archive", "s.jsonl", "--prompt", "x"],
+                "otto: --archive cannot be used with --prompt\n",
             ),
             (
                 &["serve", "--ui", "repl"],
                 "otto: serve cannot be combined with --ui\n",
             ),
             (
-                &["serve", "--approve", "x"],
-                "otto: serve cannot be combined with --approve\n",
+                &["serve", "--prompt", "x"],
+                "otto: serve cannot be combined with --prompt\n",
             ),
             (
                 &["serve", "--resume", "anything"],
@@ -693,12 +709,12 @@ mod tests {
                 "otto: --thinking must be one of low, medium, high, xhigh, max\n",
             ),
             (
-                &["--approve", "   "],
-                "otto: --approve requires a non-empty prompt\n",
+                &["--prompt", "   "],
+                "otto: --prompt requires a non-empty value\n",
             ),
             (
-                &["--approve", "x", "--ui", "tui"],
-                "otto: --approve cannot be used with --ui tui\n",
+                &["--prompt", "x", "--ui", "tui"],
+                "otto: --prompt cannot be used with --ui tui\n",
             ),
         ];
         for (args, want) in cases {

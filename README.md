@@ -90,7 +90,7 @@ Remember that we decided to ship the inbox path first.
 After configuring a default profile, you can also run one prompt and exit:
 
 ```bash
-./otto --approve "summarize what this workspace is for"
+./otto --prompt "summarize what this workspace is for"
 ./otto --continue
 ```
 

@@ -480,6 +480,19 @@ Shared commands:
   printing the new state. It is rejected while a turn is in flight, and a
   failed reload keeps the previous sandbox in place. `allow_env` changes and a
   sandbox that was unavailable at startup still need a restart.
+- `/sandbox allow <path>` adds one path to `read_paths` and reloads, so a
+  command that the sandbox denied can read it. The path is resolved to an
+  absolute, symlink-free path first and must exist; it is written to
+  `[sandbox].read_paths` in the config file, so it also applies to later
+  sessions. In the TUI the resolved path is shown in a confirmation picker
+  whose selected row is `Cancel`; applying it also asks Otto to retry the
+  command that failed.
+- `/sandbox network allow|deny` sets `[sandbox].network` the same way. In the
+  TUI, `/sandbox network` without a mode opens a picker with the current mode
+  marked.
+- If either change is written but the sandbox rejects it, the configuration
+  file is rolled back to what it held before and the previous sandbox stays in
+  place.
 - `/approve <id>` grants one pending elevated Bash command and immediately asks
   Otto to retry it. The grant is tied to the current session and exact command,
   is consumed once, and expires after five minutes.

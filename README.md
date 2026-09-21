@@ -187,7 +187,9 @@ persisted.
   control.
 
 Configure shell permissions interactively with `otto sandbox setup`; see the
-[setup guide](docs/user-manual.md#interactive-sandbox-setup).
+[setup guide](docs/user-manual.md#interactive-sandbox-setup). In a running
+session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
+same `[sandbox]` settings and apply them to the current process.
 
 Read [tools and safety](docs/user-manual.md#tools-and-safety) before granting
 access to a workspace.

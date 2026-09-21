@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::info::SandboxInfo;
 use crate::cli::runtime_builder::{Builder, Runner, RuntimeInfo, SharedSession};
+use crate::cli::sandbox_setup::{self, SandboxChange};
 use crate::session::{self as sessionfs, ArchiveResult, MAX_LIST_SESSIONS};
 use crate::tool::remind::Reminders;
 
@@ -967,6 +968,49 @@ impl Controller {
         control.reload().await
     }
 
+    /// Resolves a user-supplied `/sandbox allow` path against this process's
+    /// home directory and the filesystem, without changing anything.
+    pub fn resolve_sandbox_read_path(&self, input: &str) -> Result<String, String> {
+        sandbox_setup::resolve_read_path(input, &self.builder.home)
+    }
+
+    /// Persists one `[sandbox]` change to the configuration file and applies
+    /// it to the live sandbox.
+    ///
+    /// Nothing is written unless a sandbox control exists and no turn is
+    /// running, and a reload that fails puts the previous configuration back,
+    /// so the file on disk always describes a sandbox this process accepted.
+    /// Only `read_paths` and `network` are offered: an `allow_env` change
+    /// cannot be reloaded into a running process at all.
+    pub async fn amend_sandbox(&self, change: SandboxChange) -> Result<SandboxInfo, String> {
+        let control = {
+            let state = self.lock();
+            if state.closed {
+                return Err(CLOSED.to_string());
+            }
+            let Some(control) = self.sandbox.clone() else {
+                return Err(SANDBOX_RELOAD_UNAVAILABLE.to_string());
+            };
+            if state.busy {
+                return Err(PROMPT_ACTIVE.to_string());
+            }
+            control
+        };
+        let path = self.builder.config_path.clone();
+        let amendment = sandbox_setup::amend_sandbox_config(&path, &change)?;
+        match control.reload().await {
+            Ok(info) => Ok(info),
+            Err(message) => Err(
+                match sandbox_setup::revert_sandbox_config(&path, &amendment) {
+                    Ok(()) => format!("{message}; the configuration change was rolled back"),
+                    Err(failure) => format!(
+                        "{message}; the configuration change could not be rolled back: {failure}"
+                    ),
+                },
+            ),
+        }
+    }
+
     /// Grants one pending elevated Bash command for the current session.
     pub fn approve_bash(&self, id: &str) -> Result<String, String> {
         let session_id = {
@@ -1213,7 +1257,11 @@ fn clean(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::testutil::{builder, controller, initial_runtime, user};
+    use crate::cli::info::SandboxNetwork;
+    use crate::cli::sandbox_setup::SandboxChange;
+    use crate::cli::testutil::{
+        FakeSandbox, builder, controller, initial_runtime, seatbelt_info, user,
+    };
     use otto_core::agent::inbox::NotificationKind;
 
     #[tokio::test]
@@ -1247,6 +1295,91 @@ mod tests {
             controller.approve_bash("approval-1"),
             Err(PROMPT_ACTIVE.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn amending_the_sandbox_writes_the_configuration_and_reloads_it() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (control, calls) = FakeSandbox::new(
+            seatbelt_info(SandboxNetwork::Allowed),
+            seatbelt_info(SandboxNetwork::Denied),
+            None,
+        );
+        let controller = controller(workspace.path(), sessions.path())
+            .await
+            .with_sandbox_control(control);
+        std::fs::create_dir(workspace.path().join("cache")).expect("cache");
+        let resolved = controller
+            .resolve_sandbox_read_path("~/cache")
+            .expect("resolve");
+
+        let info = controller
+            .amend_sandbox(SandboxChange::AllowReadPath(resolved.clone()))
+            .await
+            .expect("amend");
+
+        assert_eq!(info.network, SandboxNetwork::Denied);
+        assert_eq!(*calls.lock().expect("calls"), 1);
+        let written = std::fs::read_to_string(controller.config_path()).expect("read config");
+        assert!(written.contains(&resolved), "{written}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_reload_rolls_the_configuration_back() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (control, calls) = FakeSandbox::new(
+            seatbelt_info(SandboxNetwork::Allowed),
+            seatbelt_info(SandboxNetwork::Allowed),
+            Some("sandbox reload failed: self-test-failed"),
+        );
+        let controller = controller(workspace.path(), sessions.path())
+            .await
+            .with_sandbox_control(control);
+        std::fs::write(controller.config_path(), "# preserved\n").expect("write config");
+
+        let error = controller
+            .amend_sandbox(SandboxChange::Network("deny".to_string()))
+            .await
+            .expect_err("reload fails");
+
+        assert!(error.contains("self-test-failed"), "{error}");
+        assert!(error.contains("rolled back"), "{error}");
+        assert_eq!(*calls.lock().expect("calls"), 1);
+        assert_eq!(
+            std::fs::read_to_string(controller.config_path()).expect("read config"),
+            "# preserved\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn amending_without_a_sandbox_control_or_while_busy_writes_nothing() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+
+        assert_eq!(
+            controller
+                .amend_sandbox(SandboxChange::Network("deny".to_string()))
+                .await,
+            Err(SANDBOX_RELOAD_UNAVAILABLE.to_string())
+        );
+
+        let (control, _) = FakeSandbox::new(
+            seatbelt_info(SandboxNetwork::Allowed),
+            seatbelt_info(SandboxNetwork::Denied),
+            None,
+        );
+        let controller = controller.with_sandbox_control(control);
+        let _admission = controller.begin_operation().expect("admit turn");
+        assert_eq!(
+            controller
+                .amend_sandbox(SandboxChange::Network("deny".to_string()))
+                .await,
+            Err(PROMPT_ACTIVE.to_string())
+        );
+        assert!(!controller.config_path().exists());
     }
 
     #[tokio::test]

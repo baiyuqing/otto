@@ -41,11 +41,14 @@ what the CLI actually does today.
 
 ## Quick start
 
-Build the binary:
+Install the binary:
 
 ```bash
-make build
+make install
 ```
+
+`make install` builds Otto and installs it to `~/.local/bin/otto`; make sure
+`~/.local/bin` is on your `PATH`.
 
 Create `~/.config/otto/config.toml`:
 
@@ -81,13 +84,13 @@ Export the selected profile's key and start Otto:
 
 ```bash
 export DEEPSEEK_API_KEY=your-key
-./otto --config ~/.config/otto/config.toml --profile deepseek
+otto --config ~/.config/otto/config.toml --profile deepseek
 ```
 
 An ad hoc run without a config file:
 
 ```bash
-OTTO_API_KEY=your-key ./otto \
+OTTO_API_KEY=your-key otto \
   --provider openai-compatible \
   --base-url https://api.deepseek.com/v1 \
   --model deepseek-chat \
@@ -103,7 +106,7 @@ flow (the same mechanism the Codex CLI uses).
 ### Signing in
 
 ```bash
-./otto login
+otto login
 ```
 
 `otto login` starts a local callback server, opens your browser to the OpenAI
@@ -112,8 +115,8 @@ browser does not launch. After you approve, it exchanges the authorization code
 and writes credentials to `~/.otto/auth/chatgpt.json` with file mode `0600`.
 
 ```bash
-./otto login --status   # report the ChatGPT sign-in state and access-token expiry; exits nonzero if not signed in
-./otto logout           # remove the stored credentials
+otto login --status   # report the ChatGPT sign-in state and access-token expiry; exits nonzero if not signed in
+otto logout           # remove the stored credentials
 ```
 
 ### Using the subscription
@@ -130,13 +133,13 @@ model = "gpt-5-codex"
 ```
 
 ```bash
-./otto --profile chatgpt
+otto --profile chatgpt
 ```
 
 Or ad hoc, without a profile:
 
 ```bash
-./otto --provider chatgpt --model gpt-5-codex
+otto --provider chatgpt --model gpt-5-codex
 ```
 
 ### How it works

@@ -164,6 +164,7 @@ The canonical Make targets are:
 make check-fast     # rustfmt --check, clippy -D warnings, focused otto-core tests, git diff --check
 make check          # full macOS gate: check-fast, build, all tests, wasm check+test, PTY test, UI test
 make build          # build the Web UI, cargo build --release, then copy ./otto
+make install        # run make build, then install ./otto to ~/.local/bin/otto
 make rust-fmt       # cargo fmt --all -- --check
 make rust-lint      # cargo clippy --workspace --all-targets -- -D warnings
 make rust-test      # cargo test --workspace (offline)

@@ -24,14 +24,16 @@
 ```bash
 git clone https://github.com/baiyuqing/otto.git
 cd otto
-make build
-./otto --help
+make install
+otto --help
 ```
 
-`make build` 会先刷新并嵌入 Web UI，再编译 Otto。若直接运行 `cargo build` 且
-此前未执行 `make ui`，二进制中只会嵌入一行占位文本。
+`make install` 会先刷新并嵌入 Web UI，构建 release 二进制，然后安装到
+`~/.local/bin/otto`。请确认 `~/.local/bin` 已在 `PATH` 中。若直接运行
+`cargo build` 且此前未执行 `make ui`，二进制中只会嵌入一行占位文本。
 
-以下命令在该目录中运行。将二进制文件放入 `PATH` 后，可以在其他目录直接使用 `otto`。
+如果只想在当前 checkout 中保留本地二进制，可运行 `make build`，然后执行
+`./otto --help`。
 
 ## 快速开始
 

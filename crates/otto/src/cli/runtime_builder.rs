@@ -1002,7 +1002,7 @@ pub fn resume_environment(environment: &HashMap<String, String>) -> HashMap<Stri
 }
 
 /// 16 random bytes from `/dev/urandom`, hex encoded.
-pub(super) fn random_id() -> std::io::Result<String> {
+pub(crate) fn random_id() -> std::io::Result<String> {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;

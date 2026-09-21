@@ -621,13 +621,17 @@ impl App {
                 None
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.insert(self.cursor, ch);
-                self.cursor += 1;
-                self.edited();
+                self.insert_text(&ch.to_string());
                 None
             }
             _ => None,
         }
+    }
+
+    pub fn insert_text(&mut self, value: &str) {
+        self.input.splice(self.cursor..self.cursor, value.chars());
+        self.cursor += value.chars().count();
+        self.edited();
     }
 
     /// Esc or Ctrl+C while a turn is running cancels it; the caller (which
@@ -1480,6 +1484,33 @@ mod tests {
         // so it is safe to exercise without one by checking state alone.
         assert!(!app.input.is_empty());
         let _ = event;
+    }
+
+    #[test]
+    fn insert_text_preserves_pasted_newlines_at_the_cursor() {
+        let mut app = App {
+            entries: Vec::new(),
+            usage: Usage::default(),
+            info: Info::default(),
+            input: "abcd".chars().collect(),
+            cursor: 2,
+            history: History::default(),
+            scroll: None,
+            max_scroll: Cell::new(0),
+            selection: None,
+            picker: None,
+            suggestion: 0,
+            show_help: false,
+            show_details: false,
+            busy_since: None,
+            status: None,
+            ctrl_c_armed_at: None,
+        };
+
+        app.insert_text("one\ntwo");
+
+        assert_eq!(app.input.iter().collect::<String>(), "abone\ntwocd");
+        assert_eq!(app.cursor, "abone\ntwo".chars().count());
     }
 
     #[test]

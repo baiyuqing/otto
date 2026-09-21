@@ -1077,8 +1077,15 @@ fn session_row(session: &SessionInfo) -> PickerRow {
     } else {
         &session.name
     };
+    // Every row comes from the current workspace; naming it makes that
+    // visible, since the rest of the row says nothing about where the
+    // session was recorded.
+    let workspace = std::path::Path::new(&session.cwd)
+        .file_name()
+        .map(|directory| format!(" [{}]", directory.to_string_lossy()))
+        .unwrap_or_default();
     PickerRow {
-        label: format!("{name}{marker} — {}", session.last_user_text),
+        label: format!("{name}{marker} — {}{workspace}", session.last_user_text),
         value: session.path.clone(),
     }
 }
@@ -1351,6 +1358,31 @@ mod tests {
             })
             .collect();
         Picker::new(PickerKind::Resume, rows)
+    }
+
+    #[test]
+    fn a_picker_row_names_the_session_workspace() {
+        let row = session_row(&SessionInfo {
+            name: "review".into(),
+            last_user_text: "check the diff".into(),
+            cwd: "/Users/u/Work/code/otto".into(),
+            ..SessionInfo::default()
+        });
+        assert_eq!(row.label, "review — check the diff [otto]");
+
+        let current = session_row(&SessionInfo {
+            name: "review".into(),
+            cwd: "/Users/u/Work/code/otto".into(),
+            current: true,
+            ..SessionInfo::default()
+        });
+        assert_eq!(current.label, "review (current) —  [otto]");
+
+        let unrecorded = session_row(&SessionInfo {
+            name: "review".into(),
+            ..SessionInfo::default()
+        });
+        assert_eq!(unrecorded.label, "review — ");
     }
 
     #[test]

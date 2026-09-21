@@ -51,7 +51,7 @@ use super::sandbox_runtime::{
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 use super::serve;
 
-const MAX_APPROVE_PROMPT_BYTES: usize = 1 << 20;
+const MAX_PROMPT_BYTES: usize = 1 << 20;
 
 /// Darwin's process argument/environment budget is about 1 MiB. These
 /// ceilings are deliberately larger while still bounding injected snapshots.
@@ -230,27 +230,24 @@ pub async fn run(
         return fail(stderr, SESSION_OPERATION_UNAVAILABLE);
     }
 
-    let mut approve_prompt = options.approve.clone();
-    if options.approve_set
-        && let Some(path) = approve_prompt.strip_prefix('@')
+    let mut prompt = options.prompt.clone();
+    if options.prompt_set
+        && let Some(path) = prompt.strip_prefix('@')
     {
         match std::fs::read(path) {
-            Ok(data) if data.len() > MAX_APPROVE_PROMPT_BYTES => {
+            Ok(data) if data.len() > MAX_PROMPT_BYTES => {
                 return fail(
                     stderr,
                     &format!(
-                        "read approve prompt: file is too large ({} bytes); maximum is {} bytes",
+                        "read prompt: file is too large ({} bytes); maximum is {} bytes",
                         data.len(),
-                        MAX_APPROVE_PROMPT_BYTES
+                        MAX_PROMPT_BYTES
                     ),
                 );
             }
-            Ok(data) => approve_prompt = String::from_utf8_lossy(&data).into_owned(),
+            Ok(data) => prompt = String::from_utf8_lossy(&data).into_owned(),
             Err(error) => {
-                return fail(
-                    stderr,
-                    &startup.redact(&format!("read approve prompt: {error}")),
-                );
+                return fail(stderr, &startup.redact(&format!("read prompt: {error}")));
             }
         }
     }
@@ -310,7 +307,7 @@ pub async fn run(
         Err(error) => return fail(stderr, &startup.redact(&error.to_string())),
     };
     let mut frontend = Frontend::Once;
-    if !options.approve_set {
+    if !options.prompt_set {
         frontend = match select_frontend(ui_mode, terminal) {
             Ok(frontend) => frontend,
             Err(message) => return fail(stderr, &startup.redact(&message)),
@@ -635,7 +632,7 @@ pub async fn run(
         Frontend::Once => {
             let mut console =
                 Repl::new(&controller, Box::new(&mut *stdout), Box::new(&mut *stderr));
-            console.run_once(&approve_prompt, cancel).await
+            console.run_once(&prompt, cancel).await
         }
         Frontend::Repl => {
             let mut console =

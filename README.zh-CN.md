@@ -78,7 +78,7 @@ API key 从配置中的 `api_key_env` 指定变量读取，回退变量为 `OTTO
 配置默认 profile 后，也可以运行一次任务并退出，或继续最近的会话：
 
 ```bash
-./otto --approve "总结这个工作区是做什么的"
+./otto --prompt "总结这个工作区是做什么的"
 ./otto --continue
 ```
 

@@ -380,7 +380,7 @@ pub fn bash_definition() -> ToolDefinition {
 pub fn bash_definition_with_approvals() -> ToolDefinition {
     definition(
         "bash",
-        "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. The command will not run unsandboxed until the user grants one-time approval with /approve.",
+        "Execute a shell command from the workspace. Set sandbox_permissions to require_escalated only when sandboxed execution cannot complete the task; include a justification. Only the user can grant it, by typing /approve in Otto, and the command does not run until they do.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -392,7 +392,7 @@ pub fn bash_definition_with_approvals() -> ToolDefinition {
                 "sandbox_permissions": {
                     "type": "string",
                     "enum": ["use_default", "require_escalated"],
-                    "description": "Use require_escalated to request one-time unsandboxed execution"
+                    "description": "Use require_escalated to request one-time unsandboxed execution; the user must approve it before the command runs"
                 },
                 "justification": {
                     "type": "string",
@@ -440,7 +440,11 @@ impl Tool for BashTool {
                     let justification =
                         serde_json::to_string(&args.justification).expect("string encodes");
                     return self.argument_error(&format!(
-                        "unsandboxed approval required: run /approve {id}; command={command}; justification={justification}"
+                        "unsandboxed execution was not approved; the command did not run. \
+Only the user can approve it, by typing /approve {id} in Otto. That is not a shell \
+command, so do not try to run it yourself. Ask the user for approval and then reissue \
+this exact command; if you continue without it, tell the user what you are doing \
+instead. command={command}; justification={justification}"
                     ));
                 }
                 (&approvals.executor, approvals.environment.as_slice())
@@ -752,7 +756,7 @@ mod tests {
         assert!(requested.is_error);
         assert_eq!(
             requested.content,
-            "unsandboxed approval required: run /approve approval-1; command=\"git push\"; justification=\"push the reviewed branch\""
+            "unsandboxed execution was not approved; the command did not run. Only the user can approve it, by typing /approve approval-1 in Otto. That is not a shell command, so do not try to run it yourself. Ask the user for approval and then reissue this exact command; if you continue without it, tell the user what you are doing instead. command=\"git push\"; justification=\"push the reviewed branch\""
         );
         assert_eq!(confined.calls(), 0);
         assert_eq!(elevated.calls(), 0);
@@ -767,7 +771,7 @@ mod tests {
         let requested = run_escalated(&tool, "git push", "push the reviewed branch").await;
         assert_eq!(
             requested.content,
-            "unsandboxed approval required: run /approve approval-3; command=\"git push\"; justification=\"push the reviewed branch\""
+            "unsandboxed execution was not approved; the command did not run. Only the user can approve it, by typing /approve approval-3 in Otto. That is not a shell command, so do not try to run it yourself. Ask the user for approval and then reissue this exact command; if you continue without it, tell the user what you are doing instead. command=\"git push\"; justification=\"push the reviewed branch\""
         );
         approvals
             .approve("session-1", "approval-3")

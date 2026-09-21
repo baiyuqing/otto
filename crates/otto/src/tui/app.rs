@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::tasks::{Task, TaskStatus};
 use crate::app::{Controller, Info, PROFILE_SWITCH_UNAVAILABLE};
+use crate::cli::info::SandboxNetwork;
 use crate::cli::login;
 use crate::cli::repl_commands;
 
@@ -54,6 +55,7 @@ pub(crate) enum PickerKind {
     Profile,
     Effort,
     Thinking,
+    Sandbox,
 }
 
 impl PickerKind {
@@ -64,6 +66,7 @@ impl PickerKind {
             Self::Profile => "Switch profile (enter to select, esc to cancel)",
             Self::Effort => "Reasoning effort (enter to use, s to save, esc to cancel)",
             Self::Thinking => "Reasoning effort (enter to use, s to save, esc to cancel)",
+            Self::Sandbox => "Sandbox change (select, enter to apply, esc to cancel)",
         }
     }
 }
@@ -118,6 +121,10 @@ pub(crate) enum Action {
     Resume(String),
     Archive(String),
     SandboxReload,
+    /// One resolved absolute path to add to the sandbox `read_paths`.
+    SandboxAllow(String),
+    /// The sandbox network mode, `allow` or `deny`.
+    SandboxNetwork(String),
     Approve(String),
     Login(String),
     McpLogin(String),
@@ -489,6 +496,7 @@ impl App {
                             thinking: row.value,
                             save: false,
                         }),
+                        PickerKind::Sandbox => sandbox_action(&row.value),
                     };
                 }
                 _ => {}
@@ -793,20 +801,42 @@ impl App {
                 None
             }
             SlashCommandKind::Sandbox => {
-                if args.is_empty() {
-                    let info = controller.sandbox_info();
-                    let reason = info.reason_code();
-                    let mut text = format!("Sandbox: {}", info.summary());
-                    if !reason.is_empty() {
-                        text.push_str(&format!("\nSandbox reason: {reason}"));
+                let (subcommand, rest) = match args.split_once(char::is_whitespace) {
+                    Some((subcommand, rest)) => (subcommand, rest.trim()),
+                    None => (args.as_str(), ""),
+                };
+                match (subcommand, rest) {
+                    ("", _) => {
+                        let info = controller.sandbox_info();
+                        let reason = info.reason_code();
+                        let mut text = format!("Sandbox: {}", info.summary());
+                        if !reason.is_empty() {
+                            text.push_str(&format!("\nSandbox reason: {reason}"));
+                        }
+                        self.push_system(text);
+                        None
                     }
-                    self.push_system(text);
-                    None
-                } else if args == "reload" {
-                    Some(Action::SandboxReload)
-                } else {
-                    self.push_system(format!("unknown command: /sandbox {args}"));
-                    None
+                    ("reload", "") => Some(Action::SandboxReload),
+                    ("allow", path) => {
+                        match controller.resolve_sandbox_read_path(path) {
+                            Ok(resolved) => self.picker = Some(sandbox_allow_picker(&resolved)),
+                            Err(message) => {
+                                self.push_system(format!("/sandbox allow: {message}"));
+                            }
+                        }
+                        None
+                    }
+                    ("network", "") => {
+                        self.picker = Some(sandbox_network_picker(controller));
+                        None
+                    }
+                    ("network", mode @ ("allow" | "deny")) => {
+                        Some(Action::SandboxNetwork(mode.to_string()))
+                    }
+                    _ => {
+                        self.push_system(format!("unknown command: /sandbox {args}"));
+                        None
+                    }
                 }
             }
             SlashCommandKind::Approve => {
@@ -1036,6 +1066,7 @@ fn picker_command_name(kind: PickerKind) -> &'static str {
         PickerKind::Profile => "model",
         PickerKind::Effort => "model",
         PickerKind::Thinking => "thinking",
+        PickerKind::Sandbox => "sandbox",
     }
 }
 
@@ -1049,6 +1080,66 @@ fn session_row(session: &SessionInfo) -> PickerRow {
     PickerRow {
         label: format!("{name}{marker} — {}", session.last_user_text),
         value: session.path.clone(),
+    }
+}
+
+/// The confirmation for one `/sandbox allow` grant.
+///
+/// The cancel row is the selected one: the path comes from whatever the model
+/// or the user pasted, and a grant that widens what shell commands can read
+/// should cost one deliberate keystroke rather than a reflex Enter.
+fn sandbox_allow_picker(resolved: &str) -> Picker {
+    Picker {
+        kind: PickerKind::Sandbox,
+        rows: vec![
+            PickerRow {
+                label: format!(
+                    "Allow reading {resolved} (saved to the configuration, applied now)"
+                ),
+                value: format!("allow\t{resolved}"),
+            },
+            PickerRow {
+                label: "Cancel".to_string(),
+                value: String::new(),
+            },
+        ],
+        selected: 1,
+    }
+}
+
+/// The network modes, with the one now in force marked. An unconfined process
+/// marks neither.
+fn sandbox_network_picker(controller: &Controller) -> Picker {
+    let current = match controller.sandbox_info().network {
+        SandboxNetwork::Allowed => "allow",
+        SandboxNetwork::Denied => "deny",
+        SandboxNetwork::Unconfined => "",
+    };
+    let rows: Vec<PickerRow> = ["allow", "deny"]
+        .into_iter()
+        .map(|mode| PickerRow {
+            label: format!("{}{mode}", if mode == current { "* " } else { "  " }),
+            value: format!("network\t{mode}"),
+        })
+        .collect();
+    let selected = rows
+        .iter()
+        .position(|row| row.label.starts_with("* "))
+        .unwrap_or(0);
+    Picker {
+        kind: PickerKind::Sandbox,
+        rows,
+        selected,
+    }
+}
+
+/// The action one sandbox picker row stands for. The cancel row carries no
+/// value and closes the picker.
+fn sandbox_action(value: &str) -> Option<Action> {
+    match value.split_once('\t')? {
+        ("allow", path) => Some(Action::SandboxAllow(path.to_string())),
+        ("network", mode) => Some(Action::SandboxNetwork(mode.to_string())),
+        _ => None,
     }
 }
 
@@ -2099,6 +2190,112 @@ mod tests {
             action,
             Some(Action::SetThinking { thinking, save: false }) if thinking == "low"
         ));
+    }
+
+    #[tokio::test]
+    async fn sandbox_allow_opens_a_confirmation_over_the_resolved_path() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        std::fs::create_dir(workspace.path().join("cache")).expect("cache");
+        let resolved = controller
+            .resolve_sandbox_read_path("~/cache")
+            .expect("resolve");
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        let action = app.dispatch_line("/sandbox allow ~/cache", &controller, &cancel);
+
+        assert!(action.is_none());
+        let picker = app.picker.as_ref().expect("sandbox picker");
+        assert_eq!(picker.kind, PickerKind::Sandbox);
+        assert_eq!(picker.rows.len(), 2);
+        assert!(
+            picker.rows[0].label.contains(&resolved),
+            "{:?}",
+            picker.rows
+        );
+        assert_eq!(picker.rows[1].value, "");
+        assert_eq!(picker.selected, 1);
+        app.handle_key(key(KeyCode::Up, KeyModifiers::NONE), &controller, &cancel);
+
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(matches!(&action, Some(Action::SandboxAllow(path)) if *path == resolved));
+    }
+
+    #[tokio::test]
+    async fn the_sandbox_confirmation_can_be_declined() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        std::fs::create_dir(workspace.path().join("cache")).expect("cache");
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.dispatch_line("/sandbox allow ~/cache", &controller, &cancel);
+
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(action.is_none());
+        assert!(app.picker.is_none());
+    }
+
+    #[tokio::test]
+    async fn sandbox_allow_reports_a_path_that_cannot_be_granted() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        for line in ["/sandbox allow", "/sandbox allow ~/missing"] {
+            let action = app.dispatch_line(line, &controller, &cancel);
+
+            assert!(action.is_none());
+            assert!(app.picker.is_none(), "{line}");
+            let entry = app.entries.last().expect("entry");
+            assert_eq!(entry.kind, Some(EntryKind::System));
+            assert!(entry.raw.starts_with("/sandbox allow:"), "{}", entry.raw);
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_network_takes_a_mode_or_opens_a_picker() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        let action = app.dispatch_line("/sandbox network deny", &controller, &cancel);
+        assert!(matches!(&action, Some(Action::SandboxNetwork(mode)) if mode == "deny"));
+        assert!(app.picker.is_none());
+
+        let action = app.dispatch_line("/sandbox network", &controller, &cancel);
+        assert!(action.is_none());
+        let picker = app.picker.as_ref().expect("sandbox picker");
+        assert_eq!(picker.kind, PickerKind::Sandbox);
+        assert_eq!(picker.rows.len(), 2);
+        assert_eq!(picker.rows[0].value, "network\tallow");
+        assert_eq!(picker.rows[1].value, "network\tdeny");
+
+        let action = app.dispatch_line("/sandbox network sometimes", &controller, &cancel);
+        assert!(action.is_none());
+        assert!(
+            app.entries
+                .last()
+                .expect("entry")
+                .raw
+                .starts_with("unknown command: /sandbox")
+        );
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use otto_core::config::memory::MemoryRuntime;
@@ -178,5 +179,57 @@ pub fn user(text: &str) -> Message {
         }],
         created_at: chrono::Utc::now(),
         ..Message::default()
+    }
+}
+
+/// The sandbox-reload capability without a sandbox: it counts the reloads and
+/// answers with whatever the test asked for.
+pub struct FakeSandbox {
+    pub info: SandboxInfo,
+    pub reloaded: SandboxInfo,
+    pub failure: Option<String>,
+    pub calls: Arc<Mutex<usize>>,
+}
+
+impl FakeSandbox {
+    /// A control that reports `info` and returns `reloaded`, or `failure`.
+    pub fn new(
+        info: SandboxInfo,
+        reloaded: SandboxInfo,
+        failure: Option<&str>,
+    ) -> (Arc<Self>, Arc<Mutex<usize>>) {
+        let calls = Arc::new(Mutex::new(0));
+        let control = Arc::new(Self {
+            info,
+            reloaded,
+            failure: failure.map(str::to_string),
+            calls: Arc::clone(&calls),
+        });
+        (control, calls)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::app::SandboxControl for FakeSandbox {
+    fn info(&self) -> SandboxInfo {
+        self.info
+    }
+
+    async fn reload(&self) -> Result<SandboxInfo, String> {
+        *self.calls.lock().expect("calls") += 1;
+        match &self.failure {
+            Some(message) => Err(message.clone()),
+            None => Ok(self.reloaded),
+        }
+    }
+}
+
+/// A Seatbelt state with `network`.
+pub fn seatbelt_info(network: SandboxNetwork) -> SandboxInfo {
+    SandboxInfo {
+        mode: SandboxMode::Seatbelt,
+        network,
+        bash_available: true,
+        reason: SandboxReason::None,
     }
 }

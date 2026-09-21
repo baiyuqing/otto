@@ -37,11 +37,16 @@ pub fn system_prompt_for(
 ) -> String {
     let (policy, bash_usable) = match (info.mode, info.network, info.bash_available, info.reason) {
         (SandboxMode::Seatbelt, SandboxNetwork::Allowed, true, SandboxReason::None) => (
-            "Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed.",
+            "Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed. \
+             When a Bash command fails because the sandbox denied a path, tell the user to run \
+             /sandbox allow <absolute path> for that path.",
             true,
         ),
         (SandboxMode::Seatbelt, SandboxNetwork::Denied, true, SandboxReason::None) => (
-            "Sandbox policy: Seatbelt confines Bash to workspace-write with network denied.",
+            "Sandbox policy: Seatbelt confines Bash to workspace-write with network denied. \
+             When a Bash command fails because the sandbox denied a path or a network \
+             connection, tell the user to run /sandbox allow <absolute path> for that path, or \
+             /sandbox network allow to permit network access.",
             true,
         ),
         (SandboxMode::Off, SandboxNetwork::Unconfined, true, SandboxReason::None) => (
@@ -142,13 +147,13 @@ mod tests {
             (
                 seatbelt(SandboxNetwork::Allowed),
                 "Usable tools: read, bash, edit.",
-                "Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed.",
+                "Sandbox policy: Seatbelt confines Bash to workspace-write with network allowed. When a Bash command fails because the sandbox denied a path, tell the user to run /sandbox allow <absolute path> for that path.",
                 &["network denied", "unsandboxed", "unavailable"],
             ),
             (
                 seatbelt(SandboxNetwork::Denied),
                 "Usable tools: read, bash, edit.",
-                "Sandbox policy: Seatbelt confines Bash to workspace-write with network denied.",
+                "Sandbox policy: Seatbelt confines Bash to workspace-write with network denied. When a Bash command fails because the sandbox denied a path or a network connection, tell the user to run /sandbox allow <absolute path> for that path, or /sandbox network allow to permit network access.",
                 &["network allowed", "unsandboxed", "unavailable"],
             ),
             (

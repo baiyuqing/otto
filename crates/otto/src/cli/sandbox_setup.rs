@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -256,7 +255,7 @@ pub async fn run(
                 .await;
             }
             "save" => {
-                if let Err(message) = save(&path, &original, &updated) {
+                if let Err(message) = crate::config::write_bytes(&path, &original, &updated) {
                     return fail(stderr, &format!("cannot save configuration: {message}"));
                 }
                 let _ = writeln!(stdout, "Saved. Restart Otto to apply these permissions.");
@@ -333,8 +332,9 @@ pub fn resolve_read_path(input: &str, home: &str) -> Result<String, String> {
 
 /// Applies `change` to the `[sandbox]` table at `path` and writes the file.
 ///
-/// The write goes through the same [`save`] the interactive setup uses, so a
-/// concurrent edit and a non-regular file are both refused. A change that
+/// The write goes through the same [`crate::config::write_bytes`] the
+/// interactive setup uses, so a concurrent edit and a non-regular file are
+/// both refused and the replaced contents are backed up. A change that
 /// would not resolve is rejected before anything is written, and a read path
 /// already present is left alone rather than repeated.
 pub fn amend_sandbox_config(path: &Path, change: &SandboxChange) -> Result<Amendment, String> {
@@ -360,7 +360,7 @@ pub fn amend_sandbox_config(path: &Path, change: &SandboxChange) -> Result<Amend
         SandboxChange::Network(mode) => proposed.network = Some(mode.clone()),
     }
     let updated = update_sandbox(&original, &proposed).map_err(|error| error.to_string())?;
-    save(path, &original, &updated).map_err(str::to_string)?;
+    crate::config::write_bytes(path, &original, &updated).map_err(str::to_string)?;
     Ok(Amendment { original, updated })
 }
 
@@ -370,7 +370,8 @@ pub fn amend_sandbox_config(path: &Path, change: &SandboxChange) -> Result<Amend
 /// A configuration file the amendment created is emptied rather than removed,
 /// which resolves to the same defaults.
 pub fn revert_sandbox_config(path: &Path, amendment: &Amendment) -> Result<(), String> {
-    save(path, &amendment.updated, &amendment.original).map_err(str::to_string)
+    crate::config::write_bytes(path, &amendment.updated, &amendment.original)
+        .map_err(str::to_string)
 }
 
 /// Prompts until the answer parses, returning `None` at end of input.
@@ -495,51 +496,6 @@ async fn report_check(
         }
     };
     let _ = writeln!(stdout, "{message}");
-}
-
-/// Replaces the configuration file, refusing anything that would lose a
-/// concurrent edit or follow a symlink.
-fn save(path: &Path, original: &[u8], updated: &[u8]) -> Result<(), &'static str> {
-    let current = match std::fs::read(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(_) => return Err("cannot read current file"),
-    };
-    if current != original {
-        return Err("configuration changed during setup; rerun setup");
-    }
-    if std::fs::symlink_metadata(path).is_ok_and(|info| !info.file_type().is_file()) {
-        return Err("configuration must be a regular file, not a symlink");
-    }
-    let directory = path.parent().unwrap_or(Path::new("."));
-    if std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(directory)
-        .is_err()
-    {
-        return Err("cannot create configuration directory");
-    }
-    let suffix =
-        super::runtime_builder::random_id().map_err(|_| "cannot create temporary configuration")?;
-    let temp = directory.join(format!(".otto-config-{suffix}"));
-    let write = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|_| "cannot create temporary configuration")
-        .and_then(|mut file| {
-            file.write_all(updated)
-                .and_then(|()| file.sync_all())
-                .map_err(|_| "cannot write configuration")
-        });
-    let result = write
-        .and_then(|()| std::fs::rename(&temp, path).map_err(|_| "cannot replace configuration"));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
 }
 
 fn shell_quote(value: &str) -> String {
@@ -819,13 +775,13 @@ mod tests {
         let path = directory.path().join("config.toml");
         std::fs::write(&path, b"changed").expect("write");
         assert_eq!(
-            save(&path, b"old", b"new"),
-            Err("configuration changed during setup; rerun setup")
+            crate::config::write_bytes(&path, b"old", b"new"),
+            Err("the configuration changed on disk; rerun to apply this change")
         );
         let link = directory.path().join("link");
         std::os::unix::fs::symlink(&path, &link).expect("symlink");
         assert_eq!(
-            save(&link, b"changed", b"new"),
+            crate::config::write_bytes(&link, b"changed", b"new"),
             Err("configuration must be a regular file, not a symlink")
         );
         assert_eq!(std::fs::read(&path).expect("read"), b"changed");

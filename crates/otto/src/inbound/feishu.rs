@@ -19,15 +19,25 @@ use crate::server::{Logger, Server};
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
-/// Starts the Feishu consumer when `[inbound.feishu].enabled` is true.
-/// Missing `lark-cli` logs an error and disables inbound; it is not a serve
-/// failure.
+/// Starts the Feishu consumer when `[inbound.feishu].enabled` is true and
+/// `[inbound.feishu].chat_ids` lists at least one chat. Missing `lark-cli`
+/// logs an error and disables inbound; it is not a serve failure.
 pub fn maybe_start(
     server: Arc<Server>,
     runtime: FeishuRuntime,
     cancel: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !runtime.enabled {
+        return None;
+    }
+    // `chat_ids` is the only authorization an inbound message passes before it
+    // drives a turn that runs tools, so an empty list is a misconfiguration
+    // rather than "every chat".
+    if runtime.chat_ids.is_empty() {
+        server.logger().error(
+            "feishu inbound: [inbound.feishu].chat_ids is empty; inbound disabled",
+            &[],
+        );
         return None;
     }
     Some(tokio::spawn(async move {
@@ -212,7 +222,7 @@ mod tests {
         FeishuRuntime {
             enabled: true,
             binary: binary.to_string(),
-            chat_ids: Vec::new(),
+            chat_ids: vec!["oc_1".to_string()],
         }
     }
 

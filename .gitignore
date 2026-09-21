@@ -73,3 +73,6 @@ kubeconfig
 *.token
 credentials.json
 credentials
+
+# Provider trace dumps: `otto --trace` output holds full request bodies.
+trace*.jsonl

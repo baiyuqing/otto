@@ -127,9 +127,9 @@ function render(records){
     const tr = document.createElement("tr");
     tr.className = "call";
     const status = rec.error ? "ERR" : (rec.status||"?");
-    tr.innerHTML = `<td>${rec.seq??""}</td><td>${(rec.ts||"").replace("T"," ").replace(/\.\d+Z?$/,"")}</td>`+
-      `<td class="${statusClass(rec.status)}"><span class="pill">${status}</span></td>`+
-      `<td>${rec.duration_ms??""}</td><td>${req.model||"—"}</td><td>${msgs.length}</td>`+
+    tr.innerHTML = `<td>${rec.seq??""}</td><td>${esc((rec.ts||"").replace("T"," ").replace(/\.\d+Z?$/,""))}</td>`+
+      `<td class="${statusClass(rec.status)}"><span class="pill">${esc(String(status))}</span></td>`+
+      `<td>${rec.duration_ms??""}</td><td>${esc(req.model||"—")}</td><td>${msgs.length}</td>`+
       `<td>${pt!==""?pt:"—"}${ct!==""?" → "+ct:""}</td>`;
     rows.appendChild(tr);
 
@@ -164,7 +164,7 @@ function buildDetail(rec, req, msgs, text, usage){
   const sys = (sysVal!=null) ? new Blob([typeof sysVal==="string"?sysVal:JSON.stringify(sysVal)]).size : 0;
   const tools = req.tools ? new Blob([JSON.stringify(req.tools)]).size : 0;
   const max = Math.max(1, sys, tools, ...sizes.map(s=>s.n));
-  const line=(label,n)=>`<div class="ctxrow"><span class="role">${label}</span><div class="bar" style="width:${Math.max(2,100*n/max)}%"></div><span class="muted">${bytes(n)}</span></div>`;
+  const line=(label,n)=>`<div class="ctxrow"><span class="role">${esc(label)}</span><div class="bar" style="width:${Math.max(2,100*n/max)}%"></div><span class="muted">${bytes(n)}</span></div>`;
   ctx.innerHTML = (sys?line("system",sys):"") + (tools?line(`tools (${req.tools.length})`,tools):"") +
     sizes.map((s,i)=>line(`${i}. ${s.label}`, s.n)).join("");
 

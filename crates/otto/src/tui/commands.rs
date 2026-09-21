@@ -101,7 +101,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/sandbox",
-        description: "show sandbox state, or reload the [sandbox] configuration",
+        description: "show state, allow <path>, network allow|deny, or reload",
         kind: SlashCommandKind::Sandbox,
     },
     SlashCommand {

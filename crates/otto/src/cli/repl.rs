@@ -22,13 +22,14 @@ use tokio_util::sync::CancellationToken;
 use crate::subagent::tasks::{TaskError, Tasks};
 
 use super::controller::{Controller, PROFILE_SWITCH_UNAVAILABLE};
+use super::sandbox_setup::SandboxChange;
 
 /// The longest line the REPL accepts.
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
+const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
 /// Why the loop stopped.
 #[derive(Debug)]
@@ -608,21 +609,48 @@ impl<'a> Repl<'a> {
     }
 
     /// False means "unknown command".
+    ///
+    /// `allow` and `network` write the `[sandbox]` table and reload it, the
+    /// same amendment the TUI confirms through a picker; here the typed
+    /// command is the confirmation.
     async fn sandbox(&mut self, args: &str) -> Result<bool, Error> {
-        match args {
-            "" => {
+        let (subcommand, rest) = match args.split_once(char::is_whitespace) {
+            Some((subcommand, rest)) => (subcommand, rest.trim()),
+            None => (args, ""),
+        };
+        match (subcommand, rest) {
+            ("", _) => {
                 self.print_sandbox(self.controller.sandbox_info());
                 Ok(true)
             }
-            "reload" => {
-                let info =
-                    self.controller
-                        .reload_sandbox()
-                        .await
-                        .map_err(|message| Error::Command {
-                            command: "/sandbox".to_string(),
-                            message,
-                        })?;
+            ("reload", "") => {
+                let info = self
+                    .controller
+                    .reload_sandbox()
+                    .await
+                    .map_err(sandbox_error)?;
+                self.print_sandbox(info);
+                Ok(true)
+            }
+            ("allow", path) => {
+                let resolved = self
+                    .controller
+                    .resolve_sandbox_read_path(path)
+                    .map_err(sandbox_error)?;
+                let info = self
+                    .controller
+                    .amend_sandbox(SandboxChange::AllowReadPath(resolved))
+                    .await
+                    .map_err(sandbox_error)?;
+                self.print_sandbox(info);
+                Ok(true)
+            }
+            ("network", mode @ ("allow" | "deny")) => {
+                let info = self
+                    .controller
+                    .amend_sandbox(SandboxChange::Network(mode.to_string()))
+                    .await
+                    .map_err(sandbox_error)?;
                 self.print_sandbox(info);
                 Ok(true)
             }
@@ -849,6 +877,14 @@ fn first_line(content: &str) -> &str {
 /// ponytail: the kind does not survive `SessionError::Persist(String)`, so this
 /// matches the sentinel text the store prefixes onto the message. A typed flag
 /// on `SessionError` would be the upgrade, in `otto-core`.
+/// A `/sandbox` failure in the shape the REPL reports command failures.
+fn sandbox_error(message: String) -> Error {
+    Error::Command {
+        command: "/sandbox".to_string(),
+        message,
+    }
+}
+
 pub(crate) fn is_fatal_persistence(error: &AgentError) -> bool {
     matches!(error, AgentError::Persist { source, .. }
         if source.to_string().starts_with("fatal session persistence failure"))
@@ -905,7 +941,7 @@ mod tests {
 
     use super::*;
     use crate::cli::controller::SANDBOX_RELOAD_UNAVAILABLE;
-    use crate::cli::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
+    use crate::cli::info::SandboxNetwork;
     use crate::cli::runtime_builder::Runner;
     use crate::cli::testutil::{self, controller, user};
     use crate::subagent::tasks::Tasks;
@@ -1239,53 +1275,19 @@ mod tests {
         assert_eq!(stderr, "unknown command: /sandbox bogus\n");
     }
 
-    fn seatbelt(network: SandboxNetwork) -> SandboxInfo {
-        SandboxInfo {
-            mode: SandboxMode::Seatbelt,
-            network,
-            bash_available: true,
-            reason: SandboxReason::None,
-        }
-    }
-
-    /// The reload capability without a sandbox.
-    struct FakeSandbox {
-        info: SandboxInfo,
-        reloaded: SandboxInfo,
-        failure: Option<String>,
-        calls: Arc<Mutex<usize>>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::app::SandboxControl for FakeSandbox {
-        fn info(&self) -> SandboxInfo {
-            self.info
-        }
-
-        async fn reload(&self) -> Result<SandboxInfo, String> {
-            *self.calls.lock().expect("calls") += 1;
-            match &self.failure {
-                Some(message) => Err(message.clone()),
-                None => Ok(self.reloaded),
-            }
-        }
-    }
-
     async fn reloading_controller(
         workspace: &Path,
         sessions: &Path,
         failure: Option<&str>,
     ) -> (Controller, Arc<Mutex<usize>>) {
-        let calls = Arc::new(Mutex::new(0));
-        let control = FakeSandbox {
-            info: seatbelt(SandboxNetwork::Allowed),
-            reloaded: seatbelt(SandboxNetwork::Denied),
-            failure: failure.map(str::to_string),
-            calls: Arc::clone(&calls),
-        };
+        let (control, calls) = testutil::FakeSandbox::new(
+            testutil::seatbelt_info(SandboxNetwork::Allowed),
+            testutil::seatbelt_info(SandboxNetwork::Denied),
+            failure,
+        );
         let controller = controller(workspace, sessions)
             .await
-            .with_sandbox_control(Arc::new(control));
+            .with_sandbox_control(control);
         (controller, calls)
     }
 
@@ -1351,6 +1353,69 @@ mod tests {
         let error = result.expect_err("reload");
         assert!(is_command_error(&error, "/sandbox"), "{error:?}");
         assert_eq!(error.to_string(), SANDBOX_RELOAD_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn sandbox_allow_writes_the_read_path_and_reloads() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let granted = workspace.path().join("cache");
+        std::fs::create_dir(&granted).expect("cache");
+        let (controller, calls) =
+            reloading_controller(workspace.path(), sessions.path(), None).await;
+
+        let (stdout, stderr, result) = session(
+            &format!("/sandbox allow {}\n/exit\n", granted.display()),
+            &controller,
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(stderr, "");
+        assert_eq!(*calls.lock().expect("calls"), 1);
+        assert!(stdout.contains("network denied"), "{stdout}");
+        let written =
+            std::fs::read_to_string(workspace.path().join("config.toml")).expect("config");
+        assert!(written.contains("read_paths"), "{written}");
+        assert!(written.contains("cache"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn sandbox_allow_rejects_a_path_that_does_not_exist() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, calls) =
+            reloading_controller(workspace.path(), sessions.path(), None).await;
+
+        let (_, _, result) = session("/sandbox allow ~/missing\n", &controller).await;
+
+        let error = result.expect_err("allow");
+        assert!(is_command_error(&error, "/sandbox"), "{error:?}");
+        assert_eq!(error.to_string(), "no such path: ~/missing");
+        assert_eq!(*calls.lock().expect("calls"), 0);
+        assert!(!workspace.path().join("config.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn sandbox_network_sets_the_mode_and_reports_an_unknown_one() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let (controller, calls) =
+            reloading_controller(workspace.path(), sessions.path(), None).await;
+
+        let (stdout, stderr, result) = session(
+            "/sandbox network deny\n/sandbox network sometimes\n/exit\n",
+            &controller,
+        )
+        .await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(*calls.lock().expect("calls"), 1);
+        assert!(stdout.contains("network denied"), "{stdout}");
+        assert_eq!(stderr, "unknown command: /sandbox network sometimes\n");
+        let written =
+            std::fs::read_to_string(workspace.path().join("config.toml")).expect("config");
+        assert!(written.contains("network = 'deny'"), "{written}");
     }
 
     #[tokio::test]

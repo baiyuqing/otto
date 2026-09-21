@@ -118,6 +118,9 @@ The selected model and OpenAI-compatible endpoint must support image input.
 - [Usage history](docs/user-manual.md#observability): a Web UI analysis page
   for local provider token trends and cache hit rate, without prompt or tool
   content.
+- [Durable workflows](docs/user-manual.md#durable-workflows): versioned TOML
+  DAGs with sequential/concurrent agent steps, persisted approvals, restart
+  recovery, CLI control, and a Web UI inspector.
 - [Configuration](docs/user-manual.md#configuration),
   [CLI reference](docs/user-manual.md#command-line-reference), and
   [troubleshooting](docs/user-manual.md#troubleshooting).
@@ -162,6 +165,36 @@ Interactive task commands:
 Child agents cannot start nested agents, and their transcripts are not
 persisted.
 
+### Run a durable workflow
+
+Put named `AGENT.md` definitions under `.otto/agents`, then declare a DAG in
+`.otto/workflows/review.toml`:
+
+```toml
+version = 1
+
+[[steps]]
+id = "research"
+agent = "researcher"
+prompt = "Collect evidence."
+
+[[steps]]
+id = "review"
+agent = "reviewer"
+prompt = "Review the evidence."
+needs = ["research"]
+```
+
+```text
+otto workflow run review --input "review the current change"
+otto workflow status <run-id>
+otto workflow resume <run-id> --retry <interrupted-step>
+```
+
+Workflow state lives in `~/.otto/workflows.db`; each attempt has a separate
+append-only transcript under `~/.otto/workflow-sessions`. Interrupted steps are
+never retried automatically.
+
 ## Safety and limitations
 
 - **macOS only.** Supported providers are `openai-compatible` and `chatgpt`.
@@ -178,6 +211,8 @@ persisted.
 - No automatic memory extraction or memory backup/restore/verify commands.
 - No per-skill `allowed-tools` enforcement.
 - No nested sub-agent delegation; child transcripts are not persisted.
+- Durable workflows are acyclic: no loops, conditions, handoff, group chat,
+  nested workflows, time travel, or automatic retry.
 - MCP stdio servers run unsandboxed, with an explicit environment (`PATH`,
   `HOME`, `TMPDIR`, `LANG`, `TERM`, plus the configured `env` table only).
   An MCP server that exits stays disconnected until Otto restarts; Otto does

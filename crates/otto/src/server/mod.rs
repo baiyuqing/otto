@@ -20,6 +20,7 @@ pub mod tasks;
 pub mod timers;
 pub mod turn;
 pub mod ui;
+pub mod workflows;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -118,6 +119,7 @@ pub struct Options {
     /// socket with private file modes.
     pub token: String,
     pub logger: Option<Arc<Logger>>,
+    pub workflows: Option<Arc<crate::workflow::Controller>>,
 }
 
 // ---- logging ----
@@ -269,6 +271,7 @@ pub struct Server {
     /// One handle per running wake loop, awaited by [`Server::close`].
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
+    workflows: Option<Arc<crate::workflow::Controller>>,
 }
 
 impl Server {
@@ -283,6 +286,7 @@ impl Server {
             open_gate: tokio::sync::Mutex::new(()),
             wake_loops: Mutex::new(Vec::new()),
             cancel: CancellationToken::new(),
+            workflows: options.workflows,
         })
     }
 
@@ -313,6 +317,9 @@ impl Server {
 
     /// Cancels every in-flight turn, then closes every open controller.
     pub async fn close(&self) -> Result<(), String> {
+        if let Some(workflows) = &self.workflows {
+            workflows.close().await;
+        }
         let sessions: Vec<Arc<OpenSession>> = {
             let mut map = self
                 .sessions
@@ -399,6 +406,19 @@ impl Server {
             )
             .route("/v1/sessions/{id}/mcp", get(mcp::list))
             .route("/v1/sandbox/reload", post(sandbox::reload))
+            .route("/v1/workflows", get(workflows::list).post(workflows::start))
+            .route("/v1/workflows/{id}", get(workflows::get))
+            .route("/v1/workflows/{id}/events", get(workflows::events))
+            .route("/v1/workflows/{id}/resume", post(workflows::resume))
+            .route("/v1/workflows/{id}/cancel", post(workflows::cancel))
+            .route(
+                "/v1/workflows/requests/{id}/approve",
+                post(workflows::approve),
+            )
+            .route(
+                "/v1/workflows/requests/{id}/reject",
+                post(workflows::reject),
+            )
             .route("/v1/info", get(info))
             .route("/v1/usage", get(usage))
             .route("/v1/usage/daily", get(daily_usage))
@@ -1378,6 +1398,11 @@ async fn prometheus(State(server): State<Arc<Server>>) -> Response {
     server
         .metrics
         .replace_session_contexts(server.session_context_metrics());
+    if let Some(workflows) = &server.workflows
+        && let Ok(runs) = workflows.list()
+    {
+        server.metrics.replace_workflows(&runs);
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header(
@@ -1719,6 +1744,7 @@ mod tests {
         open_gate: Option<CancellationToken>,
         list: Option<ListResult>,
         tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
+        workflows: Option<Arc<crate::workflow::Controller>>,
         token: String,
         info: Info,
     }
@@ -1763,6 +1789,7 @@ mod tests {
                 logger: Some(Arc::new(Logger::new(Box::new(SharedSink(Arc::clone(
                     &log,
                 )))))),
+                workflows: options.workflows,
             });
             let router = server.router();
             Self {
@@ -2772,6 +2799,89 @@ mod tests {
         assert!(reply.body.starts_with("openapi:"), "{}", &reply.body[..40]);
     }
 
+    struct TestWorkflowExecutor;
+
+    #[async_trait::async_trait]
+    impl crate::workflow::Executor for TestWorkflowExecutor {
+        async fn execute(
+            &self,
+            attempt: crate::workflow::Attempt,
+            _cancel: &CancellationToken,
+        ) -> Result<String, String> {
+            Ok(format!("{} done", attempt.step_id))
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_routes_start_and_report_a_durable_run() {
+        let store = Arc::new(crate::workflow::Store::open_in_memory());
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = crate::workflow::Controller::new(
+            store,
+            crate::workflow::Catalog::from_definitions(vec![crate::workflow::Definition {
+                name: "review".to_string(),
+                description: String::new(),
+                hash: "0".repeat(64),
+                agents: vec![crate::workflow::AgentSnapshot {
+                    name: "worker".to_string(),
+                    ..crate::workflow::AgentSnapshot::default()
+                }],
+                steps: vec![crate::workflow::Step {
+                    id: "work".to_string(),
+                    kind: crate::workflow::StepKind::Agent,
+                    agent: "worker".to_string(),
+                    prompt: "work".to_string(),
+                    needs: Vec::new(),
+                }],
+            }]),
+            Arc::new(TestWorkflowExecutor),
+            "/workspace".to_string(),
+            transcripts.path().to_path_buf(),
+            crate::workflow::RuntimeIdentity::default(),
+            1,
+        );
+        let harness = Harness::with(HarnessOptions {
+            workflows: Some(controller),
+            ..HarnessOptions::default()
+        });
+
+        let reply = harness
+            .send_with(
+                "POST",
+                "/v1/workflows",
+                Some(r#"{"name":"review","input":"request"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        let id = reply.json()["run"]["id"]
+            .as_str()
+            .expect("run id")
+            .to_string();
+        let mut status = String::new();
+        for _ in 0..20 {
+            let reply = harness
+                .send("GET", &format!("/v1/workflows/{id}"), None)
+                .await;
+            assert_eq!(reply.status, StatusCode::OK);
+            status = reply.json()["run"]["status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if status == "succeeded" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(status, "succeeded");
+        let events = harness
+            .send("GET", &format!("/v1/workflows/{id}/events?after=0"), None)
+            .await;
+        assert_eq!(events.status, StatusCode::OK);
+        assert_eq!(events.header("content-type"), "text/event-stream");
+        assert!(events.body.contains("step_succeeded"), "{}", events.body);
+    }
+
     /// Every API path the router serves.
     ///
     /// ponytail: axum exposes no route table, so this list is written out once
@@ -2793,6 +2903,13 @@ mod tests {
         "/v1/sessions/{id}/timers/{timer_id}/cancel",
         "/v1/sessions/{id}/mcp",
         "/v1/sandbox/reload",
+        "/v1/workflows",
+        "/v1/workflows/{id}",
+        "/v1/workflows/{id}/events",
+        "/v1/workflows/{id}/resume",
+        "/v1/workflows/{id}/cancel",
+        "/v1/workflows/requests/{id}/approve",
+        "/v1/workflows/requests/{id}/reject",
         "/v1/info",
         "/v1/usage",
         "/v1/usage/daily",

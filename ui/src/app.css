@@ -49,6 +49,7 @@ body {
   color: var(--text);
 }
 button, select, textarea { font: inherit; }
+input { font: inherit; color: var(--text); background: var(--panel-strong); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px 9px; }
 button, select {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -181,6 +182,34 @@ button.danger {
 .usage-empty p { margin: 7px 0 0; }
 .usage-loading { margin-top: 36px; color: var(--muted); }
 @keyframes usage-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+.workflows-view { flex: 1; overflow-y: auto; padding: 28px 24px 48px; }
+.workflows-heading { max-width: 76rem; margin: 0 auto 24px; display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }
+.workflows-heading h1 { margin: 0; font-size: 24px; }
+.workflows-heading p { margin: 5px 0 0; color: var(--muted); }
+.workflow-start { display: flex; gap: 7px; }
+.workflow-layout { max-width: 76rem; margin: 0 auto; display: grid; grid-template-columns: 16rem 1fr; gap: 18px; min-height: 28rem; }
+.workflow-runs { border-right: 1px solid var(--line); padding-right: 12px; }
+.workflow-runs > button { width: 100%; display: block; margin-bottom: 7px; text-align: left; background: transparent; }
+.workflow-runs > button[aria-pressed="true"] { border-color: var(--accent); }
+.workflow-runs strong, .workflow-runs span { display: block; }
+.workflow-runs span { margin-top: 3px; color: var(--muted); font: 11px var(--mono); }
+.workflow-detail > header { display: flex; gap: 12px; align-items: center; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+.workflow-detail > header > div { flex: 1; }
+.workflow-detail h2 { margin: 0; }
+.workflow-detail code { color: var(--muted); font-size: 11px; }
+.workflow-status { font: 12px var(--mono); text-transform: uppercase; }
+.workflow-approval { margin: 16px 0; padding: 14px; border: 1px solid var(--accent); background: var(--panel); }
+.workflow-approval p { white-space: pre-wrap; }
+.workflow-approval button { margin-right: 7px; }
+.workflow-steps { margin: 16px 0 0; padding: 0; list-style: none; }
+.workflow-steps li { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.workflow-steps li > div span { display: block; margin-top: 3px; color: var(--muted); font: 11px var(--mono); }
+.workflow-steps pre { grid-column: 1 / -1; max-height: 14rem; overflow: auto; margin: 0; padding: 9px; background: var(--code-bg); white-space: pre-wrap; }
+@media (max-width: 800px) {
+  .workflows-heading, .workflow-start { flex-direction: column; }
+  .workflow-layout { grid-template-columns: 1fr; }
+  .workflow-runs { border-right: 0; border-bottom: 1px solid var(--line); }
+}
 .transcript { flex: 1; overflow-y: auto; padding: 22px 16px 16px; scroll-behavior: smooth; }
 .item { max-width: 76rem; margin: 0 auto 14px; }
 .item-timestamp {

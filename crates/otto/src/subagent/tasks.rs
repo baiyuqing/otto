@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
-use otto_core::agent::inbox::Inbox;
+use otto_core::agent::inbox::{Inbox, NotificationKind};
 use otto_core::agent::tasks::TaskRegistry;
 use otto_core::model::{Message, Usage};
 use tokio::sync::{Notify, watch};
@@ -379,6 +379,29 @@ impl Tasks {
     pub fn get(&self, reference: &str) -> Option<Task> {
         let state = self.lock();
         Self::entry(&state, reference).map(|entry| entry.task.clone())
+    }
+
+    /// Removes one final task and its undelivered completion notification.
+    /// Durable workflows use this after copying the result to their own store;
+    /// interactive tasks remain queryable because they never call it.
+    pub fn remove_final(&self, id: &str) -> Option<Task> {
+        let task = {
+            let mut state = self.lock();
+            let entry = state.entries.get(id)?;
+            if !entry.task.is_final() {
+                return None;
+            }
+            let name = entry.task.name.clone();
+            let task = state.entries.remove(id)?.task;
+            state.order.retain(|candidate| candidate != id);
+            if !name.is_empty() {
+                state.names.remove(&name);
+            }
+            task
+        };
+        self.inbox.remove(id, NotificationKind::TaskFinished);
+        self.signal();
+        Some(task)
     }
 
     /// The task's child session messages, calling the stored history hook

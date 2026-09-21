@@ -36,7 +36,7 @@
 //!   top of the child task rather than inside `start`; an invalid snapshot
 //!   still fails the task with the same message, just asynchronously.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -101,7 +101,9 @@ impl Provider for SharedProvider {
 
 /// Shares one child transcript between the child's agent and the runner, which
 /// reads it back to build the final report.
-struct SharedTranscript(Arc<MemorySession>);
+type Transcript = Arc<dyn Session + Send + Sync>;
+
+struct SharedTranscript(Transcript);
 
 #[async_trait::async_trait]
 impl Session for SharedTranscript {
@@ -249,9 +251,6 @@ pub struct StartRequest {
 pub struct Runner {
     config: Config,
     child_registry: Arc<Registry>,
-    /// Per-definition tool allowlists, already intersected with the child
-    /// registry. A definition with no `tools` list has no entry here.
-    allowlists: HashMap<String, BTreeSet<String>>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -282,23 +281,18 @@ impl Runner {
             .collect();
 
         let mut warnings = Vec::new();
-        let mut allowlists = HashMap::new();
         for definition in config.catalog.definitions() {
             let Some(wanted) = &definition.tools else {
                 continue;
             };
-            let mut allowed = BTreeSet::new();
             for name in wanted {
-                if child_names.contains(name) {
-                    allowed.insert(name.clone());
-                } else {
+                if !child_names.contains(name) {
                     warnings.push(format!(
                         "agent {}: unknown tool {name:?} ignored",
                         definition.name
                     ));
                 }
             }
-            allowlists.insert(definition.name.clone(), allowed);
         }
 
         let semaphore = Arc::new(Semaphore::new(config.max_parallel));
@@ -306,7 +300,6 @@ impl Runner {
             Self {
                 config,
                 child_registry,
-                allowlists,
                 semaphore,
             },
             warnings,
@@ -343,16 +336,57 @@ impl Runner {
         self.child_registry.definitions()
     }
 
+    fn allowed_tools(&self, definition: &Definition) -> Option<BTreeSet<String>> {
+        let wanted = definition.tools.as_ref()?;
+        let available: BTreeSet<String> = self
+            .child_registry
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        Some(
+            wanted
+                .iter()
+                .filter(|name| available.contains(*name))
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// Registers a task and spawns its child, or leaves it queued when
     /// [`Config::max_parallel`] children are already running. An unknown agent
     /// name, an invalid context, or `inherit` with no parent session is
     /// rejected before any task is created.
     pub fn start(self: &Arc<Self>, request: StartRequest) -> Result<Task, StartError> {
+        self.start_with_session(request, Arc::new(MemorySession::new()))
+    }
+
+    /// Starts one child with a caller-owned session. Durable workflows use
+    /// this path so the child transcript survives the process.
+    pub fn start_with_session(
+        self: &Arc<Self>,
+        request: StartRequest,
+        transcript: Transcript,
+    ) -> Result<Task, StartError> {
+        self.start_resolved(request, transcript, None)
+    }
+
+    fn start_resolved(
+        self: &Arc<Self>,
+        request: StartRequest,
+        transcript: Transcript,
+        inline_definition: Option<Definition>,
+    ) -> Result<Task, StartError> {
         let now = self.now();
         let description = truncate_with_ellipsis(request.description.trim(), MAX_DESCRIPTION_CHARS);
 
         let agent_name = request.agent.trim();
-        let definition: Option<Definition> = if agent_name.is_empty() {
+        let definition: Option<Definition> = if let Some(definition) = inline_definition {
+            if agent_name != definition.name {
+                return Err(StartError::UnknownAgent(agent_name.to_string()));
+            }
+            Some(definition)
+        } else if agent_name.is_empty() {
             None
         } else {
             Some(
@@ -389,6 +423,7 @@ impl Runner {
                 context,
                 now,
                 Vec::new(),
+                transcript,
             );
         };
         let snapshot = if context == "inherit" {
@@ -404,7 +439,64 @@ impl Runner {
             context,
             now,
             snapshot,
+            transcript,
         )
+    }
+
+    /// Runs one child to a terminal state using `transcript` and returns its
+    /// final task record. Cancellation stops the child, not only the wait.
+    pub async fn run_with_session(
+        self: &Arc<Self>,
+        request: StartRequest,
+        transcript: Transcript,
+        cancel: &CancellationToken,
+    ) -> Result<Task, String> {
+        self.run_resolved(request, transcript, None, cancel).await
+    }
+
+    /// Runs using a definition snapshot captured when a durable workflow was
+    /// created, so editing `AGENT.md` cannot change a resumed run.
+    pub async fn run_with_definition(
+        self: &Arc<Self>,
+        request: StartRequest,
+        transcript: Transcript,
+        definition: Definition,
+        cancel: &CancellationToken,
+    ) -> Result<Task, String> {
+        self.run_resolved(request, transcript, Some(definition), cancel)
+            .await
+    }
+
+    async fn run_resolved(
+        self: &Arc<Self>,
+        request: StartRequest,
+        transcript: Transcript,
+        definition: Option<Definition>,
+        cancel: &CancellationToken,
+    ) -> Result<Task, String> {
+        let task = self
+            .start_resolved(request, transcript, definition)
+            .map_err(|error| error.to_string())?;
+        let id = task.id.clone();
+        let result = match self.config.tasks.wait(&id, cancel).await {
+            Ok(task) => Ok(task),
+            Err(TaskError::Canceled) => {
+                self.config
+                    .tasks
+                    .cancel(&id)
+                    .map_err(|error| error.to_string())?;
+                self.config
+                    .tasks
+                    .wait(&id, &CancellationToken::new())
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        if result.is_ok() {
+            self.config.tasks.remove_final(&id);
+        }
+        result
     }
 
     /// Creates the task record, builds the child agent, and spawns it.
@@ -418,9 +510,9 @@ impl Runner {
         context: String,
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
+        transcript: Transcript,
     ) -> Result<Task, StartError> {
         let cancel = CancellationToken::new();
-        let transcript = Arc::new(MemorySession::new());
         let history_source = Arc::clone(&transcript);
         let task = self.config.tasks.add(
             Task {
@@ -443,7 +535,7 @@ impl Runner {
             registry: Arc::clone(&self.child_registry),
             allowed: definition
                 .as_ref()
-                .and_then(|d| self.allowlists.get(&d.name).cloned()),
+                .and_then(|definition| self.allowed_tools(definition)),
         };
 
         let role_body = definition
@@ -514,7 +606,7 @@ impl Runner {
         task_id: String,
         prompt: String,
         child: Agent<SharedProvider, ChildTools, SharedTranscript>,
-        transcript: Arc<MemorySession>,
+        transcript: Transcript,
         snapshot: Vec<Message>,
     ) {
         for message in snapshot {

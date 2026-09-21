@@ -65,6 +65,8 @@ pub trait SessionHandle: Session + Send + Sync {
     fn name(&self) -> String;
     fn path(&self) -> String;
     fn rename(&self, name: &str) -> Result<(), String>;
+    fn thinking_level(&self) -> String;
+    fn update_thinking_level(&self, thinking: &str) -> Result<(), String>;
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String>;
     fn close(&self) -> Result<(), String>;
 
@@ -92,6 +94,14 @@ impl SessionHandle for Store {
         Store::rename(self, name).map_err(|error| error.to_string())
     }
 
+    fn thinking_level(&self) -> String {
+        Store::thinking_level(self)
+    }
+
+    fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
+        Store::update_thinking_level(self, thinking).map_err(|error| error.to_string())
+    }
+
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String> {
         Store::update_runtime(self, runtime).map_err(|error| error.to_string())
     }
@@ -116,6 +126,7 @@ pub struct MemoryHandle {
 struct MemoryState {
     header: Header,
     name: String,
+    thinking_level: String,
 }
 
 impl MemoryHandle {
@@ -126,6 +137,7 @@ impl MemoryHandle {
             state: Mutex::new(MemoryState {
                 header,
                 name: String::new(),
+                thinking_level: String::new(),
             }),
         }
     }
@@ -180,6 +192,20 @@ impl SessionHandle for MemoryHandle {
         Ok(())
     }
 
+    fn thinking_level(&self) -> String {
+        self.state().thinking_level.clone()
+    }
+
+    fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
+        if !matches!(thinking, "" | "low" | "medium" | "high" | "xhigh" | "max") {
+            return Err(
+                "invalid thinking: must be one of low, medium, high, xhigh, max".to_string(),
+            );
+        }
+        self.state().thinking_level = thinking.to_string();
+        Ok(())
+    }
+
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String> {
         if runtime.provider.is_empty() || runtime.model.is_empty() {
             return Err("session is invalid".to_string());
@@ -231,6 +257,14 @@ impl SharedSession {
 
     pub fn rename(&self, name: &str) -> Result<(), String> {
         self.0.rename(name)
+    }
+
+    pub fn thinking_level(&self) -> String {
+        self.0.thinking_level()
+    }
+
+    pub fn update_thinking_level(&self, thinking: &str) -> Result<(), String> {
+        self.0.update_thinking_level(thinking)
     }
 
     pub fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String> {

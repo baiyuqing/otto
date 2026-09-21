@@ -254,10 +254,21 @@ pub(crate) fn inspect_opened_session(
             profile: resolved.runtime.profile,
             provider: resolved.runtime.provider,
             model: resolved.runtime.model,
+            thinking: pi_level_to_thinking(&resolved.thinking_level)?,
             current: false,
         },
         warnings,
     ))
+}
+
+fn pi_level_to_thinking(thinking: &str) -> Result<String, PiError> {
+    match thinking {
+        "" | "off" => Ok(String::new()),
+        "low" | "medium" | "high" | "xhigh" | "max" => Ok(thinking.to_string()),
+        _ => Err(PiError::invalid(
+            "invalid thinking level: must be one of off, low, medium, high, xhigh, max",
+        )),
+    }
 }
 
 /// The modification time, or the zero time when the platform has none.

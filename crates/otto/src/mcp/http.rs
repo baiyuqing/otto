@@ -94,7 +94,9 @@ impl HttpTransport {
 
     /// The `Mcp-Protocol-Version`/`Mcp-Method`/`Mcp-Name`/`Mcp-Session-Id`
     /// headers for one outbound message. A probe (`era: None`) is sent with
-    /// modern headers.
+    /// modern headers, except the legacy handshake's `initialize`: it offers
+    /// its version in the body, and a modern `Mcp-Protocol-Version` header
+    /// contradicts that body, which a server rejects with `-32020`.
     fn protocol_headers(
         &self,
         era: &Option<Era>,
@@ -115,6 +117,9 @@ impl HttpTransport {
                 }
             }
             Some(Era::Modern) | None => {
+                if method == "initialize" {
+                    return headers;
+                }
                 headers.push((
                     HeaderName::from_static("mcp-protocol-version"),
                     HeaderValue::from_static(MODERN_VERSION),
@@ -619,6 +624,28 @@ mod tests {
             .unwrap()
             .unwrap();
         transport.request(outbound, &cancel).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_initialize_sends_no_protocol_version_header() {
+        let server = testserver::spawn(|req| {
+            assert_eq!(req.header("mcp-protocol-version"), "");
+            assert_eq!(req.header("mcp-method"), "");
+            testserver::json_response(
+                r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25"}}"#,
+            )
+        })
+        .await;
+        let transport =
+            HttpTransport::new(server.url.clone(), vec![], None, Duration::from_secs(5)).unwrap();
+        let outbound = Outbound {
+            method: "initialize".to_string(),
+            params: jsonrpc::initialize_params(),
+            era: None,
+        };
+        let cancel = CancellationToken::new();
+        let result = transport.request(outbound, &cancel).await.unwrap();
+        assert_eq!(result.unwrap(), json!({"protocolVersion": "2025-11-25"}));
     }
 
     #[tokio::test]

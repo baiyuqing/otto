@@ -7,10 +7,10 @@
 //! ponytail: command output for `/session`, `/model` with no argument,
 //! `/sandbox`, `/tasks` and `/task` is appended to the transcript as a system
 //! entry rather than shown in an overlay, reusing the text the line frontend
-//! prints for the same commands. Only `/resume`, `/archive`, and `/model
-//! <profile>`'s profile picker are genuinely interactive, so those get a real
-//! picker overlay (below). Upgrade path: split these into dedicated overlays if
-//! a user reports the inline transcript entries as hard to scan.
+//! prints for the same commands. `/resume`, `/archive`, `/model`, and
+//! `/thinking` have interactive picker overlays because they select from a
+//! bounded list of existing choices. Upgrade path: split these into dedicated
+//! overlays if a user reports the inline transcript entries as hard to scan.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -53,6 +53,7 @@ pub(crate) enum PickerKind {
     Archive,
     Profile,
     Effort,
+    Thinking,
 }
 
 impl PickerKind {
@@ -62,6 +63,7 @@ impl PickerKind {
             Self::Archive => "Archive session (enter to select, esc to cancel)",
             Self::Profile => "Switch profile (enter to select, esc to cancel)",
             Self::Effort => "Reasoning effort (enter to use, s to save, esc to cancel)",
+            Self::Thinking => "Reasoning effort (enter to use, s to save, esc to cancel)",
         }
     }
 }
@@ -444,15 +446,26 @@ impl App {
                 KeyCode::Down => picker.move_selection(1),
                 KeyCode::PageUp => picker.move_selection(-10),
                 KeyCode::PageDown => picker.move_selection(10),
-                KeyCode::Char('s') if picker.kind == PickerKind::Effort => {
+                KeyCode::Char('s')
+                    if matches!(picker.kind, PickerKind::Effort | PickerKind::Thinking) =>
+                {
                     let picker = self.picker.take()?;
                     let row = picker.rows.into_iter().nth(picker.selected)?;
-                    let (profile, thinking) = split_effort_value(&row.value);
-                    return Some(Action::SwitchProfileThinking {
-                        profile,
-                        thinking,
-                        save: true,
-                    });
+                    return match picker.kind {
+                        PickerKind::Effort => {
+                            let (profile, thinking) = split_effort_value(&row.value);
+                            Some(Action::SwitchProfileThinking {
+                                profile,
+                                thinking,
+                                save: true,
+                            })
+                        }
+                        PickerKind::Thinking => Some(Action::SetThinking {
+                            thinking: row.value,
+                            save: true,
+                        }),
+                        _ => None,
+                    };
                 }
                 KeyCode::Enter => {
                     let picker = self.picker.take()?;
@@ -472,6 +485,10 @@ impl App {
                                 save: false,
                             })
                         }
+                        PickerKind::Thinking => Some(Action::SetThinking {
+                            thinking: row.value,
+                            save: false,
+                        }),
                     };
                 }
                 _ => {}
@@ -759,7 +776,14 @@ impl App {
                     Some(Action::SwitchProfile(args))
                 }
             }
-            SlashCommandKind::Thinking => Some(parse_thinking_action(args, false)),
+            SlashCommandKind::Thinking => {
+                if args.is_empty() {
+                    self.picker = Some(thinking_picker(&controller.info().thinking));
+                    None
+                } else {
+                    Some(parse_thinking_action(args, false))
+                }
+            }
             SlashCommandKind::Resume => {
                 self.open_session_picker(PickerKind::Resume, controller);
                 None
@@ -1011,6 +1035,7 @@ fn picker_command_name(kind: PickerKind) -> &'static str {
         PickerKind::Archive => "archive",
         PickerKind::Profile => "model",
         PickerKind::Effort => "model",
+        PickerKind::Thinking => "thinking",
     }
 }
 
@@ -1027,9 +1052,21 @@ fn session_row(session: &SessionInfo) -> PickerRow {
     }
 }
 
+fn thinking_picker(current: &str) -> Picker {
+    level_picker(PickerKind::Thinking, current, |thinking| {
+        thinking.to_string()
+    })
+}
+
 fn effort_picker(profile: &str, controller: &Controller) -> Picker {
     let target = controller.profile_effective_thinking(profile);
-    let current = if target.is_empty() { "unset" } else { &target };
+    level_picker(PickerKind::Effort, &target, |thinking| {
+        format!("{profile}\t{thinking}")
+    })
+}
+
+fn level_picker(kind: PickerKind, target: &str, value: impl Fn(&str) -> String) -> Picker {
+    let current = if target.is_empty() { "unset" } else { target };
     let rows: Vec<PickerRow> = ["unset", "low", "medium", "high", "xhigh", "max"]
         .into_iter()
         .map(|thinking| PickerRow {
@@ -1038,15 +1075,15 @@ fn effort_picker(profile: &str, controller: &Controller) -> Picker {
                 if thinking == current { "* " } else { "  " },
                 display_thinking_choice(thinking)
             ),
-            value: format!("{profile}\t{thinking}"),
+            value: value(thinking),
         })
         .collect();
     let selected = rows
         .iter()
-        .position(|row| row.value.ends_with(&format!("\t{current}")))
+        .position(|row| row.label.starts_with("* "))
         .unwrap_or(0);
     Picker {
-        kind: PickerKind::Effort,
+        kind,
         rows,
         selected,
     }
@@ -2021,9 +2058,49 @@ mod tests {
         assert_eq!(app.suggestion, 0);
     }
 
-    /// The composer is cleared on Enter and no streamed `Event` carries the
-    /// submitted text, so without this echo the prompt is never visible in
-    /// the transcript the turn streams into.
+    #[tokio::test]
+    async fn thinking_command_without_a_level_opens_a_level_picker() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        controller.set_thinking("high").await.expect("thinking");
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        let action = app.dispatch_line("/thinking", &controller, &cancel);
+
+        assert!(action.is_none());
+        let picker = app.picker.as_ref().expect("thinking picker");
+        assert_eq!(picker.kind, PickerKind::Thinking);
+        assert_eq!(picker.rows.len(), 6);
+        assert_eq!(picker.rows[0].label, "  default");
+        assert_eq!(picker.rows[3].label, "* high");
+        assert_eq!(picker.rows[3].value, "high");
+        assert_eq!(picker.selected, 3);
+    }
+
+    #[tokio::test]
+    async fn thinking_picker_enter_sets_the_current_session_thinking() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+        app.picker = Some(thinking_picker(""));
+        app.handle_key(key(KeyCode::Down, KeyModifiers::NONE), &controller, &cancel);
+
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(matches!(
+            action,
+            Some(Action::SetThinking { thinking, save: false }) if thinking == "low"
+        ));
+    }
+
     #[tokio::test]
     async fn submitting_a_prompt_echoes_it_into_the_transcript() {
         let workspace = tempfile::tempdir().expect("workspace");

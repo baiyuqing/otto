@@ -26,6 +26,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `cli`: composition root, flag parsing, process lifecycle, signal handling, the REPL, and concrete dependency injection
   - `app`: shared lifecycle, turn admission, session replacement, task/authentication capabilities, profile selection, and session info/history access
   - `session`: native JSONL session storage built on `otto_core::session`
+  - `config`: the native config path, loading, and the one writer every config change goes through: a compare-and-swap against the bytes the caller read, an atomic temp-file rename, and a timestamped copy of the replaced contents under `backups/`
   - `tool`: native execution of workspace-confined `read`/`grep`/`find`/`ls`/`write`/`edit`/`bash`/`skill`, in-process `remind`, and the MCP tool adapter (`tool::mcp`) that presents one external server's tools to the model
   - `mcp`: the JSON-RPC codec, the stdio and HTTP transports, OAuth 2.1 sign-in for HTTP servers, and the per-server client that negotiates the protocol era and serves `tools/list`/`tools/call`
   - `sandbox`: sandbox driver contracts, the Seatbelt and direct drivers, environment filtering, and conformance helpers

@@ -141,20 +141,33 @@ fn config_path_for(lookup: &HashMap<String, String>) -> Result<PathBuf, String> 
         .collect())
 }
 
+/// The config file's path, its parsed contents, and the exact bytes they were
+/// parsed from.
+///
+/// [`save_editable_config`] passes those bytes back, so an edit another Otto
+/// process wrote in between is reported instead of overwritten.
 fn load_editable_config(
     lookup: &HashMap<String, String>,
-) -> Result<(PathBuf, otto_core::config::File), String> {
+) -> Result<(PathBuf, otto_core::config::File, Vec<u8>), String> {
     let path = config_path_for(lookup)?;
-    match crate::config::load_required(&path) {
-        Ok(file) => Ok((path, file)),
-        Err(error) if error.is_not_found() => Ok((path, otto_core::config::File::default())),
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match otto_core::config::parse(&text) {
+            Ok(file) => Ok((path, file, text.into_bytes())),
+            Err(_) => Err("load config: configuration is invalid or unavailable".to_string()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok((path, otto_core::config::File::default(), Vec::new()))
+        }
         Err(_) => Err("load config: configuration is invalid or unavailable".to_string()),
     }
 }
 
-fn save_editable_config(path: &Path, file: &otto_core::config::File) -> Result<(), String> {
-    crate::config::save(path, file)
-        .map_err(|_| "write config: configuration could not be saved".to_string())
+fn save_editable_config(
+    path: &Path,
+    file: &otto_core::config::File,
+    replacing: &[u8],
+) -> Result<(), String> {
+    crate::config::save(path, file, replacing).map_err(|error| format!("write config: {error}"))
 }
 
 fn valid_server_name(name: &str) -> bool {
@@ -174,7 +187,7 @@ fn run_list(
     if args.len() != 1 {
         return fail(stderr, USAGE);
     }
-    let Ok((_, file)) = load_editable_config(lookup) else {
+    let Ok((_, file, _)) = load_editable_config(lookup) else {
         return fail(
             stderr,
             "load config: configuration is invalid or unavailable",
@@ -301,7 +314,7 @@ fn run_add(
         Ok(parsed) => parsed,
         Err(message) => return fail(stderr, &message),
     };
-    let Ok((path, mut file)) = load_editable_config(lookup) else {
+    let Ok((path, mut file, original)) = load_editable_config(lookup) else {
         return fail(
             stderr,
             "load config: configuration is invalid or unavailable",
@@ -318,7 +331,7 @@ fn run_add(
     file.mcp
         .servers
         .insert(name.clone(), server_from_add(parsed));
-    if let Err(message) = save_editable_config(&path, &file) {
+    if let Err(message) = save_editable_config(&path, &file, &original) {
         return fail(stderr, &message);
     }
     let _ = writeln!(
@@ -343,7 +356,7 @@ fn run_remove(
     let [_, name] = args else {
         return fail(stderr, USAGE);
     };
-    let Ok((path, mut file)) = load_editable_config(lookup) else {
+    let Ok((path, mut file, original)) = load_editable_config(lookup) else {
         return fail(
             stderr,
             "load config: configuration is invalid or unavailable",
@@ -352,7 +365,7 @@ fn run_remove(
     if file.mcp.servers.remove(name).is_none() {
         return fail(stderr, &format!("unknown MCP server: {name}"));
     }
-    if let Err(message) = save_editable_config(&path, &file) {
+    if let Err(message) = save_editable_config(&path, &file, &original) {
         return fail(stderr, &message);
     }
     let _ = writeln!(
@@ -372,7 +385,7 @@ fn run_enabled(
     let [_, name] = args else {
         return fail(stderr, USAGE);
     };
-    let Ok((path, mut file)) = load_editable_config(lookup) else {
+    let Ok((path, mut file, original)) = load_editable_config(lookup) else {
         return fail(
             stderr,
             "load config: configuration is invalid or unavailable",
@@ -382,7 +395,7 @@ fn run_enabled(
         return fail(stderr, &format!("unknown MCP server: {name}"));
     };
     server.enabled = Some(enabled);
-    if let Err(message) = save_editable_config(&path, &file) {
+    if let Err(message) = save_editable_config(&path, &file, &original) {
         return fail(stderr, &message);
     }
     let verb = if enabled { "enabled" } else { "disabled" };
@@ -611,6 +624,26 @@ mod tests {
             std::fs::read_to_string(home.path().join(".config/otto/config.toml")).expect("config");
         assert!(text.contains("auth = \"oauth\""), "{text}");
         assert!(text.contains("oauth_scopes = [\"mcp:tools\"]"), "{text}");
+    }
+
+    #[test]
+    fn writing_refuses_a_config_that_changed_since_it_was_read() {
+        let home = tempfile::tempdir().expect("home");
+        let lookup = config_with_server(
+            home.path(),
+            "docs",
+            "transport = \"http\"\nurl = \"https://mcp.example.com\"\n",
+        );
+        let (path, mut file, original) = load_editable_config(&lookup).expect("load");
+        file.mcp.servers.remove("docs");
+
+        let concurrent = "default_profile = \"written by another otto\"\n";
+        std::fs::write(&path, concurrent).expect("concurrent write");
+
+        let error = save_editable_config(&path, &file, &original).expect_err("stale write");
+
+        assert!(error.contains("changed on disk"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), concurrent);
     }
 
     #[tokio::test]

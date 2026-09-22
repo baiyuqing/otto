@@ -12,6 +12,11 @@
 //! configured to render ambiguous-width characters double still aligns them
 //! at one column.
 //!
+//! A block may also be padded out to the full width with [`pad_rows`], which
+//! is what turns an entry style's background colour into a band the eye can
+//! find: a background paints only the cells its span covers, so an unpadded
+//! row stops colouring where its text ends.
+//!
 //! [`strip_gutters`] is the inverse for clipboard copy: a drag selects
 //! rendered rows, and pasting the markers back is never what the reader meant.
 
@@ -22,8 +27,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 /// The user prompt marker, shared with the REPL's input prompt
 /// (`cli::repl`) so the two frontends cannot drift apart.
 ///
-/// East Asian width Neutral, like the others here, so it stays one column
-/// even where ambiguous-width characters render double.
+/// Deliberately not `>`: a reply's markdown blockquotes carry a `> ` prefix
+/// of their own, so an ASCII chevron in the gutter reads as just another
+/// quoted line. East Asian width Neutral, like the others here, so it stays
+/// one column even where ambiguous-width characters render double.
 pub(crate) const USER_MARK: &str = "\u{276f} ";
 /// Assistant text, and the header line of a tool call.
 pub(crate) const BULLET_MARK: &str = "⏺ ";
@@ -147,6 +154,31 @@ pub(crate) fn block(
         }
     }
     out
+}
+
+/// Pads every row out to `width` display columns in `style`.
+///
+/// Only a padded row carries its entry's background colour to the edge of
+/// the transcript; a row left at its text width paints a ragged stub instead
+/// of a band, and the ragged right edge is exactly what makes a turn
+/// boundary hard to find. A row already at or past `width` is left alone,
+/// and the padding is dropped again on copy (rows are trimmed before
+/// [`strip_gutters`] runs).
+pub(crate) fn pad_rows(
+    lines: Vec<Line<'static>>,
+    style: Style,
+    width: usize,
+) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            let used: usize = line.spans.iter().map(|span| span.content.width()).sum();
+            if let Some(missing) = width.checked_sub(used).filter(|missing| *missing > 0) {
+                line.spans.push(Span::styled(" ".repeat(missing), style));
+            }
+            line
+        })
+        .collect()
 }
 
 /// Removes the rendered gutter from copied text.
@@ -309,5 +341,38 @@ mod tests {
     #[test]
     fn copying_leaves_a_blank_row_blank() {
         assert_eq!(strip_gutters("⏺ one\n\n⏺ two"), "one\n\ntwo");
+    }
+
+    #[test]
+    fn the_prompt_marker_is_not_the_markdown_quote_marker() {
+        assert!(
+            !USER_MARK.starts_with('>'),
+            "a prompt marker that is `>` reads as a quoted line in a reply"
+        );
+    }
+
+    #[test]
+    fn padding_fills_a_row_out_to_the_full_width() {
+        let style = Style::default().bg(Color::DarkGray);
+        let lines = pad_rows(block(&[plain("hi")], USER_MARK, style, 10), style, 10);
+        assert_eq!(line_text(&lines[0]).width(), 10);
+        let padding = lines[0].spans.last().expect("a padded row has spans");
+        assert_eq!(padding.style.bg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn padding_counts_display_columns_not_characters() {
+        let style = Style::default().bg(Color::DarkGray);
+        let lines = pad_rows(block(&[plain("集群")], USER_MARK, style, 10), style, 10);
+        assert_eq!(line_text(&lines[0]).width(), 10);
+    }
+
+    #[test]
+    fn padding_leaves_a_row_that_already_fills_the_width() {
+        let style = Style::default().bg(Color::DarkGray);
+        let filled = block(&[plain("abcdefgh")], USER_MARK, style, 10);
+        let padded = pad_rows(filled.clone(), style, 10);
+        assert_eq!(padded[0].spans.len(), filled[0].spans.len());
+        assert_eq!(line_text(&padded[0]).width(), 10);
     }
 }

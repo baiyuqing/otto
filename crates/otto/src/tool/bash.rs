@@ -184,6 +184,25 @@ pub struct BashTool {
     approvals: Option<(String, Arc<BashApprovals>)>,
 }
 
+/// How the shell is invoked.
+///
+/// macOS gets `-l`, a login shell, because that is how a command sees the
+/// `PATH` `path_helper` assembles from `/etc/paths` and `/etc/paths.d`;
+/// without it a Homebrew or Xcode tool the user installed is simply not
+/// found. `/etc/profile` there is Apple's and quiet.
+///
+/// Everywhere else the login profile is skipped. `/etc/profile.d/*` is
+/// arbitrary vendor code: it writes to stdout, which lands in the middle of
+/// the tool result the model reads, and it can restore the very variables
+/// the environment filter in `sandbox::environment` removed. On a platform
+/// with no confined driver nothing would contain it either. The command
+/// still gets the `PATH` Otto passes it.
+#[cfg(target_os = "macos")]
+const SHELL_FLAGS: &str = "-lc";
+/// See the macOS flags above.
+#[cfg(not(target_os = "macos"))]
+const SHELL_FLAGS: &str = "-c";
+
 impl BashTool {
     /// Binds the tool to one executor.
     ///
@@ -249,7 +268,11 @@ impl BashTool {
 
     fn request(&self, command: &str, environment: &[String]) -> Request {
         Request {
-            argv: vec![self.shell.clone(), "-lc".to_owned(), command.to_owned()],
+            argv: vec![
+                self.shell.clone(),
+                SHELL_FLAGS.to_owned(),
+                command.to_owned(),
+            ],
             dir: self.workspace_root.clone(),
             env: environment.to_vec(),
         }
@@ -889,7 +912,7 @@ mod tests {
         let expected: Vec<Request> = ["first command", "second command"]
             .iter()
             .map(|command| Request {
-                argv: strings(&["/bin/sh", "-lc", command]),
+                argv: strings(&["/bin/sh", SHELL_FLAGS, command]),
                 dir: workspace.root().to_path_buf(),
                 env: strings(&["FIRST=original", "SECOND=preserved"]),
             })
@@ -1739,6 +1762,19 @@ mod tests {
         }
     }
 
+    /// Which shell invocation each platform gets. macOS runs a login shell so
+    /// the command sees the `PATH` `path_helper` builds; nowhere else, where
+    /// `/etc/profile.d/*` would write into the tool result the model reads
+    /// and could restore variables the environment filter removed.
+    #[test]
+    fn only_macos_starts_the_command_shell_as_a_login_shell() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(SHELL_FLAGS, "-lc");
+        } else {
+            assert_eq!(SHELL_FLAGS, "-c");
+        }
+    }
+
     #[tokio::test]
     async fn it_runs_a_real_command_through_the_direct_driver() {
         let (_dir, workspace) = temp_workspace();
@@ -1773,12 +1809,8 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{result:?}");
-        // The command's own output, not the exact byte after the `stdout:`
-        // header: the shell is started with `-lc`, so on some hosts a login
-        // profile writes a line of its own before the command runs.
         for expected in [
-            "stdout:\n".to_owned(),
-            format!("cwd={}", workspace.root().display()),
+            format!("stdout:\ncwd={}", workspace.root().display()),
             "env=deterministic".to_owned(),
             "stderr:\nproblem".to_owned(),
             "exit_code: 7".to_owned(),

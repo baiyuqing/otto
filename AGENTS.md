@@ -48,16 +48,18 @@ Apply these requirements to every feature, fix, and refactor:
 Use the Makefile targets as the canonical commands:
 
 ```bash
-make check-fast  # rustfmt, clippy, focused otto-core tests, git diff --check
-make check       # full macOS build/lint/all-tests/wasm/PTY/UI gate
+make check-fast   # rustfmt, clippy, focused otto-core tests, git diff --check
+make check        # full macOS build/lint/all-tests/wasm/PTY/UI gate
+make check-linux  # the Linux gate: the same minus Seatbelt conformance and the UI
 ```
 
 See the [development guide](docs/development.md)
 for the focused package set, test commands, and contract-specific checks.
 
-CI runs `make check` with the toolchain and action pins in
-[the workflow](.github/workflows/checks.yml). Full host validation requires
-macOS 26+ and standalone Command Line Tools; see the development guide.
+CI runs `make check` on macOS and `make check-linux` on Linux, with the
+toolchain and action pins in [the workflow](.github/workflows/checks.yml).
+Full host validation requires macOS 26+ and standalone Command Line Tools;
+see the development guide.
 
 Keep README and user-facing docs limited to implemented, tested behavior. Do
 not describe `agent_send`, `agent_cancel`, `agent_report`, automatic memory

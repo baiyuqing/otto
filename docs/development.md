@@ -159,9 +159,11 @@ confirmation; seek clarification only for material scope or contract changes.
 ## Rust workflow
 
 Full host validation uses macOS 26+ with standalone Command Line Tools selected.
-Linux builds and runs Otto without a sandbox, so its gate is `make check-linux`:
-the same format, lint, test, wasm and PTY targets, minus the Seatbelt
-conformance suite, which is compiled only for macOS. Keep platform-specific
+Linux builds and runs Otto without a sandbox, so its gate is `make check-linux`,
+which CI runs on `ubuntu-24.04`: the same format, lint, test, wasm and PTY
+targets, minus the Seatbelt conformance suite, which is compiled only for
+macOS, and minus the web UI, which is platform independent and stays on the
+macOS job. Keep platform-specific
 code behind `cfg` rather than runtime checks, so a target that cannot use it
 does not compile it.
 The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
@@ -188,6 +190,7 @@ make rust-test      # cargo test --workspace (offline)
 make rust-wasm-check # cargo check -p otto-core and -p otto-web for wasm32-unknown-unknown
 make rust-wasm-test  # wasm-pack test --node for otto-core and otto-web
 make test-tui       # cargo test -p otto --test tui_pty (needs a real PTY)
+make check-linux    # the Linux gate: rust-fmt, rust-lint, rust-test, rust-wasm-check, test-tui
 ```
 
 `check-fast` runs `rustfmt`, `clippy`, and the focused `otto-core` test suite;

@@ -1151,8 +1151,8 @@ pub(crate) use {contract_check, driver_contract};
 mod tests {
     use super::*;
 
-    /// A child that has been signalled satisfies the check, even though the
-    /// probe runs while it is still leaving the process table.
+    /// A child that has been signalled and has left the process table
+    /// satisfies the check.
     #[tokio::test]
     async fn assert_gone_accepts_a_signalled_child() {
         let mut child = std::process::Command::new("/bin/sleep")
@@ -1162,6 +1162,34 @@ mod tests {
         let pid = child.id() as i32;
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL)
             .expect("signal the child");
+        let _ = child.wait();
+
+        assert_gone(pid).await;
+    }
+
+    /// Linux only: a child that was killed but not yet reaped is a zombie,
+    /// which the check accepts because it executes nothing.
+    ///
+    /// This is the case that arises in the contract's own scenarios there,
+    /// where the descendant is an orphan waiting on PID 1. It cannot arise on
+    /// macOS, where launchd reaps an orphan promptly and [`is_zombie`] is
+    /// always false — which is why this test would fail there: its child's
+    /// parent is the test process itself, so nothing reaps it until the line
+    /// after the assertion.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn assert_gone_accepts_an_unreaped_zombie() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL)
+            .expect("signal the child");
+        // Settle into the zombie state the check is meant to accept.
+        while !is_zombie(pid) {
+            tokio::time::sleep(SETTLE_INTERVAL).await;
+        }
 
         assert_gone(pid).await;
 

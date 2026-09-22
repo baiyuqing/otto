@@ -89,6 +89,9 @@ impl Selection {
     ///
     /// Trailing blanks are dropped: a transcript row is padded to the full
     /// width, and pasting that padding back is never what the user meant.
+    /// The transcript's gutter goes the same way, through
+    /// [`super::gutter::strip_gutters`]: the markers are Otto's own framing,
+    /// not part of the prompt, reply, or command the reader is copying.
     pub(crate) fn text(&self, buffer: &Buffer) -> String {
         let area = buffer.area;
         let (start, end) = self.bounds();
@@ -119,7 +122,7 @@ impl Selection {
             }
             lines.push(line.trim_end().to_string());
         }
-        lines.join("\n")
+        super::gutter::strip_gutters(&lines.join("\n"))
     }
 }
 
@@ -178,6 +181,21 @@ mod tests {
         let mut selection = Selection::new(0, 0);
         selection.extend(4, 0);
         assert_eq!(selection.text(&buffer), "hello");
+    }
+
+    #[test]
+    fn a_drag_over_the_transcript_copies_without_the_gutter() {
+        let buffer = screen(&[
+            "> what does this do",
+            "\u{23fa} it guards it",
+            "  from a timeout",
+        ]);
+        let mut selection = Selection::new(0, 0);
+        selection.extend(30, 2);
+        assert_eq!(
+            selection.text(&buffer),
+            "what does this do\nit guards it\nfrom a timeout"
+        );
     }
 
     #[test]

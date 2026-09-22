@@ -15,17 +15,16 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use super::app::App;
 use super::commands::{SLASH_COMMANDS, SlashCommand};
-use super::entries::{Entry, EntryKind};
 use super::layout::{
-    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN, escape_plain_text,
+    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN,
     escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
 };
-use super::markdown;
+use super::transcript;
 
 /// Draws one frame.
 pub(crate) fn draw(frame: &mut Frame, app: &App) {
@@ -94,7 +93,7 @@ fn composer_height(app: &App, width: u16) -> u16 {
 }
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let mut lines = transcript_lines(&app.entries, app.show_details);
+    let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
     if let Some(elapsed) = app.thinking() {
         if !lines.is_empty() {
             lines.push(Line::default());
@@ -102,7 +101,10 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(thinking_line(elapsed));
     }
 
-    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    // No `Wrap`: `transcript` already broke every row to `area.width` so it
+    // could keep a gutter marker on each one, and re-wrapping here would
+    // split those rows again and lose the alignment.
+    let paragraph = Paragraph::new(Text::from(lines));
     let total_lines = paragraph.line_count(area.width) as u16;
     let bottom = total_lines.saturating_sub(area.height);
     // The scroll keys need the bottom this layout produced to turn
@@ -111,20 +113,6 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     app.max_scroll.set(bottom);
     let scroll = app.scroll.map_or(bottom, |top| top.min(bottom));
     frame.render_widget(paragraph.scroll((scroll, 0)), area);
-}
-
-/// The whole transcript, one blank line between entries so a prompt, a
-/// reply, and a tool block read as separate blocks instead of one run of
-/// text.
-fn transcript_lines(entries: &[Entry], details: bool) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    for entry in entries {
-        if !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        lines.extend(entry_lines(entry, details));
-    }
-    lines
 }
 
 /// Spinner frames, in order.
@@ -147,126 +135,6 @@ fn thinking_line(elapsed: Duration) -> Line<'static> {
         ),
         Style::default().fg(Color::Magenta),
     )
-}
-
-/// What a user entry's lines are prefixed with. The prompt is the one piece
-/// of transcript text the person reading the screen wrote themselves, so it
-/// carries a marker the model's output never has.
-const USER_PREFIX: &str = "> ";
-
-/// Renders one transcript entry. Assistant/system/compaction/error text is
-/// markdown; tool call/result bodies are plain, pre-escaped text, and so is a
-/// user prompt, which is typed as literal text rather than authored as
-/// markdown.
-///
-/// ponytail: the prefix is part of the line's text, so `Paragraph::wrap` puts
-/// no marker on the continuation rows of a prompt wider than the terminal.
-/// Upgrade path: wrap user text here (as `composer_lines` already does for the
-/// composer) and prefix every row if that is reported as confusing.
-fn entry_lines(entry: &Entry, details: bool) -> Vec<Line<'static>> {
-    match entry.kind {
-        Some(EntryKind::User) => escape_plain_text(&entry.raw)
-            .lines()
-            .map(|line| {
-                Line::styled(
-                    format!("{USER_PREFIX}{line}"),
-                    Style::default().fg(Color::Green),
-                )
-            })
-            .collect(),
-        Some(EntryKind::Tool) => tool_lines(entry, details),
-        _ => markdown::render(&entry.raw).lines,
-    }
-}
-
-/// How much of a tool call's arguments or result a folded line shows. The
-/// cut is by character count rather than terminal width because folding
-/// exists to keep a call to one or two rows: a `Paragraph` wraps anything
-/// longer back into the block of text the fold removed.
-const TOOL_PREVIEW_LIMIT: usize = 64;
-
-/// Renders one tool call. Folded (the default) it is the call plus a
-/// one-line result, so a long `bash` output cannot push the reply that
-/// follows it off the screen; `Ctrl+O` ([`App::show_details`]) shows the
-/// call id, the arguments, and the output in full.
-fn tool_lines(entry: &Entry, details: bool) -> Vec<Line<'static>> {
-    let output_style = if entry.tool_error {
-        Style::default().fg(Color::Red)
-    } else {
-        Style::default()
-    };
-
-    if details {
-        let mut lines = vec![Line::styled(
-            format!("[tool] {} ({})", entry.tool_name, entry.tool_call_id),
-            Style::default().add_modifier(Modifier::BOLD),
-        )];
-        if !entry.tool_args.is_empty() {
-            lines.extend(plain_lines(&entry.tool_args, Style::default()));
-        }
-        if entry.tool_done {
-            lines.extend(plain_lines(&entry.tool_output, output_style));
-        }
-        return lines;
-    }
-
-    let mut header = vec![Span::styled(
-        format!("[tool] {}", entry.tool_name),
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    if !entry.tool_args.is_empty() {
-        header.push(Span::styled(
-            format!(" {}", preview(&entry.tool_args)),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
-    }
-    let mut lines = vec![Line::from(header)];
-    if entry.tool_done {
-        let style = if entry.tool_error {
-            output_style
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
-        lines.push(Line::styled(tool_summary(entry), style));
-    }
-    lines
-}
-
-/// The folded result line: the first line of the output and how many more
-/// there are, or that there was none. A call still running has no result
-/// and gets no line at all.
-fn tool_summary(entry: &Entry) -> String {
-    if entry.tool_output.trim().is_empty() {
-        return "  \u{2192} (no output)".to_string();
-    }
-    let mut summary = format!("  \u{2192} {}", preview(&entry.tool_output));
-    match entry.tool_output.lines().count().saturating_sub(1) {
-        0 => {}
-        1 => summary.push_str(" (+1 line)"),
-        more => summary.push_str(&format!(" (+{more} lines)")),
-    }
-    summary
-}
-
-/// The first line of `text`, control-escaped and cut to
-/// [`TOOL_PREVIEW_LIMIT`] characters.
-fn preview(text: &str) -> String {
-    let line = escape_single_line_text(text.lines().next().unwrap_or_default());
-    let mut cut: String = line.chars().take(TOOL_PREVIEW_LIMIT).collect();
-    if line.chars().count() > TOOL_PREVIEW_LIMIT {
-        cut.push('\u{2026}');
-    }
-    cut
-}
-
-/// Pre-escaped text as one transcript line per line of `text`. A `Line`
-/// holding an embedded newline renders as one row, so splitting here is
-/// what keeps expanded tool output readable.
-fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
-    escape_plain_text(text)
-        .split('\n')
-        .map(|line| Line::styled(line.to_string(), style))
-        .collect()
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
@@ -502,6 +370,7 @@ mod tests {
     use super::*;
     use crate::cli::testutil;
     use crate::tui::app::{Picker, PickerKind, PickerRow};
+    use crate::tui::entries::{Entry, EntryKind};
 
     async fn app_fixture() -> (tempfile::TempDir, tempfile::TempDir, App) {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -516,6 +385,28 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| draw(frame, app)).expect("draw");
         format!("{}", terminal.backend())
+    }
+
+    /// The drawn rows as plain text, without `TestBackend`'s `Display`
+    /// quoting and without the layout's side margin, so a test can assert on
+    /// the gutter a reader actually sees.
+    fn screen_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                let row: String = (0..width)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect();
+                row.trim_end()
+                    .chars()
+                    .skip(SIDE_MARGIN as usize)
+                    .collect::<String>()
+            })
+            .collect()
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -557,144 +448,62 @@ mod tests {
         assert!(!rendered(&app, 40, 10).contains("Thinking"));
     }
 
-    /// A user entry and the reply that follows it rendered as adjacent,
-    /// identically styled lines, so there was nothing on screen to tell the
-    /// prompt from the model's answer.
-    #[test]
-    fn a_user_entry_is_marked_and_separated_from_the_entry_after_it() {
-        let entries = vec![
-            crate::tui::entries::Entry {
+    /// The drawn frame, not the row builder: a prompt, the reply after it,
+    /// and a tool call each reach the screen under their own marker, so a
+    /// turn boundary is visible in the rendering the reader actually sees.
+    /// `transcript`'s own tests cover the row rules.
+    #[tokio::test]
+    async fn a_drawn_turn_shows_a_prompt_a_reply_and_a_tool_call_apart() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries = vec![
+            Entry {
                 kind: Some(EntryKind::User),
                 raw: "hello otto".to_string(),
                 ..Default::default()
             },
-            crate::tui::entries::Entry {
+            Entry {
+                kind: Some(EntryKind::Tool),
+                tool_call_id: "call-1".to_string(),
+                tool_name: "bash".to_string(),
+                tool_args: r#"{"command":"ls"}"#.to_string(),
+                tool_output: "a.txt".to_string(),
+                tool_done: true,
+                ..Default::default()
+            },
+            Entry {
                 kind: Some(EntryKind::Assistant),
                 raw: "the reply".to_string(),
                 ..Default::default()
             },
         ];
 
-        let lines: Vec<String> = transcript_lines(&entries, false)
-            .iter()
-            .map(line_text)
-            .collect();
+        let screen = rendered(&app, 60, 12);
 
-        assert_eq!(lines, vec!["> hello otto", "", "the reply"]);
+        assert!(screen.contains("> hello otto"), "{screen}");
+        assert!(screen.contains("\u{23fa} bash"), "{screen}");
+        assert!(screen.contains("\u{23bf} a.txt"), "{screen}");
+        assert!(screen.contains("\u{23fa} the reply"), "{screen}");
     }
 
-    /// Every line of a multi-line prompt carries the marker, so a pasted
-    /// block cannot be read as part of the reply.
-    #[test]
-    fn every_line_of_a_multi_line_prompt_is_marked() {
-        let entries = vec![crate::tui::entries::Entry {
+    /// A prompt too wide for the terminal keeps one marker and an aligned
+    /// indent on the rows the wrap produced, which is what `Paragraph::wrap`
+    /// used to lose entirely.
+    #[tokio::test]
+    async fn a_wrapped_prompt_is_marked_once_and_stays_aligned() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries = vec![Entry {
             kind: Some(EntryKind::User),
-            raw: "first\nsecond".to_string(),
+            raw: "alpha bravo charlie delta echo foxtrot golf".to_string(),
             ..Default::default()
         }];
 
-        let lines: Vec<String> = transcript_lines(&entries, false)
-            .iter()
-            .map(line_text)
-            .collect();
+        let rows = screen_rows(&app, 44, 10);
+        let prompt: Vec<&String> = rows.iter().filter(|row| !row.is_empty()).take(2).collect();
 
-        assert_eq!(lines, vec!["> first", "> second"]);
-    }
-
-    fn tool_entry() -> Entry {
-        Entry {
-            kind: Some(EntryKind::Tool),
-            tool_call_id: "call-1".to_string(),
-            tool_name: "bash".to_string(),
-            tool_args: r#"{"command":"ls -la"}"#.to_string(),
-            tool_output: "total 12\na.txt\nb.txt".to_string(),
-            tool_done: true,
-            ..Default::default()
-        }
-    }
-
-    /// The reported bad experience: a finished tool call printed its whole
-    /// output into the transcript, so one `bash` call pushed the reply that
-    /// followed it off the screen. Folded it is the call and a one-line
-    /// result; `Ctrl+O` is what shows the call id, the arguments, and the
-    /// output in full.
-    #[test]
-    fn a_tool_call_folds_to_a_summary_until_details_are_shown() {
-        let entry = tool_entry();
-
-        let folded: Vec<String> = entry_lines(&entry, false).iter().map(line_text).collect();
-        assert_eq!(
-            folded,
-            vec![
-                r#"[tool] bash {"command":"ls -la"}"#,
-                "  \u{2192} total 12 (+2 lines)",
-            ]
-        );
-
-        let expanded: Vec<String> = entry_lines(&entry, true).iter().map(line_text).collect();
-        assert_eq!(
-            expanded,
-            vec![
-                "[tool] bash (call-1)",
-                r#"{"command":"ls -la"}"#,
-                "total 12",
-                "a.txt",
-                "b.txt",
-            ]
-        );
-    }
-
-    /// Each folded line stays one line: neither a long argument blob nor a
-    /// long first output line may wrap back into the wall of text folding
-    /// exists to avoid.
-    #[test]
-    fn a_folded_tool_summary_cuts_long_arguments_and_output() {
-        let entry = Entry {
-            tool_args: format!(r#"{{"command":"{}"}}"#, "x".repeat(200)),
-            tool_output: format!("{}\ntail", "y".repeat(200)),
-            ..tool_entry()
-        };
-
-        let folded: Vec<String> = entry_lines(&entry, false).iter().map(line_text).collect();
-
-        let header_prefix = "[tool] bash ".chars().count();
-        assert!(
-            folded[0].chars().count() <= header_prefix + TOOL_PREVIEW_LIMIT + 1,
-            "{:?}",
-            folded[0]
-        );
-        assert!(folded[0].ends_with('\u{2026}'), "{:?}", folded[0]);
-        assert!(folded[1].ends_with("\u{2026} (+1 line)"), "{:?}", folded[1]);
-    }
-
-    /// A call still running has no result to summarize; a finished one with
-    /// no output says so rather than leaving a bare header, and a failure
-    /// carries its text in red.
-    #[test]
-    fn a_folded_tool_call_shows_its_state_while_running_and_on_failure() {
-        let running = Entry {
-            tool_done: false,
-            ..tool_entry()
-        };
-        assert_eq!(entry_lines(&running, false).len(), 1);
-
-        let empty = Entry {
-            tool_output: String::new(),
-            ..tool_entry()
-        };
-        assert_eq!(
-            line_text(&entry_lines(&empty, false)[1]),
-            "  \u{2192} (no output)"
-        );
-
-        let failed = Entry {
-            tool_output: "boom".to_string(),
-            tool_error: true,
-            ..tool_entry()
-        };
-        let lines = entry_lines(&failed, false);
-        assert_eq!(line_text(&lines[1]), "  \u{2192} boom");
-        assert_eq!(lines[1].style.fg, Some(Color::Red));
+        assert_eq!(prompt.len(), 2, "{rows:?}");
+        assert!(prompt[0].starts_with("> "), "{rows:?}");
+        assert!(prompt[1].starts_with("  "), "{rows:?}");
+        assert!(!prompt[1].trim_start().starts_with('>'), "{rows:?}");
     }
 
     #[tokio::test]

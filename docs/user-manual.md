@@ -1434,6 +1434,16 @@ What's wired:
 - Validation: `name` equals the directory name (`a-z`, `0-9`, `-`; 1 to 64
   characters) and `description` is 1 to 1024 characters. Invalid skills print
   one stderr warning and are skipped.
+- Optional `input` and `output` frontmatter keys, each up to 1024 characters,
+  declaring what the skill expects to be given and what it returns. They must
+  be declared together; declaring one alone, leaving one blank, or exceeding
+  the bound prints one stderr warning and the skill keeps working as if
+  neither were declared. `/skills` marks a skill that declares both with
+  `[contract]`. Nothing else reads these keys yet: they change no behaviour
+  in this release, and they are Otto's own addition to the Agent Skills
+  format, so other tools ignore them. See the
+  [sub-agent execution design](specs/2026-09-22-skill-subagent-execution.md)
+  for what they are for.
 - `/skills` lists the skills available in the current session.
 - `/skill <name>` displays one skill's description, location, and Markdown body.
 - Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is

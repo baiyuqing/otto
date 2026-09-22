@@ -1420,7 +1420,13 @@ paths = ["~/.otto/skills", ".otto/skills"]  # default; later entries win on name
 
 What's wired:
 
-- Skill listing in the system prompt (capped at 8 KiB).
+- Skill listing in the system prompt, capped at 8 KiB. Every skill stays
+  listed: when the full entries do not fit, the whole listing steps down to a
+  shorter form — first dropping locations, then truncating descriptions, then
+  names alone — and one stderr warning names the form it settled on. A skill is
+  only omitted when even the bare names overflow, and that warning names the
+  omitted skills, because a skill the model never sees cannot be called by
+  name. The sub-agent listing follows the same rule.
 - The `skill` tool for the model to load instructions by name or read supporting
   files.
 - Automatic appending of existing skill roots to Seatbelt read paths at process

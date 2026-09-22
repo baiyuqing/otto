@@ -1202,6 +1202,22 @@ fn list_skips_other_workspaces_and_unreadable_candidates() {
 }
 
 #[test]
+fn list_collapses_two_files_that_share_a_session_id() {
+    let temp = TempDir::new();
+    let (root, workspace, paths) = seeded_workspace(&temp, 1);
+    let key = fsops::workspace_key(&workspace).expect("key");
+    let original = &paths[0];
+    let duplicate = root.join(&key).join("session-0000-copy.jsonl");
+    fs::copy(original, &duplicate).expect("copy duplicate session file");
+    set_modified(&duplicate, 2_000);
+
+    let result = list::list(&root, &workspace.to_string_lossy(), "", 10).expect("list");
+    assert_eq!(result.sessions.len(), 1, "{:?}", result.sessions);
+    assert_eq!(result.sessions[0].id, "session-0000");
+    assert_eq!(result.sessions[0].path, duplicate.to_string_lossy());
+}
+
+#[test]
 fn list_validates_limit() {
     let temp = TempDir::new();
     let (root, workspace, _) = seeded_workspace(&temp, 1);

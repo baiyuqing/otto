@@ -34,8 +34,9 @@ pub fn inspect(path: &Path) -> Result<(SessionInfo, Vec<Warning>), PiError> {
 ///
 /// `current_path` marks the row for the session already open, by file
 /// identity when it can be stat'ed and by canonical path otherwise. A
-/// candidate that cannot be opened, changed between the two opens, or belongs
-/// to a different workspace is counted as skipped.
+/// candidate that cannot be opened, changed between the two opens, belongs to
+/// a different workspace, or shares a header id with a row already listed
+/// (kept from the newest-modified file) is counted as skipped.
 pub fn list(
     root: &Path,
     workspace: &str,
@@ -80,6 +81,7 @@ pub fn list(
     let current_metadata = std::fs::metadata(current_path).ok();
 
     let mut sessions = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
     for (name, _, expected) in &candidates {
         if sessions.len() == limit {
             break;
@@ -104,6 +106,10 @@ pub fn list(
                 result.skipped = increment_skipped(result.skipped);
                 continue;
             }
+        }
+        if !seen_ids.insert(info.id.clone()) {
+            result.skipped = increment_skipped(result.skipped);
+            continue;
         }
         if let Some(current_canonical) = current_canonical.as_deref() {
             info.current = match current_metadata.as_ref() {

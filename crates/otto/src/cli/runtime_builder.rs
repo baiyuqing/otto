@@ -792,7 +792,7 @@ impl Builder {
         session: &SharedSession,
         runtime: &Runtime,
     ) -> Result<Runner, BuildError> {
-        self.build_runner_inner(session, runtime, None)
+        self.build_runner_inner(session, runtime, None, true)
             .await
             .map(|(runner, _)| runner)
     }
@@ -804,7 +804,18 @@ impl Builder {
         trace: bool,
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let trace = trace.then(BuildTrace::new);
-        self.build_runner_inner(session, runtime, trace).await
+        self.build_runner_inner(session, runtime, trace, true).await
+    }
+
+    pub async fn build_runner_without_mcp_with_trace(
+        &self,
+        session: &SharedSession,
+        runtime: &Runtime,
+        trace: bool,
+    ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
+        let trace = trace.then(BuildTrace::new);
+        self.build_runner_inner(session, runtime, trace, false)
+            .await
     }
 
     async fn build_runner_inner(
@@ -812,6 +823,7 @@ impl Builder {
         session: &SharedSession,
         runtime: &Runtime,
         mut trace: Option<BuildTrace>,
+        connect_mcp: bool,
     ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
         let max_output = output_cap(runtime.max_output_bytes);
@@ -843,8 +855,11 @@ impl Builder {
         mark_build_trace(&mut trace, "runner/setup");
         let catalogs = self.build_catalogs(&mut tools, max_output, &mut warnings)?;
         mark_build_trace(&mut trace, "runner/catalogs");
-        let (mcp_tools, mcp_connected, mcp_servers) =
-            self.connect_mcp(max_output, &mut warnings).await;
+        let (mcp_tools, mcp_connected, mcp_servers) = if connect_mcp {
+            self.connect_mcp(max_output, &mut warnings).await
+        } else {
+            (Vec::new(), Vec::new(), self.connecting_mcp_servers())
+        };
         tools.extend(mcp_tools);
         mark_build_trace(&mut trace, "runner/mcp");
 
@@ -1276,6 +1291,43 @@ mod tests {
                 "remind_status",
                 "remind_cancel"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn build_runner_without_mcp_reports_connecting_and_skips_mcp_tools() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut builder = builder(dir.path());
+        builder.mcp = otto_core::config::McpRuntime {
+            enabled: true,
+            call_timeout_secs: 5,
+            connect_timeout_secs: 1,
+            servers: vec![otto_core::config::McpServerRuntime {
+                name: "slow".to_string(),
+                enabled: true,
+                transport: otto_core::config::McpTransport::Stdio {
+                    command: "otto-mcp-test-nonexistent-command".to_string(),
+                    args: Vec::new(),
+                    env: Vec::new(),
+                    cwd: dir.path().to_string_lossy().into_owned(),
+                },
+                secrets: Vec::new(),
+            }],
+        };
+        let session = SharedSession::memory(Header::default());
+        let (runner, _) = builder
+            .build_runner_without_mcp_with_trace(&session, &runtime(), false)
+            .await
+            .expect("runner");
+
+        let status = runner.mcp.status();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].name, "slow");
+        assert_eq!(status[0].state, crate::mcp::ServerState::Connecting);
+        assert!(
+            tool_names(&runner)
+                .into_iter()
+                .all(|name| !name.starts_with("mcp__"))
         );
     }
 

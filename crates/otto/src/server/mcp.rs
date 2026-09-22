@@ -32,6 +32,7 @@ impl From<ServerStatus> for McpServer {
         };
         let (state, tools, error) = match status.state {
             ServerState::Connected { tools } => ("connected", tools as u64, None),
+            ServerState::Connecting => ("connecting", 0, None),
             ServerState::Disabled => ("disabled", 0, None),
             ServerState::NeedsLogin => ("needs_login", 0, None),
             ServerState::Failed(message) => ("failed", 0, Some(message)),
@@ -84,6 +85,23 @@ mod tests {
                 protocol_version: Some(crate::mcp::MODERN_VERSION.to_string()),
                 state: "connected".to_string(),
                 tools: 3,
+                error: None,
+            }
+        );
+
+        assert_eq!(
+            McpServer::from(ServerStatus {
+                name: "slow".to_string(),
+                transport: "stdio",
+                era: None,
+                state: ServerState::Connecting,
+            }),
+            McpServer {
+                name: "slow".to_string(),
+                transport: "stdio".to_string(),
+                protocol_version: None,
+                state: "connecting".to_string(),
+                tools: 0,
                 error: None,
             }
         );

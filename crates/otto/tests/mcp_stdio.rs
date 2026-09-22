@@ -10,7 +10,8 @@
 //! (rejects `server/discover` with `-32601`), `unsupported` (rejects it
 //! with `-32020` and no modern version in `supported`), `garbage` (mixes
 //! invalid lines and stderr output into a working `modern`-shaped session),
-//! `exit` (exits when its one tool, `die`, is called).
+//! `exit` (exits when its one tool, `die`, is called), `stubborn` (ignores
+//! EOF and SIGTERM until SIGKILL).
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -57,6 +58,7 @@ fn main() {
     run!(test_call_timeout);
     run!(test_server_exit_fails_pending_and_later_calls);
     run!(test_close_terminates_child_and_is_idempotent);
+    run!(test_close_escalates_stubborn_child_promptly);
     run!(test_env_restriction);
 
     if failed {
@@ -403,6 +405,37 @@ async fn test_close_terminates_child_and_is_idempotent() -> Result<(), String> {
     Ok(())
 }
 
+async fn test_close_escalates_stubborn_child_promptly() -> Result<(), String> {
+    let (command, env) = fake_server_command("stubborn", &[]);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let transport = StdioTransport::spawn(&command, &[], &env, &cwd)
+        .await
+        .map_err(|e| e.to_string())?;
+    let pid = transport.pid();
+
+    let started = Instant::now();
+    transport.close().await;
+    let elapsed = started.elapsed();
+
+    check(
+        elapsed < Duration::from_secs(1),
+        format!("close took too long for stubborn child: {elapsed:?}"),
+    )?;
+    let mut gone = false;
+    for _ in 0..50 {
+        if matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None),
+            Err(nix::errno::Errno::ESRCH)
+        ) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    check(gone, format!("pid {pid} still alive after close"))?;
+    Ok(())
+}
+
 async fn test_env_restriction() -> Result<(), String> {
     let client = connect_client(
         "modern",
@@ -439,6 +472,12 @@ async fn test_env_restriction() -> Result<(), String> {
 
 fn run_fake_server() {
     let mode = std::env::var("OTTO_MCP_FAKE_SERVER").expect("mode already checked present");
+    if mode == "stubborn" {
+        ignore_sigterm_for_stubborn_test();
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
     let cancel_marker = std::env::var("OTTO_MCP_CANCEL_MARKER").ok();
     let stdout_lock = Arc::new(Mutex::new(()));
 
@@ -458,6 +497,16 @@ fn run_fake_server() {
         handle_message(&mode, message, &stdout_lock, cancel_marker.clone());
     }
     std::process::exit(0);
+}
+
+#[allow(unsafe_code)]
+fn ignore_sigterm_for_stubborn_test() {
+    // SAFETY: this helper runs only in the fake-server child process for this
+    // integration test. It installs SIG_IGN before any threads are spawned so
+    // `StdioTransport::close` must escalate from SIGTERM to SIGKILL.
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    }
 }
 
 fn handle_message(

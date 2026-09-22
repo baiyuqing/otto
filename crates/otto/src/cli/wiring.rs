@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use otto_core::agent::inbox::Inbox;
 use otto_core::agent::redactor::Redactor;
 use otto_core::config::agents::AgentsRuntime;
@@ -302,6 +303,20 @@ fn failure_message(error: &mcp::CallError, secrets: &[String], marker: &str) -> 
     redact_exact_text(&error.to_string(), secrets, marker)
 }
 
+struct McpConnectOutcome {
+    server: otto_core::config::McpServerRuntime,
+    transport: &'static str,
+    result: McpConnectResult,
+}
+
+enum McpConnectResult {
+    Disabled,
+    RedactionLimit,
+    Connected(mcp::client::Client, Option<Arc<dyn mcp::BearerSource>>),
+    NeedsLogin,
+    Failed(String),
+}
+
 impl Builder {
     /// The memory tools, in the order they are registered.
     pub fn memory_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
@@ -498,8 +513,9 @@ impl Builder {
         Ok(tools)
     }
 
-    /// Connects every enabled MCP server in configuration order, one after
-    /// another so `warnings` stays in a stable, reproducible order. Each
+    /// Connects enabled MCP servers concurrently, then processes every outcome
+    /// in configuration order so `warnings`, `/mcp` status, and cross-server
+    /// tool-name deduplication stay stable and reproducible. Each server's
     /// server's outcome is pushed to the returned [`mcp::Servers`] handle for
     /// `/mcp`; a disabled or failed server never stops the others, and never
     /// fails the build. Restarting an exited stdio server is out of scope; a
@@ -531,45 +547,76 @@ impl Builder {
         let cancel = CancellationToken::new();
         let connect_timeout = Duration::from_secs(self.mcp.connect_timeout_secs);
         let call_timeout = Duration::from_secs(self.mcp.call_timeout_secs);
-        let mut registered_names: HashSet<String> = HashSet::new();
-        for server in &self.mcp.servers {
-            let transport_kind = transport_label(&server.transport);
-            if !server.enabled {
-                servers.push(
-                    mcp::ServerStatus {
-                        name: server.name.clone(),
-                        transport: transport_kind,
-                        era: None,
-                        state: mcp::ServerState::Disabled,
-                    },
-                    None,
-                );
-                continue;
+        let outcomes = join_all(self.mcp.servers.iter().cloned().map(|server| {
+            let cancel = cancel.clone();
+            async move {
+                let transport = transport_label(&server.transport);
+                if !server.enabled {
+                    return McpConnectOutcome {
+                        server,
+                        transport,
+                        result: McpConnectResult::Disabled,
+                    };
+                }
+                let Some(marker) = dynamic_redaction_marker(&server.secrets) else {
+                    return McpConnectOutcome {
+                        server,
+                        transport,
+                        result: McpConnectResult::RedactionLimit,
+                    };
+                };
+                let result = match self
+                    .connect_one(&server, connect_timeout, call_timeout, &cancel)
+                    .await
+                {
+                    Ok((client, bearer)) => McpConnectResult::Connected(client, bearer),
+                    Err(mcp::CallError::NeedsLogin) => McpConnectResult::NeedsLogin,
+                    Err(error) => {
+                        McpConnectResult::Failed(failure_message(&error, &server.secrets, &marker))
+                    }
+                };
+                McpConnectOutcome {
+                    server,
+                    transport,
+                    result,
+                }
             }
+        }))
+        .await;
 
-            let Some(marker) = dynamic_redaction_marker(&server.secrets) else {
-                servers.push(
-                    mcp::ServerStatus {
-                        name: server.name.clone(),
-                        transport: transport_kind,
-                        era: None,
-                        state: mcp::ServerState::Failed(SECRETS_EXCEED_REDACTION_LIMITS.into()),
-                    },
-                    None,
-                );
-                let _ = writeln!(
-                    warnings,
-                    "warning: mcp server {:?} failed to connect: {SECRETS_EXCEED_REDACTION_LIMITS}",
-                    server.name
-                );
-                continue;
-            };
-
-            match self
-                .connect_one(server, connect_timeout, call_timeout, &cancel)
-                .await
-            {
-                Ok((client, bearer)) => {
+        let mut registered_names: HashSet<String> = HashSet::new();
+        for outcome in outcomes {
+            let server = outcome.server;
+            let transport_kind = outcome.transport;
+            match outcome.result {
+                McpConnectResult::Disabled => {
+                    servers.push(
+                        mcp::ServerStatus {
+                            name: server.name,
+                            transport: transport_kind,
+                            era: None,
+                            state: mcp::ServerState::Disabled,
+                        },
+                        None,
+                    );
+                }
+                McpConnectResult::RedactionLimit => {
+                    servers.push(
+                        mcp::ServerStatus {
+                            name: server.name.clone(),
+                            transport: transport_kind,
+                            era: None,
+                            state: mcp::ServerState::Failed(SECRETS_EXCEED_REDACTION_LIMITS.into()),
+                        },
+                        None,
+                    );
+                    let _ = writeln!(
+                        warnings,
+                        "warning: mcp server {:?} failed to connect: {SECRETS_EXCEED_REDACTION_LIMITS}",
+                        server.name
+                    );
+                }
+                McpConnectResult::Connected(client, bearer) => {
                     let client = Arc::new(client);
                     let mut secrets = server.secrets.clone();
                     if let Some(bearer) = &bearer {
@@ -626,7 +673,7 @@ impl Builder {
                         tool_names,
                     });
                 }
-                Err(mcp::CallError::NeedsLogin) => {
+                McpConnectResult::NeedsLogin => {
                     servers.push(
                         mcp::ServerStatus {
                             name: server.name.clone(),
@@ -642,8 +689,7 @@ impl Builder {
                         server.name, server.name
                     );
                 }
-                Err(error) => {
-                    let message = failure_message(&error, &server.secrets, &marker);
+                McpConnectResult::Failed(message) => {
                     servers.push(
                         mcp::ServerStatus {
                             name: server.name.clone(),
@@ -914,6 +960,41 @@ mod mcp_tests {
         );
         let text = String::from_utf8(warnings).expect("utf-8 warnings");
         assert!(text.contains(SECRETS_EXCEED_REDACTION_LIMITS), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn connection_results_are_reported_in_configuration_order() {
+        let directory = tempfile::tempdir().expect("directory");
+        let builder = builder_with_servers(
+            directory.path(),
+            vec![
+                stdio_server(
+                    "first",
+                    true,
+                    "otto-mcp-test-first-missing",
+                    directory.path(),
+                ),
+                stdio_server(
+                    "second",
+                    true,
+                    "otto-mcp-test-second-missing",
+                    directory.path(),
+                ),
+            ],
+        );
+
+        let mut warnings = Vec::new();
+        let (tools, connected, servers) = builder.connect_mcp(65536, &mut warnings).await;
+        assert!(tools.is_empty());
+        assert!(connected.is_empty());
+        let status = servers.status();
+        assert_eq!(status.len(), 2);
+        assert_eq!(status[0].name, "first");
+        assert_eq!(status[1].name, "second");
+        let text = String::from_utf8(warnings).expect("utf-8 warnings");
+        let first = text.find("first").expect("first warning");
+        let second = text.find("second").expect("second warning");
+        assert!(first < second, "{text}");
     }
 
     #[test]

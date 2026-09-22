@@ -35,6 +35,20 @@ use crate::tool::root::{self, Root};
 pub const MAX_SKILL_FILE_BYTES: u64 = 64 << 20;
 const MAX_SKILL_NAME_LENGTH: usize = 64;
 const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
+/// The bound on each half of a declared contract.
+pub const MAX_SKILL_CONTRACT_CHARS: usize = 1024;
+
+/// What a skill promises to be given and to return.
+///
+/// Both halves are required together: a skill that declares one alone is the
+/// case that makes sub-agent execution fail, so it is reported and treated as
+/// declaring neither. See the
+/// [sub-agent execution design](../../../docs/specs/2026-09-22-skill-subagent-execution.md).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Contract {
+    pub input: String,
+    pub output: String,
+}
 
 /// One discovered skill.
 ///
@@ -44,6 +58,10 @@ const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 pub struct Skill {
     pub name: String,
     pub description: String,
+    /// The declared input/output contract, absent unless the frontmatter
+    /// declares both halves. Its presence is what will make a skill eligible
+    /// for sub-agent execution; nothing reads it for that purpose yet.
+    pub contract: Option<Contract>,
     pub directory: PathBuf,
     pub path: PathBuf,
 }
@@ -110,7 +128,8 @@ impl Catalog {
                     &entry.name.to_string_lossy(),
                     &directory_fs,
                 ) {
-                    Ok(skill) => {
+                    Ok((skill, warning)) => {
+                        warnings.extend(warning);
                         by_name.insert(skill.name.clone(), skill);
                     }
                     Err(warning) => warnings.push(warning),
@@ -176,26 +195,34 @@ fn open_skill_dir(directory: &Path, canonical_root: &Path, entry: &root::DirEntr
     root::is_dir(&stat).then_some(directory_fs)
 }
 
-/// Parses and validates one skill directory, returning a warning string when
-/// the directory is not a usable skill.
+/// Parses and validates one skill directory.
+///
+/// `Err` means the directory is not a usable skill. `Ok` may still carry a
+/// warning: a malformed contract degrades the skill to one without a
+/// contract rather than discarding a skill that otherwise works.
 fn load_candidate(
     directory: &Path,
     skill_path: &Path,
     directory_name: &str,
     directory_fs: &Root,
-) -> Result<Skill, String> {
+) -> Result<(Skill, Option<String>), String> {
     let describe = |error: String| format!("skill {}: {error}", skill_path.display());
     let data = read_root_file(directory_fs, Path::new("SKILL.md"))
         .map_err(|error| describe(error.to_string()))?;
     let (fields, _) = frontmatter::parse(&data).map_err(describe)?;
     let name = validate_skill_name(&fields, directory_name).map_err(describe)?;
     let description = validate_skill_description(&fields).map_err(describe)?;
-    Ok(Skill {
-        name,
-        description,
-        directory: directory.to_path_buf(),
-        path: skill_path.to_path_buf(),
-    })
+    let (contract, warning) = validate_skill_contract(&fields);
+    Ok((
+        Skill {
+            name,
+            description,
+            contract,
+            directory: directory.to_path_buf(),
+            path: skill_path.to_path_buf(),
+        },
+        warning.map(describe),
+    ))
 }
 
 fn validate_skill_name(fields: &Fields, directory_name: &str) -> Result<String, String> {
@@ -236,6 +263,51 @@ fn validate_skill_description(fields: &Fields) -> Result<String, String> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+/// Reads the optional `input`/`output` contract.
+///
+/// Returns the contract and, when the declaration is unusable, one warning.
+/// Declaring neither half is the silent default: every skill written before
+/// this key pair existed takes that path, and nothing about it changes.
+fn validate_skill_contract(fields: &Fields) -> (Option<Contract>, Option<String>) {
+    let half = |key: &str| {
+        fields
+            .get(key)
+            .map_or("", String::as_str)
+            .trim()
+            .to_string()
+    };
+    let input = half("input");
+    let output = half("output");
+
+    match (input.is_empty(), output.is_empty()) {
+        (true, true) => (None, None),
+        (false, false) => {
+            for (key, value) in [("input", &input), ("output", &output)] {
+                if value.chars().count() > MAX_SKILL_CONTRACT_CHARS {
+                    return (
+                        None,
+                        Some(format!(
+                            "{key} exceeds {MAX_SKILL_CONTRACT_CHARS} characters; \
+                             the input/output contract is ignored"
+                        )),
+                    );
+                }
+            }
+            (Some(Contract { input, output }), None)
+        }
+        // Half a contract is the shape that makes sub-agent execution fail, so
+        // it is never treated as good enough.
+        _ => (
+            None,
+            Some(
+                "input and output must be declared together; \
+                 the input/output contract is ignored"
+                    .to_string(),
+            ),
+        ),
+    }
 }
 
 /// Reads `skill.path` and returns the Markdown body without the frontmatter.
@@ -339,6 +411,68 @@ mod tests {
         );
         std::fs::write(directory.join("SKILL.md"), content).expect("SKILL.md is writable");
         directory
+    }
+
+    /// Discovers one skill written with `frontmatter_extra` and returns it
+    /// alongside the discovery warnings.
+    fn discover_one(frontmatter_extra: &str) -> (Option<Skill>, Vec<String>) {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        write_skill(root.path(), "contracted", frontmatter_extra, "body\n");
+        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+        (catalog.lookup("contracted").cloned(), warnings)
+    }
+
+    #[test]
+    fn declaring_both_halves_gives_the_skill_a_contract() {
+        let (skill, warnings) = discover_one("input: a report path\noutput: a list of records\n");
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let contract = skill.expect("the skill").contract.expect("a contract");
+        assert_eq!(contract.input, "a report path");
+        assert_eq!(contract.output, "a list of records");
+    }
+
+    #[test]
+    fn declaring_neither_half_is_the_silent_default() {
+        let (skill, warnings) = discover_one("");
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(skill.expect("the skill").contract.is_none());
+    }
+
+    #[test]
+    fn declaring_one_half_warns_and_leaves_the_skill_contract_free() {
+        for half in ["input: a report path\n", "output: a list of records\n"] {
+            let (skill, warnings) = discover_one(half);
+
+            let skill = skill.expect("the skill is still usable");
+            assert!(skill.contract.is_none(), "{half:?}");
+            assert_eq!(warnings.len(), 1, "{half:?}: {warnings:?}");
+            assert!(
+                warnings[0].contains("input") && warnings[0].contains("output"),
+                "the warning must name both halves: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_over_long_half_warns_and_drops_the_contract_but_keeps_the_skill() {
+        let long = "a".repeat(MAX_SKILL_CONTRACT_CHARS + 1);
+        let (skill, warnings) = discover_one(&format!("input: {long}\noutput: fine\n"));
+
+        let skill = skill.expect("the skill is still usable");
+        assert!(skill.contract.is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("input"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_blank_half_counts_as_undeclared() {
+        let (skill, warnings) = discover_one("input: \"   \"\noutput: a list\n");
+
+        let skill = skill.expect("the skill");
+        assert!(skill.contract.is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     fn write_raw_skill(root: &Path, directory_name: &str, content: &str) -> PathBuf {
@@ -569,6 +703,7 @@ mod tests {
         let selected = Skill {
             name: "sample".into(),
             description: "d".into(),
+            contract: None,
             directory: directory.clone(),
             path: alternate,
         };
@@ -602,6 +737,7 @@ mod tests {
         let skill = Skill {
             name: "pdf".into(),
             description: "d".into(),
+            contract: None,
             directory,
             path,
         };

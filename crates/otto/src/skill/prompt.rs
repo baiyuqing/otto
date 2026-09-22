@@ -196,6 +196,7 @@ mod tests {
         let skill = Skill {
             name: "pdf".into(),
             description: "Handles <PDF> & \"forms\"\nacross lines".into(),
+            contract: None,
             directory: "/skills/pdf".into(),
             path: "/skills/pdf/SKILL.md".into(),
         };
@@ -228,6 +229,7 @@ mod tests {
                 Skill {
                     name: name.clone(),
                     description: "a".repeat(description_chars),
+                    contract: None,
                     path: format!("{directory}/SKILL.md").into(),
                     directory: directory.into(),
                 }

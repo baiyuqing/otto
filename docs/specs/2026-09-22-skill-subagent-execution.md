@@ -1,8 +1,9 @@
 # Executing a skill as a sub-agent
 
-Status: proposed 2026-09-22. **Not approved and not implemented.** This design
-is motivated by external research, and Otto has no measurement of its own yet;
-the "Validation" section below is the condition for adopting it, not a
+Status: approved 2026-09-22 (decisions settled by the user on 2026-09-22; see
+"Decisions"). Not yet implemented beyond slice 1. This design is motivated by
+external research, and Otto has no measurement of its own yet; the
+"Validation" section below is the condition for adopting slice 3, not a
 formality.
 
 ## Motivation
@@ -173,30 +174,45 @@ the two quantities the paper reports are directly measurable here:
 Until those numbers exist, sub-agent execution is opt-in per skill — which the
 contract declaration already makes it — and never a default.
 
-## Decisions to confirm
+## Decisions
 
-1. **Structured `input`/`output` frontmatter, or the paper's prose
-   convention?** *Recommendation: structured.* It makes the mode decision
-   mechanical and keeps every existing skill on its current, better-suited
-   path. The cost is a documented deviation from the Agent Skills format.
-2. **May the main agent still load an eligible skill inline?**
-   *Recommendation: yes.* Composing two skills is the capability sub-agent
-   execution sacrifices, and there should be a way back.
-3. **Should the listing show contracts for eligible skills?**
-   *Recommendation: yes, and fix the listing budget in the same change.*
-   Without the contract the main agent cannot know what to send, which the
-   paper identifies as the failure mode that makes sub-agents useless.
+1. **Structured `input`/`output` frontmatter, not the paper's prose
+   convention.** Two declared keys make the mode decision a field check
+   rather than an inference over prose, and every existing skill declares
+   neither, so all of them stay on the path the paper shows suits them. The
+   cost is a documented deviation from the Agent Skills format, and it is
+   one-way: a skill written elsewhere still works here, while these two keys
+   are ignored by tools that do not know them.
+2. **An eligible skill is marked as agent-callable in the listing, and the
+   `skill` tool still loads it inline.** The listing entry says which way the
+   skill is meant to be run, so sub-agent execution is the default the model
+   is steered towards rather than a coin flip; loading it inline stays
+   possible because composing two skills is the capability sub-agent
+   execution sacrifices, and there must be a way back.
+
+   This is the one place the design goes beyond the paper's evidence. The
+   paper compares *fixed* modes: one arm runs everything as agent skills, the
+   other everything as sub-agents. It never tested letting the model choose.
+   Steering rather than forcing is therefore a judgement, and the measurement
+   in "Validation" has to cover it: if the model ignores the marking and
+   loads eligible skills inline anyway, the marking is not doing its job and
+   the choice has to be taken away from it.
+3. **The listing shows the contract for eligible skills**, because without it
+   the main agent cannot know what to send, which the paper identifies as the
+   failure mode that makes sub-agents useless. The listing budget was fixed
+   first, in slice 1, for exactly this reason.
 
 ## Slices
 
-1. Listing degradation ladder for skills and agents. Independent of everything
-   below and worth doing on its own merits.
+1. ~~Listing degradation ladder for skills and agents.~~ Done in #178.
 2. `input`/`output` parsing, validation, and eligibility, with no execution
    change. `/skills` shows which skills are sub-agent-eligible.
 3. Registration of eligible skills as agent definitions, with the fresh-context
    and skill-directory seeding above.
-4. Measurement against slice 3 using the `usage` store, and the decision on
-   whether any of this becomes a default.
+4. Measurement against slice 3 using the `usage` store: peak context, total
+   tokens, and how often the model honours the agent-callable marking. The
+   last of these decides whether inline loading of an eligible skill stays
+   available at all.
 
 ## Reference
 

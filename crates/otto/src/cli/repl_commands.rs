@@ -166,7 +166,15 @@ pub(crate) fn skills_report(controller: &Controller) -> String {
     }
     let mut out = "Available skills:".to_string();
     for skill in catalog.skills() {
-        let _ = write!(out, "\n- {}: {}", skill.name, skill.description);
+        // A declared contract is what will make a skill runnable as a
+        // sub-agent. Nothing executes it that way yet, so the marker reports
+        // the declaration, not a capability the session has.
+        let contract = if skill.contract.is_some() {
+            " [contract]"
+        } else {
+            ""
+        };
+        let _ = write!(out, "\n- {}{}: {}", skill.name, contract, skill.description);
     }
     out
 }

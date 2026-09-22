@@ -1439,11 +1439,23 @@ What's wired:
   be declared together; declaring one alone, leaving one blank, or exceeding
   the bound prints one stderr warning and the skill keeps working as if
   neither were declared. `/skills` marks a skill that declares both with
-  `[contract]`. Nothing else reads these keys yet: they change no behaviour
-  in this release, and they are Otto's own addition to the Agent Skills
-  format, so other tools ignore them. See the
+  `[contract]`. They are Otto's own addition to the Agent Skills format, so
+  other tools ignore them. See the
   [sub-agent execution design](specs/2026-09-22-skill-subagent-execution.md)
-  for what they are for.
+  for the reasoning.
+- A skill that declares a contract is also registered as a sub-agent
+  definition under its own name, so the model may run it with the `agent`
+  tool: the skill's instructions and the delegated task go into a fresh
+  context, and only the result comes back. The skills listing marks it
+  `exec="agent"`, and the Agents listing carries the contract, which is what
+  the model needs to decide what to send. Loading such a skill inline with
+  the `skill` tool stays available, because combining two skills is what
+  sub-agent execution gives up.
+- The skill cannot widen what the sub-agent may do: it supplies only the
+  instructions, never the tool set, the model, or the write policy. An
+  `AGENT.md` definition of the same name wins, and the clash is reported.
+  Registration is skipped entirely when `[agents]` is disabled, and a skill
+  is never marked `exec="agent"` unless it really was registered.
 - `/skills` lists the skills available in the current session.
 - `/skill <name>` displays one skill's description, location, and Markdown body.
 - Discovery runs at startup and on `/new`, `/resume`, `/model`; the catalog is

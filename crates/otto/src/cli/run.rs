@@ -23,6 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use otto_core::config::resolve::{Overrides, Runtime};
 use otto_core::config::{
@@ -64,6 +65,52 @@ const MAX_CAPTURED_ENVIRONMENT_BYTES: usize = 16 << 20;
 
 const ENVIRONMENT_SNAPSHOT_TOO_LARGE: &str = "process environment snapshot is too large";
 
+struct StartupTrace {
+    enabled: bool,
+    started: Instant,
+    last: Instant,
+    entries: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl StartupTrace {
+    fn from_lookup(lookup: &EnvironmentLookup, started: Instant) -> Self {
+        let enabled = matches!(
+            lookup.get("OTTO_STARTUP_TRACE").map(String::as_str),
+            Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+        );
+        Self {
+            enabled,
+            started,
+            last: started,
+            entries: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, label: &'static str) {
+        if !self.enabled {
+            return;
+        }
+        let now = Instant::now();
+        self.entries.push((label, now.duration_since(self.last)));
+        self.last = now;
+    }
+
+    fn finish(&mut self, stderr: &mut (dyn Write + Send)) {
+        if !self.enabled {
+            return;
+        }
+        for (label, elapsed) in &self.entries {
+            let _ = writeln!(stderr, "startup {label}: {}ms", elapsed.as_millis());
+        }
+        let _ = writeln!(
+            stderr,
+            "startup total: {}ms",
+            Instant::now().duration_since(self.started).as_millis()
+        );
+        self.enabled = false;
+    }
+}
+
 /// Which frontend the resolved UI mode selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frontend {
@@ -96,6 +143,8 @@ pub async fn run(
     terminal: bool,
     cancel: &CancellationToken,
 ) -> i32 {
+    let startup_started = Instant::now();
+    let mut startup_trace: StartupTrace;
     // These dispatch before flag parsing, because their argument grammars are
     // their own.
     if let Some(first) = args.first()
@@ -192,6 +241,9 @@ pub async fn run(
         Err(message) => return fail(stderr, &message),
     };
 
+    startup_trace = StartupTrace::from_lookup(&lookup, startup_started);
+    startup_trace.mark("environment");
+
     let process_snapshot = environment_snapshot(&host_entries, vec!["OTTO_API_KEY".to_string()]);
     let empty_config = File::default();
     let empty_environment = HashMap::new();
@@ -216,6 +268,7 @@ pub async fn run(
             );
         }
     };
+    startup_trace.mark("config/load");
     let mut environment = config_environment(&config_file, &lookup);
     environment.insert("HOME".to_string(), home.clone());
 
@@ -440,6 +493,7 @@ pub async fn run(
         provider_names: sandbox_provider_environment_names(&config_file, &resolved.api_key_env),
     };
     let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
+    startup_trace.mark("sandbox/open");
     // The bash tool captures its executor when a runner is built, so the
     // process sandbox lives behind a switch that `/sandbox reload` can replace
     // without rebuilding the session or the runner.
@@ -548,6 +602,7 @@ pub async fn run(
             }
         }
     }
+    startup_trace.mark("memory/open");
     builder.memory.recall_limit = memory_config.max_results;
     builder.memory.recall_token_budget = memory_config.recall_tokens;
     let memory_service = Arc::clone(&builder.memory.service);
@@ -627,6 +682,7 @@ pub async fn run(
                 return fail(stderr, &message);
             }
         };
+    startup_trace.mark("session/activate");
     for warning in &warnings {
         let _ = writeln!(stderr, "warning: {warning}");
     }
@@ -647,6 +703,7 @@ pub async fn run(
             return fail(stderr, &message);
         }
     };
+    startup_trace.mark("runner/build");
     if let Err(message) = builder.update_session_runtime(&initial_session, &resolved) {
         runner.close_mcp().await;
         runner.close();
@@ -714,11 +771,14 @@ pub async fn run(
         return fail(stderr, "close sandbox: sandbox runtime close failed");
     }
     if cancelled_before_exit || frontend_cancelled {
+        startup_trace.finish(stderr);
         return 130;
     }
     let Err(error) = run_error else {
+        startup_trace.finish(stderr);
         return 0;
     };
+    startup_trace.finish(stderr);
     if frontend == Frontend::Once {
         // `run_once` already rendered the error to stderr.
         return 1;
@@ -1242,6 +1302,72 @@ mod tests {
             !settings.read_paths.contains(&skills),
             "a symlinked skill root reached the sandbox read paths: {settings:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn startup_trace_environment_writes_timing_lines() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let home = directory.path().join("home");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir_all(home.join(".config/otto")).expect("config dir");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::write(
+            home.join(".config/otto/config.toml"),
+            r#"
+default_profile = "alpha"
+
+[profiles.alpha]
+provider = "openai-compatible"
+base_url = "https://example.com/v1"
+model = "gpt-test"
+api_key_env = "ALPHA_KEY"
+
+[memory]
+enabled = false
+
+[mcp]
+enabled = false
+
+[skills]
+paths = []
+
+[agents]
+paths = []
+
+[sandbox]
+driver = "off"
+"#,
+        )
+        .expect("write config");
+
+        let args = vec![
+            "--cwd".to_string(),
+            workspace.to_string_lossy().into_owned(),
+            "--no-session".to_string(),
+        ];
+        let environment = entries(&[
+            &format!("HOME={}", home.to_string_lossy()),
+            "ALPHA_KEY=sk-alpha",
+            "OTTO_STARTUP_TRACE=1",
+        ]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run(
+            &args,
+            Box::new(Cursor::new(Vec::new())),
+            &mut stdout,
+            &mut stderr,
+            environment,
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
+        let stderr = String::from_utf8_lossy(&stderr);
+        assert!(stderr.contains("startup total:"), "{stderr}");
+        assert!(stderr.contains("startup sandbox/open:"), "{stderr}");
+        assert!(stderr.contains("startup runner/build:"), "{stderr}");
     }
 
     #[tokio::test]

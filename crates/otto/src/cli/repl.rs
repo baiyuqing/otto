@@ -890,13 +890,17 @@ pub(crate) fn is_fatal_persistence(error: &AgentError) -> bool {
         if source.to_string().starts_with("fatal session persistence failure"))
 }
 
-/// Reads lines on a blocking task so the loop can wait on cancellation at the
-/// same time. The channel holds one line, a read/ack handshake.
+/// Reads lines on a blocking OS thread so the loop can wait on cancellation at
+/// the same time. This deliberately avoids [`tokio::task::spawn_blocking`]:
+/// after `/exit` or Ctrl-C, terminal stdin may stay blocked in `read` until the
+/// user types another line, and Tokio waits for tracked blocking tasks during
+/// runtime shutdown. A plain thread is not joined by Tokio, so process exit can
+/// continue once the REPL loop has returned.
 fn spawn_reader<R: BufRead + Send + 'static>(
     mut input: R,
 ) -> tokio::sync::mpsc::Receiver<Result<String, Error>> {
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
-    tokio::task::spawn_blocking(move || {
+    std::thread::spawn(move || {
         loop {
             let mut buffer = Vec::new();
             // One byte past the limit plus the newline, so an over-long line
@@ -954,8 +958,8 @@ mod tests {
     };
     use otto_core::session::Session;
     use otto_core::tool::ToolResult;
-    use std::io::Cursor;
-    use std::sync::{Arc, Mutex};
+    use std::io::{Cursor, Read};
+    use std::sync::{Arc, Condvar, Mutex};
 
     #[derive(Clone, Default)]
     struct Buffer(Arc<Mutex<Vec<u8>>>);
@@ -992,6 +996,78 @@ mod tests {
             )
             .await;
         (stdout.text(), stderr.text(), result)
+    }
+
+    struct ExitThenBlock {
+        first: bool,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ExitThenBlock {
+        fn new(release: Arc<(Mutex<bool>, Condvar)>) -> Self {
+            Self {
+                first: true,
+                release,
+            }
+        }
+    }
+
+    impl Read for ExitThenBlock {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.first {
+                self.first = false;
+                let line = b"/exit\n";
+                buffer[..line.len()].copy_from_slice(line);
+                return Ok(line.len());
+            }
+            let (lock, signal) = &*self.release;
+            let mut released = lock.lock().expect("release lock");
+            while !*released {
+                released = signal.wait(released).expect("release lock");
+            }
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn exit_does_not_wait_for_the_next_blocking_stdin_read_on_runtime_drop() {
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let thread_release = Arc::clone(&release);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let workspace = tempfile::tempdir().expect("workspace");
+                let sessions = tempfile::tempdir().expect("sessions");
+                let controller = controller(workspace.path(), sessions.path()).await;
+                let stdout = Buffer::default();
+                let stderr = Buffer::default();
+                let mut repl = Repl::new(&controller, Box::new(stdout), Box::new(stderr));
+                repl.run(
+                    std::io::BufReader::new(ExitThenBlock::new(thread_release)),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect("/exit returns");
+            });
+            drop(runtime);
+            let _ = done_tx.send(());
+        });
+
+        let finished = done_rx.recv_timeout(std::time::Duration::from_millis(500));
+        {
+            let (lock, signal) = &*release;
+            *lock.lock().expect("release lock") = true;
+            signal.notify_all();
+        }
+        worker.join().expect("runtime thread");
+        assert!(
+            finished.is_ok(),
+            "runtime shutdown waited for a REPL stdin read that was still blocked"
+        );
     }
 
     #[tokio::test]

@@ -50,8 +50,10 @@ const STDERR_TAIL_BYTES: usize = 4 * 1024;
 /// message; smaller than `STDERR_TAIL_BYTES` so that message stays readable.
 const STDERR_EXIT_TAIL_BYTES: usize = 1024;
 /// How long `close` waits after dropping stdin, and again after `SIGTERM`,
-/// before escalating.
-const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+/// before escalating. Process exit awaits this path, so keep each grace window
+/// short: well-behaved servers usually exit as soon as stdin closes, while
+/// stubborn ones should not make `/exit` feel hung.
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 type PendingResult = Result<Result<Value, RpcError>, CallError>;
@@ -233,6 +235,7 @@ impl Transport for StdioTransport {
             return;
         }
         let _ = signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL);
+        let _ = wait_for_exit(self.pid, SHUTDOWN_WAIT).await;
     }
 }
 

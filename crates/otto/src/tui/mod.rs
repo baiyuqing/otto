@@ -13,7 +13,7 @@
 mod app;
 mod commands;
 mod entries;
-mod gutter;
+pub(crate) mod gutter;
 mod layout;
 mod markdown;
 mod render;
@@ -700,7 +700,7 @@ fn image_block_from_path(path: &str) -> Result<Block, String> {
 }
 
 /// One empty-text turn delivering pending sub-agent notifications. The TUI has
-/// no `"> "` marker to skip, so the only extra work is bracketing the claim
+/// no marker to skip, so the only extra work is bracketing the claim
 /// with [`App::start_turn`] so Esc still cancels and the thinking line still
 /// animates.
 async fn run_wake<B: Backend>(

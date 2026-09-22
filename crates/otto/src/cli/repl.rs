@@ -97,7 +97,7 @@ impl<'a> Repl<'a> {
         let mut lines = spawn_reader(input);
         let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
         loop {
-            let _ = write!(self.stdout, "> ");
+            let _ = write!(self.stdout, "{}", crate::tui::gutter::USER_MARK);
             let _ = self.stdout.flush();
             // The receiver is kept across iterations rather than re-subscribed:
             // subscribing now would mark a signal raised during the last turn
@@ -175,7 +175,7 @@ impl<'a> Repl<'a> {
     }
 
     /// One empty-text turn delivering the pending sub-agent notifications, and
-    /// whether it ran. The leading newline keeps the output off the `"> "`
+    /// whether it ran. The leading newline keeps the output off the prompt
     /// marker.
     async fn wake(&mut self, cancel: &CancellationToken) -> Result<bool, Error> {
         let Self {
@@ -1091,7 +1091,7 @@ mod tests {
             )),
             "{stdout}"
         );
-        assert!(stdout.contains("> "), "{stdout}");
+        assert!(stdout.contains(crate::tui::gutter::USER_MARK), "{stdout}");
         assert_eq!(stderr, "");
     }
 
@@ -1105,7 +1105,7 @@ mod tests {
 
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(stderr, "unknown command: /unknown\n");
-        assert_eq!(stdout.matches("> ").count(), 4);
+        assert_eq!(stdout.matches(crate::tui::gutter::USER_MARK).count(), 4);
     }
 
     #[tokio::test]

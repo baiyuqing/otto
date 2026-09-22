@@ -8,9 +8,9 @@
 //! a marker on the first row and an aligned indent on the rest; the transcript
 //! `Paragraph` then draws pre-wrapped lines with wrapping turned off.
 //!
-//! Markers are all East Asian width-neutral (`>` is ASCII; `⏺`, `⎿` and `✻`
-//! are Neutral, not Ambiguous), so a terminal configured for double-width
-//! ambiguous characters still aligns them at one column.
+//! Markers are all East Asian width Neutral, never Ambiguous, so a terminal
+//! configured to render ambiguous-width characters double still aligns them
+//! at one column.
 //!
 //! [`strip_gutters`] is the inverse for clipboard copy: a drag selects
 //! rendered rows, and pasting the markers back is never what the reader meant.
@@ -19,8 +19,12 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// The user prompt marker. ASCII, so it is one column in every terminal.
-pub(crate) const USER_MARK: &str = "> ";
+/// The user prompt marker, shared with the REPL's input prompt
+/// (`cli::repl`) so the two frontends cannot drift apart.
+///
+/// East Asian width Neutral, like the others here, so it stays one column
+/// even where ambiguous-width characters render double.
+pub(crate) const USER_MARK: &str = "\u{276f} ";
 /// Assistant text, and the header line of a tool call.
 pub(crate) const BULLET_MARK: &str = "⏺ ";
 /// Compaction checkpoints, notifications, and other system entries.
@@ -283,7 +287,7 @@ mod tests {
 
     #[test]
     fn copying_drops_markers_and_the_gutter_indent() {
-        let copied = strip_gutters("> what does this do\n⏺ it guards the query\n  from a timeout");
+        let copied = strip_gutters("❯ what does this do\n⏺ it guards the query\n  from a timeout");
         assert_eq!(
             copied,
             "what does this do\nit guards the query\nfrom a timeout"

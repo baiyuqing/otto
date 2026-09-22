@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn a_multi_line_prompt_keeps_its_own_line_breaks_under_one_marker() {
         let rendered = entry_lines(&entry(EntryKind::User, "one\ntwo"), false, 40);
-        assert_eq!(rows(&rendered), ["> one", "  two"]);
+        assert_eq!(rows(&rendered), ["❯ one", "  two"]);
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod tests {
             40,
         );
         let rows = rows(&rendered);
-        assert_eq!(rows[0], "> what does this do");
+        assert_eq!(rows[0], "❯ what does this do");
         assert_eq!(rows[1], "");
         assert_eq!(rows[2], "⏺ it guards the query");
     }
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn a_prompt_wraps_by_display_column_not_character_count() {
         let rendered = entry_lines(&entry(EntryKind::User, "集群数量极多"), false, 8);
-        assert_eq!(rows(&rendered), ["> 集群数", "  量极多"]);
+        assert_eq!(rows(&rendered), ["❯ 集群数", "  量极多"]);
     }
 
     #[test]

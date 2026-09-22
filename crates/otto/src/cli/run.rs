@@ -95,7 +95,7 @@ impl StartupTrace {
         self.last = now;
     }
 
-    fn finish(&mut self, stderr: &mut (dyn Write + Send)) {
+    fn finish_ready(&mut self, stderr: &mut (dyn Write + Send)) {
         if !self.enabled {
             return;
         }
@@ -104,7 +104,7 @@ impl StartupTrace {
         }
         let _ = writeln!(
             stderr,
-            "startup total: {}ms",
+            "startup ready: {}ms",
             Instant::now().duration_since(self.started).as_millis()
         );
         self.enabled = false;
@@ -735,6 +735,8 @@ pub async fn run(
         None => controller,
     };
 
+    startup_trace.finish_ready(stderr);
+
     let run_error = match frontend {
         Frontend::Once => {
             let mut console =
@@ -771,14 +773,11 @@ pub async fn run(
         return fail(stderr, "close sandbox: sandbox runtime close failed");
     }
     if cancelled_before_exit || frontend_cancelled {
-        startup_trace.finish(stderr);
         return 130;
     }
     let Err(error) = run_error else {
-        startup_trace.finish(stderr);
         return 0;
     };
-    startup_trace.finish(stderr);
     if frontend == Frontend::Once {
         // `run_once` already rendered the error to stderr.
         return 1;
@@ -1365,9 +1364,10 @@ driver = "off"
 
         assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&stderr));
         let stderr = String::from_utf8_lossy(&stderr);
-        assert!(stderr.contains("startup total:"), "{stderr}");
+        assert!(stderr.contains("startup ready:"), "{stderr}");
         assert!(stderr.contains("startup sandbox/open:"), "{stderr}");
         assert!(stderr.contains("startup runner/build:"), "{stderr}");
+        assert!(!stderr.contains("startup total:"), "{stderr}");
     }
 
     #[tokio::test]

@@ -40,38 +40,74 @@ pub(crate) fn continuation(mark: &str) -> String {
 
 /// Splits `spans` into rows at most `width` display columns wide.
 ///
-/// Breaking is by display column at the point where the next character would
-/// not fit, the same rule [`super::render::composer_lines`] uses for the
-/// composer, so a CJK character counts as two and a returned row never needs
-/// re-wrapping. Styles are preserved across a break: a span cut in half
-/// becomes two spans with the same style. An empty input is one empty row, so
-/// a blank markdown line keeps its blank row.
+/// Breaking is by display column (a CJK character counts as two), at the last
+/// break opportunity on the row: after a space, or after a wide character,
+/// which is where CJK text may break with no space to go by. A token longer
+/// than the whole row has no opportunity in it and is cut where it overflows,
+/// so a long path or hash still renders instead of disappearing. The space a
+/// row breaks at is dropped rather than left dangling at the edge.
+///
+/// Styles are preserved across a break: a span cut in half becomes two spans
+/// with the same style, and neighbouring characters that share a style are
+/// coalesced back into one span. An empty input is one empty row, so a blank
+/// markdown line keeps its blank row.
 pub(crate) fn wrap_spans(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
     let width = width.max(1);
-    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut row: Vec<Span<'static>> = Vec::new();
-    let mut text = String::new();
-    let mut column = 0usize;
+    let chars: Vec<(char, Style)> = spans
+        .iter()
+        .flat_map(|span| span.content.chars().map(|ch| (ch, span.style)))
+        .collect();
 
-    for span in spans {
-        for ch in span.content.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if column + ch_width > width && (column > 0 || !text.is_empty()) {
-                if !text.is_empty() {
-                    row.push(Span::styled(std::mem::take(&mut text), span.style));
-                }
-                rows.push(std::mem::take(&mut row));
-                column = 0;
+    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut row: Vec<(char, Style)> = Vec::new();
+    let mut column = 0usize;
+    // Where on `row` a break may happen, if anywhere.
+    let mut opportunity: Option<usize> = None;
+
+    for (ch, style) in chars {
+        let ch_width = ch.width().unwrap_or(0);
+        if column + ch_width > width && !row.is_empty() {
+            let cut = opportunity.filter(|&at| at > 0).unwrap_or(row.len());
+            let rest = row.split_off(cut);
+            while row.last().is_some_and(|(ch, _)| *ch == ' ') {
+                row.pop();
             }
-            text.push(ch);
-            column += ch_width;
+            rows.push(std::mem::take(&mut row));
+            row = rest;
+            column = row
+                .iter()
+                .map(|(ch, _)| ch.width().unwrap_or(0))
+                .sum::<usize>();
+            opportunity = None;
         }
-        if !text.is_empty() {
-            row.push(Span::styled(std::mem::take(&mut text), span.style));
+        row.push((ch, style));
+        column += ch_width;
+        if ch == ' ' || ch_width == 2 {
+            opportunity = Some(row.len());
         }
     }
     rows.push(row);
-    rows
+    rows.into_iter().map(coalesce).collect()
+}
+
+/// Rebuilds one row's characters into as few spans as their styles allow.
+fn coalesce(row: Vec<(char, Style)>) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut text = String::new();
+    let mut current: Option<Style> = None;
+    for (ch, style) in row {
+        if current != Some(style) {
+            if let Some(previous) = current {
+                spans.push(Span::styled(std::mem::take(&mut text), previous));
+            }
+            current = Some(style);
+        }
+        text.push(ch);
+    }
+    if let Some(style) = current {
+        spans.push(Span::styled(text, style));
+    }
+    spans
 }
 
 /// Wraps a whole block of lines to `width` columns under one gutter: `mark`
@@ -183,6 +219,20 @@ mod tests {
         let rows = wrap_spans(&[Span::raw("abcdefgh".to_string())], 3);
         let rows: Vec<String> = rows.iter().map(|row| text(row)).collect();
         assert_eq!(rows, ["abc", "def", "gh"]);
+    }
+
+    #[test]
+    fn wrapping_breaks_at_a_word_boundary_and_drops_that_space() {
+        let rows = wrap_spans(&[Span::raw("alpha bravo charlie".to_string())], 12);
+        let rows: Vec<String> = rows.iter().map(|row| text(row)).collect();
+        assert_eq!(rows, ["alpha bravo", "charlie"]);
+    }
+
+    #[test]
+    fn wrapping_hard_breaks_a_token_wider_than_the_row() {
+        let rows = wrap_spans(&[Span::raw("alpha abcdefghijkl".to_string())], 6);
+        let rows: Vec<String> = rows.iter().map(|row| text(row)).collect();
+        assert_eq!(rows, ["alpha", "abcdef", "ghijkl"]);
     }
 
     #[test]

@@ -466,12 +466,16 @@ OTTO_UI=repl otto
 
   | Marker | Entry |
   | --- | --- |
-  | `❯` (green) | a prompt you submitted |
+  | `❯` (bold green on a shaded band) | a prompt you submitted |
   | `⏺` | an assistant reply |
   | `⏺` (cyan) | a tool call; red when it failed |
   | `⎿` | that call's result, indented under it |
   | `✻` (dim) | a compaction checkpoint, a notification, or other system text |
 
+- A prompt is drawn as a shaded band across the transcript width, every row of
+  it, so the start of a turn is easy to find when scrolling back. The marker is
+  `❯` rather than `>` so it is not mistaken for the `>` a quoted markdown line
+  carries in a reply.
 - Entries are separated by a blank line.
 - While a turn is running, an animated `Thinking…` line with the elapsed
   seconds is shown under the transcript, and the composer title reads
@@ -496,7 +500,8 @@ OTTO_UI=repl otto
 - Mouse-wheel transcript scrolling is enabled. Dragging with the left button
   selects visible transcript text and copies it to the clipboard on release;
   no modifier key is needed. Any key or wheel notch clears the highlight. The
-  copied text has the gutter removed — markers and the indent they add — so a
+  copied text has the gutter removed — markers and the indent they add — and
+  trailing blanks dropped, including the padding a prompt's band adds, so a
   command or a code block pastes as it was written; indentation the text
   itself carried is kept.
 - The footer shows workspace/profile/model, reasoning effort, token totals, and

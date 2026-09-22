@@ -27,6 +27,10 @@ use tokio_util::sync::CancellationToken;
 pub mod direct;
 pub mod environment;
 pub mod process;
+/// macOS only: the driver shells out to `/usr/bin/sandbox-exec`, and its
+/// profile language has no meaning anywhere else. Keeping it off other
+/// targets is what lets the rest of the crate build for them.
+#[cfg(target_os = "macos")]
 pub mod seatbelt;
 
 #[cfg(test)]

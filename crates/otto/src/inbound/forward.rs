@@ -197,14 +197,20 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    fn write_script(contents: &str) -> tempfile::NamedTempFile {
+    /// A throwaway executable script.
+    ///
+    /// The write handle is dropped before the path is handed out: Linux
+    /// refuses to `exec` a file any process still holds open for writing
+    /// (`ETXTBSY`), which a `NamedTempFile` does for as long as it lives.
+    /// The returned `TempPath` keeps the file on disk and deletes it on drop.
+    fn write_script(contents: &str) -> tempfile::TempPath {
         let mut file = tempfile::NamedTempFile::new().expect("script");
         file.write_all(contents.as_bytes()).expect("write");
         file.flush().expect("flush");
         let mut permissions = file.as_file().metadata().expect("meta").permissions();
         permissions.set_mode(0o755);
         file.as_file().set_permissions(permissions).expect("chmod");
-        file
+        file.into_temp_path()
     }
 
     #[test]
@@ -305,7 +311,7 @@ test "$1" = im -a "$2" = +messages-mget || exit 2
 printf '%s\n' '{"ok":true,"data":{"messages":[{"message_id":"om_x100","content":"<forwarded_messages>abc</forwarded_messages>"}]}}'
 "#,
         );
-        let body = expand_merge_forward(script.path().to_str().expect("path"), "om_x100")
+        let body = expand_merge_forward(script.to_str().expect("path"), "om_x100")
             .await
             .expect("expand");
         assert_eq!(body, "<forwarded_messages>abc</forwarded_messages>");
@@ -315,7 +321,7 @@ printf '%s\n' '{"ok":true,"data":{"messages":[{"message_id":"om_x100","content":
     async fn a_failing_mget_is_an_error() {
         let script = write_script("#!/bin/sh\nexit 1\n");
         assert!(
-            expand_merge_forward(script.path().to_str().expect("path"), "om_x100")
+            expand_merge_forward(script.to_str().expect("path"), "om_x100")
                 .await
                 .is_err()
         );
@@ -324,7 +330,7 @@ printf '%s\n' '{"ok":true,"data":{"messages":[{"message_id":"om_x100","content":
     #[tokio::test]
     async fn an_invalid_id_does_not_spawn() {
         let script = write_script("#!/bin/sh\nexit 0\n");
-        let error = expand_merge_forward(script.path().to_str().expect("path"), "not an id")
+        let error = expand_merge_forward(script.to_str().expect("path"), "not an id")
             .await
             .expect_err("invalid");
         assert!(error.contains("invalid message id"), "{error}");
@@ -334,7 +340,7 @@ printf '%s\n' '{"ok":true,"data":{"messages":[{"message_id":"om_x100","content":
     async fn a_slow_mget_times_out() {
         let script = write_script("#!/bin/sh\nsleep 5\n");
         let error = expand_merge_forward_with_timeout(
-            script.path().to_str().expect("path"),
+            script.to_str().expect("path"),
             "om_x100",
             Duration::from_millis(50),
         )

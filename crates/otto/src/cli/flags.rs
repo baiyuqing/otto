@@ -249,8 +249,9 @@ const USAGE: &str = r"Usage: otto [options]
        otto workflow run|status|resume|fork|approve|reject|cancel ...
        otto sandbox setup [--config PATH] [--cwd PATH]
 
-Sandbox: on macOS, auto -> Seatbelt; if it cannot be established, bash is disabled.
-WARNING: off is explicitly unsafe; bash runs unsandboxed with anything accessible to your macOS user.
+Sandbox: on macOS, auto -> Seatbelt; elsewhere there is no confined driver.
+If one cannot be established, bash is disabled and the file tools remain.
+WARNING: off is explicitly unsafe; bash runs unsandboxed with anything accessible to your user.
 File tools always stay within the selected workspace.
 
 Options:

@@ -1,9 +1,10 @@
 //! Filesystem primitives the session store needs and `std` does not offer.
 //!
 //! Every attacker-controlled component below the session root is traversed with
-//! `openat` and `O_NOFOLLOW`. macOS has no safe-wrapper crate for
-//! `renamex_np(RENAME_EXCL)`, `mkdirat`, or `fstatat(AT_SYMLINK_NOFOLLOW)`, so
-//! these are raw `libc` calls confined to this module.
+//! `openat` and `O_NOFOLLOW`. No safe-wrapper crate covers the exclusive
+//! rename, `mkdirat`, or `fstatat(AT_SYMLINK_NOFOLLOW)`, so these are raw
+//! `libc` calls confined to this module. The exclusive rename is the one
+//! primitive whose spelling differs per platform; see [`rename_excl`].
 //!
 //! Ownership: [`Dir`] owns a directory descriptor and closes it on drop.
 //! Concurrency: every function is a single syscall or a short sequence of them;
@@ -149,16 +150,53 @@ pub fn exists_at_no_follow(dir: &Dir, name: &str) -> io::Result<bool> {
     Err(error)
 }
 
-/// `renamex_np(from, to, RENAME_EXCL)`: an atomic move that fails rather than
-/// replacing an existing destination, closing the check-then-rename race.
+/// An atomic move that fails with `EEXIST` rather than replacing an existing
+/// destination, closing the check-then-rename race.
+///
+/// Each platform spells it differently and neither spelling has a safe
+/// wrapper: macOS has `renamex_np(RENAME_EXCL)`, Linux has
+/// `renameat2(RENAME_NOREPLACE)`. The Linux call goes through `syscall`
+/// rather than the glibc wrapper, which only exists from glibc 2.28; a
+/// kernel older than 3.15 reports `ENOSYS`, and that is returned to the
+/// caller rather than falling back to a non-atomic link-and-unlink.
 pub fn rename_excl(from: &Path, to: &Path) -> io::Result<()> {
-    const RENAME_EXCL: libc::c_uint = 0x0000_0004;
     let (from, to) = (c_path(from)?, c_path(to)?);
     // SAFETY: both paths are NUL-terminated and outlive the call.
-    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) } < 0 {
+    if unsafe { rename_exclusive(from.as_ptr(), to.as_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// `renamex_np(from, to, RENAME_EXCL)`.
+///
+/// # Safety
+/// `from` and `to` must be valid NUL-terminated paths that outlive the call.
+#[cfg(target_os = "macos")]
+unsafe fn rename_exclusive(from: *const libc::c_char, to: *const libc::c_char) -> libc::c_int {
+    const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+    unsafe { libc::renamex_np(from, to, RENAME_EXCL) }
+}
+
+/// `renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE)`.
+///
+/// # Safety
+/// `from` and `to` must be valid NUL-terminated paths that outlive the call.
+#[cfg(target_os = "linux")]
+unsafe fn rename_exclusive(from: *const libc::c_char, to: *const libc::c_char) -> libc::c_int {
+    const RENAME_NOREPLACE: libc::c_uint = 1;
+    // `syscall` returns `long`; every outcome this cares about fits `c_int`.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from,
+            libc::AT_FDCWD,
+            to,
+            RENAME_NOREPLACE,
+        )
+    };
+    if result < 0 { -1 } else { 0 }
 }
 
 /// `fchmod(dir, 0700)`.
@@ -307,4 +345,42 @@ pub fn is_enotdir(error: &io::Error) -> bool {
 /// True when the `errno` is `ENOENT`.
 pub fn is_enoent(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::ENOENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The archive move: the session file lands at its destination and the
+    /// source is gone.
+    #[test]
+    fn rename_excl_moves_a_file_to_an_absent_destination() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let from = dir.path().join("session.jsonl");
+        let to = dir.path().join("archived.jsonl");
+        std::fs::write(&from, b"one line\n").expect("write source");
+
+        rename_excl(&from, &to).expect("rename");
+
+        assert!(!from.exists(), "the source is gone");
+        assert_eq!(std::fs::read(&to).expect("read destination"), b"one line\n");
+    }
+
+    /// The safety property `RENAME_EXCL` buys: an occupied destination is
+    /// refused rather than replaced, so the check-then-rename race cannot
+    /// destroy an archived session. Both files must survive intact.
+    #[test]
+    fn rename_excl_refuses_an_occupied_destination() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let from = dir.path().join("session.jsonl");
+        let to = dir.path().join("archived.jsonl");
+        std::fs::write(&from, b"new\n").expect("write source");
+        std::fs::write(&to, b"existing\n").expect("write destination");
+
+        let error = rename_excl(&from, &to).expect_err("refused");
+
+        assert_eq!(error.raw_os_error(), Some(libc::EEXIST), "{error}");
+        assert_eq!(std::fs::read(&from).expect("source kept"), b"new\n");
+        assert_eq!(std::fs::read(&to).expect("destination kept"), b"existing\n");
+    }
 }

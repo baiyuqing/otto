@@ -93,10 +93,6 @@ pub(crate) struct Manager {
 }
 
 impl Manager {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Runs `spec` to completion, forwarding its output into `streams`.
     ///
     /// Returns [`Error::Closed`] once [`Manager::close`] has begun, and
@@ -483,7 +479,7 @@ mod tests {
     }
 
     async fn run(spec: Spec) -> (Outcome, Result<(), Error>, String) {
-        let manager = Manager::new();
+        let manager = Manager::default();
         let mut stdout = Vec::new();
         let mut stderr = std::io::sink();
         let cancel = CancellationToken::new();
@@ -638,7 +634,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_cancelled_run_reports_both_the_signal_and_the_cancellation() {
-        let manager = Manager::new();
+        let manager = Manager::default();
         let mut stdout = std::io::sink();
         let mut stderr = std::io::sink();
         let cancel = CancellationToken::new();
@@ -671,7 +667,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_closed_manager_refuses_later_runs() {
-        let manager = Manager::new();
+        let manager = Manager::default();
         manager.close().expect("close");
         manager.close().expect("second close");
         let mut stdout = std::io::sink();

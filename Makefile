@@ -4,7 +4,7 @@
 BINARY := otto
 INSTALL_DIR ?= $(HOME)/.local/bin
 
-.PHONY: all build install check-fast check ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test test-tui clean help
+.PHONY: all build install check-fast check check-linux ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test test-tui clean help
 
 all: build
 
@@ -41,6 +41,9 @@ check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core
 	@git diff --check
 
 check: check-fast build rust-test rust-wasm-check rust-wasm-test test-tui ui-test ## full macOS acceptance, including host integration, PTY and web UI tests
+	@git diff --check || { echo "git diff --check failed"; exit 1; }
+
+check-linux: rust-fmt rust-lint rust-test rust-wasm-check test-tui ## Linux gate: no Seatbelt, so no sandbox conformance; the web UI is platform independent and stays with `check`
 	@git diff --check || { echo "git diff --check failed"; exit 1; }
 
 ui: ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)

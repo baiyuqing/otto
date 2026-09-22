@@ -78,6 +78,16 @@ fn symlink_signal() -> io::Error {
     io::Error::from_raw_os_error(libc::ELOOP)
 }
 
+/// The permission bits of `stat`, widened to `u32`.
+///
+/// `st_mode` is `mode_t`, which is `u16` on macOS and `u32` on Linux, so the
+/// conversion is widening on one target and a no-op on the other; the lint
+/// that fires on the no-op is silenced here instead of at every call site.
+#[allow(clippy::useless_conversion)]
+pub(crate) fn mode_bits(stat: &FileStat) -> u32 {
+    u32::from(stat.st_mode)
+}
+
 pub fn is_dir(stat: &FileStat) -> bool {
     SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFDIR
 }

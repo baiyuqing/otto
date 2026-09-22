@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn a_drag_over_the_transcript_copies_without_the_gutter() {
         let buffer = screen(&[
-            "> what does this do",
+            "❯ what does this do",
             "\u{23fa} it guards it",
             "  from a timeout",
         ]);

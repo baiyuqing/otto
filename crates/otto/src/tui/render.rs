@@ -479,7 +479,7 @@ mod tests {
 
         let screen = rendered(&app, 60, 12);
 
-        assert!(screen.contains("> hello otto"), "{screen}");
+        assert!(screen.contains("❯ hello otto"), "{screen}");
         assert!(screen.contains("\u{23fa} bash"), "{screen}");
         assert!(screen.contains("\u{23bf} a.txt"), "{screen}");
         assert!(screen.contains("\u{23fa} the reply"), "{screen}");
@@ -501,9 +501,9 @@ mod tests {
         let prompt: Vec<&String> = rows.iter().filter(|row| !row.is_empty()).take(2).collect();
 
         assert_eq!(prompt.len(), 2, "{rows:?}");
-        assert!(prompt[0].starts_with("> "), "{rows:?}");
+        assert!(prompt[0].starts_with("❯ "), "{rows:?}");
         assert!(prompt[1].starts_with("  "), "{rows:?}");
-        assert!(!prompt[1].trim_start().starts_with('>'), "{rows:?}");
+        assert!(!prompt[1].trim_start().starts_with('\u{276f}'), "{rows:?}");
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use otto_core::agent::redactor::Redactor;
@@ -43,6 +43,32 @@ use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 use super::prompt::system_prompt_for;
 use super::sandbox_runtime::canonical_directory;
 use super::workspace_context::workspace_context_for;
+
+struct BuildTrace {
+    last: Instant,
+    entries: Vec<(&'static str, Duration)>,
+}
+
+impl BuildTrace {
+    fn new() -> Self {
+        Self {
+            last: Instant::now(),
+            entries: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, label: &'static str) {
+        let now = Instant::now();
+        self.entries.push((label, now.duration_since(self.last)));
+        self.last = now;
+    }
+}
+
+fn mark_build_trace(trace: &mut Option<BuildTrace>, label: &'static str) {
+    if let Some(trace) = trace {
+        trace.mark(label);
+    }
+}
 
 /// Every failure here is already redacted text, so a `String` carries all a
 /// caller may show.
@@ -766,6 +792,27 @@ impl Builder {
         session: &SharedSession,
         runtime: &Runtime,
     ) -> Result<Runner, BuildError> {
+        self.build_runner_inner(session, runtime, None)
+            .await
+            .map(|(runner, _)| runner)
+    }
+
+    pub async fn build_runner_with_trace(
+        &self,
+        session: &SharedSession,
+        runtime: &Runtime,
+        trace: bool,
+    ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
+        let trace = trace.then(BuildTrace::new);
+        self.build_runner_inner(session, runtime, trace).await
+    }
+
+    async fn build_runner_inner(
+        &self,
+        session: &SharedSession,
+        runtime: &Runtime,
+        mut trace: Option<BuildTrace>,
+    ) -> Result<(Runner, Vec<(&'static str, Duration)>), BuildError> {
         let redaction_values = self.secret_values(Some(runtime));
         let max_output = output_cap(runtime.max_output_bytes);
         let mut tools = self.builtin_file_tools(max_output);
@@ -793,10 +840,13 @@ impl Builder {
         if self.memory_usable() && self.boundary_allows_dynamic(Some(runtime)) {
             tools.extend(self.memory_tools(max_output));
         }
+        mark_build_trace(&mut trace, "runner/setup");
         let catalogs = self.build_catalogs(&mut tools, max_output, &mut warnings)?;
+        mark_build_trace(&mut trace, "runner/catalogs");
         let (mcp_tools, mcp_connected, mcp_servers) =
             self.connect_mcp(max_output, &mut warnings).await;
         tools.extend(mcp_tools);
+        mark_build_trace(&mut trace, "runner/mcp");
 
         let redactor = self.boundary_redactor(Some(runtime));
         let client = if !self.boundary_allows_dynamic(Some(runtime)) {
@@ -810,6 +860,7 @@ impl Builder {
         } else {
             ProviderClient::Compat(Arc::new(Client::new(&runtime.base_url, &runtime.api_key)))
         };
+        mark_build_trace(&mut trace, "runner/provider");
 
         // The workspace context runs `git status` through the sandbox, so it
         // may only reach the executor when both the boundary is open and a
@@ -830,6 +881,7 @@ impl Builder {
             .await
                 + &catalogs.skill_section),
         );
+        mark_build_trace(&mut trace, "runner/workspace-context");
         let parent_agent_section = redactor.redact_string(&catalogs.agent_section);
         let endpoint_host = boundary::endpoint_host_for(&runtime.base_url);
         let mut child_tools =
@@ -847,6 +899,7 @@ impl Builder {
             child_tools,
             &mut warnings,
         )?;
+        mark_build_trace(&mut trace, "runner/subagents");
 
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
@@ -898,18 +951,23 @@ impl Builder {
             inbox: subagents.inbox.unwrap_or_default(),
             ..Options::default()
         };
-        Ok(Runner {
-            agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
-            system_prompt,
-            definitions,
-            usage: self.usage_collector(session, runtime),
-            tasks: subagents.tasks,
-            subagents: subagents.runner,
-            reminders: subagents.reminders,
-            skills: catalogs.skills.clone(),
-            agents: catalogs.agent_catalog.clone(),
-            mcp: mcp_servers,
-        })
+        mark_build_trace(&mut trace, "runner/registry-and-options");
+        let trace_entries = trace.map(|trace| trace.entries).unwrap_or_default();
+        Ok((
+            Runner {
+                agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
+                system_prompt,
+                definitions,
+                usage: self.usage_collector(session, runtime),
+                tasks: subagents.tasks,
+                subagents: subagents.runner,
+                reminders: subagents.reminders,
+                skills: catalogs.skills.clone(),
+                agents: catalogs.agent_catalog.clone(),
+                mcp: mcp_servers,
+            },
+            trace_entries,
+        ))
     }
 
     /// The text a caller may print for `message`.

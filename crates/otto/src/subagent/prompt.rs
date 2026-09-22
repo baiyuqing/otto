@@ -6,11 +6,43 @@
 //! attribute, because the `agent` tool's `context` parameter is optional and
 //! the model otherwise cannot tell which definitions copy the conversation.
 
-use super::Catalog;
-use crate::skill::prompt::{collapse_whitespace, escape_html};
+use super::{Catalog, Definition};
+use crate::skill::prompt::{collapse_whitespace, escape_html, truncate_chars};
 
 /// Caps the rendered prompt section, the same cap the skills section uses.
 pub const MAX_LISTING_BYTES: usize = 8 << 10;
+
+/// The number of description characters a truncated entry keeps.
+const SHORT_DESCRIPTION_CHARS: usize = 120;
+
+/// How much of every entry the listing shows, mirroring the skills section.
+///
+/// A definition missing from the listing is unreachable: the `agent` tool's
+/// `agent` parameter is keyed by name. So an oversized catalog loses detail
+/// rather than losing definitions, uniformly across entries. There is no
+/// location rung here because an `<agent>` entry carries no location, and
+/// `context="inherit"` survives every level: it changes what the `agent` tool
+/// does, so dropping it would misreport the definition.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Detail {
+    Full,
+    ShortDescription,
+    NameOnly,
+}
+
+impl Detail {
+    /// Most detailed first. The last level is the fallback when none fits.
+    const LADDER: [Self; 3] = [Self::Full, Self::ShortDescription, Self::NameOnly];
+
+    /// The phrase the degradation warning uses.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full entries",
+            Self::ShortDescription => "names and truncated descriptions",
+            Self::NameOnly => "names only",
+        }
+    }
+}
 
 const AGENTS_HEADER: &str = concat!(
     "\n\n## Agents\n",
@@ -21,45 +53,85 @@ const AGENTS_HEADER: &str = concat!(
 /// No trailing newline: the footer ends the section exactly here.
 const AGENTS_FOOTER: &str = "</available_agents>";
 
-/// Renders the section, or `""` when `catalog` is empty. Entries that would
-/// push the section past [`MAX_LISTING_BYTES`] are dropped, with one warning
-/// per dropped definition.
+/// Renders the section, or `""` when `catalog` is empty.
+///
+/// Every entry is rendered at the most detailed [`Detail`] level whose whole
+/// listing fits [`MAX_LISTING_BYTES`], so a large catalog stays complete and
+/// one warning names the level it fell back to. Only a catalog too large even
+/// for bare names loses entries, and that warning names them.
 pub fn prompt_section(catalog: &Catalog) -> (String, Vec<String>) {
     let definitions = catalog.definitions();
     if definitions.is_empty() {
         return (String::new(), Vec::new());
     }
+    let budget = MAX_LISTING_BYTES.saturating_sub(AGENTS_HEADER.len() + AGENTS_FOOTER.len());
 
+    let mut detail = Detail::NameOnly;
     let mut body = String::new();
-    let mut warnings = Vec::new();
-    for (index, definition) in definitions.iter().enumerate() {
-        // The name is already constrained to `[a-z0-9-]`; escape it anyway so
-        // every attribute value goes through the same path.
-        let entry = format!(
-            "<agent name=\"{}\"{}>{}</agent>\n",
-            escape_html(&definition.name),
-            // `context` is normalised to `fresh` or `inherit` at parse time, so
-            // the default costs no bytes in the listing.
-            if definition.context == "inherit" {
-                " context=\"inherit\""
-            } else {
-                ""
-            },
-            escape_html(&collapse_whitespace(&definition.description))
-        );
-        if AGENTS_HEADER.len() + body.len() + entry.len() + AGENTS_FOOTER.len() > MAX_LISTING_BYTES
-        {
-            warnings.extend(definitions[index..].iter().map(|remaining| {
-                format!(
-                    "agent {} omitted from prompt: listing exceeds {MAX_LISTING_BYTES} bytes",
-                    remaining.name
-                )
-            }));
+    for level in Detail::LADDER {
+        detail = level;
+        body = definitions
+            .iter()
+            .map(|definition| render_entry(definition, level))
+            .collect();
+        if body.len() <= budget {
             break;
         }
-        body.push_str(&entry);
+    }
+
+    let mut warnings = Vec::new();
+    if body.len() > budget {
+        let mut dropped: Vec<&str> = Vec::new();
+        body.clear();
+        for (index, definition) in definitions.iter().enumerate() {
+            let entry = render_entry(definition, Detail::NameOnly);
+            if body.len() + entry.len() > budget {
+                dropped.extend(
+                    definitions[index..]
+                        .iter()
+                        .map(|definition| definition.name.as_str()),
+                );
+                break;
+            }
+            body.push_str(&entry);
+        }
+        warnings.push(format!(
+            "agents listing exceeds {MAX_LISTING_BYTES} bytes even with names only; dropped: {}",
+            dropped.join(", ")
+        ));
+    } else if detail != Detail::Full {
+        warnings.push(format!(
+            "agents listing exceeds {MAX_LISTING_BYTES} bytes; shortened to {}",
+            detail.label()
+        ));
     }
     (format!("{AGENTS_HEADER}{body}{AGENTS_FOOTER}"), warnings)
+}
+
+/// One `<agent>` line at `detail`. Truncation happens before escaping, so a
+/// cut can never split an entity.
+fn render_entry(definition: &Definition, detail: Detail) -> String {
+    let description = match detail {
+        Detail::Full => escape_html(&collapse_whitespace(&definition.description)),
+        Detail::ShortDescription => escape_html(&truncate_chars(
+            &collapse_whitespace(&definition.description),
+            SHORT_DESCRIPTION_CHARS,
+        )),
+        Detail::NameOnly => String::new(),
+    };
+    // The name is already constrained to `[a-z0-9-]`; escape it anyway so
+    // every attribute value goes through the same path.
+    format!(
+        "<agent name=\"{}\"{}>{description}</agent>\n",
+        escape_html(&definition.name),
+        // `context` is normalised to `fresh` or `inherit` at parse time, so
+        // the default costs no bytes in the listing.
+        if definition.context == "inherit" {
+            " context=\"inherit\""
+        } else {
+            ""
+        },
+    )
 }
 
 #[cfg(test)]
@@ -186,26 +258,65 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_byte_cap_drops_later_definitions_with_one_warning_each() {
-        let root = tempfile::tempdir().expect("a temporary directory");
-        let long = "a".repeat(1024);
-        let names = [
-            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        ];
-        for name in names {
-            write_agent_description(root.path(), name, &long);
+    /// `count` definitions whose descriptions are `description_chars` long.
+    fn catalog_of(root: &Path, count: usize, description_chars: usize) -> Catalog {
+        let long = "a".repeat(description_chars);
+        for index in 0..count {
+            write_agent_description(root, &format!("agent-{index}"), &long);
         }
-        let (catalog, warnings) = Catalog::discover(&[root.path().to_path_buf()]);
+        let (catalog, warnings) = Catalog::discover(&[root.to_path_buf()]);
         assert!(warnings.is_empty(), "warnings = {warnings:?}");
-        assert_eq!(catalog.len(), names.len());
+        assert_eq!(catalog.len(), count);
+        catalog
+    }
 
-        let (section, prompt_warnings) = prompt_section(&catalog);
+    #[test]
+    fn every_definition_stays_listed_when_full_entries_do_not_fit() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let catalog = catalog_of(root.path(), 10, 1024);
+
+        let (section, warnings) = prompt_section(&catalog);
 
         assert!(section.len() <= MAX_LISTING_BYTES, "{}", section.len());
-        assert!(!prompt_warnings.is_empty());
-        for warning in &prompt_warnings {
-            assert!(warning.contains("omitted from prompt"), "{warning}");
+        for definition in catalog.definitions() {
+            assert!(
+                section.contains(&format!("name=\"{}\"", definition.name)),
+                "{} is unreachable: it is not in the listing",
+                definition.name
+            );
         }
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(!warnings[0].contains("dropped"), "{warnings:?}");
+    }
+
+    #[test]
+    fn names_survive_a_catalog_whose_descriptions_cannot_fit() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let catalog = catalog_of(root.path(), 100, 1024);
+
+        let (section, warnings) = prompt_section(&catalog);
+
+        assert!(section.len() <= MAX_LISTING_BYTES, "{}", section.len());
+        for definition in catalog.definitions() {
+            assert!(
+                section.contains(&format!("name=\"{}\"", definition.name)),
+                "{} is unreachable: it is not in the listing",
+                definition.name
+            );
+        }
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(!warnings[0].contains("dropped"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_catalog_too_large_even_for_names_drops_with_one_warning() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let catalog = catalog_of(root.path(), 400, 64);
+
+        let (section, warnings) = prompt_section(&catalog);
+
+        assert!(section.len() <= MAX_LISTING_BYTES, "{}", section.len());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("dropped: "), "{warnings:?}");
     }
 }

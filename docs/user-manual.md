@@ -61,12 +61,16 @@ Linux, and it is exactly as unconfined as it is on macOS: commands run as your
 user with your files and your network. Decide that per workspace, not per
 habit.
 
-Two host affordances differ. The clipboard behind the TUI's drag-copy is
+Three host affordances differ. The clipboard behind the TUI's drag-copy is
 `pbcopy` on macOS and the first of `wl-copy`, `xclip`, or `xsel` that is
 installed on Linux; with none of them, copying reports that no helper was
 found. The browser that `otto serve --open` and `otto login` launch is
 `/usr/bin/open` on macOS and `xdg-open` on Linux; a launch that fails is never
-fatal, because the URL is printed either way.
+fatal, because the URL is printed either way. A `bash` command runs under a
+login shell (`sh -lc`) on macOS, so it sees the `PATH` `path_helper` assembles
+from `/etc/paths` and `/etc/paths.d`; elsewhere it runs as `sh -c`, because
+`/etc/profile.d/*` would write into the tool result the model reads and could
+restore variables the environment filter removed.
 
 ## Quick start
 
@@ -230,7 +234,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--prompt`. |
 | `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. Cannot be combined with `--listen`. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. Cannot be combined with `--socket`. |
-| `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open`). Requires a TCP listener (`--listen` or `[server].listen`). Cannot be combined with `--socket`. A failed launch is not fatal: the URL is still printed. |
+| `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). Cannot be combined with `--socket`. A failed launch is not fatal: the URL is still printed. |
 
 ## Environment variables
 
@@ -241,6 +245,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `OTTO_MODEL` | Model override (overridden by `--model`). |
 | `OTTO_API_KEY` | Fallback API key, used when the selected profile's `api_key_env` variable is empty. |
 | `OTTO_UI` | Frontend mode (`auto`, `tui`, `repl`); overridden by `--ui`. |
+| `OTTO_STARTUP_TRACE` | `1`, `true`, `yes`, or `on` prints a startup timing breakdown to stderr (see [troubleshooting](#a-session-takes-too-long-to-start)). |
 | `<api_key_env>` | The variable named by the selected profile's `api_key_env`. Its value wins over `OTTO_API_KEY`. |
 
 API keys are environment variables only. There is no `--api-key` flag, and keys
@@ -390,15 +395,20 @@ Startup resolution is field-specific:
   `/model` opens a profile picker followed by an effort picker; `Enter` applies
   the selected effort for this process and `s` also saves it to the profile.
   `/thinking LEVEL` changes the current session's effort for later requests, and
-  `/thinking LEVEL --save` writes it back to the current profile.
+  `/thinking LEVEL --save` writes it back to the current profile. The effort in
+  effect is recorded on the session, so the TUI's `/resume` restores the
+  resumed session's own effort; a startup `--continue` / `--resume` resolves it
+  from `--thinking` and the profile as above.
 - **Agent server listener:** `--listen` > `--socket` > `[server].listen` >
   `[server].socket` > the built-in default `~/.otto/otto.sock`. A `listen`
   value at any level selects TCP and no socket is created. There is no
   environment variable. This applies only to `otto serve`.
 
 Startup `--continue` / `--resume` restore session provider/model only as
-defaults; direct flags and `OTTO_*` variables can override them. An in-process
-TUI `/resume` restores the selected session's stored provider/model and ignores
+defaults; direct flags and `OTTO_*` variables can override them, and a stored
+thinking effort is not restored. An in-process
+TUI `/resume` restores the selected session's stored provider/model and
+thinking effort, and ignores
 the process's provider/model/profile/base-URL overrides; its stored profile
 selects the endpoint and key environment.
 
@@ -504,8 +514,10 @@ OTTO_UI=repl otto
   trailing blanks dropped, including the padding a prompt's band adds, so a
   command or a code block pastes as it was written; indentation the text
   itself carried is kept.
-- The footer shows workspace/profile/model, reasoning effort, token totals, and
-  session ID when space allows.
+- The footer shows profile/model, reasoning effort, the sandbox state
+  (`seatbelt · workspace-write · network allowed`, `sandbox off · WARNING: bash
+  is unsandboxed`, or `bash disabled · sandbox unavailable`), the workspace,
+  token totals, the context percentage, and the session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys
@@ -597,7 +609,9 @@ TUI-only commands:
 
 - `/resume` opens a modal of the up to 50 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,
-  `Enter` to resume, `Esc` to close. It does not search other workspaces.
+  `Enter` to resume, `Esc` to close. It does not search other workspaces. Each
+  session id appears once: files that share one (a copy beside the original,
+  for example) collapse to the newest-modified file.
 - `/archive` opens the same modal to archive a session. `Enter` on a non-current
   session moves it into `archive/` and shows `archived session <id>`. `Enter` on
   the current session archives it and starts a fresh session. `Esc` closes
@@ -948,9 +962,10 @@ line to stdout before serving:
 otto serve: http://127.0.0.1:PORT/?token=<token>
 ```
 
-`--open` then launches that URL with `/usr/bin/open`. A failed launch is not
-fatal. `--open` with a Unix socket (the default, `--socket`, or
-`[server].socket`) exits with `otto: --open requires a TCP listener`.
+`--open` then launches that URL with `/usr/bin/open` on macOS and `xdg-open`
+on Linux. A failed launch is not fatal. `--open` with a Unix socket (the
+default, `--socket`, or `[server].socket`) exits with
+`otto: --open requires a TCP listener`.
 
 Every `/v1/` request must then carry `Authorization: Bearer <token>`; a
 missing or wrong token returns `401` with `WWW-Authenticate: Bearer`. The
@@ -1526,18 +1541,27 @@ Rules:
 
 What's wired:
 
-- Otto connects every enabled server at startup, one at a time in
-  configuration order. A server that fails to connect (bad command, connection refused, handshake
+- Otto connects every enabled server concurrently and then applies the
+  outcomes in configuration order, so warnings, `/mcp` rows, and tool-name
+  deduplication do not depend on which server answered first. A server that
+  fails to connect (bad command, connection refused, handshake
   timeout) is reported as `failed: <reason>` and contributes no tools; the
   runner still starts with every other tool available.
+- A TUI or REPL session starts before its MCP servers are connected: the
+  prompt is usable immediately, `/mcp` reports every enabled server as
+  `connecting`, and the MCP tools are attached in one swap once every server
+  has settled. The swap happens between turns, never inside one, so a turn
+  either has the MCP tools or does not. A headless `--prompt` run and
+  `otto serve` connect before the first turn instead.
 - An HTTP server configured with `auth = "oauth"` that has no valid stored
   token is reported as `needs login`, contributing no tools, until `/mcp
   login <server>` (or `otto mcp login <server>`) completes and Otto is
   restarted.
 - `/mcp` (REPL and TUI) prints one line per configured server: its connection
-  state (`connected (N tools)`, `disabled`, `needs login`, or `failed:
-  <reason>`), transport (`stdio` or `http`), and protocol era (`modern`,
-  `legacy <version>`, or `-` for a server that never negotiated one).
+  state (`connected (N tools)`, `connecting`, `disabled`, `needs login`, or
+  `failed: <reason>`), transport (`stdio` or `http`), and protocol era
+  (`modern`, `legacy <version>`, or `-` for a server that never negotiated
+  one).
 - `/mcp login <server>` runs the OAuth authorization code flow for one
   configured HTTP server with `auth = "oauth"`, opens the authorization URL,
   and stores the resulting token under `~/.otto/auth/mcp/<server>.json`.
@@ -1641,3 +1665,38 @@ The session was likely archived. Archive moves the file (not deletion) into
 
 The file is still intact; only the active-session surfaces (`/resume`,
 `--continue`, and the `/archive` picker) exclude it.
+
+### A session takes too long to start
+
+Set `OTTO_STARTUP_TRACE=1` (`true`, `yes`, and `on` also work) to print one
+line per startup phase to stderr, ending with the total time to a usable
+prompt:
+
+```bash
+OTTO_STARTUP_TRACE=1 otto --cwd /path/to/project
+```
+
+```text
+startup environment: 0ms
+startup config/load: 1ms
+startup sandbox/open: 214ms
+startup memory/open: 3ms
+startup session/activate: 0ms
+startup runner/setup: 0ms
+startup runner/catalogs: 2ms
+startup runner/mcp: 0ms
+startup runner/provider: 1ms
+startup runner/workspace-context: 41ms
+startup runner/subagents: 0ms
+startup runner/registry-and-options: 0ms
+startup runner/build: 44ms
+startup ready: 265ms
+```
+
+Each line is the time that phase took. The `runner/*` lines break the runner
+build down, and `runner/build` is their total; `startup ready` is the whole
+elapsed time before the frontend starts. `runner/mcp` is near zero in an
+interactive session because MCP servers connect in the background after the
+prompt is usable (see [MCP servers](#mcp-servers)), and
+`runner/workspace-context` includes the `git` calls the workspace header
+makes.

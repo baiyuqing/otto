@@ -298,7 +298,7 @@ components:
           type: [string, "null"]
         state:
           type: string
-          enum: [connected, disabled, needs_login, failed]
+          enum: [connected, connecting, disabled, needs_login, failed]
         tools:
           type: integer
         error:

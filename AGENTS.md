@@ -57,7 +57,9 @@ See the [development guide](docs/development.md)
 for the focused package set, test commands, and contract-specific checks.
 
 CI runs `make check` on macOS and `make check-linux` on Linux, with the
-toolchain and action pins in [the workflow](.github/workflows/checks.yml).
+toolchain and action pins in [the workflow](.github/workflows/checks.yml). A
+change that touches only Markdown outside `crates/` and `testdata/`, `docs/`,
+or `LICENSE` skips both gates; everything else runs them in full.
 Full host validation requires macOS 26+ and standalone Command Line Tools;
 see the development guide.
 

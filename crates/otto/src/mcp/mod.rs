@@ -183,6 +183,7 @@ pub trait Transport: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerState {
     Connected { tools: usize },
+    Connecting,
     Disabled,
     NeedsLogin,
     Failed(String),

@@ -513,10 +513,33 @@ impl Builder {
         Ok(tools)
     }
 
+    pub fn connecting_mcp_servers(&self) -> Arc<mcp::Servers> {
+        let servers = Arc::new(mcp::Servers::default());
+        if !self.mcp.enabled {
+            return servers;
+        }
+        for server in &self.mcp.servers {
+            servers.push(
+                mcp::ServerStatus {
+                    name: server.name.clone(),
+                    transport: transport_label(&server.transport),
+                    era: None,
+                    state: if server.enabled {
+                        mcp::ServerState::Connecting
+                    } else {
+                        mcp::ServerState::Disabled
+                    },
+                },
+                None,
+            );
+        }
+        servers
+    }
+
     /// Connects enabled MCP servers concurrently, then processes every outcome
     /// in configuration order so `warnings`, `/mcp` status, and cross-server
     /// tool-name deduplication stay stable and reproducible. Each server's
-    /// server's outcome is pushed to the returned [`mcp::Servers`] handle for
+    /// outcome is pushed to the returned [`mcp::Servers`] handle for
     /// `/mcp`; a disabled or failed server never stops the others, and never
     /// fails the build. Restarting an exited stdio server is out of scope; a
     /// server that later exits stays `Connected` until the process restarts.
@@ -879,6 +902,36 @@ mod mcp_tests {
             },
             secrets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn connecting_servers_report_configuration_order_without_dialing() {
+        let directory = tempfile::tempdir().expect("directory");
+        let builder = builder_with_servers(
+            directory.path(),
+            vec![
+                stdio_server(
+                    "slow",
+                    true,
+                    "otto-mcp-test-nonexistent-command",
+                    directory.path(),
+                ),
+                stdio_server(
+                    "off",
+                    false,
+                    "otto-mcp-test-nonexistent-command",
+                    directory.path(),
+                ),
+            ],
+        );
+
+        let status = builder.connecting_mcp_servers().status();
+        assert_eq!(status.len(), 2);
+        assert_eq!(status[0].name, "slow");
+        assert_eq!(status[0].transport, "stdio");
+        assert_eq!(status[0].state, mcp::ServerState::Connecting);
+        assert_eq!(status[1].name, "off");
+        assert_eq!(status[1].state, mcp::ServerState::Disabled);
     }
 
     #[tokio::test]

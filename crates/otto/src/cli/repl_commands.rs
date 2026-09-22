@@ -214,6 +214,7 @@ fn format_mcp_report(servers: &[crate::mcp::ServerStatus]) -> String {
         };
         let state = match &server.state {
             ServerState::Connected { tools } => format!("connected ({tools} tools)"),
+            ServerState::Connecting => "connecting".to_string(),
             ServerState::Disabled => "disabled".to_string(),
             ServerState::NeedsLogin => "needs login".to_string(),
             ServerState::Failed(message) => format!("failed: {message}"),

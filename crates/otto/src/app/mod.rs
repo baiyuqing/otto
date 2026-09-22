@@ -479,6 +479,70 @@ impl Controller {
             .ok_or_else(|| CLOSED.to_string())
     }
 
+    /// Installs a fully rebuilt runner only when no operation is active and
+    /// the session is still the one the caller built against. This is the
+    /// background MCP hot-swap path: the slow runner build happens outside
+    /// the controller lock, and this small commit step refuses to run mid-turn.
+    /// A rejected candidate is closed before returning.
+    pub fn replace_runner_if_current(
+        &self,
+        session_id: &str,
+        runner: Runner,
+        info: RuntimeInfo,
+    ) -> Result<bool, String> {
+        enum Decision {
+            Installed(Arc<Runner>),
+            Busy,
+            Closed,
+            StaleSession,
+        }
+
+        let mut runner = Some(runner);
+        let decision = {
+            let mut state = self.lock();
+            if state.closed {
+                Decision::Closed
+            } else if state.busy {
+                Decision::Busy
+            } else {
+                let current = state.current.as_mut().ok_or_else(|| CLOSED.to_string())?;
+                if current.session.header().id != session_id {
+                    Decision::StaleSession
+                } else {
+                    current.info = info;
+                    Decision::Installed(std::mem::replace(
+                        &mut current.runner,
+                        Arc::new(runner.take().expect("runner is still available")),
+                    ))
+                }
+            }
+        };
+        match decision {
+            Decision::Installed(old) => {
+                old.close();
+                Ok(true)
+            }
+            Decision::Busy => {
+                if let Some(runner) = runner.take() {
+                    runner.close();
+                }
+                Err(PROMPT_ACTIVE.to_string())
+            }
+            Decision::Closed => {
+                if let Some(runner) = runner.take() {
+                    runner.close();
+                }
+                Err(CLOSED.to_string())
+            }
+            Decision::StaleSession => {
+                if let Some(runner) = runner.take() {
+                    runner.close();
+                }
+                Ok(false)
+            }
+        }
+    }
+
     /// Shuts every connected MCP server down, waiting up to 5 seconds. A
     /// no-op on a controller with no current runner (already closed, or
     /// never opened). [`Self::close`] also starts an MCP close, but only in
@@ -1294,6 +1358,39 @@ mod tests {
         assert_eq!(
             controller.approve_bash("approval-1"),
             Err(PROMPT_ACTIVE.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_runner_only_happens_between_turns() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        let session = controller.current_session();
+        let session_id = session.header().id;
+        let runtime = initial_runtime(controller.builder());
+        let info = controller.builder().runtime_info(&runtime);
+
+        let candidate = controller
+            .builder()
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let admission = controller.begin_operation().expect("admit turn");
+        assert_eq!(
+            controller.replace_runner_if_current(&session_id, candidate, info.clone()),
+            Err(PROMPT_ACTIVE.to_string())
+        );
+        drop(admission);
+
+        let candidate = controller
+            .builder()
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        assert_eq!(
+            controller.replace_runner_if_current(&session_id, candidate, info),
+            Ok(true)
         );
     }
 

@@ -366,6 +366,7 @@ mod tests {
     use otto_core::agent::Event;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
+    use unicode_width::UnicodeWidthStr as _;
 
     use super::*;
     use crate::cli::testutil;
@@ -407,6 +408,26 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    /// The drawn frame's buffer, for the tests that assert on colour rather
+    /// than on glyphs.
+    fn drawn(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| draw(frame, app)).expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// The first row whose leftmost transcript cell carries the prompt band.
+    fn banded_row(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> Option<u16> {
+        (0..height).find(|y| {
+            (SIDE_MARGIN..width - SIDE_MARGIN).any(|x| {
+                buffer
+                    .cell((x, *y))
+                    .is_some_and(|cell| cell.bg == transcript::PROMPT_BACKGROUND)
+            })
+        })
     }
 
     fn line_text(line: &Line<'_>) -> String {
@@ -504,6 +525,72 @@ mod tests {
         assert!(prompt[0].starts_with("❯ "), "{rows:?}");
         assert!(prompt[1].starts_with("  "), "{rows:?}");
         assert!(!prompt[1].trim_start().starts_with('\u{276f}'), "{rows:?}");
+    }
+
+    /// The band is the thing a reader scrolls back to find, so it has to
+    /// survive the drawn frame: `Paragraph` colours only the cells a span
+    /// covers, and it stops at the transcript's own width, never running
+    /// into the side margin.
+    #[tokio::test]
+    async fn a_drawn_prompt_is_banded_across_the_content_width() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries = vec![Entry {
+            kind: Some(EntryKind::User),
+            raw: "hi".to_string(),
+            ..Default::default()
+        }];
+        let (width, height) = (40u16, 10u16);
+
+        let buffer = drawn(&app, width, height);
+        let row = banded_row(&buffer, width, height).expect("the prompt row is on screen");
+        for x in SIDE_MARGIN..width - SIDE_MARGIN {
+            let cell = buffer.cell((x, row)).expect("cell in bounds");
+            assert_eq!(
+                cell.bg,
+                transcript::PROMPT_BACKGROUND,
+                "column {x} is not banded"
+            );
+        }
+        for x in [0, width - 1] {
+            let cell = buffer.cell((x, row)).expect("cell in bounds");
+            assert_ne!(
+                cell.bg,
+                transcript::PROMPT_BACKGROUND,
+                "the band ran into the margin"
+            );
+        }
+    }
+
+    /// The same band under wide glyphs.
+    ///
+    /// The walk steps by display width, as [`super::super::selection`] does:
+    /// `ratatui` writes a wide character into the first of the cells it
+    /// covers and its frame diff never sends the rest, so `TestBackend` holds
+    /// a default-coloured cell where a terminal paints the glyph's own
+    /// background. Reading those cells back would assert on an artifact of
+    /// the test backend rather than on what the reader sees.
+    #[tokio::test]
+    async fn a_drawn_cjk_prompt_is_banded_too() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.entries = vec![Entry {
+            kind: Some(EntryKind::User),
+            raw: "集群数量极多".to_string(),
+            ..Default::default()
+        }];
+        let (width, height) = (44u16, 12u16);
+
+        let buffer = drawn(&app, width, height);
+        let row = banded_row(&buffer, width, height).expect("the prompt row is on screen");
+        let mut x = SIDE_MARGIN;
+        while x < width - SIDE_MARGIN {
+            let cell = buffer.cell((x, row)).expect("cell in bounds");
+            assert_eq!(
+                cell.bg,
+                transcript::PROMPT_BACKGROUND,
+                "column {x} breaks the band"
+            );
+            x += cell.symbol().width().max(1) as u16;
+        }
     }
 
     #[tokio::test]

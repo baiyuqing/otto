@@ -15,7 +15,7 @@
 //! list can only narrow the child tool set the runner already built, never
 //! widen it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -164,6 +164,55 @@ impl Catalog {
             },
             warnings,
         )
+    }
+
+    /// Adds a sub-agent definition for every skill that declares a contract,
+    /// and reports the names that became callable.
+    ///
+    /// An explicit `AGENT.md` of the same name wins: it is the definition its
+    /// author wrote on purpose, and a skill silently replacing it would change
+    /// what an existing `agent` call does. The clash is reported rather than
+    /// resolved quietly.
+    ///
+    /// A skill whose body cannot be read is reported and registered nowhere,
+    /// so the listing never marks a skill the `agent` tool could not run.
+    pub fn extend_from_skills(
+        &mut self,
+        skills: &crate::skill::Catalog,
+    ) -> (Vec<String>, BTreeSet<String>) {
+        let mut warnings = Vec::new();
+        let mut registered = BTreeSet::new();
+        for skill in skills.skills() {
+            if skill.contract.is_none() {
+                continue;
+            }
+            if self
+                .definitions
+                .iter()
+                .any(|definition| definition.name == skill.name)
+            {
+                warnings.push(format!(
+                    "skill {} is not callable as a sub-agent: an agent definition already has that name",
+                    skill.name
+                ));
+                continue;
+            }
+            let body = match crate::skill::load(skill) {
+                Ok(body) => body,
+                Err(error) => {
+                    warnings.push(format!("skill {}: {error}", skill.name));
+                    continue;
+                }
+            };
+            let Some(definition) = from_skill(skill, body) else {
+                continue;
+            };
+            registered.insert(definition.name.clone());
+            self.definitions.push(definition);
+        }
+        self.definitions
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        (warnings, registered)
     }
 
     /// The catalog's definitions, sorted by name.
@@ -758,5 +807,254 @@ mod tests {
             roots(None, Path::new("/w")),
             vec![PathBuf::from("/w/.otto/agents")]
         );
+    }
+}
+
+/// Builds the definition that runs `skill` as a sub-agent, given its already
+/// loaded Markdown body.
+///
+/// `None` for a skill with no declared contract: without one the delegating
+/// agent cannot know what to send or what comes back, which is the shape the
+/// [design](../../../docs/specs/2026-09-22-skill-subagent-execution.md)
+/// identifies as making sub-agent execution fail.
+///
+/// The definition takes no execution knobs from the skill. `context` is
+/// always `fresh`, because `inherit` would copy in exactly the context this
+/// mechanism exists to keep out, and `tools` stays `None`, which means "every
+/// child tool" and so cannot widen the set the runner already built.
+pub fn from_skill(skill: &crate::skill::Skill, body: String) -> Option<Definition> {
+    let contract = skill.contract.as_ref()?;
+    Some(Definition {
+        name: skill.name.clone(),
+        description: format!(
+            "{}\nExpected input: {}\nOutput: {}",
+            skill.description, contract.input, contract.output
+        ),
+        tools: None,
+        model: String::new(),
+        context: "fresh".to_string(),
+        write_policy: WritePolicy::default(),
+        write_paths: Vec::new(),
+        body: format!("{body}\n\n{}", resource_note(&skill.name)),
+        directory: skill.directory.clone(),
+        path: skill.path.clone(),
+    })
+}
+
+/// The trailer appended to a skill-derived body.
+///
+/// A skill package's own `scripts/` and `references/` are reached with the
+/// `skill` tool, not the file tools: a user-level skill lives outside the
+/// workspace, so the file tools reject it by design. Without this the child
+/// follows instructions that reference files it cannot open.
+fn resource_note(name: &str) -> String {
+    format!(
+        "## This skill's own files\n\
+         Read any file this skill package ships with the `skill` tool, as\n\
+         `skill(name: {name:?}, file: \"<path inside the package>\")`. The package\n\
+         may sit outside the workspace, where the file tools cannot reach it.\n\
+         Report your result in your final message, as the contract above states."
+    )
+}
+
+#[cfg(test)]
+mod skill_definition_tests {
+    use super::*;
+    use crate::skill::{Contract, Skill};
+
+    fn contracted(name: &str) -> Skill {
+        Skill {
+            name: name.into(),
+            description: "Normalizes scanner output.".into(),
+            contract: Some(Contract {
+                input: "a scanner JSON report path".into(),
+                output: "a JSON list of records".into(),
+            }),
+            directory: format!("/skills/{name}").into(),
+            path: format!("/skills/{name}/SKILL.md").into(),
+        }
+    }
+
+    #[test]
+    fn a_contracted_skill_becomes_a_fresh_context_definition() {
+        let definition = from_skill(&contracted("normalize"), "step one\nstep two".into())
+            .expect("a definition");
+
+        assert_eq!(definition.name, "normalize");
+        assert_eq!(
+            definition.context, "fresh",
+            "inherit would reintroduce the context this exists to avoid"
+        );
+        assert!(
+            definition.tools.is_none(),
+            "a skill must not widen the child tool set"
+        );
+        assert_eq!(definition.write_policy, WritePolicy::default());
+        assert!(definition.model.is_empty());
+        assert!(definition.body.contains("step one"), "{}", definition.body);
+    }
+
+    #[test]
+    fn the_description_carries_both_halves_of_the_contract() {
+        let definition = from_skill(&contracted("normalize"), "body".into()).expect("a definition");
+
+        assert!(
+            definition
+                .description
+                .contains("a scanner JSON report path"),
+            "{}",
+            definition.description
+        );
+        assert!(
+            definition.description.contains("a JSON list of records"),
+            "{}",
+            definition.description
+        );
+        assert!(
+            definition
+                .description
+                .contains("Normalizes scanner output."),
+            "{}",
+            definition.description
+        );
+    }
+
+    #[test]
+    fn the_body_tells_the_child_how_to_reach_the_packages_own_files() {
+        let definition = from_skill(&contracted("normalize"), "body".into()).expect("a definition");
+
+        assert!(
+            definition.body.contains("skill"),
+            "the child must be told which tool reads the package: {}",
+            definition.body
+        );
+        assert!(
+            definition.body.contains("normalize"),
+            "the note must name the skill: {}",
+            definition.body
+        );
+    }
+
+    #[test]
+    fn a_skill_without_a_contract_gets_no_definition() {
+        let mut plain = contracted("plain");
+        plain.contract = None;
+
+        assert!(from_skill(&plain, "body".into()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod skill_merge_tests {
+    use super::*;
+
+    fn write_skill(root: &Path, name: &str, contract: bool) {
+        let directory = root.join(name);
+        std::fs::create_dir_all(&directory).expect("the skill directory is creatable");
+        let halves = if contract {
+            "input: a path\noutput: a list\n"
+        } else {
+            ""
+        };
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: about {name}\n{halves}---\nthe {name} body\n"),
+        )
+        .expect("SKILL.md is writable");
+    }
+
+    fn write_agent(root: &Path, name: &str) {
+        let directory = root.join(name);
+        std::fs::create_dir_all(&directory).expect("the agent directory is creatable");
+        std::fs::write(
+            directory.join("AGENT.md"),
+            format!("---\nname: {name}\ndescription: the real agent\n---\nagent body\n"),
+        )
+        .expect("AGENT.md is writable");
+    }
+
+    fn skills(root: &Path) -> crate::skill::Catalog {
+        let (catalog, warnings) = crate::skill::Catalog::discover(&[root.to_path_buf()]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        catalog
+    }
+
+    #[test]
+    fn a_contracted_skill_joins_the_catalog_and_a_bare_one_does_not() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        write_skill(root.path(), "contracted", true);
+        write_skill(root.path(), "bare", false);
+        let mut catalog = Catalog::default();
+
+        let (warnings, registered) = catalog.extend_from_skills(&skills(root.path()));
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            registered.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["contracted"]
+        );
+        let definition = catalog.lookup("contracted").expect("the definition");
+        assert!(definition.body.contains("the contracted body"));
+        assert!(catalog.lookup("bare").is_none());
+    }
+
+    #[test]
+    fn a_real_definition_wins_the_name_and_the_clash_is_reported() {
+        let agents = tempfile::tempdir().expect("a temporary directory");
+        write_agent(agents.path(), "shared");
+        let (mut catalog, discover_warnings) = Catalog::discover(&[agents.path().to_path_buf()]);
+        assert!(discover_warnings.is_empty(), "{discover_warnings:?}");
+
+        let root = tempfile::tempdir().expect("a temporary directory");
+        write_skill(root.path(), "shared", true);
+
+        let (warnings, registered) = catalog.extend_from_skills(&skills(root.path()));
+
+        assert_eq!(
+            catalog
+                .lookup("shared")
+                .expect("the definition")
+                .body
+                .trim(),
+            "agent body",
+            "an explicit AGENT.md must not be displaced by a skill"
+        );
+        assert!(registered.is_empty(), "{registered:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("shared"), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_catalog_stays_sorted_by_name() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        for name in ["zulu", "alpha", "mike"] {
+            write_skill(root.path(), name, true);
+        }
+        let mut catalog = Catalog::default();
+
+        catalog.extend_from_skills(&skills(root.path()));
+
+        let names: Vec<&str> = catalog
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect();
+        assert_eq!(names, ["alpha", "mike", "zulu"]);
+    }
+
+    #[test]
+    fn an_unreadable_body_warns_and_registers_nothing() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        write_skill(root.path(), "vanishing", true);
+        let catalog_of_skills = skills(root.path());
+        std::fs::remove_file(root.path().join("vanishing/SKILL.md")).expect("removable");
+        let mut catalog = Catalog::default();
+
+        let (warnings, registered) = catalog.extend_from_skills(&catalog_of_skills);
+
+        assert!(registered.is_empty(), "{registered:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("vanishing"), "{warnings:?}");
+        assert!(catalog.lookup("vanishing").is_none());
     }
 }

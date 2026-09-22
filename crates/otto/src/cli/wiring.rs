@@ -354,7 +354,28 @@ impl Builder {
     ) -> Result<CatalogWiring, BuildError> {
         let skills = resolve_skills(&self.config, &self.environment, &self.workspace_path);
         let (catalog, mut warnings) = skill::Catalog::discover(&roots(&skills.roots));
-        let (skill_section, section_warnings) = skill::prompt_section(&catalog);
+
+        let agents = resolve_agents(&self.config, &self.environment, &self.workspace_path)
+            .map_err(|error| error.to_string())?;
+        let (mut agent_catalog, mut agent_warnings) = if agents.enabled {
+            subagent::Catalog::discover(&roots(&agents.roots))
+        } else {
+            (subagent::Catalog::default(), Vec::new())
+        };
+        // Only a skill that actually became a definition may be marked
+        // agent-callable, and only while sub-agents are enabled at all:
+        // pointing the model at an `agent` name nothing registered is worse
+        // than not routing it. So the agent catalog is built first and its
+        // answer drives the skills listing.
+        let agent_callable = if agents.enabled {
+            let (skill_warnings, registered) = agent_catalog.extend_from_skills(&catalog);
+            agent_warnings.extend(skill_warnings);
+            registered
+        } else {
+            std::collections::BTreeSet::new()
+        };
+
+        let (skill_section, section_warnings) = skill::prompt_section(&catalog, &agent_callable);
         warnings.extend(section_warnings);
         for warning in &warnings {
             let _ = writeln!(stderr, "warning: {warning}");
@@ -363,13 +384,6 @@ impl Builder {
             tools.push(Box::new(SkillTool::new(catalog.clone(), max_output)));
         }
 
-        let agents = resolve_agents(&self.config, &self.environment, &self.workspace_path)
-            .map_err(|error| error.to_string())?;
-        let (agent_catalog, mut agent_warnings) = if agents.enabled {
-            subagent::Catalog::discover(&roots(&agents.roots))
-        } else {
-            (subagent::Catalog::default(), Vec::new())
-        };
         let (agent_section, section_warnings) = subagent::prompt_section(&agent_catalog);
         agent_warnings.extend(section_warnings);
         for warning in &agent_warnings {

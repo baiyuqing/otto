@@ -48,3 +48,30 @@ jobs:
         with:
           node-version: '24'
       - run: make check
+
+  check-linux:
+    name: Linux checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+      - name: Cache cargo registry and build output
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      # Linux has no Seatbelt, so this is the Rust gate without the sandbox
+      # conformance suite; the web UI is platform independent and stays on
+      # the macOS job, which is the one that ships a binary.
+      - run: make check-linux

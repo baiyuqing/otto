@@ -126,16 +126,46 @@ impl Selection {
     }
 }
 
-/// Puts `text` on the system clipboard.
+/// The clipboard helpers to try, in order, for this target.
 ///
-/// `pbcopy` rather than an OSC 52 escape: Otto is macOS-only, `pbcopy` is
-/// always present, and OSC 52 is off by default in Terminal.app and gated
-/// behind a preference in iTerm2, where it would fail silently.
+/// A helper rather than an OSC 52 escape: `pbcopy` is always present on
+/// macOS, and OSC 52 is off by default in Terminal.app and gated behind a
+/// preference in iTerm2, where it would fail silently. Linux has no single
+/// always-present helper, so the Wayland one is tried before the X11 ones
+/// and a host with none of them reports that no clipboard helper was found.
 ///
 /// ponytail: no SSH story. If Otto ever runs on a remote host, OSC 52 is
 /// the fallback to add here.
+#[cfg(target_os = "macos")]
+const CLIPBOARD_HELPERS: &[(&str, &[&str])] = &[("pbcopy", &[])];
+/// See the macOS list above.
+#[cfg(not(target_os = "macos"))]
+const CLIPBOARD_HELPERS: &[(&str, &[&str])] = &[
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["--clipboard", "--input"]),
+];
+
+/// Puts `text` on the system clipboard.
 pub(crate) fn copy(text: &str) -> io::Result<()> {
-    let mut child = Command::new("pbcopy")
+    let mut missing = Vec::new();
+    for (helper, arguments) in CLIPBOARD_HELPERS {
+        match copy_with(helper, arguments, text) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => missing.push(*helper),
+            outcome => return outcome,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no clipboard helper found (tried {})", missing.join(", ")),
+    ))
+}
+
+/// Pipes `text` into one helper. `NotFound` means it is not installed, which
+/// [`copy`] treats as "try the next one".
+fn copy_with(helper: &str, arguments: &[&str], text: &str) -> io::Result<()> {
+    let mut child = Command::new(helper)
+        .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -143,11 +173,11 @@ pub(crate) fn copy(text: &str) -> io::Result<()> {
     child
         .stdin
         .take()
-        .ok_or_else(|| io::Error::other("pbcopy took no stdin"))?
+        .ok_or_else(|| io::Error::other(format!("{helper} took no stdin")))?
         .write_all(text.as_bytes())?;
     match child.wait()?.success() {
         true => Ok(()),
-        false => Err(io::Error::other("pbcopy failed")),
+        false => Err(io::Error::other(format!("{helper} failed"))),
     }
 }
 

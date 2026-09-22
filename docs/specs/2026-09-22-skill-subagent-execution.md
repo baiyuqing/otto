@@ -162,14 +162,23 @@ treatment.
 The paper's finding is not transferable by assertion; Otto's provider set,
 prompts and tool surface all differ. Adoption is gated on Otto's own numbers.
 
-Otto's `usage` module already collects provider token counts into SQLite, so
-the two quantities the paper reports are directly measurable here:
+Otto already writes everything needed, in two places that do not overlap.
+`scripts/skill-exec-measure.mjs` reads both and prints one report per session:
 
-1. **Peak context** per window, comparing a contract-bearing skill run both
-   ways on the same task.
+1. **Peak context** per window, from `~/.otto/usage.db`. A sub-agent's
+   transcript is a `MemorySession` and never reaches disk, so the only record
+   of its context is the usage row tagged with its task id; an empty task id
+   is the main context.
 2. **Total tokens**, which the paper expects to rise substantially. If Otto
    cannot reproduce a peak-context reduction, the feature is not worth its
    token cost and should not ship.
+3. **Whether the model honours `exec="agent"`**, from the parent transcript,
+   which is the only place the choice is visible: an inline load is a `skill`
+   call naming the skill, a delegation is an `agent` call naming it. This is
+   the signal that settles decision 2, and no other source has it.
+
+Running it needs provider credentials and real tasks, so it is not part of
+any gate; the script's own tests are, and they are offline.
 
 Until those numbers exist, sub-agent execution is opt-in per skill — which the
 contract declaration already makes it — and never a default.

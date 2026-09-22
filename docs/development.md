@@ -159,6 +159,11 @@ confirmation; seek clarification only for material scope or contract changes.
 ## Rust workflow
 
 Full host validation uses macOS 26+ with standalone Command Line Tools selected.
+Linux builds and runs Otto without a sandbox, so its gate is `make check-linux`:
+the same format, lint, test, wasm and PTY targets, minus the Seatbelt
+conformance suite, which is compiled only for macOS. Keep platform-specific
+code behind `cfg` rather than runtime checks, so a target that cannot use it
+does not compile it.
 The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
 require the third-party arm64e support introduced in macOS 26. CI selects
 `/Library/Developer/CommandLineTools` so Git and Clang use the existing reviewed

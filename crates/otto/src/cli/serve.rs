@@ -252,10 +252,15 @@ fn announce_listen(stdout: &mut (dyn Write + Send), address: &str, token: &str, 
     }
 }
 
-/// The absolute path is used because `PATH` is attacker-influenced input at
-/// this point. A failed launch is not fatal: the URL was already printed.
-#[cfg(not(test))]
+/// The browser launcher. macOS is given as an absolute path because `PATH` is
+/// attacker-influenced input at this point; every other target resolves the
+/// freedesktop `xdg-open` through `PATH`, which is the only way it is ever
+/// installed. A failed launch is not fatal: the URL was already printed.
+#[cfg(all(not(test), target_os = "macos"))]
 const OPEN_BINARY: &str = "/usr/bin/open";
+/// See the macOS launcher above.
+#[cfg(all(not(test), not(target_os = "macos")))]
+const OPEN_BINARY: &str = "xdg-open";
 
 #[cfg(test)]
 static LAUNCH_TEST: Mutex<()> = Mutex::new(());

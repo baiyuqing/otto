@@ -1,6 +1,6 @@
 # Otto User Manual
 
-Otto is a local-first agent for macOS, written in Rust. It turns a
+Otto is a local-first agent written in Rust. It turns a
 natural-language prompt into a loop of model completions, optional tool calls,
 and — when needed — context compaction, in a full-screen TUI, a line-oriented
 REPL, or `otto serve`.
@@ -34,12 +34,39 @@ what the CLI actually does today.
 
 ## Prerequisites
 
-- macOS.
+- macOS, the supported platform: it is the only one with a sandbox, and the
+  only one the acceptance gate runs on. Otto also builds and runs on Linux;
+  see [platform support](#platform-support).
 - The pinned Rust 1.98 toolchain, Node 24+, and `wasm-pack` 0.15 to build from
   source (see [Install from source](../README.md#install-from-source)).
 - One of:
   - a reachable OpenAI-compatible endpoint with SSE chat-completions streaming, plus an API key exposed through an environment variable, or
   - a ChatGPT Plus/Pro/Team/Enterprise subscription (see [ChatGPT subscription](#chatgpt-subscription)).
+
+### Platform support
+
+| | macOS | Linux |
+| --- | --- | --- |
+| `bash` under a sandbox | Seatbelt, the default | none; `auto` and `seatbelt` fail closed |
+| `bash` with `--sandbox off` | yes, unconfined | yes, unconfined |
+| File tools, sessions, compaction, memory, skills, sub-agents, MCP, workflows, `otto serve` and the Web UI, TUI and REPL | yes | yes |
+| Acceptance gate | `make check` | `make check-linux` (no Seatbelt conformance) |
+
+macOS is the supported platform. Otto builds and runs on Linux, but it has no
+confined driver there: `auto` and `seatbelt` report `unsupported-platform`,
+Otto fails closed, and the `bash` tool is not registered at all. The model
+keeps `read`, `grep`, `find`, `ls`, `write`, and `edit`, which stay inside the
+workspace as always. `--sandbox off` is the only way to run shell commands on
+Linux, and it is exactly as unconfined as it is on macOS: commands run as your
+user with your files and your network. Decide that per workspace, not per
+habit.
+
+Two host affordances differ. The clipboard behind the TUI's drag-copy is
+`pbcopy` on macOS and the first of `wl-copy`, `xclip`, or `xsel` that is
+installed on Linux; with none of them, copying reports that no helper was
+found. The browser that `otto serve --open` and `otto login` launch is
+`/usr/bin/open` on macOS and `xdg-open` on Linux; a launch that fails is never
+fatal, because the URL is printed either way.
 
 ## Quick start
 
@@ -291,7 +318,9 @@ Key points:
   On macOS, `driver = "auto"` means Seatbelt. Otto never auto-detects or
   auto-falls back to Docker. If Seatbelt cannot be established, Otto fails
   closed by disabling `bash` while keeping `read`, `grep`, `find`, `ls`,
-  `write`, and `edit` available.
+  `write`, and `edit` available. On every other platform there is no confined
+  driver at all, so `auto` and `seatbelt` fail closed the same way; see
+  [platform support](#platform-support).
 
   `/sandbox reload` applies edits to `driver`, `network`, and `read_paths` to
   the running process (see [Slash commands](#slash-commands)). Two changes
@@ -816,7 +845,7 @@ of sensitive-value bytes for exact redaction, it fails closed by disabling
 command transforms or encodes a secret, Otto may not be able to redact it.
 
 If you explicitly select `--sandbox off`, Otto prints a persistent local warning
-and `bash` runs unsandboxed as your current macOS user. In that mode,
+and `bash` runs unsandboxed as your current user. In that mode,
 `network = "deny"`, private-home/cache replacement, and `read_paths` no longer
 constrain the shell.
 
@@ -1551,9 +1580,11 @@ Confirm streaming is enabled and SSE is not buffered or rewritten.
 
 ### `warning: bash is unavailable because the configured sandbox could not be established ...`
 
-On macOS, `auto` means Seatbelt. Otto does not fall back to Docker or direct
-execution unless you explicitly choose `--sandbox off` (or `driver = "off"` in
-config). Common fixes:
+On macOS, `auto` means Seatbelt. On Linux there is no confined driver at all,
+so this warning names `unsupported-platform` and `--sandbox off` is the only
+way to run commands (see [platform support](#platform-support)). Otto does not
+fall back to Docker or direct execution unless you explicitly choose
+`--sandbox off` (or `driver = "off"` in config). Common fixes:
 
 - confirm `/usr/bin/sandbox-exec` is present and usable;
 - narrow `read_paths` so they do not include Otto's private sandbox cache root;

@@ -1773,8 +1773,12 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{result:?}");
+        // The command's own output, not the exact byte after the `stdout:`
+        // header: the shell is started with `-lc`, so on some hosts a login
+        // profile writes a line of its own before the command runs.
         for expected in [
-            format!("stdout:\ncwd={}", workspace.root().display()),
+            "stdout:\n".to_owned(),
+            format!("cwd={}", workspace.root().display()),
             "env=deterministic".to_owned(),
             "stderr:\nproblem".to_owned(),
             "exit_code: 7".to_owned(),

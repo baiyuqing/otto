@@ -230,14 +230,20 @@ mod tests {
         Arc::new(Logger::new(Box::new(std::io::sink())))
     }
 
-    fn write_script(contents: &str) -> tempfile::NamedTempFile {
+    /// A throwaway executable script.
+    ///
+    /// The write handle is dropped before the path is handed out: Linux
+    /// refuses to `exec` a file any process still holds open for writing
+    /// (`ETXTBSY`), which a `NamedTempFile` does for as long as it lives.
+    /// The returned `TempPath` keeps the file on disk and deletes it on drop.
+    fn write_script(contents: &str) -> tempfile::TempPath {
         let mut file = tempfile::NamedTempFile::new().expect("script");
         file.write_all(contents.as_bytes()).expect("write");
         file.flush().expect("flush");
         let mut permissions = file.as_file().metadata().expect("meta").permissions();
         permissions.set_mode(0o755);
         file.as_file().set_permissions(permissions).expect("chmod");
-        file
+        file.into_temp_path()
     }
 
     #[tokio::test]
@@ -268,7 +274,7 @@ while :; do sleep 1; done
         let sink = Arc::clone(&collected);
         let stop = CancellationToken::new();
         let cancel = stop.clone();
-        let runtime = runtime(&script.path().to_string_lossy());
+        let runtime = runtime(&script.to_string_lossy());
         let log = logger();
         let handle = tokio::spawn(async move {
             run_once(
@@ -319,7 +325,7 @@ while :; do sleep 1; done
         let sink = Arc::clone(&collected);
         let stop = CancellationToken::new();
         let cancel = stop.clone();
-        let runtime = runtime(&script.path().to_string_lossy());
+        let runtime = runtime(&script.to_string_lossy());
         let log = logger();
         let handle = tokio::spawn(async move {
             run_once(

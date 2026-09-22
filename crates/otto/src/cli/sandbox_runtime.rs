@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::sandbox::direct::DirectDriver;
 use crate::sandbox::environment::{EnvironmentOptions, EnvironmentSnapshot, resolve_environment};
+#[cfg(target_os = "macos")]
 use crate::sandbox::seatbelt::{Options as SeatbeltOptions, SeatbeltDriver};
 use crate::sandbox::{
     Driver, DriverMode, Error, Executor, FilesystemMode, NetworkMode, Policy, Settings,
@@ -158,19 +159,42 @@ pub async fn open_sandbox_runtime(
 
     match options.settings.driver {
         DriverMode::Auto | DriverMode::Seatbelt => {
-            if !cfg!(target_os = "macos") {
-                return unavailable(
-                    SandboxReason::UnsupportedPlatform,
-                    host_redactions,
-                    host_complete,
-                );
-            }
-            open_seatbelt(options, host_redactions, host_complete, cancel).await
+            open_confined(options, host_redactions, host_complete, cancel).await
         }
         DriverMode::Off => open_direct(options, host_redactions, host_complete, cancel).await,
     }
 }
 
+/// The confined driver `auto` and `seatbelt` ask for. Seatbelt is the only
+/// one Otto has, so every other target reports the mode as unsupported and
+/// the runtime fails closed with no `bash` tool; `--sandbox off` is the
+/// explicit, and only, way to run commands there.
+#[cfg(target_os = "macos")]
+async fn open_confined(
+    options: &OpenOptions,
+    host_redactions: Vec<String>,
+    host_complete: bool,
+    cancel: &CancellationToken,
+) -> SandboxRuntime {
+    open_seatbelt(options, host_redactions, host_complete, cancel).await
+}
+
+/// See the macOS definition above.
+#[cfg(not(target_os = "macos"))]
+async fn open_confined(
+    _options: &OpenOptions,
+    host_redactions: Vec<String>,
+    host_complete: bool,
+    _cancel: &CancellationToken,
+) -> SandboxRuntime {
+    unavailable(
+        SandboxReason::UnsupportedPlatform,
+        host_redactions,
+        host_complete,
+    )
+}
+
+#[cfg(target_os = "macos")]
 async fn open_seatbelt(
     options: &OpenOptions,
     host_redactions: Vec<String>,
@@ -427,7 +451,7 @@ pub fn sandbox_runtime_warning(info: SandboxInfo) -> Option<String> {
                 && info.bash_available
                 && info.reason == SandboxReason::None =>
         {
-            Some("warning: sandbox is off; bash runs unsandboxed as your macOS user\n".to_string())
+            Some("warning: sandbox is off; bash runs unsandboxed as your user\n".to_string())
         }
         _ => None,
     }
@@ -484,6 +508,7 @@ fn merged_redactions(
     (collector.values(), complete)
 }
 
+#[cfg(target_os = "macos")]
 fn seatbelt_sandbox_info(network: NetworkMode) -> SandboxInfo {
     SandboxInfo {
         mode: SandboxMode::Seatbelt,
@@ -518,6 +543,7 @@ fn safe_sandbox_reason(reason: SandboxReason) -> SandboxReason {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn utf8_entries(entries: &[Vec<u8>]) -> Vec<String> {
     entries
         .iter()
@@ -635,7 +661,7 @@ mod tests {
         assert!(runtime.redactions_complete);
         assert_eq!(
             sandbox_runtime_warning(runtime.info).as_deref(),
-            Some("warning: sandbox is off; bash runs unsandboxed as your macOS user\n")
+            Some("warning: sandbox is off; bash runs unsandboxed as your user\n")
         );
         runtime.close().expect("close");
         runtime.close().expect("close is idempotent");

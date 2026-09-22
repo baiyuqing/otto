@@ -117,7 +117,7 @@ pub(crate) fn write_file_atomic(
             if is_dir(&stat) {
                 return Err(format!("path is a directory: {}", path.display()));
             }
-            mode = u32::from(stat.st_mode) & 0o777;
+            mode = super::root::mode_bits(&stat) & 0o777;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.to_string()),

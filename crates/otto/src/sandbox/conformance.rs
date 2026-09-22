@@ -485,16 +485,46 @@ fn assert_signaled(status: &ExitStatus) {
     );
 }
 
+/// Asserts that `pid` is no longer executing.
+///
+/// `ESRCH` is the usual answer. A process that has been killed but not yet
+/// reaped still answers signal 0, so a zombie counts as gone: it runs no
+/// code, holds no descriptors, and only its exit status is left. Whoever
+/// reaps an orphan (PID 1 on Linux, which a container's init may do lazily)
+/// is not part of the contract being checked here. Anything else is a real
+/// survivor: it is killed so the test cannot leak it, and the check fails.
 fn assert_gone_once(pid: i32) {
     let result = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None);
+    if result == Err(nix::errno::Errno::ESRCH) || is_zombie(pid) {
+        return;
+    }
     if result.is_ok() {
         let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL);
     }
-    assert_eq!(
-        result,
-        Err(nix::errno::Errno::ESRCH),
-        "signal 0 for process {pid} did not report ESRCH"
-    );
+    panic!("process {pid} is still executing: signal 0 reported {result:?}");
+}
+
+/// Whether `pid` is a process that has exited and not yet been reaped.
+///
+/// `/proc/<pid>/stat` holds the state as the first field after the executable
+/// name, which is itself parenthesized and may contain spaces, so the scan
+/// starts after the last `)`.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some((_, after_name)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    after_name.split_whitespace().next() == Some("Z")
+}
+
+/// macOS has no `/proc`, and launchd reaps an orphan promptly, so a process
+/// that still answers signal 0 there is a real survivor.
+#[cfg(not(target_os = "linux"))]
+fn is_zombie(_pid: i32) -> bool {
+    false
 }
 
 /// Runs `request` on its own task so the check can drive the child meanwhile.

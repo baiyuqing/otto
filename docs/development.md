@@ -174,6 +174,15 @@ macOS, and minus the release build, the Node wasm tests, and the web UI, which
 are platform independent and stay on the macOS job. Keep platform-specific
 code behind `cfg` rather than runtime checks, so a target that cannot use it
 does not compile it.
+A documentation-only change skips both gates. The workflow's `changes` job
+classifies the diff first: when every changed path is Markdown outside
+`crates/` and `testdata/`, under `docs/`, or `LICENSE`, both gates start and
+skip every step, so they still report a status without installing a toolchain.
+Anything else — including a workflow edit, `testdata/server/openapi.yaml`, or a
+Markdown fixture the skill and agent loaders discover by name — runs the full
+gate. An unusual range, such as a new branch or a force push that dropped the
+old tip, also runs it.
+
 The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
 require the third-party arm64e support introduced in macOS 26. CI selects
 `/Library/Developer/CommandLineTools` so Git and Clang use the existing reviewed

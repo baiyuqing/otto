@@ -13,23 +13,81 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Both gates below always start, so a required status check always reports;
+  # this job decides whether they have any work to do. A change that touches
+  # only Markdown, `docs/`, or `LICENSE` cannot affect the build or the tests,
+  # so every step of both gates is skipped and they finish green without
+  # installing a toolchain. Anything else, including a workflow edit, runs the
+  # full gate.
+  changes:
+    name: Classify the change
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide whether the change is documentation only
+        id: classify
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -u
+          # Every unusual range - a new branch, a force push that dropped the
+          # old tip, an empty diff - falls through to running the full gate.
+          docs_only=false
+          files=""
+          if [ -n "$BASE" ] &&
+            [ "$BASE" != "0000000000000000000000000000000000000000" ] &&
+            git cat-file -e "$BASE^{commit}" 2>/dev/null
+          then
+            files="$(git diff --name-only "$BASE" "$HEAD")"
+          fi
+          # A Markdown file under `crates/` or `testdata/` is a fixture, not
+          # documentation: the skill and agent loaders discover `SKILL.md` and
+          # `AGENT.md` by name, so those paths always run the gate.
+          if [ -n "$files" ] &&
+            ! printf '%s\n' "$files" | grep -qvE '(^docs/|^LICENSE$|\.md$)' &&
+            ! printf '%s\n' "$files" | grep -qE '^(crates|testdata)/'
+          then
+            docs_only=true
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          {
+            echo "docs_only: \`$docs_only\`"
+            echo
+            echo "Changed files:"
+            echo '```'
+            printf '%s\n' "${files:-(range unavailable)}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   check:
     name: macOS acceptance
+    needs: changes
     runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           persist-credentials: false
       - name: Select standalone command line tools
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           sudo xcode-select --switch /Library/Developer/CommandLineTools
           xcode-select --print-path
       - name: Install the pinned Rust toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           rustup toolchain install
           rustc --version
       - name: Cache cargo registry and build output
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -41,27 +99,34 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Install wasm-pack
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           wasm-pack --version 2>/dev/null | grep -qx 'wasm-pack 0.15.0' ||
             cargo install wasm-pack --version 0.15.0 --locked --force
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           node-version: '24'
-      - run: make check
+      - if: needs.changes.outputs.docs_only != 'true'
+        run: make check
 
   check-linux:
     name: Linux checks
+    needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.changes.outputs.docs_only != 'true'
         with:
           persist-credentials: false
       - name: Install the pinned Rust toolchain
+        if: needs.changes.outputs.docs_only != 'true'
         run: |
           rustup toolchain install
           rustc --version
       - name: Cache cargo registry and build output
+        if: needs.changes.outputs.docs_only != 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -74,4 +139,5 @@ jobs:
       # Linux has no Seatbelt, so this is the Rust gate without the sandbox
       # conformance suite; the web UI is platform independent and stays on
       # the macOS job, which is the one that ships a binary.
-      - run: make check-linux
+      - if: needs.changes.outputs.docs_only != 'true'
+        run: make check-linux

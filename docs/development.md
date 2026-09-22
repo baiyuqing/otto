@@ -89,10 +89,18 @@ Keep `crates/otto`'s `mcp` module behind `crate::mcp`'s client, transport, and
 OAuth types; `crate::tool::mcp` (the model-facing tool adapter) and
 `Builder::connect_mcp` in `crates/otto/src/cli/wiring.rs` are the only two
 callers that construct a server connection. `connect_mcp` connects every
-enabled server, one at a time in configuration order, when the runner is
-built; a failed or sign-in-required server is reported as a warning and
+enabled server concurrently and then processes the outcomes in configuration
+order, so warnings, `/mcp` rows, and cross-server tool-name deduplication stay
+reproducible; a failed or sign-in-required server is reported as a warning and
 never blocks the runner from starting, while a disabled server is recorded
-silently. `ServerState::NeedsLogin` marks an HTTP server using OAuth
+silently. An interactive frontend does not wait for that: `cli::run` builds the
+first runner with `build_runner_without_mcp_with_trace`, whose `/mcp` rows read
+`ServerState::Connecting`, and a background task builds the full runner and
+installs it through `Controller::replace_runner_if_current`, which commits only
+between turns and only while the session it was built for is still current.
+Keep that swap the only hot path into a built runner; headless `--prompt` runs
+and `server` still connect before the first turn.
+`ServerState::NeedsLogin` marks an HTTP server using OAuth
 whose token is missing or cannot be refreshed. `/mcp` (REPL and TUI) and
 `otto mcp login|logout` in `crates/otto/src/cli/mcp.rs` are the only sign-in
 surfaces; a completed sign-in still requires restarting Otto to pick up the
@@ -160,12 +168,21 @@ confirmation; seek clarification only for material scope or contract changes.
 
 Full host validation uses macOS 26+ with standalone Command Line Tools selected.
 Linux builds and runs Otto without a sandbox, so its gate is `make check-linux`,
-which CI runs on `ubuntu-24.04`: the same format, lint, test, wasm and PTY
-targets, minus the Seatbelt conformance suite, which is compiled only for
-macOS, and minus the web UI, which is platform independent and stays on the
-macOS job. Keep platform-specific
+which CI runs on `ubuntu-24.04`: the same format, lint, test, wasm-check and
+PTY targets, minus the Seatbelt conformance suite, which is compiled only for
+macOS, and minus the release build, the Node wasm tests, and the web UI, which
+are platform independent and stay on the macOS job. Keep platform-specific
 code behind `cfg` rather than runtime checks, so a target that cannot use it
 does not compile it.
+A documentation-only change skips both gates. The workflow's `changes` job
+classifies the diff first: when every changed path is Markdown outside
+`crates/` and `testdata/`, under `docs/`, or `LICENSE`, both gates start and
+skip every step, so they still report a status without installing a toolchain.
+Anything else — including a workflow edit, `testdata/server/openapi.yaml`, or a
+Markdown fixture the skill and agent loaders discover by name — runs the full
+gate. An unusual range, such as a new branch or a force push that dropped the
+old tip, also runs it.
+
 The copied Apple broker fixtures are ad-hoc-signed arm64e executables, which
 require the third-party arm64e support introduced in macOS 26. CI selects
 `/Library/Developer/CommandLineTools` so Git and Clang use the existing reviewed

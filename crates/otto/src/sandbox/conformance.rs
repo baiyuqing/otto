@@ -43,6 +43,12 @@ use super::{
 /// How long any wait may take before the check fails.
 const AWAIT: Duration = Duration::from_secs(10);
 
+/// How long a signalled descendant may take to leave the process table before
+/// [`assert_gone`] calls it a survivor.
+const SETTLE: Duration = Duration::from_secs(2);
+/// How often [`assert_gone`] re-probes within [`SETTLE`].
+const SETTLE_INTERVAL: Duration = Duration::from_millis(10);
+
 /// The temporary tree every check runs against.
 ///
 /// Cloning shares the tree; `environment` is the only field a check varies.
@@ -485,23 +491,39 @@ fn assert_signaled(status: &ExitStatus) {
     );
 }
 
-/// Asserts that `pid` is no longer executing.
+/// Asserts that `pid` stops executing, within [`SETTLE`].
+///
+/// The driver signals the group before it returns, but a signal is not a
+/// synchronous death: the kernel closes the child's descriptors — which is
+/// what ends the driver's output drain and lets `execute` return — before the
+/// task finishes leaving the process table. Probing once therefore races
+/// teardown, which is how this read as a survivor on a loaded CI runner while
+/// passing everywhere else.
+///
+/// The window only absorbs that teardown. A descendant that was never
+/// signalled keeps answering for the whole of it and still fails the check,
+/// which is the leak this contract exists to catch.
 ///
 /// `ESRCH` is the usual answer. A process that has been killed but not yet
-/// reaped still answers signal 0, so a zombie counts as gone: it runs no
-/// code, holds no descriptors, and only its exit status is left. Whoever
-/// reaps an orphan (PID 1 on Linux, which a container's init may do lazily)
-/// is not part of the contract being checked here. Anything else is a real
-/// survivor: it is killed so the test cannot leak it, and the check fails.
-fn assert_gone_once(pid: i32) {
-    let result = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None);
-    if result == Err(nix::errno::Errno::ESRCH) || is_zombie(pid) {
-        return;
+/// reaped answers signal 0 too, so a zombie counts as gone: it runs no code,
+/// holds no descriptors, and only its exit status is left. Whoever reaps an
+/// orphan (PID 1 on Linux, which a container's init may do lazily) is not
+/// part of the contract being checked here.
+async fn assert_gone(pid: i32) {
+    let deadline = Instant::now() + SETTLE;
+    loop {
+        let result = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None);
+        if result == Err(nix::errno::Errno::ESRCH) || is_zombie(pid) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Never leak it out of the test, whatever the verdict.
+            let _ =
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL);
+            panic!("process {pid} is still executing {SETTLE:?} after its execution ended");
+        }
+        tokio::time::sleep(SETTLE_INTERVAL).await;
     }
-    if result.is_ok() {
-        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL);
-    }
-    panic!("process {pid} is still executing: signal 0 reported {result:?}");
 }
 
 /// Whether `pid` is a process that has exited and not yet been reaped.
@@ -685,7 +707,7 @@ pub(crate) async fn deadline_cancellation_removes_the_process_group(case: &dyn C
     let (status, result) = await_execution(handle, "deadline cancellation").await;
     assert_eq!(result, Err(Error::Cancelled));
     assert_signaled(&status);
-    assert_gone_once(pid);
+    assert_gone(pid).await;
     executor.close().expect("close");
 }
 
@@ -713,7 +735,7 @@ pub(crate) async fn normal_leader_exit_removes_a_background_process(case: &dyn C
     let (status, result) = await_execution(handle, "normal leader exit").await;
     result.expect("Execute");
     assert_eq!((status.code, status.signaled), (0, false), "leader status");
-    assert_gone_once(descendant);
+    assert_gone(descendant).await;
     executor.close().expect("close");
 }
 
@@ -798,7 +820,7 @@ pub(crate) async fn driver_close_drains_active_work_and_is_idempotent(case: &dyn
             "Driver::close observation = {observation:?}"
         );
     }
-    assert_gone_once(pid);
+    assert_gone(pid).await;
     await_gate(&awaiting, "external Execute result-publication barrier").await;
 
     let _ = publish.send(());
@@ -1124,3 +1146,48 @@ macro_rules! driver_contract {
 }
 
 pub(crate) use {contract_check, driver_contract};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child that has been signalled satisfies the check, even though the
+    /// probe runs while it is still leaving the process table.
+    #[tokio::test]
+    async fn assert_gone_accepts_a_signalled_child() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::SIGKILL)
+            .expect("signal the child");
+
+        assert_gone(pid).await;
+
+        let _ = child.wait();
+    }
+
+    /// The check this contract exists for: a descendant nothing signalled is
+    /// a survivor, and no settle window may excuse it.
+    ///
+    /// The verdict is taken from a task rather than `#[should_panic]` so the
+    /// child can be reaped afterwards; `assert_gone` kills it on its way out,
+    /// and this waits on it, so the test leaks neither a process nor a zombie.
+    #[tokio::test]
+    async fn assert_gone_rejects_a_survivor() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+
+        let verdict = tokio::spawn(async move { assert_gone(pid).await }).await;
+
+        assert!(
+            verdict.is_err_and(|error| error.is_panic()),
+            "a process nothing signalled must fail the check"
+        );
+        let _ = child.wait();
+    }
+}

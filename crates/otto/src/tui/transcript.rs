@@ -24,6 +24,15 @@ const TOOL_PREVIEW_LIMIT: usize = 64;
 /// error, and still cannot push a reply off the screen.
 const TOOL_RESULT_LINES: usize = 3;
 
+/// The band behind a prompt, which is what a reader scrolling back looks for
+/// to find where a turn started.
+///
+/// An ANSI colour, like every other colour the transcript uses, so it follows
+/// the terminal's own theme instead of fixing an RGB value that only suits
+/// one: bright black is a step off the background in a dark theme and a grey
+/// in a light one, and the prompt's own green stays legible on both.
+pub(super) const PROMPT_BACKGROUND: Color = Color::DarkGray;
+
 /// The whole transcript, one blank line between entries so a prompt, a reply,
 /// and a tool call read as separate blocks instead of one run of text.
 pub(crate) fn lines(entries: &[Entry], details: bool, width: usize) -> Vec<Line<'static>> {
@@ -57,12 +66,17 @@ fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>>
     }
     match entry.kind {
         Some(EntryKind::User) => {
-            let style = Style::default().fg(Color::Green);
+            let style = Style::default()
+                .fg(Color::Green)
+                .bg(PROMPT_BACKGROUND)
+                .add_modifier(Modifier::BOLD);
             let text: Vec<Line<'static>> = escape_plain_text(&entry.raw)
                 .split('\n')
                 .map(|line| Line::from(Span::styled(line.to_string(), style)))
                 .collect();
-            gutter::block(&text, USER_MARK, style, width)
+            // Padded, so the band runs the width of the transcript rather
+            // than stopping where the typed text happens to end.
+            gutter::pad_rows(gutter::block(&text, USER_MARK, style, width), style, width)
         }
         kind => {
             let (mark, style) = match kind {
@@ -167,6 +181,8 @@ fn preview(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::*;
 
     fn row_text(line: &Line<'_>) -> String {
@@ -228,7 +244,63 @@ mod tests {
     #[test]
     fn a_multi_line_prompt_keeps_its_own_line_breaks_under_one_marker() {
         let rendered = entry_lines(&entry(EntryKind::User, "one\ntwo"), false, 40);
-        assert_eq!(rows(&rendered), ["❯ one", "  two"]);
+        let padded = rows(&rendered);
+        let rows: Vec<&str> = padded.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(rows, ["❯ one", "  two"]);
+    }
+
+    #[test]
+    fn a_prompt_is_one_full_width_band_on_every_row() {
+        let rendered = entry_lines(&entry(EntryKind::User, "alpha bravo charlie"), false, 12);
+        assert!(rendered.len() > 1, "expected a wrapped prompt");
+        for line in &rendered {
+            assert_eq!(
+                row_text(line).width(),
+                12,
+                "a row short of the width breaks the band: {:?}",
+                row_text(line)
+            );
+            for span in &line.spans {
+                assert_eq!(
+                    span.style.bg,
+                    Some(PROMPT_BACKGROUND),
+                    "{:?} is not part of the band",
+                    span.content
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cjk_prompt_row_is_banded_to_the_last_column() {
+        // Width 9 leaves a column no wide character fits into, which only
+        // the padding can close.
+        let rendered = entry_lines(&entry(EntryKind::User, "集群数量极多"), false, 9);
+        for line in &rendered {
+            assert_eq!(row_text(line).width(), 9, "{:?}", row_text(line));
+            for span in &line.spans {
+                assert_eq!(span.style.bg, Some(PROMPT_BACKGROUND));
+            }
+        }
+    }
+
+    #[test]
+    fn a_reply_is_not_banded_or_padded() {
+        let rendered = entry_lines(
+            &entry(EntryKind::Assistant, "it guards the query"),
+            false,
+            40,
+        );
+        for line in &rendered {
+            assert!(
+                row_text(line).width() < 40,
+                "{:?} was padded",
+                row_text(line)
+            );
+            for span in &line.spans {
+                assert_eq!(span.style.bg, None, "{:?} is banded", span.content);
+            }
+        }
     }
 
     #[test]
@@ -275,7 +347,7 @@ mod tests {
             40,
         );
         let rows = rows(&rendered);
-        assert_eq!(rows[0], "❯ what does this do");
+        assert_eq!(rows[0].trim_end(), "❯ what does this do");
         assert_eq!(rows[1], "");
         assert_eq!(rows[2], "⏺ it guards the query");
     }

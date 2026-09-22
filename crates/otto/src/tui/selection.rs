@@ -229,6 +229,18 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_over_a_banded_prompt_copies_no_padding() {
+        // A prompt row is padded out to the transcript width so its band
+        // has no ragged edge; that padding is the renderer's, not the
+        // reader's, and must not reach the clipboard.
+        let buffer = screen(&["\u{276f} hi          ", "\u{23fa} reply       "]);
+        let mut selection = Selection::new(0, 0);
+        selection.extend(13, 1);
+
+        assert_eq!(selection.text(&buffer), "hi\nreply");
+    }
+
+    #[test]
     fn a_backwards_drag_selects_the_same_text() {
         let buffer = screen(&["hello world"]);
         let mut forwards = Selection::new(6, 0);

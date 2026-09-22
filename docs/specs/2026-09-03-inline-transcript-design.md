@@ -5,7 +5,7 @@ The TUI uses the alternate screen buffer and the viewport transcript again;
 this document is historical. The branch and worktree below are provenance only.
 Branch `feat/inline-transcript`, worktree
 `/Users/baiyuqing/Work/code/otto-inline-tui`.
-Check [`internal/tui`](../../internal/tui), the
+Check [`crates/otto/src/tui`](../../crates/otto/src/tui), the
 [user manual](../user-manual.md), and the
 [2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
 for current behavior and ownership rules.

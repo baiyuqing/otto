@@ -2,7 +2,7 @@
 
 Status: approved 2026-09-03; historical and superseded for the current API.
 It is retained for rationale. Check the current
-[`internal/server`](../../internal/server) implementation, the
+[`crates/otto/src/server`](../../crates/otto/src/server) implementation, the
 [user manual](../user-manual.md), and the
 [2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
 for current behavior and ownership rules.

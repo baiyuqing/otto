@@ -63,8 +63,9 @@ functions the REPL uses (`crates/otto/src/cli/repl_commands.rs`).
 
 Keep `crates/otto`'s `skill` module free of imports from other Otto modules
 besides `otto-core`. The skill tool's file reads stay confined to the skill
-directory. Do not document `/skills`, `/skill`, or `allowed-tools` enforcement
-as working features.
+directory. `/skills` and `/skill` are wired in both frontends and documented
+in the user manual; `allowed-tools` enforcement is not, so do not document it
+as a working feature.
 
 Keep `crates/otto`'s `subagent` module behind the runner's construction path:
 children are built only through it; the agent loop knows tasks only through
@@ -197,12 +198,23 @@ one. Keep the default test suite (`cargo test --workspace` without extra
 flags) offline: it must not need network access, provider credentials, or a
 real interactive terminal.
 
+The Node helpers under `scripts/` are opt-in and outside every Make target and
+CI: run them directly with `node --test scripts/<name>.test.mjs`.
+`scripts/pi-session-interop.mjs` covers the optional Pi interoperability probe
+described in the user manual. `scripts/trace-viewer.html` is retained from the
+Go implementation: the Rust build has no `OTTO_TRACE` writer (the name is only
+reserved in the resolution environment), so nothing in this repository produces
+the JSONL files the viewer reads. Do not document provider tracing as a working
+feature until a writer exists.
+
 ## Web UI workflow
 
-`ui/` is a Vite + React + TypeScript project with `react-markdown` and
-`remark-gfm` as its only runtime dependencies, plus the `otto-web` wasm
-package built from `crates/otto-web`. It needs Node 24+ and wasm-pack, and it
-is exercised by `make check` through the production build and `make ui-test`.
+`ui/` is a Vite + React + TypeScript project. Its runtime dependencies are
+`react`/`react-dom`, `react-markdown` with `remark-gfm`, `remark-math` and
+`rehype-katex` plus `katex` for math, `mermaid` for fenced `mermaid` blocks
+and the usage chart, and the `otto-web` wasm package built from
+`crates/otto-web`. It needs Node 24+ and wasm-pack, and it is exercised by
+`make check` through the production build and `make ui-test`.
 
 ```bash
 make ui       # wasm-pack build, then npm ci && npm run build → ui/dist, embedded by cargo build

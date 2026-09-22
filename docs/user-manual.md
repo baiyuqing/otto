@@ -160,13 +160,14 @@ otto --provider chatgpt --model gpt-5-codex
 
 ## Command-line reference
 
-Otto also has two subcommands that run before the flags below are parsed:
+Otto also has subcommands that run before the flags below are parsed:
 
 | Command | Description |
 | --- | --- |
 | `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
 | `otto logout` | Remove stored ChatGPT credentials. |
 | `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
+| `otto sandbox setup [--config PATH] [--cwd PATH]` | Choose shell sandbox permissions interactively. See [Interactive sandbox setup](#interactive-sandbox-setup). |
 | `otto workflow run <name> [--input TEXT]` | Start a durable workflow and wait until it finishes or needs approval. |
 | `otto workflow status <run-id>` | Print one workflow run and its approval requests as JSON. |
 | `otto workflow resume <run-id> [--retry <step-id>]` | Resume safe pending work, or explicitly retry one interrupted step. |
@@ -329,8 +330,9 @@ Key points:
 - A `provider = "chatgpt"` profile needs only `model`; it ignores `base_url`
   and `api_key_env` and authorizes with the credentials from `otto login`. See
   [ChatGPT subscription](#chatgpt-subscription).
-- `[profiles.NAME].max_turns` is accepted by the schema but no longer limits the
-  agent loop.
+- `[agent].max_turns` is accepted by the schema but no longer limits the agent
+  loop. It is not a profile key: every table rejects unknown fields, so
+  `max_turns` inside `[profiles.NAME]` fails config loading.
 
 ### Precedence
 
@@ -383,9 +385,6 @@ Sandbox-driver precedence:
 1. `--sandbox`
 2. `[sandbox].driver`
 3. built-in `auto`
-
-Future backend authors should also read the
-[Sandbox driver authoring guide](sandbox-driver-authoring.md).
 
 ### Backups of the config file
 
@@ -491,8 +490,8 @@ an exact command. In the REPL, type the command and press `Enter`.
 Shared commands:
 
 - `/help` shows command help.
-- `/session` shows session details (ID, path, provider, profile, model, and
-  thinking effort).
+- `/session` shows session details (ID, path, provider, model, thinking effort,
+  and sandbox state, plus the session name once `/rename` has set one).
 - `/new` closes the current session and starts a fresh one in the same process.
 - `/clear` is an alias for `/new`: it starts a fresh session, so the transcript,
   context counter, and per-session usage reset together.
@@ -534,6 +533,11 @@ Shared commands:
 - `/mcp` shows every configured MCP server and its connection state.
   `/mcp login <server>` signs in to one HTTP server that uses OAuth. See
   [MCP servers](#mcp-servers).
+- `/login` runs the same ChatGPT sign-in flow as `otto login` without leaving
+  the session, and reports `Restart Otto to use the new credentials`;
+  `/login status` prints the sign-in state. On a non-`chatgpt` provider it
+  answers that there is nothing to sign in to. `/logout` removes the stored
+  credentials. See [ChatGPT subscription](#chatgpt-subscription).
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
@@ -542,7 +546,7 @@ TUI-only commands:
   inline in the session; the selected model and provider endpoint must support
   image input. Otto sends images with `detail: high`.
 
-- `/resume` opens a modal of the up to 20 most recently modified valid sessions
+- `/resume` opens a modal of the up to 50 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,
   `Enter` to resume, `Esc` to close. It does not search other workspaces.
 - `/archive` opens the same modal to archive a session. `Enter` on a non-current
@@ -675,16 +679,6 @@ executor with fsmonitor disabled; unavailable executors produce no Git status.
 `SKILL.md` and `AGENT.md` must stay within their respective skill or agent
 definition directory. Configured external roots and linked definition
 directories remain supported.
-
-When enabled, `OTTO_TRACE` records each provider HTTP exchange as two JSONL
-records sharing one `seq`: a `request` record (method, URL, headers, request
-body, status, response headers, time to response headers) written when the
-response headers arrive, and a `response_body` record written when the response
-body is closed or drained. Bodies and error text are recorded verbatim, so a
-trace file contains conversation content; credential, cookie, and
-`chatgpt-account-id` headers contain a redaction marker instead of their value.
-The response stream reaches the caller unchanged, but a copy of it is held in
-memory until the body is closed.
 
 ### File tools
 
@@ -939,10 +933,13 @@ the transcript, and a composer:
   commands; Tab or click completes the highlighted command. Web commands backed
   by existing server APIs run locally instead of starting a provider turn:
   `/help`, `/session`, `/new`, `/clear`, `/resume`, `/model`, `/rename <name>`,
-  `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/tasks`,
-  `/task <id|name>`, `/task cancel <id|name>`, `/mcp`, and `/exit`. `/resume`
-  asks you to choose a session from the picker; `/exit` asks you to close the
-  browser tab because a page cannot reliably close a tab it did not open.
+  `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/approve <id>`,
+  `/tasks`, `/task <id|name>`, `/task cancel <id|name>`, `/mcp`, and `/exit`.
+  `/resume` asks you to choose a session from the picker; `/exit` asks you to
+  close the browser tab because a page cannot reliably close a tab it did not
+  open. `/approve <id>` grants one pending elevated Bash command through
+  `POST /v1/sessions/{id}/approvals/{approval_id}` and then submits the retry
+  prompt the server returns as the next turn.
   `/mcp` shows each configured server's connection state only; signing in
   runs on the host with `otto mcp login <server>`, since the OAuth flow opens
   a browser there, not in the page.
@@ -977,10 +974,15 @@ the transcript, and a composer:
   context size and cumulative usage from `GET /v1/sessions/{id}`, and persisted
   all-session token totals and cache hit rate from `GET /v1/usage`; during a
   turn it also totals that turn's `provider_usage` events.
-- The top bar switches between **Chat** and **Usage**. Usage shows persisted
-  totals, a Mermaid token-volume chart for the last 7, 30, or 90 UTC days,
-  and an exact daily table. It reads `GET /v1/usage/daily` and does not expose
-  the SQLite database to the browser.
+- The top bar switches between **Chat**, **Usage**, and **Workflows**. Usage
+  shows persisted totals, a Mermaid token-volume chart for the last 7, 30, or
+  90 UTC days, and an exact daily table. It reads `GET /v1/usage/daily` and
+  does not expose the SQLite database to the browser.
+- **Workflows** lists this workspace's durable runs (`GET /v1/workflows`) and
+  starts one from a name and input. Selecting a run shows its steps and
+  approval requests and offers **Resume**, **Cancel**, per-step **Retry** and
+  **Fork**, and **Approve**/**Reject** for a pending gate, over the
+  `/v1/workflows` routes below. See [Durable workflows](#durable-workflows).
 
 ### HTTP API
 
@@ -995,6 +997,7 @@ are served at the root. Request and error bodies are JSON.
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
 | `GET /v1/sessions/{id}/history` | Return the session's message history. |
+| `POST /v1/sessions/{id}/approvals/{approval_id}` | Grant one pending elevated Bash command and return the retry prompt to submit as the next turn. `409` when the approval is unknown, expired, or a turn is active. |
 | `POST /v1/sessions/{id}/turns` | Start a turn: `{"text":"...","stream":true}`. An optional `image` carries base64 `data` and `mime_type` (`image/png`, `image/jpeg`, or `image/webp`); `text` may be empty when `image` is present. `stream` defaults to `true` and returns a `text/event-stream` response starting at sequence `0`; `stream:false` waits for the turn to finish and returns its summary instead. |
 | `GET /v1/sessions/{id}/turns/{turn_id}` | Return a turn summary. Only the session's most recent turn is retained. |
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
@@ -1010,6 +1013,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/workflows/{id}` | Return a run, its steps, and its approval requests. |
 | `GET /v1/workflows/{id}/events?after=N` | Replay durable workflow SSE events after sequence `N`; unlike turn events, replay survives process restart. |
 | `POST /v1/workflows/{id}/resume` | Resume a run; `{"retry":"step-id"}` explicitly retries one interrupted step. |
+| `POST /v1/workflows/{id}/fork` | Create a new run from a committed step boundary with `{"after_step":"step-id"}`. |
 | `POST /v1/workflows/{id}/cancel` | Cancel a run after its active attempts stop. |
 | `POST /v1/workflows/requests/{id}/approve` | Approve a durable workflow gate. |
 | `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate and cancel the run. |
@@ -1127,7 +1131,9 @@ backend is involved.
 `otto_turns_total{status}`, `otto_turns_active`, `otto_turn_duration_seconds`,
 `otto_tool_calls_total{tool,status}`, `otto_tool_call_duration_seconds{tool}`,
 `otto_provider_tokens_total{kind}`, `otto_event_stream_clients`,
-`otto_workflow_runs{status}`, and `otto_workflow_steps{status}`.
+`otto_tasks_started_total`, `otto_tasks_finished_total{status}`,
+`otto_tasks_running`, `otto_workflow_runs{status}`, and
+`otto_workflow_steps{status}`.
 
 Otto logs one line per HTTP request (method, route, status, duration, request
 ID) and one line per turn start and finish (session ID, turn ID, status,

@@ -86,6 +86,10 @@ impl StartupTrace {
         }
     }
 
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     fn mark(&mut self, label: &'static str) {
         if !self.enabled {
             return;
@@ -93,6 +97,13 @@ impl StartupTrace {
         let now = Instant::now();
         self.entries.push((label, now.duration_since(self.last)));
         self.last = now;
+    }
+
+    fn extend(&mut self, entries: Vec<(&'static str, std::time::Duration)>) {
+        if !self.enabled {
+            return;
+        }
+        self.entries.extend(entries);
     }
 
     fn finish_ready(&mut self, stderr: &mut (dyn Write + Send)) {
@@ -692,7 +703,11 @@ pub async fn run(
         return 130;
     }
 
-    let runner = match builder.build_runner(&initial_session, &resolved).await {
+    let trace_runner_build = startup_trace.is_enabled();
+    let (runner, runner_trace) = match builder
+        .build_runner_with_trace(&initial_session, &resolved, trace_runner_build)
+        .await
+    {
         Ok(runner) => runner,
         Err(message) => {
             let _ = initial_session.close();
@@ -703,6 +718,7 @@ pub async fn run(
             return fail(stderr, &message);
         }
     };
+    startup_trace.extend(runner_trace);
     startup_trace.mark("runner/build");
     if let Err(message) = builder.update_session_runtime(&initial_session, &resolved) {
         runner.close_mcp().await;
@@ -1367,6 +1383,11 @@ driver = "off"
         assert!(stderr.contains("startup ready:"), "{stderr}");
         assert!(stderr.contains("startup sandbox/open:"), "{stderr}");
         assert!(stderr.contains("startup runner/build:"), "{stderr}");
+        assert!(stderr.contains("startup runner/mcp:"), "{stderr}");
+        assert!(
+            stderr.contains("startup runner/workspace-context:"),
+            "{stderr}"
+        );
         assert!(!stderr.contains("startup total:"), "{stderr}");
     }
 

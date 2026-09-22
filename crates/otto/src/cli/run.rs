@@ -31,6 +31,7 @@ use otto_core::config::{
     resolve_server, resolve_skills, resolve_ui_mode,
 };
 use otto_core::session::{CURRENT_VERSION, Header, RuntimeMetadata};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::sandbox::direct::DirectDriver;
@@ -39,7 +40,7 @@ use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
 use crate::session;
 
 use super::boundary::{self, BoundaryInputs};
-use super::controller::{Controller, SESSION_OPERATION_UNAVAILABLE};
+use super::controller::{Controller, PROMPT_ACTIVE, SESSION_OPERATION_UNAVAILABLE};
 use super::flags::{CliOptions, ParseFailure, Parsed, parse_flags};
 use super::repl::{self, Repl};
 use super::runtime_builder::{
@@ -703,11 +704,21 @@ pub async fn run(
         return 130;
     }
 
+    let background_mcp = frontend != Frontend::Once
+        && dynamic_content
+        && builder.mcp.enabled
+        && builder.mcp.servers.iter().any(|server| server.enabled);
     let trace_runner_build = startup_trace.is_enabled();
-    let (runner, runner_trace) = match builder
-        .build_runner_with_trace(&initial_session, &resolved, trace_runner_build)
-        .await
-    {
+    let runner_result = if background_mcp {
+        builder
+            .build_runner_without_mcp_with_trace(&initial_session, &resolved, trace_runner_build)
+            .await
+    } else {
+        builder
+            .build_runner_with_trace(&initial_session, &resolved, trace_runner_build)
+            .await
+    };
+    let (runner, runner_trace) = match runner_result {
         Ok(runner) => runner,
         Err(message) => {
             let _ = initial_session.close();
@@ -750,6 +761,14 @@ pub async fn run(
             .with_sandbox_control(Arc::clone(reloader) as Arc<dyn crate::app::SandboxControl>),
         None => controller,
     };
+    let controller = Arc::new(controller);
+    let mcp_swap = background_mcp.then(|| {
+        spawn_mcp_runner_swap(
+            Arc::clone(&controller),
+            resolved.clone(),
+            cancel.child_token(),
+        )
+    });
 
     startup_trace.finish_ready(stderr);
 
@@ -770,6 +789,9 @@ pub async fn run(
     let cancelled_before_exit = cancel.is_cancelled();
     let frontend_cancelled = matches!(run_error, Err(repl::Error::Cancelled));
     cancel.cancel();
+    if let Some(task) = mcp_swap {
+        task.abort();
+    }
     controller.close_mcp().await;
     let controller_error = controller.close();
     let sandbox_error = control.close().await;
@@ -805,6 +827,51 @@ pub async fn run(
         stderr,
         &format!("REPL: {}", redact_with(&tail_redactor, &error.to_string())),
     )
+}
+
+fn spawn_mcp_runner_swap(
+    controller: Arc<Controller>,
+    runtime: Runtime,
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(session) = controller.current_session_opt() else {
+            return;
+        };
+        let session_id = session.header().id;
+        let mut runner = match controller.builder().build_runner(&session, &runtime).await {
+            Ok(runner) => runner,
+            Err(_) => return,
+        };
+        let info = controller.builder().runtime_info(&runtime);
+        loop {
+            if cancel.is_cancelled() {
+                runner.close_mcp().await;
+                runner.close();
+                return;
+            }
+            match controller.replace_runner_if_current(&session_id, runner, info.clone()) {
+                Ok(true) | Ok(false) => return,
+                Err(message) if message == PROMPT_ACTIVE => {
+                    // Rebuild instead of holding a runner that may have stale
+                    // context after a long turn. This keeps the swap simple
+                    // and only installs a runner built for the post-turn state.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let Some(session) = controller.current_session_opt() else {
+                        return;
+                    };
+                    if session.header().id != session_id {
+                        return;
+                    }
+                    runner = match controller.builder().build_runner(&session, &runtime).await {
+                        Ok(next) => next,
+                        Err(_) => return,
+                    };
+                }
+                Err(_) => return,
+            }
+        }
+    })
 }
 
 /// A directly named session file must belong to the current workspace.

@@ -223,10 +223,17 @@ one. Keep the default test suite (`cargo test --workspace` without extra
 flags) offline: it must not need network access, provider credentials, or a
 real interactive terminal.
 
-The Node helpers under `scripts/` are opt-in and outside every Make target and
-CI: run them directly with `node --test scripts/<name>.test.mjs`.
+The Node helpers under `scripts/` are opt-in, but their tests are not: `make
+scripts-test` runs every `scripts/*.test.mjs`, and both gates include it. It
+needs no build and no network.
 `scripts/pi-session-interop.mjs` covers the optional Pi interoperability probe
-described in the user manual. `scripts/trace-viewer.html` is retained from the
+described in the user manual. `scripts/skill-exec-measure.mjs` reports what the
+[sub-agent execution design](specs/2026-09-22-skill-subagent-execution.md) says
+must be measured before that feature is trusted: context peak per window, total
+tokens, and how often the model honours the `exec="agent"` marking. It reads a
+session transcript and `~/.otto/usage.db`, never writes, and needs a real
+session to have happened first, so it stays out of the gates even though its
+tests are in them. `scripts/trace-viewer.html` is retained from the
 Go implementation: the Rust build has no `OTTO_TRACE` writer (the name is only
 reserved in the resolution environment), so nothing in this repository produces
 the JSONL files the viewer reads. Do not document provider tracing as a working

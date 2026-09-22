@@ -13,10 +13,12 @@
 mod app;
 mod commands;
 mod entries;
+mod gutter;
 mod layout;
 mod markdown;
 mod render;
 mod selection;
+mod transcript;
 
 use std::future::Future;
 use std::io;
@@ -1082,6 +1084,8 @@ mod tests {
     /// inside the draw closure) looked correct.
     #[tokio::test]
     async fn releasing_a_drag_copies_the_text_that_is_on_screen() {
+        use unicode_width::UnicodeWidthStr;
+
         const WIDTH: u16 = 60;
         const HEIGHT: u16 = 20;
         const NEEDLE: &str = "selectable transcript text";
@@ -1106,7 +1110,10 @@ mod tests {
                     .filter_map(|x| buffer.cell((x, y)))
                     .map(|cell| cell.symbol())
                     .collect();
-                line.find(NEEDLE).map(|at| (at as u16, y))
+                // `find` gives a byte offset; the drag needs a column, and
+                // the transcript's gutter marker is not ASCII.
+                line.find(NEEDLE)
+                    .map(|at| (UnicodeWidthStr::width(&line[..at]) as u16, y))
             })
             .expect("the transcript shows the pushed line");
 

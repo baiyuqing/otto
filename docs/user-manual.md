@@ -431,9 +431,19 @@ OTTO_UI=repl otto
 ### TUI behavior
 
 - Uses the terminal alternate screen buffer.
-- A submitted prompt is added to the transcript before the response streams in,
-  prefixed with `> ` and shown in green so it is distinct from the response.
-- Transcript entries are separated by a blank line.
+- Every transcript entry is one block under a marker in the left gutter, so a
+  turn reads as prompt, tool calls, reply. The marker opens the block and an
+  aligned indent continues it, including on the rows a wrap produced:
+
+  | Marker | Entry |
+  | --- | --- |
+  | `>` (green) | a prompt you submitted |
+  | `⏺` | an assistant reply |
+  | `⏺` (cyan) | a tool call; red when it failed |
+  | `⎿` | that call's result, indented under it |
+  | `✻` (dim) | a compaction checkpoint, a notification, or other system text |
+
+- Entries are separated by a blank line.
 - While a turn is running, an animated `Thinking…` line with the elapsed
   seconds is shown under the transcript, and the composer title reads
   `Working (Esc to cancel)`.
@@ -442,10 +452,11 @@ OTTO_UI=repl otto
   Esc cancels it the same way as a user turn. Composer text is left in place.
 - Assistant responses render as Markdown; if rendering fails, Otto falls back
   to escaped plain text.
-- Tool calls are folded to the tool name, a cut-down first line of the
-  arguments, and a one-line result (the first line of the output and how many
-  more there are). `Ctrl+O` shows the call id, the arguments, and the output in
-  full, and toggles back.
+- Tool calls are folded to the tool name and a cut-down first line of the
+  arguments, with at most the first three result lines under `⎿` and a
+  `+N lines (ctrl+o)` count for the rest. A call still running shows no result
+  line, and one that finished with none says `(no output)`. `Ctrl+O` shows the
+  call id, the arguments, and the output in full, and toggles back.
 - The composer keeps a prompt history: `↑`/`↓` walk back and forth through the
   lines already submitted, and `↓` past the newest one restores what was being
   typed. It starts from the prompts the session already had, so a resumed
@@ -455,7 +466,10 @@ OTTO_UI=repl otto
   image.
 - Mouse-wheel transcript scrolling is enabled. Dragging with the left button
   selects visible transcript text and copies it to the clipboard on release;
-  no modifier key is needed. Any key or wheel notch clears the highlight.
+  no modifier key is needed. Any key or wheel notch clears the highlight. The
+  copied text has the gutter removed — markers and the indent they add — so a
+  command or a code block pastes as it was written; indentation the text
+  itself carried is kept.
 - The footer shows workspace/profile/model, reasoning effort, token totals, and
   session ID when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.

@@ -466,7 +466,7 @@ OTTO_UI=repl otto
 
   | Marker | Entry |
   | --- | --- |
-  | `>` (green) | a prompt you submitted |
+  | `❯` (green) | a prompt you submitted |
   | `⏺` | an assistant reply |
   | `⏺` (cyan) | a tool call; red when it failed |
   | `⎿` | that call's result, indented under it |
@@ -521,7 +521,8 @@ OTTO_UI=repl otto
 
 ### REPL behavior
 
-- One prompt per line.
+- One prompt per line, entered at a `❯ ` prompt — the same marker the TUI
+  puts in front of a prompt in its transcript.
 - `Ctrl+C` during an active provider call, tool run, or compaction cancels only
   that turn and returns to the prompt; `Ctrl+C` while idle exits with status 130.
 

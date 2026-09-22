@@ -2,7 +2,7 @@
   <img src="docs/logo.svg" alt="Otto 标志" width="320">
 </p>
 
-# Otto — macOS 上的本地优先 Agent
+# Otto — 终端里的本地优先 Agent
 
 [English](README.md) · [用户手册（英文）](docs/user-manual.md)
 
@@ -17,9 +17,11 @@
 
 ## 从源码安装
 
-需要 **macOS**、由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链
+需要由 `rust-toolchain.toml` 锁定的 **Rust 1.98** 工具链
 （`rustup toolchain install` 会自动安装）、**Node 24+**、`wasm-pack` 0.15，
-以及受支持服务的访问权限。
+以及受支持服务的访问权限。**macOS** 是受支持的平台：只有它有沙箱，
+也只有它跑验收门禁。Otto 同样可以在 **Linux** 上编译和运行，限制见下方
+[安全与限制](#安全与限制)。
 
 ```bash
 git clone https://github.com/baiyuqing/otto.git
@@ -99,7 +101,11 @@ Web UI 可点击 **Image** 或粘贴截图。所选模型和 OpenAI-compatible �
 
 ## 安全与限制
 
-仅支持 macOS，provider 为 `openai-compatible` 和 `chatgpt`。
+provider 仅支持 `openai-compatible` 和 `chatgpt`。
+**macOS** 是受支持的平台；在 **Linux** 上 Otto 能编译能运行，但没有沙箱：
+`auto` 和 `seatbelt` 会失败关闭，`bash` 工具根本不会注册，只有显式传
+`--sandbox off` 才能执行命令，且完全不受约束。其余功能（文件工具、会话、
+记忆、Skills、子代理、MCP、workflow、`otto serve` 和 Web UI、TUI）两个平台一致。
 文件工具限定在工作区内；`--sandbox off` 会显式关闭 Shell 沙箱。
 Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏。
 会话文件可能包含工作区文件、提示词、图片和工具结果，应按敏感数据处理。
@@ -113,7 +119,7 @@ Seatbelt 不是虚拟机，也不能阻止对可写工作区内文件的破坏�
 代码是一个包含三个 crate 的 Cargo workspace：
 
 - `crates/otto-core`：provider 契约、wire 编解码、会话编解码、agent 循环和配置，可编译到 `wasm32-unknown-unknown`。
-- `crates/otto`：macOS 二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理、inbound 适配器和 `otto serve`。
+- `crates/otto`：原生二进制，包含 CLI、REPL、TUI、工具、沙箱、记忆、Skills、子代理、inbound 适配器和 `otto serve`。
 - `crates/otto-web`：把 `otto-core` 编译为 WebAssembly 供 `ui/` 中的浏览器前端使用，前端与二进制共用同一份实现。
 
 开发约定和检查命令见 [AGENTS.md](AGENTS.md)，包契约见[开发指南（英文）](docs/development.md)。

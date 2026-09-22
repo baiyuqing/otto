@@ -328,8 +328,13 @@ mod tests {
         let got = workspace_context_for(&root, now(), None, None, &workspace).await;
         assert!(got.starts_with("\n\n## Environment\n"), "{got}");
         assert!(got.contains(&format!("cwd: {root}\n")), "{got}");
+        // The header names the host Otto is actually running on, so the
+        // expectation follows the build target rather than pinning macOS.
         assert!(
-            got.contains("platform: darwin, date: 2026-03-04\n"),
+            got.contains(&format!(
+                "platform: {}, date: 2026-03-04\n",
+                platform_name()
+            )),
             "{got}"
         );
         assert!(!got.contains("git: "), "{got}");

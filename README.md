@@ -2,7 +2,7 @@
   <img src="docs/logo.svg" alt="Otto logo" width="320">
 </p>
 
-# Otto — a local-first agent for macOS
+# Otto — a local-first agent for your terminal
 
 [简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md)
 
@@ -23,9 +23,12 @@ memory storage.
 
 ## Install from source
 
-Requires **macOS**, the pinned **Rust 1.98** toolchain (`rustup toolchain
-install` picks it up from `rust-toolchain.toml`), **Node 24+**, `wasm-pack`
-0.15, and access to one of the two providers.
+Requires the pinned **Rust 1.98** toolchain (`rustup toolchain install` picks
+it up from `rust-toolchain.toml`), **Node 24+**, `wasm-pack` 0.15, and access
+to one of the two providers. **macOS** is the supported platform: it is the
+only one with a sandbox, and the only one the acceptance gate runs on. Otto
+also builds and runs on **Linux**, with the limits under
+[Safety and limitations](#safety-and-limitations).
 
 ```bash
 git clone https://github.com/baiyuqing/otto.git
@@ -198,7 +201,13 @@ never retried automatically.
 
 ## Safety and limitations
 
-- **macOS only.** Supported providers are `openai-compatible` and `chatgpt`.
+- **Supported providers** are `openai-compatible` and `chatgpt`.
+- **macOS** is the supported platform. On **Linux** Otto builds and runs, but
+  it has no sandbox: `bash` is not registered at all unless you pass
+  `--sandbox off`, which runs commands as your user with nothing confining
+  them. File tools, sessions, memory, skills, sub-agents, MCP, workflows, the
+  server, and the TUI work the same on both. `make check` is a macOS gate;
+  Linux is covered by `make check-linux`.
 - File tools stay within the selected workspace. Shell commands use Seatbelt by
   default; `--sandbox off` explicitly disables shell sandboxing. Seatbelt is not
   a VM and does not prevent destructive changes inside the writable workspace.
@@ -238,7 +247,7 @@ The code is a Cargo workspace of three crates:
 
 - `crates/otto-core` holds the provider contract, wire codecs, session codec,
   agent loop, and config. It builds for `wasm32-unknown-unknown`.
-- `crates/otto` is the macOS binary: CLI, REPL, TUI, tools, sandbox, memory,
+- `crates/otto` is the native binary: CLI, REPL, TUI, tools, sandbox, memory,
   skills, sub-agents, inbound adapters, and the `otto serve` server.
 - `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
   `ui/`, so the web frontend and the binary share one implementation.

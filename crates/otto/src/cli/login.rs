@@ -23,10 +23,15 @@ use super::controller::Controller;
 use super::repl::Error as ReplError;
 use crate::memory::MAX_EXACT_GUARD_VALUE_BYTES;
 
-/// The absolute path is used here because `PATH` is attacker-influenced input
-/// at this point.
-#[cfg(not(test))]
+/// The browser launcher. macOS is given as an absolute path because `PATH` is
+/// attacker-influenced input at this point; every other target resolves the
+/// freedesktop `xdg-open` through `PATH`, which is the only way it is ever
+/// installed.
+#[cfg(all(not(test), target_os = "macos"))]
 const OPEN_BINARY: &str = "/usr/bin/open";
+/// See the macOS launcher above.
+#[cfg(all(not(test), not(target_os = "macos")))]
+const OPEN_BINARY: &str = "xdg-open";
 
 const SIGNED_IN: &str = "Signed in to ChatGPT.";
 const SIGNED_OUT: &str = "Signed out of ChatGPT.";

@@ -5,6 +5,13 @@
 //! call. The assertions are on what the binary printed and on what it left in
 //! the workspace, so every layer between the flag parser and the sandbox is
 //! exercised in one process.
+//!
+//! macOS only: both runs are about the Seatbelt path — one turn under the
+//! sandbox, and one command elevated out of it. Otto has no confined driver
+//! on other targets, where `bash` is disabled unless `--sandbox off` is asked
+//! for explicitly, so there is nothing here for them to run. An end-to-end
+//! run of that `off` path would be a separate test.
+#![cfg(target_os = "macos")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

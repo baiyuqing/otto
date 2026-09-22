@@ -230,7 +230,7 @@ impl SeatbeltDriver {
             network,
             state: private,
             profile_path,
-            processes: Manager::new(),
+            processes: Manager::default(),
             inner: Mutex::new(Inner::default()),
             progress: Condvar::new(),
         };

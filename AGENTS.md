@@ -6,7 +6,7 @@ workflow.
 
 ## Scope and task map
 
-- Otto supports only the `openai-compatible` and `chatgpt` providers and runs on macOS.
+- Otto supports only the `openai-compatible` and `chatgpt` providers. macOS is the supported platform and the only one with a sandbox (Seatbelt). Otto also builds and runs on Linux, where there is no confined driver: `bash` is unavailable unless `--sandbox off` is passed explicitly, and everything else (file tools, sessions, memory, MCP, server, TUI) works. Keep platform-specific code behind `cfg`, and keep a new platform's claims limited to what its tests actually cover.
 - `crates/otto-core` is the wasm-safe library: `model`, `provider` (neutral contract), `openaicompat`/`openairesponses` (wire formats), `tool` (definitions), `session` (Pi v3 codec), `agent` (provider/tool turn loop), `config`, `wire`, and `safetext`.
 - `crates/otto` is the native binary: `cli` (composition, flags, REPL, process lifecycle), `app` (shared lifecycle and frontend capabilities), `session` (store), `config` (path resolution and the backed-up config writer), `tool` (native execution), `mcp` (stdio/HTTP client, JSON-RPC codec, OAuth sign-in for external tool servers), `sandbox` (Seatbelt/direct drivers), `provider` (HTTP transports), `auth` (ChatGPT OAuth), `memory` (SQLite/FTS5 store and service), `usage` (provider-token collection, SQLite storage, and aggregate analysis), `skill`, `subagent`, `workflow` (durable TOML DAG runs, approval gates, restart recovery, and event storage), `inbound` (host `lark-cli` Feishu consumer into the session inbox), `server` (HTTP/JSON/SSE and the embedded web UI), and `tui`.
 - `crates/otto-web` is the wasm cdylib the browser UI loads. `ui/` (TypeScript) owns the browser frontend and is a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only.
@@ -48,16 +48,18 @@ Apply these requirements to every feature, fix, and refactor:
 Use the Makefile targets as the canonical commands:
 
 ```bash
-make check-fast  # rustfmt, clippy, focused otto-core tests, git diff --check
-make check       # full macOS build/lint/all-tests/wasm/PTY/UI gate
+make check-fast   # rustfmt, clippy, focused otto-core tests, git diff --check
+make check        # full macOS build/lint/all-tests/wasm/PTY/UI gate
+make check-linux  # the Linux gate: the same minus Seatbelt conformance and the UI
 ```
 
 See the [development guide](docs/development.md)
 for the focused package set, test commands, and contract-specific checks.
 
-CI runs `make check` with the toolchain and action pins in
-[the workflow](.github/workflows/checks.yml). Full host validation requires
-macOS 26+ and standalone Command Line Tools; see the development guide.
+CI runs `make check` on macOS and `make check-linux` on Linux, with the
+toolchain and action pins in [the workflow](.github/workflows/checks.yml).
+Full host validation requires macOS 26+ and standalone Command Line Tools;
+see the development guide.
 
 Keep README and user-facing docs limited to implemented, tested behavior. Do
 not describe `agent_send`, `agent_cancel`, `agent_report`, automatic memory

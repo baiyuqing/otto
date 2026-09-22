@@ -3,7 +3,7 @@
 Status: draft, 2026-09-03, pending approval; historical and superseded for the
 current sub-agent API. It is retained for rationale. The proposal includes
 aspirational APIs; only the tool surface and behavior verified in the current
-[`internal/subagent`](../../internal/subagent) implementation and the
+[`crates/otto/src/subagent`](../../crates/otto/src/subagent) implementation and the
 [README](../../README.md#delegate-work-to-sub-agents) are current. In
 particular, `agent_send`, `agent_cancel`, and `agent_report` remain proposal
 items, not implemented features. Also consult the

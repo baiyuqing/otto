@@ -265,7 +265,7 @@ that change, and its syscall-level cause had not been established.
 
 The subsequent agent-friendly development change captured a successful group
 signal followed by repeated Darwin `EPERM` while signal delivery was still in
-flight. The current [native process manager](../../internal/sandbox/internal/nativeprocess/manager_unix.go)
+flight. The current [native process manager](../../crates/otto/src/sandbox/process.rs)
 uses a bounded Darwin group-state observation before accepting that outcome.
 It requires an earlier successful group signal and no live members; query
 failures and live groups fail closed. The original live-descendant safety

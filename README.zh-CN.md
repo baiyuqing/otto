@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="Otto 标志" width="320">
+  <img src="docs/logo.svg" alt="Otto 标志" width="320">
 </p>
 
 # Otto — macOS 上的本地优先 Agent

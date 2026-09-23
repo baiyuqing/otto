@@ -781,7 +781,9 @@ fn open_repairs_dangling_tool_call_durably() {
     assert!(messages[1].blocks[0].is_error);
     assert_eq!(
         messages[1].blocks[0].text,
-        "tool result missing from prior session"
+        "tool result missing: the prior session ended before this call \
+         finished, so it may or may not have run; check its effects before \
+         retrying"
     );
     reopened.close().expect("close");
 

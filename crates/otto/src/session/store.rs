@@ -422,6 +422,11 @@ impl Store {
 
     /// Appends a synthetic error result for each tool call left unresolved by
     /// a session that ended mid-turn.
+    ///
+    /// The prior process may have died before, during, or after the tool ran,
+    /// so the result tells the model the outcome is unknown rather than that
+    /// the call failed: a model that reads "failed" re-runs a side effect
+    /// (a push, an append) that may already have happened.
     fn repair_dangling_tool_calls(&self) -> Result<Vec<Warning>, PiError> {
         use otto_core::model::{Block, BlockType};
         let pending = pending_tool_calls(&self.messages())?;
@@ -432,7 +437,10 @@ impl Store {
                 created_at: Utc::now(),
                 blocks: vec![Block {
                     block_type: BlockType::ToolResult,
-                    text: "tool result missing from prior session".into(),
+                    text: "tool result missing: the prior session ended before this call \
+                           finished, so it may or may not have run; check its effects before \
+                           retrying"
+                        .into(),
                     tool_call_id: call.tool_call_id.clone(),
                     tool_name: call.tool_name.clone(),
                     is_error: true,

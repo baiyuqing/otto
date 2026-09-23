@@ -283,6 +283,21 @@ async fn test_is_error_propagates() -> Result<(), String> {
     Ok(())
 }
 
+/// Waits for the fake server to record a `notifications/cancelled` it
+/// received. Polls, because the notification is written after the call the
+/// test is watching has already returned.
+async fn wait_for_cancel_marker(path: &str) -> bool {
+    for _ in 0..100 {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && contents.contains("cancelled")
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
 async fn test_cancelled_call_returns_promptly() -> Result<(), String> {
     let marker = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let marker_path = marker
@@ -319,26 +334,27 @@ async fn test_cancelled_call_returns_promptly() -> Result<(), String> {
         format!("cancel took too long: {elapsed:?}"),
     )?;
 
-    let mut found = false;
-    for _ in 0..100 {
-        if let Ok(contents) = std::fs::read_to_string(&marker_path)
-            && contents.contains("cancelled")
-        {
-            found = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    check(found, "server did not record notifications/cancelled")?;
+    check(
+        wait_for_cancel_marker(&marker_path).await,
+        "server did not record notifications/cancelled",
+    )?;
 
     client.close().await;
     Ok(())
 }
 
+/// A call the server never answers times out, and the server is told the
+/// request is cancelled rather than left working on an answer no one reads.
 async fn test_call_timeout() -> Result<(), String> {
+    let marker = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    let marker_path = marker
+        .path()
+        .to_str()
+        .expect("utf8 marker path")
+        .to_string();
     let client = connect_client(
         "modern",
-        &[],
+        &[("OTTO_MCP_CANCEL_MARKER".to_string(), marker_path.clone())],
         Duration::from_secs(5),
         Duration::from_millis(150),
     )
@@ -349,6 +365,14 @@ async fn test_call_timeout() -> Result<(), String> {
     check(
         matches!(result, Err(CallError::Timeout)),
         format!("expected Timeout, got {result:?}"),
+    )?;
+    check(
+        !cancel.is_cancelled(),
+        "the call timeout must not cancel the caller's own token",
+    )?;
+    check(
+        wait_for_cancel_marker(&marker_path).await,
+        "server did not record notifications/cancelled for the timed-out call",
     )?;
     client.close().await;
     Ok(())

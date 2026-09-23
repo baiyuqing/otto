@@ -17,7 +17,9 @@
 //! may run concurrently; each transport serializes its own writes.
 //! Cancellation: a cancelled token aborts the in-flight call with
 //! [`CallError::Cancelled`]; the stdio transport also sends
-//! `notifications/cancelled`. Errors: every failure is reported in band to
+//! `notifications/cancelled`. A call that outruns `call_timeout_secs` takes
+//! that same path before it is reported as [`CallError::Timeout`], so a call
+//! Otto gives up on is never left running on the server. Errors: every failure is reported in band to
 //! the model as an error `ToolResult`; nothing here returns a `Result` to
 //! the agent loop. Security: tool names, descriptions, schemas and results
 //! are untrusted server data and are capped and redacted by the adapter.

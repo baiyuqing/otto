@@ -792,6 +792,72 @@ fn open_repairs_dangling_tool_call_durably() {
 }
 
 #[test]
+fn open_repairs_a_dangling_tool_call_left_mid_history() {
+    let temp = TempDir::new();
+    let (store, _) = new_store(&temp);
+    store.append_message(&user("hello")).expect("append user");
+    store
+        .append_message(&tool_call("call-1", "read"))
+        .expect("append call");
+    let path = store.path();
+    store.close().expect("close");
+
+    // A user message written straight after the call, which `append_message`
+    // refuses to write and only another Pi writer can produce.
+    let lines = json_lines(Path::new(&path));
+    let leaf = lines.last().expect("leaf")["id"]
+        .as_str()
+        .expect("leaf id")
+        .to_owned();
+    let mut orphaning = lines
+        .iter()
+        .find(|line| line["message"]["role"] == "user")
+        .expect("user entry")
+        .clone();
+    orphaning["id"] = serde_json::json!("deadbeef");
+    orphaning["parentId"] = serde_json::json!(leaf);
+    append_raw(&path, format!("{orphaning}\n").as_bytes());
+    let before = json_lines(Path::new(&path)).len();
+
+    let (reopened, warnings) = Store::open(&path).expect("open");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.message.contains("call-1")),
+        "the repair must be reported: {warnings:?}"
+    );
+    let roles: Vec<Role> = reopened
+        .messages()
+        .iter()
+        .map(|message| message.role.clone())
+        .collect();
+    assert_eq!(
+        roles,
+        vec![Role::User, Role::Assistant, Role::Tool, Role::User],
+        "the stand-in result belongs next to its call"
+    );
+    // The session takes writes again, which is what the dangling call broke.
+    reopened.append_message(&assistant("hi")).expect("append");
+    reopened.close().expect("close");
+
+    let lines = json_lines(Path::new(&path));
+    assert_eq!(
+        lines.len(),
+        before + 1,
+        "an append-only file cannot hold the repair: {lines:?}"
+    );
+    let (again, warnings) = Store::open(&path).expect("reopen");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.message.contains("call-1")),
+        "the repair is redone on every open: {warnings:?}"
+    );
+    assert_eq!(again.messages().len(), 5);
+    again.close().expect("close");
+}
+
+#[test]
 fn open_preserves_unknown_pi_entries_and_appends_beneath_leaf() {
     let temp = TempDir::new();
     let path = seeded_session(&temp);

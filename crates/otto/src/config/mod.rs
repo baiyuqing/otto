@@ -191,8 +191,8 @@ fn parent_directory(path: &Path) -> &Path {
 ///
 /// The timestamp is millisecond-resolution UTC in a fixed-width basic format,
 /// so the names sort chronologically; a name already taken (two writes within
-/// the same millisecond) gets a `-N` suffix, which orders arbitrarily within
-/// that millisecond and correctly against every other one.
+/// the same millisecond) gets the [`backup_name`] suffix, which keeps them in
+/// write order too.
 fn back_up(directory: &Path, current: &[u8]) -> Result<(), &'static str> {
     let backups = directory.join("backups");
     fs::DirBuilder::new()
@@ -200,18 +200,14 @@ fn back_up(directory: &Path, current: &[u8]) -> Result<(), &'static str> {
         .mode(0o700)
         .create(&backups)
         .map_err(|_| "cannot create configuration backup directory")?;
-    let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
     let mut attempt = 0;
     let mut file = loop {
-        let name = match attempt {
-            0 => format!("config-{stamp}.toml"),
-            taken => format!("config-{stamp}-{taken}.toml"),
-        };
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(backups.join(name))
+            .open(backups.join(backup_name(&stamp, attempt)))
         {
             Ok(file) => break file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempt < 99 => {
@@ -225,6 +221,20 @@ fn back_up(directory: &Path, current: &[u8]) -> Result<(), &'static str> {
         .map_err(|_| "cannot write configuration backup")?;
     prune(&backups);
     Ok(())
+}
+
+/// The backup file name for `stamp`, and for `attempt` writes already
+/// holding a name within that same millisecond.
+///
+/// The suffix separator sorts after the `.` of the extension and its counter
+/// is zero-padded, so the names of one millisecond's writes sort in write
+/// order, like every other pair. [`prune`] drops the oldest backups by that
+/// order, so a separator sorting the other way would drop the newest.
+fn backup_name(stamp: &str, attempt: u32) -> String {
+    match attempt {
+        0 => format!("config-{stamp}.toml"),
+        taken => format!("config-{stamp}_{taken:02}.toml"),
+    }
 }
 
 /// Removes all but the newest [`BACKUP_LIMIT`] backups, by name.
@@ -417,6 +427,40 @@ mod tests {
         save(&path, &profile_file("first"), b"").expect("save");
 
         assert!(backups(dir.path()).is_empty());
+    }
+
+    /// Backups are pruned by name, so the names of writes that land in the
+    /// same millisecond have to sort in write order like every other pair.
+    #[test]
+    fn save_keeps_the_newest_backups_of_a_shared_millisecond() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let directory = dir.path().join("backups");
+        fs::create_dir_all(&directory).expect("create backups");
+        let stamp = "20260923T101112.500Z";
+        let written: Vec<String> = (0..13)
+            .map(|attempt| {
+                let name = backup_name(stamp, attempt);
+                write(&directory, &name, &format!("p{attempt}"));
+                name
+            })
+            .collect();
+
+        prune(&directory);
+
+        let kept: Vec<String> = backups(dir.path())
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .expect("file name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            written[3..],
+            "prune must drop the three oldest, not the newest"
+        );
     }
 
     #[test]

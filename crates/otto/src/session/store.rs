@@ -26,8 +26,8 @@ use otto_core::session::compaction::{
     latest_compaction_metadata, validate_compaction_checkpoint,
 };
 use otto_core::session::context::{
-    add_resolved_usage, format_persisted_timestamp, format_rfc3339_nano, model_message_to_pi_entry,
-    parse_rfc3339, pending_tool_calls, snapshot_from_state,
+    add_resolved_usage, format_persisted_timestamp, format_rfc3339_nano, missing_tool_result,
+    model_message_to_pi_entry, parse_rfc3339, pending_tool_calls, snapshot_from_state,
 };
 use otto_core::session::pi::{
     PiCompaction, PiCustom, PiEntry, PiFile, PiSessionInfo, PiThinkingLevelChange,
@@ -420,24 +420,21 @@ impl Store {
             .map_err(|error| PiError::other(format!("close session file: {error}")))
     }
 
-    /// Appends a synthetic error result for each tool call left unresolved by
-    /// a session that ended mid-turn.
+    /// Appends a stand-in error result for each tool call a session that
+    /// ended mid-turn left unanswered at the end of its history.
+    ///
+    /// Only that trailing run is repaired here, because only it can be
+    /// repaired in an append-only file. A call left unanswered with history
+    /// after it is repaired in memory on every resolve instead; see
+    /// `otto_core::session::context::build_context`.
     fn repair_dangling_tool_calls(&self) -> Result<Vec<Warning>, PiError> {
-        use otto_core::model::{Block, BlockType};
         let pending = pending_tool_calls(&self.messages())?;
         let mut warnings = Vec::new();
         for call in pending {
             let message = Message {
                 role: Role::Tool,
                 created_at: Utc::now(),
-                blocks: vec![Block {
-                    block_type: BlockType::ToolResult,
-                    text: "tool result missing from prior session".into(),
-                    tool_call_id: call.tool_call_id.clone(),
-                    tool_name: call.tool_name.clone(),
-                    is_error: true,
-                    ..Block::default()
-                }],
+                blocks: vec![missing_tool_result(&call)],
                 ..Message::default()
             };
             self.append_message(&message).map_err(|error| {

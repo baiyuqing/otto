@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>otto trace viewer</title>
+<title>kite trace viewer</title>
 <style>
   :root { color-scheme: light dark; --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e2e2e2; --card:#f7f7f7; --accent:#2563eb; --ok:#16a34a; --warn:#d97706; --err:#dc2626; }
   @media (prefers-color-scheme: dark){ :root{ --bg:#161616; --fg:#e8e8e8; --muted:#999; --line:#333; --card:#1f1f1f; --accent:#60a5fa; --ok:#4ade80; --warn:#fbbf24; --err:#f87171; } }
@@ -39,12 +39,12 @@
 </head>
 <body>
 <header>
-  <h1>otto trace viewer</h1>
+  <h1>kite trace viewer</h1>
   <input type="file" id="file" accept=".jsonl,.json,.txt">
-  <span class="muted">or drop a <code>~/.otto/traces/*.jsonl</code> file anywhere</span>
+  <span class="muted">or drop a <code>~/.kite/traces/*.jsonl</code> file anywhere</span>
 </header>
 <main>
-  <div id="empty" class="drop">Load an OTTO_TRACE JSONL file to inspect calls, tokens, and context.</div>
+  <div id="empty" class="drop">Load an KITE_TRACE JSONL file to inspect calls, tokens, and context.</div>
   <div id="summary" class="summary" hidden></div>
   <table id="tbl" hidden>
     <thead><tr><th>#</th><th>time</th><th>status</th><th>ms</th><th>model</th><th>msgs</th><th>prompt→compl tok</th></tr></thead>
@@ -55,7 +55,7 @@
 const $ = s => document.querySelector(s);
 
 // --- pure parsing start ---
-// Otto traces two wire shapes: chat-completions (internal/provider/openaicompat)
+// Kite traces two wire shapes: chat-completions (internal/provider/openaicompat)
 // and the Responses API (internal/provider/openairesponses). Both are decoded
 // here. Tested by scripts/trace-viewer.test.mjs.
 function parseSSE(raw){

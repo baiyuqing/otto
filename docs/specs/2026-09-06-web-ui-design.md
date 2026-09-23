@@ -1,4 +1,4 @@
-# Web UI as a client of otto serve
+# Web UI as a client of kite serve
 
 Status: approved 2026-09-06. Records the decisions behind the loopback TCP
 listener, the bearer token, `POST .../compact`, and the embedded browser UI.
@@ -6,7 +6,7 @@ Current behavior is documented in the [user manual](../user-manual.md#agent-serv
 
 ## Goal
 
-Otto's end state is an agent that runs as a server, on this machine or
+Kite's end state is an agent that runs as a server, on this machine or
 elsewhere, and any interactive frontend is a client of that server. The
 inline Bubble Tea TUI depends on real-terminal cursor placement (required for
 macOS IME candidate windows, see PR #9) plus manual row arithmetic in
@@ -18,7 +18,7 @@ and tasks over a Unix socket; this design adds what a browser needs.
 
 ## Usage model
 
-One `otto serve` process per workspace. Each process serves its own UI and
+One `kite serve` process per workspace. Each process serves its own UI and
 listens on its own loopback port; one browser tab per process. There is no
 multi-process hub, discovery, or CORS. The TUI and REPL are left in place.
 

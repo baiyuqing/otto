@@ -35,7 +35,7 @@ const sandbox = { mode: 'seatbelt', network: 'off', bash_available: true, summar
 const idle: Session = {
   id: 'sess1',
   name: 'dev',
-  workspace: '/tmp/otto-work',
+  workspace: '/tmp/kite-work',
   provider: 'openai-compatible',
   profile: 'default',
   model: 'test',
@@ -48,7 +48,7 @@ const idle: Session = {
 }
 
 const info: Info = {
-  workspace: '/tmp/otto-work',
+  workspace: '/tmp/kite-work',
   provider: 'openai-compatible',
   profile: 'default',
   model: 'test',
@@ -171,7 +171,7 @@ describe('idle wake follow', () => {
     expect(api.usageDaily).toHaveBeenCalledWith(30)
   })
 
-  it('shows the Otto logo in the header', async () => {
+  it('shows the Kite logo in the header', async () => {
     await openIdleSession()
 
     const mark = document.querySelector('.brand-mark')
@@ -185,7 +185,7 @@ describe('idle wake follow', () => {
       servers: [{ name: 'docs', transport: 'http', protocol_version: '2026-07-28', state: 'connected', tools: 3, error: null }],
     })
 
-    const input = screen.getByPlaceholderText('Message Otto…')
+    const input = screen.getByPlaceholderText('Message Kite…')
     fireEvent.change(input, { target: { value: '/mcp' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await act(async () => {

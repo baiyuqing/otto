@@ -3,8 +3,8 @@ import { mcpServerLine, sendHint, sessionLabel, workspaceName } from './uiText'
 
 describe('ui text helpers', () => {
   it('formats compact labels for the shell around the transcript', () => {
-    expect(workspaceName('/Users/me/work/otto')).toBe('otto')
-    expect(workspaceName('/Users/me/work/otto/')).toBe('otto')
+    expect(workspaceName('/Users/me/work/kite')).toBe('kite')
+    expect(workspaceName('/Users/me/work/kite/')).toBe('kite')
     expect(sessionLabel('abcdef123456')).toBe('#abcdef12')
   })
 
@@ -22,7 +22,7 @@ describe('ui text helpers', () => {
     )
     expect(
       mcpServerLine({ name: 'legacy-tool', transport: 'http', protocol_version: '2025-11-25', state: 'needs_login', tools: 0, error: null }),
-    ).toBe('legacy-tool: needs_login (http, 2025-11-25) - run: otto mcp login legacy-tool')
+    ).toBe('legacy-tool: needs_login (http, 2025-11-25) - run: kite mcp login legacy-tool')
     expect(mcpServerLine({ name: 'broken', transport: 'stdio', protocol_version: null, state: 'failed', tools: 0, error: 'spawn failed: not found' })).toBe(
       'broken: failed: spawn failed: not found (stdio, -)',
     )

@@ -1,9 +1,9 @@
-# Otto User Manual
+# Kite User Manual
 
-Otto is a local-first agent written in Rust. It turns a
+Kite is a local-first agent written in Rust. It turns a
 natural-language prompt into a loop of model completions, optional tool calls,
 and — when needed — context compaction, in a full-screen TUI, a line-oriented
-REPL, or `otto serve`.
+REPL, or `kite serve`.
 
 This manual describes the behavior implemented by the current build: the
 OpenAI-compatible provider and the ChatGPT-subscription provider. It covers only
@@ -35,7 +35,7 @@ what the CLI actually does today.
 ## Prerequisites
 
 - macOS, the supported platform: it is the only one with a sandbox, and the
-  only one the acceptance gate runs on. Otto also builds and runs on Linux;
+  only one the acceptance gate runs on. Kite also builds and runs on Linux;
   see [platform support](#platform-support).
 - The pinned Rust 1.98 toolchain, Node 24+, and `wasm-pack` 0.15 to build from
   source (see [Install from source](../README.md#install-from-source)).
@@ -49,12 +49,12 @@ what the CLI actually does today.
 | --- | --- | --- |
 | `bash` under a sandbox | Seatbelt, the default | none; `auto` and `seatbelt` fail closed |
 | `bash` with `--sandbox off` | yes, unconfined | yes, unconfined |
-| File tools, sessions, compaction, memory, skills, sub-agents, MCP, workflows, `otto serve` and the Web UI, TUI and REPL | yes | yes |
+| File tools, sessions, compaction, memory, skills, sub-agents, MCP, workflows, `kite serve` and the Web UI, TUI and REPL | yes | yes |
 | Acceptance gate | `make check` | `make check-linux` (no Seatbelt conformance) |
 
-macOS is the supported platform. Otto builds and runs on Linux, but it has no
+macOS is the supported platform. Kite builds and runs on Linux, but it has no
 confined driver there: `auto` and `seatbelt` report `unsupported-platform`,
-Otto fails closed, and the `bash` tool is not registered at all. The model
+Kite fails closed, and the `bash` tool is not registered at all. The model
 keeps `read`, `grep`, `find`, `ls`, `write`, and `edit`, which stay inside the
 workspace as always. `--sandbox off` is the only way to run shell commands on
 Linux, and it is exactly as unconfined as it is on macOS: commands run as your
@@ -64,7 +64,7 @@ habit.
 Three host affordances differ. The clipboard behind the TUI's drag-copy is
 `pbcopy` on macOS and the first of `wl-copy`, `xclip`, or `xsel` that is
 installed on Linux; with none of them, copying reports that no helper was
-found. The browser that `otto serve --open` and `otto login` launch is
+found. The browser that `kite serve --open` and `kite login` launch is
 `/usr/bin/open` on macOS and `xdg-open` on Linux; a launch that fails is never
 fatal, because the URL is printed either way. A `bash` command runs under a
 login shell (`sh -lc`) on macOS, so it sees the `PATH` `path_helper` assembles
@@ -80,10 +80,10 @@ Install the binary:
 make install
 ```
 
-`make install` builds Otto and installs it to `~/.local/bin/otto`; make sure
+`make install` builds Kite and installs it to `~/.local/bin/kite`; make sure
 `~/.local/bin` is on your `PATH`.
 
-Create `~/.config/otto/config.toml`:
+Create `~/.config/kite/config.toml`:
 
 ```toml
 default_profile = "deepseek"
@@ -113,17 +113,17 @@ model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
-Export the selected profile's key and start Otto:
+Export the selected profile's key and start Kite:
 
 ```bash
 export DEEPSEEK_API_KEY=your-key
-otto --config ~/.config/otto/config.toml --profile deepseek
+kite --config ~/.config/kite/config.toml --profile deepseek
 ```
 
 An ad hoc run without a config file:
 
 ```bash
-OTTO_API_KEY=your-key otto \
+KITE_API_KEY=your-key kite \
   --provider openai-compatible \
   --base-url https://api.deepseek.com/v1 \
   --model deepseek-chat \
@@ -132,24 +132,24 @@ OTTO_API_KEY=your-key otto \
 
 ## ChatGPT subscription
 
-Otto can authorize requests with a ChatGPT Plus/Pro/Team/Enterprise subscription
+Kite can authorize requests with a ChatGPT Plus/Pro/Team/Enterprise subscription
 instead of a pay-per-token API key, using OpenAI's "Sign in with ChatGPT" OAuth
 flow (the same mechanism the Codex CLI uses).
 
 ### Signing in
 
 ```bash
-otto login
+kite login
 ```
 
-`otto login` starts a local callback server, opens your browser to the OpenAI
+`kite login` starts a local callback server, opens your browser to the OpenAI
 authorization page, and also prints the URL so you can open it manually if the
 browser does not launch. After you approve, it exchanges the authorization code
-and writes credentials to `~/.otto/auth/chatgpt.json` with file mode `0600`.
+and writes credentials to `~/.kite/auth/chatgpt.json` with file mode `0600`.
 
 ```bash
-otto login --status   # report the ChatGPT sign-in state and access-token expiry; exits nonzero if not signed in
-otto logout           # remove the stored credentials
+kite login --status   # report the ChatGPT sign-in state and access-token expiry; exits nonzero if not signed in
+kite logout           # remove the stored credentials
 ```
 
 ### Using the subscription
@@ -166,13 +166,13 @@ model = "gpt-5-codex"
 ```
 
 ```bash
-otto --profile chatgpt
+kite --profile chatgpt
 ```
 
 Or ad hoc, without a profile:
 
 ```bash
-otto --provider chatgpt --model gpt-5-codex
+kite --provider chatgpt --model gpt-5-codex
 ```
 
 ### How it works
@@ -191,32 +191,32 @@ otto --provider chatgpt --model gpt-5-codex
 
 ## Command-line reference
 
-Otto also has subcommands that run before the flags below are parsed:
+Kite also has subcommands that run before the flags below are parsed:
 
 | Command | Description |
 | --- | --- |
-| `otto login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
-| `otto logout` | Remove stored ChatGPT credentials. |
-| `otto memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
-| `otto sandbox setup [--config PATH] [--cwd PATH]` | Choose shell sandbox permissions interactively. See [Interactive sandbox setup](#interactive-sandbox-setup). |
-| `otto workflow run <name> [--input TEXT]` | Start a durable workflow and wait until it finishes or needs approval. |
-| `otto workflow status <run-id>` | Print one workflow run and its approval requests as JSON. |
-| `otto workflow resume <run-id> [--retry <step-id>]` | Resume safe pending work, or explicitly retry one interrupted step. |
-| `otto workflow fork <run-id> --after-step <step-id>` | Create a new run from that step's committed success boundary. |
-| `otto workflow approve\|reject <request-id>` | Resolve one persisted workflow approval gate. |
-| `otto workflow cancel <run-id>` | Stop active attempts, then mark the run canceled. |
-| `otto mcp list` | List MCP servers declared in the configuration file. See [MCP servers](#mcp-servers). |
-| `otto mcp add <server> ...` | Add an MCP server to `~/.config/otto/config.toml`. |
-| `otto mcp remove <server>` | Remove one configured MCP server. |
-| `otto mcp enable <server>` / `otto mcp disable <server>` | Toggle one configured MCP server. |
-| `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
-| `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
-| `otto serve [--socket PATH \| --listen HOST:PORT [--open]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
+| `kite login [--status]` | Sign in with a ChatGPT subscription, or (`--status`) report sign-in state. See [ChatGPT subscription](#chatgpt-subscription). |
+| `kite logout` | Remove stored ChatGPT credentials. |
+| `kite memory status\|forget <id>` | Inspect or delete memory records. See [Memory](#memory). |
+| `kite sandbox setup [--config PATH] [--cwd PATH]` | Choose shell sandbox permissions interactively. See [Interactive sandbox setup](#interactive-sandbox-setup). |
+| `kite workflow run <name> [--input TEXT]` | Start a durable workflow and wait until it finishes or needs approval. |
+| `kite workflow status <run-id>` | Print one workflow run and its approval requests as JSON. |
+| `kite workflow resume <run-id> [--retry <step-id>]` | Resume safe pending work, or explicitly retry one interrupted step. |
+| `kite workflow fork <run-id> --after-step <step-id>` | Create a new run from that step's committed success boundary. |
+| `kite workflow approve\|reject <request-id>` | Resolve one persisted workflow approval gate. |
+| `kite workflow cancel <run-id>` | Stop active attempts, then mark the run canceled. |
+| `kite mcp list` | List MCP servers declared in the configuration file. See [MCP servers](#mcp-servers). |
+| `kite mcp add <server> ...` | Add an MCP server to `~/.config/kite/config.toml`. |
+| `kite mcp remove <server>` | Remove one configured MCP server. |
+| `kite mcp enable <server>` / `kite mcp disable <server>` | Toggle one configured MCP server. |
+| `kite mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
+| `kite mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
+| `kite serve [--socket PATH \| --listen HOST:PORT [--open]]` | Run Kite as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
 
 | Flag | Description |
 | --- | --- |
 | `--help` | Show help and exit. |
-| `--config PATH` | Configuration file. Defaults to `~/.config/otto/config.toml`. |
+| `--config PATH` | Configuration file. Defaults to `~/.config/kite/config.toml`. |
 | `--cwd PATH` | Workspace directory. Defaults to `.`. |
 | `--profile NAME` | Configuration profile. |
 | `--provider NAME` | Provider override: `openai-compatible` or `chatgpt`. |
@@ -232,7 +232,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--continue` | Continue the newest valid workspace session. Cannot be combined with `--resume`, `--archive`, or `--no-session`. |
 | `--resume PATH` | Resume a specific session file. Cannot be combined with `--continue`, `--archive`, or `--no-session`. |
 | `--archive PATH` | Archive one active session file for the current `--cwd`, print the new path, and exit. Cannot be combined with `--continue`, `--resume`, `--no-session`, or `--prompt`. |
-| `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. Cannot be combined with `--listen`. |
+| `--socket PATH` | `serve` only. Unix domain socket path for `kite serve`. Defaults to `[server].socket`, then `~/.kite/kite.sock`. Cannot be combined with `--listen`. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. Cannot be combined with `--socket`. |
 | `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). Cannot be combined with `--socket`. A failed launch is not fatal: the URL is still printed. |
 
@@ -240,23 +240,23 @@ Otto also has subcommands that run before the flags below are parsed:
 
 | Variable | Meaning |
 | --- | --- |
-| `OTTO_PROVIDER` | Provider override (overrides the profile; overridden by `--provider`). |
-| `OTTO_PROFILE` | Profile override (overrides `default_profile`; overridden by `--profile`). |
-| `OTTO_MODEL` | Model override (overridden by `--model`). |
-| `OTTO_API_KEY` | Fallback API key, used when the selected profile's `api_key_env` variable is empty. |
-| `OTTO_UI` | Frontend mode (`auto`, `tui`, `repl`); overridden by `--ui`. |
-| `OTTO_STARTUP_TRACE` | `1`, `true`, `yes`, or `on` prints a startup timing breakdown to stderr (see [troubleshooting](#a-session-takes-too-long-to-start)). |
-| `<api_key_env>` | The variable named by the selected profile's `api_key_env`. Its value wins over `OTTO_API_KEY`. |
+| `KITE_PROVIDER` | Provider override (overrides the profile; overridden by `--provider`). |
+| `KITE_PROFILE` | Profile override (overrides `default_profile`; overridden by `--profile`). |
+| `KITE_MODEL` | Model override (overridden by `--model`). |
+| `KITE_API_KEY` | Fallback API key, used when the selected profile's `api_key_env` variable is empty. |
+| `KITE_UI` | Frontend mode (`auto`, `tui`, `repl`); overridden by `--ui`. |
+| `KITE_STARTUP_TRACE` | `1`, `true`, `yes`, or `on` prints a startup timing breakdown to stderr (see [troubleshooting](#a-session-takes-too-long-to-start)). |
+| `<api_key_env>` | The variable named by the selected profile's `api_key_env`. Its value wins over `KITE_API_KEY`. |
 
 API keys are environment variables only. There is no `--api-key` flag, and keys
 must never be stored in TOML.
 
 ## Configuration
 
-Otto auto-discovers only the global config file at `~/.config/otto/config.toml`.
+Kite auto-discovers only the global config file at `~/.config/kite/config.toml`.
 You can explicitly select any path with `--config`.
 
-Review any explicit config path before you run Otto. Otto never auto-discovers
+Review any explicit config path before you run Kite. Kite never auto-discovers
 repository-local config, but an explicit `--config` can request `driver = "off"`,
 extra `read_paths`, or `allow_env` grants on the next process start.
 
@@ -283,10 +283,10 @@ allow_env = []
 
 [skills]
 enabled = true
-paths = ["~/.otto/skills", ".otto/skills"]
+paths = ["~/.kite/skills", ".kite/skills"]
 
 [server]
-socket = "~/.otto/otto.sock"
+socket = "~/.kite/kite.sock"
 # listen = "127.0.0.1:8787"  # loopback TCP instead of the socket
 
 [inbound.feishu]
@@ -320,8 +320,8 @@ Key points:
   allow_env = []
   ```
 
-  On macOS, `driver = "auto"` means Seatbelt. Otto never auto-detects or
-  auto-falls back to Docker. If Seatbelt cannot be established, Otto fails
+  On macOS, `driver = "auto"` means Seatbelt. Kite never auto-detects or
+  auto-falls back to Docker. If Seatbelt cannot be established, Kite fails
   closed by disabling `bash` while keeping `read`, `grep`, `find`, `ls`,
   `write`, and `edit` available. On every other platform there is no confined
   driver at all, so `auto` and `seatbelt` fail closed the same way; see
@@ -335,15 +335,15 @@ Key points:
 
 - `[skills]` discovers reusable instruction sets from configured roots and
   registers the `skill` tool when at least one skill is found. Config keys are
-  `enabled` (default true) and `paths` (default `["~/.otto/skills", ".otto/skills"]`);
+  `enabled` (default true) and `paths` (default `["~/.kite/skills", ".kite/skills"]`);
   TOML-only, no CLI flags or environment variables.
 - `[agent.compaction]` configures automatic context compaction (see
   [Context compaction](#context-compaction)).
-- `[server].socket` sets the Unix domain socket path for `otto serve`, and
+- `[server].socket` sets the Unix domain socket path for `kite serve`, and
   `[server].listen` a loopback `HOST:PORT` to use instead (see
   [Agent server](#agent-server)). TOML-only aside from the `--socket` and
   `--listen` flags; no environment variable.
-- `[inbound.feishu]` is off by default. When `enabled = true`, `otto serve`
+- `[inbound.feishu]` is off by default. When `enabled = true`, `kite serve`
   spawns `lark-cli event consume im.message.receive_v1 --as bot` and delivers
   each text message to every open session inbox, which starts a wake turn
   when the session is idle. `binary` defaults to `lark-cli`. `chat_ids` is
@@ -353,7 +353,7 @@ Key points:
   `chat_ids` logs an error and starts nothing. Anyone in a listed chat can
   drive that session, so list chats whose membership you control.
   Credentials stay
-  in `lark-cli`'s own store, not in Otto config: unknown keys such as `token`
+  in `lark-cli`'s own store, not in Kite config: unknown keys such as `token`
   fail config load. A missing binary logs an error and disables inbound;
   serve keeps running. The TUI and REPL do not spawn this consumer.
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
@@ -362,7 +362,7 @@ Key points:
   provider/model choose its default. Optional `context_window` and
   `compaction_window` size proactive compaction for private or unknown model IDs.
 - A `provider = "chatgpt"` profile needs only `model`; it ignores `base_url`
-  and `api_key_env` and authorizes with the credentials from `otto login`. See
+  and `api_key_env` and authorizes with the credentials from `kite login`. See
   [ChatGPT subscription](#chatgpt-subscription).
 - `[agent].max_turns` is accepted by the schema but no longer limits the agent
   loop. It is not a profile key: every table rejects unknown fields, so
@@ -373,16 +373,16 @@ Key points:
 Startup resolution is field-specific:
 
 - **Profile:** explicit `--profile` wins; otherwise a startup `--continue` or
-  `--resume` uses the session's stored profile when present, then `OTTO_PROFILE`,
-  and a new session uses `OTTO_PROFILE` or `default_profile`.
-- **Provider / model:** `--provider` / `--model` override `OTTO_PROVIDER` /
-  `OTTO_MODEL`, which override the selected profile and any provider/model
+  `--resume` uses the session's stored profile when present, then `KITE_PROFILE`,
+  and a new session uses `KITE_PROFILE` or `default_profile`.
+- **Provider / model:** `--provider` / `--model` override `KITE_PROVIDER` /
+  `KITE_MODEL`, which override the selected profile and any provider/model
   stored in a resumed session. Explicit `--profile` makes that profile the
-  baseline instead, but does not outrank the `OTTO_*` variables.
+  baseline instead, but does not outrank the `KITE_*` variables.
 - **Endpoint:** `--base-url` overrides the profile's `base_url`. There is no
   base-URL environment override, and session files do not supply an endpoint.
 - **API key:** the profile's `api_key_env` variable wins if non-empty;
-  `OTTO_API_KEY` is the fallback.
+  `KITE_API_KEY` is the fallback.
 - **Agent limits:** `--shell-timeout` and `--max-output-bytes` override
   `[agent]`, which override built-in defaults. These stay in effect across
   in-process `/resume` and `/new`.
@@ -391,7 +391,7 @@ Startup resolution is field-specific:
   `read_paths`, and `allow_env` come from `[sandbox]` only. The effective
   sandbox is process-wide and does not change on startup resume or `/new`.
 - **Thinking effort:** `--thinking` overrides `[profiles.NAME].thinking`; when
-  neither is set, Otto omits the provider reasoning-effort field. In the TUI,
+  neither is set, Kite omits the provider reasoning-effort field. In the TUI,
   `/model` opens a profile picker followed by an effort picker; `Enter` applies
   the selected effort for this process and `s` also saves it to the profile.
   `/thinking LEVEL` changes the current session's effort for later requests, and
@@ -400,12 +400,12 @@ Startup resolution is field-specific:
   resumed session's own effort; a startup `--continue` / `--resume` resolves it
   from `--thinking` and the profile as above.
 - **Agent server listener:** `--listen` > `--socket` > `[server].listen` >
-  `[server].socket` > the built-in default `~/.otto/otto.sock`. A `listen`
+  `[server].socket` > the built-in default `~/.kite/kite.sock`. A `listen`
   value at any level selects TCP and no socket is created. There is no
-  environment variable. This applies only to `otto serve`.
+  environment variable. This applies only to `kite serve`.
 
 Startup `--continue` / `--resume` restore session provider/model only as
-defaults; direct flags and `OTTO_*` variables can override them, and a stored
+defaults; direct flags and `KITE_*` variables can override them, and a stored
 thinking effort is not restored. An in-process
 TUI `/resume` restores the selected session's stored provider/model and
 thinking effort, and ignores
@@ -415,7 +415,7 @@ selects the endpoint and key environment.
 UI mode precedence:
 
 1. `--ui`
-2. `OTTO_UI`
+2. `KITE_UI`
 3. `[ui].mode`
 4. built-in `auto`
 
@@ -427,24 +427,24 @@ Sandbox-driver precedence:
 
 ### Backups of the config file
 
-Commands that write the config file — `otto mcp add`/`remove`/`enable`/
-`disable`, `otto sandbox setup`, `/model --save`, `/thinking --save`,
+Commands that write the config file — `kite mcp add`/`remove`/`enable`/
+`disable`, `kite sandbox setup`, `/model --save`, `/thinking --save`,
 `/sandbox allow`, and `/sandbox network` — first copy the contents they
 replace into `backups/` beside the file, named `config-<UTC timestamp>.toml`.
 The ten most recent copies are kept; older ones are deleted. Restore one by
 copying it back:
 
 ```bash
-ls ~/.config/otto/backups/
-cp ~/.config/otto/backups/config-20260921T143001.417Z.toml ~/.config/otto/config.toml
+ls ~/.config/kite/backups/
+cp ~/.config/kite/backups/config-20260921T143001.417Z.toml ~/.config/kite/config.toml
 ```
 
 Writes go to a temporary file that is renamed over the config file, so an
 interrupted write leaves the previous file intact. Editing the file yourself is
-not backed up — Otto only sees the change when it next reads the file.
+not backed up — Kite only sees the change when it next reads the file.
 
 Each of these commands reads the whole file, edits it, and writes it back, so
-two Otto processes writing at the same time could drop one another's edits. A
+two Kite processes writing at the same time could drop one another's edits. A
 write therefore checks that the file still holds what the command read; if
 something else changed it in between, the command fails with `the configuration
 changed on disk; rerun to apply this change` and the file is left as the other
@@ -461,10 +461,10 @@ Selection:
 - `repl` forces the line-oriented REPL even from an interactive terminal.
 
 ```bash
-otto --ui auto
-otto --ui tui
-otto --ui repl
-OTTO_UI=repl otto
+kite --ui auto
+kite --ui tui
+kite --ui repl
+KITE_UI=repl kite
 ```
 
 ### TUI behavior
@@ -493,7 +493,7 @@ OTTO_UI=repl otto
 - While idle, a pending notification — a finished sub-agent, or a `remind`
   timer — starts a wake turn that delivers it and lets the model continue.
   Esc cancels it the same way as a user turn. Composer text is left in place.
-- Assistant responses render as Markdown; if rendering fails, Otto falls back
+- Assistant responses render as Markdown; if rendering fails, Kite falls back
   to escaped plain text.
 - Tool calls are folded to the tool name and a cut-down first line of the
   arguments, with at most the first three result lines under `⎿` and a
@@ -518,7 +518,7 @@ OTTO_UI=repl otto
   (`seatbelt · workspace-write · network allowed`, `sandbox off · WARNING: bash
   is unsandboxed`, or `bash disabled · sandbox unavailable`), the workspace,
   token totals, the context percentage, and the session ID when space allows.
-- If the terminal is smaller than `40x8`, Otto shows a resize message.
+- If the terminal is smaller than `40x8`, Kite shows a resize message.
 
 ### TUI keys
 
@@ -578,7 +578,7 @@ Shared commands:
   absolute, symlink-free path first and must exist; it is written to
   `[sandbox].read_paths` in the config file, so it also applies to later
   sessions. In the TUI the resolved path is shown in a confirmation picker
-  whose selected row is `Cancel`; applying it also asks Otto to retry the
+  whose selected row is `Cancel`; applying it also asks Kite to retry the
   command that failed.
 - `/sandbox network allow|deny` sets `[sandbox].network` the same way. In the
   TUI, `/sandbox network` without a mode opens a picker with the current mode
@@ -587,15 +587,15 @@ Shared commands:
   file is rolled back to what it held before and the previous sandbox stays in
   place.
 - `/approve <id>` grants one pending elevated Bash command and immediately asks
-  Otto to retry it. The grant is tied to the current session and exact command,
+  Kite to retry it. The grant is tied to the current session and exact command,
   is consumed once, and expires after five minutes.
 - `/skills` lists the skills available in the current session.
 - `/skill <name>` displays one skill's description, location, and instructions.
 - `/mcp` shows every configured MCP server and its connection state.
   `/mcp login <server>` signs in to one HTTP server that uses OAuth. See
   [MCP servers](#mcp-servers).
-- `/login` runs the same ChatGPT sign-in flow as `otto login` without leaving
-  the session, and reports `Restart Otto to use the new credentials`;
+- `/login` runs the same ChatGPT sign-in flow as `kite login` without leaving
+  the session, and reports `Restart Kite to use the new credentials`;
   `/login status` prints the sign-in state. On a non-`chatgpt` provider it
   answers that there is nothing to sign in to. `/logout` removes the stored
   credentials. See [ChatGPT subscription](#chatgpt-subscription).
@@ -605,7 +605,7 @@ TUI-only commands:
 
 - `/image <path>` attaches one image to the next prompt. The image is stored
   inline in the session; the selected model and provider endpoint must support
-  image input. Otto sends images with `detail: high`.
+  image input. Kite sends images with `detail: high`.
 
 - `/resume` opens a modal of the up to 50 most recently modified valid sessions
   for the current canonical workspace. `↑`/`↓` or `PgUp`/`PgDn` to navigate,
@@ -625,36 +625,36 @@ printing the archived path and the new session ID.
 
 ## Sessions
 
-Otto writes append-only JSONL in the **Pi session format version 3**, compatible
-with the public session format and `SessionManager` API in Pi 0.84.3. Otto
+Kite writes append-only JSONL in the **Pi session format version 3**, compatible
+with the public session format and `SessionManager` API in Pi 0.84.3. Kite
 keeps its own storage root, separate from Pi:
 
 ```text
-~/.otto/sessions/<workspace-key>/<session-id>.jsonl
+~/.kite/sessions/<workspace-key>/<session-id>.jsonl
 ```
 
-A new session file is created lazily: starting Otto reserves a session, but the
+A new session file is created lazily: starting Kite reserves a session, but the
 JSONL file is only written on the first user prompt. Starting and quitting
 without a prompt leaves no session file behind.
 
 ```bash
-./otto --cwd /path/to/project --continue
-./otto --cwd /path/to/project --resume /absolute/path/to/session.jsonl
-./otto --cwd /path/to/project --archive /absolute/path/to/active-session.jsonl
-./otto --cwd /path/to/project --no-session
+./kite --cwd /path/to/project --continue
+./kite --cwd /path/to/project --resume /absolute/path/to/session.jsonl
+./kite --cwd /path/to/project --archive /absolute/path/to/active-session.jsonl
+./kite --cwd /path/to/project --no-session
 ```
 
 Notes:
 
 - `--continue` reopens the newest valid Pi v3 session for the current canonical
-  workspace. Invalid files and old Otto v1 files are skipped.
+  workspace. Invalid files and old Kite v1 files are skipped.
 - `--resume PATH` reopens a specific valid Pi v3 session only when its recorded
   workspace matches the current `--cwd`.
-- Old Otto v1 files are left untouched, are not listed by `/resume`, and cannot
+- Old Kite v1 files are left untouched, are not listed by `/resume`, and cannot
   be resumed.
 - `--no-session` keeps history in memory only.
 - **Archiving** moves an active session into a sibling `archive/` directory:
-  `~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. The move is
+  `~/.kite/sessions/<workspace-key>/archive/<session-id>.jsonl`. The move is
   atomic and preserves the file byte-for-byte with its `0600` mode; nothing is
   deleted and no disk space is reclaimed. The `archive/` directory is created
   `0700` on the first archive and is scoped to that workspace, so archiving one
@@ -662,7 +662,7 @@ Notes:
   `/resume`, `--continue`, and the `/archive` picker, but remain resumable by
   explicit path:
   ```bash
-  ./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
+  ./kite --cwd /path/to/project --resume ~/.kite/sessions/<key>/archive/<session-id>.jsonl
   ```
   `--archive PATH` archives one active session for the current `--cwd` and
   exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
@@ -673,7 +673,7 @@ Notes:
 - Session files contain sensitive prompt text, responses, summaries, tool
   calls, tool arguments, results, and file metadata. Protect them like source
   data. They do not contain provider API keys, OAuth tokens, authorization
-  headers, or cookie values, and Otto does not persist private sandbox profile
+  headers, or cookie values, and Kite does not persist private sandbox profile
   paths as runtime metadata.
 
 ### Optional Pi interoperability probe
@@ -683,7 +683,7 @@ API) is installed, an opt-in probe opens one session and prints bounded JSON
 metadata only — never message, summary, or tool content:
 
 ```bash
-OTTO_PI_INTEROP=1 node ./scripts/pi-session-interop.mjs /tmp/otto-session.jsonl
+KITE_PI_INTEROP=1 node ./scripts/pi-session-interop.mjs /tmp/kite-session.jsonl
 ```
 
 It exits 77 with a `SKIP` message when Pi is unavailable or the gate is unset,
@@ -696,13 +696,13 @@ per-profile context metadata.
 
 Rules and defaults:
 
-- `auto = true` is the default. With `auto = true`, Otto does two bounded
+- `auto = true` is the default. With `auto = true`, Kite does two bounded
   automatic checks:
   - **Proactive compaction:** when the model window is known and the next
-    request estimate is above `working_window - reserve_tokens`, Otto attempts
+    request estimate is above `working_window - reserve_tokens`, Kite attempts
     one checkpoint before sending the provider request.
   - **Reactive overflow recovery:** when the provider returns a typed
-    context-overflow error, Otto does one automatic compaction and retries once.
+    context-overflow error, Kite does one automatic compaction and retries once.
 - The automatic paths are one-shot only; they never loop.
 - `reserve_tokens = 16384` and `keep_recent_tokens = 20000` are the defaults.
 - `context_window` and `compaction_window` must be at least `4096` when set.
@@ -714,7 +714,7 @@ the hidden summary-system prompt.
 
 ### Model window metadata
 
-Otto ships a static limit catalog for common GPT, o-series, and Claude model IDs
+Kite ships a static limit catalog for common GPT, o-series, and Claude model IDs
 so it can size compaction conservatively.
 
 - Listed full-size GPT-5.4/5.5/5.6 aliases use `context_window=1050000`,
@@ -725,7 +725,7 @@ so it can size compaction conservatively.
   `*-chat-latest` aliases use their catalog chat values.
 - GPT-4.1, GPT-4o, o1/o3/o4, and listed Claude aliases use the static catalog.
 - Claude metadata is used only when an OpenAI-compatible endpoint exposes a
-  Claude-family model ID; Otto has no Anthropic provider.
+  Claude-family model ID; Kite has no Anthropic provider.
 
 If a model ID is unknown, proactive automation is disabled (no trustworthy local
 window), but reactive one-shot recovery can still happen after a typed provider
@@ -766,7 +766,7 @@ canonical workspace, even when `--sandbox off` is selected:
 
 Recursive `grep` and `find` skip `.git` and discovered symlinks but include
 other dotfiles. Binary files, invalid UTF-8 files, and files with lines larger
-than 1 MiB are skipped by `grep`. Otto canonicalizes paths, resolves symlinks,
+than 1 MiB are skipped by `grep`. Kite canonicalizes paths, resolves symlinks,
 and rejects workspace escapes. Actual file operations use a directory handle
 so replacing a path during an operation cannot redirect them outside the
 initial workspace.
@@ -775,7 +775,7 @@ initial workspace.
 
 `remind` schedules a later wake. It returns immediately and reports the id
 it assigned, such as `scheduled r1 in 10s: check the build`. When the delay
-elapses, Otto delivers a `[timer]` notification and the idle wake loop
+elapses, Kite delivers a `[timer]` notification and the idle wake loop
 starts a turn, the same way a finished sub-agent does. At most eight timers
 can be outstanding. Each delay is 1 to 3600 seconds.
 
@@ -786,12 +786,12 @@ list and cancels that timer. Both answer `no timers in this session` and
 `unknown timer: <id>` respectively.
 
 In the REPL and the TUI, `/timers` prints the same list and
-`/timers cancel <id>` cancels one timer. `otto serve` exposes the same two
+`/timers cancel <id>` cancels one timer. `kite serve` exposes the same two
 operations as `GET /v1/sessions/{id}/timers` and
 `POST /v1/sessions/{id}/timers/{timer_id}/cancel`.
 
 File-backed sessions keep outstanding timers across a restart; opening that
-session restores them, and a timer that is already due fires as soon as Otto
+session restores them, and a timer that is already due fires as soon as Kite
 is idle. `/new` starts a different session without them. `--no-session`
 timers live only in the current process. Archiving a session cancels its
 outstanding timers permanently: the stored timers are deleted with the
@@ -800,7 +800,7 @@ agents do not get these tools.
 
 ### Interactive sandbox setup
 
-Run `otto sandbox setup` to choose network access and optionally add the built-in
+Run `kite sandbox setup` to choose network access and optionally add the built-in
 GitHub CLI recipe. Use `--config PATH` for another configuration file and `--cwd
 PATH` to select the workspace used by the check. No model or provider login is
 required.
@@ -815,28 +815,28 @@ workspace.
 The GitHub CLI recipe exposes its configuration directory read-only and allows
 `GH_CONFIG_DIR`. This can expose saved GitHub credentials to shell commands. The
 wizard uses an existing absolute `GH_CONFIG_DIR`, or defaults to `~/.config/gh`,
-and prints a launch command setting that variable because Otto replaces `HOME`.
-Run `gh auth login` outside Otto first if the configuration directory is missing.
+and prints a launch command setting that variable because Kite replaces `HOME`.
+Run `gh auth login` outside Kite first if the configuration directory is missing.
 
 Choose `check` to test sandbox startup and, when selected, GitHub CLI availability
 and directory access using the displayed launch environment. The check does not
 contact GitHub or verify authentication or network connectivity. Choose `save`
-to write the reviewed configuration, then restart Otto with the printed command.
+to write the reviewed configuration, then restart Kite with the printed command.
 
 ### `bash` sandbox policy
 
 On macOS, the default is `--sandbox auto`, which means Seatbelt. The sandboxed
-command gets whole-workspace write access plus Otto-managed private `home`,
-`tmp`, and `cache` directories beneath your user cache. Otto keeps generated
+command gets whole-workspace write access plus Kite-managed private `home`,
+`tmp`, and `cache` directories beneath your user cache. Kite keeps generated
 profile files in a separate private `profiles` directory that the sandboxed
-child cannot read. Otto does not treat the workspace as protected: source,
+child cannot read. Kite does not treat the workspace as protected: source,
 `.git`, tests, and generated files remain writable.
 
 Host home content is not automatically readable. Git config, shell dotfiles,
 and host caches are not implicitly mounted into the command view. Add only the
 narrow absolute or `~/...` `read_paths` you need. Broad `read_paths` are high
 risk because command code can read them and, with `network = "allow"`, exfiltrate
-them. Otto rejects `read_paths` that would include Otto's private sandbox state.
+them. Kite rejects `read_paths` that would include Kite's private sandbox state.
 If you need tool-specific config, prefer narrow `read_paths` plus exact config
 environment variables over exposing a large home or cache subtree.
 
@@ -852,25 +852,25 @@ TLS server certificates; without them a client that verifies certificates
 through that framework fails with an opaque trust error such as
 `x509: OSStatus -26276`.
 
-The command environment is rebuilt from one captured process snapshot. Otto
-never restores provider API-key variables, `OTTO_API_KEY`, loader-injection
-variables, shell-startup injection variables, `SSH_AUTH_SOCK`, or Otto's own
+The command environment is rebuilt from one captured process snapshot. Kite
+never restores provider API-key variables, `KITE_API_KEY`, loader-injection
+variables, shell-startup injection variables, `SSH_AUTH_SOCK`, or Kite's own
 sandbox variables. `allow_env` restores only exact names after filtering and is
 high risk because it grants the restored value to untrusted command code.
-Restored values are still added to Otto's exact-value redactor.
+Restored values are still added to Kite's exact-value redactor.
 
-If Otto would need to retain more than 512 sensitive values or more than 1 MiB
+If Kite would need to retain more than 512 sensitive values or more than 1 MiB
 of sensitive-value bytes for exact redaction, it fails closed by disabling
 `bash` for that process. Exact-value redaction is defense in depth only: if a
-command transforms or encodes a secret, Otto may not be able to redact it.
+command transforms or encodes a secret, Kite may not be able to redact it.
 
-If you explicitly select `--sandbox off`, Otto prints a persistent local warning
+If you explicitly select `--sandbox off`, Kite prints a persistent local warning
 and `bash` runs unsandboxed as your current user. In that mode,
 `network = "deny"`, private-home/cache replacement, and `read_paths` no longer
 constrain the shell.
 
 In an interactive parent session using Seatbelt, the model may set
-`sandbox_permissions` to `require_escalated` and provide a justification. Otto
+`sandbox_permissions` to `require_escalated` and provide a justification. Kite
 does not run the command; it returns an approval ID. Review the exact command
 and reason, then enter `/approve <id>`. The matching command runs once through
 the existing unconfined driver with the same filtered environment rules as
@@ -880,10 +880,10 @@ modify sandbox configuration.
 
 ### Seatbelt limitations
 
-Otto depends on Apple's deprecated `/usr/bin/sandbox-exec`. It improves
-command isolation on macOS, but it is not a VM boundary. Otto does not claim
+Kite depends on Apple's deprecated `/usr/bin/sandbox-exec`. It improves
+command isolation on macOS, but it is not a VM boundary. Kite does not claim
 protection against same-user or same-kernel attacks, pre-existing hard links,
-`setsid` escaping Otto's process-group cleanup, resource exhaustion, or
+`setsid` escaping Kite's process-group cleanup, resource exhaustion, or
 intentional damage inside the writable workspace. Docker and Apple Container are
 not detected or supported.
 
@@ -897,9 +897,9 @@ Override them with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
 read the prompt from a file (bounded to 1 MiB).
 
 ```bash
-./otto --prompt "summarize TODOs in this repo"
-./otto --prompt @prompt.txt --no-session
-./otto --prompt "explain main.go" --thinking max --continue
+./kite --prompt "summarize TODOs in this repo"
+./kite --prompt @prompt.txt --no-session
+./kite --prompt "explain main.go" --thinking max --continue
 ```
 
 `--prompt` cannot be combined with `--ui tui` or `--archive`, and composes with
@@ -907,14 +907,14 @@ read the prompt from a file (bounded to 1 MiB).
 
 ## Agent server
 
-`otto serve` runs Otto as a long-lived HTTP+JSON+SSE frontend, instead of the
+`kite serve` runs Kite as a long-lived HTTP+JSON+SSE frontend, instead of the
 TUI or REPL. One process serves one workspace and manages any number of
 sessions; turns in different sessions run concurrently, and starting a second
 turn on a session that already has one active returns `409`. It listens on
 either a Unix domain socket (the default) or a loopback TCP port.
 
 ```bash
-otto serve [--socket PATH | --listen HOST:PORT [--open]]
+kite serve [--socket PATH | --listen HOST:PORT [--open]]
 ```
 
 `serve` accepts the same startup flags as the interactive frontends
@@ -945,9 +945,9 @@ should respond uses a user-installed `lark-cli` skill through `bash`.
 
 The listener resolves in this order: `--listen` > `--socket` >
 `[server].listen` > `[server].socket` > the built-in default
-`~/.otto/otto.sock`. Exactly one listener is opened.
+`~/.kite/kite.sock`. Exactly one listener is opened.
 
-**Unix socket.** Otto creates a missing parent directory with mode `0700`,
+**Unix socket.** Kite creates a missing parent directory with mode `0700`,
 creates the socket file with mode `0600`, and refuses to start if a live
 server already owns that path. File permissions are the only access control;
 requests carry no token.
@@ -955,17 +955,17 @@ requests carry no token.
 **Loopback TCP.** `--listen HOST:PORT` accepts only loopback hosts:
 `127.0.0.1`, `::1`, or the literal `localhost` (mapped to `127.0.0.1` without a
 DNS lookup). Any other host is rejected at startup. Port `0` picks a free
-port. Otto generates a random access token for the process and prints one
+port. Kite generates a random access token for the process and prints one
 line to stdout before serving:
 
 ```
-otto serve: http://127.0.0.1:PORT/?token=<token>
+kite serve: http://127.0.0.1:PORT/?token=<token>
 ```
 
 `--open` then launches that URL with `/usr/bin/open` on macOS and `xdg-open`
 on Linux. A failed launch is not fatal. `--open` with a Unix socket (the
 default, `--socket`, or `[server].socket`) exits with
-`otto: --open requires a TCP listener`.
+`kite: --open requires a TCP listener`.
 
 Every `/v1/` request must then carry `Authorization: Bearer <token>`; a
 missing or wrong token returns `401` with `WWW-Authenticate: Bearer`. The
@@ -1005,7 +1005,7 @@ the transcript, and a composer:
   `POST /v1/sessions/{id}/approvals/{approval_id}` and then submits the retry
   prompt the server returns as the next turn.
   `/mcp` shows each configured server's connection state only; signing in
-  runs on the host with `otto mcp login <server>`, since the OAuth flow opens
+  runs on the host with `kite mcp login <server>`, since the OAuth flow opens
   a browser there, not in the page.
 - Enter sends the composer text as a turn or Web command; Shift+Enter inserts
   a newline. Assistant text renders as GitHub-Flavored Markdown, with KaTeX
@@ -1169,7 +1169,7 @@ Status codes:
 ### Observability
 
 Each normal provider response, compaction summary, and sub-agent provider
-response appends a content-free row to `~/.otto/usage.db`. The row contains
+response appends a content-free row to `~/.kite/usage.db`. The row contains
 time, workspace/session/task identifiers, provider/profile/model, usage
 presence, and token counts; it never contains prompts, response text, tool
 arguments, or tool output. Collection, SQLite storage, and the HTTP/UI query
@@ -1185,37 +1185,37 @@ days without provider calls with zeroes. The Web UI uses the existing
 MIT-licensed Mermaid dependency for its chart; no separate analytics or chart
 backend is involved.
 
-`GET /metrics` exposes `otto_http_requests_total{route,method,status}`,
-`otto_http_request_duration_seconds{route}`,
-`otto_provider_api_requests_total{provider,model,status}`,
-`otto_provider_api_request_duration_seconds{provider,model}`,
-`otto_sessions_open`, `otto_session_context_window_tokens{session_id,provider,model}`,
-`otto_session_context_input_tokens{session_id,provider,model}`,
-`otto_session_context_input_tokens_pending{session_id,provider,model}`,
-`otto_turns_total{status}`, `otto_turns_active`, `otto_turn_duration_seconds`,
-`otto_tool_calls_total{tool,status}`, `otto_tool_call_duration_seconds{tool}`,
-`otto_provider_tokens_total{kind}`, `otto_event_stream_clients`,
-`otto_tasks_started_total`, `otto_tasks_finished_total{status}`,
-`otto_tasks_running`, `otto_workflow_runs{status}`, and
-`otto_workflow_steps{status}`.
+`GET /metrics` exposes `kite_http_requests_total{route,method,status}`,
+`kite_http_request_duration_seconds{route}`,
+`kite_provider_api_requests_total{provider,model,status}`,
+`kite_provider_api_request_duration_seconds{provider,model}`,
+`kite_sessions_open`, `kite_session_context_window_tokens{session_id,provider,model}`,
+`kite_session_context_input_tokens{session_id,provider,model}`,
+`kite_session_context_input_tokens_pending{session_id,provider,model}`,
+`kite_turns_total{status}`, `kite_turns_active`, `kite_turn_duration_seconds`,
+`kite_tool_calls_total{tool,status}`, `kite_tool_call_duration_seconds{tool}`,
+`kite_provider_tokens_total{kind}`, `kite_event_stream_clients`,
+`kite_tasks_started_total`, `kite_tasks_finished_total{status}`,
+`kite_tasks_running`, `kite_workflow_runs{status}`, and
+`kite_workflow_steps{status}`.
 
-Otto logs one line per HTTP request (method, route, status, duration, request
+Kite logs one line per HTTP request (method, route, status, duration, request
 ID) and one line per turn start and finish (session ID, turn ID, status,
 duration, token usage). Prompt text and tool arguments or output are never
 logged.
 
 ### Shutdown
 
-`otto serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new
+`kite serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new
 requests, cancels every active turn and compaction, closes every session,
 removes the socket file (socket mode), and exits `0`.
 
 ### Examples
 
 ```bash
-curl -s --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions -d '{}'
-curl -N --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/turns -d '{"text":"list files"}'
-curl -s --unix-socket ~/.otto/otto.sock -X POST http://otto/v1/sessions/<id>/turns/<turn_id>/cancel
+curl -s --unix-socket ~/.kite/kite.sock -X POST http://kite/v1/sessions -d '{}'
+curl -N --unix-socket ~/.kite/kite.sock -X POST http://kite/v1/sessions/<id>/turns -d '{"text":"list files"}'
+curl -s --unix-socket ~/.kite/kite.sock -X POST http://kite/v1/sessions/<id>/turns/<turn_id>/cancel
 
 # TCP listener; TOKEN is the value printed at startup
 curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessions -d '{}'
@@ -1242,8 +1242,8 @@ gates, and restart behavior must not depend on the parent model improvising a
 plan. They are separate from the interactive session and continue to be
 inspectable after `/new`, `/resume`, or process restart.
 
-Definitions are discovered from `~/.otto/workflows/<name>.toml` and
-`<workspace>/.otto/workflows/<name>.toml`; the workspace file wins. Agent and
+Definitions are discovered from `~/.kite/workflows/<name>.toml` and
+`<workspace>/.kite/workflows/<name>.toml`; the workspace file wins. Agent and
 handoff steps reference named definitions from the existing `AGENT.md` catalog:
 
 ```toml
@@ -1293,7 +1293,7 @@ under fixed headings. There is no template language. Definitions have at most
 32 steps, must be acyclic, and are validated completely before the run is
 stored.
 
-When a run starts, Otto snapshots the workflow plus each referenced agent's
+When a run starts, Kite snapshots the workflow plus each referenced agent's
 instructions, model choice, tool allowlist, and write policy. Editing the
 source files affects new runs only. The current sandbox remains authoritative
 and a tool that no longer exists fails closed.
@@ -1316,7 +1316,7 @@ name: executor
 description: Apply approved edits under owned paths.
 tools: read, grep, find, ls, edit, write, bash
 write_policy: owned_paths
-write_paths: crates/otto/**, docs/**
+write_paths: crates/kite/**, docs/**
 ---
 ```
 
@@ -1324,19 +1324,19 @@ Supported policies are `read_only`, `propose_only`, `single_writer` (the
 default), and `owned_paths`. `read_only` and `propose_only` deny workspace
 mutation tools even if `tools` lists `edit` or `write`; `owned_paths` allows
 `edit` and `write` only for paths matching its comma-separated ownership globs
-such as `crates/otto/**` or `docs/*.md`. Workflow validation rejects agent steps
+such as `crates/kite/**` or `docs/*.md`. Workflow validation rejects agent steps
 that may run concurrently when their write scopes overlap, unless they are
 ordered with `needs` or use disjoint `owned_paths`. This makes the recommended
 shape explicit: concurrent planner/reviewer steps produce proposals, an
 approval gate records the human decision, and one executor step applies the
 approved plan.
 
-State is stored in `~/.otto/workflows.db` with mode `0600`; attempt transcripts
-are append-only Pi v3 files under `~/.otto/workflow-sessions`. Only one Otto
-process may mutate workflows for one workspace at a time. `otto serve` exposes
+State is stored in `~/.kite/workflows.db` with mode `0600`; attempt transcripts
+are append-only Pi v3 files under `~/.kite/workflow-sessions`. Only one Kite
+process may mutate workflows for one workspace at a time. `kite serve` exposes
 the same controller through the Web UI and `/v1/workflows` routes. While the
 server owns the workspace lock, use those surfaces rather than a second
-`otto workflow` CLI process.
+`kite workflow` CLI process.
 
 Recovery is deliberately conservative:
 
@@ -1345,14 +1345,14 @@ Recovery is deliberately conservative:
 - Pending approval requests keep the same request ID.
 - A step that was running becomes `interrupted` and the run becomes `paused`.
 - Interrupted steps are never retried automatically. Use
-  `otto workflow resume <run-id> --retry <step-id>` only after considering
+  `kite workflow resume <run-id> --retry <step-id>` only after considering
   whether its last tool call may already have caused an external effect.
 
-Time travel is an explicit fork, not rewind. `otto workflow fork <run-id>
+Time travel is an explicit fork, not rewind. `kite workflow fork <run-id>
 --after-step <step-id>` creates a new run from that step's committed success
 event. Steps already succeeded by that event are copied as immutable references
 to the source run's attempts; later steps are scheduled normally. The original
-run is unchanged, and Otto does not roll back external side effects.
+run is unchanged, and Kite does not roll back external side effects.
 
 The workflow runtime is fail-fast and supports agent, static handoff, and
 boolean approval steps. It does not implement loops, conditions, group chat,
@@ -1361,8 +1361,8 @@ export.
 
 ## Memory
 
-Otto has a local, per-workspace/per-user memory store backed by SQLite/FTS5
-(`crates/otto`'s `memory` module). It is enabled by default.
+Kite has a local, per-workspace/per-user memory store backed by SQLite/FTS5
+(`crates/kite`'s `memory` module). It is enabled by default.
 
 Config (`[memory]` in TOML; all keys optional):
 
@@ -1376,7 +1376,7 @@ max_results = 12
 require_encryption = false
 
 [memory.sqlite]
-path = "~/.otto/memory/memory.db"
+path = "~/.kite/memory/memory.db"
 busy_timeout = "5s"
 
 [memory.workspace_ids]
@@ -1392,7 +1392,7 @@ What's wired:
 - Agent tools: `memory_search`, `remember`, `forget`.
 - Human commands in both frontends: `/memory search`, `/memory forget`,
   `/memory review`, and `/remember`.
-- Standalone CLI: `otto memory status` and `otto memory forget <id>`.
+- Standalone CLI: `kite memory status` and `kite memory forget <id>`.
 
 Model-originated writes always land as pending candidates for human review.
 Human `/remember` and `/memory forget` apply immediately.
@@ -1401,12 +1401,12 @@ Not yet implemented:
 
 - No automatic extraction (`Binding.Observe` is not wired).
 - No backup/restore/verify commands.
-- No `otto memory backup|backups|verify|restore` subcommands.
+- No `kite memory backup|backups|verify|restore` subcommands.
 
 ## Skills
 
-Otto loads reusable instruction sets ("skills") from `~/.otto/skills` (user level)
-and workspace `.otto/skills` directories. A skill is a directory containing
+Kite loads reusable instruction sets ("skills") from `~/.kite/skills` (user level)
+and workspace `.kite/skills` directories. A skill is a directory containing
 `SKILL.md` with YAML frontmatter and Markdown body, following the Agent Skills
 format.
 
@@ -1415,7 +1415,7 @@ Config (`[skills]` in TOML; all keys optional):
 ```toml
 [skills]
 enabled = true                              # default true
-paths = ["~/.otto/skills", ".otto/skills"]  # default; later entries win on name conflict
+paths = ["~/.kite/skills", ".kite/skills"]  # default; later entries win on name conflict
 ```
 
 What's wired:
@@ -1439,7 +1439,7 @@ What's wired:
   be declared together; declaring one alone, leaving one blank, or exceeding
   the bound prints one stderr warning and the skill keeps working as if
   neither were declared. `/skills` marks a skill that declares both with
-  `[contract]`. They are Otto's own addition to the Agent Skills format, so
+  `[contract]`. They are Kite's own addition to the Agent Skills format, so
   other tools ignore them. See the
   [sub-agent execution design](specs/2026-09-22-skill-subagent-execution.md)
   for the reasoning.
@@ -1469,28 +1469,28 @@ Not yet implemented:
 
 ## MCP servers
 
-Otto connects to Model Context Protocol (MCP) servers over stdio (a local
+Kite connects to Model Context Protocol (MCP) servers over stdio (a local
 subprocess) or Streamable HTTP, and registers each server's tools for the
 model to call in the same turn loop as the built-in tools.
 
-You can edit TOML directly, or use `otto mcp add` to write the server table
+You can edit TOML directly, or use `kite mcp add` to write the server table
 for you. The commands below write the default config file
-`~/.config/otto/config.toml` and print a reminder to restart Otto:
+`~/.config/kite/config.toml` and print a reminder to restart Kite:
 
 ```bash
-otto mcp add github \
+kite mcp add github \
   --transport stdio \
   --command npx \
   --arg -y \
   --arg @modelcontextprotocol/server-github \
   --env GITHUB_TOKEN=GITHUB_TOKEN
 
-otto mcp add docs \
+kite mcp add docs \
   --transport http \
   --url https://mcp.example.com/mcp \
   --header 'Authorization=Bearer ${DOCS_MCP_TOKEN}'
 
-otto mcp add remote \
+kite mcp add remote \
   --transport http \
   --url https://remote.example.com/mcp \
   --auth oauth \
@@ -1502,14 +1502,14 @@ value. For HTTP headers, pass the desired header value; use `${VAR}` in that
 value for secrets. Other configuration commands are:
 
 ```bash
-otto mcp list
-otto mcp disable github
-otto mcp enable github
-otto mcp remove github
+kite mcp list
+kite mcp disable github
+kite mcp enable github
+kite mcp remove github
 ```
 
-After adding or changing a server, restart Otto before expecting the running
-session to see new tools. For OAuth HTTP servers, run `otto mcp login <server>`
+After adding or changing a server, restart Kite before expecting the running
+session to see new tools. For OAuth HTTP servers, run `kite mcp login <server>`
 and then restart.
 
 Manual config (`[mcp]` and `[mcp.servers.<name>]` in TOML):
@@ -1536,7 +1536,7 @@ headers = { Authorization = "Bearer ${DOCS_MCP_TOKEN}" }
 transport = "http"
 url = "https://remote.example.com/mcp"
 auth = "oauth"               # default "none"
-oauth_client_id = "otto"     # optional; used only if the server has no dynamic registration
+oauth_client_id = "kite"     # optional; used only if the server has no dynamic registration
 oauth_scopes = ["mcp:tools"] # optional
 
 [mcp.servers.legacy]
@@ -1552,7 +1552,7 @@ Rules:
   `command`, `args`, and `cwd` expand from the process environment at startup.
   An unset variable without a default is a configuration error. Credentials never appear verbatim in `config.toml`.
 - A stdio server's child process gets exactly the `env` table plus `PATH`,
-  `HOME`, `TMPDIR`, `LANG`, and `TERM` copied from Otto's own environment; no
+  `HOME`, `TMPDIR`, `LANG`, and `TERM` copied from Kite's own environment; no
   other variables are inherited. **stdio servers run unsandboxed**, outside
   Seatbelt.
 - An MCP tool is registered as `mcp__<server>__<tool>`; non-`[A-Za-z0-9_-]`
@@ -1569,7 +1569,7 @@ Rules:
 
 What's wired:
 
-- Otto connects every enabled server concurrently and then applies the
+- Kite connects every enabled server concurrently and then applies the
   outcomes in configuration order, so warnings, `/mcp` rows, and tool-name
   deduplication do not depend on which server answered first. A server that
   fails to connect (bad command, connection refused, handshake
@@ -1580,10 +1580,10 @@ What's wired:
   `connecting`, and the MCP tools are attached in one swap once every server
   has settled. The swap happens between turns, never inside one, so a turn
   either has the MCP tools or does not. A headless `--prompt` run and
-  `otto serve` connect before the first turn instead.
+  `kite serve` connect before the first turn instead.
 - An HTTP server configured with `auth = "oauth"` that has no valid stored
   token is reported as `needs login`, contributing no tools, until `/mcp
-  login <server>` (or `otto mcp login <server>`) completes and Otto is
+  login <server>` (or `kite mcp login <server>`) completes and Kite is
   restarted.
 - `/mcp` (REPL and TUI) prints one line per configured server: its connection
   state (`connected (N tools)`, `connecting`, `disabled`, `needs login`, or
@@ -1592,14 +1592,14 @@ What's wired:
   one).
 - `/mcp login <server>` runs the OAuth authorization code flow for one
   configured HTTP server with `auth = "oauth"`, opens the authorization URL,
-  and stores the resulting token under `~/.otto/auth/mcp/<server>.json`.
-  Otto must be restarted afterward to connect with the new token; the running
+  and stores the resulting token under `~/.kite/auth/mcp/<server>.json`.
+  Kite must be restarted afterward to connect with the new token; the running
   session keeps reporting `needs login` until then.
-- `otto mcp list`, `otto mcp add`, `otto mcp remove`, `otto mcp enable`, and
-  `otto mcp disable` manage server declarations in the default config file
+- `kite mcp list`, `kite mcp add`, `kite mcp remove`, `kite mcp enable`, and
+  `kite mcp disable` manage server declarations in the default config file
   without starting a session. They do not connect servers in an already-running
-  Otto process; restart Otto to apply the change.
-- `otto mcp login <server>` and `otto mcp logout <server>` run the same sign-in
+  Kite process; restart Kite to apply the change.
+- `kite mcp login <server>` and `kite mcp logout <server>` run the same sign-in
   flow, or remove the stored token, without starting a session. See
   [command-line reference](#command-line-reference).
 - Tool results are text-only: `image`/`audio` content blocks, and a
@@ -1612,7 +1612,7 @@ What's wired:
 Not yet implemented:
 
 - Restarting an exited stdio server. Once a connected stdio server's process
-  exits, it stays disconnected for the rest of the session; restart Otto to
+  exits, it stays disconnected for the rest of the session; restart Kite to
   reconnect.
 - Running stdio servers under the Seatbelt sandbox.
 - Reloading `[mcp]` without a restart, and re-registering tools in a running
@@ -1621,14 +1621,14 @@ Not yet implemented:
 
 ## Troubleshooting
 
-### `otto: missing api key`
+### `kite: missing api key`
 
 Export the environment variable named by the selected profile's `api_key_env`,
-or set `OTTO_API_KEY` as a fallback.
+or set `KITE_API_KEY` as a fallback.
 
-### `otto: missing base_url`, `otto: invalid base_url`, or request failures
+### `kite: missing base_url`, `kite: invalid base_url`, or request failures
 
-Check the selected profile, `--base-url`, and endpoint path. Otto posts to
+Check the selected profile, `--base-url`, and endpoint path. Kite posts to
 `<base-url>/chat/completions`.
 
 ### `read chat completion stream: ...` or stream ended without `[DONE]`
@@ -1640,22 +1640,22 @@ Confirm streaming is enabled and SSE is not buffered or rewritten.
 
 On macOS, `auto` means Seatbelt. On Linux there is no confined driver at all,
 so this warning names `unsupported-platform` and `--sandbox off` is the only
-way to run commands (see [platform support](#platform-support)). Otto does not
+way to run commands (see [platform support](#platform-support)). Kite does not
 fall back to Docker or direct execution unless you explicitly choose
 `--sandbox off` (or `driver = "off"` in config). Common fixes:
 
 - confirm `/usr/bin/sandbox-exec` is present and usable;
-- narrow `read_paths` so they do not include Otto's private sandbox cache root;
+- narrow `read_paths` so they do not include Kite's private sandbox cache root;
 - move the selected workspace outside cache-like locations if it would overlap
-  Otto's private sandbox state;
+  Kite's private sandbox state;
 - prefer narrow `read_paths` plus exact config variables over broad home or
   cache access;
 - use `--sandbox off` only if you accept unsandboxed current-user execution.
 
-### `no chatgpt credentials; run 'otto login'`
+### `no chatgpt credentials; run 'kite login'`
 
-The `chatgpt` provider has no stored OAuth credentials. Run `otto login` to sign
-in with your ChatGPT subscription, or check state with `otto login --status`.
+The `chatgpt` provider has no stored OAuth credentials. Run `kite login` to sign
+in with your ChatGPT subscription, or check state with `kite login --status`.
 See [ChatGPT subscription](#chatgpt-subscription).
 
 ### `/mcp` reports `failed: ...` or `needs login`
@@ -1664,14 +1664,14 @@ Check `/mcp` for the exact reason. `failed: <reason>` means the stdio command
 could not be spawned, the HTTP connection, handshake, or tool listing did not
 complete within `connect_timeout_secs`, or the server's `env`/`headers`
 secrets exceed the redaction limits; the server contributes no tools until
-Otto is restarted with the problem fixed. `needs login` means the server
+Kite is restarted with the problem fixed. `needs login` means the server
 requires OAuth and has no valid stored token: run `/mcp login <server>` (or
-`otto mcp login <server>`), then restart Otto. See
+`kite mcp login <server>`), then restart Kite. See
 [MCP servers](#mcp-servers).
 
 ### Context-length or prompt-size failures
 
-Otto tries one automatic checkpoint before the hard limit (when it knows the
+Kite tries one automatic checkpoint before the hard limit (when it knows the
 model window) and one typed-overflow recovery checkpoint after a provider
 context error. If you still hit a hard input limit:
 
@@ -1685,10 +1685,10 @@ context error. If you still hit a hard input limit:
 ### A session disappeared from `/resume` or `--continue`
 
 The session was likely archived. Archive moves the file (not deletion) into
-`~/.otto/sessions/<workspace-key>/archive/<session-id>.jsonl`. To reopen it:
+`~/.kite/sessions/<workspace-key>/archive/<session-id>.jsonl`. To reopen it:
 
 ```bash
-./otto --cwd /path/to/project --resume ~/.otto/sessions/<key>/archive/<session-id>.jsonl
+./kite --cwd /path/to/project --resume ~/.kite/sessions/<key>/archive/<session-id>.jsonl
 ```
 
 The file is still intact; only the active-session surfaces (`/resume`,
@@ -1696,12 +1696,12 @@ The file is still intact; only the active-session surfaces (`/resume`,
 
 ### A session takes too long to start
 
-Set `OTTO_STARTUP_TRACE=1` (`true`, `yes`, and `on` also work) to print one
+Set `KITE_STARTUP_TRACE=1` (`true`, `yes`, and `on` also work) to print one
 line per startup phase to stderr, ending with the total time to a usable
 prompt:
 
 ```bash
-OTTO_STARTUP_TRACE=1 otto --cwd /path/to/project
+KITE_STARTUP_TRACE=1 kite --cwd /path/to/project
 ```
 
 ```text

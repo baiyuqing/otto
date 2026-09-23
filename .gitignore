@@ -2,19 +2,19 @@
 .worktree/
 .worktrees/
 .superpowers/
-/otto
+/kite
 /dist/
 # Built web UI: `make ui` writes here; only the placeholder is tracked.
 ui/dist/*
 !ui/dist/.gitkeep
 ui/node_modules/
 .DS_Store
-.otto/
+.kite/
 *.test
 
 # Rust build artifacts and the generated wasm package.
 target/
-crates/otto-web/pkg/
+crates/kite-web/pkg/
 
 # Secrets — never commit credentials or config that may hold them.
 # Defensive/broad on purpose: better to ignore too much than leak one file.
@@ -74,5 +74,5 @@ kubeconfig
 credentials.json
 credentials
 
-# Provider trace dumps: `otto --trace` output holds full request bodies.
+# Provider trace dumps: `kite --trace` output holds full request bodies.
 trace*.jsonl

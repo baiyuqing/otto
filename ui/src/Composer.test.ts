@@ -28,7 +28,7 @@ describe('Composer text input', () => {
   it('auto-grows to fit pasted multi-line text', async () => {
     const p = props()
     render(createElement(Composer, p))
-    const composer = screen.getByPlaceholderText('Message Otto…') as HTMLTextAreaElement
+    const composer = screen.getByPlaceholderText('Message Kite…') as HTMLTextAreaElement
 
     fireEvent.change(composer, { target: { value: 'one\ntwo\nthree' } })
 
@@ -45,7 +45,7 @@ describe('Composer image input', () => {
     })
 
     fireEvent.change(screen.getByLabelText('Attach image'), { target: { files: [file] } })
-    fireEvent.change(screen.getByPlaceholderText('Message Otto…'), { target: { value: 'read it' } })
+    fireEvent.change(screen.getByPlaceholderText('Message Kite…'), { target: { value: 'read it' } })
     await waitFor(() => expect(screen.getByText('shot.png')).toBeTruthy())
     fireEvent.click(screen.getByText('Send'))
 
@@ -61,7 +61,7 @@ describe('Composer image input', () => {
     const file = new File([new Uint8Array([255, 216, 255])], 'paste.jpg', {
       type: 'image/jpeg',
     })
-    const composer = screen.getByPlaceholderText('Message Otto…')
+    const composer = screen.getByPlaceholderText('Message Kite…')
 
     fireEvent.paste(composer, {
       clipboardData: {

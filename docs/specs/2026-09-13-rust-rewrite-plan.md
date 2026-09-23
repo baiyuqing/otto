@@ -6,7 +6,7 @@ described in [AGENTS.md](../../AGENTS.md), the [development
 guide](../development.md), the [README](../../README.md), and the [user
 manual](../user-manual.md).
 
-Goal: replace the Go implementation of Otto with Rust, keep every user-visible
+Goal: replace the Go implementation of Kite with Rust, keep every user-visible
 behavior and on-disk format, and compile the provider-neutral core to
 WebAssembly so the browser UI and the native binary share one implementation
 of wire types, stream parsing, and transcript state.
@@ -15,7 +15,7 @@ of wire types, stream parsing, and transcript state.
 
 | Item | Value |
 |---|---|
-| Go production code | 49,053 lines in 19 `internal` packages plus `cmd/otto` |
+| Go production code | 49,053 lines in 19 `internal` packages plus `cmd/kite` |
 | Go test code | 75,734 lines |
 | Direct Go dependencies | 11 |
 | Browser UI | 1,442 lines TypeScript, unaffected except `sse.ts`, `transcript.ts`, `types.ts` |
@@ -24,12 +24,12 @@ of wire types, stream parsing, and transcript state.
 
 Contracts that must survive unchanged:
 
-- Session files: Pi v3 JSONL, append-only, `otto.runtime` custom entries,
+- Session files: Pi v3 JSONL, append-only, `kite.runtime` custom entries,
   16 MiB entry cap, 256 MiB file cap. Fixtures live in
   `internal/session/testdata`.
-- Config: `~/.config/otto/config.toml`, unknown fields rejected, API keys only
+- Config: `~/.config/kite/config.toml`, unknown fields rejected, API keys only
   from environment variables, ChatGPT credentials only from
-  `~/.otto/auth/chatgpt.json`.
+  `~/.kite/auth/chatgpt.json`.
 - HTTP API: `internal/server/openapi.yaml`, bearer-token gating of `/v1/`,
   Unix-socket and loopback-TCP listeners, `/metrics` text format.
 - Sandbox: `internal/sandbox/seatbelt/profile_v1.sb` byte for byte, private
@@ -45,13 +45,13 @@ Contracts that must survive unchanged:
 
 Each item below is the proposed default. Change it before phase 0 starts.
 
-1. **WebAssembly boundary.** The crate `otto-core` has no filesystem, network,
+1. **WebAssembly boundary.** The crate `kite-core` has no filesystem, network,
    process, or clock dependency and must build for `wasm32-unknown-unknown`.
    It holds the message model, provider request and response types, the
    OpenAI-compatible and Responses wire translation, the SSE frame parser,
    the Pi v3 entry codec, agent event types, the transcript reducer, and
    config resolution over already-parsed input. The browser UI loads
-   `otto-core` through `wasm-bindgen` and stops maintaining its own
+   `kite-core` through `wasm-bindgen` and stops maintaining its own
    `sse.ts`, `transcript.ts`, and `types.ts`. The `wasm32` build is the
    architecture guard: it fails if anyone adds an OS dependency to the core,
    the same role `internal/architecture/imports_test.go` plays today.
@@ -64,12 +64,12 @@ Each item below is the proposed default. Change it before phase 0 starts.
 
    | Crate | Kind | Contents |
    |---|---|---|
-   | `crates/otto-core` | lib, wasm-safe | model, provider contract, wire codecs, SSE parser, session entry codec, agent loop, events, transcript reducer, config resolution |
-   | `crates/otto` | bin | CLI, config file I/O, HTTP transport, JSONL store, tools, workspace validation, sandbox, auth, memory, skills, subagents, app controller, REPL, TUI, server, embedded web UI |
-   | `crates/otto-web` | cdylib, wasm | `wasm-bindgen` exports over `otto-core` for the browser |
+   | `crates/kite-core` | lib, wasm-safe | model, provider contract, wire codecs, SSE parser, session entry codec, agent loop, events, transcript reducer, config resolution |
+   | `crates/kite` | bin | CLI, config file I/O, HTTP transport, JSONL store, tools, workspace validation, sandbox, auth, memory, skills, subagents, app controller, REPL, TUI, server, embedded web UI |
+   | `crates/kite-web` | cdylib, wasm | `wasm-bindgen` exports over `kite-core` for the browser |
 
    The Go code separates REPL, TUI, and server into packages. In Rust these
-   are modules inside `crates/otto`; a crate per frontend adds build
+   are modules inside `crates/kite`; a crate per frontend adds build
    configuration without changing any dependency direction.
 
 3. **Coexistence.** Rust lands on `main` under `crates/` through ordinary
@@ -77,7 +77,7 @@ Each item below is the proposed default. Change it before phase 0 starts.
    stays the shipped binary until phase 9. Nothing in `crates/` touches the Go
    build, so `make check` is unaffected until the switch.
 
-4. **Async and cancellation.** `tokio` in `crates/otto`. In `otto-core` the
+4. **Async and cancellation.** `tokio` in `crates/kite`. In `kite-core` the
    agent loop is `async` and generic over a `Provider` trait and a
    `ToolExecutor` trait; it takes a `CancellationToken` from `tokio-util`
    (which builds on `wasm32` without the `rt` feature). Go's
@@ -137,7 +137,7 @@ being replaced and are the sizing basis, not a target.
   and one tool turn, tested under native `tokio` and under
   `wasm-bindgen-test`.
 - Makefile targets: `rust-fmt`, `rust-lint` (clippy with `-D warnings`),
-  `rust-test`, `rust-wasm-check` (`cargo check -p otto-core --target
+  `rust-test`, `rust-wasm-check` (`cargo check -p kite-core --target
   wasm32-unknown-unknown`). CI adds a job running them; `make check` is
   unchanged.
 
@@ -145,7 +145,7 @@ Exit criteria: all four targets pass in CI. This phase settles the async,
 cancellation, and JSON crate choices; if `tokio-util` fails on `wasm32`, the
 loop takes a `&dyn Fn() -> bool` cancellation check instead.
 
-### Phase 1: otto-core model and OpenAI-compatible codec (1,174 Go lines)
+### Phase 1: kite-core model and OpenAI-compatible codec (1,174 Go lines)
 
 - `model`: `Role`, `BlockType`, `Block`, `Message`, `ContextMetadata`,
   `ToolDefinition`, `FinishReason`, `Usage` with the validation rules in
@@ -161,10 +161,10 @@ loop takes a `&dyn Fn() -> bool` cancellation check instead.
 
 ### Phase 2: session codec and JSONL store (4,911 Go lines)
 
-- `otto-core`: Pi v3 entry types and the codec in `pi_types.go`,
+- `kite-core`: Pi v3 entry types and the codec in `pi_types.go`,
   `pi_codec.go`, `pi_details.go`, including legacy usage normalization and
   the explicit-zero usage marker.
-- `crates/otto`: the `Store` in `store.go` with `O_CREAT|O_EXCL` creation,
+- `crates/kite`: the `Store` in `store.go` with `O_CREAT|O_EXCL` creation,
   0700 directories, 0600 files, `fsync` after each record, lazy file
   creation, entry and file size caps, `ErrFatalPersistence` poisoning, plus
   `archive.go`, `list.go`, `snapshot.go`, `prepared.go`, `compaction.go`.
@@ -193,13 +193,13 @@ loop takes a `&dyn Fn() -> bool` cancellation check instead.
   `client.go`, retry with `Retry-After`, error-body cap, key redaction.
 - Config: `File` with `deny_unknown_fields`, `Load`, `Save`,
   `SetDefaultProfile` text replacement, `Resolve`, `ResolveSandbox`,
-  `model_limits.go`. Resolution logic lives in `otto-core`; file I/O in
-  `crates/otto`.
+  `model_limits.go`. Resolution logic lives in `kite-core`; file I/O in
+  `crates/kite`.
 - Agent: `Run`, `compaction.go`, `compaction_select.go`,
   `context_estimate.go`, `overflow.go`, `redactor.go`, `summary*.go`,
   `inbox.go`, `tasks.go`. Memory recall is a trait with a no-op
   implementation until phase 7.
-- `crates/otto` binary: `clap` flags matching `cmd/otto/main.go`, system
+- `crates/kite` binary: `clap` flags matching `cmd/kite/main.go`, system
   prompt assembly, workspace instruction file, REPL from `internal/repl`,
   `--approve` one-shot mode, `--continue`, `--resume`, `--archive`.
 
@@ -209,8 +209,8 @@ resumes in the Go binary.
 
 ### Phase 5: ChatGPT provider (1,449 Go lines)
 
-- `auth`: PKCE sign-in, credential file at `~/.otto/auth/chatgpt.json`
-  with the same JSON shape, refresh, `otto login` and `otto logout`.
+- `auth`: PKCE sign-in, credential file at `~/.kite/auth/chatgpt.json`
+  with the same JSON shape, refresh, `kite login` and `kite logout`.
 - `openairesponses`: Responses API request translation and SSE decoding.
 
 ### Phase 6: app controller, server, web UI bridge (3,940 Go lines)
@@ -220,7 +220,7 @@ resumes in the Go binary.
 - Server: routes from `openapi.yaml`, per-session turn buffering, SSE
   events, token gating, listeners, metrics text output, sandbox reload,
   embedded UI via `include_dir`.
-- `otto-web`: exports for SSE frame parsing, the transcript reducer, and
+- `kite-web`: exports for SSE frame parsing, the transcript reducer, and
   event types. `ui/` replaces `sse.ts`, `transcript.ts`, and `types.ts`
   with the wasm package; `make ui` runs `wasm-pack build` before `vite
   build`. Existing `vitest` cases become the acceptance tests for the wasm
@@ -231,7 +231,7 @@ resumes in the Go binary.
 - Memory contracts, policy, secret guards, `Service`, null service, the
   `rusqlite` FTS5 store with the same schema and file location, the store
   conformance harness, `memory_search`/`remember`/`forget` tools,
-  `/memory` and `/remember` commands, `otto memory status|forget`.
+  `/memory` and `/remember` commands, `kite memory status|forget`.
 - Skills: `SKILL.md` frontmatter parsing, discovery, prompt section.
 - Subagents: `Runner`, task lifecycle, `agent`/`agent_wait`/`agent_status`,
   `AGENT.md` definitions, `context: inherit`.
@@ -243,7 +243,7 @@ resumes in the Go binary.
   profile, rename, resume, sandbox, and task panes.
 - Markdown renderer over `pulldown-cmark`. This is the only component with
   no library equivalent; budget it separately.
-- PTY smoke test with `nix::pty`, matching `cmd/otto/tui_pty_test.go`.
+- PTY smoke test with `nix::pty`, matching `cmd/kite/tui_pty_test.go`.
 
 ### Phase 9: parity gate and switch
 

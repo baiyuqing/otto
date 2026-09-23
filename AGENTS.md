@@ -6,11 +6,11 @@ workflow.
 
 ## Scope and task map
 
-- Otto supports only the `openai-compatible` and `chatgpt` providers. macOS is the supported platform and the only one with a sandbox (Seatbelt). Otto also builds and runs on Linux, where there is no confined driver: `bash` is unavailable unless `--sandbox off` is passed explicitly, and everything else (file tools, sessions, memory, MCP, server, TUI) works. Keep platform-specific code behind `cfg`, and keep a new platform's claims limited to what its tests actually cover.
-- `crates/otto-core` is the wasm-safe library: `model`, `provider` (neutral contract), `openaicompat`/`openairesponses` (wire formats), `tool` (definitions), `session` (Pi v3 codec), `agent` (provider/tool turn loop), `config`, `wire`, and `safetext`.
-- `crates/otto` is the native binary: `cli` (composition, flags, REPL, process lifecycle), `app` (shared lifecycle and frontend capabilities), `session` (store), `config` (path resolution and the backed-up config writer), `tool` (native execution), `mcp` (stdio/HTTP client, JSON-RPC codec, OAuth sign-in for external tool servers), `sandbox` (Seatbelt/direct drivers), `provider` (HTTP transports), `auth` (ChatGPT OAuth), `memory` (SQLite/FTS5 store and service), `usage` (provider-token collection, SQLite storage, and aggregate analysis), `skill`, `subagent`, `workflow` (durable TOML DAG runs, approval gates, restart recovery, and event storage), `inbound` (host `lark-cli` Feishu consumer into the session inbox), `server` (HTTP/JSON/SSE and the embedded web UI), and `tui`.
-- `crates/otto-web` is the wasm cdylib the browser UI loads. `ui/` (TypeScript) owns the browser frontend and is a client of `crates/otto`'s HTTP API and `crates/otto-web`'s wasm exports only.
-- The [architecture contract design](docs/specs/2026-09-05-architecture-contracts.md) records compatibility and ownership rationale. `make rust-wasm-check` enforces the wasm32 boundary: `otto-core` and `otto-web` must stay buildable for `wasm32-unknown-unknown`, which keeps native-only code (sandbox, auth, SQLite, process control) out of the shared library.
+- Kite supports only the `openai-compatible` and `chatgpt` providers. macOS is the supported platform and the only one with a sandbox (Seatbelt). Kite also builds and runs on Linux, where there is no confined driver: `bash` is unavailable unless `--sandbox off` is passed explicitly, and everything else (file tools, sessions, memory, MCP, server, TUI) works. Keep platform-specific code behind `cfg`, and keep a new platform's claims limited to what its tests actually cover.
+- `crates/kite-core` is the wasm-safe library: `model`, `provider` (neutral contract), `openaicompat`/`openairesponses` (wire formats), `tool` (definitions), `session` (Pi v3 codec), `agent` (provider/tool turn loop), `config`, `wire`, and `safetext`.
+- `crates/kite` is the native binary: `cli` (composition, flags, REPL, process lifecycle), `app` (shared lifecycle and frontend capabilities), `session` (store), `config` (path resolution and the backed-up config writer), `tool` (native execution), `mcp` (stdio/HTTP client, JSON-RPC codec, OAuth sign-in for external tool servers), `sandbox` (Seatbelt/direct drivers), `provider` (HTTP transports), `auth` (ChatGPT OAuth), `memory` (SQLite/FTS5 store and service), `usage` (provider-token collection, SQLite storage, and aggregate analysis), `skill`, `subagent`, `workflow` (durable TOML DAG runs, approval gates, restart recovery, and event storage), `inbound` (host `lark-cli` Feishu consumer into the session inbox), `server` (HTTP/JSON/SSE and the embedded web UI), and `tui`.
+- `crates/kite-web` is the wasm cdylib the browser UI loads. `ui/` (TypeScript) owns the browser frontend and is a client of `crates/kite`'s HTTP API and `crates/kite-web`'s wasm exports only.
+- The [architecture contract design](docs/specs/2026-09-05-architecture-contracts.md) records compatibility and ownership rationale. `make rust-wasm-check` enforces the wasm32 boundary: `kite-core` and `kite-web` must stay buildable for `wasm32-unknown-unknown`, which keeps native-only code (sandbox, auth, SQLite, process control) out of the shared library.
 - Current user behavior belongs in the [README](README.md) and [user manual](docs/user-manual.md). Design documents are historical rationale unless they explicitly say otherwise.
 
 Do not document or implement other providers, and do not list planned
@@ -38,9 +38,9 @@ Apply these requirements to every feature, fix, and refactor:
 
 ## Safety
 
-- API keys come only from environment variables; ChatGPT credentials come only from `otto login`. Never place secrets in config, fixtures, logs, docs, tests, or skill files.
+- API keys come only from environment variables; ChatGPT credentials come only from `kite login`. Never place secrets in config, fixtures, logs, docs, tests, or skill files.
 - File tools reject workspace and skill-directory escapes after canonical-path and symlink validation.
-- `bash` runs through `crates/otto`'s `sandbox` module; Seatbelt is the default and only explicit sandbox `off` is unsandboxed. It still starts in the selected workspace.
+- `bash` runs through `crates/kite`'s `sandbox` module; Seatbelt is the default and only explicit sandbox `off` is unsandboxed. It still starts in the selected workspace.
 - Keep the default test suite offline: no provider credentials, network access, or real interactive terminal.
 
 ## Verification
@@ -48,7 +48,7 @@ Apply these requirements to every feature, fix, and refactor:
 Use the Makefile targets as the canonical commands:
 
 ```bash
-make check-fast   # rustfmt, clippy, focused otto-core tests, git diff --check
+make check-fast   # rustfmt, clippy, focused kite-core tests, git diff --check
 make check        # full macOS build/lint/all-tests/wasm/PTY/UI gate
 make check-linux  # the Linux gate: the same minus Seatbelt conformance and the UI
 ```

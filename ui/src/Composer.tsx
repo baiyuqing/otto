@@ -84,7 +84,7 @@ export function Composer(props: {
         <textarea
           ref={textareaRef}
           value={text}
-          placeholder={props.disabled ? 'Open or create a session first' : 'Message Otto…'}
+          placeholder={props.disabled ? 'Open or create a session first' : 'Message Kite…'}
           disabled={props.disabled || props.running || props.compacting}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
@@ -102,7 +102,7 @@ export function Composer(props: {
         <div className="composer-actions">
           <span className="composer-hint">
             {props.running
-              ? 'Otto is working…'
+              ? 'Kite is working…'
               : props.compacting
                 ? 'Compacting context…'
                 : suggestions.length > 0

@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
-const INTEROP_ENV = "OTTO_PI_INTEROP";
+const INTEROP_ENV = "KITE_PI_INTEROP";
 const MAX_TEXT = 256;
 
 function skip(message) {

@@ -23,7 +23,7 @@ one documented in `docs/user-manual.md`.
 
 ## Goal
 
-Let Otto call tools exposed by external Model Context Protocol (MCP) servers.
+Let Kite call tools exposed by external Model Context Protocol (MCP) servers.
 A configured server's tools appear in the tool list alongside the built-in
 tools, under a prefixed name, and calls are forwarded over the server's
 transport. The server list and connection status are visible through a
@@ -91,7 +91,7 @@ headers = { Authorization = "Bearer ${DOCS_MCP_TOKEN}" }
 transport = "http"
 url = "https://remote.example.com/mcp"
 auth = "oauth"              # default "none"; "oauth" enables the flow below
-oauth_client_id = "otto"    # optional; used when the server offers no dynamic registration
+oauth_client_id = "kite"    # optional; used when the server offers no dynamic registration
 oauth_scopes = ["mcp:tools"] # optional; default: scopes the server advertises
 
 [mcp.servers.legacy]
@@ -116,11 +116,11 @@ Rules:
   literal `Bearer ` token or `ghp_`/`sk-`-style prefix outside a `${...}`
   reference.
 - A stdio server's child environment is exactly the `env` table plus
-  `PATH`, `HOME`, `TMPDIR`, `LANG`, and `TERM` copied from Otto's own
+  `PATH`, `HOME`, `TMPDIR`, `LANG`, and `TERM` copied from Kite's own
   environment. No other inherited variables.
 - `cwd` resolves like `skills.paths`: `~/` and relative paths through
   `resolve_roots`. Default is the workspace path.
-- Resolution lives in `crates/otto-core/src/config/mcp.rs` as
+- Resolution lives in `crates/kite-core/src/config/mcp.rs` as
   `resolve_mcp(&File, env, workspace) -> Result<McpRuntime, ConfigError>`.
   It is pure (no I/O) and wasm-safe.
 
@@ -183,7 +183,7 @@ reconnects.
 
 ### stdio
 
-`crates/otto/src/mcp/stdio.rs`. The client spawns the command with
+`crates/kite/src/mcp/stdio.rs`. The client spawns the command with
 `tokio::process::Command`, `stdin` and `stdout` piped, `stderr` piped and
 drained to the log at debug level (line-buffered, capped at 64 KiB per line)
 (superseded, see Deviations: stderr is kept as a bounded tail folded into
@@ -191,9 +191,9 @@ the failure reason, not logged).
 Messages are newline-delimited JSON-RPC; a line that is not valid JSON-RPC
 is logged and skipped.
 
-The sandbox executor (`crates/otto/src/sandbox/process.rs`) closes the
+The sandbox executor (`crates/kite/src/sandbox/process.rs`) closes the
 child's stdin, so it cannot host a stdio server. In this iteration stdio
-servers run unsandboxed, in the same process group as Otto, with the
+servers run unsandboxed, in the same process group as Kite, with the
 restricted environment described above. The user manual states this. Running
 the child under the generated Seatbelt profile is a follow-up, listed below.
 
@@ -207,7 +207,7 @@ spawning.
 
 ### Streamable HTTP
 
-`crates/otto/src/mcp/http.rs`, using the already-pinned `reqwest` client.
+`crates/kite/src/mcp/http.rs`, using the already-pinned `reqwest` client.
 Every request is one POST to `url` with:
 
 - `Content-Type: application/json`
@@ -220,7 +220,7 @@ Every request is one POST to `url` with:
 
 A `text/event-stream` response is read until the event carrying the JSON-RPC
 response with the matching `id`; other events are ignored. The SSE reader is
-a 40-line parser in `crates/otto/src/mcp/sse.rs` (`data:` accumulation,
+a 40-line parser in `crates/kite/src/mcp/sse.rs` (`data:` accumulation,
 blank-line dispatch, `event:`/`id:` ignored); `openaicompat::stream` is
 provider-specific and is not reused. The response is treated as complete
 when the stream ends; `notifications/cancelled` is not sent over HTTP,
@@ -231,14 +231,14 @@ features.
 
 ### OAuth 2.1 authorization (HTTP only)
 
-`crates/otto/src/mcp/oauth.rs`, following the MCP authorization
+`crates/kite/src/mcp/oauth.rs`, following the MCP authorization
 specification (OAuth 2.1 authorization code grant with PKCE S256, RFC 9728
 protected resource metadata, RFC 8414 authorization server metadata, RFC
 7591 dynamic client registration, RFC 8707 resource indicators). A server
 with `auth = "oauth"` goes through this flow; `auth = "none"` (default)
 sends only the static `headers`.
 
-Discovery, run by `otto mcp login <server>` and again whenever a stored
+Discovery, run by `kite mcp login <server>` and again whenever a stored
 token is rejected:
 
 1. POST `tools/list` without a token. Expect HTTP 401 with
@@ -257,7 +257,7 @@ token is rejected:
    `/.well-known/openid-configuration`. Every URL must be `https` or a
    loopback `http` address; anything else fails the login.
 4. Client identity: if the metadata has `registration_endpoint`, POST a
-   dynamic registration with `client_name: "otto"`,
+   dynamic registration with `client_name: "kite"`,
    `redirect_uris: ["http://localhost:1455/auth/callback",
    "http://localhost:1457/auth/callback"]`, `grant_types:
    ["authorization_code", "refresh_token"]`, `token_endpoint_auth_method:
@@ -271,14 +271,14 @@ token is rejected:
    (`oauth_scopes` joined by spaces, else `scopes_supported`, else the
    `scope` parameter from the 401 `WWW-Authenticate` header, else omitted),
    and `resource=<canonical url>`. The URL is opened through the same
-   opener `otto login` uses. The callback listener is the existing
+   opener `kite login` uses. The callback listener is the existing
    `auth::login::serve_callback`, made `pub(crate)`.
 6. Token: POST `token_endpoint` with `grant_type=authorization_code`,
    `code`, `redirect_uri`, `code_verifier`, `client_id`, `resource`.
    Refresh: `grant_type=refresh_token`, `refresh_token`, `client_id`,
    `resource`. Both use `auth::oauth::http_client()` (no redirects).
 
-Token storage: `~/.otto/auth/mcp/<server>.json`, 0600 in a 0700 directory,
+Token storage: `~/.kite/auth/mcp/<server>.json`, 0600 in a 0700 directory,
 written atomically by the same temp-file-and-rename path `Credentials::save`
 uses (that code moves into a shared `auth::write_secret_file`). Fields:
 `access_token`, `refresh_token`, `expiry` (RFC 3339), `client_id`,
@@ -291,7 +291,7 @@ Runtime behavior:
 
 - Access token expired (or expiring within 60 s) → refresh before the
   request. Refresh failure → the server's status becomes `needs login`, the
-  tool call returns `mcp <server>: authorization required; run 'otto mcp
+  tool call returns `mcp <server>: authorization required; run 'kite mcp
   login <server>'`, and no browser is opened. Login is never started from
   inside a tool call.
 - HTTP 401 with a stored token → one refresh attempt, then the same
@@ -301,10 +301,10 @@ Runtime behavior:
 - At runner start a server whose token file is missing is reported as
   `needs login` and contributes no tools; the runner still starts.
 
-Commands: `otto mcp login <server>` (runs discovery and the flow, then
-prints `logged in to <server>`), `otto mcp logout <server>` (removes the
+Commands: `kite mcp login <server>` (runs discovery and the flow, then
+prints `logged in to <server>`), `kite mcp logout <server>` (removes the
 token file), and `/mcp login <server>` in the REPL, which runs the same
-flow and then prints `logged in to <server>; restart otto to load its
+flow and then prints `logged in to <server>; restart kite to load its
 tools`. The tool registry is immutable after `build_runner`, and adding
 in-session re-registration is out of scope for this iteration. `/mcp`
 shows `needs login` for such servers.
@@ -316,9 +316,9 @@ server's results and stderr log.
 
 ### Shared JSON-RPC layer
 
-`crates/otto/src/mcp/jsonrpc.rs`: `Request`, `Response`, `Notification`,
+`crates/kite/src/mcp/jsonrpc.rs`: `Request`, `Response`, `Notification`,
 `Error` types with `serde`, id allocation, and the `_meta` builder for
-modern requests. `crates/otto/src/mcp/client.rs`: `Client` holding one
+modern requests. `crates/kite/src/mcp/client.rs`: `Client` holding one
 `Box<dyn Transport>`, the negotiated era, the cached tool list, and a
 `tokio::sync::Mutex` guarding the in-flight request map. `Transport` is the
 one trait with two implementations because there are two real consumers.
@@ -374,21 +374,21 @@ mcp servers (2 configured, 1 connected)
 ## Package layout
 
 ```
-crates/otto-core/src/config/mcp.rs      Mcp, McpServer tables; resolve_mcp; ${VAR} expansion
-crates/otto/src/mcp/mod.rs              connect_all, McpStatus, McpTools, module contract doc
-crates/otto/src/mcp/jsonrpc.rs          message types, _meta builder
-crates/otto/src/mcp/client.rs           Client, era negotiation, tools/list, tools/call
-crates/otto/src/mcp/stdio.rs            StdioTransport
-crates/otto/src/mcp/http.rs             HttpTransport, bearer injection, 401/403 handling
-crates/otto/src/mcp/oauth.rs            discovery, registration, PKCE flow, token file
-crates/otto/src/mcp/sse.rs              minimal SSE frame reader
-crates/otto/src/auth/mod.rs             write_secret_file extracted from Credentials::save
-crates/otto/src/cli/mcp.rs              `otto mcp login|logout <server>` subcommand
-crates/otto/src/tool/mcp.rs             McpTool: Tool adapter, naming, result mapping
-crates/otto/src/cli/wiring.rs           push MCP tools; Runner field; close
-crates/otto/src/cli/repl_commands.rs    /mcp
-crates/otto/src/app/mod.rs              Controller::mcp()
-crates/otto/tests/mcp_stdio.rs          end-to-end against a fixture server
+crates/kite-core/src/config/mcp.rs      Mcp, McpServer tables; resolve_mcp; ${VAR} expansion
+crates/kite/src/mcp/mod.rs              connect_all, McpStatus, McpTools, module contract doc
+crates/kite/src/mcp/jsonrpc.rs          message types, _meta builder
+crates/kite/src/mcp/client.rs           Client, era negotiation, tools/list, tools/call
+crates/kite/src/mcp/stdio.rs            StdioTransport
+crates/kite/src/mcp/http.rs             HttpTransport, bearer injection, 401/403 handling
+crates/kite/src/mcp/oauth.rs            discovery, registration, PKCE flow, token file
+crates/kite/src/mcp/sse.rs              minimal SSE frame reader
+crates/kite/src/auth/mod.rs             write_secret_file extracted from Credentials::save
+crates/kite/src/cli/mcp.rs              `kite mcp login|logout <server>` subcommand
+crates/kite/src/tool/mcp.rs             McpTool: Tool adapter, naming, result mapping
+crates/kite/src/cli/wiring.rs           push MCP tools; Runner field; close
+crates/kite/src/cli/repl_commands.rs    /mcp
+crates/kite/src/app/mod.rs              Controller::mcp()
+crates/kite/tests/mcp_stdio.rs          end-to-end against a fixture server
 testdata/mcp/fake_server.py             stdio fixture: legacy and modern modes, echo/error/image tools
 ```
 
@@ -402,7 +402,7 @@ client is under 1,000 lines.
 Each step is one subagent task with bounded file ownership. Tests are
 written first in every step.
 
-1. `otto-core` config (`config/mcp.rs`, `config/mod.rs` `File.mcp`):
+1. `kite-core` config (`config/mcp.rs`, `config/mod.rs` `File.mcp`):
    parsing, validation, `${VAR}` expansion, error messages. Model: sonnet.
 2. JSON-RPC types and SSE reader (`mcp/jsonrpc.rs`, `mcp/sse.rs`): pure
    codecs with unit tests. Model: haiku.
@@ -449,4 +449,4 @@ step's diff and runs `make check-fast`, then `make check` after step 7.
 - No new dependencies.
 - stdio servers run unsandboxed with an explicit environment (user decision, 2026-09-19).
 - HTTP transport and OAuth 2.1 are in the first iteration (user decision, 2026-09-19).
-- Tokens live in `~/.otto/auth/mcp/<server>.json`, next to the ChatGPT credential file, with the same file permissions and atomic write.
+- Tokens live in `~/.kite/auth/mcp/<server>.json`, next to the ChatGPT credential file, with the same file permissions and atomic write.

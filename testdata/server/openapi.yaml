@@ -1,20 +1,20 @@
 openapi: 3.1.0
 info:
-  title: Otto agent server
+  title: Kite agent server
   version: "1"
   description: >
-    HTTP+JSON+SSE frontend for otto serve. One app.Controller per session;
+    HTTP+JSON+SSE frontend for kite serve. One app.Controller per session;
     turns stream as Server-Sent Events. See
     docs/specs/2026-09-03-agent-server-design.md.
 servers:
-  - url: http://otto
+  - url: http://kite
 components:
   securitySchemes:
     bearer:
       type: http
       scheme: bearer
       description: >
-        Required on every /v1/ path when otto serve listens on TCP
+        Required on every /v1/ path when kite serve listens on TCP
         (--listen): the per-process token printed at startup, sent as
         "Authorization: Bearer <token>". Missing or wrong tokens get 401 with
         WWW-Authenticate: Bearer. The Unix-socket listener has no token.
@@ -187,7 +187,7 @@ components:
       required: [sessions]
     Message:
       type: object
-      description: otto_core::model::Message; see crates/otto-core/src/model.rs for the full shape.
+      description: kite_core::model::Message; see crates/kite-core/src/model.rs for the full shape.
     TurnSummary:
       type: object
       properties:
@@ -216,7 +216,7 @@ components:
       required: [id, trigger, status, text, usage, usage_present, started_at]
     Task:
       type: object
-      description: app::Task; see crates/otto/src/app/tasks.rs for the full shape.
+      description: app::Task; see crates/kite/src/app/tasks.rs for the full shape.
       properties:
         id:
           type: string
@@ -287,7 +287,7 @@ components:
       required: [timers]
     McpServer:
       type: object
-      description: server::mcp::McpServer; see crates/otto/src/server/mcp.rs for the full shape.
+      description: server::mcp::McpServer; see crates/kite/src/server/mcp.rs for the full shape.
       properties:
         name:
           type: string
@@ -995,7 +995,7 @@ paths:
       summary: Re-read the sandbox configuration and apply it to the running process
       description: >
         Applies the current [sandbox] configuration to the running process
-        without restarting otto. read_paths, network, and driver take effect;
+        without restarting kite. read_paths, network, and driver take effect;
         allow_env changes and a sandbox that was unavailable at startup still
         require a restart and are reported as a failure. One sandbox serves
         every session, so the reload is refused while any session has a turn in

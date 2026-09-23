@@ -3,7 +3,7 @@
 Status: draft, 2026-09-03, pending approval; historical and superseded for the
 current sub-agent API. It is retained for rationale. The proposal includes
 aspirational APIs; only the tool surface and behavior verified in the current
-[`crates/otto/src/subagent`](../../crates/otto/src/subagent) implementation and the
+[`crates/kite/src/subagent`](../../crates/kite/src/subagent) implementation and the
 [README](../../README.md#delegate-work-to-sub-agents) are current. In
 particular, `agent_send`, `agent_cancel`, and `agent_report` remain proposal
 items, not implemented features. Also consult the
@@ -92,7 +92,7 @@ Parameters:
 | `prompt` | string | yes | The complete task. The child sees nothing else unless `context` is `inherit`. |
 | `description` | string | no | Short label (≤ 80 chars) shown in status output and the TUI panel. |
 | `name` | string | no | Optional task name, unique in this session; usable instead of the task id in `agent_wait`, `agent_status`, and `/task`. 1 to 64 letters, digits, `_` or `-`, not of the form `tN`. A name already used in the session, including by a finished task, returns an error result and no task is created. |
-| `model` | string | no | Provider model id for the child. Default: the session model, or the definition's `model`. Passed through unchanged; Otto keeps no model catalog, allowlist, or price data, and an id the endpoint rejects fails the task with the provider's error. |
+| `model` | string | no | Provider model id for the child. Default: the session model, or the definition's `model`. Passed through unchanged; Kite keeps no model catalog, allowlist, or price data, and an id the endpoint rejects fails the task with the provider's error. |
 | `agent` | string | no | Definition name. No enum; see Decisions taken. Unknown name → error result. |
 | `context` | `"fresh"` \| `"inherit"` | no | Default `fresh`, or the definition's `context` field. See "Context: fresh or inherit". |
 | `wait` | bool | no | `true` = start and block until the task ends; equivalent to `agent` followed by `agent_wait`. |
@@ -299,7 +299,7 @@ prompt = `PromptFor(childDefinitions)` + `"\n\n## Sub-agent role\n"` +
 with `options.Inbox = task.inbox`, `options.Model` = the call's `model`, else the
 definition's `model`, else the session model → goroutine: `child.Run(taskCtx, prompt, emit)`.
 
-Generic instruction: "You are running as a sub-agent of Otto. Complete only
+Generic instruction: "You are running as a sub-agent of Kite. Complete only
 the delegated task below with the available tools, then reply with a
 self-contained final report. That final message is returned to the caller as
 your result; nothing else you write is."
@@ -432,15 +432,15 @@ provider interaction while the child runs.
   /v1/sessions/{id}/tasks/{task_id}` (record plus `history` in the same wire
   form as session history), `POST /v1/sessions/{id}/tasks/{task_id}/cancel`.
 - Wire events: new type `notification` with `task_id`, `text`, `usage`.
-- Metrics: `otto_tasks_started_total`, `otto_tasks_finished_total{status}`,
-  `otto_tasks_running`.
+- Metrics: `kite_tasks_started_total`, `kite_tasks_finished_total{status}`,
+  `kite_tasks_running`.
 - `openapi.yaml` and `docs/specs/2026-09-03-agent-server-design.md` updated
   in the same PR.
 
 ## Agent definitions
 
 ```
-~/.otto/agents/reviewer/AGENT.md
+~/.kite/agents/reviewer/AGENT.md
 ---
 name: reviewer
 description: Review a diff for correctness and missing tests. Use after code changes.
@@ -460,7 +460,7 @@ You review code. Report findings as file:line bullets ordered by severity.
   warning "tools must be a comma-separated list" (the frontmatter parser drops
   YAML block lists silently).
 - `model`: optional provider model id; the default for this definition. A
-  per-call `model` overrides it. Otto keeps no model catalog or price data;
+  per-call `model` overrides it. Kite keeps no model catalog or price data;
   the model decides which id to pass.
 - `context`: optional, `fresh` (default) or `inherit`; the tool parameter
   overrides it.
@@ -500,7 +500,7 @@ section; the `agent` tool still works without a definition.
 ```toml
 [agents]
 enabled = true                              # default; false removes all agent* tools
-paths = ["~/.otto/agents", ".otto/agents"]  # default; later wins on name conflict
+paths = ["~/.kite/agents", ".kite/agents"]  # default; later wins on name conflict
 max_parallel = 4                            # default; concurrent children per session, 1..16
 ```
 
@@ -534,7 +534,7 @@ roots are added to the Seatbelt read paths at process start, like skill roots.
   `custom_message` does not keep usage, so after `/resume` the session total
   excludes child usage. `Info().Usage` (session aggregate) never includes child
   usage. This is a known gap, listed under Follow-ups.
-- Cost controls: per-call `model` (chosen by the model; Otto holds no price
+- Cost controls: per-call `model` (chosen by the model; Kite holds no price
   data), per-definition default `model`, `max_parallel`, `context: fresh` by
   default, `agent_wait` timeouts.
 
@@ -555,11 +555,11 @@ roots are added to the Seatbelt read paths at process start, like skill roots.
 | `internal/agent` | `inbox.go` (`Inbox`, `Notification`), `tasks.go` (`Task`, `TaskStatus`, `Tasks`), `Options.Inbox`, `Options.Tasks`, `Agent.Tasks()`, inbox drain and wake-turn rule in `Run`, `EventNotification`. No import of `internal/subagent`. |
 | `internal/subagent` (new) | `definition.go`, `prompt.go`, `runner.go`, `inherit.go`, `tools.go` (`agent`, `agent_wait`, `agent_status`, `agent_send`, `agent_cancel`, `agent_report`). Imports `agent`, `tool`, `session`, `provider`, `model`, `skill` (frontmatter). Never imported by `agent`, `app`, or the frontends. |
 | `internal/tool` | `Registry.Lookup`, `Registry.Tools`; export `DecodeStrictJSON`, `CappedTextResult`. |
-| `internal/skill` | export `ParseFrontmatter`; still imports nothing from Otto. |
+| `internal/skill` | export `ParseFrontmatter`; still imports nothing from Kite. |
 | `internal/session` | `Store.Append` encodes `RoleContext` messages as `custom_message`. |
 | `internal/config` | `agents.go`, `File.Agents`, shared root expansion with skills. |
 | `internal/app` | `Controller.Tasks()`; replacement and `Close` already close the old runner. |
-| `cmd/otto` | `buildRunner` wiring, `boundaryToolDefinitions`, `systemPromptFor` guidance line for delegation, Seatbelt read paths for agent roots. |
+| `cmd/kite` | `buildRunner` wiring, `boundaryToolDefinitions`, `systemPromptFor` guidance line for delegation, Seatbelt read paths for agent roots. |
 | `internal/tui`, `internal/repl`, `internal/server` | as described under Frontends. |
 
 AGENTS.md gains the `internal/subagent` package entry and the rule: "children
@@ -583,7 +583,7 @@ Each phase is one PR on `feat/subagents`-derived branches; `make check` and
 4. `internal/subagent`: `Runner` (goroutine per task, semaphore, task record
    updates from child events, result extraction, cancellation), tools `agent`
    (without `agent`/`context` parameters), `agent_wait`, `agent_status`.
-5. `cmd/otto`: wiring in `buildRunner`, `boundaryToolDefinitions`, one
+5. `cmd/kite`: wiring in `buildRunner`, `boundaryToolDefinitions`, one
    guidance line in `systemPromptFor`. `app.Controller.Tasks()`.
 6. REPL: notification rendering, wake from the `Run` loop select, `/tasks`,
    `/task <id>`, `/task cancel <id>`.
@@ -601,7 +601,7 @@ Each phase is one PR on `feat/subagents`-derived branches; `make check` and
    model; the status table is unchanged.
 3. The system-prompt guidance states the provider name, the endpoint host
    (host only, never userinfo or query), and the session model, and says that
-   Otto keeps no model list or price data, so the model picks the cheapest
+   Kite keeps no model list or price data, so the model picks the cheapest
    adequate id from its own knowledge and reruns on the session model if the
    endpoint rejects the id.
 
@@ -664,7 +664,7 @@ All offline, next to their packages.
 - `internal/repl`: wake from the select; command output.
 - `internal/server`: task routes; wake turn with `trigger: task`; cancel
   endpoint; `notification` wire event; metrics names.
-- `cmd/otto`: `agent*` tools present in definitions and in the `Usable tools:`
+- `cmd/kite`: `agent*` tools present in definitions and in the `Usable tools:`
   line; absent with `enabled = false`; child tool set excludes the listed
   tools; PTY smoke test still passes.
 
@@ -705,7 +705,7 @@ All offline, next to their packages.
 - `skill.ParseFrontmatter` is exported instead of adding an
   `internal/frontmatter` package.
 - The sub-agent model is chosen per call by the model, not by
-  configuration: `agent` takes a free-form `model` id, Otto keeps no catalog,
+  configuration: `agent` takes a free-form `model` id, Kite keeps no catalog,
   allowlist, or price data, and the system prompt states the provider,
   endpoint host, and session model so the model can choose. Model
   availability and pricing change faster than a maintained list, and the

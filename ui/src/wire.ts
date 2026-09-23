@@ -1,6 +1,6 @@
 // The wire format and the transcript reducer live in Rust
-// (crates/otto-core/src/wire) and reach the browser through the wasm package
-// `make ui` builds into crates/otto-web/pkg. This module re-exports them and
+// (crates/kite-core/src/wire) and reach the browser through the wasm package
+// `make ui` builds into crates/kite-web/pkg. This module re-exports them and
 // adds the one piece that cannot be wasm: the ReadableStream adapter.
 
 export type {
@@ -20,9 +20,9 @@ export type {
   TurnSummary,
   Usage,
   WireEvent,
-} from 'otto-web'
+} from 'kite-web'
 
-import type { Item as WebItem } from 'otto-web'
+import type { Item as WebItem } from 'kite-web'
 
 export type Item =
   | (Extract<WebItem, { kind: 'user' }> & { created_at?: string })
@@ -31,9 +31,9 @@ export type Item =
   | (Extract<WebItem, { kind: 'tool' }> & { created_at?: string })
   | Extract<WebItem, { kind: 'notice' | 'error' }>
 
-export { fromHistory, parseFrames, reduce } from 'otto-web'
+export { fromHistory, parseFrames, reduce } from 'kite-web'
 
-import init, { parseFrames, type Frame } from 'otto-web'
+import init, { parseFrames, type Frame } from 'kite-web'
 
 // ready resolves once the wasm module is instantiated. Every export above
 // traps if it is called first, so the entry point awaits this before render.

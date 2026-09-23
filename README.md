@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="Otto logo" width="320">
+  <img src="docs/logo.svg" alt="Kite logo" width="320">
 </p>
 
-# Otto — a local-first agent for your terminal
+# Kite — a local-first agent for your terminal
 
 [简体中文](README.zh-CN.md) · [User manual](docs/user-manual.md)
 
-**Otto is a local-first agent for your terminal, built in Rust.**
+**Kite is a local-first agent for your terminal, built in Rust.**
 Give it a task; it runs a loop of model completions, tool calls, and — when
 needed — context compaction. Connect through an OpenAI-compatible API endpoint
-or sign in with `otto login` for the ChatGPT provider. Model requests go to the
+or sign in with `kite login` for the ChatGPT provider. Model requests go to the
 selected provider; local-first refers to the runtime, session history, and
 memory storage.
 
@@ -18,7 +18,7 @@ memory storage.
 - **Keep access bounded.** Workspace-confined file tools and macOS Seatbelt
   sandboxing for shell commands by default.
 - **Keep going without you typing.** Persistent sessions, local memory, reusable
-  skills, bounded sub-agents, timers, and — with `otto serve` — optional Feishu
+  skills, bounded sub-agents, timers, and — with `kite serve` — optional Feishu
   inbound into the session inbox.
 
 ## Install from source
@@ -26,24 +26,24 @@ memory storage.
 Requires the pinned **Rust 1.98** toolchain (`rustup toolchain install` picks
 it up from `rust-toolchain.toml`), **Node 24+**, `wasm-pack` 0.15, and access
 to one of the two providers. **macOS** is the supported platform: it is the
-only one with a sandbox, and the only one the acceptance gate runs on. Otto
+only one with a sandbox, and the only one the acceptance gate runs on. Kite
 also builds and runs on **Linux**, with the limits under
 [Safety and limitations](#safety-and-limitations).
 
 ```bash
-git clone https://github.com/baiyuqing/otto.git
-cd otto
+git clone https://github.com/baiyuqing/kite.git
+cd kite
 make install
-otto --help
+kite --help
 ```
 
 `make install` refreshes and embeds the Web UI, builds the release binary, and
-installs it to `~/.local/bin/otto`. Make sure `~/.local/bin` is on your `PATH`.
+installs it to `~/.local/bin/kite`. Make sure `~/.local/bin` is on your `PATH`.
 A direct `cargo build` without a prior `make ui` embeds a one-line placeholder
 instead.
 
 If you only want a local copy in the checkout, run `make build` and then
-`./otto --help`.
+`./kite --help`.
 
 ## Quick start
 
@@ -52,34 +52,34 @@ If you only want a local copy in the checkout, run `make build` and then
 Sign in, then choose a model available to your account (replace `YOUR_MODEL_ID`):
 
 ```bash
-./otto login
-./otto --provider chatgpt --model YOUR_MODEL_ID
+./kite login
+./kite --provider chatgpt --model YOUR_MODEL_ID
 ```
 
 See [sign-in and profiles](docs/user-manual.md#chatgpt-subscription) for details.
 
 ### OpenAI-compatible API
 
-Export your API key as `OTTO_API_KEY` in your shell. Replace the endpoint and
+Export your API key as `KITE_API_KEY` in your shell. Replace the endpoint and
 model below with values from your provider; the endpoint must support streaming
 Chat Completions.
 
 ```bash
-./otto --provider openai-compatible \
+./kite --provider openai-compatible \
   --base-url https://example.invalid/v1 \
   --model YOUR_MODEL_ID
 ```
 
-Otto reads API keys from the profile's `api_key_env` variable or falls back to
-`OTTO_API_KEY`. Keys have no CLI flag and must not be stored in TOML. For a
+Kite reads API keys from the profile's `api_key_env` variable or falls back to
+`KITE_API_KEY`. Keys have no CLI flag and must not be stored in TOML. For a
 persistent setup, see [configuration](docs/user-manual.md#configuration).
 
 ## Try a task
 
-Start Otto in the workspace you want it to use:
+Start Kite in the workspace you want it to use:
 
 ```bash
-./otto --provider chatgpt --model YOUR_MODEL_ID --cwd /path/to/workspace
+./kite --provider chatgpt --model YOUR_MODEL_ID --cwd /path/to/workspace
 ```
 
 Example prompts to enter in the interactive session:
@@ -93,8 +93,8 @@ Remember that we decided to ship the inbox path first.
 After configuring a default profile, you can also run one prompt and exit:
 
 ```bash
-./otto --prompt "summarize what this workspace is for"
-./otto --continue
+./kite --prompt "summarize what this workspace is for"
+./kite --continue
 ```
 
 Use `/help` for interactive commands. Sessions support continuing, resuming, and
@@ -114,7 +114,7 @@ The selected model and OpenAI-compatible endpoint must support image input.
 - [Timers](docs/user-manual.md#remind): the model schedules a later wake with
   `remind`; `/timers` lists this session's outstanding timers and
   `/timers cancel <id>` stops one.
-- [Local server](docs/user-manual.md#agent-server): `otto serve` over a Unix
+- [Local server](docs/user-manual.md#agent-server): `kite serve` over a Unix
   socket or a loopback TCP port, with an embedded browser UI. Optional
   [Feishu inbound](docs/user-manual.md#feishu-inbound) delivers group and chat
   text into open session inboxes.
@@ -137,14 +137,14 @@ context by default.
 Optional named definitions live under:
 
 ```text
-~/.otto/agents
-<workspace>/.otto/agents
+~/.kite/agents
+<workspace>/.kite/agents
 ```
 
 Example:
 
 ```text
-~/.otto/agents/researcher/AGENT.md
+~/.kite/agents/researcher/AGENT.md
 ```
 
 ```markdown
@@ -170,8 +170,8 @@ persisted.
 
 ### Run a durable workflow
 
-Put named `AGENT.md` definitions under `.otto/agents`, then declare a DAG in
-`.otto/workflows/review.toml`:
+Put named `AGENT.md` definitions under `.kite/agents`, then declare a DAG in
+`.kite/workflows/review.toml`:
 
 ```toml
 version = 1
@@ -189,20 +189,20 @@ needs = ["research"]
 ```
 
 ```text
-otto workflow run review --input "review the current change"
-otto workflow status <run-id>
-otto workflow fork <run-id> --after-step <step-id>
-otto workflow resume <run-id> --retry <interrupted-step>
+kite workflow run review --input "review the current change"
+kite workflow status <run-id>
+kite workflow fork <run-id> --after-step <step-id>
+kite workflow resume <run-id> --retry <interrupted-step>
 ```
 
-Workflow state lives in `~/.otto/workflows.db`; each attempt has a separate
-append-only transcript under `~/.otto/workflow-sessions`. Interrupted steps are
+Workflow state lives in `~/.kite/workflows.db`; each attempt has a separate
+append-only transcript under `~/.kite/workflow-sessions`. Interrupted steps are
 never retried automatically.
 
 ## Safety and limitations
 
 - **Supported providers** are `openai-compatible` and `chatgpt`.
-- **macOS** is the supported platform. On **Linux** Otto builds and runs, but
+- **macOS** is the supported platform. On **Linux** Kite builds and runs, but
   it has no sandbox: `bash` is not registered at all unless you pass
   `--sandbox off`, which runs commands as your user with nothing confining
   them. File tools, sessions, memory, skills, sub-agents, MCP, workflows, the
@@ -211,7 +211,7 @@ never retried automatically.
 - File tools stay within the selected workspace. Shell commands use Seatbelt by
   default; `--sandbox off` explicitly disables shell sandboxing. Seatbelt is not
   a VM and does not prevent destructive changes inside the writable workspace.
-- In an interactive parent session, Otto can request one-time unsandboxed Bash
+- In an interactive parent session, Kite can request one-time unsandboxed Bash
   execution. Review the exact command and run `/approve <id>` to grant it once;
   the request expires after five minutes and never changes `config.toml`.
 - Session files may contain workspace files, prompts, images, and tool results. Treat
@@ -227,13 +227,13 @@ never retried automatically.
   without rewinding external side effects.
 - MCP stdio servers run unsandboxed, with an explicit environment (`PATH`,
   `HOME`, `TMPDIR`, `LANG`, `TERM`, plus the configured `env` table only).
-  An MCP server that exits stays disconnected until Otto restarts; Otto does
+  An MCP server that exits stays disconnected until Kite restarts; Kite does
   not respawn it.
 - The local server binds loopback addresses only; there is no TLS, CORS, or
   token persistence. The Unix socket relies on file permissions for access
   control.
 
-Configure shell permissions interactively with `otto sandbox setup`; see the
+Configure shell permissions interactively with `kite sandbox setup`; see the
 [setup guide](docs/user-manual.md#interactive-sandbox-setup). In a running
 session, `/sandbox allow <path>` and `/sandbox network allow|deny` write the
 same `[sandbox]` settings and apply them to the current process.
@@ -245,11 +245,11 @@ access to a workspace.
 
 The code is a Cargo workspace of three crates:
 
-- `crates/otto-core` holds the provider contract, wire codecs, session codec,
+- `crates/kite-core` holds the provider contract, wire codecs, session codec,
   agent loop, and config. It builds for `wasm32-unknown-unknown`.
-- `crates/otto` is the native binary: CLI, REPL, TUI, tools, sandbox, memory,
-  skills, sub-agents, inbound adapters, and the `otto serve` server.
-- `crates/otto-web` compiles `otto-core` to WebAssembly for the browser UI in
+- `crates/kite` is the native binary: CLI, REPL, TUI, tools, sandbox, memory,
+  skills, sub-agents, inbound adapters, and the `kite serve` server.
+- `crates/kite-web` compiles `kite-core` to WebAssembly for the browser UI in
   `ui/`, so the web frontend and the binary share one implementation.
 
 See [AGENTS.md](AGENTS.md) for the task map and the
@@ -260,7 +260,7 @@ Go implementation (tagged `go-final`) was replaced.
 
 ```bash
 make build
-make check-fast  # rustfmt, clippy, focused otto-core tests
+make check-fast  # rustfmt, clippy, focused kite-core tests
 make check       # full macOS acceptance: all tests, wasm, PTY, and web UI
                  # (needs wasm-pack 0.15 and Node 24+)
 ```

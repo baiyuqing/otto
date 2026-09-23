@@ -12,7 +12,7 @@ input. It does not pretend to roll back external effects.
 ## User shape
 
 ```text
-otto workflow fork <run-id> --after-step <step-id>
+kite workflow fork <run-id> --after-step <step-id>
 ```
 
 Server:

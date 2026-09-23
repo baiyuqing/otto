@@ -6,7 +6,7 @@ const sandbox = { mode: 'seatbelt', network: 'off', bash_available: true, summar
 
 const session = (over: Partial<Session> = {}): Session => ({
   id: 's1',
-  workspace: '/tmp/otto',
+  workspace: '/tmp/kite',
   provider: 'openai-compatible',
   profile: 'default',
   model: 'test',

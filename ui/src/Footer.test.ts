@@ -11,7 +11,7 @@ describe('Footer usage history', () => {
     render(
       createElement(Footer, {
         info: {
-          workspace: '/tmp/otto',
+          workspace: '/tmp/kite',
           provider: 'openai-compatible',
           profile: 'default',
           model: 'test',

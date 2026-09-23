@@ -3,20 +3,20 @@
 Status: **approved** 2026-09-16. This change implements the contract below.
 
 Superseded on 2026-09-21: `chat_ids` is an allowlist, not an optional
-filter. An empty list admits nothing and `otto serve` starts no consumer.
+filter. An empty list admits nothing and `kite serve` starts no consumer.
 The "empty → do not filter by chat" behavior described below is historical.
 
-Otto's turn loop, inbox, and idle wake already accept later messages. The
+Kite's turn loop, inbox, and idle wake already accept later messages. The
 missing piece is a host-side producer that pushes work-context into the
 inbox. The first producer is Feishu. This is not a new Provider, skill, or
 Connector trait.
 
 ## Objective
 
-`otto serve` optionally consumes Feishu group and direct-chat text and turns
+`kite serve` optionally consumes Feishu group and direct-chat text and turns
 it into the existing inbox `Message` notification, which starts a wake turn
 when the session is idle. Credentials, the long-lived connection, and event
-subscription stay in `lark-cli`. Otto owns configuration, process lifetime,
+subscription stay in `lark-cli`. Kite owns configuration, process lifetime,
 NDJSON → `Notification`, and fan-out.
 
 ## Scope
@@ -26,7 +26,7 @@ NDJSON → `Notification`, and fan-out.
   logs, and the user manual.
 - Out: replying in Feishu, a TUI/REPL consumer, Telegram, a Connector trait,
   a new Provider, changing the HTTP `trigger: user|task` contract,
-  `OTTO_TRACE`, automatic memory extraction, office skills, and per-workspace
+  `KITE_TRACE`, automatic memory extraction, office skills, and per-workspace
   routing.
 
 ## Decisions
@@ -50,7 +50,7 @@ notification. No current runner returns false.
 **2. Reuse the existing wake path.**
 
 The inbox stays on the session `Tasks` registry (`on_change` → `updates`).
-`otto serve`'s wake loop already watches that signal. `[agents].enabled =
+`kite serve`'s wake loop already watches that signal. `[agents].enabled =
 false` disables wake the same way it disables `remind`. This change does not
 decouple the two.
 
@@ -65,7 +65,7 @@ means every chat. TUI and REPL processes do not spawn `lark-cli`.
 
 **4. `lark-cli` is a transport subprocess, not a skill.**
 
-When enabled, `otto serve` spawns:
+When enabled, `kite serve` spawns:
 
 `lark-cli event consume im.message.receive_v1 --as bot`
 
@@ -86,18 +86,18 @@ binary = "lark-cli"      # empty or whitespace → this default
 chat_ids = []            # empty → do not filter by chat
 ```
 
-`deny_unknown_fields`. A `token` / `app_secret` key fails config load. Otto
+`deny_unknown_fields`. A `token` / `app_secret` key fails config load. Kite
 does not read Feishu secrets from its environment.
 
 ## Ownership
 
 | Layer | Owns |
 |---|---|
-| `otto-core` | Skip invalid `task_id` context metadata; Inbox / Event types stay |
-| `crates/otto` `app` | `Controller::notify` |
-| `crates/otto` `inbound` | NDJSON parse + supervisor (native only) |
-| `crates/otto` `server` / `cli/serve` | Fan-out and process lifetime |
-| `otto-web` / `ui/` | Unchanged |
+| `kite-core` | Skip invalid `task_id` context metadata; Inbox / Event types stay |
+| `crates/kite` `app` | `Controller::notify` |
+| `crates/kite` `inbound` | NDJSON parse + supervisor (native only) |
+| `crates/kite` `server` / `cli/serve` | Fan-out and process lifetime |
+| `kite-web` / `ui/` | Unchanged |
 
 ## Errors and safety
 
@@ -126,5 +126,5 @@ does not read Feishu secrets from its environment.
 ## Non-goals
 
 Outbound replies, calendar/doc retrieval, per-session routing, a TUI
-consumer, `OTTO_TRACE`, a new `NotificationKind`, and detaching the inbox
+consumer, `KITE_TRACE`, a new `NotificationKind`, and detaching the inbox
 from `Tasks`.

@@ -33,7 +33,7 @@ export function TranscriptView(props: { items: Item[]; activeSession: boolean })
           <h1>{props.activeSession ? 'Session is open' : 'No session'}</h1>
           <p>
             {props.activeSession
-              ? 'Type below. Otto works in this workspace.'
+              ? 'Type below. Kite works in this workspace.'
               : 'Create a session or resume one from the top bar.'}
           </p>
         </div>

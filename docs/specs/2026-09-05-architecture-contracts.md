@@ -52,7 +52,7 @@ valid transient and persisted messages continue to work.
   existing `ContextType`, `ContextTokensBefore`, and `Display` fields to avoid
   an unrelated HTTP history schema migration.
 - Deliver notifications with TaskID in both the event and the Message metadata.
-  Encode it as `details: {"otto": {"taskId": "t1"}}` on Pi custom-message
+  Encode it as `details: {"kite": {"taskId": "t1"}}` on Pi custom-message
   records. The local codec already preserves optional raw `details`; compatibility
   claims are limited to the checked-in codec/fixtures until an interop check runs.
 - Decode typed metadata first. Recover TaskID from the legacy notification text
@@ -78,7 +78,7 @@ resumed rendering agree. A fixture-level check verifies Pi compatibility.
   survive session accumulation/reopen; negative counts or cached > input are
   invalid regardless of presence.
 - Pi requires an assistant usage object. For newly written explicit-zero usage,
-  add `details: {"otto": {"usagePresent": true}}` using its existing optional
+  add `details: {"kite": {"usagePresent": true}}` using its existing optional
   details field. Legacy zero objects without the marker retain nil normalization.
   Parse only the exact namespaced boolean, tolerating absent/unrelated details.
   This records information in new records without inventing it for old ones.
@@ -223,7 +223,7 @@ minimal production change, then its package gates. Pure cleanup must preserve th
 existing behavior tests; a focused ownership/copy test covers any changed contract.
 Workers report the RED command/failure and GREEN result, plus intentional API changes.
 
-Final gates: `go build -trimpath -o ./otto ./cmd/otto`, `go test ./...`,
+Final gates: `go build -trimpath -o ./kite ./cmd/kite`, `go test ./...`,
 `go test -race ./...`, the offline PTY lifecycle test, `go vet ./...`,
 `go run honnef.co/go/tools/cmd/staticcheck@latest ./...`, gofmt, and
 `git diff --check`. Run relevant session interop script tests without fetching
@@ -239,10 +239,10 @@ an execution environment difference, not a reason to bypass sandbox protection.
 
 Passed on the completed worktree:
 
-- `go build -trimpath -o ./otto ./cmd/otto`
+- `go build -trimpath -o ./kite ./cmd/kite`
 - `go test ./... -count=1`
 - `go test -race ./... -count=1`
-- `go test ./cmd/otto -run TestTUIPseudoTerminalLifecycle -count=1`
+- `go test ./cmd/kite -run TestTUIPseudoTerminalLifecycle -count=1`
 - `go vet ./...`
 - `go run honnef.co/go/tools/cmd/staticcheck@latest ./...`
 - gofmt and `git diff --check`
@@ -265,7 +265,7 @@ that change, and its syscall-level cause had not been established.
 
 The subsequent agent-friendly development change captured a successful group
 signal followed by repeated Darwin `EPERM` while signal delivery was still in
-flight. The current [native process manager](../../crates/otto/src/sandbox/process.rs)
+flight. The current [native process manager](../../crates/kite/src/sandbox/process.rs)
 uses a bounded Darwin group-state observation before accepting that outcome.
 It requires an earlier successful group signal and no live members; query
 failures and live groups fail closed. The original live-descendant safety

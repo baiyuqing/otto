@@ -63,7 +63,7 @@ export const SessionManager = {
 `;
 
 async function withProbeFixture(lines, env, callback) {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "otto-pi-probe-"));
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "kite-pi-probe-"));
   try {
     const nodeModules = path.join(tempDir, "node_modules", "@earendil-works", "pi-coding-agent");
     await mkdir(nodeModules, { recursive: true });
@@ -94,7 +94,7 @@ test("counts Pi compactionSummary context metadata", async () => {
     '{"type":"message","id":"a1","parentId":null,"timestamp":"2026-08-28T10:00:01Z","message":{"role":"user","content":"u1","timestamp":1}}',
     '{"type":"compaction","id":"a2","parentId":"a1","timestamp":"2026-08-28T10:00:02Z","summary":"summary","firstKeptEntryId":"a1","tokensBefore":17}',
     '{"type":"message","id":"a3","parentId":"a2","timestamp":"2026-08-28T10:00:03Z","message":{"role":"assistant","content":"a1","api":"openai-completions","provider":"openai-compatible","model":"model","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":3}}',
-  ], { OTTO_PI_INTEROP: "1" }, async (result) => {
+  ], { KITE_PI_INTEROP: "1" }, async (result) => {
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(result.stdout);
     assert.equal(output.compaction.contextMessageCount, 1);
@@ -105,9 +105,9 @@ test("counts Pi compactionSummary context metadata", async () => {
 test("accepts retainedTail empty array checkpoints", async () => {
   await withProbeFixture([
     '{"type":"session","version":3,"id":"probe-tail","timestamp":"2026-08-28T10:00:00Z","cwd":"/workspace"}',
-    '{"type":"custom","id":"b1","parentId":null,"timestamp":"2026-08-28T10:00:01Z","customType":"otto.runtime","data":{"profile":"default","provider":"openai-compatible","model":"model"}}',
+    '{"type":"custom","id":"b1","parentId":null,"timestamp":"2026-08-28T10:00:01Z","customType":"kite.runtime","data":{"profile":"default","provider":"openai-compatible","model":"model"}}',
     '{"type":"compaction","id":"b2","parentId":"b1","timestamp":"2026-08-28T10:00:02Z","summary":"summary","tokensBefore":17,"retainedTail":[]}',
-  ], { OTTO_PI_INTEROP: "1" }, async (result) => {
+  ], { KITE_PI_INTEROP: "1" }, async (result) => {
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(result.stdout);
     assert.equal(output.compaction.entriesWithRetainedTail, 1);
@@ -115,12 +115,12 @@ test("accepts retainedTail empty array checkpoints", async () => {
   });
 });
 
-test("requires OTTO_PI_INTEROP=1", async () => {
+test("requires KITE_PI_INTEROP=1", async () => {
   await withProbeFixture([
     '{"type":"session","version":3,"id":"probe-gate","timestamp":"2026-08-28T10:00:00Z","cwd":"/workspace"}',
   ], {}, async (result) => {
     assert.equal(result.status, 77, result.stderr);
     assert.equal(result.stdout, "");
-    assert.equal(result.stderr.trim(), "SKIP: OTTO_PI_INTEROP=1 is required to run the optional Pi interop probe");
+    assert.equal(result.stderr.trim(), "SKIP: KITE_PI_INTEROP=1 is required to run the optional Pi interop probe");
   });
 });

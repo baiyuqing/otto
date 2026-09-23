@@ -1,7 +1,7 @@
-# Otto development and macOS acceptance checks. See docs/development.md.
+# Kite development and macOS acceptance checks. See docs/development.md.
 # Tests use no live provider credentials; tool/dependency setup may use network.
 
-BINARY := otto
+BINARY := kite
 INSTALL_DIR ?= $(HOME)/.local/bin
 
 .PHONY: all build install check-fast check check-linux ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui clean help
@@ -12,7 +12,7 @@ build: ui ## build the Web UI and compile the Rust binary (release) to ./$(BINAR
 	cargo build --release
 	cp target/release/$(BINARY) ./$(BINARY)
 
-install: build ## install the Otto binary to $(INSTALL_DIR)
+install: build ## install the Kite binary to $(INSTALL_DIR)
 	install -d "$(INSTALL_DIR)"
 	install -m 0755 ./$(BINARY) "$(INSTALL_DIR)/$(BINARY)"
 
@@ -25,22 +25,22 @@ rust-lint: ## run clippy across the Rust workspace with warnings as errors
 rust-test: ## run the full native Rust test suite
 	cargo test --workspace
 
-rust-wasm-check: ## verify otto-core and otto-web still build for wasm32
-	cargo check -p otto-core --target wasm32-unknown-unknown
-	cargo check -p otto-web --target wasm32-unknown-unknown
+rust-wasm-check: ## verify kite-core and kite-web still build for wasm32
+	cargo check -p kite-core --target wasm32-unknown-unknown
+	cargo check -p kite-web --target wasm32-unknown-unknown
 
 rust-wasm-test: ## run the Rust wasm tests under Node (needs wasm-pack)
-	wasm-pack test --node crates/otto-core
-	wasm-pack test --node crates/otto-web
+	wasm-pack test --node crates/kite-core
+	wasm-pack test --node crates/kite-web
 
 scripts-test: ## run the Node tests beside scripts/ (offline, no build needed)
 	node --test scripts/*.test.mjs
 
 test-tui: ## run the TUI PTY lifecycle smoke test (needs a real PTY)
-	cargo test -p otto --test tui_pty
+	cargo test -p kite --test tui_pty
 
 check-fast: rust-fmt rust-lint ## quick feedback: formatting, lint, focused core tests
-	cargo test -p otto-core
+	cargo test -p kite-core
 	@git diff --check
 
 check: check-fast build rust-test rust-wasm-check rust-wasm-test scripts-test test-tui ui-test ## full macOS acceptance, including host integration, PTY and web UI tests
@@ -51,11 +51,11 @@ check-linux: rust-fmt rust-lint rust-test rust-wasm-check scripts-test test-tui 
 
 ui: ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)
 	rm -rf ui/dist/assets ui/dist/index.html
-	wasm-pack build --target web crates/otto-web
+	wasm-pack build --target web crates/kite-web
 	cd ui && npm ci && npm run build
 
 ui-test: ## run the web UI unit tests (needs Node 24+ and wasm-pack)
-	wasm-pack build --target web crates/otto-web
+	wasm-pack build --target web crates/kite-web
 	cd ui && npm ci && npm test
 
 clean: ## remove the built binary

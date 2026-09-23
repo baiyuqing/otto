@@ -2,7 +2,7 @@
 
 Status: approved 2026-09-22 (decisions settled by the user on 2026-09-22; see
 "Decisions"). Not yet implemented beyond slice 1. This design is motivated by
-external research, and Otto has no measurement of its own yet; the
+external research, and Kite has no measurement of its own yet; the
 "Validation" section below is the condition for adopting slice 3, not a
 formality.
 
@@ -13,7 +13,7 @@ Skills: Executing Reusable Knowledge for Long-Horizon Agentic Tasks*
 (arXiv:2609.09233v1) compares the two ways a skill package can be run:
 
 - **Agent-skill execution** — the skill's `SKILL.md` body is loaded into the
-  main context and the main policy follows it. This is what Otto does today.
+  main context and the main policy follows it. This is what Kite does today.
 - **Sub-agent execution** — a fresh context is seeded with the skill body and
   the delegated subtask; only the final answer returns to the main context.
 
@@ -24,7 +24,7 @@ The paper's result is *conditional*, and the condition is the whole point:
 | Loosely structured knowledge, no stated inputs or outputs | **agent skill**, across every model tested |
 | Procedural instructions with explicit input/output contracts | **sub-agent**, by a margin that grows as context pressure grows |
 
-Two secondary findings matter for Otto:
+Two secondary findings matter for Kite:
 
 - Sub-agent execution lowers *peak* context but raises *total* tokens
   substantially, because the delegating agent must restate what the child
@@ -34,21 +34,21 @@ Two secondary findings matter for Otto:
 
 This is external evidence obtained on a different harness (OpenHands) and a
 different benchmark (SkillsBench). It is a reason to build the mechanism and
-measure it, not a reason to change Otto's default.
+measure it, not a reason to change Kite's default.
 
-## Why Otto is unusually well placed
+## Why Kite is unusually well placed
 
-Otto already has both halves and has never connected them.
+Kite already has both halves and has never connected them.
 
-`crates/otto/src/skill/mod.rs` gives `Skill { name, description, directory,
-path }` plus a body loaded on demand. `crates/otto/src/subagent/definition.rs`
+`crates/kite/src/skill/mod.rs` gives `Skill { name, description, directory,
+path }` plus a body loaded on demand. `crates/kite/src/subagent/definition.rs`
 gives `Definition { name, description, body, directory, path, tools, model,
 context, write_policy, write_paths }`. The first five fields are the same
 data. The sub-agent runner already spawns a child with its own transcript, its
 own tool subset, and a fixed delegation depth of one, and the `agent` tool
 already takes `agent: <name>`, `prompt`, and `wait`.
 
-So the paper's `E(Subagent(s), x) = r_T` is, in Otto's terms, already spelled
+So the paper's `E(Subagent(s), x) = r_T` is, in Kite's terms, already spelled
 `agent(agent = <skill>, prompt = x, wait = true)`. What is missing is only
 that a skill cannot become an agent definition.
 
@@ -60,7 +60,7 @@ The paper writes a skill description as `d = (q_in, h, q_out)`: a summary plus
 natural-language input and output contracts. Their packages express this as
 prose inside `description`.
 
-Otto should make it **structured frontmatter** instead:
+Kite should make it **structured frontmatter** instead:
 
 ```markdown
 ---
@@ -140,7 +140,7 @@ noted as follow-up work, not designed here.
 ## Prerequisite: the initial-context budget
 
 The paper's distracting-skill experiment is direct evidence that a long
-listing costs accuracy by itself. Otto's current listing has a defect that
+listing costs accuracy by itself. Kite's current listing has a defect that
 this design would make worse, and it should be fixed first:
 
 `skill::prompt_section` drops entries once the rendered section would pass 8
@@ -159,17 +159,17 @@ treatment.
 
 ## Validation
 
-The paper's finding is not transferable by assertion; Otto's provider set,
-prompts and tool surface all differ. Adoption is gated on Otto's own numbers.
+The paper's finding is not transferable by assertion; Kite's provider set,
+prompts and tool surface all differ. Adoption is gated on Kite's own numbers.
 
-Otto already writes everything needed, in two places that do not overlap.
+Kite already writes everything needed, in two places that do not overlap.
 `scripts/skill-exec-measure.mjs` reads both and prints one report per session:
 
-1. **Peak context** per window, from `~/.otto/usage.db`. A sub-agent's
+1. **Peak context** per window, from `~/.kite/usage.db`. A sub-agent's
    transcript is a `MemorySession` and never reaches disk, so the only record
    of its context is the usage row tagged with its task id; an empty task id
    is the main context.
-2. **Total tokens**, which the paper expects to rise substantially. If Otto
+2. **Total tokens**, which the paper expects to rise substantially. If Kite
    cannot reproduce a peak-context reduction, the feature is not worth its
    token cost and should not ship.
 3. **Whether the model honours `exec="agent"`**, from the parent transcript,

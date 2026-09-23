@@ -416,10 +416,10 @@ export function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand" aria-label="Otto Web UI">
+        <div className="brand" aria-label="Kite Web UI">
           <img className="brand-mark" src={logo} alt="" />
           <div>
-            <div className="brand-name">Otto</div>
+            <div className="brand-name">Kite</div>
             <div className="brand-subtitle">local agent</div>
           </div>
         </div>

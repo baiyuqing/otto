@@ -67,7 +67,7 @@ test("a malformed line is skipped rather than failing the run", () => {
 });
 
 test("window peaks separate the main context from each sub-agent", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "otto-measure-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "kite-measure-"));
   try {
     const database = path.join(directory, "usage.db");
     await seed(database, [
@@ -90,7 +90,7 @@ test("window peaks separate the main context from each sub-agent", async () => {
 });
 
 test("the report names the largest window, which is what the design compares", async () => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "otto-measure-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "kite-measure-"));
   try {
     const database = path.join(directory, "usage.db");
     await seed(database, [
@@ -108,7 +108,7 @@ test("the report names the largest window, which is what the design compares", a
   }
 });
 
-/// Writes rows in the shape `crates/otto/src/usage.rs` creates.
+/// Writes rows in the shape `crates/kite/src/usage.rs` creates.
 async function seed(database, rows) {
   const { DatabaseSync } = await import("node:sqlite");
   const connection = new DatabaseSync(database);

@@ -12,7 +12,7 @@
     "types": ["vite/client", "node"],
     "baseUrl": ".",
     "paths": {
-      "otto-web": ["../crates/otto-web/pkg/otto_web.d.ts"]
+      "kite-web": ["../crates/kite-web/pkg/kite_web.d.ts"]
     }
   },
   "include": ["src"]

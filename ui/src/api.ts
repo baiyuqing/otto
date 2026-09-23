@@ -76,7 +76,7 @@ export interface WorkflowView {
   requests: WorkflowRequest[]
 }
 
-const TOKEN_KEY = 'otto.token'
+const TOKEN_KEY = 'kite.token'
 
 // loadToken takes the token from the startup URL's query string, keeps it
 // in sessionStorage (per tab, gone when the tab closes), and removes it from

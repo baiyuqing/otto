@@ -2,17 +2,17 @@
 
 Status: approved 2026-09-03; historical and superseded for the current API.
 It is retained for rationale. Check the current
-[`crates/otto/src/server`](../../crates/otto/src/server) implementation, the
+[`crates/kite/src/server`](../../crates/kite/src/server) implementation, the
 [user manual](../user-manual.md), and the
 [2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
 for current behavior and ownership rules.
 
 ## Goal
 
-Otto currently has two in-process frontends, `internal/tui` and
+Kite currently has two in-process frontends, `internal/tui` and
 `internal/repl`. Neither is reachable from outside the process, so an
-external program (a web UI, a script) has no way to drive Otto. This PR adds
-a third frontend, `otto serve`, that exposes the agent over HTTP+JSON+SSE on
+external program (a web UI, a script) has no way to drive Kite. This PR adds
+a third frontend, `kite serve`, that exposes the agent over HTTP+JSON+SSE on
 a Unix domain socket, so it can act as an agent server for other local
 processes.
 
@@ -34,11 +34,11 @@ listed again in [Follow-ups, not in this PR](#follow-ups-not-in-this-pr).
 ### CLI
 
 ```
-otto serve [--config --cwd --profile --provider --base-url --model --thinking --sandbox --shell-timeout --max-output-bytes] [--socket PATH]
+kite serve [--config --cwd --profile --provider --base-url --model --thinking --sandbox --shell-timeout --max-output-bytes] [--socket PATH]
 ```
 
 `run()` recognizes `args[0] == "serve"` at the same subcommand-dispatch site
-used for `memory`/`login`/`logout` (`cmd/otto/main.go:216`), strips it, and
+used for `memory`/`login`/`logout` (`cmd/kite/main.go:216`), strips it, and
 continues through the existing `parseFlags` with `options.serve = true`.
 `serve` combined with `--ui`, `--approve`, `--resume`, `--continue`,
 `--archive`, or `--no-session` exits with code 2. `--no-session` is rejected
@@ -49,23 +49,23 @@ the server API.
 Startup reuses the full existing chain unchanged: environment capture →
 `loadConfig` → `configEnvironment` → workspace resolution → session root →
 `runtimeBuilder` → sandbox → memory service. `options.serve` skips
-`selectFrontend` (`cmd/otto/main.go:344-350`), which would otherwise error
-when `OTTO_UI=tui` or `[ui].mode = "tui"` is set and stdin is not a
+`selectFrontend` (`cmd/kite/main.go:344-350`), which would otherwise error
+when `KITE_UI=tui` or `[ui].mode = "tui"` is set and stdin is not a
 terminal. The serve branch is taken before `initialSession` is constructed
-(`cmd/otto/main.go:550`): `if options.serve { return runServe(...) }`. Serve
+(`cmd/kite/main.go:550`): `if options.serve { return runServe(...) }`. Serve
 mode does not pre-create a session; sessions are created or opened per HTTP
 request through the session factories described in [Sessions](#sessions).
 
 `serve` refuses to start with `errSessionOperationUnavailable` when
 `!dynamicContent`, the same check already applied to `--resume`,
-`--continue`, and `--archive` (`cmd/otto/main.go:288`). This is consistent
+`--continue`, and `--archive` (`cmd/kite/main.go:288`). This is consistent
 with `buildNewReplacement`, which returns the same error in that state
-(`cmd/otto/runtime_builder.go:388`).
+(`cmd/kite/runtime_builder.go:388`).
 
 ### Socket path and listener
 
 Priority: `--socket` flag > `[server].socket` (TOML) > default
-`~/.otto/otto.sock`. No environment variable.
+`~/.kite/kite.sock`. No environment variable.
 
 `internal/server/listen.go`:
 
@@ -91,9 +91,9 @@ and file permissions above are considered sufficient for this iteration.
 
 SIGTERM is subscribed only inside the serve branch:
 `signal.Notify(ch, syscall.SIGTERM)` calling `cancelProcess()` on receipt.
-The shared `subscribeOSInterrupts` (`cmd/otto/main.go:148`, `os.Interrupt`
+The shared `subscribeOSInterrupts` (`cmd/kite/main.go:148`, `os.Interrupt`
 only) is left untouched, because the shared signal loop
-(`cmd/otto/main.go:435-441`) routes every signal to `currentREPL.Interrupt()`
+(`cmd/kite/main.go:435-441`) routes every signal to `currentREPL.Interrupt()`
 first and only falls back to `cancelProcess()` when no REPL claims it;
 reusing that loop for SIGTERM in serve mode would risk a `kill` only
 canceling the active turn instead of terminating the process.
@@ -105,21 +105,21 @@ every open `*app.Controller` → `runServe` returns → the existing
 deleted → process exits 0. Controllers must close before the memory service,
 because the memory service's `Close` waits for operations still in flight.
 
-`printUsage` (`cmd/otto/main.go:829`) gains a line for
-`otto serve [options] [--socket PATH]` and a description of `--socket`.
+`printUsage` (`cmd/kite/main.go:829`) gains a line for
+`kite serve [options] [--socket PATH]` and a description of `--socket`.
 
 ## Sessions
 
 ### Controller assembly reuse
 
-`cmd/otto/main.go:583-648` already assembles one `*app.Controller` inline.
+`cmd/kite/main.go:583-648` already assembles one `*app.Controller` inline.
 That assembly is extracted into:
 
 ```go
 func (b runtimeBuilder) newController(initial session.Session, runner app.Runner, info app.RuntimeInfo, dynamicContent bool) (*app.Controller, error)
 ```
 
-in `cmd/otto/runtime_builder.go`. Inside it, the `build` closure passed to
+in `cmd/kite/runtime_builder.go`. Inside it, the `build` closure passed to
 `app.New` returns the supplied `runner` directly (no
 `initialRunnerPending` flag), and the `create` closure returns
 `errSessionOperationUnavailable`. Both are dead paths today:
@@ -141,7 +141,7 @@ existing tests are expected to pass unmodified.
 
 ### Session factories
 
-Implemented in `cmd/otto`, passed into the server package as plain
+Implemented in `cmd/kite`, passed into the server package as plain
 functions. All three use `processCtx`, never an HTTP request context, and
 wrap errors through `builder.redactError` before returning them.
 
@@ -153,7 +153,7 @@ wrap errors through `builder.redactError` before returning them.
   resumed by id; session.PathForID would need exporting to reach further
   back.`
 - `List(ctx)`: `session.List(..., 20)`; `errors.Is(err, os.ErrNotExist)`
-  returns an empty result, since a fresh `$HOME` has no `~/.otto/sessions`
+  returns an empty result, since a fresh `$HOME` has no `~/.kite/sessions`
   directory yet.
 
 `Create` and `Open` never use the request context because
@@ -214,11 +214,11 @@ first prompt the session file does not exist yet, `Store.Path()` reads it
 non-atomically, and the `id` already works as the handle for every
 endpoint. `GET /v1/sessions` list rows instead use `session.SessionInfo`
 (`internal/session/types.go:78`), which does carry `path`, for callers that
-want to resume by file path with `otto --resume PATH` outside the server.
+want to resume by file path with `kite --resume PATH` outside the server.
 
 ```bash
-curl -s --unix-socket ./otto.sock -X POST http://otto/v1/sessions -d '{}'
-curl -s --unix-socket ./otto.sock http://otto/v1/sessions
+curl -s --unix-socket ./kite.sock -X POST http://kite/v1/sessions -d '{}'
+curl -s --unix-socket ./kite.sock http://kite/v1/sessions
 ```
 
 ## Turns and event streaming
@@ -298,8 +298,8 @@ SSE frame format: `id: <seq>`, `event: <agent.EventType literal>`,
 one to one (shapes in [Wire events](#wire-events)).
 
 ```bash
-curl -N --unix-socket ./otto.sock -X POST http://otto/v1/sessions/<id>/turns -d '{"text":"list files"}'
-curl -s --unix-socket ./otto.sock -X POST http://otto/v1/sessions/<id>/turns/<turn_id>/cancel
+curl -N --unix-socket ./kite.sock -X POST http://kite/v1/sessions/<id>/turns -d '{"text":"list files"}'
+curl -s --unix-socket ./kite.sock -X POST http://kite/v1/sessions/<id>/turns/<turn_id>/cancel
 ```
 
 ## Wire events
@@ -416,19 +416,19 @@ doesn't have. All three routes reach the registry only through
 `internal/subagent` or the runner directly.
 
 ```bash
-curl -s --unix-socket ./otto.sock http://otto/v1/sessions/<id>/tasks
-curl -s --unix-socket ./otto.sock http://otto/v1/sessions/<id>/tasks/t1
-curl -s --unix-socket ./otto.sock -X POST http://otto/v1/sessions/<id>/tasks/t1/cancel
+curl -s --unix-socket ./kite.sock http://kite/v1/sessions/<id>/tasks
+curl -s --unix-socket ./kite.sock http://kite/v1/sessions/<id>/tasks/t1
+curl -s --unix-socket ./kite.sock -X POST http://kite/v1/sessions/<id>/tasks/t1/cancel
 ```
 
 ### Task metrics
 
-- `otto_tasks_started_total` — counter, incremented once per task the wake
+- `kite_tasks_started_total` — counter, incremented once per task the wake
   loop first observes in `Tasks().List()`.
-- `otto_tasks_finished_total{status}` — counter, `status` one of
+- `kite_tasks_finished_total{status}` — counter, `status` one of
   `succeeded`/`failed`/`canceled`, incremented once per task the first time
   its status is observed as final.
-- `otto_tasks_running` — gauge, the number of tasks currently observed with
+- `kite_tasks_running` — gauge, the number of tasks currently observed with
   status `running`, summed across sessions.
 
 The server only sees tasks through `Tasks().List()`, not a push per
@@ -458,20 +458,20 @@ Error body: `{"error":{"code","message"}}`.
 dependency. Labels never carry a path, a query parameter, or request/turn
 text.
 
-- `otto_http_requests_total{route,method,status}`
-- `otto_http_request_duration_seconds{route}`
-- `otto_sessions_open`
-- `otto_turns_total{status}`
-- `otto_turns_active`
-- `otto_turn_duration_seconds`
-- `otto_tool_calls_total{tool,status}`
-- `otto_tool_call_duration_seconds{tool}` — measured from `toolStart` to the
+- `kite_http_requests_total{route,method,status}`
+- `kite_http_request_duration_seconds{route}`
+- `kite_sessions_open`
+- `kite_turns_total{status}`
+- `kite_turns_active`
+- `kite_turn_duration_seconds`
+- `kite_tool_calls_total{tool,status}`
+- `kite_tool_call_duration_seconds{tool}` — measured from `toolStart` to the
   matching `tool_call_finished`, one active interval per turn since tool
   calls run one at a time
-- `otto_provider_tokens_total{kind}`
-- `otto_event_stream_clients`
-- `otto_tasks_started_total`, `otto_tasks_finished_total{status}`,
-  `otto_tasks_running` — see [Task metrics](#task-metrics)
+- `kite_provider_tokens_total{kind}`
+- `kite_event_stream_clients`
+- `kite_tasks_started_total`, `kite_tasks_finished_total{status}`,
+  `kite_tasks_running` — see [Task metrics](#task-metrics)
 
 Durations use fixed histogram buckets. `GET /metrics` renders all of these
 in Prometheus text exposition format.
@@ -533,7 +533,7 @@ type Server struct {
 `File` gains `Server Server `toml:"server"`` (`config.Load` is strict, so
 the field must be present in the struct even though the TOML section is
 optional). `ResolveServer(file, override, env) (ServerRuntime, error)`
-applies override > file > default (`~/.otto/otto.sock`), with `~/`
+applies override > file > default (`~/.kite/kite.sock`), with `~/`
 expansion using the same `homeFromEnv`-based switch
 `internal/config/skills.go:44-56` and `internal/config/memory.go:49-58`
 already use.
@@ -551,14 +551,14 @@ already use.
 | `internal/server/listen.go` | socket creation and permission checks |
 | `internal/server/openapi.yaml` | OpenAPI 3.1 document, served via `go:embed` at `GET /v1/openapi.yaml` |
 | `internal/config/server.go` (new) | `[server]` TOML struct and resolution |
-| `cmd/otto/main.go` | `serve` dispatch, `--socket` flag, `options.serve`, conflicting-flag checks, skip `selectFrontend`, `runServe`, serve-only SIGTERM subscription, usage text |
-| `cmd/otto/runtime_builder.go` | `newController` extraction |
+| `cmd/kite/main.go` | `serve` dispatch, `--socket` flag, `options.serve`, conflicting-flag checks, skip `selectFrontend`, `runServe`, serve-only SIGTERM subscription, usage text |
+| `cmd/kite/runtime_builder.go` | `newController` extraction |
 
 `internal/server` imports only `internal/app`, `internal/agent`,
 `internal/model`, `internal/session`, and `internal/tool` (for `Result`); it
-never imports `cmd/otto`. Its ID generator uses `crypto/rand`, 16 bytes,
-hex-encoded — a five-line duplicate of `cmd/otto`'s `randomID`, kept
-separate because `cmd/otto` is not reachable from `internal/server`.
+never imports `cmd/kite`. Its ID generator uses `crypto/rand`, 16 bytes,
+hex-encoded — a five-line duplicate of `cmd/kite`'s `randomID`, kept
+separate because `cmd/kite` is not reachable from `internal/server`.
 
 ```go
 type Options struct {
@@ -596,7 +596,7 @@ check`, one commit.
 | 7 | `internal/server/server.go` | real `*app.Controller` built from `app.New(session.NewMemory(hdr), ...)` plus a scripted fake `app.Runner`; `httptest.NewServer` covers every endpoint: 201/200/204/404/409/400, SSE streaming with `after` and `Last-Event-ID`, `stream:false`, cancel, `DELETE` canceling an active turn, resume of an already-open session returning 200 without a second `Open`, two concurrent resumes calling `Open` once, two sessions running turns concurrently, metrics/logs free of prompt text, fixed 500 body |
 | 8 | `internal/server/listen.go` | `t.Chdir(t.TempDir())` with a relative socket path (avoids the 104-byte `sun_path` limit); `0600` permission, parent-directory permission check, stale-socket cleanup, non-socket preservation, "already running" |
 | 9 | `openapi.yaml` + `go:embed` | every `ServeMux` pattern appears under `paths:` in the embedded document |
-| 10 | `cmd/otto` wiring | `newController` extraction (existing tests unchanged) → `serve` dispatch/`--socket`/conflicting-flag checks/skip `selectFrontend` → SIGTERM → `List` on `ENOENT` returns empty → end-to-end test: `run(ctx, ["serve","--config",cfg,"--cwd",ws,"--socket","otto.sock"])` in a goroutine, an `http.Transport{DialContext: unix}` client creates a session, posts a turn, reads SSE text from a fake provider, lists sessions, then `ctx` is canceled and the test asserts exit code 0 and socket-file removal |
+| 10 | `cmd/kite` wiring | `newController` extraction (existing tests unchanged) → `serve` dispatch/`--socket`/conflicting-flag checks/skip `selectFrontend` → SIGTERM → `List` on `ENOENT` returns empty → end-to-end test: `run(ctx, ["serve","--config",cfg,"--cwd",ws,"--socket","kite.sock"])` in a goroutine, an `http.Transport{DialContext: unix}` client creates a session, posts a turn, reads SSE text from a fake provider, lists sessions, then `ctx` is canceled and the test asserts exit code 0 and socket-file removal |
 | 11 | docs | README "Configuration and precedence" + new "Agent server" section, `docs/user-manual.md` command table and config example plus a new "Agent server" chapter, `CLAUDE.md` architecture bullet 9 (and fixing bullet 6's link to the now-deleted `docs/superpowers/` path to point at `docs/specs/`) |
 | 12 | `make check` | fmt, vet, staticcheck, test, test-race, `git diff --check`; small commits; open the PR |
 
@@ -606,19 +606,19 @@ Verification:
 go test ./internal/server -race -count=1
 go test ./internal/config -run Server
 go test ./internal/trace -race
-go test ./cmd/otto -run Serve -count=1
+go test ./cmd/kite -run Serve -count=1
 make check
 ```
 
 Manual smoke test:
 
 ```bash
-make build && ./otto serve --socket ./otto.sock
+make build && ./kite serve --socket ./kite.sock
 # in another terminal:
-curl -s --unix-socket ./otto.sock http://otto/healthz
-curl -s --unix-socket ./otto.sock -X POST http://otto/v1/sessions -d '{}'
-curl -N --unix-socket ./otto.sock -X POST http://otto/v1/sessions/<id>/turns -d '{"text":"list files"}'
-curl -s --unix-socket ./otto.sock http://otto/metrics | grep otto_
+curl -s --unix-socket ./kite.sock http://kite/healthz
+curl -s --unix-socket ./kite.sock -X POST http://kite/v1/sessions -d '{}'
+curl -N --unix-socket ./kite.sock -X POST http://kite/v1/sessions/<id>/turns -d '{"text":"list files"}'
+curl -s --unix-socket ./kite.sock http://kite/metrics | grep kite_
 # then: kill -TERM <pid>; confirm exit code 0 and that the socket file is gone.
 ```
 

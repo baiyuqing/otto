@@ -4,8 +4,8 @@ Status: approved 2026-09-03; implemented in #55 and reverted on 2026-09-06.
 The TUI uses the alternate screen buffer and the viewport transcript again;
 this document is historical. The branch and worktree below are provenance only.
 Branch `feat/inline-transcript`, worktree
-`/Users/baiyuqing/Work/code/otto-inline-tui`.
-Check [`crates/otto/src/tui`](../../crates/otto/src/tui), the
+`/Users/baiyuqing/Work/code/kite-inline-tui`.
+Check [`crates/kite/src/tui`](../../crates/kite/src/tui), the
 [user manual](../user-manual.md), and the
 [2026-09-05 architecture contracts](2026-09-05-architecture-contracts.md)
 for current behavior and ownership rules.
@@ -59,7 +59,7 @@ New state:
 
 - `committed int`: `entries[:committed]` have been written to scrollback;
   `committedAssistantTurn bool` tracks grouping state across the commit boundary
-  ("Otto" heading).
+  ("Kite" heading).
 - Refactor `transcriptContent` (in `model.go:1572`) into a pure function
   `renderTranscript(entries []Entry, assistantTurn bool, width int) (string,
   bool)` shared by both commit and live rendering. Reuse the same block renderers:

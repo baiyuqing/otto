@@ -6,7 +6,7 @@ Status: approved and implemented through slices A-C on 2026-09-21. Branch
 
 ## Implementation notes
 
-- Every CLI workflow command takes the workspace lock. While `otto serve`
+- Every CLI workflow command takes the workspace lock. While `kite serve`
   owns it, inspect and control runs through its HTTP/Web UI instead of a second
   CLI process.
 - Resume requires the current profile/provider/model identity to match the
@@ -31,7 +31,7 @@ The first implementation supports:
 - durable event replay and status through the existing application and server
   boundaries.
 
-This is not a replacement for Otto's model-driven `agent` tool. Ad-hoc
+This is not a replacement for Kite's model-driven `agent` tool. Ad-hoc
 sub-agents remain useful when the model should decide what to delegate.
 Workflows are for paths whose order, gates, and recovery behavior must be
 declared before execution.
@@ -45,7 +45,7 @@ declared before execution.
 - No automatic retry. Retrying an interrupted step may repeat an external
   effect, so it requires an explicit human action.
 - No attempt to resume inside a provider request or tool call.
-- No YAML. Definitions use TOML, which Otto already parses and versions.
+- No YAML. Definitions use TOML, which Kite already parses and versions.
 - No change to Pi v3 parent-session semantics. Workflow durability is stored
   separately; a context-compaction checkpoint is not a workflow checkpoint.
 - No prompt, tool arguments, tool output, or response text in logs, metrics,
@@ -53,7 +53,7 @@ declared before execution.
 
 ## Current boundaries to preserve
 
-- `otto-core::agent::Agent` remains the provider/tool turn loop.
+- `kite-core::agent::Agent` remains the provider/tool turn loop.
 - `app::Controller` remains the shared frontend use-case boundary and sole
   owner of chat turn admission and session replacement. Workflow lifecycle is
   separate, so replacing a chat session cannot stop a workflow.
@@ -71,8 +71,8 @@ declared before execution.
 
 ## Definition format
 
-Definitions are discovered from `~/.otto/workflows` and
-`<workspace>/.otto/workflows`, with the workspace definition winning on a name
+Definitions are discovered from `~/.kite/workflows` and
+`<workspace>/.kite/workflows`, with the workspace definition winning on a name
 collision. One `<name>.toml` file defines one workflow:
 
 ```toml
@@ -142,7 +142,7 @@ that no longer exists fails closed.
 - Every execution of an agent step has an integer `attempt`, starting at 1.
 - A human request has a globally unique opaque `request_id`.
 
-IDs use Otto's existing native convention: 16 bytes from `/dev/urandom`, lower
+IDs use Kite's existing native convention: 16 bytes from `/dev/urandom`, lower
 hex encoded. Display names never serve as database identity.
 
 ### Run state
@@ -216,7 +216,7 @@ helper is extracted from `subagent::runner`; it is the only new common seam and
 has two real consumers: ad-hoc sub-agents and workflow attempts.
 
 Workflow attempts use a file-backed Pi v3 session instead of `MemorySession`.
-Attempt transcripts live under `~/.otto/workflow-sessions`, scoped by
+Attempt transcripts live under `~/.kite/workflow-sessions`, scoped by
 workspace, run, step, and attempt. They are sensitive, use directory mode
 `0700` and file mode `0600`, and are never rewritten. A retry gets a new file;
 the interrupted transcript remains available for diagnosis.
@@ -243,7 +243,7 @@ requests can be added after the durable gate is proven.
 
 ## Persistence
 
-One local SQLite database, `~/.otto/workflows.db`, is opened at the composition
+One local SQLite database, `~/.kite/workflows.db`, is opened at the composition
 root with the same permissions, busy timeout, WAL mode, and fixed-text error
 boundary as the usage store. It contains these responsibilities:
 
@@ -270,17 +270,17 @@ changing durable state.
 
 Only one process may schedule or mutate workflows for one workspace at a time.
 The workflow controller holds a nonblocking exclusive advisory lock on
-`~/.otto/workflow-locks/<workspace-key>.lock`; a competing controller reports
+`~/.kite/workflow-locks/<workspace-key>.lock`; a competing controller reports
 `workflow runtime is already active for this workspace`. The kernel relies on
 the OS releasing that lock at process exit, not on a time-based lease.
-Separate workspaces can run concurrently. This is sufficient for Otto's
+Separate workspaces can run concurrently. This is sufficient for Kite's
 single-host scope and avoids a distributed lease protocol.
 
 ## Application and frontend boundaries
 
-`crates/otto::workflow` owns definitions, persistence, scheduling, and recovery.
+`crates/kite::workflow` owns definitions, persistence, scheduling, and recovery.
 It is native-only: durable state, process lifecycle, and child session files do
-not belong in wasm-safe `otto-core`.
+not belong in wasm-safe `kite-core`.
 
 The application layer owns one workspace-scoped `WorkflowController`, beside
 the chat-session controllers. It exposes a narrow facade for
@@ -293,12 +293,12 @@ definition remains fixed.
 The first command/API surface is deliberately small:
 
 ```text
-otto workflow run <name> [--input TEXT]
-otto workflow status <run-id>
-otto workflow resume <run-id> [--retry <step-id>]
-otto workflow approve <request-id>
-otto workflow reject <request-id>
-otto workflow cancel <run-id>
+kite workflow run <name> [--input TEXT]
+kite workflow status <run-id>
+kite workflow resume <run-id> [--retry <step-id>]
+kite workflow approve <request-id>
+kite workflow reject <request-id>
+kite workflow cancel <run-id>
 ```
 
 Server routes mirror those use cases under `/v1/workflows`; they do not require

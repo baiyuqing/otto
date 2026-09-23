@@ -81,7 +81,7 @@ export function parseSession(text) {
 /**
  * The context peak of every window one session used, main context first.
  *
- * Rows come from `usage_events` as `crates/otto/src/usage.rs` writes them: an
+ * Rows come from `usage_events` as `crates/kite/src/usage.rs` writes them: an
  * empty `task_id` is the main context and every other value is one sub-agent.
  */
 export function windowPeaks(database, sessionId) {
@@ -141,7 +141,7 @@ export function report(parsed, peaks) {
 
 function main(argv) {
   const sessions = [];
-  let database = path.join(os.homedir(), ".otto/usage.db");
+  let database = path.join(os.homedir(), ".kite/usage.db");
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === "--usage") {
       database = argv[index + 1];

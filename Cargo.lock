@@ -924,6 +924,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "kite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "crossterm",
+ "futures-util",
+ "include_dir",
+ "kite-core",
+ "libc",
+ "nix",
+ "pulldown-cmark",
+ "ratatui",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tower",
+ "unicode-width",
+]
+
+[[package]]
+name = "kite-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "url",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "kite-web"
+version = "0.1.0"
+dependencies = [
+ "kite-core",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1106,67 +1167,6 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "otto"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "crossterm",
- "futures-util",
- "include_dir",
- "libc",
- "nix",
- "otto-core",
- "pulldown-cmark",
- "ratatui",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tower",
- "unicode-width",
-]
-
-[[package]]
-name = "otto-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "url",
- "wasm-bindgen-test",
-]
-
-[[package]]
-name = "otto-web"
-version = "0.1.0"
-dependencies = [
- "otto-core",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-test",
-]
 
 [[package]]
 name = "palette"

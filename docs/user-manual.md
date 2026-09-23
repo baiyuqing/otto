@@ -1517,7 +1517,7 @@ Manual config (`[mcp]` and `[mcp.servers.<name>]` in TOML):
 ```toml
 [mcp]
 enabled = true              # default true; false skips every server
-call_timeout_secs = 60      # default 60; applies to each tool call
+call_timeout_secs = 60      # default 60; per tool call, and cancels the call on the server
 connect_timeout_secs = 20   # default 20; bounds the whole connect (discover probe, handshake, and tool listing together)
 
 [mcp.servers.github]

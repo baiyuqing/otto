@@ -302,9 +302,9 @@ impl<'a> EditMatcher<'a> {
         total: usize,
     ) -> Result<ResolvedEdit, String> {
         let content = self.content;
-        let count = content.matches(old_text).count();
+        let (first_match, count) = occurrences(content, old_text);
         if count == 1 {
-            let start = content.find(old_text).expect("one match exists");
+            let start = first_match.expect("one match exists");
             return Ok(ResolvedEdit {
                 start,
                 end: start + old_text.len(),
@@ -322,24 +322,33 @@ impl<'a> EditMatcher<'a> {
         if fuzzy_old.trim().is_empty() {
             return Err(match_error(index, total, &not_found(path)));
         }
-        let count = fuzzy.matches(&fuzzy_old).count();
+        let (first_match, count) = occurrences(fuzzy, &fuzzy_old);
         if count == 0 {
             return Err(match_error(index, total, &not_found(path)));
         }
         if count > 1 {
             return Err(match_error(index, total, &ambiguous(count, path)));
         }
-        let start = fuzzy.find(&fuzzy_old).expect("one match exists");
+        let start = first_match.expect("one match exists");
 
         // The file's bytes differ from old_text inside the match (quotes,
         // dashes, trailing whitespace). Keep them wherever new_text leaves
         // old_text unchanged and rewrite only the span between the common
         // prefix and suffix.
         let (prefix, suffix) = common_affixes(old_text, new_text);
+        let prefix = keep_interior_whitespace(old_text, new_text, prefix);
         old_offsets.truncate(fuzzy_old.len());
         let first = start + search_ints(&old_offsets, prefix);
         let last = start + search_ints(&old_offsets, old_text.len() - suffix);
-        let content_start = fuzzy_offsets[first];
+        // Anchor the span right after the last matched rune rather than at the
+        // next one, so whitespace the fuzzy view dropped from the file stays
+        // after the inserted text instead of before it.
+        let content_start = if first > start {
+            let previous = fuzzy_offsets[first - 1];
+            previous + rune_len(content, previous)
+        } else {
+            fuzzy_offsets[first]
+        };
         let mut content_end = content_start;
         if last > first {
             let last_rune = fuzzy_offsets[last - 1];
@@ -351,6 +360,40 @@ impl<'a> EditMatcher<'a> {
             text: new_text[prefix..new_text.len() - suffix].to_owned(),
         })
     }
+}
+
+/// The first occurrence of `needle` in `haystack` and the number of
+/// occurrences, counting overlapping ones: `aa` occurs twice in `aaa`, so it is
+/// ambiguous there rather than unique.
+fn occurrences(haystack: &str, needle: &str) -> (Option<usize>, usize) {
+    let mut first = None;
+    let mut count = 0;
+    let mut from = 0;
+    while let Some(index) = haystack[from..].find(needle) {
+        let at = from + index;
+        first.get_or_insert(at);
+        count += 1;
+        from = at + rune_len(haystack, at);
+    }
+    (first, count)
+}
+
+/// Shortens a common `prefix` that ends inside trailing whitespace of an
+/// `old_text` line when `new_text` continues that line with more text. The
+/// fuzzy view dropped that whitespace, so the file may not contain it; left in
+/// the prefix, it would be treated as unchanged file bytes and lost, although
+/// `new_text` needs it between the kept text and the inserted text.
+fn keep_interior_whitespace(old_text: &str, new_text: &str, prefix: usize) -> usize {
+    if matches!(new_text.as_bytes().get(prefix), None | Some(b'\n')) {
+        return prefix;
+    }
+    let line_start = old_text[..prefix].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = old_text[prefix..]
+        .find('\n')
+        .map_or(old_text.len(), |index| prefix + index);
+    prefix.min(trim_trailing_fuzzy_whitespace(
+        old_text, line_start, line_end,
+    ))
 }
 
 /// The byte length of the rune starting at `offset`. Mirrors Go's
@@ -781,6 +824,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_occurrences_are_ambiguous() {
+        for (name, file, old_text) in [
+            ("exact", "aaa\n", "aa"),
+            ("fuzzy", "x\u{2019}x\u{2019}x\n", "x'x"),
+        ] {
+            let (root, path) = sample(file);
+            let workspace = workspace(root.path());
+            let arguments = serde_json::json!({
+                "path": "sample.txt",
+                "old_text": old_text,
+                "new_text": "X",
+            })
+            .to_string();
+            let result = run(&EditTool::new(&workspace), &arguments).await;
+            assert!(result.is_error, "{name}: {result:?}");
+            assert_eq!(
+                result.content,
+                "edit failed: old_text matched 2 locations in sample.txt; include more surrounding context to make it unique",
+                "{name}"
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), file, "{name}");
+        }
+    }
+
+    #[tokio::test]
     async fn match_errors_do_not_echo_the_requested_text() {
         let (root, _) = sample("dup\ndup\n");
         let workspace = workspace(root.path());
@@ -989,6 +1057,20 @@ mod tests {
                 "foo\n    ",
                 "FOO\n    ",
                 "FOO  \n    bar\n",
+            ),
+            (
+                "keeps old_text trailing whitespace that new_text makes interior",
+                "say(\u{201c}hi\u{201d})\n",
+                "say(\"hi\") ",
+                "say(\"hi\") // x",
+                "say(\u{201c}hi\u{201d}) // x\n",
+            ),
+            (
+                "inserts before the file's trailing whitespace",
+                "say(\u{201c}hi\u{201d})  \n",
+                "say(\"hi\") ",
+                "say(\"hi\") // x",
+                "say(\u{201c}hi\u{201d}) // x  \n",
             ),
             (
                 "inserts between fuzzy lines",

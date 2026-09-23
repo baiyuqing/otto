@@ -9,6 +9,7 @@
 use std::io;
 use std::path::Path;
 
+use super::gitignore::GitignoreStack;
 use super::gopath::{base, bytes, clean, is_abs, path_from, rel};
 use super::root::Root;
 use super::workspace::Workspace;
@@ -364,7 +365,7 @@ pub(crate) fn path_has_git_segment(relative: &str) -> bool {
     relative.split('/').any(|segment| segment == ".git")
 }
 
-/// One entry produced by [`walk_dir`].
+/// One entry produced by [`walk_dir_ignoring`].
 pub(crate) struct WalkEntry {
     /// The slash path relative to the workspace root handle.
     pub(crate) path: String,
@@ -387,10 +388,16 @@ pub(crate) enum WalkAction {
 /// reported, never followed, so a link out of the workspace is skipped by the
 /// caller rather than traversed.
 ///
+/// When `ignore` is set, an entry the repository's `.gitignore` files ignore is
+/// not reported, and an ignored directory is not descended into. The search
+/// root itself is always reported, so pointing a tool at an ignored directory
+/// still searches it.
+///
 /// Returns `Ok(true)` when the visitor stopped the walk.
-pub(crate) fn walk_dir(
+pub(crate) fn walk_dir_ignoring(
     root_fs: &Root,
     root: &str,
+    ignore: Option<&mut GitignoreStack>,
     visit: &mut dyn FnMut(&WalkEntry) -> io::Result<WalkAction>,
 ) -> io::Result<bool> {
     let stat = root_fs.stat(Path::new(root))?;
@@ -410,9 +417,55 @@ pub(crate) fn walk_dir(
     if !is_dir {
         return Ok(false);
     }
-    walk_children(root_fs, root, visit)
+    match ignore {
+        Some(stack) => walk_children_ignoring(root_fs, root, stack, visit),
+        None => walk_children(root_fs, root, visit),
+    }
 }
 
+/// [`walk_children`] that consults, and extends, the `.gitignore` stack.
+fn walk_children_ignoring(
+    root_fs: &Root,
+    directory: &str,
+    stack: &mut GitignoreStack,
+    visit: &mut dyn FnMut(&WalkEntry) -> io::Result<WalkAction>,
+) -> io::Result<bool> {
+    stack.truncate_to(directory);
+    stack.push(root_fs, directory);
+    for child in root_fs.read_dir(Path::new(directory))? {
+        let name = child.name.to_string_lossy().into_owned();
+        let path = if directory == "." {
+            name.clone()
+        } else {
+            format!("{directory}/{name}")
+        };
+        if stack.is_ignored(&path, child.is_dir) {
+            continue;
+        }
+        let entry = WalkEntry {
+            path,
+            name,
+            is_dir: child.is_dir,
+            is_symlink: child.is_symlink,
+            is_regular: child.is_regular,
+        };
+        let descend = entry.is_dir;
+        let path = entry.path.clone();
+        match visit(&entry)? {
+            WalkAction::Stop => return Ok(true),
+            WalkAction::SkipDir => continue,
+            WalkAction::Continue => {}
+        }
+        if descend && walk_children_ignoring(root_fs, &path, stack, visit)? {
+            return Ok(true);
+        }
+        // A sibling subtree may have pushed its own rules; drop them again.
+        stack.truncate_to(directory);
+    }
+    Ok(false)
+}
+
+/// [`walk_dir_ignoring`] without `.gitignore` filtering.
 fn walk_children(
     root_fs: &Root,
     directory: &str,

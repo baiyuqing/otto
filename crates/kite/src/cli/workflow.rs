@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use nix::fcntl::{Flock, FlockArg};
 use kite_core::config::resolve::Runtime;
 use kite_core::session::{CURRENT_VERSION, Header, Session};
+use nix::fcntl::{Flock, FlockArg};
 use tokio_util::sync::CancellationToken;
 
 use super::runtime_builder::{Builder, MemoryHandle, Runner, SharedSession, random_id};

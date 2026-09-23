@@ -24,7 +24,7 @@ use super::compaction::{
     compaction_aware_path, compaction_has_retained_tail, safe_context_token_count,
 };
 use super::pi::{
-    PiContentBlock, PiCustomMessage, PiEntry, PiMessage, PiKiteDetails, PiUsage,
+    PiContentBlock, PiCustomMessage, PiEntry, PiKiteDetails, PiMessage, PiUsage,
     decode_pi_kite_details, encode_pi_kite_details,
 };
 use super::types::{Header, RuntimeMetadata, Snapshot, Warning};

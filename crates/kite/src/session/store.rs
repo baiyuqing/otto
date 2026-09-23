@@ -33,8 +33,8 @@ use kite_core::session::pi::{
     PiCompaction, PiCustom, PiEntry, PiFile, PiSessionInfo, PiThinkingLevelChange,
 };
 use kite_core::session::{
-    CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, MAX_SESSION_ENTRY_BYTES,
-    MAX_SESSION_FILE_BYTES, KITE_RUNTIME_CUSTOM_TYPE, PiError, PiErrorKind, PiRecord,
+    CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, KITE_RUNTIME_CUSTOM_TYPE,
+    MAX_SESSION_ENTRY_BYTES, MAX_SESSION_FILE_BYTES, PiError, PiErrorKind, PiRecord,
     RuntimeMetadata, Session, SessionError, Snapshot, Warning, active_context_path, build_context,
     decode_pi_file, encode_pi_record, index_context_entries,
 };

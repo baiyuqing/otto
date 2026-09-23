@@ -5,10 +5,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
 use kite_core::agent::inbox::Notification;
 use kite_core::config::FeishuRuntime;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::Child;
 use tokio_util::sync::CancellationToken;

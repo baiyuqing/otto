@@ -33,7 +33,7 @@ pub use context::{
 pub use pi::{
     MAX_SESSION_ENTRY_BYTES, MAX_SESSION_FILE_BYTES, PI_SESSION_VERSION, PiBranchSummary,
     PiCompaction, PiContentBlock, PiCost, PiCustom, PiCustomMessage, PiEntry, PiFile, PiHeader,
-    PiLabel, PiMessage, PiModelChange, PiKiteDetails, PiSessionInfo, PiThinkingLevelChange,
+    PiKiteDetails, PiLabel, PiMessage, PiModelChange, PiSessionInfo, PiThinkingLevelChange,
     PiUsage, decode_pi_kite_details, encode_pi_kite_details,
 };
 pub use types::{

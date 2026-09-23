@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 use nix::fcntl::OFlag;
 use nix::sys::stat::Mode;
 
-use super::gopath::{bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel};
+use super::gopath::{base, bytes, clean, dir, has_parent_traversal, is_abs, join, path_from, rel};
 use super::root::{Root, is_symlink};
 
 /// Maximum number of symbolic links followed while resolving a write target.
@@ -49,10 +49,24 @@ pub struct Workspace {
     root: PathBuf,
     lexical_root: PathBuf,
     root_fs: Root,
-    /// One mutex per root-relative path so that `write` and `edit`, which
-    /// subagents share with the parent agent, never interleave a
-    /// read-modify-write on the same file.
-    mutations: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    /// One mutex per file so that `write` and `edit`, which subagents share
+    /// with the parent agent, never interleave a read-modify-write on the same
+    /// file.
+    mutations: Mutex<HashMap<MutationKey, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// The identity a mutation lock is keyed by. Spellings of one file that differ
+/// in `.`, repeated slashes, or a symbolic-linked directory name the same
+/// parent directory, so they share an [`MutationKey::Entry`]. A path whose
+/// parent does not exist yet falls back to its cleaned spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum MutationKey {
+    Entry {
+        device: u64,
+        inode: u64,
+        name: Vec<u8>,
+    },
+    Path(Vec<u8>),
 }
 
 impl Workspace {
@@ -76,21 +90,40 @@ impl Workspace {
         })
     }
 
-    /// Waits until no other `write` or `edit` holds `key`, then returns the
-    /// guard that releases it. `key` is the root-relative name returned by
-    /// [`Workspace::write_relative`], so both tools lock the same entry for the
-    /// same file.
+    /// Waits until no other `write` or `edit` holds the file `key` names, then
+    /// returns the guard that releases it. `key` is the root-relative name
+    /// returned by [`Workspace::write_relative`], which already resolves a
+    /// final symbolic link; the lock is keyed by the parent directory's
+    /// identity and the final name, so every spelling of one file shares it.
     // ponytail: entries live for the workspace lifetime; add ref-counted
     // cleanup if path churn matters.
     pub(crate) async fn lock_path(&self, key: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+        let key = self.mutation_key(key);
         let lock = {
             let mut mutations = self
                 .mutations
                 .lock()
                 .expect("the lock table is never poisoned");
-            Arc::clone(mutations.entry(key.to_path_buf()).or_default())
+            Arc::clone(mutations.entry(key).or_default())
         };
         lock.lock_owned().await
+    }
+
+    fn mutation_key(&self, path: &Path) -> MutationKey {
+        let cleaned = clean(bytes(path));
+        let parent = self.root_fs.open_file(
+            &path_from(dir(&cleaned)),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        );
+        match parent.and_then(|parent| parent.metadata()) {
+            Ok(metadata) => MutationKey::Entry {
+                device: std::os::unix::fs::MetadataExt::dev(&metadata),
+                inode: std::os::unix::fs::MetadataExt::ino(&metadata),
+                name: base(&cleaned),
+            },
+            Err(_) => MutationKey::Path(cleaned),
+        }
     }
 
     /// The canonical absolute root directory. Every resolved path is inside it.
@@ -472,6 +505,38 @@ mod tests {
         for link in ["relative-link", "absolute-link"] {
             let got = workspace.write_relative(Path::new(link)).unwrap();
             assert_eq!(got, PathBuf::from("target.txt"), "write_relative({link})");
+        }
+    }
+
+    #[tokio::test]
+    async fn equivalent_spellings_share_one_mutation_lock() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::fs::write(root.path().join("real/b.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("real", root.path().join("alias")).unwrap();
+        let workspace = workspace(root.path());
+        for (canonical, spellings) in [
+            ("real/b.txt", ["./real/b.txt", "real//b.txt", "alias/b.txt"]),
+            (
+                "real/new.txt",
+                ["./real/new.txt", "real//new.txt", "alias/new.txt"],
+            ),
+        ] {
+            let key = workspace.write_relative(Path::new(canonical)).unwrap();
+            let guard = workspace.lock_path(&key).await;
+            for spelling in spellings {
+                let key = workspace.write_relative(Path::new(spelling)).unwrap();
+                let blocked = tokio::time::timeout(
+                    std::time::Duration::from_millis(20),
+                    workspace.lock_path(&key),
+                )
+                .await;
+                assert!(
+                    blocked.is_err(),
+                    "{spelling} did not share the lock of {canonical}"
+                );
+            }
+            drop(guard);
         }
     }
 

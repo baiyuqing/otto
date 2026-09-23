@@ -108,9 +108,14 @@ impl WarningCollector {
 /// Replays the entry tree from `leaf_id` back to its root and returns the
 /// messages, runtime and token totals in force there.
 ///
-/// Warnings describe entries that were skipped or re-rooted; they are never
-/// fatal. An error means the session cannot be represented at all, and no
-/// warnings are returned with it.
+/// A tool call the history left unanswered with more history after it is
+/// repaired here, in memory, and warned about; see
+/// [`repair_interrupted_tool_calls`] for why the file cannot hold that
+/// repair and why a trailing one is left alone.
+///
+/// Warnings describe entries that were skipped, re-rooted or repaired; they
+/// are never fatal. An error means the session cannot be represented at all,
+/// and no warnings are returned with it.
 pub fn build_context(
     entries: &[PiEntry],
     leaf_id: &str,
@@ -222,6 +227,9 @@ pub fn build_context(
         resolved
             .messages
             .extend(pi_entry_to_context_messages(&entry)?);
+    }
+    for repair in repair_interrupted_tool_calls(&mut resolved.messages) {
+        collector.add(repair);
     }
     pending_tool_calls(&resolved.messages)?;
     Ok((resolved, collector.warnings))
@@ -1129,6 +1137,114 @@ pub fn validate_assistant_tool_finish(
         ));
     }
     Ok(())
+}
+
+/// Text of the result that stands in for one the session never recorded.
+pub const MISSING_TOOL_RESULT_TEXT: &str = "tool result missing from prior session";
+
+/// The stand-in for a tool result the session never recorded. It is an error
+/// result, so the model reads the call as failed rather than as answered.
+pub fn missing_tool_result(call: &Block) -> Block {
+    Block {
+        block_type: BlockType::ToolResult,
+        text: MISSING_TOOL_RESULT_TEXT.into(),
+        tool_call_id: call.tool_call_id.clone(),
+        tool_name: call.tool_name.clone(),
+        is_error: true,
+        ..Block::default()
+    }
+}
+
+/// Splices a stand-in result in for every tool call this history leaves
+/// unanswered *before its end*, and returns one description per repair.
+///
+/// A run of calls that reaches the end is left alone: that is a session
+/// interrupted mid-turn, and the native store answers it durably when it
+/// opens the file. A run with history after it cannot be answered in the
+/// file at all, because Pi history is append-only and a result belongs
+/// directly after its call, so it is repaired here instead, on every
+/// resolve, and the file keeps the gap. Without this the whole session stops
+/// resolving, which is one interrupted call poisoning every later request.
+///
+/// Damage no repair can describe -- a duplicate call id, a result with no
+/// call, a tool message carrying something else -- is left untouched for
+/// [`pending_tool_calls`] to reject.
+fn repair_interrupted_tool_calls(messages: &mut Vec<Message>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut pending: Vec<Block> = Vec::new();
+    let mut anchor = Message::default();
+    let mut splices: Vec<(usize, Vec<Message>)> = Vec::new();
+
+    for (index, message) in messages.iter().enumerate() {
+        if message.role == Role::Tool {
+            for block in &message.blocks {
+                if block.block_type != BlockType::ToolResult {
+                    return Vec::new();
+                }
+                let answered = pending.iter().position(|call| {
+                    call.tool_call_id == block.tool_call_id && call.tool_name == block.tool_name
+                });
+                let Some(answered) = answered else {
+                    return Vec::new();
+                };
+                pending.remove(answered);
+            }
+            continue;
+        }
+        if !pending.is_empty() {
+            splices.push((
+                index,
+                stand_in_results(&anchor, std::mem::take(&mut pending)),
+            ));
+        }
+        if message.role != Role::Assistant {
+            continue;
+        }
+        for block in &message.blocks {
+            if block.block_type != BlockType::ToolCall {
+                continue;
+            }
+            if !seen.insert(block.tool_call_id.clone()) {
+                return Vec::new();
+            }
+            pending.push(block.clone());
+        }
+        anchor = message.clone();
+    }
+
+    let mut repairs = Vec::new();
+    for (_, stand_ins) in &splices {
+        for message in stand_ins {
+            for block in &message.blocks {
+                repairs.push(format!(
+                    "repaired dangling tool call {} in memory; the stored history keeps the gap",
+                    block.tool_call_id
+                ));
+            }
+        }
+    }
+    // Late to early, so an earlier splice does not move a later index.
+    for (index, stand_ins) in splices.into_iter().rev() {
+        messages.splice(index..index, stand_ins);
+    }
+    repairs
+}
+
+/// One stand-in tool message per unanswered `call`, carrying ids derived from
+/// the message that made the calls the way a compaction's retained tail
+/// derives its own.
+fn stand_in_results(anchor: &Message, calls: Vec<Block>) -> Vec<Message> {
+    calls
+        .into_iter()
+        .enumerate()
+        .map(|(index, call)| Message {
+            id: format!("{}-repair-{index}", anchor.id),
+            role: Role::Tool,
+            created_at: anchor.created_at,
+            blocks: vec![missing_tool_result(&call)],
+            ..Message::default()
+        })
+        .collect()
 }
 
 /// Walks a message list and returns the tool calls that are still unanswered.
@@ -2271,5 +2387,53 @@ mod tests {
                 .collect();
             assert_eq!(got, want, "{name}");
         }
+    });
+    test!(build_context_repairs_a_tool_call_the_history_left_behind {
+        let root = user_entry("63100001", None, "root");
+        let assistant = tool_call_entry("63100002", Some("63100001"), &[("call-1", "read")]);
+        let next = user_entry("63100003", Some("63100002"), "next");
+
+        let (context, warnings) =
+            build_context(&[root, assistant, next], "63100003").expect("build context");
+
+        let roles: Vec<Role> = context.messages.iter().map(|message| message.role.clone()).collect();
+        assert_eq!(
+            roles,
+            vec![Role::User, Role::Assistant, Role::Tool, Role::User],
+            "the stand-in result belongs next to its call"
+        );
+        let repaired = &context.messages[2];
+        assert_eq!(repaired.blocks.len(), 1);
+        assert_eq!(repaired.blocks[0].tool_call_id, "call-1");
+        assert_eq!(repaired.blocks[0].tool_name, "read");
+        assert!(repaired.blocks[0].is_error);
+        assert_eq!(repaired.blocks[0].text, MISSING_TOOL_RESULT_TEXT);
+        assert_eq!(repaired.created_at, context.messages[1].created_at);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.message.contains("call-1")),
+            "the repair must be reported: {warnings:?}"
+        );
+    });
+
+    test!(build_context_leaves_a_trailing_tool_call_for_the_durable_repair {
+        let (root, assistant) = single_tool_call("63110001", "63110002");
+
+        let (context, warnings) = build_context(&[root, assistant], "63110002").expect("build context");
+
+        assert_eq!(context.messages.len(), 2, "{:?}", context.messages);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let pending = pending_tool_calls(&context.messages).expect("pending tool calls");
+        assert_eq!(pending.len(), 1);
+    });
+
+    test!(build_context_still_rejects_a_tool_result_without_a_call {
+        let root = user_entry("63120001", None, "root");
+        let orphan = tool_result_entry("63120002", Some("63120001"), "call-1", "read", "done");
+
+        let error = build_context(&[root, orphan], "63120002").expect_err("must reject");
+
+        assert_eq!(error.kind(), PiErrorKind::Invalid);
     });
 }

@@ -68,6 +68,46 @@ impl Client {
         }
     }
 
+    /// Sends `outbound` and gives up on it after `call_timeout`.
+    ///
+    /// The timeout cancels a private child token instead of dropping the
+    /// request future, so the transport runs the cancellation path it would
+    /// run for a caller's cancellation: the pending request is released and
+    /// the server is told to stop. Dropping the future instead leaves the
+    /// call dangling on both sides, with the server still working on an
+    /// answer nobody will read.
+    ///
+    /// The caller's own cancellation keeps reporting [`CallError::Cancelled`];
+    /// only a cancellation this timeout caused becomes [`CallError::Timeout`].
+    async fn request_within_timeout(
+        &self,
+        outbound: Outbound,
+        cancel: &CancellationToken,
+    ) -> Result<Result<Value, jsonrpc::RpcError>, CallError> {
+        let child = cancel.child_token();
+        let request = self.transport.request(outbound, &child);
+        let mut request = std::pin::pin!(request);
+        let sleep = tokio::time::sleep(self.call_timeout);
+        let mut sleep = std::pin::pin!(sleep);
+        let mut timed_out = false;
+        loop {
+            tokio::select! {
+                outcome = &mut request => {
+                    return match outcome {
+                        Err(CallError::Cancelled) if timed_out && !cancel.is_cancelled() => {
+                            Err(CallError::Timeout)
+                        }
+                        outcome => outcome,
+                    };
+                }
+                () = &mut sleep, if !timed_out => {
+                    timed_out = true;
+                    child.cancel();
+                }
+            }
+        }
+    }
+
     pub fn era(&self) -> &Era {
         &self.era
     }
@@ -100,10 +140,7 @@ impl ToolServer for Client {
             params,
             era: Some(self.era.clone()),
         };
-        let result =
-            tokio::time::timeout(self.call_timeout, self.transport.request(outbound, cancel))
-                .await
-                .map_err(|_| CallError::Timeout)??;
+        let result = self.request_within_timeout(outbound, cancel).await?;
         let result = result.map_err(|error| CallError::Rpc {
             code: error.code,
             message: error.message,
@@ -497,5 +534,90 @@ mod tests {
         );
         assert!(!message.contains("top-secret-marker"));
         assert!(!message.contains("must-not-leak"));
+    }
+    /// Negotiates modern with an empty tool list, then waits for the caller's
+    /// token on every `tools/call` and records that it saw the cancellation,
+    /// the way a real transport releases its pending request.
+    struct CancelAwareTransport {
+        cancels: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for CancelAwareTransport {
+        async fn request(
+            &self,
+            outbound: Outbound,
+            cancel: &CancellationToken,
+        ) -> Result<Result<Value, RpcError>, CallError> {
+            match outbound.method.as_str() {
+                "server/discover" => modern_discover_ok(),
+                "tools/list" => Ok(Ok(json!({"tools": []}))),
+                "tools/call" => {
+                    cancel.cancelled().await;
+                    self.cancels.fetch_add(1, Ordering::SeqCst);
+                    Err(CallError::Cancelled)
+                }
+                other => panic!("unexpected method {other}"),
+            }
+        }
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+        async fn close(&self) {}
+    }
+
+    async fn cancel_aware_client(call_timeout: Duration) -> (Client, Arc<AtomicUsize>) {
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let transport: Box<dyn Transport> = Box::new(CancelAwareTransport {
+            cancels: cancels.clone(),
+        });
+        let cancel = CancellationToken::new();
+        let client = Client::connect(
+            "test".to_string(),
+            transport,
+            Duration::from_secs(5),
+            call_timeout,
+            &cancel,
+        )
+        .await
+        .expect("connect succeeds");
+        (client, cancels)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_call_cancels_the_request_it_gives_up_on() {
+        let (client, cancels) = cancel_aware_client(Duration::from_millis(50)).await;
+        let cancel = CancellationToken::new();
+
+        let result = client.call("slow", json!({}), &cancel).await;
+
+        assert!(
+            matches!(result, Err(CallError::Timeout)),
+            "expected Timeout, got {result:?}"
+        );
+        assert_eq!(
+            cancels.load(Ordering::SeqCst),
+            1,
+            "the transport must observe the cancellation so the call is released"
+        );
+        assert!(
+            !cancel.is_cancelled(),
+            "a call timeout must not cancel the caller's own token"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_call_is_not_reported_as_a_timeout() {
+        let (client, cancels) = cancel_aware_client(Duration::from_secs(60)).await;
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = client.call("slow", json!({}), &cancel).await;
+
+        assert!(
+            matches!(result, Err(CallError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
+        assert_eq!(cancels.load(Ordering::SeqCst), 1);
     }
 }

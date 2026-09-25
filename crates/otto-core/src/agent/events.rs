@@ -130,6 +130,11 @@ pub enum Event {
     TextDelta {
         text: String,
     },
+    /// Redacted model reasoning text. It is shown and persisted but never
+    /// sent back to a provider.
+    ReasoningDelta {
+        text: String,
+    },
     ToolCallStarted {
         tool_name: String,
         tool_call_id: String,
@@ -191,6 +196,7 @@ impl Event {
             Self::AgentStarted => "agent_started",
             Self::AgentFinished => "agent_finished",
             Self::TextDelta { .. } => "text_delta",
+            Self::ReasoningDelta { .. } => "reasoning_delta",
             Self::ToolCallStarted { .. } => "tool_call_started",
             Self::ToolCallFinished { .. } => "tool_call_finished",
             Self::ProviderUsage { .. } => "provider_usage",

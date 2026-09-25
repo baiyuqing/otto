@@ -611,18 +611,31 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         cancel: &CancellationToken,
     ) -> (Response, bool, Option<AgentError>) {
         let mut stream = self.redactor.new_stream();
+        // Reasoning has its own redaction stream; it is flushed before the
+        // first text delta so the two keep their provider order.
+        let mut reasoning = self.redactor.new_stream();
         let visible_text = std::sync::atomic::AtomicBool::new(false);
         let started = (self.options.now)();
         let outcome = {
-            let mut on_stream = |event: StreamEvent| {
-                let StreamEvent::TextDelta { text: delta } = event else {
-                    return;
-                };
-                let text = stream.write(&delta);
-                if !text.is_empty() {
-                    visible_text.store(true, std::sync::atomic::Ordering::SeqCst);
-                    emit(Event::TextDelta { text });
+            let mut on_stream = |event: StreamEvent| match event {
+                StreamEvent::ReasoningDelta { text: delta } => {
+                    let text = reasoning.write(&delta);
+                    if !text.is_empty() {
+                        emit(Event::ReasoningDelta { text });
+                    }
                 }
+                StreamEvent::TextDelta { text: delta } => {
+                    let held = reasoning.flush();
+                    if !held.is_empty() {
+                        emit(Event::ReasoningDelta { text: held });
+                    }
+                    let text = stream.write(&delta);
+                    if !text.is_empty() {
+                        visible_text.store(true, std::sync::atomic::Ordering::SeqCst);
+                        emit(Event::TextDelta { text });
+                    }
+                }
+                _ => {}
             };
             self.provider
                 .complete(request, &mut on_stream, cancel)
@@ -639,6 +652,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 Some(AgentError::Provider(error)),
             ),
             Ok(response) => {
+                let held = reasoning.flush();
+                if !held.is_empty() {
+                    emit(Event::ReasoningDelta { text: held });
+                }
                 let text = stream.flush();
                 if !text.is_empty() {
                     visible_text.store(true, std::sync::atomic::Ordering::SeqCst);

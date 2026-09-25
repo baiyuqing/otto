@@ -906,6 +906,81 @@ async fn a_credential_is_redacted_from_events_persistence_and_history() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn reasoning_is_streamed_redacted_and_persisted() {
+    const SECRET: &str = "sk-live-abcdef";
+    let reasoning = format!("use {SECRET} then");
+    let provider = FakeProvider::new(vec![
+        Turn {
+            events: vec![
+                StreamEvent::ReasoningDelta {
+                    text: "use sk-live".into(),
+                },
+                StreamEvent::ReasoningDelta {
+                    text: "-abcdef then".into(),
+                },
+                StreamEvent::TextDelta { text: "ok".into() },
+            ],
+            outcome: Ok(Response {
+                message: Message {
+                    role: Role::Assistant,
+                    finish_reason: Some(FinishReason::Stop),
+                    blocks: vec![Block::reasoning(reasoning), Block::text("ok")],
+                    ..Message::default()
+                },
+            }),
+        },
+        Turn::text("second"),
+    ]);
+    let agent = Agent::with_redactor(
+        provider,
+        EchoExecutor {
+            content: None,
+            persisted: None,
+        },
+        MemorySession::new(),
+        options(),
+        Redactor::new(&[SECRET.to_owned()]),
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    for prompt in ["first", "again"] {
+        agent
+            .run(
+                prompt,
+                &mut |event| sink.lock().expect("e").push(event),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("run");
+    }
+
+    let streamed: Vec<Event> = collect(&events)
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                Event::ReasoningDelta { .. } | Event::TextDelta { .. }
+            )
+        })
+        .collect();
+    let reasoning_text: String = streamed
+        .iter()
+        .take_while(|event| matches!(event, Event::ReasoningDelta { .. }))
+        .map(|event| match event {
+            Event::ReasoningDelta { text } => text.as_str(),
+            _ => "",
+        })
+        .collect();
+    let redacted = format!("use {} then", super::redactor::REDACTION_MARKER);
+    assert_eq!(reasoning_text, redacted);
+    assert!(matches!(&streamed[streamed.len() - 2], Event::TextDelta { text } if text == "ok"));
+
+    let first_reply = &agent.session().messages()[1];
+    assert_eq!(first_reply.blocks[0], Block::reasoning(redacted));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn an_incomplete_redactor_runs_no_provider_tool_or_session_call() {
     let provider = FakeProvider::new(vec![Turn::text("never sent")]);
     let agent = Agent::with_redactor(

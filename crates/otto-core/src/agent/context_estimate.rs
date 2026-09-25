@@ -71,8 +71,9 @@ fn estimate_block(block: &Block) -> i64 {
             total = saturating_add(total, estimate_string(&block.tool_call_id));
             saturating_add(total, estimate_string(&block.tool_name))
         }
-        // An unknown block type costs nothing.
-        BlockType::Other(_) => 0,
+        // Reasoning is never sent to a provider, and an unknown block type
+        // costs nothing.
+        BlockType::Reasoning | BlockType::Other(_) => 0,
     }
 }
 
@@ -171,7 +172,7 @@ mod tests {
                         + formula(&block.tool_call_id)
                         + formula(&block.tool_name)
                 }
-                BlockType::Other(_) => 0,
+                BlockType::Reasoning | BlockType::Other(_) => 0,
             };
         }
         want

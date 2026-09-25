@@ -319,6 +319,9 @@ button.danger {
   white-space: pre-wrap;
 }
 .item.tool.error summary { color: var(--danger); }
+.item.reasoning { color: var(--muted); font-size: 13px; }
+.item.reasoning summary { cursor: pointer; font-style: italic; }
+.item.reasoning pre { margin: 4px 0 0; font-family: inherit; white-space: pre-wrap; }
 .item.notice {
   width: fit-content;
   padding: 4px 8px;

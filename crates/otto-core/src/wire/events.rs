@@ -124,7 +124,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
         ..WireEvent::default()
     };
     match event {
-        Event::TextDelta { text } => wire.text = text.clone(),
+        Event::TextDelta { text } | Event::ReasoningDelta { text } => wire.text = text.clone(),
         Event::ToolCallStarted {
             tool_name,
             tool_call_id,

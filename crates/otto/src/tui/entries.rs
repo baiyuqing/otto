@@ -18,6 +18,8 @@ use otto_core::session::COMPACTION_CONTEXT_TYPE;
 pub enum EntryKind {
     User,
     Assistant,
+    /// Model reasoning, drawn dimmed above the reply it precedes.
+    Reasoning,
     Tool,
     Compaction,
     Error,
@@ -114,6 +116,16 @@ pub fn entries_from_history(history: &[Message]) -> (Vec<Entry>, Usage) {
                         continue;
                     }
                     text.push_str(&block.text);
+                }
+                BlockType::Reasoning => {
+                    flush_text(&mut entries, &mut text, &mut text_ordinal, false);
+                    entries.push(Entry {
+                        raw: block.text.clone(),
+                        ..Entry::new(
+                            format!("{base_id}-reasoning-{block_index}"),
+                            EntryKind::Reasoning,
+                        )
+                    });
                 }
                 BlockType::Image => {
                     flush_text(&mut entries, &mut text, &mut text_ordinal, false);
@@ -274,6 +286,7 @@ fn entry_kind_label(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::User => "user",
         EntryKind::Assistant => "assistant",
+        EntryKind::Reasoning => "reasoning",
         EntryKind::Tool => "tool",
         EntryKind::Compaction => "compaction",
         EntryKind::Error => "error",
@@ -395,6 +408,27 @@ mod tests {
         assert_eq!(entries[0].raw, "hi");
         assert_eq!(entries[1].kind, Some(EntryKind::Assistant));
         assert_eq!(entries[1].raw, "hello");
+    }
+
+    #[test]
+    fn resumed_reasoning_is_its_own_entry_before_the_reply() {
+        let history = [Message {
+            role: Role::Assistant,
+            blocks: vec![Block::reasoning("weigh options"), Block::text("hello")],
+            ..Message::default()
+        }];
+        let (entries, _) = entries_from_history(&history);
+        let kinds: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry.kind, entry.raw.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (Some(EntryKind::Reasoning), "weigh options"),
+                (Some(EntryKind::Assistant), "hello"),
+            ]
+        );
     }
 
     #[test]

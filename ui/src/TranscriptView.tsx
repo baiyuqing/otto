@@ -215,6 +215,15 @@ function ItemView({ item }: { item: Item }) {
           <MarkdownView text={item.text} />
         </ItemFrame>
       )
+    case 'reasoning': {
+      const [first, ...rest] = item.text.split('\n')
+      return (
+        <details className="item reasoning">
+          <summary>{first}</summary>
+          {rest.length > 0 && <pre>{rest.join('\n')}</pre>}
+        </details>
+      )
+    }
     case 'tool':
       return (
         <details className={`item tool${item.isError ? ' error' : ''}`}>

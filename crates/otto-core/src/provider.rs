@@ -40,12 +40,18 @@ pub struct Response {
 
 /// An incremental update observed while a response streams.
 ///
-/// Text deltas reach the frontend as they arrive. Tool-call deltas are
-/// reported for progress display only: the authoritative tool calls are the
-/// blocks of [`Response::message`].
+/// Text and reasoning deltas reach the frontend as they arrive. Tool-call
+/// deltas are reported for progress display only: the authoritative tool
+/// calls are the blocks of [`Response::message`]. The concatenated reasoning
+/// deltas equal the text of the response's [`BlockType::Reasoning`] block.
+///
+/// [`BlockType::Reasoning`]: crate::model::BlockType::Reasoning
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
     TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
         text: String,
     },
     ToolCallDelta {

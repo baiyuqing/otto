@@ -992,6 +992,22 @@ impl App {
     /// as an event.
     pub fn apply_event(&mut self, event: Event) -> bool {
         match event {
+            Event::ReasoningDelta { text } => {
+                if let Some(last) = self.entries.last_mut()
+                    && last.kind == Some(EntryKind::Reasoning)
+                    && last.id == "streaming-reasoning"
+                {
+                    last.raw.push_str(&text);
+                } else {
+                    self.entries.push(Entry {
+                        id: "streaming-reasoning".to_string(),
+                        kind: Some(EntryKind::Reasoning),
+                        raw: text,
+                        ..Entry::default()
+                    });
+                }
+                false
+            }
             Event::TextDelta { text } => {
                 if let Some(last) = self.entries.last_mut()
                     && last.kind == Some(EntryKind::Assistant)
@@ -1608,6 +1624,32 @@ mod tests {
             arguments: String::new(),
         });
         assert_eq!(app.scroll, Some(4));
+    }
+
+    #[tokio::test]
+    async fn reasoning_deltas_build_one_entry_before_the_reply() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let before = app.entries.len();
+
+        for text in ["weigh ", "options"] {
+            app.apply_event(Event::ReasoningDelta { text: text.into() });
+        }
+        app.apply_event(Event::TextDelta { text: "ok".into() });
+
+        let added: Vec<_> = app.entries[before..]
+            .iter()
+            .map(|entry| (entry.kind, entry.raw.as_str()))
+            .collect();
+        assert_eq!(
+            added,
+            [
+                (Some(EntryKind::Reasoning), "weigh options"),
+                (Some(EntryKind::Assistant), "ok"),
+            ]
+        );
     }
 
     /// A turn ignores every other key ([`App::handle_key`] returns early

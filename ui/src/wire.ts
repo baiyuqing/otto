@@ -28,6 +28,7 @@ export type Item =
   | (Extract<WebItem, { kind: 'user' }> & { created_at?: string })
   | (Extract<WebItem, { kind: 'image' }> & { created_at?: string })
   | (Extract<WebItem, { kind: 'assistant' }> & { created_at?: string })
+  | (Extract<WebItem, { kind: 'reasoning' }> & { created_at?: string })
   | (Extract<WebItem, { kind: 'tool' }> & { created_at?: string })
   | Extract<WebItem, { kind: 'notice' | 'error' }>
 

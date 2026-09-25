@@ -16,8 +16,8 @@ const api = vi.hoisted(() => ({
   renameSession: vi.fn(),
   listTasks: vi.fn(),
   listMcp: vi.fn(),
+  cancelTurn: vi.fn(),
 }))
-
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
   return {
@@ -101,6 +101,7 @@ describe('idle wake follow', () => {
     api.listTasks.mockResolvedValue({ tasks: [] })
     api.listMcp.mockResolvedValue({ servers: [] })
     api.attach.mockResolvedValue(new Response('', { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.cancelTurn.mockResolvedValue(new Response(null, { status: 204 }))
   })
 
   afterEach(() => {
@@ -139,6 +140,20 @@ describe('idle wake follow', () => {
     })
 
     expect(api.attach).toHaveBeenCalledWith('sess1', 'wake1')
+  })
+
+  it('cancels a running turn when Escape is pressed', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    await openIdleSession()
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    expect(api.cancelTurn).toHaveBeenCalledWith('sess1', 'turn1')
   })
 
   it('reloads history when a wake finished between polls', async () => {

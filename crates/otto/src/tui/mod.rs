@@ -384,138 +384,142 @@ async fn run_app<B: Backend>(
 
         // Any key moves the composer or the transcript under the highlight.
         app.selection = None;
-        let action = app.handle_key(key, controller, cancel);
-        match action {
-            None => {}
-            Some(Action::Exit) => return Ok(()),
-            Some(Action::Prompt(line)) => {
-                if let Err(error) = run_turn(
-                    &mut app,
-                    terminal,
-                    keys,
-                    controller,
-                    cancel,
-                    line,
-                    pending_image.take(),
-                )
-                .await
-                {
-                    propagate_turn_error(error)?;
-                }
-            }
-            Some(Action::Image(path)) => match image_block_from_path(&path) {
-                Ok(image) => {
-                    pending_image = Some(image);
-                    app.push_system(format!("Attached image: {path}"));
-                }
-                Err(message) => app.push_system(format!("/image: {message}")),
-            },
-            Some(Action::Compact(focus)) => {
-                if let Err(error) =
-                    run_compact(&mut app, terminal, keys, controller, cancel, focus).await
-                {
-                    propagate_turn_error(error)?;
-                }
-            }
-            Some(Action::NewSession) => {
-                pending_image = None;
-                match controller.new_session().await {
-                    Ok(()) => {
-                        app.refresh(controller);
-                        push_session_id(&mut app, controller);
+        let mut action = app.handle_key(key, controller, cancel);
+        while let Some(current_action) = action.take() {
+            match current_action {
+                Action::Exit => return Ok(()),
+                Action::Prompt(line) => {
+                    if let Err(error) = run_turn(
+                        &mut app,
+                        terminal,
+                        keys,
+                        controller,
+                        cancel,
+                        line,
+                        pending_image.take(),
+                    )
+                    .await
+                    {
+                        propagate_turn_error(error)?;
+                    } else {
+                        action = app.submit_input(controller, cancel);
                     }
-                    Err(message) => app.push_system(format!("/new: {message}")),
                 }
-            }
-            Some(Action::SwitchProfile(profile)) => {
-                pending_image = None;
-                switch_profile(&mut app, controller, &profile).await;
-            }
-            Some(Action::SwitchProfileThinking {
-                profile,
-                thinking,
-                save,
-            }) => {
-                pending_image = None;
-                switch_profile(&mut app, controller, &profile).await;
-                apply_thinking(&mut app, controller, &thinking, save).await;
-            }
-            Some(Action::SetThinking { thinking, save }) => {
-                apply_thinking(&mut app, controller, &thinking, save).await;
-            }
-            Some(Action::Resume(path)) => {
-                pending_image = None;
-                match controller.resume_session(&path).await {
-                    Ok(result) => {
-                        app.refresh(controller);
-                        app.push_system(format!("Resumed: {}", result.session_path));
-                        for warning in &result.warnings {
-                            app.push_system(warning.clone());
-                        }
-                        push_session_id(&mut app, controller);
+                Action::Image(path) => match image_block_from_path(&path) {
+                    Ok(image) => {
+                        pending_image = Some(image);
+                        app.push_system(format!("Attached image: {path}"));
                     }
-                    Err(message) => app.push_system(format!("/resume: {message}")),
-                }
-            }
-            Some(Action::Archive(path)) => {
-                pending_image = None;
-                match controller.archive_session(&path).await {
-                    Ok(result) => {
-                        app.refresh(controller);
-                        app.push_system(format!("Archived: {}", result.path));
-                        push_session_id(&mut app, controller);
-                    }
-                    Err(message) => app.push_system(format!("/archive: {message}")),
-                }
-            }
-            Some(Action::SandboxReload) => match controller.reload_sandbox().await {
-                Ok(info) => app.push_system(format!("Sandbox: {}", info.summary())),
-                Err(message) => app.push_system(format!("/sandbox reload: {message}")),
-            },
-            Some(Action::SandboxAllow(path)) => {
-                if let Err(error) = amend_sandbox(
-                    &mut app,
-                    terminal,
-                    keys,
-                    controller,
-                    cancel,
-                    SandboxChange::AllowReadPath(path),
-                )
-                .await
-                {
-                    propagate_turn_error(error)?;
-                }
-            }
-            Some(Action::SandboxNetwork(mode)) => {
-                if let Err(error) = amend_sandbox(
-                    &mut app,
-                    terminal,
-                    keys,
-                    controller,
-                    cancel,
-                    SandboxChange::Network(mode),
-                )
-                .await
-                {
-                    propagate_turn_error(error)?;
-                }
-            }
-            Some(Action::Approve(id)) => match controller.approve_bash(&id) {
-                Ok(prompt) => {
-                    app.push_system(format!("Approved {id} for one command."));
+                    Err(message) => app.push_system(format!("/image: {message}")),
+                },
+                Action::Compact(focus) => {
                     if let Err(error) =
-                        run_turn(&mut app, terminal, keys, controller, cancel, prompt, None).await
+                        run_compact(&mut app, terminal, keys, controller, cancel, focus).await
                     {
                         propagate_turn_error(error)?;
                     }
                 }
-                Err(message) => app.push_system(format!("/approve: {message}")),
-            },
-            Some(Action::Login(args)) => {
-                login_dispatch(&mut app, controller, &args, cancel).await;
-            }
-            Some(Action::McpLogin(name)) => {
-                mcp_login_dispatch(&mut app, controller, &name, cancel).await;
+                Action::NewSession => {
+                    pending_image = None;
+                    match controller.new_session().await {
+                        Ok(()) => {
+                            app.refresh(controller);
+                            push_session_id(&mut app, controller);
+                        }
+                        Err(message) => app.push_system(format!("/new: {message}")),
+                    }
+                }
+                Action::SwitchProfile(profile) => {
+                    pending_image = None;
+                    switch_profile(&mut app, controller, &profile).await;
+                }
+                Action::SwitchProfileThinking {
+                    profile,
+                    thinking,
+                    save,
+                } => {
+                    pending_image = None;
+                    switch_profile(&mut app, controller, &profile).await;
+                    apply_thinking(&mut app, controller, &thinking, save).await;
+                }
+                Action::SetThinking { thinking, save } => {
+                    apply_thinking(&mut app, controller, &thinking, save).await;
+                }
+                Action::Resume(path) => {
+                    pending_image = None;
+                    match controller.resume_session(&path).await {
+                        Ok(result) => {
+                            app.refresh(controller);
+                            app.push_system(format!("Resumed: {}", result.session_path));
+                            for warning in &result.warnings {
+                                app.push_system(warning.clone());
+                            }
+                            push_session_id(&mut app, controller);
+                        }
+                        Err(message) => app.push_system(format!("/resume: {message}")),
+                    }
+                }
+                Action::Archive(path) => {
+                    pending_image = None;
+                    match controller.archive_session(&path).await {
+                        Ok(result) => {
+                            app.refresh(controller);
+                            app.push_system(format!("Archived: {}", result.path));
+                            push_session_id(&mut app, controller);
+                        }
+                        Err(message) => app.push_system(format!("/archive: {message}")),
+                    }
+                }
+                Action::SandboxReload => match controller.reload_sandbox().await {
+                    Ok(info) => app.push_system(format!("Sandbox: {}", info.summary())),
+                    Err(message) => app.push_system(format!("/sandbox reload: {message}")),
+                },
+                Action::SandboxAllow(path) => {
+                    if let Err(error) = amend_sandbox(
+                        &mut app,
+                        terminal,
+                        keys,
+                        controller,
+                        cancel,
+                        SandboxChange::AllowReadPath(path),
+                    )
+                    .await
+                    {
+                        propagate_turn_error(error)?;
+                    }
+                }
+                Action::SandboxNetwork(mode) => {
+                    if let Err(error) = amend_sandbox(
+                        &mut app,
+                        terminal,
+                        keys,
+                        controller,
+                        cancel,
+                        SandboxChange::Network(mode),
+                    )
+                    .await
+                    {
+                        propagate_turn_error(error)?;
+                    }
+                }
+                Action::Approve(id) => match controller.approve_bash(&id) {
+                    Ok(prompt) => {
+                        app.push_system(format!("Approved {id} for one command."));
+                        if let Err(error) =
+                            run_turn(&mut app, terminal, keys, controller, cancel, prompt, None)
+                                .await
+                        {
+                            propagate_turn_error(error)?;
+                        }
+                    }
+                    Err(message) => app.push_system(format!("/approve: {message}")),
+                },
+                Action::Login(args) => {
+                    login_dispatch(&mut app, controller, &args, cancel).await;
+                }
+                Action::McpLogin(name) => {
+                    mcp_login_dispatch(&mut app, controller, &name, cancel).await;
+                }
             }
         }
 
@@ -581,9 +585,9 @@ async fn drive_turn<B: Backend, T, E>(
 }
 
 /// Handles one event delivered while a turn is running: the interrupt keys
-/// cancel it, the scroll keys and the wheel move the transcript, a drag
-/// selects, and everything else is dropped the way [`App::handle_key`]'s
-/// `busy()` branch drops it.
+/// cancel it, scroll/wheel/drag still navigate the transcript, and ordinary
+/// composer keys edit the single queued draft that will be submitted after a
+/// successful turn.
 ///
 /// Scrolling has to work here and not only between turns: a streaming turn
 /// is when there is most output to read back through.
@@ -593,13 +597,17 @@ fn apply_turn_key<B: Backend>(
     event: TuiEvent,
     turn: &CancellationToken,
 ) {
-    let key = match event {
-        TuiEvent::Key(key) => key,
-        TuiEvent::Paste(_) => return,
-        TuiEvent::Wheel { up } => {
-            app.scroll_wheel(up);
-            return;
+    match event {
+        TuiEvent::Key(key) => {
+            app.selection = None;
+            if App::is_interrupt_key(&key) {
+                turn.cancel();
+            } else {
+                app.handle_busy_composer_key(key);
+            }
         }
+        TuiEvent::Paste(text) => app.insert_text(&text),
+        TuiEvent::Wheel { up } => app.scroll_wheel(up),
         TuiEvent::Select { phase, col, row } => {
             // The turn loop redraws on every tick anyway, so a failed draw
             // here is not worth ending the turn over.
@@ -608,15 +616,8 @@ fn apply_turn_key<B: Backend>(
             {
                 app.push_system(format!("copy: {error}"));
             }
-            return;
         }
-        TuiEvent::Redraw => return,
-    };
-    app.selection = None;
-    if App::is_interrupt_key(&key) {
-        turn.cancel();
-    } else {
-        app.handle_scroll_key(&key);
+        TuiEvent::Redraw => {}
     }
 }
 

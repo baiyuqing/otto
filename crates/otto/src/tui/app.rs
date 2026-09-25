@@ -540,8 +540,12 @@ impl App {
             return None;
         }
         if self.busy() {
-            // Most keys are ignored while a turn runs; Esc (Cancel) is handled
-            // by the caller, which cancels the turn's child token.
+            // While a turn runs, the composer is the single queued draft for
+            // the next input. Enter only marks the current draft as queued;
+            // the run loop dispatches its final contents after the turn
+            // finishes successfully. Esc/Ctrl+C are intercepted by the caller
+            // as cancellation before this method is invoked.
+            self.handle_busy_composer_key(key);
             return None;
         }
         if key.code == KeyCode::Char('?') && self.input.is_empty() {
@@ -593,15 +597,7 @@ impl App {
                 if self.input.is_empty() {
                     return None;
                 }
-                let line = std::mem::take(&mut self.input)
-                    .into_iter()
-                    .collect::<String>()
-                    .trim()
-                    .to_string();
-                self.cursor = 0;
-                self.suggestion = 0;
-                self.history.remember(&line);
-                self.dispatch_line(&line, controller, cancel)
+                self.submit_input(controller, cancel)
             }
             KeyCode::Backspace => {
                 if self.cursor > 0 {
@@ -657,6 +653,67 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn handle_busy_composer_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) =>
+            {
+                self.input.insert(self.cursor, '\n');
+                self.cursor += 1;
+                self.edited();
+            }
+            KeyCode::Enter => {}
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                    self.input.remove(self.cursor);
+                }
+                self.edited();
+            }
+            KeyCode::Delete => {
+                if self.cursor < self.input.len() {
+                    self.input.remove(self.cursor);
+                }
+                self.edited();
+            }
+            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.input.len()),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.input.len(),
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_text(&ch.to_string());
+            }
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Up | KeyCode::Down => {
+                self.handle_scroll_key(&key);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn submit_input(
+        &mut self,
+        controller: &Controller,
+        cancel: &CancellationToken,
+    ) -> Option<Action> {
+        if self.input.is_empty() {
+            return None;
+        }
+        let line = std::mem::take(&mut self.input)
+            .into_iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        self.cursor = 0;
+        self.suggestion = 0;
+        if line.is_empty() {
+            return None;
+        }
+        self.history.remember(&line);
+        self.dispatch_line(&line, controller, cancel)
     }
 
     pub fn insert_text(&mut self, value: &str) {
@@ -1529,6 +1586,67 @@ mod tests {
         assert!(app.handle_ctrl_c().is_none());
         assert!(app.input.is_empty());
         assert_eq!(app.cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn busy_composer_keeps_one_editable_draft_out_of_history_until_dispatch() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.start_turn();
+
+        app.handle_key(
+            key(KeyCode::Char('h'), KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        app.handle_key(
+            key(KeyCode::Char('i'), KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(action.is_none());
+        assert_eq!(app.input.iter().collect::<String>(), "hi");
+        assert_eq!(app.cursor, 2);
+        assert!(
+            app.history.previous("").is_none(),
+            "queued drafts are not prompt history"
+        );
+        assert!(
+            app.entries.is_empty(),
+            "queued drafts are not transcript history"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_draft_enters_history_only_when_submitted_after_turn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.start_turn();
+
+        app.insert_text("next prompt");
+        assert!(app.entries.is_empty());
+        assert!(app.history.previous("").is_none());
+
+        app.end_turn();
+        let action = app.submit_input(&controller, &cancel);
+
+        assert!(matches!(action, Some(Action::Prompt(line)) if line == "next prompt"));
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].kind, Some(EntryKind::User));
+        assert_eq!(app.entries[0].raw, "next prompt");
+        assert_eq!(app.history.previous(""), Some("next prompt".to_string()));
     }
 
     #[test]

@@ -44,7 +44,7 @@ use crate::subagent::runner::{
 };
 use crate::subagent::tasks::Tasks;
 use crate::tool::Tool;
-use crate::tool::mcp::{McpTool, tools_for};
+use crate::tool::mcp::{McpCatalogEntry, McpTool, router_tools, tools_for};
 use crate::tool::memory::{ForgetTool, MemorySearchTool, RememberTool};
 use crate::tool::remind::{self, Reminders};
 use crate::tool::result::redact_exact_text;
@@ -223,7 +223,8 @@ fn transport_label(transport: &McpTransport) -> &'static str {
 /// server-prefixed names of the tools that survived cross-server
 /// deduplication.
 pub struct ConnectedServer {
-    client: Arc<mcp::client::Client>,
+    server: Arc<dyn mcp::ToolServer>,
+    tool_infos: Vec<mcp::ToolInfo>,
     secrets: Vec<String>,
     bearer: Option<Arc<dyn mcp::BearerSource>>,
     tool_names: Vec<String>,
@@ -242,24 +243,36 @@ pub fn mcp_child_tools(
     connected: &[ConnectedServer],
     max_output: usize,
 ) -> Vec<Box<dyn Tool + Send + Sync>> {
-    let mut tools = Vec::new();
+    mcp_router_tools(connected, max_output)
+}
+
+fn mcp_router_tools(
+    connected: &[ConnectedServer],
+    max_output: usize,
+) -> Vec<Box<dyn Tool + Send + Sync>> {
+    let mut entries = Vec::new();
     for server in connected {
-        let (server_tools, _warnings) = tools_for(
-            Arc::clone(&server.client) as Arc<dyn mcp::ToolServer>,
-            server.client.tools(),
-            max_output,
-            server.secrets.clone(),
-            server.bearer.clone(),
-        );
         let kept: HashSet<&str> = server.tool_names.iter().map(String::as_str).collect();
-        tools.extend(
-            server_tools
-                .into_iter()
-                .filter(|tool| kept.contains(tool.definition().name.as_str()))
-                .map(|tool| Box::new(tool) as Box<dyn Tool + Send + Sync>),
-        );
+        for info in &server.tool_infos {
+            let Some(prefixed_name) =
+                crate::tool::mcp::prefixed_name(server.server.name(), &info.name)
+            else {
+                continue;
+            };
+            if !kept.contains(prefixed_name.as_str()) {
+                continue;
+            }
+            entries.push(McpCatalogEntry {
+                server: Arc::clone(&server.server),
+                info: info.clone(),
+                prefixed_name,
+                max_output_bytes: max_output,
+                secrets: server.secrets.clone(),
+                bearer: server.bearer.clone(),
+            });
+        }
     }
-    tools
+    router_tools(entries, max_output)
 }
 
 /// Cross-server tool-name collision guard (Finding 2). Server names may
@@ -699,15 +712,9 @@ impl Builder {
                         },
                         Some(Arc::clone(&client)),
                     );
-                    tools.extend(
-                        server_tools
-                            .into_iter()
-                            .enumerate()
-                            .filter(|(index, _)| keep.contains(index))
-                            .map(|(_, tool)| Box::new(tool) as Box<dyn Tool + Send + Sync>),
-                    );
                     connected.push(ConnectedServer {
-                        client,
+                        server: Arc::clone(&client) as Arc<dyn mcp::ToolServer>,
+                        tool_infos: client.tools().to_vec(),
                         secrets,
                         bearer,
                         tool_names,
@@ -747,6 +754,7 @@ impl Builder {
                 }
             }
         }
+        tools.extend(mcp_router_tools(&connected, max_output));
         (tools, connected, servers)
     }
 
@@ -1085,6 +1093,31 @@ mod mcp_tests {
     #[test]
     fn mcp_child_tools_is_empty_for_no_connected_servers() {
         assert!(mcp_child_tools(&[], 65536).is_empty());
+    }
+
+    #[test]
+    fn lazy_mcp_exposes_router_tools_instead_of_remote_tool_schemas() {
+        let server: Arc<dyn mcp::ToolServer> = Arc::new(FakeToolServer {
+            name: "notion".into(),
+        });
+        let connected = vec![ConnectedServer {
+            server,
+            tool_infos: vec![tool_info("notion-fetch"), tool_info("notion-ai-search")],
+            secrets: Vec::new(),
+            bearer: None,
+            tool_names: vec![
+                "mcp__notion__notion-fetch".to_string(),
+                "mcp__notion__notion-ai-search".to_string(),
+            ],
+        }];
+
+        let names = mcp_child_tools(&connected, 65536)
+            .into_iter()
+            .map(|tool| tool.definition().name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["mcp_search_tools", "mcp_call_tool"]);
+        assert!(!names.iter().any(|name| name.starts_with("mcp__notion__")));
     }
 
     // --- cross-server tool-name collisions (Finding 2) ---

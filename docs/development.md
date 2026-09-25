@@ -93,7 +93,12 @@ enabled server concurrently and then processes the outcomes in configuration
 order, so warnings, `/mcp` rows, and cross-server tool-name deduplication stay
 reproducible; a failed or sign-in-required server is reported as a warning and
 never blocks the runner from starting, while a disabled server is recorded
-silently. An interactive frontend does not wait for that: `cli::run` builds the
+silently. Connected servers contribute the compact `mcp_search_tools` /
+`mcp_call_tool` router pair to the parent and child registries instead of one
+provider-visible schema per remote MCP tool; `tools_for` and
+`dedup_cross_server` still run at connect time so router search/call only sees
+validated, stable, non-colliding `mcp__<server>__<tool>` names. An interactive
+frontend does not wait for that: `cli::run` builds the
 first runner with `build_runner_without_mcp_with_trace`, whose `/mcp` rows read
 `ServerState::Connecting`, and a background task builds the full runner and
 installs it through `Controller::replace_runner_if_current`, which commits only
@@ -106,9 +111,9 @@ whose token is missing or cannot be refreshed. `/mcp` (REPL and TUI) and
 surfaces; a completed sign-in still requires restarting Otto to pick up the
 new token. A stdio server that exits stays disconnected until Otto
 restarts; there is no restart policy. A tool name that collides with one
-already registered by an earlier server, or a server whose `env`/`headers`
+already advertised by an earlier server, or a server whose `env`/`headers`
 secrets exceed the redaction limits in `otto_core::safetext`, is skipped
-with a warning instead of connecting. Keep MCP transport tests offline: only a
+with a warning instead of being made available through the router. Keep MCP transport tests offline: only a
 nonexistent stdio command (reaching `ServerState::Failed`) and a disabled
 server (reaching `ServerState::Disabled`) exercise the real connect path in
 tests; cover the other states through pure functions such as

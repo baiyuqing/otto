@@ -277,7 +277,9 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.busy() {
+    let title = if app.busy() && !app.input.is_empty() {
+        "Queued input (Esc cancels turn)"
+    } else if app.busy() {
         "Working (Esc to cancel)"
     } else {
         "Otto"
@@ -296,9 +298,7 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         inner,
     );
 
-    if !app.busy() {
-        frame.set_cursor_position((inner.x + caret_column, inner.y + caret_row - scroll));
-    }
+    frame.set_cursor_position((inner.x + caret_column, inner.y + caret_row - scroll));
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {

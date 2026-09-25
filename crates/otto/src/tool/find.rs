@@ -11,10 +11,11 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
+use super::gitignore::GitignoreStack;
 use super::result::{capped_text_result, decode_strict_json};
 use super::search::{
     WalkAction, match_glob_segments, resolve_search_limit, search_relative_path,
-    search_root_inside_git, validated_glob_segments, walk_dir,
+    search_root_inside_git, validated_glob_segments, walk_dir_ignoring,
 };
 use super::workspace::Workspace;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
@@ -31,6 +32,8 @@ struct FindArgs {
     path: String,
     #[serde(default)]
     limit: Option<i64>,
+    #[serde(default)]
+    no_ignore: bool,
 }
 
 /// Finds workspace files by glob.
@@ -52,7 +55,7 @@ impl<'a> FindTool<'a> {
 pub fn find_definition() -> ToolDefinition {
     definition(
         "find",
-        "Find workspace files by glob pattern (read-only)",
+        "Find workspace files by glob pattern (read-only). Files the workspace's .gitignore excludes are skipped unless no_ignore is set",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -64,6 +67,10 @@ pub fn find_definition() -> ToolDefinition {
                 "path": {
                     "type": "string",
                     "description": "Workspace-relative directory or file to search; defaults to ."
+                },
+                "no_ignore": {
+                    "type": "boolean",
+                    "description": "Search files the repository's .gitignore excludes; defaults to false"
                 },
                 "limit": {
                     "type": "integer",
@@ -122,31 +129,38 @@ impl Tool for FindTool<'_> {
 
         let mut matches: Vec<String> = Vec::new();
         let mut truncated = false;
-        let walk = walk_dir(self.workspace.root_fs(), &root, &mut |entry| {
-            if cancel.is_cancelled() {
-                return Err(std::io::Error::other(CONTEXT_CANCELED));
-            }
-            if entry.path != root && entry.name == ".git" {
-                return Ok(if entry.is_dir {
-                    WalkAction::SkipDir
-                } else {
-                    WalkAction::Continue
-                });
-            }
-            if entry.is_dir || entry.is_symlink || !entry.is_regular {
-                return Ok(WalkAction::Continue);
-            }
-            let candidate = search_relative_path(&root, &entry.path)?;
-            if !match_glob_segments(&glob_segments, &candidate) {
-                return Ok(WalkAction::Continue);
-            }
-            if matches.len() >= limit {
-                truncated = true;
-                return Ok(WalkAction::Stop);
-            }
-            matches.push(entry.path.clone());
-            Ok(WalkAction::Continue)
-        });
+        let mut ignore =
+            (!args.no_ignore).then(|| GitignoreStack::for_root(self.workspace.root_fs(), &root));
+        let walk = walk_dir_ignoring(
+            self.workspace.root_fs(),
+            &root,
+            ignore.as_mut(),
+            &mut |entry| {
+                if cancel.is_cancelled() {
+                    return Err(std::io::Error::other(CONTEXT_CANCELED));
+                }
+                if entry.path != root && entry.name == ".git" {
+                    return Ok(if entry.is_dir {
+                        WalkAction::SkipDir
+                    } else {
+                        WalkAction::Continue
+                    });
+                }
+                if entry.is_dir || entry.is_symlink || !entry.is_regular {
+                    return Ok(WalkAction::Continue);
+                }
+                let candidate = search_relative_path(&root, &entry.path)?;
+                if !match_glob_segments(&glob_segments, &candidate) {
+                    return Ok(WalkAction::Continue);
+                }
+                if matches.len() >= limit {
+                    truncated = true;
+                    return Ok(WalkAction::Stop);
+                }
+                matches.push(entry.path.clone());
+                Ok(WalkAction::Continue)
+            },
+        );
         if let Err(error) = walk {
             return error_result(error);
         }
@@ -244,6 +258,66 @@ mod tests {
             cancelled.is_error && cancelled.content.contains(CONTEXT_CANCELED),
             "{cancelled:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn gitignored_files_are_skipped_unless_no_ignore_is_set() {
+        let root = tempfile::tempdir().unwrap();
+        write_search_file(root.path(), ".gitignore", "target/\n*.tmp\n!keep.tmp\n");
+        for name in [
+            "main.go",
+            "keep.tmp",
+            "drop.tmp",
+            "target/build.go",
+            "src/nested.go",
+            "src/.gitignore",
+            "src/nested.tmp",
+        ] {
+            write_search_file(root.path(), name, "content\n");
+        }
+        write_search_file(root.path(), "src/.gitignore", "nested.go\n");
+        let workspace = workspace(root.path());
+        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+
+        let ignored = run(&tool, r#"{"pattern":"**/*"}"#).await;
+        assert!(!ignored.is_error, "{ignored:?}");
+        assert_eq!(
+            ignored.content,
+            ".gitignore\nkeep.tmp\nmain.go\nsrc/.gitignore\n"
+        );
+
+        let everything = run(&tool, r#"{"pattern":"**/*.go","no_ignore":true}"#).await;
+        assert!(!everything.is_error, "{everything:?}");
+        assert_eq!(
+            everything.content,
+            "main.go\nsrc/nested.go\ntarget/build.go\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicitly_requested_ignored_root_is_searched() {
+        let root = tempfile::tempdir().unwrap();
+        write_search_file(root.path(), ".gitignore", "target/\n");
+        write_search_file(root.path(), "target/build.go", "content\n");
+        write_search_file(root.path(), "target/deep/more.go", "content\n");
+        let workspace = workspace(root.path());
+        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let result = run(&tool, r#"{"pattern":"**/*.go","path":"target"}"#).await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(result.content, "target/build.go\ntarget/deep/more.go\n");
+    }
+
+    #[tokio::test]
+    async fn a_scoped_search_honors_a_parent_gitignore() {
+        let root = tempfile::tempdir().unwrap();
+        write_search_file(root.path(), ".gitignore", "*.tmp\n");
+        write_search_file(root.path(), "src/keep.go", "content\n");
+        write_search_file(root.path(), "src/drop.tmp", "content\n");
+        let workspace = workspace(root.path());
+        let tool = FindTool::new(&workspace, MAX_OUTPUT_BYTES);
+        let result = run(&tool, r#"{"pattern":"**/*","path":"src"}"#).await;
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(result.content, "src/keep.go\n");
     }
 
     #[tokio::test]

@@ -47,4 +47,10 @@ describe('Footer usage history', () => {
 
     expect(screen.getByText('recorded in 200 out 35 cached 100 (50% hit)')).toBeTruthy()
   })
+
+  it('shows the running turn status', () => {
+    render(createElement(Footer, { info: null, session: null, turnUsage: null, recordedUsage: null, status: 'reasoning · 3s · turn 12s' }))
+
+    expect(screen.getByText('reasoning · 3s · turn 12s')).toBeTruthy()
+  })
 })

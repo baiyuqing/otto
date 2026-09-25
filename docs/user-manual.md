@@ -487,9 +487,17 @@ OTTO_UI=repl otto
   `❯` rather than `>` so it is not mistaken for the `>` a quoted markdown line
   carries in a reply.
 - Entries are separated by a blank line.
-- While a turn is running, an animated `Thinking…` line with the elapsed
-  seconds is shown under the transcript, and the composer title reads
-  `Working (Esc to cancel)`.
+- While a turn is running, an animated status line is shown under the
+  transcript, and the composer title reads `Working (Esc to cancel)`. The line
+  reads `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and
+  the seconds since the turn started. The phase is `waiting for model`,
+  `reasoning`, `responding`, `compacting`, `running TOOL ARGS` (arguments
+  truncated to 60 characters), or `retry A/M after REASON, waiting DELAY` when
+  the provider request is retried after a connection error, an interrupted
+  stream, or a retryable HTTP status.
+- When a thinking effort is set and the provider returns reasoning summaries,
+  the summary text streams as a dimmed `reasoning` entry before the reply and
+  is saved in the session, so a resumed session shows it again.
 - While idle, a pending notification — a finished sub-agent, or a `remind`
   timer — starts a wake turn that delivers it and lets the model continue.
   Esc cancels it the same way as a user turn. Composer text is left in place.
@@ -1043,7 +1051,9 @@ the transcript, and a composer:
 - The footer shows `GET /v1/info` (provider, model, sandbox), the session's
   context size and cumulative usage from `GET /v1/sessions/{id}`, and persisted
   all-session token totals and cache hit rate from `GET /v1/usage`; during a
-  turn it also totals that turn's `provider_usage` events.
+  turn it also totals that turn's `provider_usage` events and shows the same
+  phase status line as the TUI. Reasoning summaries render as a collapsed
+  block whose first line is the summary.
 - The top bar switches between **Chat**, **Usage**, and **Workflows**. Usage
   shows persisted totals, a Mermaid token-volume chart for the last 7, 30, or
   90 UTC days, and an exact daily table. It reads `GET /v1/usage/daily` and
@@ -1154,10 +1164,15 @@ unless `status` is `error`; `finished_at` is omitted while the turn runs.
 
 Each SSE frame carries `id: <sequence>`, `event: <name>`, and a JSON `data:`
 payload. Event names are the `agent.Event` type names: `agent_started`,
-`text_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
-`compaction_planned`, `compaction_started`, `compaction_completed`,
+`text_delta`, `reasoning_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
+`provider_retry`, `compaction_planned`, `compaction_started`, `compaction_completed`,
 `compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`,
-plus `notification` when a sub-agent task finishes.
+plus `notification` when a sub-agent task finishes. `reasoning_delta` carries
+`text` like `text_delta`. `provider_retry` carries
+`retry: {attempt, max_attempts, delay_ms, reason}`, where `attempt` is the
+1-based attempt about to start and `reason` is an HTTP status such as
+`HTTP 503`, `connection error`, or `stream interrupted`; it never contains the
+response body.
 
 ### Errors
 

@@ -263,6 +263,8 @@ impl<'a> EventRedactor<'a> {
     /// all empty afterwards is dropped.
     fn emit(&mut self, event: StreamEvent, sink: StreamSink<'_>) {
         match event {
+            // Carries no provider text, so there is nothing to redact.
+            retry @ StreamEvent::Retry { .. } => sink(retry),
             StreamEvent::ReasoningDelta { text } => {
                 let text = self.reasoning.write(&text);
                 if !text.is_empty() {

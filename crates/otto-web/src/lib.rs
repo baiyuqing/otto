@@ -141,6 +141,7 @@ export interface WireEvent {
     | 'tool_call_started'
     | 'tool_call_finished'
     | 'provider_usage'
+    | 'provider_retry'
     | 'provider_api_call'
     | 'compaction_started'
     | 'compaction_planned'
@@ -159,6 +160,7 @@ export interface WireEvent {
   usage?: Usage
   usage_present?: boolean
   compaction?: Compaction
+  retry?: { attempt: number; max_attempts: number; delay_ms: number; reason: string }
   error?: string
 }
 
@@ -259,6 +261,21 @@ pub fn reduce(items: ItemArray, event_json: &str) -> Result<ItemArray, JsValue> 
     let next = transcript::reduce_json(&current, event_json)
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     Ok(to_js(&next)?.unchecked_into())
+}
+
+/// Returns the turn phase `event_json` starts, or `undefined` when the event
+/// leaves the phase unchanged. See [`transcript::phase`].
+#[wasm_bindgen]
+pub fn phase(event_json: &str) -> Result<Option<String>, JsValue> {
+    let event: otto_core::wire::events::WireEvent =
+        serde_json::from_str(event_json).map_err(|error| JsValue::from_str(&error.to_string()))?;
+    Ok(transcript::phase(&event))
+}
+
+/// Formats the running-turn status line. See [`transcript::status_line`].
+#[wasm_bindgen(js_name = statusLine)]
+pub fn status_line(phase: &str, phase_secs: u32, turn_secs: u32) -> String {
+    transcript::status_line(phase, phase_secs.into(), turn_secs.into())
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]

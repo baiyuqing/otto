@@ -635,7 +635,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         emit(Event::TextDelta { text });
                     }
                 }
-                _ => {}
+                StreamEvent::Retry {
+                    attempt,
+                    max_attempts,
+                    delay,
+                    reason,
+                } => emit(Event::ProviderRetry {
+                    attempt,
+                    max_attempts,
+                    delay,
+                    reason,
+                }),
+                StreamEvent::ToolCallDelta { .. } => {}
             };
             self.provider
                 .complete(request, &mut on_stream, cancel)

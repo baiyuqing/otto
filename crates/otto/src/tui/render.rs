@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use super::app::App;
+use super::app::{App, TurnStatus};
 use super::commands::{SLASH_COMMANDS, SlashCommand};
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN,
@@ -94,11 +94,11 @@ fn composer_height(app: &App, width: u16) -> u16 {
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
-    if let Some(elapsed) = app.thinking() {
+    if let Some(status) = app.thinking() {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
-        lines.push(thinking_line(elapsed));
+        lines.push(thinking_line(&status));
     }
 
     // No `Wrap`: `transcript` already broke every row to `area.width` so it
@@ -122,16 +122,21 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// redraws on this interval for as long as a turn runs.
 pub(super) const SPINNER_FRAME: Duration = Duration::from_millis(100);
 
-/// The line shown under the transcript while a turn is in flight. A turn
-/// streams nothing between the prompt and the model's first token, so this
-/// is the only thing that distinguishes waiting from a hung terminal.
-fn thinking_line(elapsed: Duration) -> Line<'static> {
-    let frame = elapsed.as_millis() / SPINNER_FRAME.as_millis();
+/// The line shown under the transcript while a turn is in flight: the phase
+/// (waiting for the model, reasoning, running a tool, a provider retry) and
+/// how long the phase and the turn have lasted, so a slow step is
+/// distinguishable from a hung terminal.
+fn thinking_line(status: &TurnStatus) -> Line<'static> {
+    let frame = status.turn_elapsed.as_millis() / SPINNER_FRAME.as_millis();
     Line::styled(
         format!(
-            "{} Thinking… {}s",
+            "{} {}",
             SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()],
-            elapsed.as_secs()
+            otto_core::wire::transcript::status_line(
+                &status.phase,
+                status.phase_elapsed.as_secs(),
+                status.turn_elapsed.as_secs()
+            )
         ),
         Style::default().fg(Color::Magenta),
     )
@@ -437,15 +442,21 @@ mod tests {
             .collect()
     }
 
-    /// The frame index and the elapsed count both come from one `Duration`,
-    /// so they cannot disagree about how long the turn has been running.
+    /// The frame index and the turn count both come from one `Duration`, so
+    /// they cannot disagree about how long the turn has been running.
     #[test]
-    fn the_thinking_frame_advances_with_elapsed_time() {
-        let at = |ms| line_text(&thinking_line(Duration::from_millis(ms)));
+    fn the_status_line_names_the_phase_and_advances_with_elapsed_time() {
+        let at = |phase_ms, turn_ms| {
+            line_text(&thinking_line(&TurnStatus {
+                phase: "reasoning".into(),
+                phase_elapsed: Duration::from_millis(phase_ms),
+                turn_elapsed: Duration::from_millis(turn_ms),
+            }))
+        };
 
-        assert_eq!(at(0), "⠋ Thinking… 0s");
-        assert_eq!(at(100), "⠙ Thinking… 0s");
-        assert_eq!(at(1_000), "⠋ Thinking… 1s");
+        assert_eq!(at(0, 0), "⠋ reasoning · 0s · turn 0s");
+        assert_eq!(at(0, 100), "⠙ reasoning · 0s · turn 0s");
+        assert_eq!(at(1_000, 5_000), "⠋ reasoning · 1s · turn 5s");
     }
 
     /// A turn streams nothing until the model's first token, so without this
@@ -459,14 +470,27 @@ mod tests {
             ..Default::default()
         });
 
-        let idle = rendered(&app, 40, 10);
+        let idle = rendered(&app, 50, 10);
         app.start_turn();
-        let busy = rendered(&app, 40, 10);
+        let busy = rendered(&app, 50, 10);
+        app.apply_event(Event::ToolCallStarted {
+            tool_name: "bash".into(),
+            tool_call_id: "c1".into(),
+            arguments: r#"{"command":"ls"}"#.into(),
+        });
+        let running = rendered(&app, 50, 10);
         app.end_turn();
 
-        assert!(!idle.contains("Thinking"), "idle transcript:\n{idle}");
-        assert!(busy.contains("Thinking"), "running transcript:\n{busy}");
-        assert!(!rendered(&app, 40, 10).contains("Thinking"));
+        assert!(!idle.contains("waiting"), "idle transcript:\n{idle}");
+        assert!(
+            busy.contains("waiting for model · 0s · turn 0s"),
+            "running transcript:\n{busy}"
+        );
+        assert!(
+            running.contains(r#"running bash {"command":"ls"}"#),
+            "tool transcript:\n{running}"
+        );
+        assert!(!rendered(&app, 50, 10).contains("turn"));
     }
 
     /// The drawn frame, not the row builder: a prompt, the reply after it,

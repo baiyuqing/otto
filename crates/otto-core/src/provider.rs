@@ -59,6 +59,15 @@ pub enum StreamEvent {
         tool_name: String,
         arguments: String,
     },
+    /// A failed attempt will be retried after `delay`. `attempt` is the
+    /// 1-based number of the attempt about to start; `reason` is an HTTP
+    /// status or a transport error class, never response body text.
+    Retry {
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        reason: String,
+    },
 }
 
 /// The provider rejected the request because it exceeds the context window.

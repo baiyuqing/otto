@@ -151,6 +151,14 @@ pub enum Event {
         /// False when the provider reported no usage; `usage` is then zero.
         present: bool,
     },
+    /// The provider will retry a failed attempt after `delay`; see
+    /// [`crate::provider::StreamEvent::Retry`].
+    ProviderRetry {
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        reason: String,
+    },
     ProviderApiCall {
         provider: String,
         model: String,
@@ -201,6 +209,7 @@ impl Event {
             Self::ToolCallFinished { .. } => "tool_call_finished",
             Self::ProviderUsage { .. } => "provider_usage",
             Self::ProviderApiCall { .. } => "provider_api_call",
+            Self::ProviderRetry { .. } => "provider_retry",
             Self::CompactionStarted { .. } => "compaction_started",
             Self::CompactionPlanned { .. } => "compaction_planned",
             Self::CompactionCompleted { .. } => "compaction_completed",

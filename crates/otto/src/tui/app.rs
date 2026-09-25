@@ -19,6 +19,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use otto_core::agent::{CompactionResult, Event};
 use otto_core::model::Usage;
 use otto_core::session::types::SessionInfo;
+use otto_core::wire::events::to_wire;
+use otto_core::wire::transcript;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::tasks::{Task, TaskStatus};
@@ -31,6 +33,14 @@ use super::commands::{self, SlashCommand, SlashCommandKind};
 use super::entries::{self, Entry, EntryKind};
 use super::layout;
 use super::selection::Selection;
+
+/// What the status line under the transcript shows while a turn runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnStatus {
+    pub phase: String,
+    pub phase_elapsed: Duration,
+    pub turn_elapsed: Duration,
+}
 
 /// The time a first Ctrl+C stays armed for a confirming second press.
 const CTRL_C_ARM_WINDOW: Duration = Duration::from_secs(1);
@@ -258,6 +268,9 @@ pub(crate) struct App {
     /// field rather than a `bool` plus a timestamp, so "a turn is running"
     /// and "how long it has been running" cannot disagree.
     busy_since: Option<Instant>,
+    /// The running turn's phase and when it began; see
+    /// [`otto_core::wire::transcript::phase`].
+    phase: (String, Instant),
     pub status: Option<String>,
     ctrl_c_armed_at: Option<Instant>,
 }
@@ -281,6 +294,7 @@ impl App {
             show_help: false,
             show_details: false,
             busy_since: None,
+            phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
         }
@@ -290,7 +304,9 @@ impl App {
     /// [`super::run_wake`] bracket every `Controller` call with this and
     /// [`App::end_turn`].
     pub fn start_turn(&mut self) {
-        self.busy_since = Some(Instant::now());
+        let now = Instant::now();
+        self.busy_since = Some(now);
+        self.phase = ("waiting for model".into(), now);
     }
 
     pub fn end_turn(&mut self) {
@@ -301,10 +317,14 @@ impl App {
         self.busy_since.is_some()
     }
 
-    /// How long the running turn has been in flight, or `None` between
-    /// turns. Drives the thinking indicator in [`super::render`].
-    pub fn thinking(&self) -> Option<Duration> {
-        Some(self.busy_since?.elapsed())
+    /// The running turn's phase and timings, or `None` between turns. Drives
+    /// the status line in [`super::render`].
+    pub fn thinking(&self) -> Option<TurnStatus> {
+        Some(TurnStatus {
+            phase: self.phase.0.clone(),
+            phase_elapsed: self.phase.1.elapsed(),
+            turn_elapsed: self.busy_since?.elapsed(),
+        })
     }
 
     /// Rebuilds the transcript from the controller's current history.
@@ -991,6 +1011,11 @@ impl App {
     /// also print a turn's final `Err` when the same failure already appeared
     /// as an event.
     pub fn apply_event(&mut self, event: Event) -> bool {
+        if let Some(phase) = transcript::phase(&to_wire(&event))
+            && phase != self.phase.0
+        {
+            self.phase = (phase, Instant::now());
+        }
         match event {
             Event::ReasoningDelta { text } => {
                 if let Some(last) = self.entries.last_mut()
@@ -1073,6 +1098,7 @@ impl App {
             | Event::AgentFinished
             | Event::ProviderUsage { .. }
             | Event::ProviderApiCall { .. }
+            | Event::ProviderRetry { .. }
             | Event::CompactionStarted { .. }
             | Event::CompactionPlanned { .. } => false,
         }
@@ -1441,6 +1467,7 @@ mod tests {
             show_help: false,
             show_details: false,
             busy_since: None,
+            phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
         };
@@ -1466,6 +1493,7 @@ mod tests {
             show_help: false,
             show_details: false,
             busy_since: None,
+            phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
         };
@@ -1491,6 +1519,7 @@ mod tests {
             show_help: false,
             show_details: false,
             busy_since: None,
+            phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
         };
@@ -1519,6 +1548,7 @@ mod tests {
             show_help: false,
             show_details: false,
             busy_since: None,
+            phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
         };
@@ -1650,6 +1680,26 @@ mod tests {
                 (Some(EntryKind::Assistant), "ok"),
             ]
         );
+    }
+
+    /// The phase duration counts from the phase's first event: each further
+    /// delta of the same phase does not restart it.
+    #[tokio::test]
+    async fn repeated_deltas_do_not_restart_the_phase_clock() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.start_turn();
+
+        app.apply_event(Event::ReasoningDelta { text: "a".into() });
+        let started = app.phase.1;
+        app.apply_event(Event::ReasoningDelta { text: "b".into() });
+        assert_eq!(app.phase, ("reasoning".to_string(), started));
+
+        app.apply_event(Event::TextDelta { text: "ok".into() });
+        assert_eq!(app.phase.0, "responding");
+        assert!(app.phase.1 >= started);
     }
 
     /// A turn ignores every other key ([`App::handle_key`] returns early

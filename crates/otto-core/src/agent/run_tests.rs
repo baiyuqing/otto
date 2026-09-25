@@ -906,6 +906,59 @@ async fn a_credential_is_redacted_from_events_persistence_and_history() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_provider_retry_is_forwarded_before_the_reply() {
+    let mut turn = Turn::text("ok");
+    turn.events.insert(
+        0,
+        StreamEvent::Retry {
+            attempt: 2,
+            max_attempts: 3,
+            delay: std::time::Duration::from_millis(250),
+            reason: "HTTP 503".into(),
+        },
+    );
+    let agent = Agent::new(
+        FakeProvider::new(vec![turn]),
+        EchoExecutor {
+            content: None,
+            persisted: None,
+        },
+        MemorySession::new(),
+        options(),
+    );
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    agent
+        .run(
+            "hi",
+            &mut |event| sink.lock().expect("e").push(event),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+    let events = collect(&events);
+    let retry = events
+        .iter()
+        .position(|event| {
+            *event
+                == Event::ProviderRetry {
+                    attempt: 2,
+                    max_attempts: 3,
+                    delay: std::time::Duration::from_millis(250),
+                    reason: "HTTP 503".into(),
+                }
+        })
+        .expect("retry forwarded");
+    let text = events
+        .iter()
+        .position(|event| matches!(event, Event::TextDelta { .. }))
+        .expect("text");
+    assert!(retry < text);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn reasoning_is_streamed_redacted_and_persisted() {
     const SECRET: &str = "sk-live-abcdef";
     let reasoning = format!("use {SECRET} then");

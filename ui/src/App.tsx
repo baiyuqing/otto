@@ -392,9 +392,20 @@ export function App() {
     }
   }
 
-  const cancel = () => {
+  const cancel = useCallback(() => {
     if (session && turnId) api.cancelTurn(session.id, turnId).catch(fail)
-  }
+  }, [fail, session, turnId])
+
+  useEffect(() => {
+    if (!turnId) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.repeat) return
+      event.preventDefault()
+      cancel()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [cancel, turnId])
 
   const compact = async (focus: string) => {
     if (!session) return

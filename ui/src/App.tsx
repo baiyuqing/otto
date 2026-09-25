@@ -79,6 +79,8 @@ export function App() {
   const [compacting, setCompacting] = useState(false)
   const [tasksKey, setTasksKey] = useState(0)
   const [showContext, setShowContext] = useState(false)
+  const [renameDraft, setRenameDraft] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState(false)
   const [error, setError] = useState('')
   const compactAbort = useRef<AbortController | null>(null)
   // The running turn's phase and when it and the turn started (ms). A turn
@@ -416,21 +418,29 @@ export function App() {
     }
   }
 
-  const renameSession = async () => {
+  const renameSession = async (name: string) => {
     if (!session) return
-    const current = session.name ?? ''
-    const name = window.prompt('Rename session', current)?.trim()
-    if (!name) return
     setError('')
+    setRenaming(true)
     try {
       const renamed = await api.renameSession(session.id, name)
       setSession(renamed)
+      setRenameDraft(null)
       void refreshSessions()
     } catch (e) {
       fail(e)
+    } finally {
+      setRenaming(false)
     }
   }
 
+  const openRenameDialog = () => {
+    if (!session) return
+    setRenameDraft(session.name ?? sessionLabel(session.id))
+  }
+
+  const renameName = renameDraft?.trim() ?? ''
+  const canSaveRename = Boolean(renameName) && !renaming
   const busy = turnId !== null || compacting
 
   return (
@@ -462,7 +472,7 @@ export function App() {
           <div className="session-chip" title={session.id}>
             <span>{session.name ?? sessionLabel(session.id)}</span>
             <strong>{workspaceName(session.workspace)}</strong>
-            <button type="button" disabled={busy} onClick={renameSession}>
+            <button type="button" disabled={busy} onClick={openRenameDialog}>
               Rename
             </button>
             <button type="button" aria-pressed={showContext} onClick={() => setShowContext((v) => !v)}>
@@ -507,6 +517,50 @@ export function App() {
           onCancel={cancel}
           onCompact={compact}
         />
+      )}
+      {renameDraft !== null && (
+        <div className="modal-backdrop" onMouseDown={() => !renaming && setRenameDraft(null)}>
+          <form
+            className="rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-title"
+            onMouseDown={(e) => e.stopPropagation()}
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (canSaveRename) void renameSession(renameName)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' && !renaming) setRenameDraft(null)
+            }}
+          >
+            <div className="rename-dialog-icon" aria-hidden="true">
+              ✦
+            </div>
+            <div className="rename-dialog-copy">
+              <h2 id="rename-title">Rename session</h2>
+              <p>Give this workspace thread a short, memorable name.</p>
+            </div>
+            <label className="rename-field">
+              <span>Session name</span>
+              <input
+                autoFocus
+                value={renameDraft}
+                maxLength={80}
+                placeholder="e.g. Release notes polish"
+                onChange={(e) => setRenameDraft(e.target.value)}
+              />
+            </label>
+            <div className="rename-actions">
+              <button type="button" className="secondary" disabled={renaming} onClick={() => setRenameDraft(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="primary" disabled={!canSaveRename}>
+                {renaming ? 'Saving…' : 'Save name'}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
       <Footer
         info={info}

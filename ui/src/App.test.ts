@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
   getSession: vi.fn(),
   history: vi.fn(),
   attach: vi.fn(),
+  renameSession: vi.fn(),
   listTasks: vi.fn(),
   listMcp: vi.fn(),
 }))
@@ -177,6 +178,31 @@ describe('idle wake follow', () => {
     const mark = document.querySelector('.brand-mark')
     expect(mark?.tagName).toBe('IMG')
     expect(mark?.getAttribute('alt')).toBe('')
+  })
+
+  it('renames the active session from a custom dialog', async () => {
+    await openIdleSession()
+    api.renameSession.mockResolvedValue({ ...idle, name: 'polished ui' })
+    const promptSpy = vi.spyOn(window, 'prompt')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+
+    const dialog = screen.getByRole('dialog', { name: 'Rename session' })
+    expect(dialog).toBeTruthy()
+    const input = screen.getByLabelText('Session name') as HTMLInputElement
+    expect(input.value).toBe('dev')
+    expect(promptSpy).not.toHaveBeenCalled()
+
+    fireEvent.change(input, { target: { value: ' polished ui ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }))
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(api.renameSession).toHaveBeenCalledWith('sess1', 'polished ui')
+    expect(screen.queryByRole('dialog', { name: 'Rename session' })).toBeNull()
+    promptSpy.mockRestore()
   })
 
   it('lists MCP servers for the /mcp command', async () => {

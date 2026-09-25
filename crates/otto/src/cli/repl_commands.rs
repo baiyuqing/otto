@@ -532,6 +532,9 @@ impl Repl<'_> {
         if !task.model.is_empty() {
             let _ = writeln!(self.stdout, "model: {}", task.model);
         }
+        if !task.session_path.is_empty() {
+            let _ = writeln!(self.stdout, "transcript: {}", task.session_path);
+        }
         if let Some(history) = tasks.history(id)
             && !history.is_empty()
         {
@@ -1075,12 +1078,17 @@ mod tests {
             )
             .expect("add task");
         tasks.finish(&task.id, TaskStatus::Succeeded, Utc::now(), "done", "");
+        tasks.set_session_path(&task.id, "/sessions/p/t1-c.jsonl");
 
         let (stdout, _) =
             session(&format!("/tasks\n/task {}\n/exit\n", task.id), &controller).await;
 
         assert!(stdout.contains(&task.id), "{stdout}");
         assert!(stdout.contains("model: gpt-alpha"), "{stdout}");
+        assert!(
+            stdout.contains("transcript: /sessions/p/t1-c.jsonl"),
+            "{stdout}"
+        );
         assert!(stdout.contains("result: done"), "{stdout}");
     }
 

@@ -675,6 +675,18 @@ Notes:
   `--archive PATH` archives one active session for the current `--cwd` and
   exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
   or `--prompt`.
+- **Sub-agent transcripts** are written beside the parent session, in a
+  directory named after the parent file without `.jsonl`:
+  `~/.otto/sessions/<workspace-key>/<session-id>/<task-id>-<child-id>.jsonl`.
+  Each is a Pi v3 session whose header records the parent file in
+  `parentSession`; it contains any inherited context, the delegated prompt,
+  and every child message and tool call. The file is created on the child's
+  first write, with the same `0700` directory and `0600` file modes. Child
+  transcripts are not listed by `/resume` or `--continue`. Archiving a session
+  moves its transcript directory into `archive/` with it. Under
+  `--no-session`, children stay in memory. `/task <id|name>` prints the file
+  as a `transcript:` line, and the task JSON carries it as `session_path`. If
+  a child transcript cannot be created, only that task fails.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.

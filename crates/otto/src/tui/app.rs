@@ -1370,11 +1370,18 @@ fn task_report(controller: &Controller, args: &str) -> String {
             Err(message) => format!("/task {reference} cancel: {message}"),
         },
         TaskRequest::Show(reference) => match tasks.get(reference) {
-            Some(task) => task_line(&task),
+            Some(task) => task_detail(&task),
             None => "task not found".to_string(),
         },
         TaskRequest::Usage => unreachable!("returned above"),
     }
+}
+
+fn task_detail(task: &Task) -> String {
+    if task.session_path.is_empty() {
+        return task_line(task);
+    }
+    format!("{}\ntranscript: {}", task_line(task), task.session_path)
 }
 
 fn task_line(task: &Task) -> String {
@@ -1654,6 +1661,37 @@ mod tests {
             arguments: String::new(),
         });
         assert_eq!(app.scroll, Some(4));
+    }
+
+    #[test]
+    fn task_detail_names_the_child_transcript_when_one_exists() {
+        let mut task = Task {
+            id: "t1".to_string(),
+            name: String::new(),
+            agent: "reviewer".to_string(),
+            description: "check the diff".to_string(),
+            model: String::new(),
+            status: TaskStatus::Running,
+            created_at: chrono::DateTime::from_timestamp(0, 0).expect("epoch"),
+            started_at: None,
+            finished_at: None,
+            steps: 0,
+            tool_calls: 0,
+            last_tool: String::new(),
+            last_text: String::new(),
+            usage: Default::default(),
+            usage_present: false,
+            result: String::new(),
+            error: String::new(),
+            session_path: String::new(),
+        };
+        assert_eq!(task_detail(&task), task_line(&task));
+
+        task.session_path = "/sessions/p/t1-c.jsonl".to_string();
+        assert_eq!(
+            task_detail(&task),
+            format!("{}\ntranscript: /sessions/p/t1-c.jsonl", task_line(&task))
+        );
     }
 
     #[tokio::test]

@@ -2,6 +2,9 @@
 
 Status: approved 2026-09-25. The user accepted D1 (Pi `thinking` blocks), D2
 (per-parent directory), and D3 (no configuration switch) as recommended.
+Implemented: slice 1 (reasoning), slice 2 (sub-agent transcripts), and
+slice 3 (turn phase). The [user manual](../user-manual.md) describes current
+behavior.
 
 ## Problem
 

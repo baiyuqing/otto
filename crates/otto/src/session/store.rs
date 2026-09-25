@@ -60,6 +60,11 @@ pub(crate) struct StoreState {
     pub(crate) file_bytes: i64,
     pub(crate) fatal: Option<PiError>,
     pub(crate) closed: bool,
+    /// The file [`Store::ensure_file`] creates in place of
+    /// `<root>/<workspace key>/<id>.jsonl`; set for a sub-agent transcript.
+    pub(crate) file_path: Option<PathBuf>,
+    /// The Pi header's `parentSession`: the parent session file path.
+    pub(crate) parent_session: Option<String>,
     /// Test-only fault injection for the durable-write path.
     #[cfg(test)]
     pub(crate) fail_writes: bool,
@@ -103,10 +108,39 @@ impl Store {
                 file_bytes: 0,
                 fatal: None,
                 closed: false,
+                file_path: None,
+                parent_session: None,
                 #[cfg(test)]
                 fail_writes: false,
             }),
         })
+    }
+
+    /// Returns a lazy store for a sub-agent transcript of the parent session
+    /// file `parent`: `<parent without .jsonl>/<name>.jsonl`, with the Pi
+    /// header's `parentSession` set to `parent`. The directory is created
+    /// `0700` on the first write, as the default layout's is.
+    pub fn create_child_lazy(
+        parent: impl AsRef<Path>,
+        name: &str,
+        header: Header,
+    ) -> Result<Self, PiError> {
+        let parent = parent.as_ref();
+        let store = Self::create_lazy(PathBuf::new(), header)?;
+        {
+            let mut state = store.lock()?;
+            state.file_path = Some(Self::child_path(parent, name));
+            state.parent_session = Some(parent.to_string_lossy().into_owned());
+        }
+        Ok(store)
+    }
+
+    /// The file [`Store::create_child_lazy`] writes for `parent` and `name`.
+    pub fn child_path(parent: impl AsRef<Path>, name: &str) -> PathBuf {
+        parent
+            .as_ref()
+            .with_extension("")
+            .join(format!("{name}.jsonl"))
     }
 
     /// Reads a session header without opening a store.
@@ -155,6 +189,8 @@ impl Store {
                 file_bytes: position as i64,
                 fatal: None,
                 closed: false,
+                file_path: None,
+                parent_session: None,
                 #[cfg(test)]
                 fail_writes: false,
             }),
@@ -467,7 +503,17 @@ impl StoreState {
         if self.file.is_some() {
             return Ok(());
         }
-        let directory = super::list::session_directory(&self.root, &self.header.workspace)?;
+        let (directory, path) = match &self.file_path {
+            Some(path) => (
+                path.parent().unwrap_or(Path::new("")).to_path_buf(),
+                path.clone(),
+            ),
+            None => {
+                let directory = super::list::session_directory(&self.root, &self.header.workspace)?;
+                let path = directory.join(format!("{}.jsonl", self.header.id));
+                (directory, path)
+            }
+        };
         std::fs::create_dir_all(&directory)
             .map_err(|error| PiError::other(format!("create session directory: {error}")))?;
         std::fs::set_permissions(
@@ -476,7 +522,6 @@ impl StoreState {
         )
         .map_err(|error| PiError::other(format!("chmod session directory: {error}")))?;
 
-        let path = directory.join(format!("{}.jsonl", self.header.id));
         let mut file = {
             use std::os::unix::fs::OpenOptionsExt;
             OpenOptions::new()
@@ -522,7 +567,7 @@ impl StoreState {
             id: self.header.id.clone(),
             timestamp: timestamp.clone(),
             cwd: self.header.workspace.clone(),
-            parent_session: None,
+            parent_session: self.parent_session.clone(),
             raw: Vec::new(),
         };
         let mut file_bytes = write_pi_record(file, &encode_pi_record(PiRecord::Header(&header))?)

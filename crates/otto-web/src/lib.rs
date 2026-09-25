@@ -182,6 +182,7 @@ export interface Task {
   usage_present: boolean
   result?: string
   error?: string
+  session_path?: string
 }
 
 export interface TaskDetail extends Task {

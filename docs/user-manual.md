@@ -607,6 +607,13 @@ Shared commands:
   `/login status` prints the sign-in state. On a non-`chatgpt` provider it
   answers that there is nothing to sign in to. `/logout` removes the stored
   credentials. See [ChatGPT subscription](#chatgpt-subscription).
+- `/agents` lists sub-agent tasks recorded in `~/.otto/tasks.db` by every
+  session of every Otto process on this machine, newest first, running or
+  finished (see [Sub-agent task records](#sub-agent-task-records)). The REPL
+  prints the latest 50 as one line each: parent session, task id, agent,
+  status, created time, and the description (or the start of the prompt). The
+  TUI opens a modal; see TUI-only commands. `/tasks` and `/task` still cover
+  only the current session.
 - `/exit` exits when idle (REPL EOF also exits).
 
 TUI-only commands:
@@ -622,6 +629,16 @@ TUI-only commands:
   scroll it), and `Esc` goes back one level. The report is taken when the modal
   opens. The memory section is the previous turn's recall; the next turn
   recalls again with its own prompt.
+- `/agents` opens a modal of recorded sub-agent tasks, newest first, with
+  status, agent (`default` when none), description, workspace, parent
+  session, created time, duration, steps, tool calls, and tokens. It starts
+  with this workspace's tasks; `w` toggles between this workspace and all
+  workspaces, and `s` cycles the status filter through all, queued, running,
+  succeeded, failed, canceled, and interrupted. `↑`/`↓` or `PgUp`/`PgDn`
+  select, `Enter` opens the task's prompt, result or error, and child
+  transcript (`↑`/`↓`/`PgUp`/`PgDn` scroll it), and `Esc` goes back one
+  level. The modal re-reads `tasks.db` every 2 seconds while it is open and
+  Otto is idle.
 - `/image <path>` attaches one image to the next prompt. The image is stored
   inline in the session; the selected model and provider endpoint must support
   image input. Otto sends images with `detail: high`.
@@ -1081,7 +1098,8 @@ the transcript, and a composer:
   turn it also totals that turn's `provider_usage` events and shows the same
   phase status line as the TUI. Reasoning summaries render as a collapsed
   block whose first line is the summary.
-- The top bar switches between **Chat**, **Usage**, and **Workflows**. Usage
+- The top bar switches between **Chat**, **Usage**, **Workflows**, and
+  **Agents**. Usage
   shows persisted totals, a Mermaid token-volume chart for the last 7, 30, or
   90 UTC days, and an exact daily table. It reads `GET /v1/usage/daily` and
   does not expose the SQLite database to the browser.
@@ -1090,6 +1108,15 @@ the transcript, and a composer:
   approval requests and offers **Resume**, **Cancel**, per-step **Retry** and
   **Fork**, and **Approve**/**Reject** for a pending gate, over the
   `/v1/workflows` routes below. See [Durable workflows](#durable-workflows).
+- **Agents** lists sub-agent tasks from every session of every Otto process
+  (`GET /v1/tasks`), newest first, with status, agent, description,
+  workspace, parent session, created time, duration, steps, tool calls, and
+  tokens. The status and workspace filters map to the query parameters, and
+  **Load more** fetches older rows. It polls every 3 seconds while a listed
+  task is queued or running. Selecting a row shows the prompt, the result or
+  error, and the child transcript; **Cancel** appears for a queued or running
+  task whose parent session this server has open, and the parent session
+  opens in Chat when this server lists it.
 
 ### HTTP API
 
@@ -1114,6 +1141,8 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
+| `GET /v1/tasks?status=&workspace=&limit=&before=` | List recorded sub-agent tasks from `~/.otto/tasks.db`, from any session and any Otto process, newest first by `created_at`. `status` is `queued`, `running`, `succeeded`, `failed`, `canceled`, or `interrupted`; `workspace` is an exact path; `limit` defaults to 100 and is capped at 500; `before` is the `next_before` cursor of the previous page (empty when there are no older rows). Each task carries `cancelable: true` only when this server has its parent session open and the task is queued or running. |
+| `GET /v1/tasks/{parent_session}/{task_id}` | Return one recorded task under `task`, its child transcript as `history`, and `transcript_missing: true` (with an empty `history`) when the transcript file is absent or unreadable. `404` for an unknown task. |
 | `GET /v1/sessions/{id}/timers` | List the session's outstanding timers, soonest first: `id`, `fire_at`, and `message`. |
 | `POST /v1/sessions/{id}/timers/{timer_id}/cancel` | Cancel one outstanding timer and return it. `404` if no timer has that id. |
 | `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
@@ -1252,6 +1281,34 @@ Otto logs one line per HTTP request (method, route, status, duration, request
 ID) and one line per turn start and finish (session ID, turn ID, status,
 duration, token usage). Prompt text and tool arguments or output are never
 logged.
+
+### Sub-agent task records
+
+Every sub-agent task started by the `agent` tool is recorded in
+`~/.otto/tasks.db` (SQLite, file mode `0600`), one row per task, keyed by
+parent session and task id. Otto writes the row when the task is queued and
+again when it starts, after each provider step and tool call, and when it
+finishes. Each Otto process writes only its own tasks; `/agents`, the Web
+UI's **Agents** view, and `GET /v1/tasks` read every process's rows.
+
+A row holds the workspace, the parent session id and file (for a
+`--no-session` parent, the id is `memory:<pid>:<process start time>` and the
+file is empty), the agent, name, description, model, and context mode, the
+status and its timestamps, step and tool-call counts and the last tool,
+input, output, and cached tokens, the child transcript path, the owning
+process id and start time, and the first 64 KiB each of the prompt, the
+result, and the error. These texts are stored in plaintext, like the session
+files that already hold them in full. Nothing is sent off the machine, and
+rows are never pruned.
+
+A queued or running row whose owning process has exited (or whose process id
+now belongs to a different process) is shown as `interrupted`; the stored row
+is not changed.
+
+If `tasks.db` cannot be opened, or was written by a newer Otto with a schema
+this build does not know, Otto prints one warning at startup and runs without
+recording. A write error later in the process stops recording for that
+process without output. Neither affects the task.
 
 ### Shutdown
 

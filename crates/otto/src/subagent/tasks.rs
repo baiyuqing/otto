@@ -19,6 +19,15 @@
 //!
 //! The cancel hook is the child's [`CancellationToken`], which is what the
 //! runner has and what a test can observe.
+//!
+//! An optional [`crate::subagent::record::Recorder`], set at construction via
+//! [`Tasks::with_recorder`], mirrors every task this registry changes into
+//! `~/.otto/tasks.db`. `add`, `mark_running`, `record_provider_step`,
+//! `record_tool_call` and `finish` call it with the task's state after the
+//! change, outside the registry mutex, using the fixed
+//! [`crate::subagent::record::TaskContext`] passed at construction. The
+//! recorder trait cannot fail its caller, so this never affects a task's
+//! outcome.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -29,6 +38,8 @@ use otto_core::agent::tasks::TaskRegistry;
 use otto_core::model::{Message, Usage};
 use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
+
+use super::record::{Recorder, TaskContext};
 
 /// A sub-agent task's position in its lifecycle:
 /// queued -> running -> {succeeded, failed, canceled}.
@@ -158,6 +169,7 @@ pub struct Tasks {
     inbox: Arc<Inbox>,
     updates: Arc<Updates>,
     updates_receiver: watch::Receiver<u64>,
+    recorder: Option<(Arc<dyn Recorder>, TaskContext)>,
 }
 
 impl std::fmt::Debug for Tasks {
@@ -178,6 +190,17 @@ impl Default for Tasks {
 impl Tasks {
     /// Creates an empty registry.
     pub fn new() -> Self {
+        Self::new_inner(None)
+    }
+
+    /// Creates an empty registry that mirrors every task it changes into
+    /// `recorder`, tagged with the fixed `context` (parent session,
+    /// workspace, and owning process).
+    pub fn with_recorder(recorder: Arc<dyn Recorder>, context: TaskContext) -> Self {
+        Self::new_inner(Some((recorder, context)))
+    }
+
+    fn new_inner(recorder: Option<(Arc<dyn Recorder>, TaskContext)>) -> Self {
         let (sender, receiver) = watch::channel(0);
         let updates = Arc::new(Updates {
             sender: Mutex::new(Some(sender)),
@@ -193,6 +216,19 @@ impl Tasks {
             inbox,
             updates,
             updates_receiver: receiver,
+            recorder,
+        }
+    }
+
+    /// Calls the recorder, if any, with `id`'s current state. A no-op for an
+    /// unknown id (already removed, or the state changed underneath a
+    /// caller that saw the update).
+    fn record(&self, id: &str) {
+        let Some((recorder, context)) = &self.recorder else {
+            return;
+        };
+        if let Some(task) = self.get(id) {
+            recorder.upsert(context, &task);
         }
     }
 
@@ -265,6 +301,7 @@ impl Tasks {
             created
         };
         self.signal();
+        self.record(&created.id);
         Ok(created)
     }
 
@@ -284,6 +321,7 @@ impl Tasks {
         };
         if changed {
             self.signal();
+            self.record(id);
         }
     }
 
@@ -320,6 +358,7 @@ impl Tasks {
         };
         if changed {
             self.signal();
+            self.record(id);
         }
     }
 
@@ -339,6 +378,7 @@ impl Tasks {
         };
         if changed {
             self.signal();
+            self.record(id);
         }
     }
 
@@ -372,6 +412,7 @@ impl Tasks {
         if let Some(done) = done {
             done.notify_waiters();
             self.signal();
+            self.record(id);
         }
     }
 
@@ -574,6 +615,8 @@ mod tests {
     use std::time::Duration;
 
     use otto_core::model::{Block, BlockType, Role};
+
+    use crate::subagent::record;
 
     use super::*;
 
@@ -918,5 +961,79 @@ mod tests {
             tasks.wait("missing", &CancellationToken::new()).await,
             Err(TaskError::NotFound("missing".into()))
         );
+    }
+
+    fn recorder_context(parent_session: &str) -> record::TaskContext {
+        record::TaskContext {
+            parent_session: parent_session.to_string(),
+            parent_session_path: format!("/home/me/.otto/sessions/{parent_session}.jsonl"),
+            workspace: "/work".into(),
+            pid: 4_294_967_294, // a pid that cannot exist; not what these tests check
+            process_started_at: "2026-09-25T10:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn two_registries_share_one_recorder_and_both_rows_are_listed() {
+        // Standing in for two otto processes writing the same `tasks.db`.
+        let store = Arc::new(record::Store::open_in_memory().expect("store"));
+        let first = Tasks::with_recorder(
+            Arc::clone(&store) as Arc<dyn Recorder>,
+            recorder_context("s1"),
+        );
+        let second = Tasks::with_recorder(
+            Arc::clone(&store) as Arc<dyn Recorder>,
+            recorder_context("s2"),
+        );
+
+        first
+            .add(
+                Task {
+                    prompt: "first".into(),
+                    ..Task::default()
+                },
+                None,
+                None,
+            )
+            .expect("valid");
+        second
+            .add(
+                Task {
+                    prompt: "second".into(),
+                    ..Task::default()
+                },
+                None,
+                None,
+            )
+            .expect("valid");
+
+        let listed = store.list(&record::ListQuery::default()).expect("list");
+        let mut sessions: Vec<&str> = listed
+            .tasks
+            .iter()
+            .map(|row| row.parent_session.as_str())
+            .collect();
+        sessions.sort_unstable();
+        assert_eq!(sessions, ["s1", "s2"]);
+    }
+
+    #[test]
+    fn a_recorder_write_error_is_silent_and_the_task_still_finishes() {
+        let store = record::Store::open_in_memory().expect("store");
+        store
+            .list(&record::ListQuery::default())
+            .expect("the schema exists before it is broken");
+        // Break the schema so every subsequent write fails.
+        store.break_schema_for_test();
+        let broken: Arc<dyn Recorder> = Arc::new(store);
+        let tasks = Tasks::with_recorder(broken, recorder_context("s1"));
+
+        let task = tasks.add(Task::default(), None, None).expect("valid");
+        tasks.mark_running(&task.id, at(1));
+        tasks.finish(&task.id, TaskStatus::Succeeded, at(2), "done", "");
+
+        let finished = tasks.get(&task.id).expect("the task still exists");
+        assert_eq!(finished.status, TaskStatus::Succeeded);
+        assert_eq!(finished.result, "done");
     }
 }

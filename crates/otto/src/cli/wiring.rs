@@ -440,7 +440,27 @@ impl Builder {
         }
 
         let persist = self.reminder_persist_path(session);
-        let tasks = Arc::new(Tasks::new());
+        let tasks = Arc::new(match &self.task_recorder {
+            Some(store) => {
+                let (pid, process_started_at) = subagent::record::current_process();
+                let parent_session = if self.no_session {
+                    format!("memory:{pid}:{process_started_at}")
+                } else {
+                    session.header().id
+                };
+                Tasks::with_recorder(
+                    Arc::clone(store) as Arc<dyn subagent::record::Recorder>,
+                    subagent::record::TaskContext {
+                        parent_session,
+                        parent_session_path: session.path(),
+                        workspace: self.workspace_path.clone(),
+                        pid,
+                        process_started_at,
+                    },
+                )
+            }
+            None => Tasks::new(),
+        });
         let usage = self.usage_collector(session, runtime);
         let session_for_children = session.clone();
         let session = session.clone();

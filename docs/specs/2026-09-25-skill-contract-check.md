@@ -1,6 +1,6 @@
 # Checking a skill's contract automatically (experimental)
 
-Status: approved 2026-09-25. Not yet implemented. Experimental: the rules,
+Status: approved 2026-09-25. Implemented. Experimental: the rules,
 the questions, the thresholds, the database schema and the `/skills` display
 may change or be removed without a compatibility path. It is enabled at run
 time through the `[experimental]` config table; it is built and tested like
@@ -144,9 +144,12 @@ without new requests.
 | `procedural` | choice is not `procedural` |
 | `self_contained` | `noul` < 0.5 |
 | `output_usable` | `noul` < 0.5 |
-| `body_matches_contract` | score is not `matches` |
+| `body_matches_contract` | `score` < 1.5, i.e. the nearest level is not `matches` (level 2) |
 
-A Choice or Score answer with `confidence` < 0.6 is shown as uncertain. Noul
+TypeSafe returns a Score answer as a probability-weighted number between
+the level indexes (0 = `does not match`, 1 = `partly matches`, 2 =
+`matches`), not as a level name. A Choice or Score answer with `confidence`
+< 0.6 is shown as uncertain. Noul
 answers carry no confidence in the TypeSafe API and are shown by value alone.
 0.5 and 0.6 are initial values, to be adjusted against skills whose
 suitability is known. A `rules` row shows each fired rule as a hint on its

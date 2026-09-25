@@ -81,12 +81,32 @@ pub struct File {
     pub agents: Agents,
     #[serde(default, skip_serializing_if = "Inbound::is_default")]
     pub inbound: Inbound,
+    #[serde(default, skip_serializing_if = "Experimental::is_default")]
+    pub experimental: Experimental,
     #[serde(default)]
     pub server: Server,
     #[serde(default)]
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+}
+
+/// The `[experimental]` table: features that may change shape or be removed
+/// without a compatibility path. Unlike every other table it does not reject
+/// unknown keys, so dropping a feature later never turns a config that
+/// enabled it into a parse error; [`File::experimental_warnings`] reports
+/// each surviving unknown key once, for the caller to print at load time.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Experimental {
+    pub typesafe_skill_check: Option<bool>,
+    #[serde(flatten)]
+    unknown: std::collections::BTreeMap<String, toml::Value>,
+}
+
+impl Experimental {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The `[sandbox]` table as written in the config file, before resolution.
@@ -167,6 +187,16 @@ pub fn parse(text: &str) -> Result<File, ConfigError> {
 /// pure; the native crate writes it to disk.
 pub fn to_toml_string(file: &File) -> Result<String, ConfigError> {
     toml::to_string(file).map_err(|err| ConfigError::new(err.to_string()))
+}
+
+/// One line per unknown `[experimental]` key, for a caller to print as a
+/// startup warning. Empty when the table has none.
+pub fn experimental_warnings(file: &File) -> Vec<String> {
+    file.experimental
+        .unknown
+        .keys()
+        .map(|key| format!("unknown [experimental] key: {key}"))
+        .collect()
 }
 
 static DEFAULT_PROFILE_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
@@ -400,6 +430,39 @@ model = "gpt-5-codex"
         let content = "[profiles.new]\nprovider = \"chatgpt\"\nmodel = \"gpt-5-codex\"\n";
         let updated = set_default_profile(content, "new");
         assert!(updated.starts_with("default_profile = \"new\"\n"));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn experimental_absent_resolves_to_disabled() {
+        let file = parse("").expect("parse");
+        assert_eq!(file.experimental.typesafe_skill_check, None);
+        assert!(experimental_warnings(&file).is_empty());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn experimental_unknown_key_parses_and_warns() {
+        let file = parse(
+            r#"[experimental]
+typesafe_skill_check = true
+future_thing = "x"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(file.experimental.typesafe_skill_check, Some(true));
+        assert_eq!(
+            experimental_warnings(&file),
+            vec!["unknown [experimental] key: future_thing".to_string()]
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn experimental_table_omitted_when_default_on_serialize() {
+        let file = parse("").expect("parse");
+        let text = to_toml_string(&file).expect("serialize");
+        assert!(!text.contains("experimental"), "{text}");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

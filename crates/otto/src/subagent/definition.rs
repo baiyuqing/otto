@@ -54,6 +54,10 @@ pub struct Definition {
     pub directory: PathBuf,
     /// The absolute path of `AGENT.md`.
     pub path: PathBuf,
+    /// Set only by [`from_skill`]: this definition came from a skill's
+    /// `SKILL.md`, not a real `AGENT.md`. The automatic contract check
+    /// (`crate::skill::check`) triggers only for these.
+    pub is_skill_derived: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -331,6 +335,7 @@ fn load_candidate(
         body: body.trim().to_string(),
         directory: directory.to_path_buf(),
         path: agent_path.to_path_buf(),
+        is_skill_derived: false,
     })
 }
 
@@ -838,6 +843,7 @@ pub fn from_skill(skill: &crate::skill::Skill, body: String) -> Option<Definitio
         body: format!("{body}\n\n{}", resource_note(&skill.name)),
         directory: skill.directory.clone(),
         path: skill.path.clone(),
+        is_skill_derived: true,
     })
 }
 

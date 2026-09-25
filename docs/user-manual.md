@@ -1573,6 +1573,35 @@ Not yet implemented:
 - `allowed-tools` enforcement.
 - Reading `~/.claude/skills`; hot reload inside a session.
 
+### Automatic contract check (experimental)
+
+This feature is experimental: its config, storage, and display may change or
+be removed without notice.
+
+When enabled, the first time a session delegates to a given version of a
+skill's `SKILL.md` (a skill with an `input`/`output` contract, run through the
+`agent` tool), Otto sends the full `SKILL.md` text, including its
+frontmatter, to `https://api.typesafe.ai` for an automated review of whether
+the skill's instructions are self-contained and its declared contract
+matches what the body does. A skill flagged by a local pattern check (for
+example, an `output` field too vague to be useful) is judged locally and
+never sent. Results are stored in `~/.otto/skill-checks.db` (SQLite,
+append-only) and shown per skill in `/skills`.
+
+Enable it with all three of:
+
+```toml
+[skills]
+enabled = true            # default; must not be explicitly false
+
+[experimental]
+typesafe_skill_check = true
+```
+
+and a non-empty `TYPESAFE_API_KEY` environment variable. Any one of these
+missing leaves the checker off entirely: nothing is sent, and
+`~/.otto/skill-checks.db` is never opened.
+
 ## MCP servers
 
 Otto connects to Model Context Protocol (MCP) servers over stdio (a local

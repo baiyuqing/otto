@@ -10,6 +10,7 @@ import { ContextPanel } from './ContextPanel'
 import { Tasks } from './Tasks'
 import { UsageView } from './UsageView'
 import { WorkflowsView } from './WorkflowsView'
+import { AgentsView } from './AgentsView'
 import { mcpServerLine, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
 import logo from '../logo.svg'
@@ -68,7 +69,7 @@ const taskText = (task: {
     .join('\n')
 
 export function App() {
-  const [view, setView] = useState<'chat' | 'workflows' | 'usage'>('chat')
+  const [view, setView] = useState<'chat' | 'workflows' | 'usage' | 'agents'>('chat')
   const [info, setInfo] = useState<Info | null>(null)
   const [sessions, setSessions] = useState<SessionListRow[]>([])
   const [session, setSession] = useState<Session | null>(null)
@@ -474,6 +475,9 @@ export function App() {
           <button type="button" aria-pressed={view === 'workflows'} onClick={() => setView('workflows')}>
             Workflows
           </button>
+          <button type="button" aria-pressed={view === 'agents'} onClick={() => setView('agents')}>
+            Agents
+          </button>
         </nav>
         {view === 'chat' && (
           <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
@@ -505,6 +509,14 @@ export function App() {
           <UsageView onError={fail} />
         ) : view === 'workflows' ? (
           <WorkflowsView onError={fail} />
+        ) : view === 'agents' ? (
+          <AgentsView
+            onError={fail}
+            onOpenSession={(id) => {
+              setView('chat')
+              void open(id)
+            }}
+          />
         ) : (
           <TranscriptView items={items} activeSession={session !== null} />
         )}

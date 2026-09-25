@@ -33,6 +33,7 @@ pub enum SlashCommandKind {
     Exit,
     Tasks,
     Task,
+    Agents,
     Context,
     Timers,
     Skill,
@@ -149,6 +150,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/task",
         description: "show or cancel a sub-agent task",
         kind: SlashCommandKind::Task,
+    },
+    SlashCommand {
+        name: "/agents",
+        description: "browse every recorded sub-agent task, across sessions",
+        kind: SlashCommandKind::Agents,
     },
     SlashCommand {
         name: "/context",

@@ -152,6 +152,18 @@ impl Store {
         Ok(resolve_pi_store_state(&decoded)?.header)
     }
 
+    /// Reads a session file's full message transcript without opening it for
+    /// writing: no incomplete-line or dangling-tool-call repair, so it never
+    /// touches disk. For a transcript this process does not own, where
+    /// [`Store::open`]'s repair-and-append behavior would be wrong.
+    pub fn read_transcript(path: impl AsRef<Path>) -> Result<Vec<Message>, PiError> {
+        let mut file = File::open(path.as_ref())
+            .map_err(|error| PiError::other(format!("open session file: {error}")))?;
+        reject_oversized_session_file(&file)?;
+        let decoded = decode_pi_file_read_only(&mut file)?;
+        Ok(resolve_pi_store_state(&decoded)?.messages)
+    }
+
     /// Opens an existing session for appending, repairing an incomplete final
     /// line and any tool call left without a result.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<Warning>), PiError> {

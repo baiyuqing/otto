@@ -9,6 +9,7 @@
 //! operations. Each [`OpenSession`] has its own `Mutex` for the turn and
 //! compaction slots.
 
+pub mod agents;
 pub mod approvals;
 pub mod auth;
 pub mod compact;
@@ -107,6 +108,23 @@ pub trait Factory: Send + Sync {
         _session_id: Option<&str>,
     ) -> Result<crate::usage::Analysis, String> {
         crate::usage::Analysis::empty(days).map_err(|error| error.to_string())
+    }
+    /// Sub-agent task rows from `tasks.db`, across every otto process on the
+    /// machine. An empty result when no recorder is wired.
+    fn tasks_list(
+        &self,
+        _query: &crate::subagent::record::ListQuery,
+    ) -> Result<crate::subagent::record::ListResult, String> {
+        Ok(crate::subagent::record::ListResult::default())
+    }
+    /// One task row from `tasks.db` by its primary key. `Ok(None)` when no
+    /// recorder is wired.
+    fn tasks_get(
+        &self,
+        _parent_session: &str,
+        _task_id: &str,
+    ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
+        Ok(None)
     }
 }
 
@@ -407,6 +425,8 @@ impl Server {
             )
             .route("/v1/sessions/{id}/mcp", get(mcp::list))
             .route("/v1/sandbox/reload", post(sandbox::reload))
+            .route("/v1/tasks", get(agents::list))
+            .route("/v1/tasks/{parent_session}/{task_id}", get(agents::get))
             .route("/v1/workflows", get(workflows::list).post(workflows::start))
             .route("/v1/workflows/{id}", get(workflows::get))
             .route("/v1/workflows/{id}/events", get(workflows::events))
@@ -1663,6 +1683,9 @@ mod tests {
         /// Every controller shares this registry. `None` gives each its own.
         tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
         list: Option<ListResult>,
+        /// Backs `Factory::tasks_list`/`tasks_get`. `None` keeps the trait's
+        /// empty defaults, matching a process with no recorder wired.
+        task_recorder: Option<Arc<crate::subagent::record::Store>>,
         create_calls: AtomicUsize,
         open_calls: AtomicUsize,
     }
@@ -1730,6 +1753,29 @@ mod tests {
         fn list(&self) -> Option<Result<ListResult, String>> {
             self.list.clone().map(Ok)
         }
+
+        fn tasks_list(
+            &self,
+            query: &crate::subagent::record::ListQuery,
+        ) -> Result<crate::subagent::record::ListResult, String> {
+            match &self.task_recorder {
+                Some(store) => store.list(query).map_err(|error| error.to_string()),
+                None => Ok(crate::subagent::record::ListResult::default()),
+            }
+        }
+
+        fn tasks_get(
+            &self,
+            parent_session: &str,
+            task_id: &str,
+        ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
+            match &self.task_recorder {
+                Some(store) => store
+                    .get(parent_session, task_id)
+                    .map_err(|error| error.to_string()),
+                None => Ok(None),
+            }
+        }
     }
 
     // ---- the harness ----
@@ -1760,6 +1806,7 @@ mod tests {
         open_gate: Option<CancellationToken>,
         list: Option<ListResult>,
         tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
+        task_recorder: Option<Arc<crate::subagent::record::Store>>,
         workflows: Option<Arc<crate::workflow::Controller>>,
         token: String,
         info: Info,
@@ -1794,6 +1841,7 @@ mod tests {
                 open_gate: options.open_gate,
                 list: options.list,
                 tasks: options.tasks,
+                task_recorder: options.task_recorder,
                 create_calls: AtomicUsize::new(0),
                 open_calls: AtomicUsize::new(0),
             });
@@ -2961,6 +3009,8 @@ mod tests {
         "/v1/sessions/{id}/timers/{timer_id}/cancel",
         "/v1/sessions/{id}/mcp",
         "/v1/sandbox/reload",
+        "/v1/tasks",
+        "/v1/tasks/{parent_session}/{task_id}",
         "/v1/workflows",
         "/v1/workflows/{id}",
         "/v1/workflows/{id}/events",
@@ -3235,6 +3285,277 @@ mod tests {
             .await;
         assert_eq!(repeat.status, StatusCode::CONFLICT);
         assert_eq!(repeat.json()["error"]["code"], "task_done");
+    }
+
+    // ---- cross-process task routes (tasks.db) ----
+
+    /// A `TaskContext` for `parent_session`, workspace `/work`.
+    fn agents_context(parent_session: &str) -> crate::subagent::record::TaskContext {
+        crate::subagent::record::TaskContext {
+            parent_session: parent_session.to_string(),
+            parent_session_path: format!("/home/me/.otto/sessions/{parent_session}.jsonl"),
+            workspace: "/work".to_string(),
+            pid: 4_294_967_294, // a pid that cannot exist, so queued/running rows read as interrupted
+            process_started_at: "2026-09-25T10:00:00Z".to_string(),
+        }
+    }
+
+    /// A stored task row: `task_id`, `status`, and `created_at` (RFC 3339,
+    /// determines list order and the `before` cursor) vary per call.
+    fn agents_task(
+        task_id: &str,
+        status: crate::subagent::tasks::TaskStatus,
+        created_at: &str,
+    ) -> crate::subagent::tasks::Task {
+        crate::subagent::tasks::Task {
+            id: task_id.to_string(),
+            name: "reviewer".to_string(),
+            agent: "code-reviewer".to_string(),
+            description: "review the diff".to_string(),
+            model: "gpt-5.1".to_string(),
+            status,
+            created_at: chrono::DateTime::parse_from_rfc3339(created_at)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            session_path: format!("/home/me/.otto/sessions/parent/{task_id}-child.jsonl"),
+            ..crate::subagent::tasks::Task::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_v1_tasks_route_lists_newest_first_and_filters_by_status_and_workspace() {
+        use crate::subagent::record::{Recorder, Store, TaskContext};
+        use crate::subagent::tasks::TaskStatus;
+
+        let store = Arc::new(Store::open_in_memory().expect("store"));
+        store.upsert(
+            &agents_context("s1"),
+            &agents_task("t1", TaskStatus::Running, "2026-09-25T10:00:00Z"),
+        );
+        store.upsert(
+            &agents_context("s1"),
+            &agents_task("t2", TaskStatus::Succeeded, "2026-09-25T10:01:00Z"),
+        );
+        store.upsert(
+            &TaskContext {
+                workspace: "/other".to_string(),
+                ..agents_context("s2")
+            },
+            &agents_task("t3", TaskStatus::Running, "2026-09-25T10:02:00Z"),
+        );
+
+        let harness = Harness::with(HarnessOptions {
+            task_recorder: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+
+        let reply = harness.send("GET", "/v1/tasks", None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let body = reply.json();
+        let tasks = body["tasks"].as_array().expect("tasks");
+        // Newest first.
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|t| t["task_id"].clone())
+                .collect::<Vec<_>>(),
+            vec!["t3", "t2", "t1"]
+        );
+
+        let by_status = harness
+            .send("GET", "/v1/tasks?status=succeeded", None)
+            .await
+            .json();
+        let by_status = by_status["tasks"].as_array().expect("tasks");
+        assert_eq!(by_status.len(), 1);
+        assert_eq!(by_status[0]["task_id"], "t2");
+
+        let by_workspace = harness
+            .send("GET", "/v1/tasks?workspace=/other", None)
+            .await
+            .json();
+        let by_workspace = by_workspace["tasks"].as_array().expect("tasks");
+        assert_eq!(by_workspace.len(), 1);
+        assert_eq!(by_workspace[0]["task_id"], "t3");
+    }
+
+    #[tokio::test]
+    async fn the_v1_tasks_route_bounds_limit_and_pages_with_before() {
+        use crate::subagent::record::{Recorder, Store};
+        use crate::subagent::tasks::TaskStatus;
+
+        let store = Arc::new(Store::open_in_memory().expect("store"));
+        for n in 0..3 {
+            store.upsert(
+                &agents_context("s1"),
+                &agents_task(
+                    &format!("t{n}"),
+                    TaskStatus::Succeeded,
+                    &format!("2026-09-25T10:0{n}:00Z"),
+                ),
+            );
+        }
+        let harness = Harness::with(HarnessOptions {
+            task_recorder: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+
+        // limit=1 returns only the newest row; next_before is an exclusive
+        // cursor on its own created_at, so paging by it skips past it.
+        let first_page = harness.send("GET", "/v1/tasks?limit=1", None).await.json();
+        let tasks = first_page["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["task_id"], "t2");
+        let next_before = first_page["next_before"].as_str().expect("next_before");
+        assert_eq!(next_before, "2026-09-25T10:02:00.000000000Z");
+
+        let second_page = harness
+            .send(
+                "GET",
+                &format!("/v1/tasks?limit=1&before={next_before}"),
+                None,
+            )
+            .await
+            .json();
+        let tasks = second_page["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["task_id"], "t1");
+
+        // limit clamps to 500 rather than erroring on an out-of-range value.
+        let clamped = harness
+            .send("GET", "/v1/tasks?limit=100000", None)
+            .await
+            .json();
+        assert_eq!(clamped["tasks"].as_array().expect("tasks").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_v1_tasks_route_marks_cancelable_only_for_an_owned_non_final_task() {
+        use crate::subagent::record::{Recorder, Store, TaskContext};
+        use crate::subagent::tasks::TaskStatus;
+
+        let store = Arc::new(Store::open_in_memory().expect("store"));
+        let harness = Harness::with(HarnessOptions {
+            task_recorder: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+        let owned_session = harness.create().await;
+        // The current process's own pid and start time, so a `queued`/
+        // `running` row reads back as verifiably alive instead of
+        // `interrupted` (see `record::interrupted`).
+        let (pid, process_started_at) = crate::subagent::record::current_process();
+        let live_context = |parent_session: &str| TaskContext {
+            parent_session: parent_session.to_string(),
+            parent_session_path: format!("/home/me/.otto/sessions/{parent_session}.jsonl"),
+            workspace: "/work".to_string(),
+            pid,
+            process_started_at: process_started_at.clone(),
+        };
+        store.upsert(
+            &live_context(&owned_session),
+            &agents_task("running-owned", TaskStatus::Running, "2026-09-25T10:00:00Z"),
+        );
+        store.upsert(
+            &live_context(&owned_session),
+            &agents_task(
+                "finished-owned",
+                TaskStatus::Succeeded,
+                "2026-09-25T10:01:00Z",
+            ),
+        );
+        store.upsert(
+            &live_context("not-open-here"),
+            &agents_task(
+                "running-elsewhere",
+                TaskStatus::Running,
+                "2026-09-25T10:02:00Z",
+            ),
+        );
+
+        let body = harness.send("GET", "/v1/tasks", None).await.json();
+        let tasks = body["tasks"].as_array().expect("tasks");
+        let cancelable = |task_id: &str| {
+            tasks.iter().find(|t| t["task_id"] == task_id).expect("row")["cancelable"]
+                .as_bool()
+                .expect("cancelable")
+        };
+        assert!(cancelable("running-owned"));
+        assert!(!cancelable("finished-owned"));
+        assert!(!cancelable("running-elsewhere"));
+    }
+
+    #[tokio::test]
+    async fn the_v1_tasks_detail_route_reads_the_child_transcript_and_reports_a_missing_one() {
+        use crate::subagent::record::{Recorder, Store};
+        use crate::subagent::tasks::TaskStatus;
+
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = Arc::new(Store::open_in_memory().expect("store"));
+        let harness = Harness::with(HarnessOptions {
+            task_recorder: Some(Arc::clone(&store)),
+            ..HarnessOptions::default()
+        });
+
+        // A task whose child transcript file exists.
+        let child_store = crate::session::Store::create(
+            sessions.path(),
+            Header {
+                version: CURRENT_VERSION,
+                id: "t1-child".to_string(),
+                workspace: "/work".to_string(),
+                provider: "openai-compatible".to_string(),
+                profile: "alpha".to_string(),
+                model: "test-model".to_string(),
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .expect("create child session");
+        child_store
+            .append_message(&testutil::user("hello from the child"))
+            .expect("append");
+        let child_path = child_store.path();
+        let mut context = agents_context("s1");
+        context.parent_session_path = "/home/me/.otto/sessions/s1.jsonl".to_string();
+        let mut task = agents_task(
+            "with-transcript",
+            TaskStatus::Succeeded,
+            "2026-09-25T10:00:00Z",
+        );
+        task.session_path = child_path;
+        store.upsert(&context, &task);
+
+        // A task whose recorded session_path does not exist on disk.
+        store.upsert(
+            &agents_context("s1"),
+            &agents_task(
+                "no-transcript",
+                TaskStatus::Succeeded,
+                "2026-09-25T10:01:00Z",
+            ),
+        );
+
+        let found = harness
+            .send("GET", "/v1/tasks/s1/with-transcript", None)
+            .await;
+        assert_eq!(found.status, StatusCode::OK, "{}", found.body);
+        let found = found.json();
+        assert_eq!(found["task"]["task_id"], "with-transcript");
+        assert_eq!(found["transcript_missing"], false);
+        assert_eq!(
+            found["history"].as_array().expect("history").len(),
+            1,
+            "{found:?}"
+        );
+
+        let missing = harness
+            .send("GET", "/v1/tasks/s1/no-transcript", None)
+            .await
+            .json();
+        assert_eq!(missing["transcript_missing"], true);
+        assert_eq!(missing["history"].as_array().expect("history").len(), 0);
+
+        let not_found = harness.send("GET", "/v1/tasks/s1/nope", None).await;
+        assert_eq!(not_found.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

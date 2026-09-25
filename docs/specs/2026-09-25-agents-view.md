@@ -1,6 +1,6 @@
 # All sub-agent runs in the TUI and the web UI
 
-Status: draft 2026-09-25, awaiting approval.
+Status: approved 2026-09-25.
 
 ## Problem
 
@@ -63,9 +63,11 @@ Writes:
   `mark_running`, `record_provider_step`, `record_tool_call` and `finish`
   upsert the task's row after the registry mutex is released. Tests and
   `--no-session` headless runs without a recorder behave as today.
-- A recorder error (open, schema, write) logs one `tracing` warning per
-  process and disables the recorder for that process. It never fails a task
-  or a turn.
+- An open or schema error prints one warning to stderr at startup, before
+  any UI starts, and the process runs without a recorder. A later write
+  error disables the recorder for that process without output, like the
+  `usage.db` collector, because stderr output would overwrite the TUI
+  screen. Neither fails a task or a turn.
 - The schema carries a `user_version`. A database with an unknown version is
   not written; the recorder is disabled with a warning.
 - Several processes write the same file. SQLite serialises the writes; each
@@ -147,8 +149,9 @@ and `transcript_missing`.
 
 - `/agents` opens a modal over `tasks.db`, newest first, with the same
   columns as the web table narrowed to the terminal width.
-- Keys: up/down to move, `s` to cycle the status filter (all, running,
-  finished, failed, interrupted), `w` to toggle between this workspace and
+- Keys: up/down to move, `s` to cycle the status filter (all, queued,
+  running, succeeded, failed, canceled, interrupted: the values `GET
+  /v1/tasks` accepts), `w` to toggle between this workspace and
   all workspaces (default: this workspace), Enter to open the selected task,
   Esc to close.
 - The detail pane shows the prompt, result or error, and the child transcript

@@ -29,6 +29,7 @@ use crate::cli::info::SandboxNetwork;
 use crate::cli::login;
 use crate::cli::repl_commands;
 
+use super::agents_view::AgentsView;
 use super::commands::{self, SlashCommand, SlashCommandKind};
 use super::context_view::ContextView;
 use super::entries::{self, Entry, EntryKind};
@@ -261,6 +262,8 @@ pub(crate) struct App {
     pub picker: Option<Picker>,
     /// The open `/context` overlay.
     pub context: Option<ContextView>,
+    /// The open `/agents` overlay.
+    pub agents: Option<AgentsView>,
     /// The highlighted row of the slash-command suggestion panel (see
     /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
     /// only ever indexes the match list the current value produces.
@@ -294,6 +297,7 @@ impl App {
             selection: None,
             picker: None,
             context: None,
+            agents: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -473,6 +477,13 @@ impl App {
         if let Some(view) = &mut self.context {
             if !view.handle_key(key.code) {
                 self.context = None;
+            }
+            return None;
+        }
+
+        if let Some(view) = &mut self.agents {
+            if !view.handle_key(key.code, controller) {
+                self.agents = None;
             }
             return None;
         }
@@ -735,7 +746,11 @@ impl App {
     /// [`App::suggestion`] indexing the highlighted one. An open overlay hides
     /// the panel. [`super::render`] draws exactly this list.
     pub(super) fn suggestions(&self) -> Vec<SlashCommand> {
-        if self.show_help || self.picker.is_some() || self.context.is_some() {
+        if self.show_help
+            || self.picker.is_some()
+            || self.context.is_some()
+            || self.agents.is_some()
+        {
             return Vec::new();
         }
         let value: String = self.input.iter().collect();
@@ -985,6 +1000,10 @@ impl App {
                     Some(report) => self.context = Some(ContextView::new(report)),
                     None => self.push_system("/context: no session is open".to_string()),
                 }
+                None
+            }
+            SlashCommandKind::Agents => {
+                self.agents = Some(AgentsView::open(controller));
                 None
             }
             SlashCommandKind::Timers => {
@@ -1548,6 +1567,7 @@ mod tests {
             selection: None,
             picker: None,
             context: None,
+            agents: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1575,6 +1595,7 @@ mod tests {
             selection: None,
             picker: None,
             context: None,
+            agents: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1663,6 +1684,7 @@ mod tests {
             selection: None,
             picker: None,
             context: None,
+            agents: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1693,6 +1715,7 @@ mod tests {
             selection: None,
             picker: None,
             context: None,
+            agents: None,
             suggestion: 0,
             show_help: false,
             show_details: false,

@@ -16,10 +16,11 @@ use serde_json::json;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
+use super::gitignore::GitignoreStack;
 use super::result::{CappedByteCollector, capped_collector_result, decode_strict_json};
 use super::search::{
     WalkAction, match_glob_segments, resolve_search_limit, search_relative_path,
-    search_root_inside_git, validated_glob_segments, walk_dir,
+    search_root_inside_git, validated_glob_segments, walk_dir_ignoring,
 };
 use super::workspace::Workspace;
 use super::{CONTEXT_CANCELED, Tool, definition, error_result};
@@ -44,6 +45,8 @@ struct GrepArgs {
     ignore_case: bool,
     #[serde(default)]
     limit: Option<i64>,
+    #[serde(default)]
+    no_ignore: bool,
 }
 
 /// Searches workspace file contents.
@@ -65,7 +68,7 @@ impl<'a> GrepTool<'a> {
 pub fn grep_definition() -> ToolDefinition {
     definition(
         "grep",
-        "Search workspace file contents with a regular expression (read-only)",
+        "Search workspace file contents with a regular expression (read-only). Files the workspace's .gitignore excludes are skipped unless no_ignore is set",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -85,6 +88,10 @@ pub fn grep_definition() -> ToolDefinition {
                 "ignore_case": {
                     "type": "boolean",
                     "description": "Match without case sensitivity; defaults to false"
+                },
+                "no_ignore": {
+                    "type": "boolean",
+                    "description": "Search files the repository's .gitignore excludes; defaults to false"
                 },
                 "limit": {
                     "type": "integer",
@@ -155,57 +162,65 @@ impl Tool for GrepTool<'_> {
         let mut collector = CappedByteCollector::new(self.max_output_bytes);
         let mut match_count = 0usize;
         let mut truncation_marker = "";
-        let walk = walk_dir(self.workspace.root_fs(), &root, &mut |entry| {
-            if cancel.is_cancelled() {
-                return Err(io::Error::other(CONTEXT_CANCELED));
-            }
-            if entry.path != root && entry.name == ".git" {
-                return Ok(if entry.is_dir {
-                    WalkAction::SkipDir
-                } else {
-                    WalkAction::Continue
-                });
-            }
-            if entry.is_dir || entry.is_symlink || !entry.is_regular {
-                return Ok(WalkAction::Continue);
-            }
-            let candidate = search_relative_path(&root, &entry.path)?;
-            if let Some(segments) = &glob_segments
-                && !match_glob_segments(segments, &candidate)
-            {
-                return Ok(WalkAction::Continue);
-            }
-            let file = self
-                .workspace
-                .open_relative(std::path::Path::new(&entry.path))?;
-            let remaining_bytes = self
-                .max_output_bytes
-                .saturating_sub(collector.bytes().len());
-            let scan = scan_grep_reader(
-                file,
-                &expression,
-                limit.saturating_sub(match_count),
-                remaining_bytes,
-                cancel,
-            )?;
-            if !scan.text_file {
-                return Ok(WalkAction::Continue);
-            }
-            for line in &scan.matches {
-                collector
-                    .write(format!("{}:{}:{}\n", entry.path, line.number, line.text).as_bytes());
-                match_count += 1;
-            }
-            if scan.match_overflow {
-                truncation_marker = "[truncated: result limit reached]";
-                return Ok(WalkAction::Stop);
-            }
-            if scan.byte_overflow || collector.discarded() > 0 {
-                truncation_marker = "[truncated: output limit reached]";
-                return Ok(WalkAction::Stop);
-            }
-            Ok(WalkAction::Continue)
-        });
+        let mut ignore =
+            (!args.no_ignore).then(|| GitignoreStack::for_root(self.workspace.root_fs(), &root));
+        let walk = walk_dir_ignoring(
+            self.workspace.root_fs(),
+            &root,
+            ignore.as_mut(),
+            &mut |entry| {
+                if cancel.is_cancelled() {
+                    return Err(io::Error::other(CONTEXT_CANCELED));
+                }
+                if entry.path != root && entry.name == ".git" {
+                    return Ok(if entry.is_dir {
+                        WalkAction::SkipDir
+                    } else {
+                        WalkAction::Continue
+                    });
+                }
+                if entry.is_dir || entry.is_symlink || !entry.is_regular {
+                    return Ok(WalkAction::Continue);
+                }
+                let candidate = search_relative_path(&root, &entry.path)?;
+                if let Some(segments) = &glob_segments
+                    && !match_glob_segments(segments, &candidate)
+                {
+                    return Ok(WalkAction::Continue);
+                }
+                let file = self
+                    .workspace
+                    .open_relative(std::path::Path::new(&entry.path))?;
+                let remaining_bytes = self
+                    .max_output_bytes
+                    .saturating_sub(collector.bytes().len());
+                let scan = scan_grep_reader(
+                    file,
+                    &expression,
+                    limit.saturating_sub(match_count),
+                    remaining_bytes,
+                    cancel,
+                )?;
+                if !scan.text_file {
+                    return Ok(WalkAction::Continue);
+                }
+                for line in &scan.matches {
+                    collector.write(
+                        format!("{}:{}:{}\n", entry.path, line.number, line.text).as_bytes(),
+                    );
+                    match_count += 1;
+                }
+                if scan.match_overflow {
+                    truncation_marker = "[truncated: result limit reached]";
+                    return Ok(WalkAction::Stop);
+                }
+                if scan.byte_overflow || collector.discarded() > 0 {
+                    truncation_marker = "[truncated: output limit reached]";
+                    return Ok(WalkAction::Stop);
+                }
+                Ok(WalkAction::Continue)
+            },
+        );
         if let Err(error) = walk {
             return error_result(error);
         }
@@ -347,6 +362,28 @@ mod tests {
     use crate::tool::testutil::{
         MAX_OUTPUT_BYTES, run, run_cancelled, workspace, write_search_file,
     };
+
+    #[tokio::test]
+    async fn gitignored_files_are_skipped_unless_no_ignore_is_set() {
+        let root = tempfile::tempdir().unwrap();
+        write_search_file(root.path(), ".gitignore", "target/\n*.tmp\n");
+        for name in ["main.go", "drop.tmp", "target/build.go"] {
+            write_search_file(root.path(), name, "needle here\n");
+        }
+        let workspace = workspace(root.path());
+        let tool = GrepTool::new(&workspace, MAX_OUTPUT_BYTES);
+
+        let ignored = run(&tool, r#"{"pattern":"needle"}"#).await;
+        assert!(!ignored.is_error, "{ignored:?}");
+        assert_eq!(ignored.content, "main.go:1:needle here\n");
+
+        let everything = run(&tool, r#"{"pattern":"needle","no_ignore":true}"#).await;
+        assert!(!everything.is_error, "{everything:?}");
+        assert_eq!(
+            everything.content,
+            "drop.tmp:1:needle here\nmain.go:1:needle here\ntarget/build.go:1:needle here\n"
+        );
+    }
 
     #[tokio::test]
     async fn regex_search_honours_globs_and_skips_git_binary_and_symlinks() {

@@ -15,6 +15,7 @@
 pub mod bash;
 pub mod edit;
 pub mod find;
+pub(crate) mod gitignore;
 pub(crate) mod gopath;
 pub mod grep;
 pub mod ls;

@@ -1623,13 +1623,17 @@ What's wired:
   deduplication do not depend on which server answered first. A server that
   fails to connect (bad command, connection refused, handshake
   timeout) is reported as `failed: <reason>` and contributes no tools; the
-  runner still starts with every other tool available.
+  runner still starts with every other tool available. Connected MCP servers
+  expose a small lazy router (`mcp_search_tools` and `mcp_call_tool`) instead
+  of registering every remote tool schema in the model context. Search for a
+  remote tool by server/name/description, then call the selected tool by the
+  full `mcp__<server>__<tool>` name returned by search.
 - A TUI or REPL session starts before its MCP servers are connected: the
   prompt is usable immediately, `/mcp` reports every enabled server as
-  `connecting`, and the MCP tools are attached in one swap once every server
-  has settled. The swap happens between turns, never inside one, so a turn
-  either has the MCP tools or does not. A headless `--prompt` run and
-  `otto serve` connect before the first turn instead.
+  `connecting`, and the MCP router tools are attached in one swap once every
+  server has settled. The swap happens between turns, never inside one, so a
+  turn either has the MCP router tools or does not. A headless `--prompt` run
+  and `otto serve` connect before the first turn instead.
 - An HTTP server configured with `auth = "oauth"` that has no valid stored
   token is reported as `needs login`, contributing no tools, until `/mcp
   login <server>` (or `otto mcp login <server>`) completes and Otto is

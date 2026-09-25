@@ -15,17 +15,19 @@
 //! capped before it reaches the model, and the result text is redacted and
 //! capped the same way the built-in tools are.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
 use otto_core::safetext::dynamic_redaction_marker;
 use otto_core::tool::ToolResult;
+use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
 use super::result::{capped_text_result, redact_exact_text};
-use super::{CONTEXT_CANCELED, Tool, error_result};
+use super::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 use crate::mcp::{BearerSource, CallError, CallOutcome, ContentBlock, ToolInfo, ToolServer};
 
 /// Every registered MCP tool name starts with this.
@@ -112,7 +114,7 @@ pub struct McpTool {
 }
 
 impl McpTool {
-    fn new(
+    pub(crate) fn new(
         server: Arc<dyn ToolServer>,
         name: String,
         info: &ToolInfo,
@@ -305,7 +307,187 @@ impl Tool for McpTool {
     }
 }
 
-/// Builds adapters for every tool `server` advertised, in input order.
+/// A compact catalog/search entry for one already-connected MCP tool.
+#[derive(Clone)]
+pub(crate) struct McpCatalogEntry {
+    pub server: Arc<dyn ToolServer>,
+    pub info: ToolInfo,
+    pub prefixed_name: String,
+    pub max_output_bytes: usize,
+    pub secrets: Vec<String>,
+    pub bearer: Option<Arc<dyn BearerSource>>,
+}
+
+/// Builds the two lazy MCP router tools. They are intentionally tiny compared
+/// with large server schemas: the model searches names/descriptions, then calls
+/// one selected MCP tool by its already-prefixed name.
+pub(crate) fn router_tools(
+    entries: Vec<McpCatalogEntry>,
+    max_output_bytes: usize,
+) -> Vec<Box<dyn Tool + Send + Sync>> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let catalog = Arc::new(McpCatalog::new(entries));
+    vec![
+        Box::new(McpSearchTools::new(Arc::clone(&catalog), max_output_bytes)),
+        Box::new(McpCallTool::new(catalog)),
+    ]
+}
+
+struct McpCatalog {
+    entries: Vec<McpCatalogEntry>,
+    by_name: HashMap<String, usize>,
+}
+
+impl McpCatalog {
+    fn new(entries: Vec<McpCatalogEntry>) -> Self {
+        let by_name = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.prefixed_name.clone(), index))
+            .collect();
+        Self { entries, by_name }
+    }
+
+    fn get(&self, name: &str) -> Option<&McpCatalogEntry> {
+        self.by_name.get(name).map(|&index| &self.entries[index])
+    }
+}
+
+struct McpSearchTools {
+    catalog: Arc<McpCatalog>,
+    max_output_bytes: usize,
+}
+
+impl McpSearchTools {
+    fn new(catalog: Arc<McpCatalog>, max_output_bytes: usize) -> Self {
+        Self {
+            catalog,
+            max_output_bytes,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SearchArgs {
+    query: String,
+}
+
+#[async_trait::async_trait]
+impl Tool for McpSearchTools {
+    fn definition(&self) -> ToolDefinition {
+        definition(
+            "mcp_search_tools",
+            "Search connected MCP tools by name or description. Use this before calling mcp_call_tool when you need an MCP server such as Notion. Returns compact tool names and descriptions, not full schemas.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keywords for the MCP tool or server you need, such as 'notion search' or 'github issue'."}
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    async fn execute(&self, arguments: &RawValue, _cancel: &CancellationToken) -> ToolResult {
+        let args: SearchArgs = match serde_json::from_str(arguments.get()) {
+            Ok(args) => args,
+            Err(error) => {
+                return error_result(format!("mcp_search_tools: invalid arguments: {error}"));
+            }
+        };
+        let terms: Vec<String> = args
+            .query
+            .split_whitespace()
+            .map(|term| term.to_ascii_lowercase())
+            .collect();
+        let mut lines = Vec::new();
+        for entry in &self.catalog.entries {
+            let description = build_description(entry.server.name(), &entry.info);
+            let haystack = format!(
+                "{} {} {} {}",
+                entry.prefixed_name,
+                entry.server.name(),
+                entry.info.name,
+                description
+            )
+            .to_ascii_lowercase();
+            if terms.is_empty() || terms.iter().all(|term| haystack.contains(term)) {
+                lines.push(format!("{} — {}", entry.prefixed_name, description));
+            }
+        }
+        if lines.is_empty() {
+            return text_result("no matching MCP tools");
+        }
+        capped_text_result(&lines.join("\n"), self.max_output_bytes)
+    }
+}
+
+struct McpCallTool {
+    catalog: Arc<McpCatalog>,
+}
+
+impl McpCallTool {
+    fn new(catalog: Arc<McpCatalog>) -> Self {
+        Self { catalog }
+    }
+}
+
+#[derive(Deserialize)]
+struct CallArgs {
+    tool: String,
+    #[serde(default)]
+    arguments: Option<Value>,
+}
+
+#[async_trait::async_trait]
+impl Tool for McpCallTool {
+    fn definition(&self) -> ToolDefinition {
+        definition(
+            "mcp_call_tool",
+            "Call one connected MCP tool by the full name returned from mcp_search_tools. Provide arguments as a JSON object. This keeps large MCP tool schemas out of the main context until a concrete call is needed.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "description": "Full MCP tool name, for example mcp__notion__notion-fetch."},
+                    "arguments": {"type": "object", "description": "Arguments for the remote MCP tool."}
+                },
+                "required": ["tool"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
+        let args: CallArgs = match serde_json::from_str(arguments.get()) {
+            Ok(args) => args,
+            Err(error) => {
+                return error_result(format!("mcp_call_tool: invalid arguments: {error}"));
+            }
+        };
+        let Some(entry) = self.catalog.get(&args.tool) else {
+            return error_result(format!("mcp_call_tool: unknown MCP tool {:?}", args.tool));
+        };
+        let call_args = args
+            .arguments
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        if !call_args.is_object() {
+            return error_result("mcp_call_tool: arguments must be a JSON object");
+        }
+        let tool = McpTool::new(
+            Arc::clone(&entry.server),
+            entry.prefixed_name.clone(),
+            &entry.info,
+            entry.max_output_bytes,
+            entry.secrets.clone(),
+            entry.bearer.clone(),
+        );
+        let raw = RawValue::from_string(call_args.to_string()).expect("JSON value is valid");
+        tool.execute(&raw, cancel).await
+    }
+}
 /// Skips, with one warning each, a tool whose prefixed name would exceed
 /// [`MAX_TOOL_NAME_BYTES`], and both tools of a same-name collision after
 /// sanitizing.
@@ -435,6 +617,96 @@ mod tests {
             structured_content: None,
             is_error: false,
         }
+    }
+
+    fn catalog_entry(server: Arc<dyn ToolServer>, info: ToolInfo) -> McpCatalogEntry {
+        let prefixed_name = prefixed_name(server.name(), &info.name).expect("prefixed name");
+        McpCatalogEntry {
+            server,
+            info,
+            prefixed_name,
+            max_output_bytes: 1024,
+            secrets: Vec::new(),
+            bearer: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn router_search_returns_compact_matches_without_full_schema() {
+        let server = FakeServer::new("notion", ok(CallOutcome::default()));
+        let mut search_info = info("notion-ai-search");
+        search_info.description = Some("Search Notion pages and connected sources".to_string());
+        search_info.input_schema = Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "large": {"type": "string", "description": "this schema should not appear in search results"}
+            }
+        }));
+        let fetch_info = info("notion-fetch");
+        let tools = router_tools(
+            vec![
+                catalog_entry(server.clone() as Arc<dyn ToolServer>, search_info),
+                catalog_entry(server as Arc<dyn ToolServer>, fetch_info),
+            ],
+            1024,
+        );
+        let search = tools
+            .iter()
+            .find(|tool| tool.definition().name == "mcp_search_tools")
+            .expect("search tool");
+
+        let result = run(search.as_ref(), r#"{"query":"search"}"#).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("mcp__notion__notion-ai-search"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Search Notion"),
+            "{}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("inputSchema"),
+            "{}",
+            result.content
+        );
+        assert!(!result.content.contains("large"), "{}", result.content);
+        assert!(
+            !result.content.contains("notion-fetch"),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn router_call_forwards_to_the_selected_remote_tool() {
+        let server = FakeServer::new("notion", ok(text_outcome("page contents")));
+        let tools = router_tools(
+            vec![catalog_entry(
+                server.clone() as Arc<dyn ToolServer>,
+                info("notion-fetch"),
+            )],
+            1024,
+        );
+        let call = tools
+            .iter()
+            .find(|tool| tool.definition().name == "mcp_call_tool")
+            .expect("call tool");
+
+        let result = run(
+            call.as_ref(),
+            r#"{"tool":"mcp__notion__notion-fetch","arguments":{"id":"page-1"}}"#,
+        )
+        .await;
+
+        assert_eq!(result.content, "page contents");
+        let seen = server.seen.lock().unwrap().clone().expect("remote call");
+        assert_eq!(seen.0, "notion-fetch");
+        assert_eq!(seen.1, serde_json::json!({"id": "page-1"}));
     }
 
     // --- naming ---

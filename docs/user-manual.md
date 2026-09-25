@@ -765,7 +765,13 @@ canonical workspace, even when `--sandbox off` is selected:
   that `new_text` changes.
 
 Recursive `grep` and `find` skip `.git` and discovered symlinks but include
-other dotfiles. Binary files, invalid UTF-8 files, and files with lines larger
+other dotfiles. They also skip what the workspace's `.gitignore` files exclude,
+so a search is not spent on build output or vendored dependencies; pass
+`no_ignore: true` to search those files anyway. Pointing `path` at an ignored
+directory searches it, because naming it is the request. The rules honored are
+git's own, including `!` negation, directory-only trailing `/`, anchoring
+slashes, and `**`; `.git/info/exclude` and the global `core.excludesFile` are
+not read. Binary files, invalid UTF-8 files, and files with lines larger
 than 1 MiB are skipped by `grep`. Otto canonicalizes paths, resolves symlinks,
 and rejects workspace escapes. Actual file operations use a directory handle
 so replacing a path during an operation cannot redirect them outside the

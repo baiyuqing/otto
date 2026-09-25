@@ -378,6 +378,7 @@ impl Server {
                     .delete(delete_session),
             )
             .route("/v1/sessions/{id}/history", get(history))
+            .route("/v1/sessions/{id}/context", get(context))
             .route(
                 "/v1/sessions/{id}/approvals/{approval_id}",
                 post(approvals::approve),
@@ -1184,6 +1185,20 @@ async fn history(State(server): State<Arc<Server>>, Path(id): Path<String>) -> R
         // An empty Vec serializes as "[]".
         Some(session) => json_response::<Vec<Message>>(StatusCode::OK, &session.ctrl.history()),
         None => not_found("session not found"),
+    }
+}
+
+async fn context(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
+    let Some(session) = server.lookup(&id) else {
+        return not_found("session not found");
+    };
+    match session.ctrl.context_report() {
+        Some(report) => json_response(StatusCode::OK, &report),
+        None => error_response(
+            StatusCode::CONFLICT,
+            "context_unavailable",
+            "the session context is not available",
+        ),
     }
 }
 
@@ -2226,6 +2241,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_context_report_is_served_per_open_session() {
+        let harness = Harness::new();
+        let id = harness.create().await;
+        let reply = harness
+            .send("GET", &format!("/v1/sessions/{id}/context"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        // The harness runner has no prompt and no tools; the section contents
+        // are covered by the otto-core and runtime-builder tests.
+        let report = reply.json();
+        assert_eq!(report["model"], "test-model");
+        assert!(report["sections"].is_array(), "{}", reply.body);
+        assert!(report["reported_input_tokens"].is_null());
+        assert_eq!(
+            harness
+                .send("GET", "/v1/sessions/missing/context", None)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
     async fn listing_merges_open_sessions_over_the_disk_list() {
         let harness = Harness::with(HarnessOptions {
             list: Some(ListResult::default()),
@@ -2909,6 +2947,7 @@ mod tests {
         "/v1/sessions",
         "/v1/sessions/{id}",
         "/v1/sessions/{id}/history",
+        "/v1/sessions/{id}/context",
         "/v1/sessions/{id}/approvals/{approval_id}",
         "/v1/sessions/{id}/turns",
         "/v1/sessions/{id}/turns/{turn_id}",

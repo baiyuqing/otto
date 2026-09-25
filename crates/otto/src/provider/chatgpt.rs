@@ -241,6 +241,7 @@ struct ToolState<'a> {
 /// become a secret is held back until the next delta or until [`Self::flush`].
 struct EventRedactor<'a> {
     redactor: &'a Redactor,
+    reasoning: StreamRedactor<'a>,
     text: StreamRedactor<'a>,
     tools: HashMap<String, ToolState<'a>>,
     /// Insertion order of `tools`, so the flush order is deterministic.
@@ -251,6 +252,7 @@ impl<'a> EventRedactor<'a> {
     fn new(redactor: &'a Redactor) -> Self {
         Self {
             redactor,
+            reasoning: redactor.new_stream(),
             text: redactor.new_stream(),
             tools: HashMap::new(),
             order: Vec::new(),
@@ -261,7 +263,20 @@ impl<'a> EventRedactor<'a> {
     /// all empty afterwards is dropped.
     fn emit(&mut self, event: StreamEvent, sink: StreamSink<'_>) {
         match event {
+            // Carries no provider text, so there is nothing to redact.
+            retry @ StreamEvent::Retry { .. } => sink(retry),
+            StreamEvent::ReasoningDelta { text } => {
+                let text = self.reasoning.write(&text);
+                if !text.is_empty() {
+                    sink(StreamEvent::ReasoningDelta { text });
+                }
+            }
             StreamEvent::TextDelta { text } => {
+                // Reasoning precedes text; release its held tail first.
+                let held = self.reasoning.flush();
+                if !held.is_empty() {
+                    sink(StreamEvent::ReasoningDelta { text: held });
+                }
                 let text = self.text.write(&text);
                 if !text.is_empty() {
                     sink(StreamEvent::TextDelta { text });
@@ -304,6 +319,10 @@ impl<'a> EventRedactor<'a> {
 
     /// Emits whatever every stream held back.
     fn flush(&mut self, sink: StreamSink<'_>) {
+        let reasoning = self.reasoning.flush();
+        if !reasoning.is_empty() {
+            sink(StreamEvent::ReasoningDelta { text: reasoning });
+        }
         let text = self.text.flush();
         if !text.is_empty() {
             sink(StreamEvent::TextDelta { text });
@@ -590,6 +609,41 @@ mod tests {
             arguments
         );
         assert!(visible.contains(&marker), "no marker in {visible}");
+    }
+
+    #[tokio::test]
+    async fn a_credential_split_across_reasoning_deltas_is_redacted() {
+        let account_id = "acct-reasoning-789";
+        let marker = redaction_marker(&["token".to_owned(), account_id.to_owned()]);
+        let delta = |text: &str| {
+            format!(
+                "event: response.reasoning_summary_text.delta\ndata: {{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"summary_index\":0,\"delta\":\"{text}\"}}\n"
+            )
+        };
+        let stream = [
+            delta(&format!("see {}", &account_id[..6])),
+            delta(&format!("{} now", &account_id[6..])),
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n".to_owned(),
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n".to_owned(),
+        ]
+        .join("\n");
+        let server = testserver::spawn(move |_| sse_response(&stream)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), account_id);
+
+        let (result, events) = complete(&client, &Request::default()).await;
+        let response = result.unwrap();
+
+        let reasoning: String = events
+            .iter()
+            .map_while(|event| match event {
+                StreamEvent::ReasoningDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let expected = format!("see {marker} now");
+        assert_eq!(reasoning, expected);
+        assert!(matches!(events.last(), Some(StreamEvent::TextDelta { text }) if text == "ok"));
+        assert_eq!(response.message.blocks[0], Block::reasoning(expected));
     }
 
     /// An HTTP error names only the status, so no part of the body can reach

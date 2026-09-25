@@ -6,6 +6,8 @@
 export type {
   Block,
   Compaction,
+  ContextReport,
+  ContextSection,
   Frame,
   Info,
   Message,
@@ -28,10 +30,11 @@ export type Item =
   | (Extract<WebItem, { kind: 'user' }> & { created_at?: string })
   | (Extract<WebItem, { kind: 'image' }> & { created_at?: string })
   | (Extract<WebItem, { kind: 'assistant' }> & { created_at?: string })
+  | (Extract<WebItem, { kind: 'reasoning' }> & { created_at?: string })
   | (Extract<WebItem, { kind: 'tool' }> & { created_at?: string })
   | Extract<WebItem, { kind: 'notice' | 'error' }>
 
-export { fromHistory, parseFrames, reduce } from 'otto-web'
+export { fromHistory, parseFrames, phase, reduce, statusLine } from 'otto-web'
 
 import init, { parseFrames, type Frame } from 'otto-web'
 

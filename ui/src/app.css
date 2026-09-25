@@ -319,6 +319,9 @@ button.danger {
   white-space: pre-wrap;
 }
 .item.tool.error summary { color: var(--danger); }
+.item.reasoning { color: var(--muted); font-size: 13px; }
+.item.reasoning summary { cursor: pointer; font-style: italic; }
+.item.reasoning pre { margin: 4px 0 0; font-family: inherit; white-space: pre-wrap; }
 .item.notice {
   width: fit-content;
   padding: 4px 8px;
@@ -484,6 +487,39 @@ button.danger {
 .tasks pre {
   font-size: 11px;
   max-height: 8em;
+  overflow: auto;
+  margin: 4px 0;
+  white-space: pre-wrap;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 8px;
+  border: 1px solid var(--line);
+}
+
+.context-panel {
+  position: fixed;
+  top: 64px;
+  right: 0;
+  bottom: 0;
+  width: min(520px, 100vw);
+  overflow: auto;
+  padding: 12px 16px;
+  font-size: 12px;
+  font-family: var(--mono);
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  z-index: 10;
+}
+.context-head { display: flex; justify-content: space-between; align-items: center; }
+.context-summary { color: var(--muted); margin: 8px 0; }
+.context-panel summary { cursor: pointer; display: flex; gap: 8px; align-items: center; }
+.context-panel summary > span:first-child { flex: 1; overflow-wrap: anywhere; }
+.context-tokens { color: var(--muted); }
+.context-panel meter { width: 80px; }
+.context-section { margin: 6px 0; }
+.context-item { margin: 4px 0 4px 16px; }
+.context-panel pre {
+  max-height: 24em;
   overflow: auto;
   margin: 4px 0;
   white-space: pre-wrap;

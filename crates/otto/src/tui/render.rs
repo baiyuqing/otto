@@ -15,10 +15,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use super::app::App;
+use super::app::{App, TurnStatus};
 use super::commands::{SLASH_COMMANDS, SlashCommand};
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN,
@@ -61,6 +61,8 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
 
     if app.show_help {
         draw_help(frame, area);
+    } else if let Some(view) = &app.context {
+        draw_context(frame, area, view);
     } else if let Some(picker) = &app.picker {
         draw_picker(frame, area, picker);
     }
@@ -94,11 +96,11 @@ fn composer_height(app: &App, width: u16) -> u16 {
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
-    if let Some(elapsed) = app.thinking() {
+    if let Some(status) = app.thinking() {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
-        lines.push(thinking_line(elapsed));
+        lines.push(thinking_line(&status));
     }
 
     // No `Wrap`: `transcript` already broke every row to `area.width` so it
@@ -122,16 +124,21 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// redraws on this interval for as long as a turn runs.
 pub(super) const SPINNER_FRAME: Duration = Duration::from_millis(100);
 
-/// The line shown under the transcript while a turn is in flight. A turn
-/// streams nothing between the prompt and the model's first token, so this
-/// is the only thing that distinguishes waiting from a hung terminal.
-fn thinking_line(elapsed: Duration) -> Line<'static> {
-    let frame = elapsed.as_millis() / SPINNER_FRAME.as_millis();
+/// The line shown under the transcript while a turn is in flight: the phase
+/// (waiting for the model, reasoning, running a tool, a provider retry) and
+/// how long the phase and the turn have lasted, so a slow step is
+/// distinguishable from a hung terminal.
+fn thinking_line(status: &TurnStatus) -> Line<'static> {
+    let frame = status.turn_elapsed.as_millis() / SPINNER_FRAME.as_millis();
     Line::styled(
         format!(
-            "{} Thinking… {}s",
+            "{} {}",
             SPINNER_FRAMES[frame as usize % SPINNER_FRAMES.len()],
-            elapsed.as_secs()
+            otto_core::wire::transcript::status_line(
+                &status.phase,
+                status.phase_elapsed.as_secs(),
+                status.turn_elapsed.as_secs()
+            )
         ),
         Style::default().fg(Color::Magenta),
     )
@@ -329,6 +336,34 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
     frame.render_stateful_widget(list, popup, &mut state);
 }
 
+/// The `/context` overlay: the section list, or one item's full text over it.
+fn draw_context(frame: &mut Frame, area: Rect, view: &super::context_view::ContextView) {
+    let popup = centered_rect(80, 70, area);
+    frame.render_widget(Clear, popup);
+    if let Some(text) = &view.text {
+        let paragraph = Paragraph::new(text.text.as_str())
+            .wrap(Wrap { trim: false })
+            .scroll((text.scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("{} (esc to go back)", text.title)),
+            );
+        frame.render_widget(paragraph, popup);
+        return;
+    }
+    let items: Vec<ListItem> = view
+        .rows()
+        .into_iter()
+        .map(|row| ListItem::new(view.row_label(row)))
+        .collect();
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(view.header()))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default().with_selected(Some(view.selected));
+    frame.render_stateful_widget(list, popup, &mut state);
+}
+
 /// A centered `percent_x` by `percent_y` rectangle within `area`. Standard
 /// ratatui popup-centering helper, from the project's own examples.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -437,15 +472,21 @@ mod tests {
             .collect()
     }
 
-    /// The frame index and the elapsed count both come from one `Duration`,
-    /// so they cannot disagree about how long the turn has been running.
+    /// The frame index and the turn count both come from one `Duration`, so
+    /// they cannot disagree about how long the turn has been running.
     #[test]
-    fn the_thinking_frame_advances_with_elapsed_time() {
-        let at = |ms| line_text(&thinking_line(Duration::from_millis(ms)));
+    fn the_status_line_names_the_phase_and_advances_with_elapsed_time() {
+        let at = |phase_ms, turn_ms| {
+            line_text(&thinking_line(&TurnStatus {
+                phase: "reasoning".into(),
+                phase_elapsed: Duration::from_millis(phase_ms),
+                turn_elapsed: Duration::from_millis(turn_ms),
+            }))
+        };
 
-        assert_eq!(at(0), "⠋ Thinking… 0s");
-        assert_eq!(at(100), "⠙ Thinking… 0s");
-        assert_eq!(at(1_000), "⠋ Thinking… 1s");
+        assert_eq!(at(0, 0), "⠋ reasoning · 0s · turn 0s");
+        assert_eq!(at(0, 100), "⠙ reasoning · 0s · turn 0s");
+        assert_eq!(at(1_000, 5_000), "⠋ reasoning · 1s · turn 5s");
     }
 
     /// A turn streams nothing until the model's first token, so without this
@@ -459,14 +500,27 @@ mod tests {
             ..Default::default()
         });
 
-        let idle = rendered(&app, 40, 10);
+        let idle = rendered(&app, 50, 10);
         app.start_turn();
-        let busy = rendered(&app, 40, 10);
+        let busy = rendered(&app, 50, 10);
+        app.apply_event(Event::ToolCallStarted {
+            tool_name: "bash".into(),
+            tool_call_id: "c1".into(),
+            arguments: r#"{"command":"ls"}"#.into(),
+        });
+        let running = rendered(&app, 50, 10);
         app.end_turn();
 
-        assert!(!idle.contains("Thinking"), "idle transcript:\n{idle}");
-        assert!(busy.contains("Thinking"), "running transcript:\n{busy}");
-        assert!(!rendered(&app, 40, 10).contains("Thinking"));
+        assert!(!idle.contains("waiting"), "idle transcript:\n{idle}");
+        assert!(
+            busy.contains("waiting for model · 0s · turn 0s"),
+            "running transcript:\n{busy}"
+        );
+        assert!(
+            running.contains(r#"running bash {"command":"ls"}"#),
+            "tool transcript:\n{running}"
+        );
+        assert!(!rendered(&app, 50, 10).contains("turn"));
     }
 
     /// The drawn frame, not the row builder: a prompt, the reply after it,
@@ -627,6 +681,49 @@ mod tests {
                 .symbol(),
             " "
         );
+    }
+
+    #[tokio::test]
+    async fn the_context_overlay_shows_the_header_sections_and_item_text() {
+        use crate::tui::context_view::ContextView;
+        use otto_core::agent::context_report::{
+            ContextItem, ContextReport, ContextSection, SectionKind,
+        };
+
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        let mut view = ContextView::new(ContextReport {
+            model: "gpt-5".into(),
+            context_window: 0,
+            compaction_threshold: 0,
+            estimated_total: 1_200,
+            reported_input_tokens: None,
+            sections: vec![ContextSection {
+                kind: SectionKind::SystemPrompt,
+                tokens: 1_200,
+                items: vec![ContextItem {
+                    label: "Base".into(),
+                    tokens: 1_200,
+                    text: "You are Otto.\nsecond line".into(),
+                }],
+            }],
+        });
+        app.context = Some(view.clone());
+
+        let screen = screen_rows(&app, 120, 30).join("\n");
+        assert!(
+            screen.contains("Context  gpt-5 · ~1.2k tokens (estimate)"),
+            "{screen}"
+        );
+        assert!(screen.contains("System prompt"), "{screen}");
+
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Down);
+        view.handle_key(KeyCode::Enter);
+        app.context = Some(view);
+        let screen = screen_rows(&app, 120, 30).join("\n");
+        assert!(screen.contains("Base · ~1.2k tokens"), "{screen}");
+        assert!(screen.contains("You are Otto."), "{screen}");
+        assert!(screen.contains("second line"), "{screen}");
     }
 
     /// Below the static minimum on either axis, the frame is just the resize

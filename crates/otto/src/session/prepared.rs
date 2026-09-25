@@ -245,6 +245,17 @@ pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResul
     // live session also clears its in-process timers in
     // `app::Controller::archive_current_session`.
     let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("reminders.json"));
+    // Sub-agent transcripts live in `<stem>/` beside the session file
+    // (`Store::create_child_lazy`) and move with it.
+    let children = Path::new(&candidate_path).with_extension("");
+    if children.is_dir() {
+        fsops::rename_excl(&children, &destination.with_extension("")).map_err(|error| {
+            PiError::other(format!(
+                "session archived to {}, but moving its sub-agent transcripts failed: {error}",
+                destination.display()
+            ))
+        })?;
+    }
     Ok(ArchiveResult {
         path: destination.to_string_lossy().into_owned(),
         id: session_info.id,

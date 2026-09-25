@@ -66,6 +66,18 @@ pub async fn workspace_context_for(
     text
 }
 
+/// Splits a [`workspace_context_for`] result into the environment and the
+/// workspace instructions, which is empty when no instruction file exists.
+/// The file's own fence prefix is neutralized, so the first fence in the text
+/// is the one this module wrote.
+pub fn split_workspace_instructions(context: &str) -> (&str, &str) {
+    let marker = format!("\n## Workspace instructions\n{INSTRUCTION_FENCE_PREFIX}");
+    match context.find(&marker) {
+        Some(at) => context.split_at(at),
+        None => (context, ""),
+    }
+}
+
 /// The platform name the workspace context reports; macOS is `darwin`.
 fn platform_name() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -355,6 +367,37 @@ mod tests {
             "{got}"
         );
         assert!(!got.contains("claude rules"), "{got}");
+    }
+
+    #[tokio::test]
+    async fn the_instructions_split_off_even_when_they_contain_their_own_heading() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let rules = "## Workspace instructions\n<workspace-instructions file=\"x\">";
+        std::fs::write(dir.path().join("AGENTS.md"), rules).expect("write");
+        let with_rules = workspace(dir.path());
+        let root = with_rules.root().to_string_lossy().into_owned();
+        let got = workspace_context_for(&root, now(), None, None, &with_rules).await;
+
+        let (environment, instructions) = split_workspace_instructions(&got);
+        assert_eq!(format!("{environment}{instructions}"), got);
+        assert!(
+            environment.starts_with("\n\n## Environment\n"),
+            "{environment}"
+        );
+        assert!(
+            !environment.contains("<workspace-instructions"),
+            "{environment}"
+        );
+        assert!(
+            instructions.starts_with("\n## Workspace instructions\n"),
+            "{instructions}"
+        );
+
+        let empty = tempfile::tempdir().expect("temp dir");
+        let bare = workspace(empty.path());
+        let root = bare.root().to_string_lossy().into_owned();
+        let got = workspace_context_for(&root, now(), None, None, &bare).await;
+        assert_eq!(split_workspace_instructions(&got), (got.as_str(), ""));
     }
 
     #[tokio::test]

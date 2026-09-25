@@ -39,7 +39,8 @@ use crate::memory::{
 use crate::skill;
 use crate::subagent;
 use crate::subagent::runner::{
-    Config as RunnerConfig, OptionsTemplate, PromptFor, Runner as SubagentRunner,
+    ChildSession, Config as RunnerConfig, OptionsTemplate, PromptFor, Runner as SubagentRunner,
+    Transcript,
 };
 use crate::subagent::tasks::Tasks;
 use crate::tool::Tool;
@@ -428,6 +429,7 @@ impl Builder {
         let persist = self.reminder_persist_path(session);
         let tasks = Arc::new(Tasks::new());
         let usage = self.usage_collector(session, runtime);
+        let session_for_children = session.clone();
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
             provider,
@@ -456,6 +458,7 @@ impl Builder {
             max_parallel: catalogs.agents.max_parallel.max(0) as usize,
             max_output_bytes: runtime.max_output_bytes.max(0) as usize,
             usage,
+            child_session: Some(child_sessions(session_for_children)),
         })
         .map_err(|error| format!("create sub-agent runner: {error}"))?;
         for warning in &warnings {
@@ -1168,10 +1171,68 @@ mod mcp_tests {
     }
 }
 
+/// Persists each sub-agent transcript beside the parent session file, as
+/// `<parent without .jsonl>/<task id>-<child id>.jsonl`. A parent with no file
+/// (`--no-session`, or nothing written yet) keeps its children in memory.
+fn child_sessions(parent: SharedSession) -> ChildSession {
+    Arc::new(move |task_id: &str| {
+        let parent_path = parent.path();
+        if parent_path.is_empty() {
+            return Ok(None);
+        }
+        let mut header = parent.header();
+        header.id = super::runtime_builder::random_id()
+            .map_err(|error| format!("create sub-agent session id: {error}"))?;
+        header.created_at = chrono::Utc::now();
+        let name = format!("{task_id}-{}", header.id);
+        let store = crate::session::Store::create_child_lazy(&parent_path, &name, header)
+            .map_err(|error| error.to_string())?;
+        let path = crate::session::Store::child_path(&parent_path, &name);
+        Ok(Some((
+            Arc::new(store) as Transcript,
+            path.to_string_lossy().into_owned(),
+        )))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory::{NAMESPACE_USER, NAMESPACE_WORKSPACE, RememberRequest, SearchRequest};
+
+    #[test]
+    fn children_of_an_in_memory_parent_stay_in_memory() {
+        let build = child_sessions(SharedSession::memory(otto_core::session::Header::default()));
+        assert!(build("t1").expect("build").is_none());
+    }
+
+    #[tokio::test]
+    async fn children_of_a_session_file_are_written_beside_it() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let store = crate::session::Store::create(
+            root.path(),
+            otto_core::session::Header {
+                id: "parent".into(),
+                workspace: workspace.path().to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("parent");
+        let parent_path = store.path();
+        let build = child_sessions(SharedSession::new(Arc::new(store)));
+
+        let (_, path) = build("t1").expect("build").expect("persisted");
+
+        let prefix = std::path::Path::new(&parent_path)
+            .with_extension("")
+            .join("t1-");
+        assert!(path.starts_with(&*prefix.to_string_lossy()), "{path}");
+        assert!(path.ends_with(".jsonl"), "{path}");
+    }
 
     /// A database path whose parent is a regular file, so every open fails
     /// deterministically.

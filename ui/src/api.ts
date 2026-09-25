@@ -1,4 +1,4 @@
-import { readSSE, type Compaction, type Frame, type Info, type Session, type SessionListRow, type Task, type TaskDetail, type TurnSummary, type WireEvent } from './wire'
+import { readSSE, type Compaction, type ContextReport, type Frame, type Info, type Session, type SessionListRow, type Task, type TaskDetail, type TurnSummary, type WireEvent } from './wire'
 
 export interface UsageSummary {
   requests: number
@@ -149,6 +149,7 @@ export const api = {
   getTurn: (id: string, turnId: string) => json<TurnSummary>(`/v1/sessions/${id}/turns/${turnId}`),
   cancelTurn: (id: string, turnId: string) => request(`/v1/sessions/${id}/turns/${turnId}/cancel`, { method: 'POST' }),
   listTasks: (id: string) => json<{ tasks: Task[] }>(`/v1/sessions/${id}/tasks`),
+  context: (id: string) => json<ContextReport>(`/v1/sessions/${id}/context`),
   listMcp: (id: string) => json<{ servers: McpServer[] }>(`/v1/sessions/${id}/mcp`),
   getTask: (id: string, taskId: string) => json<TaskDetail>(`/v1/sessions/${id}/tasks/${taskId}`),
   cancelTask: (id: string, taskId: string) => request(`/v1/sessions/${id}/tasks/${taskId}/cancel`, { method: 'POST' }),

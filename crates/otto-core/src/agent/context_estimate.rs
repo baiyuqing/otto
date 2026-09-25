@@ -71,20 +71,21 @@ fn estimate_block(block: &Block) -> i64 {
             total = saturating_add(total, estimate_string(&block.tool_call_id));
             saturating_add(total, estimate_string(&block.tool_name))
         }
-        // An unknown block type costs nothing.
-        BlockType::Other(_) => 0,
+        // Reasoning is never sent to a provider, and an unknown block type
+        // costs nothing.
+        BlockType::Reasoning | BlockType::Other(_) => 0,
     }
 }
 
 /// Three bytes per token, rounded up, and zero for an empty string.
-fn estimate_string(value: &str) -> i64 {
+pub(crate) fn estimate_string(value: &str) -> i64 {
     if value.is_empty() {
         return 0;
     }
     1 + (value.len() as i64 - 1) / 3
 }
 
-fn estimate_tool_definition(definition: &ToolDefinition) -> i64 {
+pub(crate) fn estimate_tool_definition(definition: &ToolDefinition) -> i64 {
     let mut total = TOOL_DEFINITION_FRAMING_TOKENS;
     total = saturating_add(total, estimate_string(&definition.name));
     total = saturating_add(total, estimate_string(&definition.description));
@@ -171,7 +172,7 @@ mod tests {
                         + formula(&block.tool_call_id)
                         + formula(&block.tool_name)
                 }
-                BlockType::Other(_) => 0,
+                BlockType::Reasoning | BlockType::Other(_) => 0,
             };
         }
         want

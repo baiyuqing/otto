@@ -89,6 +89,8 @@ pub struct Task {
     pub usage_present: bool,
     pub result: String,
     pub error: String,
+    /// The child transcript file, empty when the child runs in memory.
+    pub session_path: String,
 }
 
 impl Task {
@@ -282,6 +284,14 @@ impl Tasks {
         };
         if changed {
             self.signal();
+        }
+    }
+
+    /// Records the file the task's transcript is written to. Unknown ids are
+    /// ignored.
+    pub fn set_session_path(&self, id: &str, path: &str) {
+        if let Some(entry) = self.lock().entries.get_mut(id) {
+            entry.task.session_path = path.to_string();
         }
     }
 

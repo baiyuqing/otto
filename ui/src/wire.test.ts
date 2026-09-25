@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fromHistory, parseFrames, reduce, type Item } from './wire'
+import { fromHistory, parseFrames, phase, reduce, statusLine, type Item } from './wire'
 
 // The reducer takes each event as the SSE frame's data field, so these are
 // the exact JSON bodies the server writes.
@@ -94,5 +94,22 @@ describe('parseFrames', () => {
     const { frames, rest } = parseFrames('id: 0\nevent: text_delta\ndata: {"a":1}\n\nid: 1\nevent: agent_fin')
     expect(frames).toEqual([{ id: 0, event: 'text_delta', data: '{"a":1}' }])
     expect(rest).toBe('id: 1\nevent: agent_fin')
+  })
+})
+
+describe('phase', () => {
+  it('names the turn phase an event starts and ignores the rest', () => {
+    expect(phase('{"type":"reasoning_delta","text":"x"}')).toBe('reasoning')
+    expect(phase('{"type":"tool_call_started","tool_call_id":"c1","tool_name":"bash","tool_args":{"command":"ls"}}')).toBe(
+      'running bash {"command":"ls"}',
+    )
+    expect(
+      phase('{"type":"provider_retry","retry":{"attempt":2,"max_attempts":3,"delay_ms":250,"reason":"HTTP 503"}}'),
+    ).toBe('retry 2/3 after HTTP 503, waiting 250ms')
+    expect(phase('{"type":"provider_usage"}')).toBeUndefined()
+  })
+
+  it('formats the status line with both durations', () => {
+    expect(statusLine('reasoning', 3, 12)).toBe('reasoning · 3s · turn 12s')
   })
 })

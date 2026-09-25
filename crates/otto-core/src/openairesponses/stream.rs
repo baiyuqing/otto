@@ -60,6 +60,11 @@ pub struct StreamAssembler {
     line: Vec<u8>,
     data_lines: Vec<Vec<u8>>,
     text: String,
+    reasoning: String,
+    /// The `(item_id, summary_index)` of the last reasoning delta; a new pair
+    /// starts a new summary part, separated from the previous one by a blank
+    /// line.
+    reasoning_part: Option<(String, i64)>,
     calls: Vec<AssembledToolCall>,
     by_item: HashMap<String, usize>,
     usage: Option<Usage>,
@@ -119,7 +124,10 @@ impl StreamAssembler {
         }
 
         let has_tool_calls = !self.calls.is_empty();
-        let mut blocks = Vec::with_capacity(1 + self.calls.len());
+        let mut blocks = Vec::with_capacity(2 + self.calls.len());
+        if !self.reasoning.is_empty() {
+            blocks.push(Block::reasoning(self.reasoning));
+        }
         if !self.text.is_empty() {
             blocks.push(Block::text(self.text));
         }
@@ -206,6 +214,23 @@ impl StreamAssembler {
                     self.text.push_str(&event.delta);
                     self.emitted = true;
                     emit(StreamEvent::TextDelta { text: event.delta });
+                }
+            }
+            "response.reasoning_summary_text.delta" => {
+                if !event.delta.is_empty() {
+                    let part = (event.item_id, event.summary_index);
+                    if self.reasoning_part.as_ref() != Some(&part) {
+                        if !self.reasoning.is_empty() {
+                            self.reasoning.push_str("\n\n");
+                            emit(StreamEvent::ReasoningDelta {
+                                text: "\n\n".into(),
+                            });
+                        }
+                        self.reasoning_part = Some(part);
+                    }
+                    self.reasoning.push_str(&event.delta);
+                    self.emitted = true;
+                    emit(StreamEvent::ReasoningDelta { text: event.delta });
                 }
             }
             "response.output_item.added" => {
@@ -426,6 +451,54 @@ mod tests {
             Some(r#"{"path":"B"}"#)
         );
         assert_eq!(events.len(), 4);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn reasoning_summary_deltas_stream_and_become_one_reasoning_block() {
+        let body = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"r1\",\"summary_index\":0,\"delta\":\"Read \"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"r1\",\"summary_index\":0,\"delta\":\"the file\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"r1\",\"summary_index\":1,\"delta\":\"Then answer\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        );
+        for chunk in [0, 1, 7] {
+            let (result, events) = assemble(body.as_bytes(), chunk);
+            let response = result.expect("assembled");
+            let reasoning = |text: &str| StreamEvent::ReasoningDelta { text: text.into() };
+            assert_eq!(
+                events,
+                vec![
+                    reasoning("Read "),
+                    reasoning("the file"),
+                    reasoning("\n\n"),
+                    reasoning("Then answer"),
+                    StreamEvent::TextDelta { text: "hi".into() },
+                ]
+            );
+            assert_eq!(
+                response.message.blocks,
+                vec![
+                    Block::reasoning("Read the file\n\nThen answer"),
+                    Block::text("hi")
+                ]
+            );
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_reasoning_delta_marks_the_stream_emitted() {
+        let mut assembler = StreamAssembler::new();
+        let mut sink = |_: StreamEvent| {};
+        assembler
+            .push(
+                b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"r1\",\"summary_index\":0,\"delta\":\"x\"}\n\n",
+                &mut sink,
+            )
+            .expect("push");
+        assert!(assembler.emitted());
     }
 
     /// A non-function output item, a reasoning summary for example, is ignored

@@ -11,10 +11,12 @@ export function Footer(props: {
   session: Session | null
   turnUsage: Usage | null
   recordedUsage: UsageSummary | null
+  status?: string | null
 }) {
-  const { info, session, turnUsage, recordedUsage } = props
+  const { info, session, turnUsage, recordedUsage, status } = props
   return (
     <div className="footer">
+      {status && <span>{status}</span>}
       {info && (
         <span>
           {info.provider} · {info.model} · thinking {info.thinking || 'default'} · {info.sandbox}

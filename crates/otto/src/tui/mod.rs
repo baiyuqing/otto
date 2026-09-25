@@ -12,6 +12,7 @@
 
 mod app;
 mod commands;
+mod context_view;
 mod entries;
 pub(crate) mod gutter;
 mod layout;

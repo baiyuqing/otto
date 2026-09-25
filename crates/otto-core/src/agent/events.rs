@@ -130,6 +130,11 @@ pub enum Event {
     TextDelta {
         text: String,
     },
+    /// Redacted model reasoning text. It is shown and persisted but never
+    /// sent back to a provider.
+    ReasoningDelta {
+        text: String,
+    },
     ToolCallStarted {
         tool_name: String,
         tool_call_id: String,
@@ -145,6 +150,14 @@ pub enum Event {
         usage: Usage,
         /// False when the provider reported no usage; `usage` is then zero.
         present: bool,
+    },
+    /// The provider will retry a failed attempt after `delay`; see
+    /// [`crate::provider::StreamEvent::Retry`].
+    ProviderRetry {
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        reason: String,
     },
     ProviderApiCall {
         provider: String,
@@ -191,10 +204,12 @@ impl Event {
             Self::AgentStarted => "agent_started",
             Self::AgentFinished => "agent_finished",
             Self::TextDelta { .. } => "text_delta",
+            Self::ReasoningDelta { .. } => "reasoning_delta",
             Self::ToolCallStarted { .. } => "tool_call_started",
             Self::ToolCallFinished { .. } => "tool_call_finished",
             Self::ProviderUsage { .. } => "provider_usage",
             Self::ProviderApiCall { .. } => "provider_api_call",
+            Self::ProviderRetry { .. } => "provider_retry",
             Self::CompactionStarted { .. } => "compaction_started",
             Self::CompactionPlanned { .. } => "compaction_planned",
             Self::CompactionCompleted { .. } => "compaction_completed",

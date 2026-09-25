@@ -40,18 +40,33 @@ pub struct Response {
 
 /// An incremental update observed while a response streams.
 ///
-/// Text deltas reach the frontend as they arrive. Tool-call deltas are
-/// reported for progress display only: the authoritative tool calls are the
-/// blocks of [`Response::message`].
+/// Text and reasoning deltas reach the frontend as they arrive. Tool-call
+/// deltas are reported for progress display only: the authoritative tool
+/// calls are the blocks of [`Response::message`]. The concatenated reasoning
+/// deltas equal the text of the response's [`BlockType::Reasoning`] block.
+///
+/// [`BlockType::Reasoning`]: crate::model::BlockType::Reasoning
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
     TextDelta {
+        text: String,
+    },
+    ReasoningDelta {
         text: String,
     },
     ToolCallDelta {
         tool_call_id: String,
         tool_name: String,
         arguments: String,
+    },
+    /// A failed attempt will be retried after `delay`. `attempt` is the
+    /// 1-based number of the attempt about to start; `reason` is an HTTP
+    /// status or a transport error class, never response body text.
+    Retry {
+        attempt: u32,
+        max_attempts: u32,
+        delay: std::time::Duration,
+        reason: String,
     },
 }
 

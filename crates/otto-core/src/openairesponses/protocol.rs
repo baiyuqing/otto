@@ -35,11 +35,13 @@ pub struct WireRequest {
     pub store: bool,
 }
 
-/// The reasoning-effort request field, present only when the model asks for
-/// one.
+/// The reasoning request field, present only when the model asks for an
+/// effort. `summary: "auto"` asks the backend to stream a reasoning summary,
+/// which Otto shows and persists but never sends back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireReasoning {
     pub effort: String,
+    pub summary: String,
 }
 
 /// One advertised tool. The Responses API flattens the function definition
@@ -103,6 +105,9 @@ pub struct WireEvent {
     pub delta: String,
     #[serde(default, deserialize_with = "null_as_default")]
     pub item_id: String,
+    /// The summary part a `response.reasoning_summary_text.delta` belongs to.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub summary_index: i64,
     #[serde(default)]
     pub item: Option<WireOutputItem>,
     #[serde(default)]
@@ -242,6 +247,7 @@ pub fn build_request(request: &Request) -> WireRequest {
         } else {
             Some(WireReasoning {
                 effort: request.thinking.clone(),
+                summary: "auto".into(),
             })
         },
         stream: true,
@@ -405,6 +411,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![
+                        Block::reasoning("never sent"),
                         Block::text("sure"),
                         Block {
                             block_type: BlockType::ToolCall,
@@ -443,7 +450,7 @@ mod tests {
                 r#"{"type":"function_call","call_id":"call-1","name":"read","arguments":"{\"path\":\"README.md\"}"},"#,
                 r#"{"type":"function_call_output","call_id":"call-1","output":"file body"}],"#,
                 r#""tools":[{"type":"function","name":"read","description":"read a file","parameters":{"alpha":{"a":3,"b":2},"zeta":1}}],"#,
-                r#""reasoning":{"effort":"high"},"stream":true,"store":false}"#
+                r#""reasoning":{"effort":"high","summary":"auto"},"stream":true,"store":false}"#
             )
         );
     }

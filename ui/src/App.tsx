@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, events, loadToken, setToken, type UsageSummary } from './api'
 import { parseWebCommand, supportedCommands } from './commands'
-import { fromHistory, reduce, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
+import { fromHistory, phase, reduce, statusLine, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
 import { SessionPicker } from './SessionPicker'
 import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
 import { Footer } from './Footer'
+import { ContextPanel } from './ContextPanel'
 import { Tasks } from './Tasks'
 import { UsageView } from './UsageView'
 import { WorkflowsView } from './WorkflowsView'
@@ -77,8 +78,13 @@ export function App() {
   const [recordedUsage, setRecordedUsage] = useState<UsageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
   const [tasksKey, setTasksKey] = useState(0)
+  const [showContext, setShowContext] = useState(false)
   const [error, setError] = useState('')
   const compactAbort = useRef<AbortController | null>(null)
+  // The running turn's phase and when it and the turn started (ms). A turn
+  // re-attached after a reload counts from the attach, not the server start.
+  const [phaseState, setPhaseState] = useState<{ name: string; since: number; turnStart: number } | null>(null)
+  const [now, setNow] = useState(Date.now())
 
   const fail = useCallback((e: unknown) => setError(describe(e)), [])
 
@@ -113,6 +119,8 @@ export function App() {
               }))
             }
             if (event.type === 'notification') setTasksKey((k) => k + 1)
+            const next = phase(raw)
+            if (next) setPhaseState((p) => (p && p.name !== next ? { ...p, name: next, since: Date.now() } : p))
             setItems((prev) => reduce(prev, raw))
           }
           const s = await api.getSession(sessionId)
@@ -166,6 +174,18 @@ export function App() {
     // attach twice in development.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (turnId === null) {
+      setPhaseState(null)
+      return
+    }
+    const start = Date.now()
+    setNow(start)
+    setPhaseState({ name: 'waiting for model', since: start, turnStart: start })
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [turnId])
 
   const sessionRef = useRef(session)
   sessionRef.current = session
@@ -445,6 +465,9 @@ export function App() {
             <button type="button" disabled={busy} onClick={renameSession}>
               Rename
             </button>
+            <button type="button" aria-pressed={showContext} onClick={() => setShowContext((v) => !v)}>
+              Context
+            </button>
           </div>
         )}
       </header>
@@ -465,6 +488,14 @@ export function App() {
           <TranscriptView items={items} activeSession={session !== null} />
         )}
       </main>
+      {view === 'chat' && session && showContext && (
+        <ContextPanel
+          sessionId={session.id}
+          refreshKey={tasksKey}
+          onClose={() => setShowContext(false)}
+          onError={fail}
+        />
+      )}
       {view === 'chat' && session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
       {view === 'chat' && (
         <Composer
@@ -477,7 +508,20 @@ export function App() {
           onCompact={compact}
         />
       )}
-      <Footer info={info} session={session} turnUsage={turnUsage} recordedUsage={recordedUsage} />
+      <Footer
+        info={info}
+        session={session}
+        turnUsage={turnUsage}
+        recordedUsage={recordedUsage}
+        status={
+          phaseState &&
+          statusLine(
+            phaseState.name,
+            Math.max(0, Math.floor((now - phaseState.since) / 1000)),
+            Math.max(0, Math.floor((now - phaseState.turnStart) / 1000)),
+          )
+        }
+      />
     </div>
   )
 }

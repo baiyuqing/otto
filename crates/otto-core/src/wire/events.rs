@@ -59,6 +59,19 @@ pub struct WirePlan {
     pub mode: String,
 }
 
+/// `provider_retry`'s payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRetry {
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default)]
+    pub max_attempts: u32,
+    #[serde(default)]
+    pub delay_ms: u64,
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// One event as it crosses the HTTP boundary.
 ///
 /// `tool_args` stays a [`RawValue`] so provider argument JSON reaches the
@@ -89,6 +102,8 @@ pub struct WireEvent {
     pub compaction: Option<WireCompaction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<WirePlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<WireRetry>,
     #[serde(default, skip_serializing_if = "is_empty")]
     pub error: String,
 }
@@ -110,6 +125,7 @@ impl PartialEq for WireEvent {
             && self.usage_present == other.usage_present
             && self.compaction == other.compaction
             && self.plan == other.plan
+            && self.retry == other.retry
             && self.error == other.error
     }
 }
@@ -124,7 +140,7 @@ pub fn to_wire(event: &Event) -> WireEvent {
         ..WireEvent::default()
     };
     match event {
-        Event::TextDelta { text } => wire.text = text.clone(),
+        Event::TextDelta { text } | Event::ReasoningDelta { text } => wire.text = text.clone(),
         Event::ToolCallStarted {
             tool_name,
             tool_call_id,
@@ -165,6 +181,19 @@ pub fn to_wire(event: &Event) -> WireEvent {
             wire.compaction = Some(to_wire_compaction(compaction));
         }
         Event::CompactionPlanned { plan } => wire.plan = Some(to_wire_plan(plan)),
+        Event::ProviderRetry {
+            attempt,
+            max_attempts,
+            delay,
+            reason,
+        } => {
+            wire.retry = Some(WireRetry {
+                attempt: *attempt,
+                max_attempts: *max_attempts,
+                delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                reason: reason.clone(),
+            });
+        }
         Event::CompactionWarning { message }
         | Event::MemoryWarning { message }
         | Event::AgentError { message } => wire.error = message.clone(),

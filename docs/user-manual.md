@@ -487,9 +487,17 @@ OTTO_UI=repl otto
   `❯` rather than `>` so it is not mistaken for the `>` a quoted markdown line
   carries in a reply.
 - Entries are separated by a blank line.
-- While a turn is running, an animated `Thinking…` line with the elapsed
-  seconds is shown under the transcript, and the composer title reads
-  `Working (Esc to cancel)`.
+- While a turn is running, an animated status line is shown under the
+  transcript, and the composer title reads `Working (Esc to cancel)`. The line
+  reads `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and
+  the seconds since the turn started. The phase is `waiting for model`,
+  `reasoning`, `responding`, `compacting`, `running TOOL ARGS` (arguments
+  truncated to 60 characters), or `retry A/M after REASON, waiting DELAY` when
+  the provider request is retried after a connection error, an interrupted
+  stream, or a retryable HTTP status.
+- When a thinking effort is set and the provider returns reasoning summaries,
+  the summary text streams as a dimmed `reasoning` entry before the reply and
+  is saved in the session, so a resumed session shows it again.
 - While idle, a pending notification — a finished sub-agent, or a `remind`
   timer — starts a wake turn that delivers it and lets the model continue.
   Esc cancels it the same way as a user turn. Composer text is left in place.
@@ -603,6 +611,17 @@ Shared commands:
 
 TUI-only commands:
 
+- `/context` opens a modal that lists what the next provider request contains:
+  the system prompt parts (base, environment, workspace instructions, skills,
+  agents), built-in and MCP tool definitions, the compaction summary, the
+  previous turn's memory recall, and each message. The title shows the model,
+  the estimated total against the context window, the last provider-reported
+  input tokens, and the automatic compaction threshold. Token numbers are
+  estimates (about 3 bytes per token), not tokenizer counts. `↑`/`↓` select,
+  `Enter` expands a section or opens an item's full text (`↑`/`↓`/`PgUp`/`PgDn`
+  scroll it), and `Esc` goes back one level. The report is taken when the modal
+  opens. The memory section is the previous turn's recall; the next turn
+  recalls again with its own prompt.
 - `/image <path>` attaches one image to the next prompt. The image is stored
   inline in the session; the selected model and provider endpoint must support
   image input. Otto sends images with `detail: high`.
@@ -667,6 +686,18 @@ Notes:
   `--archive PATH` archives one active session for the current `--cwd` and
   exits. It cannot be combined with `--continue`, `--resume`, `--no-session`,
   or `--prompt`.
+- **Sub-agent transcripts** are written beside the parent session, in a
+  directory named after the parent file without `.jsonl`:
+  `~/.otto/sessions/<workspace-key>/<session-id>/<task-id>-<child-id>.jsonl`.
+  Each is a Pi v3 session whose header records the parent file in
+  `parentSession`; it contains any inherited context, the delegated prompt,
+  and every child message and tool call. The file is created on the child's
+  first write, with the same `0700` directory and `0600` file modes. Child
+  transcripts are not listed by `/resume` or `--continue`. Archiving a session
+  moves its transcript directory into `archive/` with it. Under
+  `--no-session`, children stay in memory. `/task <id|name>` prints the file
+  as a `transcript:` line, and the task JSON carries it as `session_path`. If
+  a child transcript cannot be created, only that task fails.
 - Manual and automatic compaction append Pi v3 `type: "compaction"`
   checkpoints carrying `firstKeptEntryId`, `tokensBefore`, optional usage, and
   bounded file metadata.
@@ -1040,10 +1071,16 @@ the transcript, and a composer:
   tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
   and at turn end, polls every 3 seconds while a task is queued or running,
   and offers **Cancel** for those.
+- **Context** in the session bar opens a side panel with the same report as
+  the TUI `/context` modal (`GET /v1/sessions/{id}/context`): one bar per
+  section, and each section and item expands to show its text. It re-reads
+  when opened and at turn end.
 - The footer shows `GET /v1/info` (provider, model, sandbox), the session's
   context size and cumulative usage from `GET /v1/sessions/{id}`, and persisted
   all-session token totals and cache hit rate from `GET /v1/usage`; during a
-  turn it also totals that turn's `provider_usage` events.
+  turn it also totals that turn's `provider_usage` events and shows the same
+  phase status line as the TUI. Reasoning summaries render as a collapsed
+  block whose first line is the summary.
 - The top bar switches between **Chat**, **Usage**, and **Workflows**. Usage
   shows persisted totals, a Mermaid token-volume chart for the last 7, 30, or
   90 UTC days, and an exact daily table. It reads `GET /v1/usage/daily` and
@@ -1073,6 +1110,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
+| `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |
@@ -1154,10 +1192,15 @@ unless `status` is `error`; `finished_at` is omitted while the turn runs.
 
 Each SSE frame carries `id: <sequence>`, `event: <name>`, and a JSON `data:`
 payload. Event names are the `agent.Event` type names: `agent_started`,
-`text_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
-`compaction_planned`, `compaction_started`, `compaction_completed`,
+`text_delta`, `reasoning_delta`, `tool_call_started`, `tool_call_finished`, `provider_usage`,
+`provider_retry`, `compaction_planned`, `compaction_started`, `compaction_completed`,
 `compaction_warning`, `memory_warning`, `agent_finished`, and `agent_error`,
-plus `notification` when a sub-agent task finishes.
+plus `notification` when a sub-agent task finishes. `reasoning_delta` carries
+`text` like `text_delta`. `provider_retry` carries
+`retry: {attempt, max_attempts, delay_ms, reason}`, where `attempt` is the
+1-based attempt about to start and `reason` is an HTTP status such as
+`HTTP 503`, `connection error`, or `stream interrupted`; it never contains the
+response body.
 
 ### Errors
 

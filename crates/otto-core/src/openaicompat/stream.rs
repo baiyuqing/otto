@@ -53,6 +53,7 @@ pub struct StreamAssembler {
     line: Vec<u8>,
     data_lines: Vec<Vec<u8>>,
     text: String,
+    reasoning: String,
     calls: Vec<AssembledToolCall>,
     by_index: HashMap<i64, usize>,
     usage: Option<Usage>,
@@ -67,6 +68,7 @@ impl Default for StreamAssembler {
             line: Vec::new(),
             data_lines: Vec::new(),
             text: String::new(),
+            reasoning: String::new(),
             calls: Vec::new(),
             by_index: HashMap::new(),
             usage: None,
@@ -126,7 +128,10 @@ impl StreamAssembler {
             return Err(StreamError::MissingDone);
         }
 
-        let mut blocks = Vec::with_capacity(1 + self.calls.len());
+        let mut blocks = Vec::with_capacity(2 + self.calls.len());
+        if !self.reasoning.is_empty() {
+            blocks.push(Block::reasoning(self.reasoning));
+        }
         if !self.text.is_empty() {
             blocks.push(Block::text(self.text));
         }
@@ -212,6 +217,13 @@ impl StreamAssembler {
             });
         }
         for choice in chunk.choices {
+            for reasoning in [choice.delta.reasoning_content, choice.delta.reasoning] {
+                if !reasoning.is_empty() {
+                    self.reasoning.push_str(&reasoning);
+                    self.emitted = true;
+                    emit(StreamEvent::ReasoningDelta { text: reasoning });
+                }
+            }
             if !choice.delta.content.is_empty() {
                 self.text.push_str(&choice.delta.content);
                 self.emitted = true;
@@ -278,6 +290,51 @@ mod tests {
                 (response, events)
             }
         }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn reasoning_content_and_reasoning_fields_stream_as_reasoning() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Look \",\"content\":null}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"first\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        for chunk in [0, 1, 5] {
+            let (result, events) = assemble(body.as_bytes(), chunk);
+            let response = result.expect("assembled");
+            assert_eq!(
+                events,
+                vec![
+                    StreamEvent::ReasoningDelta {
+                        text: "Look ".into()
+                    },
+                    StreamEvent::ReasoningDelta {
+                        text: "first".into()
+                    },
+                    StreamEvent::TextDelta { text: "ok".into() },
+                ]
+            );
+            assert_eq!(
+                response.message.blocks,
+                vec![Block::reasoning("Look first"), Block::text("ok")]
+            );
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_reasoning_delta_marks_the_stream_emitted() {
+        let mut assembler = StreamAssembler::new();
+        let mut sink = |_: StreamEvent| {};
+        assembler
+            .push(
+                b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"x\"}}]}\n\n",
+                &mut sink,
+            )
+            .expect("push");
+        assert!(assembler.emitted());
     }
 
     const TEXT_AND_TOOL_CALL: &str = concat!(

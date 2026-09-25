@@ -89,6 +89,9 @@ pub enum BlockType {
     Image,
     ToolCall,
     ToolResult,
+    /// Model reasoning text shown to the user. It is persisted and displayed
+    /// but never sent back to a provider.
+    Reasoning,
     Other(String),
 }
 
@@ -99,6 +102,7 @@ impl From<String> for BlockType {
             "image" => Self::Image,
             "tool_call" => Self::ToolCall,
             "tool_result" => Self::ToolResult,
+            "reasoning" => Self::Reasoning,
             _ => Self::Other(value),
         }
     }
@@ -111,6 +115,7 @@ impl From<BlockType> for String {
             BlockType::Image => "image".into(),
             BlockType::ToolCall => "tool_call".into(),
             BlockType::ToolResult => "tool_result".into(),
+            BlockType::Reasoning => "reasoning".into(),
             BlockType::Other(other) => other,
         }
     }
@@ -212,6 +217,14 @@ impl Block {
         }
     }
 
+    pub fn reasoning(value: impl Into<String>) -> Self {
+        Self {
+            block_type: BlockType::Reasoning,
+            text: value.into(),
+            ..Self::default()
+        }
+    }
+
     pub fn image(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
         Self {
             block_type: BlockType::Image,
@@ -266,6 +279,18 @@ impl Block {
                     || self.arguments.is_some()
                 {
                     return Err(ValidationError("tool-result block is malformed"));
+                }
+            }
+            BlockType::Reasoning => {
+                if self.text.is_empty()
+                    || !self.data.is_empty()
+                    || !self.mime_type.is_empty()
+                    || !self.tool_call_id.is_empty()
+                    || !self.tool_name.is_empty()
+                    || self.arguments.is_some()
+                    || self.is_error
+                {
+                    return Err(ValidationError("reasoning block is malformed"));
                 }
             }
             BlockType::Other(_) => {
@@ -413,11 +438,12 @@ impl Message {
                 if matches!(self.finish_reason, Some(FinishReason::Other(_))) {
                     return Err(ValidationError("unsupported assistant finish reason"));
                 }
-                if self
-                    .blocks
-                    .iter()
-                    .any(|block| !matches!(block.block_type, BlockType::Text | BlockType::ToolCall))
-                {
+                if self.blocks.iter().any(|block| {
+                    !matches!(
+                        block.block_type,
+                        BlockType::Text | BlockType::ToolCall | BlockType::Reasoning
+                    )
+                }) {
                     return Err(ValidationError(
                         "assistant message contains incompatible block",
                     ));
@@ -616,6 +642,44 @@ mod tests {
         let encoded = serde_json::to_string(&original).expect("encode");
         let decoded: Message = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn assistant_reasoning_block_is_valid_and_excluded_from_text() {
+        let message = Message {
+            id: "msg-r".into(),
+            role: Role::Assistant,
+            created_at: at(10),
+            blocks: vec![Block::reasoning("plan"), Block::text("done")],
+            finish_reason: Some(FinishReason::Stop),
+            ..Message::default()
+        };
+        message.validate().expect("assistant may carry reasoning");
+        assert_eq!(message.text(), "done");
+        let encoded = serde_json::to_string(&message).expect("encode");
+        assert!(
+            encoded.contains(r#""type":"reasoning""#),
+            "encoded: {encoded}"
+        );
+        let decoded: Message = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(message, decoded);
+    }
+
+    #[test]
+    fn reasoning_block_is_rejected_outside_assistant_and_when_malformed() {
+        assert!(Block::reasoning("").validate().is_err());
+        let with_tool = Block {
+            tool_call_id: "c1".into(),
+            ..Block::reasoning("x")
+        };
+        assert!(with_tool.validate().is_err());
+        let user = Message {
+            id: "u".into(),
+            role: Role::User,
+            blocks: vec![Block::reasoning("x")],
+            ..Message::default()
+        };
+        assert!(user.validate().is_err());
     }
 
     #[test]

@@ -34,7 +34,9 @@ use tokio_util::sync::CancellationToken;
 use otto_core::openaicompat::overflow::{MAX_ERROR_BODY, classify_overflow};
 use otto_core::openaicompat::protocol::{build_request, serialized_request_size};
 use otto_core::openaicompat::stream::StreamAssembler;
-use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
+use otto_core::provider::{
+    Provider, ProviderError, Request, RequestSizer, Response, StreamEvent, StreamSink,
+};
 
 use crate::gourl::{self, Encoding};
 
@@ -159,6 +161,7 @@ impl Client {
                     emitted: false,
                     retryable,
                     retry_after: None,
+                    reason: "connection error".into(),
                 });
             }
         };
@@ -186,6 +189,7 @@ impl Client {
                         emitted: assembler.emitted(),
                         retryable: true,
                         retry_after: None,
+                        reason: "stream interrupted".into(),
                     });
                 }
             };
@@ -224,6 +228,7 @@ impl Client {
                     emitted: false,
                     retryable: is_retryable_status(status),
                     retry_after,
+                    reason: format!("HTTP {status}"),
                 };
             }
             ErrorBody::Body(body) => body,
@@ -237,6 +242,7 @@ impl Client {
                 emitted: false,
                 retryable: false,
                 retry_after: None,
+                reason: String::new(),
             };
         }
         Failure {
@@ -247,6 +253,7 @@ impl Client {
             emitted: false,
             retryable: is_retryable_status(status),
             retry_after,
+            reason: format!("HTTP {status}"),
         }
     }
 
@@ -330,6 +337,12 @@ impl Provider for Client {
             let delay = failure
                 .retry_after
                 .unwrap_or(BASE_BACKOFF * (1u32 << attempt));
+            emit(StreamEvent::Retry {
+                attempt: attempt + 2,
+                max_attempts: MAX_ATTEMPTS,
+                delay,
+                reason: failure.reason,
+            });
             if with_cancel(cancel, (self.sleep)(delay)).await.is_none() {
                 return Err(ProviderError::Cancelled);
             }
@@ -356,6 +369,9 @@ struct Failure {
     retryable: bool,
     /// The delay a `Retry-After` header asked for, used only when retrying.
     retry_after: Option<Duration>,
+    /// What [`StreamEvent::Retry`] reports: the HTTP status or the transport
+    /// error class. Never body text.
+    reason: String,
 }
 
 impl Failure {
@@ -365,6 +381,7 @@ impl Failure {
             emitted: false,
             retryable: false,
             retry_after: None,
+            reason: String::new(),
         }
     }
 
@@ -376,6 +393,7 @@ impl Failure {
             emitted,
             retryable: false,
             retry_after: None,
+            reason: String::new(),
         }
     }
 }
@@ -728,6 +746,40 @@ mod tests {
                 "status {status}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn each_retry_is_reported_before_its_backoff_without_the_body() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let server = spawn_server(move |_head, _body| {
+            if counter.fetch_add(1, Ordering::SeqCst) < 2 {
+                return http_response(503, &[], "secret body text");
+            }
+            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
+        })
+        .await;
+        let (sleeper, _) = recording_sleeper();
+        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
+
+        let mut events = Vec::new();
+        let mut emit = |event: StreamEvent| events.push(event);
+        client
+            .complete(&model_request(), &mut emit, &CancellationToken::new())
+            .await
+            .expect("the third attempt succeeds");
+
+        let retry = |attempt, delay| StreamEvent::Retry {
+            attempt,
+            max_attempts: 3,
+            delay: Duration::from_millis(delay),
+            reason: "HTTP 503".into(),
+        };
+        let retries: Vec<_> = events
+            .into_iter()
+            .filter(|event| matches!(event, StreamEvent::Retry { .. }))
+            .collect();
+        assert_eq!(retries, vec![retry(2, 250), retry(3, 500)]);
     }
 
     #[tokio::test]

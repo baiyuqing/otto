@@ -367,6 +367,110 @@ components:
               items:
                 $ref: "#/components/schemas/Message"
           required: [history]
+    TaskRow:
+      type: object
+      description: subagent::record::TaskRow; one row from tasks.db, across every otto process on the machine.
+      properties:
+        parent_session:
+          type: string
+        task_id:
+          type: string
+        workspace:
+          type: string
+        parent_session_path:
+          type: string
+        name:
+          type: string
+        agent:
+          type: string
+        description:
+          type: string
+        model:
+          type: string
+        context:
+          type: string
+        prompt:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, canceled, interrupted]
+        created_at:
+          type: string
+        started_at:
+          type: string
+        finished_at:
+          type: string
+        steps:
+          type: integer
+        tool_calls:
+          type: integer
+        last_tool:
+          type: string
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        cached_tokens:
+          type: integer
+        result:
+          type: string
+        error:
+          type: string
+        session_path:
+          type: string
+        cancelable:
+          type: boolean
+          description: True only when the task belongs to a session this server owns and is not final.
+      required:
+        [
+          parent_session,
+          task_id,
+          workspace,
+          parent_session_path,
+          name,
+          agent,
+          description,
+          model,
+          context,
+          prompt,
+          status,
+          created_at,
+          started_at,
+          finished_at,
+          steps,
+          tool_calls,
+          last_tool,
+          input_tokens,
+          output_tokens,
+          cached_tokens,
+          result,
+          error,
+          session_path,
+          cancelable,
+        ]
+    TaskRowList:
+      type: object
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskRow"
+        next_before:
+          type: string
+          description: An exclusive created_at cursor for the next page; empty when there are no older rows.
+      required: [tasks, next_before]
+    TaskRowDetail:
+      type: object
+      properties:
+        task:
+          $ref: "#/components/schemas/TaskRow"
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        transcript_missing:
+          type: boolean
+      required: [task, history, transcript_missing]
     WireEvent:
       type: object
       description: >
@@ -1084,6 +1188,67 @@ paths:
                 $ref: "#/components/schemas/Error"
         "501":
           description: Sandbox reload is not available in this process
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/tasks:
+    get:
+      summary: List sub-agent task rows from tasks.db, newest first, across every otto process on the machine
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+          description: One of the stored statuses or interrupted
+        - name: workspace
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Defaults to 100, clamped to 500
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: string
+          description: An exclusive created_at cursor
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRowList"
+  /v1/tasks/{parent_session}/{task_id}:
+    parameters:
+      - name: parent_session
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get one task row from tasks.db, plus its child session's history
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRowDetail"
+        "404":
+          description: Task not found
           content:
             application/json:
               schema:

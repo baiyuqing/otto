@@ -1,4 +1,4 @@
-import { readSSE, type Compaction, type ContextReport, type Frame, type Info, type Session, type SessionListRow, type Task, type TaskDetail, type TurnSummary, type WireEvent } from './wire'
+import { readSSE, type Compaction, type ContextReport, type Frame, type Info, type Message, type Session, type SessionListRow, type Task, type TaskDetail, type TurnSummary, type WireEvent } from './wire'
 
 export interface UsageSummary {
   requests: number
@@ -74,6 +74,46 @@ export interface WorkflowRequest {
 export interface WorkflowView {
   run: WorkflowRun
   requests: WorkflowRequest[]
+}
+
+// AgentTask is one row of GET /v1/tasks: a sub-agent run from any session of
+// any otto process on the machine, read from ~/.otto/tasks.db.
+export interface AgentTask {
+  parent_session: string
+  task_id: string
+  workspace: string
+  parent_session_path: string
+  name?: string
+  agent: string
+  description: string
+  model?: string
+  context?: string
+  prompt: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'interrupted'
+  created_at: string
+  started_at: string
+  finished_at: string
+  steps: number
+  tool_calls: number
+  last_tool?: string
+  input_tokens: number
+  output_tokens: number
+  cached_tokens: number
+  result: string
+  error: string
+  session_path: string
+  cancelable: boolean
+}
+
+export interface AgentTaskList {
+  tasks: AgentTask[]
+  next_before: string
+}
+
+export interface AgentTaskDetail {
+  task: AgentTask
+  history: Message[]
+  transcript_missing: boolean
 }
 
 const TOKEN_KEY = 'otto.token'
@@ -172,6 +212,18 @@ export const api = {
   cancelWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/${id}/cancel`, { method: 'POST' }),
   approveWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/requests/${id}/approve`, { method: 'POST' }),
   rejectWorkflow: (id: string) => json<WorkflowView>(`/v1/workflows/requests/${id}/reject`, { method: 'POST' }),
+
+  listAgentTasks: (params: { status?: string; workspace?: string; limit?: number; before?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.status) q.set('status', params.status)
+    if (params.workspace) q.set('workspace', params.workspace)
+    if (params.limit !== undefined) q.set('limit', String(params.limit))
+    if (params.before) q.set('before', params.before)
+    const query = q.toString()
+    return json<AgentTaskList>(`/v1/tasks${query ? `?${query}` : ''}`)
+  },
+  getAgentTask: (parentSession: string, taskId: string) =>
+    json<AgentTaskDetail>(`/v1/tasks/${encodeURIComponent(parentSession)}/${encodeURIComponent(taskId)}`),
 
   // startTurn opens the turn's event stream from sequence 0.
   startTurn: (id: string, text: string, image?: { data: string; mime_type: string }) =>

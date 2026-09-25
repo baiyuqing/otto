@@ -10,6 +10,7 @@
 //! update signal and runs an empty-text turn whenever a notification is
 //! pending, matching [`crate::cli::repl::Repl`]. There is no second scheduler.
 
+mod agents_view;
 mod app;
 mod commands;
 mod context_view;
@@ -288,6 +289,7 @@ fn draw_error<E: std::fmt::Display>(error: E) -> ReplError {
 enum IdleEvent {
     Input(Option<TuiEvent>),
     Registry(bool),
+    AgentsTick,
 }
 
 async fn run_app<B: Backend>(
@@ -303,6 +305,12 @@ async fn run_app<B: Backend>(
         .map_err(draw_error)?;
 
     let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
+    // The `/agents` overlay's 2-second refresh (spec: "It refreshes every 2
+    // seconds while open."). `None` while the overlay is closed, so the loop
+    // spends no cycles on it otherwise. `reset()` right after creation moves
+    // the first tick 2 seconds out, since `open()`/`handle_key` already ran
+    // a fresh query and an immediate tick would just repeat it.
+    let mut agents_refresh: Option<tokio::time::Interval> = None;
     loop {
         match controller.subagent_tasks() {
             Some(tasks) => {
@@ -316,6 +324,15 @@ async fn run_app<B: Backend>(
             }
             None => updates = None,
         }
+        match &app.agents {
+            Some(_) if agents_refresh.is_none() => {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                interval.reset();
+                agents_refresh = Some(interval);
+            }
+            None => agents_refresh = None,
+            Some(_) => {}
+        }
         let event = {
             let signal = async {
                 match updates.as_mut() {
@@ -323,13 +340,29 @@ async fn run_app<B: Backend>(
                     None => std::future::pending().await,
                 }
             };
+            let tick = async {
+                match agents_refresh.as_mut() {
+                    Some(interval) => interval.tick().await,
+                    None => std::future::pending().await,
+                };
+            };
             tokio::select! {
                 _ = cancel.cancelled() => return Err(ReplError::Cancelled),
                 event = keys.recv() => IdleEvent::Input(event),
                 open = signal => IdleEvent::Registry(open),
+                () = tick => IdleEvent::AgentsTick,
             }
         };
         let event = match event {
+            IdleEvent::AgentsTick => {
+                if let Some(view) = &mut app.agents {
+                    view.tick(controller);
+                }
+                terminal
+                    .draw(|frame| render::draw(frame, &app))
+                    .map_err(draw_error)?;
+                continue;
+            }
             IdleEvent::Input(event) => event,
             IdleEvent::Registry(false) => {
                 updates = None;

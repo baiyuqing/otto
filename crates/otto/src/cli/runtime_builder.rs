@@ -601,6 +601,11 @@ pub struct Builder {
     /// `build_runner` time; the servers themselves are not connected until
     /// then.
     pub mcp: McpRuntime,
+    /// Process-wide sub-agent task recorder (`~/.otto/tasks.db`). `None` keeps
+    /// `build_subagents` from recording task history, matching today's
+    /// behaviour; `build_subagents` injects it into every `Tasks` registry it
+    /// builds.
+    pub task_recorder: Option<Arc<crate::subagent::record::Store>>,
 }
 
 impl Builder {
@@ -621,6 +626,29 @@ impl Builder {
                 .daily(days, session_id)
                 .map_err(|error| error.to_string()),
             None => crate::usage::Analysis::empty(days).map_err(|error| error.to_string()),
+        }
+    }
+
+    pub fn tasks_list(
+        &self,
+        query: &crate::subagent::record::ListQuery,
+    ) -> Result<crate::subagent::record::ListResult, String> {
+        match &self.task_recorder {
+            Some(store) => store.list(query).map_err(|error| error.to_string()),
+            None => Ok(crate::subagent::record::ListResult::default()),
+        }
+    }
+
+    pub fn tasks_get(
+        &self,
+        parent_session: &str,
+        task_id: &str,
+    ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
+        match &self.task_recorder {
+            Some(store) => store
+                .get(parent_session, task_id)
+                .map_err(|error| error.to_string()),
+            None => Ok(None),
         }
     }
 
@@ -1240,6 +1268,7 @@ mod tests {
                 connect_timeout_secs: 20,
                 servers: Vec::new(),
             },
+            task_recorder: None,
         }
     }
 

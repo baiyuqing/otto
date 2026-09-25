@@ -185,6 +185,27 @@ export interface Task {
   session_path?: string
 }
 
+export interface ContextItem {
+  label: string
+  tokens: number
+  text: string
+}
+
+export interface ContextSection {
+  kind: 'system_prompt' | 'tools' | 'mcp_tools' | 'compaction_summary' | 'memory' | 'messages'
+  tokens: number
+  items: ContextItem[]
+}
+
+export interface ContextReport {
+  model: string
+  context_window: number
+  compaction_threshold: number
+  estimated_total: number
+  reported_input_tokens: number | null
+  sections: ContextSection[]
+}
+
 export interface TaskDetail extends Task {
   history: Message[]
 }

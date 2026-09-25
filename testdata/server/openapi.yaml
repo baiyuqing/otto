@@ -256,7 +256,52 @@ components:
           type: string
         error:
           type: string
+        session_path:
+          type: string
+          description: The child session transcript file; omitted when the task runs in memory.
       required: [id, agent, description, status, created_at, steps, tool_calls, usage, usage_present]
+    ContextReport:
+      type: object
+      description: >-
+        otto_core::agent::context_report::ContextReport. Token numbers are
+        estimates (3 bytes per token plus framing), not tokenizer counts.
+      properties:
+        model:
+          type: string
+        context_window:
+          type: integer
+          description: The provider's hard input ceiling; 0 when not configured.
+        compaction_threshold:
+          type: integer
+          description: The estimate at which automatic compaction runs; 0 when it is off.
+        estimated_total:
+          type: integer
+        reported_input_tokens:
+          type: [integer, "null"]
+        sections:
+          type: array
+          items:
+            type: object
+            properties:
+              kind:
+                type: string
+                enum: [system_prompt, tools, mcp_tools, compaction_summary, memory, messages]
+              tokens:
+                type: integer
+              items:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    label:
+                      type: string
+                    tokens:
+                      type: integer
+                    text:
+                      type: string
+                  required: [label, tokens, text]
+            required: [kind, tokens, items]
+      required: [model, context_window, compaction_threshold, estimated_total, reported_input_tokens, sections]
     TaskList:
       type: object
       properties:
@@ -669,6 +714,30 @@ paths:
                   $ref: "#/components/schemas/Message"
         "404":
           description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sessions/{id}/context:
+    parameters:
+      - $ref: "#/components/parameters/sessionID"
+    get:
+      summary: What the next provider request contains, part by part
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContextReport"
+        "404":
+          description: Session not open
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: The redaction boundary withholds dynamic content
           content:
             application/json:
               schema:

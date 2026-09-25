@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 pub mod compaction;
 pub mod compaction_select;
 pub mod context_estimate;
+pub mod context_report;
 pub mod events;
 pub mod inbox;
 pub mod memory;
@@ -68,6 +69,9 @@ pub struct Options {
     pub model: String,
     pub provider_name: String,
     pub system_prompt: String,
+    /// Labeled pieces of `system_prompt`, for the context report only. They
+    /// are ignored unless they concatenate to `system_prompt` exactly.
+    pub system_prompt_parts: Vec<(String, String)>,
     pub thinking: String,
     /// Returns the current time. Called once per persisted message and twice
     /// per provider call, to measure its duration.
@@ -101,6 +105,7 @@ impl Default for Options {
             model: String::new(),
             provider_name: String::new(),
             system_prompt: String::new(),
+            system_prompt_parts: Vec::new(),
             thinking: String::new(),
             now: Box::new(zero_time),
             new_id: Box::new(String::new),
@@ -125,6 +130,8 @@ pub struct Agent<P, T, S> {
     pub(super) session: S,
     pub(super) options: Options,
     pub(super) redactor: Redactor,
+    /// The memory block the last user turn recalled, for the context report.
+    last_memory_context: std::sync::Mutex<String>,
 }
 
 impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
@@ -165,6 +172,46 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             session,
             options,
             redactor,
+            last_memory_context: std::sync::Mutex::default(),
+        }
+    }
+
+    /// What the next ordinary provider request contains, from the same
+    /// builder the run loop uses. Per-turn state (a tool-result overlay, the
+    /// next recall) does not exist yet, so the request carries neither; the
+    /// last turn's recall is listed as its own section.
+    pub fn context_report(&self) -> context_report::ContextReport {
+        let (request, estimated_total) =
+            self.build_normal_provider_request(&RunDispatchState::default());
+        let memory = self
+            .last_memory_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let settings = &self.options.compaction;
+        let compaction_threshold = match automatic_compaction_triggers(settings) {
+            Some((working, _)) if settings.auto => working,
+            _ => 0,
+        };
+        let snapshot = crate::session::context::snapshot_from_state(
+            crate::model::Usage::default(),
+            false,
+            &request.messages,
+            self.session.latest_compaction().as_ref(),
+        );
+        context_report::ContextReport {
+            model: request.model.clone(),
+            context_window: settings.hard_input_window.max(0),
+            compaction_threshold,
+            estimated_total,
+            reported_input_tokens: snapshot
+                .context_input_tokens_present
+                .then_some(snapshot.context_input_tokens),
+            sections: context_report::sections(
+                &request,
+                &self.options.system_prompt_parts,
+                &memory,
+            ),
         }
     }
 
@@ -270,6 +317,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     }),
                 }
             }
+            *self
+                .last_memory_context
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = state.memory_context.clone();
         }
         if let Err(error) = self.deliver_notifications(emit).await {
             return Err(self.fail(emit, error));

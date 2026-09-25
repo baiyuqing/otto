@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 use super::app::{App, TurnStatus};
@@ -61,6 +61,8 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
 
     if app.show_help {
         draw_help(frame, area);
+    } else if let Some(view) = &app.context {
+        draw_context(frame, area, view);
     } else if let Some(picker) = &app.picker {
         draw_picker(frame, area, picker);
     }
@@ -331,6 +333,34 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(picker.selected));
     frame.render_widget(Clear, popup);
+    frame.render_stateful_widget(list, popup, &mut state);
+}
+
+/// The `/context` overlay: the section list, or one item's full text over it.
+fn draw_context(frame: &mut Frame, area: Rect, view: &super::context_view::ContextView) {
+    let popup = centered_rect(80, 70, area);
+    frame.render_widget(Clear, popup);
+    if let Some(text) = &view.text {
+        let paragraph = Paragraph::new(text.text.as_str())
+            .wrap(Wrap { trim: false })
+            .scroll((text.scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("{} (esc to go back)", text.title)),
+            );
+        frame.render_widget(paragraph, popup);
+        return;
+    }
+    let items: Vec<ListItem> = view
+        .rows()
+        .into_iter()
+        .map(|row| ListItem::new(view.row_label(row)))
+        .collect();
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(view.header()))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state = ListState::default().with_selected(Some(view.selected));
     frame.render_stateful_widget(list, popup, &mut state);
 }
 
@@ -651,6 +681,49 @@ mod tests {
                 .symbol(),
             " "
         );
+    }
+
+    #[tokio::test]
+    async fn the_context_overlay_shows_the_header_sections_and_item_text() {
+        use crate::tui::context_view::ContextView;
+        use otto_core::agent::context_report::{
+            ContextItem, ContextReport, ContextSection, SectionKind,
+        };
+
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        let mut view = ContextView::new(ContextReport {
+            model: "gpt-5".into(),
+            context_window: 0,
+            compaction_threshold: 0,
+            estimated_total: 1_200,
+            reported_input_tokens: None,
+            sections: vec![ContextSection {
+                kind: SectionKind::SystemPrompt,
+                tokens: 1_200,
+                items: vec![ContextItem {
+                    label: "Base".into(),
+                    tokens: 1_200,
+                    text: "You are Otto.\nsecond line".into(),
+                }],
+            }],
+        });
+        app.context = Some(view.clone());
+
+        let screen = screen_rows(&app, 120, 30).join("\n");
+        assert!(
+            screen.contains("Context  gpt-5 · ~1.2k tokens (estimate)"),
+            "{screen}"
+        );
+        assert!(screen.contains("System prompt"), "{screen}");
+
+        view.handle_key(KeyCode::Enter);
+        view.handle_key(KeyCode::Down);
+        view.handle_key(KeyCode::Enter);
+        app.context = Some(view);
+        let screen = screen_rows(&app, 120, 30).join("\n");
+        assert!(screen.contains("Base · ~1.2k tokens"), "{screen}");
+        assert!(screen.contains("You are Otto."), "{screen}");
+        assert!(screen.contains("second line"), "{screen}");
     }
 
     /// Below the static minimum on either axis, the frame is just the resize

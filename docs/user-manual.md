@@ -611,6 +611,17 @@ Shared commands:
 
 TUI-only commands:
 
+- `/context` opens a modal that lists what the next provider request contains:
+  the system prompt parts (base, environment, workspace instructions, skills,
+  agents), built-in and MCP tool definitions, the compaction summary, the
+  previous turn's memory recall, and each message. The title shows the model,
+  the estimated total against the context window, the last provider-reported
+  input tokens, and the automatic compaction threshold. Token numbers are
+  estimates (about 3 bytes per token), not tokenizer counts. `↑`/`↓` select,
+  `Enter` expands a section or opens an item's full text (`↑`/`↓`/`PgUp`/`PgDn`
+  scroll it), and `Esc` goes back one level. The report is taken when the modal
+  opens. The memory section is the previous turn's recall; the next turn
+  recalls again with its own prompt.
 - `/image <path>` attaches one image to the next prompt. The image is stored
   inline in the session; the selected model and provider endpoint must support
   image input. Otto sends images with `detail: high`.
@@ -1060,6 +1071,10 @@ the transcript, and a composer:
   tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
   and at turn end, polls every 3 seconds while a task is queued or running,
   and offers **Cancel** for those.
+- **Context** in the session bar opens a side panel with the same report as
+  the TUI `/context` modal (`GET /v1/sessions/{id}/context`): one bar per
+  section, and each section and item expands to show its text. It re-reads
+  when opened and at turn end.
 - The footer shows `GET /v1/info` (provider, model, sandbox), the session's
   context size and cumulative usage from `GET /v1/sessions/{id}`, and persisted
   all-session token totals and cache hit rate from `GET /v1/usage`; during a
@@ -1095,6 +1110,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/turns/{turn_id}/events?after=N` | Re-read the most recent turn's event stream from sequence `N+1`; also honors the `Last-Event-ID` header. |
 | `POST /v1/sessions/{id}/turns/{turn_id}/cancel` | Cancel the turn, `202`. |
 | `POST /v1/sessions/{id}/compact` | Run one context compaction now, optionally with `{"focus":"..."}`, and return the compaction result (`noop:true` when there was nothing to compact). `409 turn_active` while a turn or another compaction runs; `409 compaction_failed` when the compaction fails and the previous context stays in effect. Closing the request cancels the compaction. |
+| `GET /v1/sessions/{id}/context` | Return what the next provider request contains: model, context window, compaction threshold, estimated and last reported input tokens, and sections of items with estimated tokens and text. `409 context_unavailable` when the redaction boundary is closed. |
 | `GET /v1/sessions/{id}/tasks` | List the session's sub-agent tasks in creation order. |
 | `GET /v1/sessions/{id}/tasks/{task_id}` | Return one task plus its child session's history. |
 | `POST /v1/sessions/{id}/tasks/{task_id}/cancel` | Cancel a running task and return it. `409 task_done` if it already finished. |

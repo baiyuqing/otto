@@ -30,6 +30,7 @@ use crate::cli::login;
 use crate::cli::repl_commands;
 
 use super::commands::{self, SlashCommand, SlashCommandKind};
+use super::context_view::ContextView;
 use super::entries::{self, Entry, EntryKind};
 use super::layout;
 use super::selection::Selection;
@@ -258,6 +259,8 @@ pub(crate) struct App {
     /// wheel notch clears it, because both move the text out from under it.
     pub selection: Option<Selection>,
     pub picker: Option<Picker>,
+    /// The open `/context` overlay.
+    pub context: Option<ContextView>,
     /// The highlighted row of the slash-command suggestion panel (see
     /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
     /// only ever indexes the match list the current value produces.
@@ -290,6 +293,7 @@ impl App {
             max_scroll: Cell::new(0),
             selection: None,
             picker: None,
+            context: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -462,6 +466,13 @@ impl App {
         if self.show_help {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
                 self.show_help = false;
+            }
+            return None;
+        }
+
+        if let Some(view) = &mut self.context {
+            if !view.handle_key(key.code) {
+                self.context = None;
             }
             return None;
         }
@@ -667,7 +678,7 @@ impl App {
     /// [`App::suggestion`] indexing the highlighted one. An open overlay hides
     /// the panel. [`super::render`] draws exactly this list.
     pub(super) fn suggestions(&self) -> Vec<SlashCommand> {
-        if self.show_help || self.picker.is_some() {
+        if self.show_help || self.picker.is_some() || self.context.is_some() {
             return Vec::new();
         }
         let value: String = self.input.iter().collect();
@@ -910,6 +921,13 @@ impl App {
             }
             SlashCommandKind::Task => {
                 self.push_system(task_report(controller, &args));
+                None
+            }
+            SlashCommandKind::Context => {
+                match controller.context_report() {
+                    Some(report) => self.context = Some(ContextView::new(report)),
+                    None => self.push_system("/context: no session is open".to_string()),
+                }
                 None
             }
             SlashCommandKind::Timers => {
@@ -1397,6 +1415,8 @@ fn task_line(task: &Task) -> String {
 
 #[cfg(test)]
 mod tests {
+    use otto_core::agent::context_report::SectionKind;
+
     use super::*;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -1470,6 +1490,7 @@ mod tests {
             max_scroll: Cell::new(0),
             selection: None,
             picker: None,
+            context: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1496,6 +1517,7 @@ mod tests {
             max_scroll: Cell::new(0),
             selection: None,
             picker: None,
+            context: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1522,6 +1544,7 @@ mod tests {
             max_scroll: Cell::new(0),
             selection: None,
             picker: None,
+            context: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1551,6 +1574,7 @@ mod tests {
             max_scroll: Cell::new(0),
             selection: None,
             picker: None,
+            context: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1840,6 +1864,26 @@ mod tests {
             app.entries.last().expect("entry").raw,
             repl_commands::MCP_USAGE
         );
+    }
+
+    #[tokio::test]
+    async fn context_command_opens_the_report_and_esc_closes_it() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let cancel = CancellationToken::new();
+
+        assert!(
+            app.dispatch_line("/context", &controller, &cancel)
+                .is_none()
+        );
+        let view = app.context.as_ref().expect("the context overlay is open");
+        assert_eq!(view.report.sections[0].kind, SectionKind::SystemPrompt);
+        assert!(app.suggestions().is_empty(), "an overlay hides suggestions");
+
+        app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller, &cancel);
+        assert!(app.context.is_none());
     }
 
     #[tokio::test]

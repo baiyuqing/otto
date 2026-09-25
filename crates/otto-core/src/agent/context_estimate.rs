@@ -78,14 +78,14 @@ fn estimate_block(block: &Block) -> i64 {
 }
 
 /// Three bytes per token, rounded up, and zero for an empty string.
-fn estimate_string(value: &str) -> i64 {
+pub(crate) fn estimate_string(value: &str) -> i64 {
     if value.is_empty() {
         return 0;
     }
     1 + (value.len() as i64 - 1) / 3
 }
 
-fn estimate_tool_definition(definition: &ToolDefinition) -> i64 {
+pub(crate) fn estimate_tool_definition(definition: &ToolDefinition) -> i64 {
     let mut total = TOOL_DEFINITION_FRAMING_TOKENS;
     total = saturating_add(total, estimate_string(&definition.name));
     total = saturating_add(total, estimate_string(&definition.description));

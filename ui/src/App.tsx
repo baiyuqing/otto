@@ -6,6 +6,7 @@ import { SessionPicker } from './SessionPicker'
 import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
 import { Footer } from './Footer'
+import { ContextPanel } from './ContextPanel'
 import { Tasks } from './Tasks'
 import { UsageView } from './UsageView'
 import { WorkflowsView } from './WorkflowsView'
@@ -77,6 +78,7 @@ export function App() {
   const [recordedUsage, setRecordedUsage] = useState<UsageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
   const [tasksKey, setTasksKey] = useState(0)
+  const [showContext, setShowContext] = useState(false)
   const [error, setError] = useState('')
   const compactAbort = useRef<AbortController | null>(null)
   // The running turn's phase and when it and the turn started (ms). A turn
@@ -463,6 +465,9 @@ export function App() {
             <button type="button" disabled={busy} onClick={renameSession}>
               Rename
             </button>
+            <button type="button" aria-pressed={showContext} onClick={() => setShowContext((v) => !v)}>
+              Context
+            </button>
           </div>
         )}
       </header>
@@ -483,6 +488,14 @@ export function App() {
           <TranscriptView items={items} activeSession={session !== null} />
         )}
       </main>
+      {view === 'chat' && session && showContext && (
+        <ContextPanel
+          sessionId={session.id}
+          refreshKey={tasksKey}
+          onClose={() => setShowContext(false)}
+          onError={fail}
+        />
+      )}
       {view === 'chat' && session && <Tasks sessionId={session.id} refreshKey={tasksKey} onError={fail} />}
       {view === 'chat' && (
         <Composer

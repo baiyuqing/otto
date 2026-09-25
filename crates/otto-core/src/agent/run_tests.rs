@@ -16,6 +16,7 @@ use crate::provider::{
 use crate::session::{MemorySession, Session};
 use crate::tool::{ToolExecutor, ToolResult};
 
+use super::context_report::SectionKind;
 use super::inbox::{Inbox, Notification, NotificationKind};
 use super::memory::{MemoryError, MemoryRecall, RecallRequest, RecallResult, Record, Scope};
 use super::redactor::Redactor;
@@ -2203,4 +2204,159 @@ async fn a_failed_tool_result_append_stops_before_the_next_provider_call() {
         .expect_err("the append failure stops the run");
     assert!(error.to_string().ends_with("disk full"), "{error}");
     assert_eq!(agent.provider().requests().len(), 1);
+}
+
+// -- context report --------------------------------------------------------
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn the_context_report_lists_what_the_next_request_sends() {
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::tool_call("c1", r#"{"value":1}"#),
+            Turn::text("done"),
+        ]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            system_prompt: "base\n## Skills\nnone".into(),
+            system_prompt_parts: vec![
+                ("Base".into(), "base\n".into()),
+                ("Skills".into(), "## Skills\nnone".into()),
+            ],
+            memory: Some(Arc::new(FakeMemory::with_records(one_record()))),
+            compaction: CompactionSettings {
+                auto: true,
+                hard_input_window: 200_000,
+                working_window: 100_000,
+                reserve_tokens: 1_000,
+                keep_recent_tokens: 10_000,
+            },
+            ..options()
+        },
+    );
+    agent
+        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+
+    let report = agent.context_report();
+    assert_eq!(report.model, "test-model");
+    assert_eq!(report.context_window, 200_000);
+    assert_eq!(report.compaction_threshold, 99_000);
+
+    let section = |kind: SectionKind| {
+        report
+            .sections
+            .iter()
+            .find(|section| section.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind:?} section"))
+    };
+    let prompt = section(SectionKind::SystemPrompt);
+    let labels: Vec<&str> = prompt.items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels, ["Base", "Skills"]);
+    let text: String = prompt.items.iter().map(|i| i.text.as_str()).collect();
+    assert_eq!(text, "base\n## Skills\nnone");
+
+    let tools = section(SectionKind::Tools);
+    assert_eq!(tools.items.len(), 1);
+    assert_eq!(tools.items[0].label, "echo");
+    assert!(tools.items[0].text.contains(r#""type":"object""#));
+
+    // user, assistant tool call, tool result, assistant text: the session
+    // transcript, in order.
+    let messages = section(SectionKind::Messages);
+    assert_eq!(messages.items.len(), agent.session().messages().len());
+    assert_eq!(messages.items[0].label, "#1 user");
+    assert_eq!(messages.items[0].text, "hello");
+    assert_eq!(messages.items[1].label, "#2 assistant echo");
+    assert_eq!(messages.items[2].label, "#3 tool echo");
+    assert_eq!(messages.items[3].text, "done");
+
+    let memory = section(SectionKind::Memory);
+    assert!(memory.items[0].text.contains("prefers vim"));
+
+    for section in &report.sections {
+        let sum: i64 = section.items.iter().map(|item| item.tokens).sum();
+        assert_eq!(section.tokens, sum, "{:?}", section.kind);
+    }
+    assert!(report.estimated_total > 0);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn prompt_parts_that_do_not_match_the_prompt_fall_back_to_one_part() {
+    let agent = Agent::new(
+        FakeProvider::new(Vec::new()),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            system_prompt: "the real prompt".into(),
+            system_prompt_parts: vec![("Base".into(), "something else".into())],
+            ..options()
+        },
+    );
+    let report = agent.context_report();
+    let prompt = &report.sections[0];
+    assert_eq!(prompt.kind, SectionKind::SystemPrompt);
+    assert_eq!(prompt.items.len(), 1);
+    assert_eq!(prompt.items[0].label, "System prompt");
+    assert_eq!(prompt.items[0].text, "the real prompt");
+    // No compaction settings: no window and no threshold.
+    assert_eq!(report.context_window, 0);
+    assert_eq!(report.compaction_threshold, 0);
+    assert!(
+        !report
+            .sections
+            .iter()
+            .any(|section| section.kind == SectionKind::Memory),
+        "no recall ran, so there is no memory section"
+    );
+}
+
+#[test]
+fn a_compaction_summary_and_mcp_tools_get_their_own_sections() {
+    use crate::session::COMPACTION_CONTEXT_TYPE;
+    let request = Request {
+        model: "m".into(),
+        system_prompt: "p".into(),
+        thinking: String::new(),
+        messages: vec![
+            Message {
+                role: Role::Context,
+                context_type: COMPACTION_CONTEXT_TYPE.into(),
+                blocks: vec![Block::text("[Compaction summary]\nearlier")],
+                ..Message::default()
+            },
+            Message {
+                role: Role::User,
+                blocks: vec![Block::text("next")],
+                ..Message::default()
+            },
+        ],
+        tools: vec![
+            ToolDefinition {
+                name: "read".into(),
+                ..ToolDefinition::default()
+            },
+            ToolDefinition {
+                name: "mcp__github__search".into(),
+                ..ToolDefinition::default()
+            },
+        ],
+    };
+    let sections = super::context_report::sections(&request, &[], "");
+    let kinds: Vec<SectionKind> = sections.iter().map(|section| section.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            SectionKind::SystemPrompt,
+            SectionKind::Tools,
+            SectionKind::McpTools,
+            SectionKind::CompactionSummary,
+            SectionKind::Messages,
+        ]
+    );
+    assert_eq!(sections[3].items[0].text, "[Compaction summary]\nearlier");
+    assert_eq!(sections[4].items[0].label, "#2 user");
 }

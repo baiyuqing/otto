@@ -6,6 +6,8 @@
 export type {
   Block,
   Compaction,
+  ContextReport,
+  ContextSection,
   Frame,
   Info,
   Message,

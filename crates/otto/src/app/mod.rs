@@ -428,6 +428,16 @@ impl Controller {
         }
     }
 
+    /// What the next provider request contains, or `None` after a close or
+    /// when the redaction boundary withholds dynamic content.
+    pub fn context_report(&self) -> Option<otto_core::agent::context_report::ContextReport> {
+        if !self.dynamic_content {
+            return None;
+        }
+        let runner = self.current_runner()?;
+        Some(runner.context_report())
+    }
+
     /// The session currently in force, or `None` after a close.
     pub fn current_session_opt(&self) -> Option<SharedSession> {
         self.lock()
@@ -1343,6 +1353,27 @@ mod tests {
         assert_eq!(info.session_path, "");
         assert_eq!(info.sandbox.summary(), controller.sandbox_info().summary());
         assert_eq!(info.workspace, controller.workspace());
+    }
+
+    #[tokio::test]
+    async fn the_context_report_is_withheld_without_dynamic_content() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let open = controller(workspace.path(), sessions.path()).await;
+        let report = open.context_report().expect("report");
+        assert_eq!(report.model, "gpt-alpha");
+        assert!(!report.sections.is_empty());
+
+        let builder = builder(workspace.path(), sessions.path());
+        let runtime = initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("session");
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let info = builder.runtime_info(&runtime);
+        let withheld = Controller::new(builder, false, session, runner, info);
+        assert!(withheld.context_report().is_none());
     }
 
     #[tokio::test]

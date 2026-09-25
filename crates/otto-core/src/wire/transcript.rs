@@ -32,6 +32,12 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         created_at: String,
     },
+    /// Model reasoning that precedes an assistant reply.
+    Reasoning {
+        text: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        created_at: String,
+    },
     Tool {
         id: String,
         name: String,
@@ -231,6 +237,14 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
                         created_at: message_created_at(message),
                     });
                 }
+                "reasoning" => {
+                    if message.role == "assistant" && !block.text.is_empty() {
+                        items.push(Item::Reasoning {
+                            text: block.text.clone(),
+                            created_at: message_created_at(message),
+                        });
+                    }
+                }
                 "image" if message.role == "user" => {
                     items.push(Item::Image {
                         data: block.data.clone(),
@@ -263,6 +277,57 @@ pub fn from_history_messages(messages: &[HistoryMessage]) -> Vec<Item> {
     items
 }
 
+/// How many characters of a tool call's raw arguments the phase shows.
+const PHASE_ARGS_LIMIT: usize = 60;
+
+/// The turn phase `event` starts, or `None` when the event leaves the phase
+/// unchanged. Both frontends show the result through [`status_line`].
+pub fn phase(event: &WireEvent) -> Option<String> {
+    let phase = match event.event_type.as_str() {
+        "agent_started" | "tool_call_finished" | "compaction_completed" => {
+            "waiting for model".to_string()
+        }
+        "reasoning_delta" => "reasoning".to_string(),
+        "text_delta" => "responding".to_string(),
+        "compaction_started" => "compacting".to_string(),
+        "tool_call_started" => {
+            let raw = event.tool_args.as_deref().map_or("", RawValue::get);
+            let flat: String = raw
+                .chars()
+                .map(|c| if c.is_whitespace() { ' ' } else { c })
+                .collect();
+            let preview = if flat.chars().count() > PHASE_ARGS_LIMIT {
+                let cut: String = flat.chars().take(PHASE_ARGS_LIMIT - 1).collect();
+                format!("{cut}…")
+            } else {
+                flat
+            };
+            format!("running {} {preview}", event.tool_name)
+                .trim_end()
+                .to_string()
+        }
+        "provider_retry" => {
+            let retry = event.retry.clone().unwrap_or_default();
+            let delay = if retry.delay_ms < 1000 {
+                format!("{}ms", retry.delay_ms)
+            } else {
+                format!("{}s", retry.delay_ms as f64 / 1000.0)
+            };
+            format!(
+                "retry {}/{} after {}, waiting {delay}",
+                retry.attempt, retry.max_attempts, retry.reason
+            )
+        }
+        _ => return None,
+    };
+    Some(phase)
+}
+
+/// The in-flight turn's status: `<phase> · <phase seconds>s · turn <turn seconds>s`.
+pub fn status_line(phase: &str, phase_secs: u64, turn_secs: u64) -> String {
+    format!("{phase} · {phase_secs}s · turn {turn_secs}s")
+}
+
 /// Applies one turn event, given as the SSE frame's `data` field, and returns
 /// the next transcript. `items` is never modified.
 pub fn reduce_json(items: &[Item], event_json: &str) -> Result<Vec<Item>, serde_json::Error> {
@@ -273,6 +338,21 @@ pub fn reduce_json(items: &[Item], event_json: &str) -> Result<Vec<Item>, serde_
 /// The decoded form of [`reduce_json`].
 pub fn reduce(items: &[Item], event: &WireEvent) -> Vec<Item> {
     match event.event_type.as_str() {
+        "reasoning_delta" => {
+            if event.text.is_empty() {
+                return items.to_vec();
+            }
+            let mut next = items.to_vec();
+            if let Some(Item::Reasoning { text, .. }) = next.last_mut() {
+                text.push_str(&event.text);
+            } else {
+                next.push(Item::Reasoning {
+                    text: event.text.clone(),
+                    created_at: String::new(),
+                });
+            }
+            next
+        }
         "text_delta" => {
             if event.text.is_empty() {
                 return items.to_vec();
@@ -442,6 +522,34 @@ mod tests {
             r#"{"type":"agent_finished"}"#,
         ]);
         assert_eq!(items, vec![assistant("hello")]);
+    }
+
+    fn reasoning(text: &str) -> Item {
+        Item::Reasoning {
+            text: text.into(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn merges_reasoning_deltas_into_one_item_before_the_reply() {
+        let items = apply(&[
+            r#"{"type":"reasoning_delta","text":"weigh "}"#,
+            r#"{"type":"reasoning_delta","text":"options"}"#,
+            r#"{"type":"text_delta","text":"ok"}"#,
+        ]);
+        assert_eq!(items, vec![reasoning("weigh options"), assistant("ok")]);
+    }
+
+    #[test]
+    fn history_reasoning_is_not_rendered_as_reply_text() {
+        let items = from_history(
+            r#"[{"role":"assistant","blocks":[
+              {"type":"reasoning","text":"weigh options"},
+              {"type":"text","text":"ok"}]}]"#,
+        )
+        .expect("decodes");
+        assert_eq!(items, vec![reasoning("weigh options"), assistant("ok")]);
     }
 
     #[test]
@@ -614,5 +722,48 @@ mod tests {
             serde_json::to_string(&tool("c1", "bash", "a", None, None)).expect("item serializes"),
             r#"{"kind":"tool","id":"c1","name":"bash","args":"a"}"#
         );
+    }
+
+    fn phase_of(event_json: &str) -> Option<String> {
+        phase(&serde_json::from_str(event_json).expect("event decodes"))
+    }
+
+    #[test]
+    fn each_turn_event_maps_to_its_phase() {
+        let long = "x".repeat(80);
+        let cases = [
+            (r#"{"type":"agent_started"}"#.to_string(), Some("waiting for model")),
+            (r#"{"type":"tool_call_finished","tool_call_id":"c1"}"#.into(), Some("waiting for model")),
+            (r#"{"type":"compaction_completed"}"#.into(), Some("waiting for model")),
+            (r#"{"type":"reasoning_delta","text":"a"}"#.into(), Some("reasoning")),
+            (r#"{"type":"text_delta","text":"a"}"#.into(), Some("responding")),
+            (r#"{"type":"compaction_started"}"#.into(), Some("compacting")),
+            (
+                r#"{"type":"tool_call_started","tool_name":"bash","tool_args":{"command":"ls\n-la"}}"#.into(),
+                Some(r#"running bash {"command":"ls\n-la"}"#),
+            ),
+            (
+                format!(r#"{{"type":"tool_call_started","tool_name":"read","tool_args":"{long}"}}"#),
+                Some(&*format!("running read \"{}…", "x".repeat(58))),
+            ),
+            (
+                r#"{"type":"provider_retry","retry":{"attempt":2,"max_attempts":3,"delay_ms":250,"reason":"HTTP 503"}}"#.into(),
+                Some("retry 2/3 after HTTP 503, waiting 250ms"),
+            ),
+            (
+                r#"{"type":"provider_retry","retry":{"attempt":3,"max_attempts":3,"delay_ms":2500,"reason":"HTTP 429"}}"#.into(),
+                Some("retry 3/3 after HTTP 429, waiting 2.5s"),
+            ),
+            (r#"{"type":"provider_usage"}"#.into(), None),
+            (r#"{"type":"agent_finished"}"#.into(), None),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(phase_of(&event).as_deref(), expected, "{event}");
+        }
+    }
+
+    #[test]
+    fn the_status_line_names_the_phase_and_both_durations() {
+        assert_eq!(status_line("reasoning", 4, 71), "reasoning · 4s · turn 71s");
     }
 }

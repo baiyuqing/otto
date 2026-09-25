@@ -209,6 +209,8 @@ pub fn serialize_summary_input(
                         encode_json_string(&content)
                     )
                 }
+                // Reasoning is display-only and never part of model input.
+                BlockType::Reasoning => continue,
                 BlockType::Other(_) => {
                     return Err("compaction source has an unsupported block type".into());
                 }

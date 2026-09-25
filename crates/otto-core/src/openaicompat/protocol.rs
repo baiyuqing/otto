@@ -164,6 +164,12 @@ pub struct WireChoice {
 pub struct WireDelta {
     #[serde(default, deserialize_with = "null_as_default")]
     pub content: String,
+    /// Reasoning text as DeepSeek, Qwen, and vLLM spell it.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub reasoning_content: String,
+    /// Reasoning text as OpenRouter spells it.
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub reasoning: String,
     #[serde(default, deserialize_with = "null_as_default")]
     pub tool_calls: Vec<WireToolCall>,
 }
@@ -412,6 +418,7 @@ mod tests {
                 Message {
                     role: Role::Assistant,
                     blocks: vec![
+                        Block::reasoning("never sent"),
                         Block::text("sure"),
                         Block {
                             block_type: BlockType::ToolCall,

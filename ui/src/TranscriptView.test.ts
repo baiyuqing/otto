@@ -91,3 +91,19 @@ describe('TranscriptView images', () => {
     expect(element?.getAttribute('alt')).toBe('Sent image')
   })
 })
+
+describe('TranscriptView reasoning', () => {
+  it('shows reasoning collapsed with its first line as the summary', () => {
+    const items: Item[] = [
+      { kind: 'reasoning', text: 'Weigh options\nthen pick the smaller diff' },
+      { kind: 'assistant', text: 'ok' },
+    ]
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items }))
+
+    const details = container.querySelector('details.item.reasoning') as HTMLDetailsElement
+    expect(details).not.toBeNull()
+    expect(details.open).toBe(false)
+    expect(details.querySelector('summary')?.textContent).toContain('Weigh options')
+    expect(details.textContent).toContain('then pick the smaller diff')
+  })
+})

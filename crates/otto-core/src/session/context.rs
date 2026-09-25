@@ -587,11 +587,20 @@ fn pi_context_text_and_tool_blocks(message: &PiMessage, role: Role) -> Result<Ve
                     .map_err(|_| PiError::invalid("image content is malformed"))?;
                 blocks.push(image);
             }
+            // Otto writes unsigned assistant reasoning. Signed or redacted
+            // thinking from another writer cannot be represented.
             "thinking" => {
-                return Err(PiError::new(
-                    PiErrorKind::UnsupportedContent,
-                    "Pi message content is not supported by Otto",
-                ));
+                if role != Role::Assistant
+                    || block.thinking.is_empty()
+                    || !block.thinking_signature.is_empty()
+                    || block.redacted.is_some()
+                {
+                    return Err(PiError::new(
+                        PiErrorKind::UnsupportedContent,
+                        "Pi message content is not supported by Otto",
+                    ));
+                }
+                blocks.push(Block::reasoning(block.thinking.clone()));
             }
             _ => {
                 return Err(PiError::new(
@@ -1005,6 +1014,18 @@ fn model_blocks_to_pi_content(role: Role, blocks: &[Block]) -> Result<Box<RawVal
                 content.push(PiContentBlock {
                     type_name: "text".into(),
                     text: block.text.clone(),
+                    ..PiContentBlock::default()
+                });
+            }
+            BlockType::Reasoning => {
+                if role != Role::Assistant {
+                    return Err(PiError::invalid(
+                        "reasoning content is incompatible with message role",
+                    ));
+                }
+                content.push(PiContentBlock {
+                    type_name: "thinking".into(),
+                    thinking: block.text.clone(),
                     ..PiContentBlock::default()
                 });
             }
@@ -1592,6 +1613,54 @@ mod tests {
             ..PiMessage::default()
         }));
         built
+    }
+
+    #[test]
+    fn assistant_reasoning_round_trips_as_pi_thinking() {
+        let message = Message {
+            id: "m1".into(),
+            role: Role::Assistant,
+            blocks: vec![Block::reasoning("check the file"), Block::text("done")],
+            created_at: DateTime::from_timestamp(1, 0).expect("in range"),
+            finish_reason: Some(FinishReason::Stop),
+            ..Message::default()
+        };
+        let header = Header {
+            provider: "openai-compatible".into(),
+            model: "m".into(),
+            ..Header::default()
+        };
+        let (entry, _) = model_message_to_pi_entry(&message, "e1", None, &header).expect("encode");
+        let wire = entry.message.as_ref().expect("message");
+        assert_eq!(wire.content_blocks[0].type_name, "thinking");
+        assert_eq!(wire.content_blocks[0].thinking, "check the file");
+        let decoded = pi_entry_to_context_messages(&entry).expect("decode");
+        assert_eq!(decoded[0].blocks, message.blocks);
+    }
+
+    #[test]
+    fn pi_thinking_is_rejected_when_signed_or_outside_assistant() {
+        let mut signed = assistant_entry("a1", None, "x", "p", "m", 1, 1, "stop");
+        signed.message.as_mut().expect("message").content_blocks = vec![PiContentBlock {
+            type_name: "thinking".into(),
+            thinking: "t".into(),
+            thinking_signature: "sig".into(),
+            ..PiContentBlock::default()
+        }];
+        assert!(pi_entry_to_context_messages(&signed).is_err());
+
+        let mut user = entry("message", "u1", None);
+        user.message = Some(Box::new(PiMessage {
+            role: "user".into(),
+            content_blocks: vec![PiContentBlock {
+                type_name: "thinking".into(),
+                thinking: "t".into(),
+                ..PiContentBlock::default()
+            }],
+            timestamp: 1,
+            ..PiMessage::default()
+        }));
+        assert!(pi_entry_to_context_messages(&user).is_err());
     }
 
     fn tool_call_entry(id: &str, parent_id: Option<&str>, calls: &[(&str, &str)]) -> PiEntry {

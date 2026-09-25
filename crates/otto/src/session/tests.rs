@@ -1478,6 +1478,71 @@ fn archive_moves_active_session_preserving_bytes_and_mode() {
     );
 }
 
+/// Writes one child transcript for the parent at `parent` and returns its path.
+fn seed_child(workspace: &Path, parent: &str) -> PathBuf {
+    let mut header = test_header(workspace);
+    header.id = "child-0000".into();
+    let store = Store::create_child_lazy(parent, "t1-child-0000", header).expect("create child");
+    store.append_message(&user("delegated")).expect("append");
+    let path = PathBuf::from(store.path());
+    store.close().expect("close");
+    path
+}
+
+#[test]
+fn a_child_store_is_written_lazily_beside_its_parent() {
+    let temp = TempDir::new();
+    let (_, workspace, paths) = seeded_workspace(&temp, 1);
+    let mut header = test_header(&workspace);
+    header.id = "child-0000".into();
+    let want = Path::new(&paths[0])
+        .with_extension("")
+        .join("t1-child-0000.jsonl");
+
+    let store = Store::create_child_lazy(&paths[0], "t1-child-0000", header).expect("create");
+    assert!(!want.exists(), "no file before the first write");
+    store.append_message(&user("delegated")).expect("append");
+    store.close().expect("close");
+
+    assert_eq!(store.path(), want.to_string_lossy());
+    assert_eq!(mode(&want), 0o600);
+    assert_eq!(mode(want.parent().expect("parent")), 0o700);
+    let text = fs::read_to_string(&want).expect("read");
+    let first: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("header")).expect("json");
+    assert_eq!(first["parentSession"], paths[0].as_str());
+    let (reopened, _) = Store::open(&want).expect("reopen");
+    assert_eq!(reopened.messages().len(), 1);
+    reopened.close().expect("close");
+}
+
+#[test]
+fn list_does_not_return_child_transcripts() {
+    let temp = TempDir::new();
+    let (root, workspace, paths) = seeded_workspace(&temp, 1);
+    seed_child(&workspace, &paths[0]);
+
+    let listed = list::list(&root, &workspace.to_string_lossy(), "", 10).expect("list");
+    let listed: Vec<_> = listed.sessions.iter().map(|s| s.path.clone()).collect();
+    assert_eq!(listed, paths);
+}
+
+#[test]
+fn archive_moves_the_child_transcript_directory() {
+    let temp = TempDir::new();
+    let (root, workspace, paths) = seeded_workspace(&temp, 1);
+    let child = seed_child(&workspace, &paths[0]);
+
+    let result =
+        archive(&root, &workspace.to_string_lossy(), Path::new(&paths[0])).expect("archive");
+
+    assert!(!child.parent().expect("dir").exists());
+    let moved = Path::new(&result.path)
+        .with_extension("")
+        .join(child.file_name().expect("name"));
+    assert!(moved.exists(), "{moved:?}");
+}
+
 #[test]
 fn archive_deletes_the_reminder_sidecar() {
     let temp = TempDir::new();

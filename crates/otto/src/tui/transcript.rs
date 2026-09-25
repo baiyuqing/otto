@@ -78,6 +78,14 @@ fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>>
             // than stopping where the typed text happens to end.
             gutter::pad_rows(gutter::block(&text, USER_MARK, style, width), style, width)
         }
+        Some(EntryKind::Reasoning) => {
+            let dim = Style::default().add_modifier(Modifier::DIM);
+            let mut text = markdown::render(&entry.raw).lines;
+            for span in text.iter_mut().flat_map(|line| line.spans.iter_mut()) {
+                span.style = span.style.add_modifier(Modifier::DIM);
+            }
+            gutter::block(&text, SYSTEM_MARK, dim, width)
+        }
         kind => {
             let (mark, style) = match kind {
                 Some(EntryKind::Error) => (BULLET_MARK, Style::default().fg(Color::Red)),
@@ -281,6 +289,19 @@ mod tests {
             for span in &line.spans {
                 assert_eq!(span.style.bg, Some(PROMPT_BACKGROUND));
             }
+        }
+    }
+
+    #[test]
+    fn reasoning_text_is_dimmed() {
+        let rendered = entry_lines(&entry(EntryKind::Reasoning, "weigh **options**"), false, 40);
+        assert!(!rendered.is_empty());
+        for span in rendered.iter().flat_map(|line| &line.spans) {
+            assert!(
+                span.style.add_modifier.contains(Modifier::DIM),
+                "{:?} is not dim",
+                span.content
+            );
         }
     }
 

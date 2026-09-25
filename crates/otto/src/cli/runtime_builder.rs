@@ -42,7 +42,7 @@ use super::boundary::{self, BoundaryInputs, FixedText};
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 use super::prompt::system_prompt_for;
 use super::sandbox_runtime::canonical_directory;
-use super::workspace_context::workspace_context_for;
+use super::workspace_context::{split_workspace_instructions, workspace_context_for};
 
 struct BuildTrace {
     last: Instant,
@@ -446,6 +446,11 @@ impl Runner {
 
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
+    }
+
+    /// What the next provider request contains.
+    pub fn context_report(&self) -> otto_core::agent::context_report::ContextReport {
+        self.agent.context_report()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
@@ -885,17 +890,15 @@ impl Builder {
         } else {
             None
         };
-        let prompt_tail = redactor.redact_string(
-            &(workspace_context_for(
-                &self.workspace_path,
-                Utc::now(),
-                context_executor,
-                self.sandbox_environment.as_deref(),
-                self.workspace,
-            )
-            .await
-                + &catalogs.skill_section),
-        );
+        let environment = workspace_context_for(
+            &self.workspace_path,
+            Utc::now(),
+            context_executor,
+            self.sandbox_environment.as_deref(),
+            self.workspace,
+        )
+        .await;
+        let prompt_tail = redactor.redact_string(&(environment.clone() + &catalogs.skill_section));
         mark_build_trace(&mut trace, "runner/workspace-context");
         let parent_agent_section = redactor.redact_string(&catalogs.agent_section);
         let endpoint_host = boundary::endpoint_host_for(&runtime.base_url);
@@ -919,14 +922,29 @@ impl Builder {
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
         let definitions = registry.definitions();
-        let system_prompt = system_prompt_for(
+        let base_prompt = system_prompt_for(
             &definitions,
             self.effective_sandbox_info(),
             &runtime.provider,
             &endpoint_host,
             &runtime.model,
-        ) + &prompt_tail
-            + &parent_agent_section;
+        );
+        let system_prompt = base_prompt.clone() + &prompt_tail + &parent_agent_section;
+        let (environment, instructions) = split_workspace_instructions(&environment);
+        let system_prompt_parts: Vec<(String, String)> = [
+            ("Base", base_prompt),
+            ("Environment", redactor.redact_string(environment)),
+            (
+                "Workspace instructions",
+                redactor.redact_string(instructions),
+            ),
+            ("Skills", redactor.redact_string(&catalogs.skill_section)),
+            ("Agents", parent_agent_section),
+        ]
+        .into_iter()
+        .filter(|(_, text)| !text.is_empty())
+        .map(|(label, text)| (label.to_string(), text))
+        .collect();
 
         let request_sizer = match &client {
             ProviderClient::Compat(client) => {
@@ -943,6 +961,7 @@ impl Builder {
             model: runtime.model.clone(),
             provider_name: runtime.provider.clone(),
             system_prompt: system_prompt.clone(),
+            system_prompt_parts,
             thinking: runtime.thinking.clone(),
             now: Box::new(Utc::now),
             request_sizer,
@@ -1466,6 +1485,16 @@ mod tests {
         assert!(prompt.contains("<workspace-instructions"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");
         assert!(!prompt.contains("sk-secret-value"), "{prompt}");
+
+        let report = runner.context_report();
+        let parts = &report.sections[0].items;
+        let labels: Vec<&str> = parts.iter().map(|part| part.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Base", "Environment", "Workspace instructions"],
+            "the parts must concatenate to the prompt, or the report falls back to one part"
+        );
+        assert!(parts[2].text.contains("house rules"));
     }
 
     #[test]

@@ -3,8 +3,9 @@
 //!
 //! Ownership: a [`Runner`] owns the child tool registry it builds from
 //! [`Config::tools`]. The task registry, the provider and the clock are shared
-//! with the parent through `Arc`. Each child owns its own in-memory transcript,
-//! which is never persisted.
+//! with the parent through `Arc`. Each child owns its own transcript: a session
+//! file beside the parent's when [`Config::child_session`] returns one, and an
+//! in-memory session otherwise.
 //!
 //! Concurrency and cancellation: every child runs in its own Tokio task,
 //! admitted by a semaphore that caps [`Config::max_parallel`] concurrent
@@ -28,10 +29,10 @@
 //!   provider.
 //! - [`Registry`] owns boxed tools and cannot be subset, so a child gets a
 //!   [`ChildTools`] view over one shared child registry plus an allowlist.
-//! - [`MemorySession`] carries no header, so a child session has no id;
-//!   nothing observable depends on one, because the transcript is never
-//!   persisted, and the transcript can therefore be built before the task
-//!   exists.
+//! - A persisted child transcript is named after its task id, which exists
+//!   only after `Tasks::add`, so the transcript is chosen after the task is
+//!   added and the registry's history hook reads it through a `OnceLock`. A
+//!   transcript that cannot be created fails only that task.
 //! - `Session::append` is async, so an inherited snapshot is replayed at the
 //!   top of the child task rather than inside `start`; an invalid snapshot
 //!   still fails the task with the same message, just asynchronously.
@@ -101,7 +102,13 @@ impl Provider for SharedProvider {
 
 /// Shares one child transcript between the child's agent and the runner, which
 /// reads it back to build the final report.
-type Transcript = Arc<dyn Session + Send + Sync>;
+pub type Transcript = Arc<dyn Session + Send + Sync>;
+
+/// Builds the transcript for the task with the given id and returns it with
+/// its file path. `Ok(None)` keeps the child in memory; an error fails the
+/// task before it starts.
+pub type ChildSession =
+    Arc<dyn Fn(&str) -> Result<Option<(Transcript, String)>, String> + Send + Sync>;
 
 struct SharedTranscript(Transcript);
 
@@ -284,6 +291,9 @@ pub struct Config {
     pub max_output_bytes: usize,
     /// The parent session's usage collector. Each child binds its task id.
     pub usage: Option<crate::usage::Collector>,
+    /// Builds a persisted transcript for each [`Runner::start`] child. `None`
+    /// keeps every child in memory.
+    pub child_session: Option<ChildSession>,
 }
 
 /// One delegation request.
@@ -415,7 +425,7 @@ impl Runner {
     /// name, an invalid context, or `inherit` with no parent session is
     /// rejected before any task is created.
     pub fn start(self: &Arc<Self>, request: StartRequest) -> Result<Task, StartError> {
-        self.start_with_session(request, Arc::new(MemorySession::new()))
+        self.start_resolved(request, None, None)
     }
 
     /// Starts one child with a caller-owned session. Durable workflows use
@@ -425,13 +435,13 @@ impl Runner {
         request: StartRequest,
         transcript: Transcript,
     ) -> Result<Task, StartError> {
-        self.start_resolved(request, transcript, None)
+        self.start_resolved(request, Some(transcript), None)
     }
 
     fn start_resolved(
         self: &Arc<Self>,
         request: StartRequest,
-        transcript: Transcript,
+        transcript: Option<Transcript>,
         inline_definition: Option<Definition>,
     ) -> Result<Task, StartError> {
         let now = self.now();
@@ -532,7 +542,7 @@ impl Runner {
         cancel: &CancellationToken,
     ) -> Result<Task, String> {
         let task = self
-            .start_resolved(request, transcript, definition)
+            .start_resolved(request, Some(transcript), definition)
             .map_err(|error| error.to_string())?;
         let id = task.id.clone();
         let result = match self.config.tasks.wait(&id, cancel).await {
@@ -567,10 +577,13 @@ impl Runner {
         context: String,
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
-        transcript: Transcript,
+        transcript: Option<Transcript>,
     ) -> Result<Task, StartError> {
         let cancel = CancellationToken::new();
-        let history_source = Arc::clone(&transcript);
+        // The task id names the child's file, so the transcript is built
+        // after the task is registered; history reads it once it is set.
+        let slot: Arc<std::sync::OnceLock<Transcript>> = Arc::default();
+        let history_source = Arc::clone(&slot);
         let task = self.config.tasks.add(
             Task {
                 name: request.name.trim().to_string(),
@@ -585,8 +598,29 @@ impl Runner {
                 ..Task::default()
             },
             Some(cancel.clone()),
-            Some(Arc::new(move || history_source.messages())),
+            Some(Arc::new(move || {
+                history_source
+                    .get()
+                    .map(|transcript| transcript.messages())
+                    .unwrap_or_default()
+            })),
         )?;
+        let transcript = match (transcript, &self.config.child_session) {
+            (Some(transcript), _) => transcript,
+            (None, None) => Arc::new(MemorySession::new()),
+            (None, Some(build)) => match build(&task.id) {
+                Ok(Some((transcript, path))) => {
+                    self.config.tasks.set_session_path(&task.id, &path);
+                    transcript
+                }
+                Ok(None) => Arc::new(MemorySession::new()),
+                Err(error) => {
+                    self.finish(&task.id, TaskStatus::Failed, now, &[], Some(&error));
+                    return Ok(self.config.tasks.get(&task.id).unwrap_or(task));
+                }
+            },
+        };
+        let _ = slot.set(Arc::clone(&transcript));
 
         let tools = ChildTools {
             registry: Arc::clone(&self.child_registry),
@@ -1782,6 +1816,100 @@ mod tests {
         let last = &messages[want_snapshot.len()];
         assert_eq!(last.role, Role::User);
         assert_eq!(last.text(), "delegated task");
+    }
+
+    /// A child store for task `task_id` beside `parent`, or one whose writes
+    /// fail when `fail` is set.
+    fn child_store(parent: &std::path::Path, task_id: &str, fail: bool) -> (Transcript, String) {
+        let name = format!("{task_id}-child");
+        let store = crate::session::Store::create_child_lazy(
+            parent,
+            &name,
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: parent.parent().expect("dir").to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("child store");
+        store.lock().expect("lock").fail_writes = fail;
+        let path = crate::session::Store::child_path(parent, &name);
+        (Arc::new(store), path.to_string_lossy().into_owned())
+    }
+
+    #[tokio::test]
+    async fn a_child_transcript_with_its_inherited_context_is_written_to_its_own_file() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        // A stored parent message always carries a timestamp.
+        let inherited: Vec<Message> = [
+            user_message("u1", "first"),
+            tool_call_message("a1", "agent"),
+        ]
+        .into_iter()
+        .map(|message| Message {
+            created_at: Utc::now(),
+            ..message
+        })
+        .collect();
+        config.parent_session = Some(Arc::new(move || inherited.clone()));
+        let parent = parent_path.clone();
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&parent, task_id, false)))
+        }));
+        let (runner, _) = runner(config);
+
+        let task = runner
+            .start(StartRequest {
+                prompt: "delegated task".into(),
+                context: "inherit".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        let done = wait_final(&tasks, &task.id).await;
+
+        let want = dir
+            .path()
+            .join("parent")
+            .join(format!("{}-child.jsonl", task.id));
+        assert_eq!(done.status, TaskStatus::Succeeded, "{}", done.error);
+        assert_eq!(done.session_path, want.to_string_lossy());
+        let (store, _) = crate::session::Store::open(&want).expect("open child");
+        let texts: Vec<String> = store.messages().iter().map(Message::text).collect();
+        assert_eq!(texts, ["first", "delegated task", "done"]);
+        store.close().expect("close");
+    }
+
+    #[tokio::test]
+    async fn a_child_transcript_write_failure_fails_only_that_task() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&parent_path, task_id, true)))
+        }));
+        let (runner, _) = runner(config);
+
+        let task = runner
+            .start(StartRequest {
+                prompt: "delegated task".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        let done = wait_final(&tasks, &task.id).await;
+
+        assert_eq!(done.status, TaskStatus::Failed);
+        assert!(!done.error.is_empty());
     }
 
     #[tokio::test]

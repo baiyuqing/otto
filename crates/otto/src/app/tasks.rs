@@ -76,6 +76,9 @@ pub struct Task {
     pub result: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// The child session transcript file; empty when the task runs in memory.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub session_path: String,
 }
 
 /// The read/control contract a frontend gets.
@@ -130,6 +133,7 @@ fn wire(task: &crate::subagent::tasks::Task) -> Task {
         usage_present: task.usage_present,
         result: task.result.clone(),
         error: task.error.clone(),
+        session_path: task.session_path.clone(),
     }
 }
 
@@ -199,6 +203,7 @@ mod tests {
             usage_present: false,
             result: String::new(),
             error: String::new(),
+            session_path: String::new(),
         };
         assert_eq!(
             serde_json::to_string(&task).expect("json"),
@@ -225,11 +230,13 @@ mod tests {
                 None,
             )
             .expect("add");
+        registry.set_session_path(&added.id, "/sessions/p/t1-c.jsonl");
         let view: &dyn TaskView = &registry;
 
         let listed = view.list();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, added.id);
+        assert_eq!(listed[0].session_path, "/sessions/p/t1-c.jsonl");
         assert_eq!(listed[0].status, TaskStatus::Queued);
         // A name resolves the same way an id does.
         assert_eq!(view.get("lint").expect("by name").id, added.id);

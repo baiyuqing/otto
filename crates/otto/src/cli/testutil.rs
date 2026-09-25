@@ -91,6 +91,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
             connect_timeout_secs: 20,
             servers: Vec::new(),
         },
+        task_recorder: None,
     }
 }
 

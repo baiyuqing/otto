@@ -197,7 +197,7 @@ button.danger {
   gap: 8px;
   margin-top: 2px;
 }
-.rename-actions button { border-radius: 999px; padding: 8px 14px; }
+.rename-actions button { border-radius: var(--radius); padding: 8px 14px; }
 @keyframes dialog-enter { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .workspace-shell { min-height: 0; flex: 1; display: flex; }
 .usage-view {

@@ -25,7 +25,8 @@ use crate::memory::{
     ForgetRequest, RecordRef, RememberRequest, Scope, SearchRequest, SearchResult, Service,
 };
 use crate::skill;
-use crate::subagent::format::{task_line, task_steps};
+use crate::subagent::format::{first_runes, one_line, task_line, task_steps};
+use crate::subagent::record::{self, TaskRow};
 use crate::subagent::tasks::Tasks;
 use crate::tool::remind::{NO_TIMERS, timer_line};
 
@@ -82,6 +83,28 @@ impl Controller {
     pub(crate) fn subagent_tasks(&self) -> Option<Arc<Tasks>> {
         self.current_runner()?.tasks.clone()
     }
+}
+
+/// One recorded task row in the layout `/agents` prints: parent session, task
+/// id, agent name, status, created time, then the same description-or-prompt
+/// label [`task_label`](super::super::subagent::format::task_label) builds for
+/// [`task_line`]. Trailing padding is trimmed.
+fn agent_row_line(row: &TaskRow) -> String {
+    let name = if row.agent.is_empty() {
+        "(default)"
+    } else {
+        &row.agent
+    };
+    let label = if row.description.is_empty() {
+        first_runes(&one_line(&row.prompt), 60)
+    } else {
+        row.description.clone()
+    };
+    let line = format!(
+        "{:<26} {:<4} {:<10} {:<11} {:<20}  {label}",
+        row.parent_session, row.task_id, name, row.status, row.created_at
+    );
+    line.trim_end_matches(' ').to_string()
 }
 
 /// `/timers` and `/timers cancel <id>` for both frontends: the `Ok` text is
@@ -490,6 +513,31 @@ impl Repl<'_> {
         }
     }
 
+    /// `/agents`: the latest 50 recorded sub-agent tasks, from `tasks.db`,
+    /// across every session and process. `None` on the builder's recorder
+    /// (no `~/.otto/tasks.db`, or it failed to open) prints the same "no
+    /// recorded tasks" line as an empty result, since [`Builder::tasks_list`]
+    /// already degrades that way.
+    pub(super) fn agents_command(&mut self) {
+        let query = record::ListQuery {
+            limit: Some(50),
+            ..Default::default()
+        };
+        match self.controller.builder().tasks_list(&query) {
+            Ok(result) if result.tasks.is_empty() => {
+                let _ = writeln!(self.stdout, "no recorded tasks");
+            }
+            Ok(result) => {
+                for row in &result.tasks {
+                    let _ = writeln!(self.stdout, "{}", agent_row_line(row));
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(self.stderr, "{error}");
+            }
+        }
+    }
+
     /// `/timers`: the session's outstanding timers, or one cancelled.
     pub(super) fn timers_command(&mut self, args: &str) {
         match timers_report(self.controller, args) {
@@ -887,7 +935,14 @@ mod tests {
 
         let (stdout, _) = session("/help\n/exit\n", &controller).await;
 
-        for command in ["/memory", "/remember", "/tasks", "/task ", "/mcp"] {
+        for command in [
+            "/memory",
+            "/remember",
+            "/tasks",
+            "/task ",
+            "/agents",
+            "/mcp",
+        ] {
             assert!(stdout.contains(command), "{command} missing from {stdout}");
         }
     }
@@ -1025,6 +1080,62 @@ mod tests {
             "{stderr}"
         );
         assert!(stderr.contains("unknown task: nope"), "{stderr}");
+    }
+
+    /// A controller whose builder carries a task recorder, in place of the
+    /// default `None` `testutil::builder` sets.
+    async fn controller_with_task_recorder(
+        workspace: &Path,
+        sessions: &Path,
+        store: Arc<record::Store>,
+    ) -> Controller {
+        let mut builder = testutil::builder(workspace, sessions);
+        builder.task_recorder = Some(store);
+        let runtime = testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("session");
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let info = builder.runtime_info(&runtime);
+        Controller::new(builder, true, session, runner, info)
+    }
+
+    #[tokio::test]
+    async fn agents_lists_recorded_tasks_across_sessions_and_reports_when_empty() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = Arc::new(record::Store::open_in_memory().expect("store"));
+        let controller =
+            controller_with_task_recorder(workspace.path(), sessions.path(), Arc::clone(&store))
+                .await;
+
+        let (stdout, _) = session("/agents\n/exit\n", &controller).await;
+        assert!(stdout.contains("no recorded tasks"), "{stdout}");
+
+        let context = record::TaskContext {
+            parent_session: "other-session".into(),
+            parent_session_path: "/sessions/other.jsonl".into(),
+            workspace: "/work".into(),
+            pid: 4_294_967_294,
+            process_started_at: "2026-09-25T10:00:00Z".into(),
+        };
+        record::Recorder::upsert(
+            &*store,
+            &context,
+            &Task {
+                id: "t9".into(),
+                description: "review the diff".into(),
+                status: TaskStatus::Succeeded,
+                created_at: Some(Utc::now()),
+                ..Task::default()
+            },
+        );
+
+        let (stdout, _) = session("/agents\n/exit\n", &controller).await;
+        assert!(stdout.contains("other-session"), "{stdout}");
+        assert!(stdout.contains("t9"), "{stdout}");
+        assert!(stdout.contains("review the diff"), "{stdout}");
     }
 
     #[tokio::test]

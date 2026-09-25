@@ -432,6 +432,17 @@ pub async fn run(
             None
         }
     };
+    let task_recorder =
+        match crate::subagent::record::Store::open(&Path::new(&home).join(".otto/tasks.db")) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "warning: task history store unavailable, continuing without task recording"
+                );
+                None
+            }
+        };
 
     let mut builder = Builder {
         config_path: PathBuf::from(&config_path),
@@ -456,6 +467,7 @@ pub async fn run(
         memory: Default::default(),
         usage,
         mcp: mcp_config,
+        task_recorder,
     };
 
     let mut prepared_initial = None;

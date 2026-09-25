@@ -15,13 +15,15 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+};
 use unicode_width::UnicodeWidthChar;
 
 use super::app::{App, TurnStatus};
 use super::commands::{SLASH_COMMANDS, SlashCommand};
 use super::layout::{
-    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN,
+    INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN, escape_plain_text,
     escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
 };
 use super::transcript;
@@ -63,6 +65,8 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
         draw_help(frame, area);
     } else if let Some(view) = &app.context {
         draw_context(frame, area, view);
+    } else if let Some(view) = &app.agents {
+        draw_agents(frame, area, view);
     } else if let Some(picker) = &app.picker {
         draw_picker(frame, area, picker);
     }
@@ -362,6 +366,121 @@ fn draw_context(frame: &mut Frame, area: Rect, view: &super::context_view::Conte
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     let mut state = ListState::default().with_selected(Some(view.selected));
     frame.render_stateful_widget(list, popup, &mut state);
+}
+
+/// The `/agents` overlay: the task list, narrowed to the terminal width by
+/// `Table`'s own percentage columns, or one task's detail pane over it.
+fn draw_agents(frame: &mut Frame, area: Rect, view: &super::agents_view::AgentsView) {
+    let popup = centered_rect(96, 90, area);
+    frame.render_widget(Clear, popup);
+    match &view.detail {
+        Some(detail) => draw_agent_detail(frame, popup, detail),
+        None => draw_agent_list(frame, popup, view),
+    }
+}
+
+fn draw_agent_list(frame: &mut Frame, area: Rect, view: &super::agents_view::AgentsView) {
+    use super::agents_view::{COLUMN_HEADERS, columns};
+
+    let now = chrono::Utc::now();
+    let header =
+        Row::new(COLUMN_HEADERS.to_vec()).style(Style::default().add_modifier(Modifier::BOLD));
+    let rows: Vec<Row> = view
+        .rows
+        .iter()
+        .map(|row| Row::new(columns(row, now).to_vec()))
+        .collect();
+    let widths = [
+        Constraint::Percentage(9),
+        Constraint::Percentage(9),
+        Constraint::Percentage(22),
+        Constraint::Percentage(9),
+        Constraint::Percentage(9),
+        Constraint::Percentage(13),
+        Constraint::Percentage(7),
+        Constraint::Percentage(6),
+        Constraint::Percentage(6),
+        Constraint::Percentage(10),
+    ];
+    let title = format!(
+        "{}  (up/down move, s status, w workspace, enter open, esc close)",
+        view.header()
+    );
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let mut state =
+        TableState::default().with_selected((!view.rows.is_empty()).then_some(view.selected));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+/// The prompt, result or error, and the child transcript (reusing
+/// [`transcript::lines`], the same renderer the main transcript pane uses),
+/// as one scrollable paragraph.
+fn draw_agent_detail(frame: &mut Frame, area: Rect, detail: &super::agents_view::Detail) {
+    let row = &detail.row;
+    let agent = if row.agent.is_empty() {
+        "default"
+    } else {
+        &row.agent
+    };
+    let mut lines: Vec<Line<'static>> = vec![Line::from(format!(
+        "{} · {agent} · {}",
+        row.task_id, row.status
+    ))];
+    if !row.description.is_empty() {
+        lines.push(Line::from(format!(
+            "Description: {}",
+            escape_plain_text(&row.description)
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from("Prompt:"));
+    lines.extend(
+        escape_plain_text(&row.prompt)
+            .split('\n')
+            .map(|line| Line::from(line.to_string()))
+            .collect::<Vec<_>>(),
+    );
+    if !row.error.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from("Error:"));
+        lines.extend(
+            escape_plain_text(&row.error)
+                .split('\n')
+                .map(|line| Line::from(line.to_string()))
+                .collect::<Vec<_>>(),
+        );
+    } else if !row.result.is_empty() {
+        lines.push(Line::default());
+        lines.push(Line::from("Result:"));
+        lines.extend(
+            escape_plain_text(&row.result)
+                .split('\n')
+                .map(|line| Line::from(line.to_string()))
+                .collect::<Vec<_>>(),
+        );
+    }
+    lines.push(Line::default());
+    if detail.transcript_missing {
+        lines.push(Line::from("(no child transcript)"));
+    } else {
+        lines.extend(transcript::lines(
+            &detail.entries,
+            false,
+            area.width.saturating_sub(2) as usize,
+        ));
+    }
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((detail.scroll, 0))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("{} (esc to go back)", row.task_id)),
+        );
+    frame.render_widget(paragraph, area);
 }
 
 /// A centered `percent_x` by `percent_y` rectangle within `area`. Standard
@@ -724,6 +843,78 @@ mod tests {
         assert!(screen.contains("Base · ~1.2k tokens"), "{screen}");
         assert!(screen.contains("You are Otto."), "{screen}");
         assert!(screen.contains("second line"), "{screen}");
+    }
+
+    /// A controller whose builder carries a task recorder, mirroring
+    /// `cli::repl_commands::tests::controller_with_task_recorder`.
+    async fn controller_with_task_recorder(
+        workspace: &std::path::Path,
+        sessions: &std::path::Path,
+        store: std::sync::Arc<crate::subagent::record::Store>,
+    ) -> crate::app::Controller {
+        let mut builder = testutil::builder(workspace, sessions);
+        builder.task_recorder = Some(store);
+        let runtime = testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("session");
+        let runner = builder
+            .build_runner(&session, &runtime)
+            .await
+            .expect("runner");
+        let info = builder.runtime_info(&runtime);
+        crate::app::Controller::new(builder, true, session, runner, info)
+    }
+
+    /// The spec's TUI acceptance case: the modal lists rows, narrowed to an
+    /// 80-column terminal, and opening a row shows its detail pane.
+    #[tokio::test]
+    async fn the_agents_overlay_lists_rows_and_fits_eighty_columns() {
+        use crate::subagent::record::{self, TaskContext};
+        use crate::subagent::tasks::{Task, TaskStatus};
+        use crate::tui::agents_view::AgentsView;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let store = std::sync::Arc::new(record::Store::open_in_memory().expect("store"));
+        let workspace_path = workspace.path().to_str().expect("utf8 path").to_string();
+        record::Recorder::upsert(
+            &*store,
+            &TaskContext {
+                parent_session: "s1".into(),
+                parent_session_path: "/sessions/s1.jsonl".into(),
+                workspace: workspace_path,
+                pid: 4_294_967_294,
+                process_started_at: "2026-09-25T10:00:00Z".into(),
+            },
+            &Task {
+                id: "t1".into(),
+                description: "review the diff".into(),
+                status: TaskStatus::Succeeded,
+                created_at: Some(chrono::Utc::now()),
+                ..Task::default()
+            },
+        );
+        let controller = controller_with_task_recorder(
+            workspace.path(),
+            sessions.path(),
+            std::sync::Arc::clone(&store),
+        )
+        .await;
+        let mut app = App::new(&controller);
+        app.agents = Some(AgentsView::open(&controller));
+
+        // At 80 columns the description column is narrower than the full
+        // text; `Table` truncates it rather than panicking or overflowing.
+        let screen = screen_rows(&app, 80, 24).join("\n");
+        assert!(screen.contains("succeed"), "{screen}");
+        assert!(screen.contains("review t"), "{screen}");
+
+        app.agents
+            .as_mut()
+            .expect("open")
+            .handle_key(KeyCode::Enter, &controller);
+        let screen = screen_rows(&app, 80, 24).join("\n");
+        assert!(screen.contains("t1"), "{screen}");
+        assert!(screen.contains("no child transcript"), "{screen}");
     }
 
     /// Below the static minimum on either axis, the frame is just the resize

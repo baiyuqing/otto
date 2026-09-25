@@ -14,6 +14,7 @@ pub mod definition;
 pub mod format;
 pub mod inherit;
 pub mod prompt;
+pub mod record;
 pub mod runner;
 pub mod tasks;
 #[cfg(test)]

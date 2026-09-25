@@ -113,6 +113,21 @@ impl Factory for ServeFactory {
     ) -> Result<crate::usage::Analysis, String> {
         self.builder.usage_analysis(days, session_id)
     }
+
+    fn tasks_list(
+        &self,
+        query: &crate::subagent::record::ListQuery,
+    ) -> Result<crate::subagent::record::ListResult, String> {
+        self.builder.tasks_list(query)
+    }
+
+    fn tasks_get(
+        &self,
+        parent_session: &str,
+        task_id: &str,
+    ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
+        self.builder.tasks_get(parent_session, task_id)
+    }
 }
 
 // ---- the command ----

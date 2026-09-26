@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod memory;
 pub mod model_limits;
 mod paths;
+pub mod projects;
 pub mod resolve;
 pub mod sandbox;
 pub mod sandbox_setup;
@@ -37,6 +38,7 @@ pub use inbound::{FeishuRuntime, Inbound, resolve_feishu};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
 pub use model_limits::ModelLimits;
+pub use projects::{Project, TrustLevel};
 pub use resolve::{CompactionRuntime, Overrides, Runtime, SessionDefaults, resolve};
 pub use sandbox::{SandboxDriverMode, SandboxNetworkMode, SandboxSettings, resolve_sandbox};
 pub use sandbox_setup::update_sandbox;
@@ -89,6 +91,8 @@ pub struct File {
     pub sandbox: SandboxConfig,
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+    #[serde(default)]
+    pub projects: HashMap<String, projects::Project>,
 }
 
 /// The `[experimental]` table: features that may change shape or be removed

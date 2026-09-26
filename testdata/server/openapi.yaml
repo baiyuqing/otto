@@ -212,6 +212,29 @@ components:
           items:
             $ref: "#/components/schemas/SessionListRow"
       required: [sessions]
+    StatusSession:
+      type: object
+      properties:
+        id:
+          type: string
+        workspace:
+          type: string
+        turn:
+          type: [string, "null"]
+          enum: [running, ok, error, canceled, null]
+        approvals:
+          type: integer
+        tasks:
+          type: integer
+      required: [id, workspace, turn, approvals, tasks]
+    StatusSnapshot:
+      type: object
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/StatusSession"
+      required: [sessions]
     Message:
       type: object
       description: otto_core::model::Message; see crates/otto-core/src/model.rs for the full shape.
@@ -1535,6 +1558,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Info"
+  /v1/status:
+    get:
+      summary: Stream every open session's status over SSE
+      description: >-
+        Each event is a full snapshot: every open session in this process,
+        sorted by workspace then id. The first snapshot is sent on connect;
+        after that, one is sent whenever it differs from the last one sent on
+        this connection. No id: field and no replay.
+      responses:
+        "200":
+          description: text/event-stream of StatusSnapshot frames
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/StatusSnapshot"
   /v1/usage:
     get:
       summary: Aggregate persisted provider token usage

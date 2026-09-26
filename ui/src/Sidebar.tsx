@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SessionListRow } from './wire'
-import { api, type WorkspaceEntry } from './api'
+import { api, type SessionStatus, type WorkspaceEntry } from './api'
 import { sessionLabel, workspaceName } from './uiText'
 
 export interface SidebarGroup {
@@ -32,6 +32,7 @@ export function Sidebar(props: {
   current: string
   disabled: boolean
   onOpen: (id?: string, workspace?: string) => void
+  status?: Map<string, SessionStatus>
 }) {
   const [startup, setStartup] = useState('')
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([])
@@ -73,34 +74,61 @@ export function Sidebar(props: {
   return (
     <div className="sidebar">
       <div className="sidebar-groups">
-        {groups.map((group) => (
-          <div className="sidebar-group" key={group.path}>
-            <div className="sidebar-group-header" title={group.path}>
-              <span>{workspaceName(group.path)}</span>
-              <button
-                type="button"
-                disabled={props.disabled}
-                onClick={() => props.onOpen(undefined, group.path === startup ? undefined : group.path)}
-              >
-                New session
-              </button>
+        {groups.map((group) => {
+          const runningCount = group.sessions.filter((s) => props.status?.get(s.id)?.turn === 'running').length
+          return (
+            <div className="sidebar-group" key={group.path}>
+              <div className="sidebar-group-header" title={group.path}>
+                <span>{workspaceName(group.path)}</span>
+                {runningCount > 0 && <span className="status-running-count">{runningCount} running</span>}
+                <button
+                  type="button"
+                  disabled={props.disabled}
+                  onClick={() => props.onOpen(undefined, group.path === startup ? undefined : group.path)}
+                >
+                  New session
+                </button>
+              </div>
+              {group.sessions.map((s) => {
+                const st = props.status?.get(s.id)
+                return (
+                  <button
+                    type="button"
+                    key={s.id}
+                    className="sidebar-session"
+                    disabled={props.disabled}
+                    aria-current={s.id === props.current ? 'true' : undefined}
+                    onClick={() => props.onOpen(s.id)}
+                  >
+                    <span>{s.name ?? sessionLabel(s.id)}</span>
+                    {s.open ? <span>●</span> : null}
+                    {st?.turn === 'running' && (
+                      <span className="status-badge status-running" aria-label="Turn running">
+                        running
+                      </span>
+                    )}
+                    {st && st.approvals > 0 && (
+                      <span className="status-badge status-approval" aria-label="Approval pending">
+                        approval
+                      </span>
+                    )}
+                    {st?.turn === 'error' && (
+                      <span className="status-badge status-error" aria-label="Turn failed">
+                        error
+                      </span>
+                    )}
+                    {st && st.tasks > 0 && (
+                      <span className="status-badge status-tasks" aria-label={`${st.tasks} sub-agent tasks running`}>
+                        {st.tasks} tasks
+                      </span>
+                    )}
+                    {s.model && <span>{s.model}</span>}
+                  </button>
+                )
+              })}
             </div>
-            {group.sessions.map((s) => (
-              <button
-                type="button"
-                key={s.id}
-                className="sidebar-session"
-                disabled={props.disabled}
-                aria-current={s.id === props.current ? 'true' : undefined}
-                onClick={() => props.onOpen(s.id)}
-              >
-                <span>{s.name ?? sessionLabel(s.id)}</span>
-                {s.open ? <span>●</span> : null}
-                {s.model && <span>{s.model}</span>}
-              </button>
-            ))}
-          </div>
-        ))}
+          )
+        })}
       </div>
       <div className="sidebar-add">
         <input

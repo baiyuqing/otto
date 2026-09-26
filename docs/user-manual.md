@@ -288,6 +288,7 @@ paths = ["~/.otto/skills", ".otto/skills"]
 [server]
 socket = "~/.otto/otto.sock"
 # listen = "127.0.0.1:8787"  # loopback TCP instead of the socket
+# workspace_roots = ["~/Work"]  # directories another workspace may load from
 
 [inbound.feishu]
 enabled = false
@@ -343,6 +344,10 @@ Key points:
   `[server].listen` a loopback `HOST:PORT` to use instead (see
   [Agent server](#agent-server)). TOML-only aside from the `--socket` and
   `--listen` flags; no environment variable.
+- `[server].workspace_roots` lists directories under which `otto serve` may
+  load another workspace besides the startup one (see
+  [Workspaces](#workspaces)). Default empty: only the startup workspace is
+  admitted. TOML-only, no CLI flag or environment variable.
 - `[inbound.feishu]` is off by default. When `enabled = true`, `otto serve`
   spawns `lark-cli event consume im.message.receive_v1 --as bot` and delivers
   each text message to every open session inbox, which starts a wake turn
@@ -403,6 +408,8 @@ Startup resolution is field-specific:
   `[server].socket` > the built-in default `~/.otto/otto.sock`. A `listen`
   value at any level selects TCP and no socket is created. There is no
   environment variable. This applies only to `otto serve`.
+- **Agent server workspace admission:** `[server].workspace_roots` only;
+  there is no flag or environment variable, and no precedence chain.
 
 Startup `--continue` / `--resume` restore session provider/model only as
 defaults; direct flags and `OTTO_*` variables can override them, and a stored
@@ -962,10 +969,12 @@ read the prompt from a file (bounded to 1 MiB).
 ## Agent server
 
 `otto serve` runs Otto as a long-lived HTTP+JSON+SSE frontend, instead of the
-TUI or REPL. One process serves one workspace and manages any number of
-sessions; turns in different sessions run concurrently, and starting a second
-turn on a session that already has one active returns `409`. It listens on
-either a Unix domain socket (the default) or a loopback TCP port.
+TUI or REPL. One process holds the startup workspace (`--cwd`, default `.`)
+and, when `[server].workspace_roots` admits others, any number of additional
+workspaces loaded on first use; it manages any number of sessions across all
+loaded workspaces. Turns in different sessions run concurrently, and starting
+a second turn on a session that already has one active returns `409`. It
+listens on either a Unix domain socket (the default) or a loopback TCP port.
 
 ```bash
 otto serve [--socket PATH | --listen HOST:PORT [--open]]
@@ -994,6 +1003,9 @@ message is expanded one level with `lark-cli im +messages-mget --as bot`
 Interactive cards and empty bodies are ignored. Shutting down the server
 sends SIGTERM to the child. Replying in Feishu is not wired: a model that
 should respond uses a user-installed `lark-cli` skill through `bash`.
+Delivery and idle-session wake are limited to open sessions in the startup
+workspace; sessions in another loaded workspace do not receive Feishu
+messages.
 
 ### Listener
 
@@ -1029,6 +1041,46 @@ logged and is not persisted; restarting the process issues a new one. There
 is no TLS and no CORS: the port is meant for a browser or client on the same
 machine.
 
+### Workspaces
+
+The startup workspace is loaded when the process starts. `[server].workspace_roots`
+(default empty) lists directories under which another workspace may be
+loaded on first use, from a session create naming it or from
+`POST /v1/workspaces`. A path is admitted when, after resolving symlinks and
+canonicalizing it, it is an existing directory that is either the startup
+workspace or a descendant of one canonicalized root (a root itself is
+admitted). An unadmitted path returns `403` with `code: "WORKSPACE_NOT_ADMITTED"`;
+a missing or non-directory path returns `400` with `code: "INVALID_WORKSPACE"`.
+With the default empty `workspace_roots`, only the startup workspace is
+admitted and the server behaves as a single-workspace process.
+
+- `GET /v1/workspaces` lists loaded workspaces, startup first, then by path:
+  `{"startup": path, "roots": [path...], "workspaces": [{"path", "open_sessions", "workflows"}...]}`.
+- `POST /v1/workspaces {"path": "..."}` admits and loads a workspace,
+  returning one `workspaces` entry: `201` when it was newly loaded, `200`
+  when it was already loaded.
+- `POST /v1/sessions` takes an optional `"workspace"`; the default is the
+  startup workspace. `GET /v1/sessions` and `GET/POST /v1/workflows` take an
+  optional `?workspace=`; absent, they cover every loaded workspace (sessions
+  and workflow list) or default to the startup workspace (workflow start).
+  Run-scoped workflow routes (`GET /v1/workflows/{id}`, `.../resume`,
+  `.../fork`, `.../cancel`, and the approval routes) search every loaded
+  workspace for the run or request id. Every workspace value is admitted
+  before any lookup, so an unadmitted path is `403` even for a read.
+- `POST /v1/sandbox/reload` reloads every loaded workspace's sandbox and
+  keeps the single-workspace `409` guard: it fails while any open session in
+  any loaded workspace has a turn running, and also fails `409` if any
+  workspace's reload itself errors. With one loaded workspace the response is
+  unchanged, the reloaded sandbox object; with more than one, it adds a
+  `workspaces` array with each workspace's own reload result.
+- Each loaded workspace with a workflow database keeps its own file lock
+  (`~/.otto/workflow-locks/{key}.lock`); a workspace whose lock is held by
+  another process has workflows disabled for it (`GET/POST /v1/workflows`
+  returns the same error a single-workspace server returns when workflows
+  are disabled), while its sessions and turns still work.
+- A workspace stays loaded for the life of the process; there is no route to
+  unload one.
+
 ### Web UI
 
 `GET /` serves the browser UI built by `make ui` and embedded into the
@@ -1046,7 +1098,16 @@ the transcript, and a composer:
 
 - Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
   renders its history. The session id is kept in the URL fragment, so a reload
-  reopens the same session.
+  reopens the same session. Each entry shows the session's workspace basename
+  next to its name, with the full path in a tooltip; a session with no
+  recorded workspace renders as before.
+- **New session** offers a workspace picker, populated from
+  `GET /v1/workspaces` with the startup workspace selected by default, plus a
+  path field and button that call `POST /v1/workspaces` and select the
+  newly loaded (or already loaded) entry; a `400`/`403`/`500` from that call
+  is shown next to the field. Creating a session sends `"workspace"` only
+  when a non-startup workspace is selected. `/new` keeps creating in the
+  currently open session's workspace.
 - Typing `/` in the composer shows local suggestions for supported Web slash
   commands; Tab or click completes the highlighted command. Web commands backed
   by existing server APIs run locally instead of starting a provider turn:
@@ -1128,8 +1189,10 @@ are served at the root. Request and error bodies are JSON.
 
 | Method and path | Behavior |
 | --- | --- |
-| `POST /v1/sessions` | Create a session (`{}`) or attach to one already open in this process (`{"resume":"<id>"}`). `201` for a new session, `200` for an already-open one. Returns the session object. |
-| `GET /v1/sessions` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. |
+| `GET /v1/workspaces` | List loaded workspaces, startup first: `{"startup", "roots", "workspaces": [{"path", "open_sessions", "workflows"}...]}`. |
+| `POST /v1/workspaces` | Admit and load a workspace (`{"path":"..."}`). `201` when newly loaded, `200` when already loaded. `400 INVALID_WORKSPACE` or `403 WORKSPACE_NOT_ADMITTED` otherwise. Returns one `workspaces` entry. |
+| `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or attach to one already open in this process (`{"resume":"<id>"}`, searched in `workspace` if given, else every loaded workspace). `201` for a new session, `200` for an already-open one. Returns the session object. |
+| `GET /v1/sessions?workspace=<path>` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. Without `workspace`, every loaded workspace; with it, that workspace only. |
 | `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |
 | `DELETE /v1/sessions/{id}` | Cancel any active turn, close the session, `204`. |
@@ -1149,15 +1212,15 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/sessions/{id}/timers` | List the session's outstanding timers, soonest first: `id`, `fire_at`, and `message`. |
 | `POST /v1/sessions/{id}/timers/{timer_id}/cancel` | Cancel one outstanding timer and return it. `404` if no timer has that id. |
 | `GET /v1/sessions/{id}/mcp` | List the session's MCP servers and their connection state, in configuration order. |
-| `GET/POST /v1/workflows` | List workspace workflow runs, or start one with `{"name":"...","input":"..."}`. |
-| `GET /v1/workflows/{id}` | Return a run, its steps, and its approval requests. |
+| `GET/POST /v1/workflows?workspace=<path>` | List that workspace's workflow runs (default the startup workspace), or start one there with `{"name":"...","input":"..."}`. |
+| `GET /v1/workflows/{id}` | Return a run, its steps, and its approval requests. Searches every loaded workspace for the run id. |
 | `GET /v1/workflows/{id}/events?after=N` | Replay durable workflow SSE events after sequence `N`; unlike turn events, replay survives process restart. |
 | `POST /v1/workflows/{id}/resume` | Resume a run; `{"retry":"step-id"}` explicitly retries one interrupted step. |
 | `POST /v1/workflows/{id}/fork` | Create a new run from a committed step boundary with `{"after_step":"step-id"}`. |
 | `POST /v1/workflows/{id}/cancel` | Cancel a run after its active attempts stop. |
-| `POST /v1/workflows/requests/{id}/approve` | Approve a durable workflow gate. |
-| `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate and cancel the run. |
-| `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to the running process; returns the sandbox object now in effect. `409` while any session has a turn in flight or when the reload fails, `501` when the process has no reloadable sandbox. |
+| `POST /v1/workflows/requests/{id}/approve` | Approve a durable workflow gate. Searches every loaded workspace for the request id. |
+| `POST /v1/workflows/requests/{id}/reject` | Reject a durable workflow gate and cancel the run. Searches every loaded workspace for the request id. |
+| `POST /v1/sandbox/reload` | Re-read `[sandbox]` and apply it to every loaded workspace; `409` while any session in any loaded workspace has a turn in flight, or `409 sandbox_reload_failed` when any workspace's reload fails; `501` when the process has no reloadable sandbox. With one loaded workspace, returns the sandbox object now in effect, as before; with more than one, the startup workspace's sandbox fields stay at the top level and an added `workspaces` array carries each workspace's own `{"workspace", "sandbox", "error"}` (`sandbox` and `error` are mutually exclusive). |
 | `GET /v1/info` | Process-level static info: workspace, provider, profile, model, sandbox summary, and the configured profile names. |
 | `GET /v1/usage?session_id=<id>` | Aggregate persisted provider token usage across all sessions, or one session when `session_id` is set. |
 | `GET /v1/usage/daily?days=30&session_id=<id>` | Return zero-filled daily usage and range totals for 1 to 365 UTC days. `session_id` is optional. |

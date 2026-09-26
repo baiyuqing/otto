@@ -116,6 +116,20 @@ export interface AgentTaskDetail {
   transcript_missing: boolean
 }
 
+// WorkspaceEntry is one loaded workspace from GET /v1/workspaces, also the
+// body of POST /v1/workspaces's response.
+export interface WorkspaceEntry {
+  path: string
+  open_sessions: number
+  workflows: boolean
+}
+
+export interface WorkspaceList {
+  startup: string
+  roots: string[]
+  workspaces: WorkspaceEntry[]
+}
+
 const TOKEN_KEY = 'otto.token'
 
 // loadToken takes the token from the startup URL's query string, keeps it
@@ -178,8 +192,13 @@ export const api = {
     json<UsageSummary>(`/v1/usage${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`),
   usageDaily: (days: number) => json<UsageAnalysis>(`/v1/usage/daily?days=${days}`),
   listSessions: () => json<{ sessions: SessionListRow[] }>('/v1/sessions'),
-  createSession: (resume?: string) =>
-    json<Session>('/v1/sessions', { method: 'POST', body: JSON.stringify(resume ? { resume } : {}) }),
+  createSession: (resume?: string, workspace?: string) =>
+    json<Session>('/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ ...(resume ? { resume } : {}), ...(workspace ? { workspace } : {}) }),
+    }),
+  listWorkspaces: () => json<WorkspaceList>('/v1/workspaces'),
+  addWorkspace: (path: string) => json<WorkspaceEntry>('/v1/workspaces', { method: 'POST', body: JSON.stringify({ path }) }),
   renameSession: (id: string, name: string) =>
     json<Session>(`/v1/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   getSession: (id: string) => json<Session>(`/v1/sessions/${id}`),

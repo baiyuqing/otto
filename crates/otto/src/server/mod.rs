@@ -149,6 +149,12 @@ pub trait Factory: Send + Sync {
     /// already loaded.
     async fn load_workspace(&self, path: &str)
     -> Result<(WorkspaceInfo, bool), WorkspaceLoadError>;
+    /// Unloads `path` and removes it from the persisted workspace list.
+    /// `path` is matched literally when it does not resolve (a deleted
+    /// directory's persisted entry). The caller has already checked for open
+    /// sessions, which `Factory` cannot see; this checks active workflow
+    /// runs.
+    async fn remove_workspace(&self, path: &str) -> Result<(), WorkspaceRemoveError>;
     /// The loaded workspace's command executor and sandbox environment, for
     /// `GET /v1/workspaces/diff`. `None` when the workspace has no usable
     /// sandbox (also the default for a `Factory` that never wires one, which
@@ -196,6 +202,18 @@ pub enum WorkspaceLoadError {
     /// Admitted, but opening it failed (sandbox, MCP config, ...). Nothing
     /// was registered.
     Failed(String),
+}
+
+/// Why [`Factory::remove_workspace`] refused a path.
+#[derive(Debug)]
+pub enum WorkspaceRemoveError {
+    /// Neither loaded nor in the persisted list.
+    NotFound,
+    /// The startup workspace, which is never removable.
+    IsStartup,
+    /// A session is open in that workspace or its workflow controller has an
+    /// active run. The message names which.
+    InUse(String),
 }
 
 /// Configures a [`Server`].
@@ -524,7 +542,9 @@ impl Server {
             )
             .route(
                 "/v1/workspaces",
-                get(workspaces::list).post(workspaces::register),
+                get(workspaces::list)
+                    .post(workspaces::register)
+                    .delete(workspaces::remove),
             )
             .route("/v1/workspaces/diff", get(diff::get))
             .route("/v1/info", get(info))
@@ -1130,6 +1150,26 @@ pub(crate) fn workspace_load_error_response(error: WorkspaceLoadError) -> Respon
         }
         WorkspaceLoadError::Failed(message) => {
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &message)
+        }
+    }
+}
+
+/// The response for a [`WorkspaceRemoveError`], used by `DELETE
+/// /v1/workspaces`.
+pub(crate) fn workspace_remove_error_response(error: WorkspaceRemoveError) -> Response {
+    match error {
+        WorkspaceRemoveError::NotFound => error_response(
+            StatusCode::NOT_FOUND,
+            "WORKSPACE_NOT_FOUND",
+            "workspace not found",
+        ),
+        WorkspaceRemoveError::IsStartup => error_response(
+            StatusCode::CONFLICT,
+            "WORKSPACE_IS_STARTUP",
+            "the startup workspace cannot be removed",
+        ),
+        WorkspaceRemoveError::InUse(message) => {
+            error_response(StatusCode::CONFLICT, "WORKSPACE_IN_USE", &message)
         }
     }
 }
@@ -1943,6 +1983,9 @@ mod tests {
         /// concurrent loads of one path.
         gate: Option<CancellationToken>,
         loaded: tokio::sync::Mutex<BTreeMap<String, bool>>,
+        /// A loaded path with a simulated active workflow run, so
+        /// `remove_workspace` answers `WorkspaceRemoveError::InUse` for it.
+        in_use: Option<String>,
     }
 
     impl Default for FakeWorkspaces {
@@ -1953,6 +1996,7 @@ mod tests {
                 error: None,
                 gate: None,
                 loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+                in_use: None,
             }
         }
     }
@@ -2163,6 +2207,22 @@ mod tests {
                 },
                 true,
             ))
+        }
+
+        async fn remove_workspace(&self, path: &str) -> Result<(), WorkspaceRemoveError> {
+            if path == self.workspaces.startup {
+                return Err(WorkspaceRemoveError::IsStartup);
+            }
+            if self.workspaces.in_use.as_deref() == Some(path) {
+                return Err(WorkspaceRemoveError::InUse(
+                    "an active workflow run".to_string(),
+                ));
+            }
+            let mut loaded = self.workspaces.loaded.lock().await;
+            if loaded.remove(path).is_none() {
+                return Err(WorkspaceRemoveError::NotFound);
+            }
+            Ok(())
         }
 
         async fn workflow_controller(
@@ -4255,6 +4315,155 @@ mod tests {
         );
         assert_eq!(reply.json()["error"]["code"], "internal");
         assert_eq!(reply.json()["error"]["message"], "sandbox open failed");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_loaded_workspace_unloads_it() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                loaded: tokio::sync::Mutex::new(BTreeMap::from([("/other".to_string(), true)])),
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let reply = harness
+            .send("DELETE", "/v1/workspaces?path=/other", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+
+        let list = harness.send("GET", "/v1/workspaces", None).await.json();
+        let workspaces = list["workspaces"].as_array().expect("workspaces");
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0]["path"], harness.factory.workspaces.startup);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_unknown_path_answers_404() {
+        let harness = Harness::new();
+        let reply = harness
+            .send("DELETE", "/v1/workspaces?path=/nope", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn deleting_the_startup_workspace_answers_409() {
+        let harness = Harness::new();
+        let startup = harness.factory.workspaces.startup.clone();
+        let reply = harness
+            .send("DELETE", &format!("/v1/workspaces?path={startup}"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "WORKSPACE_IS_STARTUP");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_workspace_with_an_open_session_answers_409() {
+        // A session registered directly against a second workspace's own
+        // builder, bypassing `TestFactory` (which always builds against the
+        // harness's one builder), matching
+        // `notify_open_sessions_skips_sessions_outside_the_startup_workspace`.
+        let other_workspace = tempfile::tempdir().expect("other workspace");
+        let other_sessions = tempfile::tempdir().expect("other sessions");
+        // Canonical, as a real session's workspace is (`/var` → `/private/var`).
+        let other_root = std::fs::canonicalize(other_workspace.path()).expect("canonical");
+        let other_builder = Arc::new(testutil::builder(&other_root, other_sessions.path()));
+        let other_path = other_builder.workspace_path.clone();
+
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec![other_path.clone()],
+                loaded: tokio::sync::Mutex::new(BTreeMap::from([(other_path.clone(), true)])),
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let session = SharedSession::memory(Header {
+            version: CURRENT_VERSION,
+            id: new_id().expect("id"),
+            workspace: other_path.clone(),
+            provider: "openai-compatible".to_string(),
+            profile: "alpha".to_string(),
+            model: "test-model".to_string(),
+            created_at: chrono::Utc::now(),
+        });
+        let runner = Runner::scripted(
+            session.clone(),
+            Arc::clone(&harness.provider) as Arc<dyn Provider + Send + Sync>,
+            Arc::new(crate::subagent::tasks::Tasks::new()),
+        );
+        let other_ctrl = Controller::with_builder(
+            other_builder,
+            true,
+            session,
+            runner,
+            RuntimeInfo {
+                provider: "openai-compatible".to_string(),
+                profile: "alpha".to_string(),
+                model: "test-model".to_string(),
+                thinking: "high".to_string(),
+                context_window: 128_000,
+                sandbox: SandboxInfo::default(),
+            },
+        );
+        harness.server.register(other_ctrl);
+
+        let reply = harness
+            .send("DELETE", &format!("/v1/workspaces?path={other_path}"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "WORKSPACE_IN_USE");
+
+        // A non-canonical spelling of the same directory is checked too.
+        let reply = harness
+            .send(
+                "DELETE",
+                &format!("/v1/workspaces?path={other_path}/."),
+                None,
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+
+        let list = harness.send("GET", "/v1/workspaces", None).await.json();
+        assert_eq!(list["workspaces"].as_array().expect("workspaces").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_workspace_with_an_active_run_answers_409() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                loaded: tokio::sync::Mutex::new(BTreeMap::from([("/other".to_string(), true)])),
+                in_use: Some("/other".to_string()),
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let reply = harness
+            .send("DELETE", "/v1/workspaces?path=/other", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "WORKSPACE_IN_USE");
+
+        let list = harness.send("GET", "/v1/workspaces", None).await.json();
+        assert_eq!(list["workspaces"].as_array().expect("workspaces").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_workspace_without_a_token_answers_401() {
+        let harness = Harness::with(HarnessOptions {
+            token: "secret".to_string(),
+            ..HarnessOptions::default()
+        });
+        let reply = harness
+            .send("DELETE", "/v1/workspaces?path=/other", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
     }
 
     // ---- workspace diff ----

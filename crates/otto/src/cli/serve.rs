@@ -157,6 +157,51 @@ impl Workspaces {
         }
         Ok((host, true))
     }
+
+    /// Unloads `path` per the spec's four-step procedure, holding `loaded`'s
+    /// lock across all of it (a concurrent load or remove of the same path is
+    /// serialized). The startup workspace is never removable. `home` locates
+    /// the persisted list; a failure to update it is a stderr warning, not an
+    /// error, matching [`load`](Self::load)'s own handling.
+    async fn remove(
+        &self,
+        path: &str,
+        home: &str,
+        stderr: &mut (dyn Write + Send),
+    ) -> Result<(), server::WorkspaceRemoveError> {
+        if path == self.startup {
+            return Err(server::WorkspaceRemoveError::IsStartup);
+        }
+        let mut loaded = self.loaded.lock().await;
+        let host = loaded.get(path).cloned();
+        if let Some(host) = &host
+            && let Some(controller) = &host.workflows
+            && controller.active_runs() > 0
+        {
+            return Err(server::WorkspaceRemoveError::InUse(
+                "an active workflow run".to_string(),
+            ));
+        }
+        if host.is_none() {
+            let in_list = read_workspace_list(home)
+                .unwrap_or_default()
+                .iter()
+                .any(|entry| entry == path);
+            if !in_list {
+                return Err(server::WorkspaceRemoveError::NotFound);
+            }
+        }
+        loaded.remove(path);
+        if let Some(host) = host
+            && let Some(controller) = &host.workflows
+        {
+            controller.close().await;
+        }
+        if let Err(error) = remove_from_workspace_list(home, path) {
+            let _ = writeln!(stderr, "warning: cannot update workspace list: {error}");
+        }
+        Ok(())
+    }
 }
 
 // ---- admission ----
@@ -194,6 +239,16 @@ fn admit_workspace(
     } else {
         Err(Admission::NotAdmitted)
     }
+}
+
+/// The canonical form of `path`, or `path` itself when it no longer resolves
+/// (its directory was deleted since it was added). Unlike [`admit_workspace`],
+/// `DELETE /v1/workspaces` must still match a persisted entry whose directory
+/// is gone, so a literal-string fallback replaces admission here.
+fn canonical_or_literal(path: &str) -> String {
+    canonical_directory(Path::new(path))
+        .map(|canonical| canonical.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
 }
 
 /// Canonicalizes `[server].workspace_roots` once at startup. A root that does
@@ -238,18 +293,10 @@ fn read_workspace_list(home: &str) -> Result<Vec<String>, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Adds `path` to the persisted workspace list (sorted, deduplicated) and
-/// writes it through a temporary file in `~/.otto` followed by `rename`, so a
-/// reader never observes a partial file. A currently unparsable file is
-/// treated as an empty list rather than preserved, matching the spec's "the
-/// next successful add ... rewrites it from the empty list plus the new
-/// path".
-fn add_to_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
-    let mut workspaces = read_workspace_list(home).unwrap_or_default();
-    if !workspaces.iter().any(|entry| entry == path) {
-        workspaces.push(path.to_string());
-        workspaces.sort();
-    }
+/// Writes `workspaces` through a temporary file in `~/.otto` followed by
+/// `rename`, so a reader never observes a partial file. Shared by
+/// [`add_to_workspace_list`] and [`remove_from_workspace_list`].
+fn write_workspace_list(home: &str, workspaces: Vec<String>) -> std::io::Result<()> {
     let directory = Path::new(home).join(".otto");
     std::fs::create_dir_all(&directory)?;
     let json = serde_json::to_vec(&WorkspaceListFile { workspaces })
@@ -258,6 +305,27 @@ fn add_to_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
     let temp = directory.join(format!(".serve-workspaces-{suffix}.json"));
     std::fs::write(&temp, &json)?;
     std::fs::rename(&temp, workspace_list_path(home))
+}
+
+/// Adds `path` to the persisted workspace list (sorted, deduplicated). A
+/// currently unparsable file is treated as an empty list rather than
+/// preserved, matching the spec's "the next successful add ... rewrites it
+/// from the empty list plus the new path".
+fn add_to_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
+    let mut workspaces = read_workspace_list(home).unwrap_or_default();
+    if !workspaces.iter().any(|entry| entry == path) {
+        workspaces.push(path.to_string());
+        workspaces.sort();
+    }
+    write_workspace_list(home, workspaces)
+}
+
+/// Removes `path` from the persisted workspace list, preserving the order of
+/// the remaining entries. A path not in the list is a no-op.
+fn remove_from_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
+    let mut workspaces = read_workspace_list(home).unwrap_or_default();
+    workspaces.retain(|entry| entry != path);
+    write_workspace_list(home, workspaces)
 }
 
 /// Loads every path in the persisted workspace list into `workspaces`, after
@@ -547,6 +615,15 @@ impl Factory for ServeFactory {
             },
             newly_loaded,
         ))
+    }
+
+    async fn remove_workspace(&self, path: &str) -> Result<(), server::WorkspaceRemoveError> {
+        let canonical = canonical_or_literal(path);
+        let home = self.builder().shared.home.clone();
+        // ponytail: no writer is threaded through `Factory::remove_workspace`,
+        // matching `load_workspace`'s own stderr fallback.
+        let mut stderr = std::io::stderr();
+        self.workspaces.remove(&canonical, &home, &mut stderr).await
     }
 
     async fn workflow_controller(
@@ -1508,5 +1585,142 @@ mod tests {
             read_workspace_list(home_str).expect("read"),
             vec![other_string]
         );
+    }
+
+    // ---- removing a workspace ----
+
+    /// Removing a loaded, persisted workspace drops its host and its
+    /// persisted-list entry in one call. The other entries keep their
+    /// original order: `remove_from_workspace_list`'s `retain` never
+    /// resorts, unlike `add_to_workspace_list`.
+    #[tokio::test]
+    async fn removing_a_loaded_and_persisted_workspace_unloads_it_and_updates_the_list() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace_path = canonical_directory(workspace.path()).expect("canonical");
+        let workspace_string = workspace_path.to_string_lossy().into_owned();
+        let home_str = home.path().to_str().expect("utf-8 home");
+        write_workspace_list(
+            home_str,
+            vec![
+                "z-other".to_string(),
+                workspace_string.clone(),
+                "a-other".to_string(),
+            ],
+        )
+        .expect("seed the persisted list");
+
+        let mut loaded = BTreeMap::new();
+        loaded.insert(
+            workspace_string.clone(),
+            dummy_host(&workspace_path, sessions.path()),
+        );
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(loaded),
+        };
+        let mut stderr = Vec::new();
+
+        workspaces
+            .remove(&workspace_string, home_str, &mut stderr)
+            .await
+            .expect("remove a loaded workspace");
+
+        assert!(
+            !workspaces
+                .loaded
+                .lock()
+                .await
+                .contains_key(&workspace_string)
+        );
+        assert_eq!(
+            read_workspace_list(home_str).expect("read"),
+            vec!["z-other".to_string(), "a-other".to_string()],
+            "the other entries keep their original order"
+        );
+    }
+
+    /// A path only in the persisted list, never loaded, is removed from the
+    /// list; `loaded` is untouched.
+    #[tokio::test]
+    async fn removing_a_persisted_only_workspace_removes_it_from_the_list() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let home_str = home.path().to_str().expect("utf-8 home");
+        add_to_workspace_list(home_str, "/some/persisted/path").expect("seed");
+        add_to_workspace_list(home_str, "/other/path").expect("seed");
+
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        let mut stderr = Vec::new();
+
+        workspaces
+            .remove("/some/persisted/path", home_str, &mut stderr)
+            .await
+            .expect("remove a persisted-only workspace");
+
+        assert!(workspaces.loaded.lock().await.is_empty());
+        assert_eq!(
+            read_workspace_list(home_str).expect("read"),
+            vec!["/other/path".to_string()]
+        );
+    }
+
+    /// A path neither loaded nor in the persisted list is `NotFound`.
+    #[tokio::test]
+    async fn removing_an_unknown_path_answers_not_found() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        let mut stderr = Vec::new();
+        let home_str = home.path().to_str().expect("utf-8 home");
+
+        let error = workspaces
+            .remove("/never/added", home_str, &mut stderr)
+            .await
+            .expect_err("an unknown path must not be removable");
+        assert!(matches!(error, server::WorkspaceRemoveError::NotFound));
+    }
+
+    /// The startup workspace can never be removed, even when it happens to
+    /// also be in the persisted list.
+    #[tokio::test]
+    async fn removing_the_startup_workspace_answers_is_startup() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        let mut stderr = Vec::new();
+        let home_str = home.path().to_str().expect("utf-8 home");
+
+        let error = workspaces
+            .remove(&startup_path.to_string_lossy(), home_str, &mut stderr)
+            .await
+            .expect_err("the startup workspace must not be removable");
+        assert!(matches!(error, server::WorkspaceRemoveError::IsStartup));
     }
 }

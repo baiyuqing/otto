@@ -1649,6 +1649,16 @@ impl Controller {
         self.get(run_id)
     }
 
+    /// The number of runs currently executing. Used by `cli::serve`'s
+    /// workspace removal to refuse unloading a workspace with work in
+    /// flight.
+    pub fn active_runs(&self) -> usize {
+        self.active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len()
+    }
+
     pub async fn close(&self) {
         let active: Vec<(String, CancellationToken, Arc<Notify>)> = self
             .active
@@ -3301,5 +3311,39 @@ prompt = "work"
         let paused = controller.get(&run.id).expect("run");
         assert_eq!(paused.status, RunStatus::Paused);
         assert_eq!(paused.steps[0].status, StepStatus::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn active_runs_counts_in_flight_runs_and_drops_to_zero_after_close() {
+        let started = Arc::new(Notify::new());
+        let definition = definition(
+            br#"
+version = 1
+[[steps]]
+id = "work"
+agent = "worker"
+prompt = "work"
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new(
+            Arc::new(Store::open_in_memory()),
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(BlockingExecutor {
+                started: Arc::clone(&started),
+            }),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            1,
+        );
+        assert_eq!(controller.active_runs(), 0);
+
+        controller.start("flow", "").await.expect("start");
+        started.notified().await;
+        assert_eq!(controller.active_runs(), 1);
+
+        controller.close().await;
+        assert_eq!(controller.active_runs(), 0);
     }
 }

@@ -110,7 +110,7 @@ export function App() {
   // ones opened elsewhere; a snapshot naming a session outside the current
   // list means the session list is stale.
   const knownSessionIds = new Set(sessions.map((s) => s.id))
-  const status = useStatus(knownSessionIds, () => void refreshSessions())
+  const status = useStatus(knownSessionIds, () => void refreshSessions(), fail)
 
   // consume reads a turn's stream to the end. The stream closes when the
   // turn is done, but also when the connection drops, so it then asks the
@@ -554,10 +554,11 @@ export function App() {
                   setChangesWorkspace(workspace)
                   setView('changes')
                 }}
+                onWorkspaceRemoved={() => void refreshSessions()}
               />
             </div>
             {view === 'changes' ? (
-              <ChangesView workspace={changesWorkspace} onError={fail} />
+              <ChangesView workspace={changesWorkspace} status={status} onError={fail} />
             ) : (
               <TranscriptView items={items} activeSession={session !== null} />
             )}

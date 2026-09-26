@@ -279,9 +279,7 @@ impl Factory for ServeFactory {
             .await
             .ok_or_else(|| SESSION_NOT_FOUND.to_string())?;
         for host in &hosts {
-            let Ok(listed) = listed_for(&host.builder) else {
-                continue;
-            };
+            let listed = listed_for(&host.builder)?;
             if let Some(entry) = listed.sessions.into_iter().find(|entry| entry.id == id) {
                 // The repair warnings the CLI prints have no channel here;
                 // the web UI reads the repaired history like any other.
@@ -1008,6 +1006,91 @@ mod tests {
 
         assert_eq!(controller.workspace(), other_path.to_string_lossy());
         assert_eq!(other_host.builder.workspace.root(), other_path);
+    }
+
+    /// A host whose session directory listing fails (here: `session_root` is
+    /// a file, not a directory) must report that failure, not a plain
+    /// "session not found" — a caller reading 404 would otherwise conclude
+    /// there is no such session, when the real problem is a broken session
+    /// directory.
+    #[tokio::test]
+    async fn opening_by_id_in_a_named_workspace_whose_listing_fails_propagates_the_error() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let startup_sessions = tempfile::tempdir().expect("startup sessions");
+        let startup_host = dummy_host(&startup_path, startup_sessions.path());
+
+        let other = tempfile::tempdir().expect("other workspace");
+        let other_path = canonical_directory(other.path()).expect("canonical");
+        let broken_session_root = other.path().join("sessions-is-a-file");
+        std::fs::write(&broken_session_root, b"not a directory").expect("write file");
+        let other_host = dummy_host(&other_path, &broken_session_root);
+
+        let mut loaded = BTreeMap::new();
+        loaded.insert(other_path.to_string_lossy().into_owned(), other_host);
+        let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
+        let factory = ServeFactory {
+            workspaces: Workspaces {
+                startup: startup_path.to_string_lossy().into_owned(),
+                startup_host,
+                roots: Vec::new(),
+                loaded: tokio::sync::Mutex::new(loaded),
+            },
+            runtime,
+            cancel: CancellationToken::new(),
+        };
+
+        let error = match factory
+            .open("some-id", Some(&other_path.to_string_lossy()))
+            .await
+        {
+            Ok(_) => panic!("a broken session directory must not read as an open session"),
+            Err(error) => error,
+        };
+        assert_ne!(error, SESSION_NOT_FOUND, "{error}");
+    }
+
+    /// The same failure, met while searching every loaded workspace for a
+    /// resumed id (no `workspace` given): a broken host earlier in the search
+    /// order must not be silently skipped in favor of a later host that
+    /// happens to hold the id.
+    #[tokio::test]
+    async fn opening_by_id_across_workspaces_propagates_one_hosts_listing_error() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let broken_session_root = startup.path().join("sessions-is-a-file");
+        std::fs::write(&broken_session_root, b"not a directory").expect("write file");
+        let startup_host = dummy_host(&startup_path, &broken_session_root);
+
+        let other = tempfile::tempdir().expect("other workspace");
+        let other_path = canonical_directory(other.path()).expect("canonical");
+        let other_sessions = tempfile::tempdir().expect("other sessions");
+        let other_host = dummy_host(&other_path, other_sessions.path());
+
+        let runtime = crate::cli::testutil::initial_runtime(&other_host.builder);
+        let created = Controller::create(Arc::clone(&other_host.builder), &runtime)
+            .await
+            .expect("create a real session in the working workspace");
+        let id = created.info().session_id;
+
+        let mut loaded = BTreeMap::new();
+        loaded.insert(other_path.to_string_lossy().into_owned(), other_host);
+        let factory = ServeFactory {
+            workspaces: Workspaces {
+                startup: startup_path.to_string_lossy().into_owned(),
+                startup_host,
+                roots: Vec::new(),
+                loaded: tokio::sync::Mutex::new(loaded),
+            },
+            runtime,
+            cancel: CancellationToken::new(),
+        };
+
+        let error = match factory.open(&id, None).await {
+            Ok(_) => panic!("the broken startup workspace must not be skipped over"),
+            Err(error) => error,
+        };
+        assert_ne!(error, SESSION_NOT_FOUND, "{error}");
     }
 
     #[test]

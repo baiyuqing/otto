@@ -380,11 +380,17 @@ impl Server {
         &self.log
     }
 
-    /// Fans `notification` out to every currently open session. Sessions that
-    /// have no task registry (sub-agents off) drop it. Returns how many
-    /// sessions were open, including those that could not receive it.
+    /// Fans `notification` out to every currently open session in the startup
+    /// workspace. Sessions in another workspace (opened via `?workspace=` or
+    /// `{"workspace": ...}`) are not this host's concern: Feishu inbound is
+    /// wired to one workspace only. Sessions that have no task registry
+    /// (sub-agents off) drop it. Returns how many sessions received it.
     pub(crate) fn notify_open_sessions(&self, notification: Notification) -> usize {
-        let sessions = self.all_sessions();
+        let sessions: Vec<Arc<OpenSession>> = self
+            .all_sessions()
+            .into_iter()
+            .filter(|session| session.ctrl.workspace() == self.info.workspace)
+            .collect();
         for session in &sessions {
             session.ctrl.notify(notification.clone());
         }
@@ -2122,6 +2128,14 @@ mod tests {
             let sessions = tempfile::tempdir().expect("sessions");
             let builder = Arc::new(testutil::builder(workspace.path(), sessions.path()));
             let provider = ScriptedProvider::new(options.script);
+            // Production always sets `Options.info.workspace` from the same
+            // path as the startup workspace (`cli/serve.rs`); match that here
+            // unless a test explicitly overrides `info` to check the field
+            // itself (e.g. `the_info_endpoint_echoes_the_configured_info`).
+            let mut info = options.info;
+            if info.workspace.is_empty() {
+                info.workspace = builder.workspace_path.clone();
+            }
             let mut workspaces = options.workspaces;
             workspaces.startup = builder.workspace_path.clone();
             let mut workflows = options.workflow_workspaces;
@@ -2149,7 +2163,7 @@ mod tests {
             let log = Arc::new(Mutex::new(Vec::new()));
             let server = Server::new(Options {
                 factory: Arc::clone(&factory) as Arc<dyn Factory>,
-                info: options.info,
+                info,
                 token: options.token,
                 logger: Some(Arc::new(Logger::new(Box::new(SharedSink(Arc::clone(
                     &log,
@@ -4453,6 +4467,83 @@ mod tests {
             assert_eq!(pending.len(), 1, "{id}");
             assert_eq!(pending[0].text, "[feishu] hello");
         }
+    }
+
+    #[tokio::test]
+    async fn notify_open_sessions_skips_sessions_outside_the_startup_workspace() {
+        let harness = Harness::new();
+        let startup_id = harness.create().await;
+
+        // A session opened directly against a second workspace, bypassing
+        // `TestFactory` (which always builds against the harness's one
+        // builder): `Server::register` takes a `Controller` regardless of
+        // which workspace built it.
+        let other_workspace = tempfile::tempdir().expect("other workspace");
+        let other_sessions = tempfile::tempdir().expect("other sessions");
+        let other_builder = Arc::new(testutil::builder(
+            other_workspace.path(),
+            other_sessions.path(),
+        ));
+        let session = SharedSession::memory(Header {
+            version: CURRENT_VERSION,
+            id: new_id().expect("id"),
+            workspace: other_builder.workspace_path.clone(),
+            provider: "openai-compatible".to_string(),
+            profile: "alpha".to_string(),
+            model: "test-model".to_string(),
+            created_at: chrono::Utc::now(),
+        });
+        let runner = Runner::scripted(
+            session.clone(),
+            Arc::clone(&harness.provider) as Arc<dyn Provider + Send + Sync>,
+            Arc::new(crate::subagent::tasks::Tasks::new()),
+        );
+        let other_ctrl = Controller::with_builder(
+            other_builder,
+            true,
+            session,
+            runner,
+            RuntimeInfo {
+                provider: "openai-compatible".to_string(),
+                profile: "alpha".to_string(),
+                model: "test-model".to_string(),
+                thinking: "high".to_string(),
+                context_window: 128_000,
+                sandbox: SandboxInfo::default(),
+            },
+        );
+        let other_id = other_ctrl.info().session_id.clone();
+        harness.server.register(other_ctrl);
+
+        let notification = otto_core::agent::inbox::Notification {
+            kind: Some(otto_core::agent::inbox::NotificationKind::Message),
+            text: "[feishu] hello".to_string(),
+            ..otto_core::agent::inbox::Notification::default()
+        };
+        assert_eq!(harness.server.notify_open_sessions(notification), 1);
+
+        let startup_pending = harness
+            .server
+            .lookup(&startup_id)
+            .expect("startup session")
+            .ctrl
+            .subagent_tasks()
+            .expect("registry")
+            .notifications()
+            .snapshot();
+        assert_eq!(startup_pending.len(), 1);
+        assert_eq!(startup_pending[0].text, "[feishu] hello");
+
+        let other_pending = harness
+            .server
+            .lookup(&other_id)
+            .expect("other session")
+            .ctrl
+            .subagent_tasks()
+            .expect("registry")
+            .notifications()
+            .snapshot();
+        assert!(other_pending.is_empty(), "{other_pending:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

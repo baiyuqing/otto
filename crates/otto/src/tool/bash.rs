@@ -147,6 +147,15 @@ impl BashApprovals {
         Ok(())
     }
 
+    /// Unexpired pending approvals for `session_id`: 0 or 1, since a session
+    /// keeps only its newest request. Applies the same expiry filter as
+    /// [`BashApprovals::approve`].
+    pub fn pending_count(&self, session_id: &str) -> usize {
+        let mut state = self.state.lock().expect("bash approval mutex");
+        self.retain_fresh(&mut state);
+        usize::from(state.requests.contains_key(session_id))
+    }
+
     fn take(&self, session_id: &str, command: &str) -> bool {
         let mut state = self.state.lock().expect("bash approval mutex");
         self.retain_fresh(&mut state);
@@ -846,6 +855,27 @@ mod tests {
             approvals.approve("session-1", &id),
             Err("approval request not found or expired")
         );
+    }
+
+    #[test]
+    fn pending_count_counts_unexpired_entries_only() {
+        let approvals = BashApprovals::with_lifetime(
+            Arc::new(FakeExecutor::default()),
+            Vec::new(),
+            Duration::from_secs(60),
+        );
+        assert_eq!(approvals.pending_count("session-1"), 0);
+        approvals.request("session-1", "git push");
+        assert_eq!(approvals.pending_count("session-1"), 1);
+        assert_eq!(approvals.pending_count("other-session"), 0);
+
+        let expired = BashApprovals::with_lifetime(
+            Arc::new(FakeExecutor::default()),
+            Vec::new(),
+            Duration::ZERO,
+        );
+        expired.request("session-1", "git push");
+        assert_eq!(expired.pending_count("session-1"), 0);
     }
 
     /// The captured stdout body.

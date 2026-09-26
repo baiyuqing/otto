@@ -13,6 +13,7 @@ import { WorkflowsView } from './WorkflowsView'
 import { AgentsView } from './AgentsView'
 import { mcpServerLine, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
+import { useStatus } from './status'
 import logo from '../logo.svg'
 
 setToken(loadToken())
@@ -102,6 +103,12 @@ export function App() {
   )
 
   const refreshUsage = useCallback(() => api.usage().then(setRecordedUsage).catch(fail), [fail])
+
+  // The status stream reports every open session in this process, including
+  // ones opened elsewhere; a snapshot naming a session outside the current
+  // list means the session list is stale.
+  const knownSessionIds = new Set(sessions.map((s) => s.id))
+  const status = useStatus(knownSessionIds, () => void refreshSessions())
 
   // consume reads a turn's stream to the end. The stream closes when the
   // turn is done, but also when the connection drops, so it then asks the
@@ -534,6 +541,7 @@ export function App() {
                 sessions={sessions}
                 current={session?.id ?? ''}
                 disabled={busy}
+                status={status}
                 onOpen={(id, workspace) => {
                   setSidebarOpen(false)
                   void open(id, workspace)

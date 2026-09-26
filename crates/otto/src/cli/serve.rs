@@ -111,6 +111,12 @@ impl Workspaces {
     /// registry". A failed workflow-controller lock is not this kind of
     /// failure: it mirrors startup's own handling, where the workspace loads
     /// with `workflows: None` and a stderr warning.
+    ///
+    /// `persist` records a newly-built host's path into the persisted
+    /// workspace list file, still under `loaded`'s lock so two concurrent
+    /// calls for different paths cannot race each other's read-modify-write.
+    /// Startup's own reload of that same file passes `false`: those paths
+    /// are already in it.
     async fn load(
         &self,
         canonical: &Path,
@@ -118,6 +124,7 @@ impl Workspaces {
         runtime: &Runtime,
         cancel: &CancellationToken,
         stderr: &mut (dyn Write + Send),
+        persist: bool,
     ) -> Result<(Arc<WorkspaceHost>, bool), String> {
         let path = canonical.to_string_lossy().into_owned();
         let mut loaded = self.loaded.lock().await;
@@ -144,7 +151,10 @@ impl Workspaces {
             workflows,
             reloader,
         });
-        loaded.insert(path, Arc::clone(&host));
+        loaded.insert(path.clone(), Arc::clone(&host));
+        if persist && let Err(error) = add_to_workspace_list(&shared.home, &path) {
+            let _ = writeln!(stderr, "warning: cannot save workspace list: {error}");
+        }
         Ok((host, true))
     }
 }
@@ -197,6 +207,104 @@ fn canonicalize_workspace_roots(raw_roots: &[String]) -> Result<Vec<PathBuf>, St
                 .map_err(|error| format!("[server] workspace_roots: \"{root}\": {error}"))
         })
         .collect()
+}
+
+// ---- persisted workspace list ----
+
+/// `~/.otto/serve-workspaces.json`: every workspace ever added via `POST
+/// /v1/workspaces`, so a restarted `otto serve` reloads them. One file per
+/// user, shared by every `otto serve` process.
+fn workspace_list_path(home: &str) -> PathBuf {
+    Path::new(home).join(".otto/serve-workspaces.json")
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct WorkspaceListFile {
+    workspaces: Vec<String>,
+}
+
+/// Reads the persisted workspace list. A missing file reads as an empty
+/// list; an unparsable file is `Err` so the caller can warn without touching
+/// it, leaving it for the next successful [`add_to_workspace_list`] to
+/// overwrite.
+fn read_workspace_list(home: &str) -> Result<Vec<String>, String> {
+    let bytes = match std::fs::read(workspace_list_path(home)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    serde_json::from_slice::<WorkspaceListFile>(&bytes)
+        .map(|file| file.workspaces)
+        .map_err(|error| error.to_string())
+}
+
+/// Adds `path` to the persisted workspace list (sorted, deduplicated) and
+/// writes it through a temporary file in `~/.otto` followed by `rename`, so a
+/// reader never observes a partial file. A currently unparsable file is
+/// treated as an empty list rather than preserved, matching the spec's "the
+/// next successful add ... rewrites it from the empty list plus the new
+/// path".
+fn add_to_workspace_list(home: &str, path: &str) -> std::io::Result<()> {
+    let mut workspaces = read_workspace_list(home).unwrap_or_default();
+    if !workspaces.iter().any(|entry| entry == path) {
+        workspaces.push(path.to_string());
+        workspaces.sort();
+    }
+    let directory = Path::new(home).join(".otto");
+    std::fs::create_dir_all(&directory)?;
+    let json = serde_json::to_vec(&WorkspaceListFile { workspaces })
+        .expect("a list of strings always serializes");
+    let suffix = super::runtime_builder::random_id()?;
+    let temp = directory.join(format!(".serve-workspaces-{suffix}.json"));
+    std::fs::write(&temp, &json)?;
+    std::fs::rename(&temp, workspace_list_path(home))
+}
+
+/// Loads every path in the persisted workspace list into `workspaces`, after
+/// the startup workspace is already loaded. A path that fails admission or
+/// fails to load is skipped with a stderr warning naming the path and the
+/// reason; it stays in the file for the next start to retry. Called once at
+/// startup, so it never persists what it loads back to the file (those paths
+/// are already in it).
+async fn load_persisted_workspaces(
+    workspaces: &Workspaces,
+    shared: &Arc<super::runtime_builder::Shared>,
+    runtime: &Runtime,
+    cancel: &CancellationToken,
+    stderr: &mut (dyn Write + Send),
+) {
+    let paths = match read_workspace_list(&shared.home) {
+        Ok(paths) => paths,
+        Err(error) => {
+            let _ = writeln!(stderr, "warning: cannot read workspace list: {error}");
+            Vec::new()
+        }
+    };
+    for path in paths {
+        let canonical = match workspaces.admit(&path) {
+            Ok(canonical) => canonical,
+            Err(Admission::Invalid) => {
+                let _ = writeln!(
+                    stderr,
+                    "warning: cannot load workspace {path}: not an existing directory"
+                );
+                continue;
+            }
+            Err(Admission::NotAdmitted) => {
+                let _ = writeln!(
+                    stderr,
+                    "warning: cannot load workspace {path}: outside the startup workspace and configured roots"
+                );
+                continue;
+            }
+        };
+        if let Err(error) = workspaces
+            .load(&canonical, shared, runtime, cancel, stderr, false)
+            .await
+        {
+            let _ = writeln!(stderr, "warning: cannot load workspace {path}: {error}");
+        }
+    }
 }
 
 // ---- the session factory ----
@@ -414,6 +522,7 @@ impl Factory for ServeFactory {
                 &self.runtime,
                 &self.cancel,
                 &mut stderr,
+                true,
             )
             .await
             .map_err(|error| {
@@ -539,6 +648,14 @@ pub async fn run(
         roots: workspace_roots,
         loaded: tokio::sync::Mutex::new(BTreeMap::from([(workspace_path, Arc::clone(&host))])),
     };
+    load_persisted_workspaces(
+        &workspaces,
+        &builder.shared,
+        &runtime,
+        &serve_cancel,
+        stderr,
+    )
+    .await;
     let server = Server::new(Options {
         info: Info {
             workspace: builder.workspace_path.clone(),
@@ -939,7 +1056,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let mut stderr = Vec::new();
                 workspaces
-                    .load(&canonical, &shared, &runtime, &cancel, &mut stderr)
+                    .load(&canonical, &shared, &runtime, &cancel, &mut stderr, false)
                     .await
                     .expect("load")
             }));
@@ -985,7 +1102,7 @@ mod tests {
         let mut stderr = Vec::new();
 
         let error = match workspaces
-            .load(&missing, &shared, &runtime, &cancel, &mut stderr)
+            .load(&missing, &shared, &runtime, &cancel, &mut stderr, false)
             .await
         {
             Ok(_) => panic!("a missing directory must fail to load"),
@@ -996,7 +1113,7 @@ mod tests {
 
         std::fs::create_dir(&missing).expect("create the workspace directory");
         let (_, newly_loaded) = workspaces
-            .load(&missing, &shared, &runtime, &cancel, &mut stderr)
+            .load(&missing, &shared, &runtime, &cancel, &mut stderr, false)
             .await
             .expect("load after fixing the path");
         assert!(newly_loaded);
@@ -1148,5 +1265,238 @@ mod tests {
         ])
         .expect("canonicalize");
         assert_eq!(roots, vec![canonical_a, canonical_b]);
+    }
+
+    // ---- persisted workspace list ----
+
+    fn runtime_for(shared: &Arc<crate::cli::runtime_builder::Shared>) -> Runtime {
+        crate::cli::runtime_builder::resolve_initial_runtime(
+            &shared.config,
+            &shared.environment,
+            None,
+            &shared.overrides,
+        )
+        .expect("runtime")
+    }
+
+    /// Adding a workspace persists it, and a fresh registry over the same
+    /// home (a restart) reloads it, so it shows up in `Factory::workspaces`
+    /// the same way `GET /v1/workspaces` reports it.
+    #[tokio::test]
+    async fn a_persisted_workspace_reloads_at_startup_and_is_listed() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let roots_dir = tempfile::tempdir().expect("roots");
+        let roots_path = canonical_directory(roots_dir.path()).expect("canonical");
+        let workspace_path = roots_path.join("project");
+        std::fs::create_dir(&workspace_path).expect("workspace directory");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+        let runtime = runtime_for(&shared);
+        let cancel = CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let first_run = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: vec![roots_path.clone()],
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        first_run
+            .load(
+                &workspace_path,
+                &shared,
+                &runtime,
+                &cancel,
+                &mut stderr,
+                true,
+            )
+            .await
+            .expect("load and persist");
+
+        // The restart: a fresh registry seeded with only the startup
+        // workspace, as `run` seeds it before reloading the persisted list.
+        let restarted = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: vec![roots_path],
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        load_persisted_workspaces(&restarted, &shared, &runtime, &cancel, &mut stderr).await;
+        let factory = ServeFactory {
+            workspaces: restarted,
+            runtime,
+            cancel,
+        };
+
+        let listed = factory.workspaces().await.loaded;
+        assert!(
+            listed
+                .iter()
+                .any(|info| info.path == workspace_path.to_string_lossy()),
+            "{listed:?}"
+        );
+    }
+
+    /// A path saved while it was inside `workspace_roots` is skipped with a
+    /// warning once a config change moves it outside; a path still inside
+    /// loads normally.
+    #[tokio::test]
+    async fn a_listed_path_outside_current_roots_is_skipped_others_load() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let roots_dir = tempfile::tempdir().expect("roots");
+        let roots_path = canonical_directory(roots_dir.path()).expect("canonical");
+        let admitted = roots_path.join("project");
+        std::fs::create_dir(&admitted).expect("admitted child");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_path = canonical_directory(outside.path()).expect("canonical");
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+        let runtime = runtime_for(&shared);
+        let home_str = home.path().to_str().expect("utf-8 home");
+        add_to_workspace_list(home_str, &admitted.to_string_lossy()).expect("add admitted");
+        add_to_workspace_list(home_str, &outside_path.to_string_lossy()).expect("add outside");
+
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: vec![roots_path],
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        let cancel = CancellationToken::new();
+        let mut stderr = Vec::new();
+        load_persisted_workspaces(&workspaces, &shared, &runtime, &cancel, &mut stderr).await;
+
+        let loaded = workspaces.loaded.lock().await;
+        assert!(loaded.contains_key(&admitted.to_string_lossy().into_owned()));
+        assert!(!loaded.contains_key(&outside_path.to_string_lossy().into_owned()));
+        drop(loaded);
+        let warning = String::from_utf8(stderr).expect("utf-8");
+        assert!(
+            warning.contains(outside_path.to_string_lossy().as_ref()),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("outside the startup workspace and configured roots"),
+            "{warning}"
+        );
+    }
+
+    /// A persisted path whose directory was since deleted is skipped with a
+    /// warning; startup does not fail because of it.
+    #[tokio::test]
+    async fn a_deleted_persisted_directory_is_skipped_with_a_warning() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let missing = home.path().join("does-not-exist");
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+        let runtime = runtime_for(&shared);
+        add_to_workspace_list(
+            home.path().to_str().expect("utf-8 home"),
+            &missing.to_string_lossy(),
+        )
+        .expect("add missing path");
+
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        let cancel = CancellationToken::new();
+        let mut stderr = Vec::new();
+        load_persisted_workspaces(&workspaces, &shared, &runtime, &cancel, &mut stderr).await;
+
+        assert!(workspaces.loaded.lock().await.is_empty());
+        let warning = String::from_utf8(stderr).expect("utf-8");
+        assert!(
+            warning.contains(missing.to_string_lossy().as_ref()),
+            "{warning}"
+        );
+        assert!(warning.contains("not an existing directory"), "{warning}");
+    }
+
+    /// An unparsable persisted file is a startup warning, not a startup
+    /// failure, and startup never rewrites it: only a later successful add
+    /// does.
+    #[tokio::test]
+    async fn an_unparsable_workspace_list_file_warns_and_is_left_unchanged() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+        let runtime = runtime_for(&shared);
+        let home_str = home.path().to_str().expect("utf-8 home");
+        std::fs::create_dir_all(home.path().join(".otto")).expect(".otto dir");
+        let garbage = b"not json".to_vec();
+        std::fs::write(workspace_list_path(home_str), &garbage).expect("write garbage");
+
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        let cancel = CancellationToken::new();
+        let mut stderr = Vec::new();
+        load_persisted_workspaces(&workspaces, &shared, &runtime, &cancel, &mut stderr).await;
+
+        assert!(workspaces.loaded.lock().await.is_empty());
+        let warning = String::from_utf8(stderr).expect("utf-8");
+        assert!(warning.contains("warning:"), "{warning}");
+        let after = std::fs::read(workspace_list_path(home_str)).expect("read back");
+        assert_eq!(after, garbage, "an unparsable file must be left untouched");
+    }
+
+    /// The startup workspace is loaded before `Workspaces` exists and is
+    /// already in `loaded`, so `load` never reaches the persist step for it;
+    /// adding a different path twice still leaves one entry.
+    #[tokio::test]
+    async fn the_startup_workspace_is_never_persisted_and_duplicate_adds_collapse() {
+        let home = tempfile::tempdir().expect("home");
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(home.path());
+        let runtime = runtime_for(&shared);
+        let cancel = CancellationToken::new();
+        let mut stderr = Vec::new();
+        let startup_host = dummy_host(&startup_path, sessions.path());
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: Arc::clone(&startup_host),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::from([(
+                startup_path.to_string_lossy().into_owned(),
+                startup_host,
+            )])),
+        };
+
+        let (_, newly_loaded) = workspaces
+            .load(&startup_path, &shared, &runtime, &cancel, &mut stderr, true)
+            .await
+            .expect("load the already-loaded startup workspace");
+        assert!(!newly_loaded);
+        assert!(
+            !workspace_list_path(home.path().to_str().expect("utf-8 home")).exists(),
+            "the startup workspace must never be written to the persisted list"
+        );
+
+        let other = tempfile::tempdir().expect("other");
+        let other_path = canonical_directory(other.path()).expect("canonical");
+        let other_string = other_path.to_string_lossy().into_owned();
+        let home_str = home.path().to_str().expect("utf-8 home");
+        add_to_workspace_list(home_str, &other_string).expect("add once");
+        add_to_workspace_list(home_str, &other_string).expect("add twice");
+        assert_eq!(
+            read_workspace_list(home_str).expect("read"),
+            vec![other_string]
+        );
     }
 }

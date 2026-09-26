@@ -236,6 +236,9 @@ export const api = {
     }),
   listWorkspaces: () => json<WorkspaceList>('/v1/workspaces'),
   addWorkspace: (path: string) => json<WorkspaceEntry>('/v1/workspaces', { method: 'POST', body: JSON.stringify({ path }) }),
+  // removeWorkspace returns 204 with no body, so this uses request() rather
+  // than json() to avoid parsing an empty response.
+  removeWorkspace: (path: string) => request(`/v1/workspaces?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
   getWorkspaceDiff: (workspace: string) => json<WorkspaceDiff>(`/v1/workspaces/diff?workspace=${encodeURIComponent(workspace)}`),
   renameSession: (id: string, name: string) =>
     json<Session>(`/v1/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),

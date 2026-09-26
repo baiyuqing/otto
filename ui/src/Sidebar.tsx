@@ -33,6 +33,7 @@ export function Sidebar(props: {
   disabled: boolean
   onOpen: (id?: string, workspace?: string) => void
   onOpenChanges?: (workspace: string) => void
+  onWorkspaceRemoved?: () => void
   status?: Map<string, SessionStatus>
 }) {
   const [startup, setStartup] = useState('')
@@ -70,6 +71,17 @@ export function Sidebar(props: {
     }
   }
 
+  const removeWorkspace = async (path: string) => {
+    setAddError('')
+    try {
+      await api.removeWorkspace(path)
+      setWorkspaces((prev) => prev.filter((w) => w.path !== path))
+      props.onWorkspaceRemoved?.()
+    } catch (e) {
+      setAddError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const groups = groupSessions(startup, workspaces, props.sessions)
 
   return (
@@ -96,6 +108,11 @@ export function Sidebar(props: {
                 >
                   New session
                 </button>
+                {group.path !== startup && (
+                  <button type="button" disabled={props.disabled} onClick={() => void removeWorkspace(group.path)}>
+                    Remove
+                  </button>
+                )}
               </div>
               {group.sessions.map((s) => {
                 const st = props.status?.get(s.id)

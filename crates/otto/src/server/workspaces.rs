@@ -3,12 +3,16 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::body::Body;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use super::{Server, json_response, workspace_load_error_response};
+use super::{
+    Server, error_response, json_response, workspace_load_error_response,
+    workspace_remove_error_response,
+};
 
 #[derive(Serialize)]
 struct Entry {
@@ -80,5 +84,37 @@ pub async fn register(
             json_response(status, &entry)
         }
         Err(error) => workspace_load_error_response(error),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveQuery {
+    path: String,
+}
+
+pub async fn remove(
+    State(server): State<Arc<Server>>,
+    Query(query): Query<RemoveQuery>,
+) -> Response {
+    // Sessions record the canonical workspace path; a path that no longer
+    // resolves (a deleted directory's persisted entry) is used as given.
+    let path = std::fs::canonicalize(&query.path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or(query.path);
+    let open = open_sessions(&server, &path);
+    if open > 0 {
+        return error_response(
+            StatusCode::CONFLICT,
+            "WORKSPACE_IN_USE",
+            &format!("{open} open session(s) in this workspace"),
+        );
+    }
+    match server.factory.remove_workspace(&path).await {
+        Ok(()) => Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Body::empty())
+            .expect("static response"),
+        Err(error) => workspace_remove_error_response(error),
     }
 }

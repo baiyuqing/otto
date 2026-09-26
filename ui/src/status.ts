@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { streamStatus, type SessionStatus } from './api'
+import { ApiError, streamStatus, type SessionStatus } from './api'
 
 export const STATUS_RECONNECT_MS = 1000
 
@@ -8,13 +8,20 @@ export const STATUS_RECONNECT_MS = 1000
 // errors, for as long as the component stays mounted, and calls
 // onUnknownSession once per snapshot that names a session id outside
 // knownIds (the caller's job is deciding what "unknown" means and reacting,
-// e.g. by refreshing its session list).
-export function useStatus(knownIds: Set<string>, onUnknownSession: () => void): Map<string, SessionStatus> {
+// e.g. by refreshing its session list). A 401 (the server issued a new
+// token) is reported through onError instead, and stops reconnecting.
+export function useStatus(
+  knownIds: Set<string>,
+  onUnknownSession: () => void,
+  onError: (error: unknown) => void,
+): Map<string, SessionStatus> {
   const [status, setStatus] = useState<Map<string, SessionStatus>>(new Map())
   const knownIdsRef = useRef(knownIds)
   knownIdsRef.current = knownIds
   const onUnknownRef = useRef(onUnknownSession)
   onUnknownRef.current = onUnknownSession
+  const onErrorRef = useRef(onError)
+  onErrorRef.current = onError
 
   useEffect(() => {
     let stopped = false
@@ -28,7 +35,11 @@ export function useStatus(knownIds: Set<string>, onUnknownSession: () => void): 
             setStatus(new Map(snapshot.sessions.map((s) => [s.id, s])))
             if (snapshot.sessions.some((s) => !knownIdsRef.current.has(s.id))) onUnknownRef.current()
           }
-        } catch {
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 401) {
+            onErrorRef.current(e)
+            return
+          }
           // Connection dropped or aborted; fall through to reconnect below.
         }
         if (stopped) return

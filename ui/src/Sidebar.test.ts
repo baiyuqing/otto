@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const api = vi.hoisted(() => ({
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
+  removeWorkspace: vi.fn(),
 }))
 
 vi.mock('./api', () => ({ api }))
@@ -124,6 +125,49 @@ describe('Sidebar', () => {
 
     for (const button of screen.getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByLabelText('Add workspace path') as HTMLInputElement).disabled).toBe(true)
+  })
+
+  it('shows a Remove button for non-startup groups only', async () => {
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1))
+
+    const appHeader = screen.getByTitle('/Users/me/src/app')
+    expect(within(appHeader).getByRole('button', { name: 'Remove' })).toBeTruthy()
+    const otherHeader = screen.getByTitle('/Users/me/src/other')
+    expect(within(otherHeader).queryByRole('button', { name: 'Remove' })).toBeNull()
+  })
+
+  it('calls the API and onWorkspaceRemoved on a successful workspace remove', async () => {
+    api.removeWorkspace.mockResolvedValue(undefined)
+    const onWorkspaceRemoved = vi.fn()
+    // A session-less group so a successful remove also drops it from the
+    // sidebar (a group with sessions stays, since groupSessions unions
+    // workspaces with the workspaces sessions report).
+    api.listWorkspaces.mockResolvedValue({
+      startup: '/Users/me/src/other',
+      roots: [],
+      workspaces: [...workspaces, { path: '/Users/me/src/empty', open_sessions: 0, workflows: false }],
+    })
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn(), onWorkspaceRemoved }))
+    const emptyHeader = await screen.findByTitle('/Users/me/src/empty')
+
+    fireEvent.click(within(emptyHeader).getByRole('button', { name: 'Remove' }))
+
+    expect(api.removeWorkspace).toHaveBeenCalledWith('/Users/me/src/empty')
+    await waitFor(() => expect(screen.queryByTitle('/Users/me/src/empty')).toBeNull())
+    expect(onWorkspaceRemoved).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the server error inline when removing a workspace is rejected', async () => {
+    const { ApiError } = await vi.importActual<typeof import('./api')>('./api')
+    api.removeWorkspace.mockRejectedValue(new ApiError(409, 'WORKSPACE_IN_USE', 'workspace in use'))
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+    const appHeader = await screen.findByTitle('/Users/me/src/app')
+
+    fireEvent.click(within(appHeader).getByRole('button', { name: 'Remove' }))
+
+    expect(await screen.findByText('workspace in use')).toBeTruthy()
+    expect(screen.getByTitle('/Users/me/src/app')).toBeTruthy()
   })
 })
 

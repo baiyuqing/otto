@@ -1,6 +1,6 @@
 # Process-wide session status stream for `otto serve`
 
-Status: draft, awaiting approval.
+Status: approved 2026-09-26.
 
 ## Problem
 

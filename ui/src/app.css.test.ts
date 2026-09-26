@@ -21,4 +21,10 @@ describe('web UI theme', () => {
     expect(css).not.toMatch(/\bInter\b/)
     expect(css).not.toMatch(/border-radius:\s*999px/)
   })
+
+  it('hides the sidebar below 720px behind the topbar toggle', () => {
+    const narrow = css.match(/@media \(max-width: 720px\) \{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(narrow).toMatch(/\.sidebar-toggle \{ display: inline-flex; \}/)
+    expect(narrow).toMatch(/\.sidebar-wrap \{ display: none; \}/)
+  })
 })

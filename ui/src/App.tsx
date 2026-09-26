@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, events, loadToken, setToken, type UsageSummary } from './api'
 import { parseWebCommand, supportedCommands } from './commands'
 import { fromHistory, phase, reduce, statusLine, type Info, type Item, type Session, type SessionListRow, type Usage } from './wire'
-import { SessionPicker } from './SessionPicker'
+import { Sidebar } from './Sidebar'
 import { TranscriptView } from './TranscriptView'
 import { Composer } from './Composer'
 import { Footer } from './Footer'
@@ -83,6 +83,7 @@ export function App() {
   const [renameDraft, setRenameDraft] = useState<string | null>(null)
   const [renaming, setRenaming] = useState(false)
   const [error, setError] = useState('')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const compactAbort = useRef<AbortController | null>(null)
   // The running turn's phase and when it and the turn started (ms). A turn
   // re-attached after a reload counts from the attach, not the server start.
@@ -262,7 +263,7 @@ export function App() {
       return
     }
     if (command.kind === 'resume') {
-      setItems((prev) => [...prev, { kind: 'notice', text: 'Choose a session from the picker to resume it.' }])
+      setItems((prev) => [...prev, { kind: 'notice', text: 'Choose a session from the sidebar to resume it.' }])
       return
     }
     if (command.kind === 'model') {
@@ -482,7 +483,14 @@ export function App() {
           </button>
         </nav>
         {view === 'chat' && (
-          <SessionPicker sessions={sessions} current={session?.id ?? ''} disabled={busy} onOpen={open} />
+          <button
+            type="button"
+            className="sidebar-toggle"
+            aria-pressed={sidebarOpen}
+            onClick={() => setSidebarOpen((v) => !v)}
+          >
+            Sessions
+          </button>
         )}
         <span className="spacer" />
         {view === 'chat' && session && (
@@ -520,7 +528,20 @@ export function App() {
             }}
           />
         ) : (
-          <TranscriptView items={items} activeSession={session !== null} />
+          <>
+            <div className={`sidebar-wrap${sidebarOpen ? ' open' : ''}`}>
+              <Sidebar
+                sessions={sessions}
+                current={session?.id ?? ''}
+                disabled={busy}
+                onOpen={(id, workspace) => {
+                  setSidebarOpen(false)
+                  void open(id, workspace)
+                }}
+              />
+            </div>
+            <TranscriptView items={items} activeSession={session !== null} />
+          </>
         )}
       </main>
       {view === 'chat' && session && showContext && (

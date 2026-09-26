@@ -70,6 +70,8 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         },
         sandbox_secrets_baseline: Vec::new(),
         sandbox_secrets_baseline_complete: true,
+        sandbox_driver_override: None,
+        explicit_config: false,
         auth_path: String::new(),
         auth_credentials: crate::auth::Credentials::default(),
         auth_credentials_loaded: false,
@@ -119,6 +121,39 @@ pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
         host_entries: vec![b"HOME=/tmp".to_vec()],
         sandbox_secrets_baseline: Vec::new(),
         sandbox_secrets_baseline_complete: true,
+        sandbox_driver_override: None,
+        explicit_config: false,
+        auth_path: String::new(),
+        auth_credentials: crate::auth::Credentials::default(),
+        auth_credentials_loaded: false,
+        usage: None,
+        task_recorder: None,
+        skill_checker: None,
+        memory: Default::default(),
+    })
+}
+
+/// A [`Shared`] whose config leaves `[sandbox].driver` unset but carries a
+/// `--sandbox` override, for the test that a workspace loaded at runtime
+/// honors the same override startup applies to its own workspace.
+pub fn shared_with_sandbox_driver_override(root: &Path, driver: &str) -> Arc<Shared> {
+    let config = config();
+    let mut environment = environment();
+    environment.insert("HOME".to_string(), root.to_string_lossy().into_owned());
+    Arc::new(Shared {
+        config_path: root.join("config.toml"),
+        config,
+        environment,
+        home: root.to_string_lossy().into_owned(),
+        session_root: root.join("sessions"),
+        shell: "/bin/sh".to_string(),
+        no_session: true,
+        overrides: Overrides::default(),
+        host_entries: vec![b"HOME=/tmp".to_vec()],
+        sandbox_secrets_baseline: Vec::new(),
+        sandbox_secrets_baseline_complete: true,
+        sandbox_driver_override: Some(driver.to_string()),
+        explicit_config: false,
         auth_path: String::new(),
         auth_credentials: crate::auth::Credentials::default(),
         auth_credentials_loaded: false,

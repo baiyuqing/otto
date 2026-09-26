@@ -588,8 +588,21 @@ pub struct Shared {
     /// The redaction boundary's secret set before the sandbox for any one
     /// workspace opens and may add its own. `Builder::for_workspace` seeds
     /// the per-workspace `sandbox_secrets` from this.
+    ///
+    /// This baseline is captured once, from the startup workspace's own
+    /// sandbox, and reused as the seed for every workspace loaded later. A
+    /// workspace loaded at runtime does not get its own baseline recomputed
+    /// from its own sandbox.
     pub sandbox_secrets_baseline: Vec<String>,
     pub sandbox_secrets_baseline_complete: bool,
+    /// `--sandbox`, when the flag was passed. Process-wide: every workspace's
+    /// `resolve_sandbox_settings` call uses this same override, so `otto
+    /// serve --sandbox off` applies to a workspace loaded after startup too.
+    pub sandbox_driver_override: Option<String>,
+    /// Whether `--config` named the config file explicitly, vs. the default
+    /// path. Each workspace's `SandboxReloader` re-reads this same file on
+    /// `/sandbox reload`, so the flag is process-wide rather than per-workspace.
+    pub explicit_config: bool,
     /// The captured `~/.otto/auth/chatgpt.json`.
     pub auth_path: String,
     /// The captured credentials, valid only when loaded is true.
@@ -1345,6 +1358,8 @@ mod tests {
             overrides: Overrides::default(),
             sandbox_secrets_baseline: Vec::new(),
             sandbox_secrets_baseline_complete: true,
+            sandbox_driver_override: None,
+            explicit_config: false,
             auth_path: String::new(),
             auth_credentials: crate::auth::Credentials::default(),
             auth_credentials_loaded: false,

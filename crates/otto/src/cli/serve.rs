@@ -38,11 +38,16 @@ fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
 
 // ---- the workspace registry ----
 
-/// One loaded workspace: its composition root and, when the workflow lock
-/// was acquired, its workflow controller.
+/// One loaded workspace: its composition root, its own `/sandbox reload`
+/// state, and, when the workflow lock was acquired, its workflow controller.
 struct WorkspaceHost {
     builder: Arc<Builder>,
     workflows: Option<Arc<crate::workflow::Controller>>,
+    /// This workspace's own sandbox reloader (`None` when it never got a
+    /// usable sandbox). `/sandbox reload` today only reloads the startup
+    /// workspace (`ServeFactory` reads `startup_host().reloader`); wiring it
+    /// to iterate every host is slice 5.
+    reloader: Option<Arc<SandboxReloader>>,
 }
 
 /// The workspaces this server process has loaded, keyed by canonical path.
@@ -111,9 +116,9 @@ impl Workspaces {
         if let Some(host) = loaded.get(&path) {
             return Ok((Arc::clone(host), false));
         }
-        let builder = Arc::new(
-            super::run::load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?,
-        );
+        let (builder, reloader) =
+            super::run::load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?;
+        let builder = Arc::new(builder);
         let workflows =
             match super::workflow::build_controller(Arc::clone(&builder), runtime, stderr).await {
                 Ok(controller) => Some(controller),
@@ -126,7 +131,11 @@ impl Workspaces {
                     None
                 }
             };
-        let host = Arc::new(WorkspaceHost { builder, workflows });
+        let host = Arc::new(WorkspaceHost {
+            builder,
+            workflows,
+            reloader,
+        });
         loaded.insert(path, Arc::clone(&host));
         Ok((host, true))
     }
@@ -189,7 +198,6 @@ fn canonicalize_workspace_roots(raw_roots: &[String]) -> Result<Vec<PathBuf>, St
 struct ServeFactory {
     workspaces: Workspaces,
     runtime: Runtime,
-    sandbox: Option<Arc<SandboxReloader>>,
     /// Cancels a workspace load in progress when the server shuts down;
     /// otherwise never fired during normal operation.
     cancel: CancellationToken,
@@ -217,7 +225,7 @@ impl ServeFactory {
     }
 
     fn wire(&self, controller: Controller) -> Controller {
-        match &self.sandbox {
+        match &self.workspaces.startup_host().reloader {
             Some(control) => {
                 controller.with_sandbox_control(Arc::clone(control) as Arc<dyn SandboxControl>)
             }
@@ -250,11 +258,12 @@ impl Factory for ServeFactory {
     }
 
     fn sandbox_reload_available(&self) -> bool {
-        self.sandbox.is_some()
+        self.workspaces.startup_host().reloader.is_some()
     }
 
     async fn reload_sandbox(&self) -> Option<Result<SandboxInfo, String>> {
-        let control = self.sandbox.as_ref()?;
+        let host = self.workspaces.startup_host();
+        let control = host.reloader.as_ref()?;
         Some(SandboxControl::reload(control.as_ref()).await)
     }
 
@@ -430,6 +439,7 @@ pub async fn run(
     let host = Arc::new(WorkspaceHost {
         builder: Arc::clone(&builder),
         workflows,
+        reloader,
     });
     let workspaces = Workspaces {
         startup: workspace_path.clone(),
@@ -450,7 +460,6 @@ pub async fn run(
         factory: Arc::new(ServeFactory {
             workspaces,
             runtime: runtime.clone(),
-            sandbox: reloader,
             cancel: serve_cancel.clone(),
         }),
         token,
@@ -779,6 +788,7 @@ mod tests {
         Arc::new(WorkspaceHost {
             builder: Arc::new(crate::cli::testutil::builder(workspace_root, session_root)),
             workflows: None,
+            reloader: None,
         })
     }
 

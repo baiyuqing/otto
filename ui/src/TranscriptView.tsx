@@ -52,6 +52,13 @@ function MarkdownView({ text }: { text: string }) {
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
       components={{
+        a({ children, ...props }) {
+          return (
+            <a {...props} target="_blank" rel="noopener noreferrer">
+              {children}
+            </a>
+          )
+        },
         code({ inline, className, children, ...props }: CodeProps) {
           const match = /language-(\w+)/.exec(className ?? '')
           const code = String(children).replace(/\n$/, '')

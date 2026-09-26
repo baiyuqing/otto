@@ -132,6 +132,7 @@ struct Entry {
     cancel: Option<CancellationToken>,
     #[allow(clippy::type_complexity)]
     history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
+    inbox: Arc<Inbox>,
     done: Arc<Notify>,
 }
 
@@ -291,6 +292,7 @@ impl Tasks {
                     task,
                     cancel,
                     history,
+                    inbox: Arc::new(Inbox::new(None)),
                     done: Arc::new(Notify::new()),
                 },
             );
@@ -470,6 +472,37 @@ impl Tasks {
             Some(hook) => hook(),
             None => Vec::new(),
         })
+    }
+
+    /// The task's private inbox, used to deliver parent messages into the
+    /// child at its next agent-loop notification checkpoint.
+    pub fn child_inbox(&self, reference: &str) -> Option<Arc<Inbox>> {
+        let state = self.lock();
+        let entry = Self::entry(&state, reference)?;
+        Some(Arc::clone(&entry.inbox))
+    }
+
+    /// Queues a parent message for a queued or running child. The returned id
+    /// is the canonical task id, even when `reference` was a task name.
+    pub fn send_message(&self, reference: &str, message: &str) -> Result<String, TaskError> {
+        let (id, inbox) = {
+            let state = self.lock();
+            let Some(entry) = Self::entry(&state, reference) else {
+                return Err(TaskError::NotFound(reference.to_string()));
+            };
+            if entry.task.is_final() {
+                return Err(TaskError::Finished(reference.to_string()));
+            }
+            (entry.task.id.clone(), Arc::clone(&entry.inbox))
+        };
+        inbox.push(otto_core::agent::inbox::Notification {
+            task_id: id.clone(),
+            kind: Some(NotificationKind::Message),
+            text: format!("[parent-message] {message}"),
+            usage: None,
+        });
+        self.signal();
+        Ok(id)
     }
 
     /// Cancels the task outside the registry lock. It errors for an unknown

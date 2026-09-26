@@ -48,6 +48,7 @@ use otto_core::model::{Message, Role, ToolDefinition};
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{MemorySession, Session};
 use otto_core::tool::{ToolExecutor, ToolResult};
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -55,9 +56,9 @@ use tokio_util::sync::CancellationToken;
 use super::format::{comma_int, first_runes, one_line, round_to_seconds};
 use super::tasks::{Task, TaskError, TaskStatus, Tasks};
 use super::{Catalog, Definition, WritePolicy, inherit_snapshot};
-use crate::tool::Tool;
 use crate::tool::registry::Registry;
-use crate::tool::result::capped_text_result;
+use crate::tool::result::{capped_text_result, decode_strict_json};
+use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
 
 /// Tools a child never receives: the agent-control tools, because delegation
 /// depth is fixed at one; the memory tools, because a child gets no memory
@@ -78,7 +79,7 @@ pub const EXCLUDED_CHILD_TOOLS: [&str; 11] = [
 
 /// Appended to a child's system prompt under `## Sub-agent role` when it has
 /// no definition, or its definition's body is empty.
-const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result; nothing else you write is.";
+const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Otto. Complete only the delegated task below with the available tools, then reply with a self-contained final report. That final message is returned to the caller as your result. Use agent_report to send concise progress updates, blockers, plans, or interim findings to the parent when useful; those reports do not end your task.";
 
 const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16384;
@@ -134,6 +135,10 @@ impl Session for SharedTranscript {
     }
 }
 
+/// Child-only tool used by a running sub-agent to send a progress update to
+/// the parent without finishing the task.
+const AGENT_REPORT_DESCRIPTION: &str = "Report progress, blockers, plans, or interim findings to the parent agent without ending this sub-agent task. Use this when the parent should know what you are doing or may want to send a follow-up task update with agent_send.";
+
 /// One child's view of the shared child registry: the tools whose names are in
 /// `allowed`, in the registry's own order. `None` allows every child tool.
 pub struct ChildTools {
@@ -141,6 +146,9 @@ pub struct ChildTools {
     allowed: Option<BTreeSet<String>>,
     write_policy: WritePolicy,
     write_paths: Vec<String>,
+    parent_inbox: Arc<Inbox>,
+    task_id: String,
+    max_output_bytes: usize,
 }
 
 impl ChildTools {
@@ -176,6 +184,39 @@ impl ChildTools {
             }
         }
     }
+
+    fn agent_report_definition() -> ToolDefinition {
+        definition(
+            "agent_report",
+            AGENT_REPORT_DESCRIPTION,
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Progress, blocker, plan, or interim finding to show to the parent agent."
+                    }
+                },
+                "required": ["message"]
+            }),
+        )
+    }
+
+    fn report(&self, message: &str) -> ToolResult {
+        let text = capped_text_result(
+            &format!("[task-report] task {}\n{}", self.task_id, message),
+            self.max_output_bytes,
+        )
+        .content;
+        self.parent_inbox.push(Notification {
+            task_id: self.task_id.clone(),
+            kind: Some(NotificationKind::TaskReport),
+            text,
+            usage: None,
+        });
+        text_result("report sent to parent")
+    }
 }
 
 fn mutation_path(arguments: &RawValue) -> Result<String, String> {
@@ -203,14 +244,24 @@ fn path_matches(pattern: &str, path: &str) -> bool {
     pattern == path
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentReportArgs {
+    #[serde(default)]
+    message: String,
+}
+
 #[async_trait::async_trait]
 impl ToolExecutor for ChildTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
-        self.registry
+        let mut definitions: Vec<ToolDefinition> = self
+            .registry
             .definitions()
             .into_iter()
             .filter(|definition| self.permits(&definition.name))
-            .collect()
+            .collect();
+        definitions.push(Self::agent_report_definition());
+        definitions
     }
 
     async fn execute(
@@ -219,6 +270,20 @@ impl ToolExecutor for ChildTools {
         arguments: &RawValue,
         cancel: &CancellationToken,
     ) -> ToolResult {
+        if name == "agent_report" {
+            if cancel.is_cancelled() {
+                return error_result(CONTEXT_CANCELED);
+            }
+            let args: AgentReportArgs = match decode_strict_json(arguments.get(), &["message"]) {
+                Ok(args) => args,
+                Err(message) => return error_result(message),
+            };
+            let message = args.message.trim();
+            if message.is_empty() {
+                return error_result("message is required");
+            }
+            return self.report(message);
+        }
         if !self.permits(name) {
             return ToolResult::unknown_tool(name);
         }
@@ -644,6 +709,9 @@ impl Runner {
             write_paths: definition
                 .as_ref()
                 .map_or_else(Vec::new, |definition| definition.write_paths.clone()),
+            parent_inbox: Arc::clone(self.config.tasks.notifications()),
+            task_id: task.id.clone(),
+            max_output_bytes: self.config.max_output_bytes,
         };
 
         let role_body = definition
@@ -660,6 +728,11 @@ impl Runner {
         let template = &self.config.template;
         let now_clock = Arc::clone(&template.now);
         let new_id = Arc::clone(&template.new_id);
+        let child_inbox = self
+            .config
+            .tasks
+            .child_inbox(&task.id)
+            .unwrap_or_else(|| Arc::new(Inbox::new(None)));
         let options = Options {
             model: redactor.redact_string(&model),
             provider_name: template.provider_name.clone(),
@@ -671,10 +744,11 @@ impl Runner {
             compaction: template.compaction,
             // A child gets no memory binding, no registry of its own, and a
             // private inbox: it can neither recall, delegate, nor observe the
-            // parent's notifications.
+            // parent's notifications, but the parent can send messages into
+            // this private queue with agent_send.
             memory: None,
             tasks: None,
-            inbox: Arc::new(Inbox::new(None)),
+            inbox: child_inbox,
             ..Options::default()
         };
 
@@ -1179,15 +1253,32 @@ mod tests {
         assert_eq!(notification.usage, None);
     }
 
+    fn child_tools(
+        registry: Arc<Registry>,
+        write_policy: WritePolicy,
+        write_paths: Vec<String>,
+        parent_inbox: Arc<Inbox>,
+    ) -> ChildTools {
+        ChildTools {
+            registry,
+            allowed: None,
+            write_policy,
+            write_paths,
+            parent_inbox,
+            task_id: "t1".to_string(),
+            max_output_bytes: 16384,
+        }
+    }
+
     #[tokio::test]
     async fn write_policy_denies_mutation_tools_before_execution() {
         let registry = Arc::new(Registry::new(vec![stub("read"), stub("write")]).unwrap());
-        let tools = ChildTools {
+        let tools = child_tools(
             registry,
-            allowed: None,
-            write_policy: WritePolicy::ProposeOnly,
-            write_paths: Vec::new(),
-        };
+            WritePolicy::ProposeOnly,
+            Vec::new(),
+            Arc::new(Inbox::new(None)),
+        );
 
         let result = tools
             .execute(
@@ -1204,12 +1295,12 @@ mod tests {
     #[tokio::test]
     async fn owned_paths_allows_only_matching_mutations() {
         let registry = Arc::new(Registry::new(vec![stub("write")]).unwrap());
-        let tools = ChildTools {
+        let tools = child_tools(
             registry,
-            allowed: None,
-            write_policy: WritePolicy::OwnedPaths,
-            write_paths: vec!["crates/otto/**".to_string(), "docs/*.md".to_string()],
-        };
+            WritePolicy::OwnedPaths,
+            vec!["crates/otto/**".to_string(), "docs/*.md".to_string()],
+            Arc::new(Inbox::new(None)),
+        );
 
         let allowed = tools
             .execute(
@@ -1229,6 +1320,40 @@ mod tests {
             .await;
         assert!(denied.is_error, "{denied:?}");
         assert!(denied.content.contains("owned_paths"), "{denied:?}");
+    }
+
+    #[tokio::test]
+    async fn agent_report_is_child_only_and_pushes_parent_notification() {
+        let parent_inbox = Arc::new(Inbox::new(None));
+        let registry = Arc::new(Registry::new(vec![stub("read")]).unwrap());
+        let tools = child_tools(
+            registry,
+            WritePolicy::SingleWriter,
+            Vec::new(),
+            Arc::clone(&parent_inbox),
+        );
+        assert!(
+            tool_names(&tools.definitions()).contains(&"agent_report".to_string()),
+            "child definitions should include agent_report"
+        );
+
+        let result = tools
+            .execute(
+                "agent_report",
+                &raw(r#"{"message":"found the failing test"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(result.content, "report sent to parent");
+        let notification = parent_inbox
+            .remove("t1", NotificationKind::TaskReport)
+            .expect("a task report was queued");
+        assert_eq!(notification.task_id, "t1");
+        assert_eq!(notification.kind, Some(NotificationKind::TaskReport));
+        assert!(notification.text.contains("[task-report] task t1"));
+        assert!(notification.text.contains("found the failing test"));
     }
 
     #[tokio::test]
@@ -1653,7 +1778,7 @@ mod tests {
                 .first()
                 .expect("one request")
                 .system_prompt
-                .starts_with("PARENT PROMPT tools=grep,read\n"),
+                .starts_with("PARENT PROMPT tools=grep,read,agent_report\n"),
             "{}",
             requests[0].system_prompt
         );
@@ -1688,7 +1813,7 @@ mod tests {
             assert!(
                 provider.requests()[0]
                     .system_prompt
-                    .starts_with("PARENT PROMPT tools=read\n"),
+                    .starts_with("PARENT PROMPT tools=read,agent_report\n"),
                 "{}",
                 provider.requests()[0].system_prompt
             );

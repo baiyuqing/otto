@@ -660,6 +660,11 @@ impl Runner {
         let template = &self.config.template;
         let now_clock = Arc::clone(&template.now);
         let new_id = Arc::clone(&template.new_id);
+        let child_inbox = self
+            .config
+            .tasks
+            .child_inbox(&task.id)
+            .unwrap_or_else(|| Arc::new(Inbox::new(None)));
         let options = Options {
             model: redactor.redact_string(&model),
             provider_name: template.provider_name.clone(),
@@ -671,10 +676,11 @@ impl Runner {
             compaction: template.compaction,
             // A child gets no memory binding, no registry of its own, and a
             // private inbox: it can neither recall, delegate, nor observe the
-            // parent's notifications.
+            // parent's notifications, but the parent can send messages into
+            // this private queue with agent_send.
             memory: None,
             tasks: None,
-            inbox: Arc::new(Inbox::new(None)),
+            inbox: child_inbox,
             ..Options::default()
         };
 

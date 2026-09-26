@@ -447,6 +447,16 @@ impl Factory for ServeFactory {
         results
     }
 
+    async fn diff_runner(
+        &self,
+        workspace: &str,
+    ) -> Option<(Arc<dyn crate::sandbox::CommandExecutor>, Vec<String>)> {
+        let host = self.workspaces.host(workspace).await?;
+        let executor = host.builder.command_executor.clone()?;
+        let environment = host.builder.sandbox_environment.clone()?;
+        Some((executor, environment))
+    }
+
     fn usage_summary(&self, session_id: Option<&str>) -> Result<crate::usage::Summary, String> {
         self.builder().usage_summary(session_id)
     }

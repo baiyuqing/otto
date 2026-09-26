@@ -10,6 +10,7 @@ import { ContextPanel } from './ContextPanel'
 import { Tasks } from './Tasks'
 import { UsageView } from './UsageView'
 import { WorkflowsView } from './WorkflowsView'
+import { ChangesView } from './ChangesView'
 import { AgentsView } from './AgentsView'
 import { mcpServerLine, sessionLabel, workspaceName } from './uiText'
 import { IDLE_POLL_MS, idleFollow } from './follow'
@@ -70,7 +71,8 @@ const taskText = (task: {
     .join('\n')
 
 export function App() {
-  const [view, setView] = useState<'chat' | 'workflows' | 'usage' | 'agents'>('chat')
+  const [view, setView] = useState<'chat' | 'workflows' | 'usage' | 'agents' | 'changes'>('chat')
+  const [changesWorkspace, setChangesWorkspace] = useState('')
   const [info, setInfo] = useState<Info | null>(null)
   const [sessions, setSessions] = useState<SessionListRow[]>([])
   const [session, setSession] = useState<Session | null>(null)
@@ -489,7 +491,7 @@ export function App() {
             Agents
           </button>
         </nav>
-        {view === 'chat' && (
+        {(view === 'chat' || view === 'changes') && (
           <button
             type="button"
             className="sidebar-toggle"
@@ -544,11 +546,21 @@ export function App() {
                 status={status}
                 onOpen={(id, workspace) => {
                   setSidebarOpen(false)
+                  setView('chat')
                   void open(id, workspace)
+                }}
+                onOpenChanges={(workspace) => {
+                  setSidebarOpen(false)
+                  setChangesWorkspace(workspace)
+                  setView('changes')
                 }}
               />
             </div>
-            <TranscriptView items={items} activeSession={session !== null} />
+            {view === 'changes' ? (
+              <ChangesView workspace={changesWorkspace} onError={fail} />
+            ) : (
+              <TranscriptView items={items} activeSession={session !== null} />
+            )}
           </>
         )}
       </main>

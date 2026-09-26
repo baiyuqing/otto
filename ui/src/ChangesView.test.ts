@@ -10,7 +10,7 @@ const api = vi.hoisted(() => ({
 vi.mock('./api', () => ({ api }))
 
 import { ChangesView } from './ChangesView'
-import type { WorkspaceDiff } from './api'
+import type { SessionStatus, WorkspaceDiff } from './api'
 
 const diff: WorkspaceDiff = {
   workspace: '/Users/me/src/app',
@@ -83,5 +83,42 @@ describe('ChangesView', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(screen.queryByText('first')).toBeNull()
     expect(screen.getByText('second')).toBeTruthy()
+  })
+
+  it('refetches when a session in its workspace goes from running to ok', async () => {
+    api.getWorkspaceDiff.mockResolvedValue(diff)
+    const onError = vi.fn()
+    const running = new Map<string, SessionStatus>([
+      ['s1', { id: 's1', workspace: '/Users/me/src/app', turn: 'running', approvals: 0, tasks: 0 }],
+    ])
+    const view = render(createElement(ChangesView, { workspace: '/Users/me/src/app', status: running, onError }))
+    await screen.findByText('main')
+    expect(api.getWorkspaceDiff).toHaveBeenCalledTimes(1)
+
+    const ok = new Map<string, SessionStatus>([
+      ['s1', { id: 's1', workspace: '/Users/me/src/app', turn: 'ok', approvals: 0, tasks: 0 }],
+    ])
+    view.rerender(createElement(ChangesView, { workspace: '/Users/me/src/app', status: ok, onError }))
+
+    await waitFor(() => expect(api.getWorkspaceDiff).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not refetch for a running-to-ok transition in another workspace', async () => {
+    api.getWorkspaceDiff.mockResolvedValue(diff)
+    const onError = vi.fn()
+    const running = new Map<string, SessionStatus>([
+      ['s1', { id: 's1', workspace: '/Users/me/src/other', turn: 'running', approvals: 0, tasks: 0 }],
+    ])
+    const view = render(createElement(ChangesView, { workspace: '/Users/me/src/app', status: running, onError }))
+    await screen.findByText('main')
+    expect(api.getWorkspaceDiff).toHaveBeenCalledTimes(1)
+
+    const ok = new Map<string, SessionStatus>([
+      ['s1', { id: 's1', workspace: '/Users/me/src/other', turn: 'ok', approvals: 0, tasks: 0 }],
+    ])
+    view.rerender(createElement(ChangesView, { workspace: '/Users/me/src/app', status: ok, onError }))
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(api.getWorkspaceDiff).toHaveBeenCalledTimes(1)
   })
 })

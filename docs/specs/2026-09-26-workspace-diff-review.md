@@ -1,6 +1,6 @@
 # Read-only review of a working directory's git changes
 
-Status: draft, awaiting approval.
+Status: approved 2026-09-26.
 
 ## Problem
 

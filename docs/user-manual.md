@@ -1046,11 +1046,12 @@ machine.
 The startup workspace is loaded when the process starts. `[server].workspace_roots`
 (default empty) lists directories under which another workspace may be
 loaded on first use, from a session create naming it or from
-`POST /v1/workspaces`. A path is admitted when, after resolving symlinks and
-canonicalizing it, it is an existing directory that is either the startup
+`POST /v1/workspaces`. A path is admitted when it is absolute and, after
+resolving symlinks and canonicalizing it, it is an existing directory that is either the startup
 workspace or a descendant of one canonicalized root (a root itself is
 admitted). An unadmitted path returns `403` with `code: "WORKSPACE_NOT_ADMITTED"`;
-a missing or non-directory path returns `400` with `code: "INVALID_WORKSPACE"`.
+a relative, missing, or non-directory path returns `400` with
+`code: "INVALID_WORKSPACE"`.
 With the default empty `workspace_roots`, only the startup workspace is
 admitted and the server behaves as a single-workspace process.
 
@@ -1061,8 +1062,8 @@ admitted and the server behaves as a single-workspace process.
   when it was already loaded.
 - `POST /v1/sessions` takes an optional `"workspace"`; the default is the
   startup workspace. `GET /v1/sessions` and `GET/POST /v1/workflows` take an
-  optional `?workspace=`; absent, they cover every loaded workspace (sessions
-  and workflow list) or default to the startup workspace (workflow start).
+  optional `?workspace=`; absent, `GET /v1/sessions` covers every loaded
+  workspace, and the workflow list and start use the startup workspace.
   Run-scoped workflow routes (`GET /v1/workflows/{id}`, `.../resume`,
   `.../fork`, `.../cancel`, and the approval routes) search every loaded
   workspace for the run or request id. Every workspace value is admitted

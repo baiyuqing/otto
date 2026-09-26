@@ -435,7 +435,7 @@ mod tests {
         dynamic: bool,
     ) -> Controller {
         let mut builder = testutil::builder(workspace, sessions);
-        builder.auth_path = auth_path.to_string_lossy().into_owned();
+        builder.shared_mut().auth_path = auth_path.to_string_lossy().into_owned();
         let runtime = testutil::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder

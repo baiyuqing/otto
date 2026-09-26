@@ -44,7 +44,8 @@ use super::controller::{Controller, PROMPT_ACTIVE, SESSION_OPERATION_UNAVAILABLE
 use super::flags::{CliOptions, ParseFailure, Parsed, parse_flags};
 use super::repl::{self, Repl};
 use super::runtime_builder::{
-    Builder, SharedSession, leaked_workspace, resolve_initial_runtime, validate_session_workspace,
+    Builder, Shared, SharedSession, leaked_workspace, resolve_initial_runtime,
+    validate_session_workspace,
 };
 use super::sandbox_runtime::{
     OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
@@ -487,32 +488,29 @@ pub async fn run(
         };
     let skill_checker = skill_checker(&config_file, &environment, &home, &mut *stderr);
 
-    let mut builder = Builder {
+    let shared = Arc::new(Shared {
         config_path: PathBuf::from(&config_path),
         config: config_file.clone(),
         environment: environment.clone(),
         home: home.clone(),
-        workspace,
-        workspace_path: workspace_path.clone(),
         session_root: session_root.clone(),
         shell: shell.clone(),
         no_session: options.no_session,
         overrides: overrides_from(&options),
-        command_executor: None,
-        bash_approvals: None,
-        sandbox_environment: None,
-        sandbox_info: super::info::SandboxInfo::default(),
-        sandbox_secrets: startup.sandbox_secrets.clone(),
-        sandbox_secrets_complete: startup.complete,
+        host_entries: host_entries.clone(),
+        sandbox_secrets_baseline: startup.sandbox_secrets.clone(),
+        sandbox_secrets_baseline_complete: startup.complete,
+        sandbox_driver_override: sandbox_driver_override.clone(),
+        explicit_config: options.explicit_config,
         auth_path: captured_auth.path.clone(),
         auth_credentials: captured_auth.credentials.clone(),
         auth_credentials_loaded: captured_auth.loaded,
-        memory: Default::default(),
         usage,
-        mcp: mcp_config,
         task_recorder,
         skill_checker,
-    };
+        memory: Default::default(),
+    });
+    let mut builder = Builder::for_workspace(shared, workspace, workspace_path.clone(), mcp_config);
 
     let mut prepared_initial = None;
     let mut metadata = None;
@@ -552,95 +550,34 @@ pub async fn run(
         Err(error) => return fail(stderr, &builder.redact_error(&error.to_string(), None)),
     };
 
-    let open_options = OpenOptions {
-        settings: settings_from_config(&sandbox_settings),
-        workspace: workspace_path.clone(),
-        shell: shell.clone(),
-        home: home.clone(),
-        host_entries: host_entries.clone(),
-        provider_names: sandbox_provider_environment_names(&config_file, &resolved.api_key_env),
-    };
-    let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
+    // `elevate` is REPL/TUI-specific here (an interactive frontend or a
+    // server both need `/approve`); `load_workspace` always passes `true`,
+    // because every workspace `otto serve` loads at runtime needs the same
+    // support the startup workspace gets.
+    let elevate = options.serve || frontend != Frontend::Once;
+    let composed = compose_workspace_sandbox(
+        &mut builder,
+        &sandbox_settings,
+        Path::new(&config_path),
+        options.explicit_config,
+        sandbox_driver_override.as_deref(),
+        &resolved.api_key_env,
+        elevate,
+        cancel,
+        stderr,
+    )
+    .await;
     startup_trace.mark("sandbox/open");
-    // The bash tool captures its executor when a runner is built, so the
-    // process sandbox lives behind a switch that `/sandbox reload` can replace
-    // without rebuilding the session or the runner.
-    let had_executor = sandbox.executor.is_some();
-    let sandbox_environment = sandbox.environment.clone();
-    let sandbox_info = sandbox.info;
-    let redaction_values = sandbox.redaction_values.clone();
-    let redactions_complete = sandbox.redactions_complete;
-    let control = SandboxSwitch::new(sandbox);
-    let mut approval_executor: Option<Arc<Executor>> = None;
+    // Composition's only await is the sandbox open above; nothing after it
+    // can move `cancel` from unset to set, so one check here covers both the
+    // switch and the (synchronous) elevation/reloader construction.
     if cancel.is_cancelled() {
-        let _ = control.close().await;
+        let _ = composed.control.close().await;
         return 130;
     }
-    if had_executor {
-        builder.command_executor =
-            Some(Arc::clone(&control) as Arc<dyn crate::sandbox::CommandExecutor>);
-    }
-    builder.sandbox_environment = sandbox_environment;
-    builder.sandbox_info = sandbox_info;
-    let (merged, merged_complete) = merge_redactions(&builder.sandbox_secrets, &redaction_values);
-    builder.sandbox_secrets = merged;
-    builder.sandbox_secrets_complete =
-        builder.sandbox_secrets_complete && redactions_complete && merged_complete;
-    if (options.serve || frontend != Frontend::Once)
-        && sandbox_info.mode == super::info::SandboxMode::Seatbelt
-    {
-        let elevated_environment = resolve_environment(&EnvironmentOptions {
-            host_entries: host_entries.clone(),
-            provider_names: sandbox_provider_environment_names(&config_file, &resolved.api_key_env),
-            allow_names: sandbox_settings.allow_env.clone(),
-            private_directories: None,
-        });
-        if let Ok(snapshot) = elevated_environment
-            && snapshot.redactions_complete()
-            && let Some(entries) = snapshot.entries()
-            && let Ok(executor) = Executor::new(
-                Arc::new(DirectDriver::new()),
-                Policy {
-                    filesystem: FilesystemMode::Unconfined,
-                    network: NetworkMode::Allow,
-                },
-                workspace.root(),
-            )
-        {
-            let executor = Arc::new(executor);
-            let command_executor: Arc<dyn crate::sandbox::CommandExecutor> = executor.clone();
-            builder.bash_approvals = Some(Arc::new(crate::tool::bash::BashApprovals::new(
-                command_executor,
-                entries.to_vec(),
-            )));
-            let (merged, complete) =
-                merge_redactions(&builder.sandbox_secrets, snapshot.redaction_values());
-            builder.sandbox_secrets = merged;
-            builder.sandbox_secrets_complete &= complete;
-            approval_executor = Some(executor);
-        }
-    }
-    if let Some(warning) = sandbox_runtime_warning(builder.effective_sandbox_info()) {
-        let _ = stderr.write_all(warning.as_bytes());
-    }
-    // No reloader at all without a usable sandbox, because there is then
-    // nothing to re-point.
-    let reloader = (had_executor && builder.effective_sandbox_info().bash_available).then(|| {
-        Arc::new(SandboxReloader {
-            control: Arc::clone(&control),
-            config_path: PathBuf::from(&config_path),
-            explicit_config: options.explicit_config,
-            driver_override: sandbox_driver_override.clone(),
-            environment: environment.clone(),
-            api_key_env: resolved.api_key_env.clone(),
-            reopen: open_options,
-            cancel: cancel.child_token(),
-        })
-    });
-    if cancel.is_cancelled() {
-        let _ = control.close().await;
-        return 130;
-    }
+    let control = composed.control;
+    let approval_executor = composed.approval_executor;
+    let reloader = composed.reloader;
 
     let dynamic_content = builder.boundary_allows_dynamic(Some(&resolved));
     if (prepared_initial.is_some() || options.serve || workflow_command.is_some())
@@ -653,9 +590,10 @@ pub async fn run(
         let secrets = builder.secret_values(Some(&resolved));
         match super::wiring::open_memory_service(&memory_config, &secrets, stderr) {
             Ok((service, user_scope, usable)) => {
-                builder.memory.service = service;
-                builder.memory.user_scope = user_scope;
-                builder.memory.usable = usable;
+                let shared = builder.shared_mut();
+                shared.memory.service = service;
+                shared.memory.user_scope = user_scope;
+                shared.memory.usable = usable;
             }
             Err(error) => {
                 let _ = control.close().await;
@@ -663,7 +601,7 @@ pub async fn run(
             }
         }
         match super::wiring::workspace_memory_scope(&memory_config, &workspace_path) {
-            Ok(scope) => builder.memory.workspace_scope = scope,
+            Ok(scope) => builder.workspace_scope = scope,
             Err(error) => {
                 let _ = control.close().await;
                 return fail(stderr, &error);
@@ -671,8 +609,11 @@ pub async fn run(
         }
     }
     startup_trace.mark("memory/open");
-    builder.memory.recall_limit = memory_config.max_results;
-    builder.memory.recall_token_budget = memory_config.recall_tokens;
+    {
+        let shared = builder.shared_mut();
+        shared.memory.recall_limit = memory_config.max_results;
+        shared.memory.recall_token_budget = memory_config.recall_tokens;
+    }
     let memory_service = Arc::clone(&builder.memory.service);
     if cancel.is_cancelled() {
         let _ = control.close().await;
@@ -1256,6 +1197,193 @@ pub(super) fn resolve_sandbox_settings(
     resolve_sandbox(&raw, driver_override).map_err(|error| error.to_string())
 }
 
+/// The sandbox artifacts one workspace's composition produces: the switch
+/// wired into `builder.command_executor`, the elevated bash-approval
+/// executor (`None` when `elevate` was false, the sandbox is not Seatbelt, or
+/// elevation failed), and the reloader `/sandbox reload` uses to reopen this
+/// workspace's own sandbox (`None` without a usable sandbox).
+pub(super) struct WorkspaceSandbox {
+    pub(super) control: Arc<SandboxSwitch>,
+    pub(super) approval_executor: Option<Arc<Executor>>,
+    pub(super) reloader: Option<Arc<SandboxReloader>>,
+}
+
+/// Opens one workspace's sandbox and, when eligible, its elevated
+/// bash-approval executor, filling in `builder`'s sandbox-derived fields
+/// (`command_executor`, `sandbox_environment`, `sandbox_info`,
+/// `sandbox_secrets*`, `bash_approvals`) along the way.
+///
+/// Shared by `run`'s startup composition and `load_workspace`, so a workspace
+/// admitted after startup gets the same `--sandbox` override, `/approve`
+/// support, and `/sandbox reload` wiring as the startup workspace — see
+/// `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server structure").
+/// `elevate` gates the approval executor; `sandbox_settings`, `config_path`,
+/// `explicit_config`, `driver_override`, and `api_key_env` are inputs the two
+/// callers resolve differently (startup from CLI flags and a resumed
+/// session's metadata, `load_workspace` from `Shared` alone), so they stay
+/// parameters rather than being resolved inside this function.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn compose_workspace_sandbox(
+    builder: &mut Builder,
+    sandbox_settings: &SandboxSettings,
+    config_path: &Path,
+    explicit_config: bool,
+    driver_override: Option<&str>,
+    api_key_env: &str,
+    elevate: bool,
+    cancel: &CancellationToken,
+    stderr: &mut (dyn Write + Send),
+) -> WorkspaceSandbox {
+    let open_options = OpenOptions {
+        settings: settings_from_config(sandbox_settings),
+        workspace: builder.workspace_path.clone(),
+        shell: builder.shell.clone(),
+        home: builder.home.clone(),
+        host_entries: builder.host_entries.clone(),
+        provider_names: sandbox_provider_environment_names(&builder.config, api_key_env),
+    };
+    let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
+    // The bash tool captures its executor when a runner is built, so the
+    // process sandbox lives behind a switch that `/sandbox reload` can replace
+    // without rebuilding the session or the runner.
+    let had_executor = sandbox.executor.is_some();
+    let sandbox_environment = sandbox.environment.clone();
+    let sandbox_info = sandbox.info;
+    let redaction_values = sandbox.redaction_values.clone();
+    let redactions_complete = sandbox.redactions_complete;
+    let control = SandboxSwitch::new(sandbox);
+    if had_executor {
+        builder.command_executor =
+            Some(Arc::clone(&control) as Arc<dyn crate::sandbox::CommandExecutor>);
+    }
+    builder.sandbox_environment = sandbox_environment;
+    builder.sandbox_info = sandbox_info;
+    let (merged, merged_complete) = merge_redactions(&builder.sandbox_secrets, &redaction_values);
+    builder.sandbox_secrets = merged;
+    builder.sandbox_secrets_complete =
+        builder.sandbox_secrets_complete && redactions_complete && merged_complete;
+
+    let mut approval_executor: Option<Arc<Executor>> = None;
+    if elevate && sandbox_info.mode == super::info::SandboxMode::Seatbelt {
+        let elevated_environment = resolve_environment(&EnvironmentOptions {
+            host_entries: builder.host_entries.clone(),
+            provider_names: sandbox_provider_environment_names(&builder.config, api_key_env),
+            allow_names: sandbox_settings.allow_env.clone(),
+            private_directories: None,
+        });
+        if let Ok(snapshot) = elevated_environment
+            && snapshot.redactions_complete()
+            && let Some(entries) = snapshot.entries()
+            && let Ok(executor) = Executor::new(
+                Arc::new(DirectDriver::new()),
+                Policy {
+                    filesystem: FilesystemMode::Unconfined,
+                    network: NetworkMode::Allow,
+                },
+                builder.workspace.root(),
+            )
+        {
+            let executor = Arc::new(executor);
+            let command_executor: Arc<dyn crate::sandbox::CommandExecutor> = executor.clone();
+            builder.bash_approvals = Some(Arc::new(crate::tool::bash::BashApprovals::new(
+                command_executor,
+                entries.to_vec(),
+            )));
+            let (merged, complete) =
+                merge_redactions(&builder.sandbox_secrets, snapshot.redaction_values());
+            builder.sandbox_secrets = merged;
+            builder.sandbox_secrets_complete &= complete;
+            approval_executor = Some(executor);
+        }
+    }
+    if let Some(warning) = sandbox_runtime_warning(builder.effective_sandbox_info()) {
+        let _ = stderr.write_all(warning.as_bytes());
+    }
+    // No reloader at all without a usable sandbox, because there is then
+    // nothing to re-point.
+    let reloader = (had_executor && builder.effective_sandbox_info().bash_available).then(|| {
+        Arc::new(SandboxReloader {
+            control: Arc::clone(&control),
+            config_path: config_path.to_path_buf(),
+            explicit_config,
+            driver_override: driver_override.map(str::to_string),
+            environment: builder.environment.clone(),
+            api_key_env: api_key_env.to_string(),
+            reopen: open_options,
+            cancel: cancel.child_token(),
+        })
+    });
+
+    WorkspaceSandbox {
+        control,
+        approval_executor,
+        reloader,
+    }
+}
+
+/// Builds a `Builder` for a workspace admitted after startup: `serve.rs`'s
+/// workspace registry calls this the first time a path is loaded.
+///
+/// Reuses the startup sequence's pieces rather than duplicating them:
+/// `leaked_workspace` and `resolve_mcp` resolve against `canonical_path`
+/// instead of the ones `cli::run` resolved for the startup workspace, then
+/// `compose_workspace_sandbox` opens this workspace's own sandbox, elevated
+/// bash-approval executor, and `/sandbox reload` state the same way startup
+/// does for its own workspace — always elevating (`elevate: true`) since
+/// every workspace `otto serve` loads needs `/approve` the same as the
+/// startup workspace, unlike the CLI's `frontend != Frontend::Once` gate,
+/// which only matters for the interactive REPL/TUI path. The memory service
+/// stays the one already on `shared`; only this workspace's `workspace_scope`
+/// is computed. Returns the reloader alongside the `Builder` so
+/// `serve.rs`'s `WorkspaceHost` can wire its own `/sandbox reload`.
+pub(super) async fn load_workspace(
+    shared: Arc<Shared>,
+    canonical_path: &Path,
+    cancel: &CancellationToken,
+    stderr: &mut (dyn Write + Send),
+) -> Result<(Builder, Option<Arc<SandboxReloader>>), String> {
+    let workspace_path = canonical_path.to_string_lossy().into_owned();
+    let workspace = leaked_workspace(canonical_path).map_err(|error| error.to_string())?;
+    let mcp_config = resolve_mcp(&shared.config, &shared.environment, &workspace_path)
+        .map_err(|error| error.to_string())?;
+    let mut builder = Builder::for_workspace(
+        Arc::clone(&shared),
+        workspace,
+        workspace_path.clone(),
+        mcp_config,
+    );
+
+    let driver_override = shared.sandbox_driver_override.clone();
+    let sandbox_settings = resolve_sandbox_settings(
+        &shared.config,
+        &shared.environment,
+        &workspace_path,
+        driver_override.as_deref(),
+    )?;
+    let resolved =
+        resolve_initial_runtime(&shared.config, &shared.environment, None, &shared.overrides)
+            .map_err(|error| error.to_string())?;
+    let composed = compose_workspace_sandbox(
+        &mut builder,
+        &sandbox_settings,
+        &shared.config_path,
+        shared.explicit_config,
+        driver_override.as_deref(),
+        &resolved.api_key_env,
+        true,
+        cancel,
+        stderr,
+    )
+    .await;
+
+    let memory_config =
+        resolve_memory(&shared.config, &shared.environment).map_err(|error| error.to_string())?;
+    builder.workspace_scope =
+        super::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
+
+    Ok((builder, composed.reloader))
+}
+
 fn select_frontend(mode: UiMode, terminal: bool) -> Result<Frontend, String> {
     match mode {
         UiMode::Auto if terminal => Ok(Frontend::Tui),
@@ -1610,5 +1738,109 @@ driver = "off"
         assert_eq!(code, 0);
         assert!(String::from_utf8_lossy(&stdout).starts_with("Usage: otto [options]"));
         assert!(stderr.is_empty());
+    }
+
+    // ---- load_workspace ----
+
+    use crate::cli::testutil::{shared_with_offline_sandbox, shared_with_sandbox_driver_override};
+
+    /// Loading a second workspace must not open a second memory service: the
+    /// service lives on `Shared`, and `load_workspace` only computes the new
+    /// workspace's own scope.
+    #[tokio::test]
+    async fn load_workspace_reuses_the_shared_memory_service() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let canonical = canonical_directory(workspace.path()).expect("canonical");
+        let shared = shared_with_offline_sandbox(shared_root.path());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let (builder, _reloader) =
+            load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+                .await
+                .expect("load workspace");
+
+        assert!(Arc::ptr_eq(&builder.memory.service, &shared.memory.service));
+        assert_eq!(builder.workspace_path, canonical.to_string_lossy());
+    }
+
+    /// The new workspace opens its own sandbox with the shared `host_entries`
+    /// and shell, the same as startup does for its own workspace.
+    #[tokio::test]
+    async fn load_workspace_opens_its_own_sandbox() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let canonical = canonical_directory(workspace.path()).expect("canonical");
+        let shared = shared_with_offline_sandbox(shared_root.path());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let (builder, _reloader) =
+            load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+                .await
+                .expect("load workspace");
+
+        assert_eq!(
+            builder.sandbox_info.mode,
+            super::super::info::SandboxMode::Off
+        );
+        assert!(builder.sandbox_info.bash_available);
+        assert!(builder.command_executor.is_some());
+    }
+
+    /// `otto serve --sandbox off` must apply to a workspace loaded after
+    /// startup too: both read the same `Shared::sandbox_driver_override`
+    /// rather than `load_workspace` dropping it.
+    #[tokio::test]
+    async fn load_workspace_honors_the_shared_sandbox_driver_override() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let canonical = canonical_directory(workspace.path()).expect("canonical");
+        let shared = shared_with_sandbox_driver_override(shared_root.path(), "off");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let (builder, _reloader) =
+            load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+                .await
+                .expect("load workspace");
+
+        assert_eq!(
+            builder.sandbox_info.mode,
+            super::super::info::SandboxMode::Off
+        );
+    }
+
+    /// On a host where Seatbelt actually comes up, a workspace loaded at
+    /// runtime gets the same elevated `/approve` executor startup builds for
+    /// its own workspace. Skips (rather than failing) when this host cannot
+    /// open Seatbelt, the same accommodation `open_sandbox_runtime` itself
+    /// makes for a host missing the entitlement or Command Line Tools
+    /// (`docs/development.md`).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn load_workspace_seatbelt_gets_bash_approvals() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let canonical = canonical_directory(workspace.path()).expect("canonical");
+        let shared = shared_with_sandbox_driver_override(shared_root.path(), "seatbelt");
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let (builder, reloader) =
+            load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+                .await
+                .expect("load workspace");
+
+        if builder.sandbox_info.mode != super::super::info::SandboxMode::Seatbelt {
+            eprintln!(
+                "skipping: Seatbelt did not come up on this host: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+            return;
+        }
+        assert!(builder.bash_approvals.is_some());
+        assert!(reloader.is_some());
     }
 }

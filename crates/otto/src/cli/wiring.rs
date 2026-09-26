@@ -56,7 +56,11 @@ use crate::tool::skill::SkillTool;
 const SECRETS_EXCEED_REDACTION_LIMITS: &str =
     "secret values exceed the redaction limits (64 values, 8 KiB each, 16 KiB total)";
 
-/// The process-wide memory service and the two scopes one session reads.
+/// The process-wide memory service and the parts of it that do not depend on
+/// one workspace. Lives on `Shared`, so every `Builder` a process loads reads
+/// the same service: opening a second workspace must not open a second
+/// memory store. The workspace scope stays on `Builder` (`Builder::for_workspace`),
+/// since it is derived from that workspace's own path.
 ///
 /// The default is a null service reporting memory as disabled, which every
 /// operation answers without touching a store.
@@ -66,7 +70,6 @@ pub struct MemoryWiring {
     /// the agent.
     pub usable: bool,
     pub user_scope: Scope,
-    pub workspace_scope: Scope,
     pub recall_limit: i64,
     pub recall_token_budget: i64,
 }
@@ -77,7 +80,6 @@ impl Default for MemoryWiring {
             service: Arc::new(Service::null(None)),
             usable: false,
             user_scope: Scope::default(),
-            workspace_scope: Scope::default(),
             recall_limit: 0,
             recall_token_budget: 0,
         }
@@ -334,10 +336,7 @@ enum McpConnectResult {
 impl Builder {
     /// The memory tools, in the order they are registered.
     pub fn memory_tools(&self, max_output: usize) -> Vec<Box<dyn Tool + Send + Sync>> {
-        let scopes = vec![
-            self.memory.user_scope.clone(),
-            self.memory.workspace_scope.clone(),
-        ];
+        let scopes = vec![self.memory.user_scope.clone(), self.workspace_scope.clone()];
         vec![
             Box::new(MemorySearchTool::new(
                 Arc::clone(&self.memory.service),
@@ -346,7 +345,7 @@ impl Builder {
             )),
             Box::new(RememberTool::new(
                 Arc::clone(&self.memory.service),
-                self.memory.workspace_scope.clone(),
+                self.workspace_scope.clone(),
             )),
             Box::new(ForgetTool::new(Arc::clone(&self.memory.service), scopes)),
         ]
@@ -862,11 +861,8 @@ impl Builder {
         self.memory
             .service
             .bind(BindOptions {
-                scopes: vec![
-                    self.memory.user_scope.clone(),
-                    self.memory.workspace_scope.clone(),
-                ],
-                default_write_scope: self.memory.workspace_scope.clone(),
+                scopes: vec![self.memory.user_scope.clone(), self.workspace_scope.clone()],
+                default_write_scope: self.workspace_scope.clone(),
                 ..BindOptions::default()
             })
             .map_err(|error| format!("bind memory: {error}"))
@@ -1498,6 +1494,7 @@ mod catalog_tests {
         let workspace = std::fs::canonicalize(workspace_dir.path()).expect("canonical workspace");
         let mut builder = testutil::builder(&workspace, workspace_dir.path());
         builder
+            .shared_mut()
             .environment
             .insert("HOME".to_string(), home.to_string_lossy().into_owned());
         Fixture {
@@ -1620,7 +1617,7 @@ mod catalog_tests {
             "Extract pdfs.",
             "body\n",
         );
-        fixture.builder.config.skills.enabled = Some(false);
+        fixture.builder.shared_mut().config.skills.enabled = Some(false);
 
         let (wiring, tools, _) = catalogs(&fixture.builder);
         assert_eq!(wiring.skill_section, "");
@@ -1711,7 +1708,7 @@ mod catalog_tests {
             "Reviews code for style and correctness.",
             "body\n",
         );
-        fixture.builder.config.agents.enabled = Some(false);
+        fixture.builder.shared_mut().config.agents.enabled = Some(false);
 
         let (wiring, _, _) = catalogs(&fixture.builder);
         assert!(!wiring.agents.enabled);
@@ -1745,7 +1742,7 @@ mod catalog_tests {
     #[test]
     fn an_out_of_range_max_parallel_fails_the_build() {
         let mut fixture = fixture();
-        fixture.builder.config.agents.max_parallel = Some(17);
+        fixture.builder.shared_mut().config.agents.max_parallel = Some(17);
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         let error = match fixture
             .builder

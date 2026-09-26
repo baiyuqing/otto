@@ -94,6 +94,33 @@ components:
           type: boolean
         summary:
           type: string
+    WorkspaceReload:
+      type: object
+      description: One workspace's own POST /v1/sandbox/reload outcome. Exactly one of sandbox or error is present.
+      properties:
+        workspace:
+          type: string
+        sandbox:
+          $ref: "#/components/schemas/Sandbox"
+        error:
+          type: string
+      required: [workspace]
+    SandboxReload:
+      description: >
+        POST /v1/sandbox/reload's response when more than one workspace is
+        loaded. The top-level mode/network/bash_available/summary fields are
+        still the startup workspace's own outcome, unchanged from the
+        single-workspace Sandbox response; workspaces lists every host that
+        was reloaded, startup first, each naming its own path.
+      allOf:
+        - $ref: "#/components/schemas/Sandbox"
+        - type: object
+          properties:
+            workspaces:
+              type: array
+              items:
+                $ref: "#/components/schemas/WorkspaceReload"
+          required: [workspaces]
     ApprovalResponse:
       type: object
       properties:
@@ -629,6 +656,25 @@ components:
         step_id: {type: string}
         status: {type: string}
       required: [seq, run_id, occurred_at, kind, step_id, status]
+    WorkspaceEntry:
+      type: object
+      properties:
+        path: {type: string}
+        open_sessions: {type: integer}
+        workflows: {type: boolean}
+      required: [path, open_sessions, workflows]
+    WorkspaceList:
+      type: object
+      properties:
+        startup: {type: string}
+        roots:
+          type: array
+          items: {type: string}
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceEntry"
+      required: [startup, roots, workspaces]
   parameters:
     sessionID:
       name: id
@@ -696,6 +742,9 @@ paths:
                 resume:
                   type: string
                   description: An existing session id. Omit to create a new session.
+                workspace:
+                  type: string
+                  description: An admitted workspace path to create or resume in. Defaults to the startup workspace; loaded if not already.
       responses:
         "201":
           description: New session created
@@ -710,7 +759,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Session"
         "400":
-          description: Invalid JSON body
+          description: Invalid JSON body, or workspace not an absolute, existing directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: workspace is outside the startup workspace and configured roots
           content:
             application/json:
               schema:
@@ -729,6 +784,13 @@ paths:
                 $ref: "#/components/schemas/Error"
     get:
       summary: List sessions (disk sessions merged with open sessions)
+      parameters:
+        - name: workspace
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Restrict to one admitted workspace, loaded if not already. Omit to list every loaded workspace's sessions.
       responses:
         "200":
           description: OK
@@ -736,6 +798,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionList"
+        "400":
+          description: workspace not an absolute, existing directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: workspace is outside the startup workspace and configured roots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}:
     parameters:
       - $ref: "#/components/parameters/sessionID"
@@ -1167,21 +1241,30 @@ paths:
     post:
       summary: Re-read the sandbox configuration and apply it to the running process
       description: >
-        Applies the current [sandbox] configuration to the running process
+        Applies the current [sandbox] configuration to every loaded
+        workspace's own process sandbox, each through its own reloader,
         without restarting otto. read_paths, network, and driver take effect;
         allow_env changes and a sandbox that was unavailable at startup still
         require a restart and are reported as a failure. One sandbox serves
-        every session, so the reload is refused while any session has a turn in
-        flight.
+        every session in its workspace, so the reload is refused while any
+        session in any loaded workspace has a turn in flight. With only the
+        startup workspace loaded, the response is the plain Sandbox object,
+        unchanged from before other workspaces could be loaded. With more
+        than one workspace loaded, the response is a SandboxReload object,
+        and a failure in any one workspace's reload fails the whole request
+        with 409, naming which workspace failed and which ones were still
+        reloaded.
       responses:
         "200":
           description: The sandbox state now in effect
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Sandbox"
+                oneOf:
+                  - $ref: "#/components/schemas/Sandbox"
+                  - $ref: "#/components/schemas/SandboxReload"
         "409":
-          description: A turn is active, or the reload failed and the previous sandbox is still in effect
+          description: A turn is active, or the reload failed for at least one workspace and its previous sandbox is still in effect
           content:
             application/json:
               schema:
@@ -1402,6 +1485,46 @@ paths:
                 $ref: "#/components/schemas/WorkflowView"
         "409":
           description: Request conflict
+  /v1/workspaces:
+    get:
+      summary: List loaded workspaces, startup first then by path
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceList"
+    post:
+      summary: Load a workspace, or return it if already loaded
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string}
+              required: [path]
+      responses:
+        "201":
+          description: Newly loaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceEntry"
+        "200":
+          description: Already loaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceEntry"
+        "400":
+          description: Not an absolute, existing directory
+        "403":
+          description: Outside the startup workspace and configured roots
+        "500":
+          description: Admitted, but opening it failed
   /v1/info:
     get:
       summary: Process-level static info

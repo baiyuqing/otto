@@ -44,9 +44,9 @@ struct WorkspaceHost {
     builder: Arc<Builder>,
     workflows: Option<Arc<crate::workflow::Controller>>,
     /// This workspace's own sandbox reloader (`None` when it never got a
-    /// usable sandbox). `/sandbox reload` today only reloads the startup
-    /// workspace (`ServeFactory` reads `startup_host().reloader`); wiring it
-    /// to iterate every host is slice 5.
+    /// usable sandbox). `POST /v1/sandbox/reload` reloads the startup
+    /// workspace through `ServeFactory::reload_sandbox` and every other
+    /// loaded workspace through `reload_other_sandboxes`.
     reloader: Option<Arc<SandboxReloader>>,
 }
 
@@ -321,6 +321,22 @@ impl Factory for ServeFactory {
         let host = self.workspaces.startup_host();
         let control = host.reloader.as_ref()?;
         Some(SandboxControl::reload(control.as_ref()).await)
+    }
+
+    async fn reload_other_sandboxes(&self) -> Vec<(String, Result<SandboxInfo, String>)> {
+        let mut results = Vec::new();
+        for (path, host) in self.workspaces.list().await {
+            if path == self.workspaces.startup {
+                continue;
+            }
+            if let Some(control) = &host.reloader {
+                let result = SandboxControl::reload(control.as_ref())
+                    .await
+                    .map_err(|error| self.builder().redact_error(&error, Some(&self.runtime)));
+                results.push((path, result));
+            }
+        }
+        results
     }
 
     fn usage_summary(&self, session_id: Option<&str>) -> Result<crate::usage::Summary, String> {

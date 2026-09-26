@@ -44,6 +44,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::{self, Controller};
 use crate::cli::info::SandboxInfo;
+#[cfg(test)]
+use crate::cli::info::{SandboxMode, SandboxNetwork, SandboxReason};
 use metrics::{Metrics, SessionContext};
 use turn::{TRIGGER_TASK, TRIGGER_USER, Turn};
 
@@ -102,6 +104,12 @@ pub trait Factory: Send + Sync {
     /// /v1/sandbox/reload`, which then answers 501.
     async fn reload_sandbox(&self) -> Option<Result<SandboxInfo, String>> {
         None
+    }
+    /// Reloads every other loaded workspace's own sandbox (the startup
+    /// workspace's reload is [`Factory::reload_sandbox`]), by path. A
+    /// workspace with no reloader of its own is left out.
+    async fn reload_other_sandboxes(&self) -> Vec<(String, Result<SandboxInfo, String>)> {
+        Vec::new()
     }
     /// Persisted provider token usage, optionally scoped to one session.
     fn usage_summary(&self, _session_id: Option<&str>) -> Result<crate::usage::Summary, String> {
@@ -1838,6 +1846,13 @@ mod tests {
         /// Workflow controllers keyed by workspace path. The entry at the
         /// harness's own workspace path is the startup controller.
         workflows: HashMap<String, Arc<crate::workflow::Controller>>,
+        /// Canned `Factory::reload_sandbox` answer. `None` matches the
+        /// trait's default (`sandbox_reload_available` false, `POST
+        /// /v1/sandbox/reload` answers 501).
+        sandbox_reload: Option<Result<SandboxInfo, String>>,
+        /// Canned `Factory::reload_other_sandboxes` answer, one entry per
+        /// non-startup workspace with its own reloader.
+        sandbox_reload_others: Vec<(String, Result<SandboxInfo, String>)>,
         create_calls: AtomicUsize,
         open_calls: AtomicUsize,
     }
@@ -2030,6 +2045,18 @@ mod tests {
             );
             all
         }
+
+        fn sandbox_reload_available(&self) -> bool {
+            self.sandbox_reload.is_some()
+        }
+
+        async fn reload_sandbox(&self) -> Option<Result<SandboxInfo, String>> {
+            self.sandbox_reload.clone()
+        }
+
+        async fn reload_other_sandboxes(&self) -> Vec<(String, Result<SandboxInfo, String>)> {
+            self.sandbox_reload_others.clone()
+        }
     }
 
     // ---- the harness ----
@@ -2069,6 +2096,8 @@ mod tests {
         /// `startup` is always overwritten with the harness's own workspace;
         /// set `admitted`/`error`/`gate` for `/v1/workspaces` tests.
         workspaces: FakeWorkspaces,
+        sandbox_reload: Option<Result<SandboxInfo, String>>,
+        sandbox_reload_others: Vec<(String, Result<SandboxInfo, String>)>,
         token: String,
         info: Info,
     }
@@ -2112,6 +2141,8 @@ mod tests {
                 task_recorder: options.task_recorder,
                 workspaces,
                 workflows,
+                sandbox_reload: options.sandbox_reload,
+                sandbox_reload_others: options.sandbox_reload_others,
                 create_calls: AtomicUsize::new(0),
                 open_calls: AtomicUsize::new(0),
             });
@@ -3668,6 +3699,104 @@ mod tests {
         let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
         assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
         assert_eq!(reply.json()["error"]["code"], "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn sandbox_reload_response_is_unchanged_for_a_single_workspace() {
+        let harness = Harness::with(HarnessOptions {
+            sandbox_reload: Some(Ok(SandboxInfo {
+                mode: SandboxMode::Seatbelt,
+                network: SandboxNetwork::Allowed,
+                bash_available: true,
+                reason: SandboxReason::None,
+            })),
+            ..Default::default()
+        });
+        let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let body = reply.json();
+        assert_eq!(body["mode"], "seatbelt");
+        assert_eq!(body["network"], "allowed");
+        assert_eq!(body["bash_available"], true);
+        assert!(
+            body.get("workspaces").is_none(),
+            "single-workspace reload gained a workspaces field: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_reload_failure_is_unchanged_for_a_single_workspace() {
+        let harness = Harness::with(HarnessOptions {
+            sandbox_reload: Some(Err("boom".to_string())),
+            ..Default::default()
+        });
+        let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "sandbox_reload_failed");
+        assert_eq!(reply.json()["error"]["message"], "boom");
+    }
+
+    #[tokio::test]
+    async fn sandbox_reload_reloads_every_loaded_workspace() {
+        let startup = "/startup".to_string();
+        let harness = Harness::with(HarnessOptions {
+            info: Info {
+                workspace: startup.clone(),
+                ..Default::default()
+            },
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..Default::default()
+            },
+            sandbox_reload: Some(Ok(SandboxInfo {
+                mode: SandboxMode::Seatbelt,
+                network: SandboxNetwork::Allowed,
+                bash_available: true,
+                reason: SandboxReason::None,
+            })),
+            sandbox_reload_others: vec![(
+                "/other".to_string(),
+                Ok(SandboxInfo {
+                    mode: SandboxMode::Off,
+                    network: SandboxNetwork::Unconfined,
+                    bash_available: true,
+                    reason: SandboxReason::None,
+                }),
+            )],
+            ..Default::default()
+        });
+        let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let body = reply.json();
+        assert_eq!(body["mode"], "seatbelt", "{body}");
+        let workspaces = body["workspaces"].as_array().expect("workspaces array");
+        assert_eq!(workspaces.len(), 2, "{body}");
+        assert_eq!(workspaces[0]["workspace"], startup);
+        assert_eq!(workspaces[0]["sandbox"]["mode"], "seatbelt");
+        assert_eq!(workspaces[1]["workspace"], "/other");
+        assert_eq!(workspaces[1]["sandbox"]["mode"], "off");
+    }
+
+    #[tokio::test]
+    async fn sandbox_reload_names_the_workspace_that_failed() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..Default::default()
+            },
+            sandbox_reload: Some(Ok(SandboxInfo::default())),
+            sandbox_reload_others: vec![("/other".to_string(), Err("boom".to_string()))],
+            ..Default::default()
+        });
+        let reply = harness.send("POST", "/v1/sandbox/reload", None).await;
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "sandbox_reload_failed");
+        let message = reply.json()["error"]["message"]
+            .as_str()
+            .expect("message")
+            .to_string();
+        assert!(message.contains("/other"), "{message}");
+        assert!(message.contains("boom"), "{message}");
     }
 
     #[tokio::test]

@@ -22,7 +22,12 @@ pub async fn approve(
         return not_found("session not found");
     };
     match session.ctrl.approve_bash(&approval_id) {
-        Ok(prompt) => json_response(StatusCode::OK, &ApprovalResponse { prompt }),
+        Ok(prompt) => {
+            // ponytail: expiry is observed lazily; add a timer if a stale
+            // approval count matters.
+            server.status_changed.send_modify(|version| *version += 1);
+            json_response(StatusCode::OK, &ApprovalResponse { prompt })
+        }
         Err(message) => error_response(StatusCode::CONFLICT, "approval_failed", &message),
     }
 }

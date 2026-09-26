@@ -237,6 +237,20 @@ button.danger {
 }
 .sidebar-session[aria-current="true"] { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .sidebar-session span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-running-count { font-size: 11px; color: var(--accent); }
+.status-badge {
+  flex: none;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.status-badge.status-running { border-color: var(--accent); color: var(--accent); }
+.status-badge.status-error { border-color: var(--danger); color: var(--danger); }
+.status-badge.status-approval { border-color: var(--danger); color: var(--danger); }
 .sidebar-add { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; border-top: 1px solid var(--line); }
 .sidebar-add input { flex: 1; min-width: 0; }
 .usage-view {

@@ -19,6 +19,7 @@
 //! Scope: `allowed-tools` is parsed but never turned into an enforcement
 //! decision; see the README for the features that are deliberately absent.
 
+pub mod check;
 pub mod frontmatter;
 pub mod prompt;
 

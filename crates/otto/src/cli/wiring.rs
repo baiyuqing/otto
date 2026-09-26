@@ -492,6 +492,7 @@ impl Builder {
             max_output_bytes: runtime.max_output_bytes.max(0) as usize,
             usage,
             child_session: Some(child_sessions(session_for_children)),
+            checker: self.skill_checker.clone(),
         })
         .map_err(|error| format!("create sub-agent runner: {error}"))?;
         for warning in &warnings {

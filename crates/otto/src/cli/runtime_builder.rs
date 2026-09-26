@@ -606,6 +606,10 @@ pub struct Builder {
     /// behaviour; `build_subagents` injects it into every `Tasks` registry it
     /// builds.
     pub task_recorder: Option<Arc<crate::subagent::record::Store>>,
+    /// The automatic skill contract check (experimental). `None` when the
+    /// feature is disabled or its database could not be opened; either way
+    /// `build_subagents` wires no checker in and delegation is unaffected.
+    pub skill_checker: Option<Arc<crate::skill::check::Checker>>,
 }
 
 impl Builder {
@@ -1269,6 +1273,7 @@ mod tests {
                 servers: Vec::new(),
             },
             task_recorder: None,
+            skill_checker: None,
         }
     }
 

@@ -182,22 +182,38 @@ fn render_search_result(result: &SearchResult) -> String {
     content.trim_end_matches('\n').to_string()
 }
 
+/// Renders one skill's catalog line, plus its automatic contract check
+/// status when the skill has a declared contract (the property that makes
+/// it eligible for sub-agent delegation) and a checker is available.
+fn skill_line(skill: &skill::Skill, checker: Option<&crate::skill::check::Checker>) -> String {
+    // A declared contract is what will make a skill runnable as a
+    // sub-agent. Nothing executes it that way yet, so the marker reports
+    // the declaration, not a capability the session has.
+    let contract = if skill.contract.is_some() {
+        " [contract]"
+    } else {
+        ""
+    };
+    let mut line = format!("\n- {}{}: {}", skill.name, contract, skill.description);
+    // The automatic contract check (experimental) only ever runs for a
+    // skill delegated to as a sub-agent, i.e. one with a contract.
+    if skill.contract.is_some()
+        && let Some(checker) = checker
+    {
+        let _ = write!(line, "\n  check: {}", checker.display(skill));
+    }
+    line
+}
+
 pub(crate) fn skills_report(controller: &Controller) -> String {
     let catalog = controller.skills();
     if catalog.is_empty() {
         return "No skills found.".to_string();
     }
+    let checker = controller.skill_checker();
     let mut out = "Available skills:".to_string();
     for skill in catalog.skills() {
-        // A declared contract is what will make a skill runnable as a
-        // sub-agent. Nothing executes it that way yet, so the marker reports
-        // the declaration, not a capability the session has.
-        let contract = if skill.contract.is_some() {
-            " [contract]"
-        } else {
-            ""
-        };
-        let _ = write!(out, "\n- {}{}: {}", skill.name, contract, skill.description);
+        out.push_str(&skill_line(skill, checker.as_deref()));
     }
     out
 }
@@ -1450,5 +1466,86 @@ mod tests {
         let (_, stderr) = session("/tasks\n/task t1\n/exit\n", &controller).await;
 
         assert_eq!(stderr.matches(SUBAGENTS_UNAVAILABLE).count(), 2, "{stderr}");
+    }
+
+    fn write_skill_with_vague_output(directory: &Path) {
+        std::fs::create_dir_all(directory).expect("mkdir");
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: reviewer\ndescription: reviews things\ninput: a path\noutput: the result\n---\nBody.\n",
+        )
+        .expect("write SKILL.md");
+    }
+
+    fn contracted_skill(directory: &Path) -> skill::Skill {
+        skill::Skill {
+            name: "reviewer".to_string(),
+            description: "reviews things".to_string(),
+            contract: Some(skill::Contract {
+                input: "a path".to_string(),
+                output: "the result".to_string(),
+            }),
+            directory: directory.to_path_buf(),
+            path: directory.join("SKILL.md"),
+        }
+    }
+
+    #[test]
+    fn skill_line_omits_the_check_line_without_a_contract() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_skill_with_vague_output(dir.path());
+        let mut skill = contracted_skill(dir.path());
+        skill.contract = None;
+        let checker = crate::skill::check::Checker::open_in_memory("http://127.0.0.1:1", "key");
+
+        assert!(!skill_line(&skill, Some(&checker)).contains("check:"));
+    }
+
+    #[test]
+    fn skill_line_omits_the_check_line_without_a_checker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_skill_with_vague_output(dir.path());
+        let skill = contracted_skill(dir.path());
+
+        assert!(!skill_line(&skill, None).contains("check:"));
+    }
+
+    #[test]
+    fn skill_line_reports_not_checked_yet_for_a_contract_skill_with_no_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_skill_with_vague_output(dir.path());
+        let skill = contracted_skill(dir.path());
+        let checker = crate::skill::check::Checker::open_in_memory("http://127.0.0.1:1", "key");
+
+        assert!(skill_line(&skill, Some(&checker)).contains("check: not checked yet"));
+    }
+
+    #[tokio::test]
+    async fn skill_line_shows_the_rules_result_after_a_trigger() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_skill_with_vague_output(dir.path());
+        let skill = contracted_skill(dir.path());
+        // The base URL is never contacted: the vague `output` field fires a
+        // rule, so this checks the render without a network stub.
+        let checker = Arc::new(crate::skill::check::Checker::open_in_memory(
+            "http://127.0.0.1:1",
+            "key",
+        ));
+        checker.trigger(
+            skill.name.clone(),
+            skill.directory.clone(),
+            skill.path.clone(),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while checker.display(&skill) == "not checked yet" {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background check did not complete in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let line = skill_line(&skill, Some(&checker));
+        assert!(line.contains("check: rules"), "{line}");
     }
 }

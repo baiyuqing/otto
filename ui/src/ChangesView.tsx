@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type DiffFile, type WorkspaceDiff } from './api'
+import { api, type DiffFile, type SessionStatus, type WorkspaceDiff } from './api'
 
 const fileLabel = (file: DiffFile) => (file.status === 'renamed' && file.old_path ? `${file.old_path} → ${file.path}` : file.path)
 
@@ -38,7 +38,15 @@ function File({ file }: { file: DiffFile }) {
   )
 }
 
-export function ChangesView({ workspace, onError }: { workspace: string; onError: (error: unknown) => void }) {
+export function ChangesView({
+  workspace,
+  status,
+  onError,
+}: {
+  workspace: string
+  status?: Map<string, SessionStatus>
+  onError: (error: unknown) => void
+}) {
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null)
   // Only the latest request's response is shown, so a slow response for a
   // previous directory or an earlier Refresh cannot replace a newer one.
@@ -60,6 +68,22 @@ export function ChangesView({ workspace, onError }: { workspace: string; onError
     setDiff(null)
     void load()
   }, [load])
+
+  // Refetch when a session in this workspace finishes a turn (running ->
+  // anything else) between two consecutive status snapshots.
+  const previousStatus = useRef(status)
+  useEffect(() => {
+    const previous = previousStatus.current
+    previousStatus.current = status
+    if (!status || previous === status) return
+    for (const [id, s] of status) {
+      if (s.workspace !== workspace) continue
+      if (previous?.get(id)?.turn === 'running' && s.turn !== 'running') {
+        void load()
+        return
+      }
+    }
+  }, [status, workspace, load])
 
   return (
     <section className="changes-view" aria-labelledby="changes-title">

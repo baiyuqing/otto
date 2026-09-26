@@ -1582,6 +1582,36 @@ paths:
           description: Outside the startup workspace and configured roots
         "500":
           description: Admitted, but opening it failed
+    delete:
+      summary: Unload a workspace and remove it from the persisted list
+      description: >-
+        path is canonicalized the same way POST does, without the root
+        check, so an entry for a directory that no longer exists can still
+        be removed by its literal, previously persisted string.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Unloaded, removed from the persisted list, or both
+        "404":
+          description: WORKSPACE_NOT_FOUND, neither loaded nor in the list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            WORKSPACE_IS_STARTUP for the startup workspace, or
+            WORKSPACE_IN_USE for an open session or an active workflow run
+            in that workspace
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/workspaces/diff:
     get:
       summary: A read-only diff of the workspace's changes against HEAD

@@ -1079,8 +1079,12 @@ admitted and the server behaves as a single-workspace process.
   another process has workflows disabled for it (`GET/POST /v1/workflows`
   returns the same error a single-workspace server returns when workflows
   are disabled), while its sessions and turns still work.
-- A workspace stays loaded for the life of the process; there is no route to
-  unload one.
+- `DELETE /v1/workspaces?path=...` unloads a workspace and removes it from
+  the persisted list: `204` on success, `404 WORKSPACE_NOT_FOUND` when it is
+  neither loaded nor listed, `409 WORKSPACE_IS_STARTUP` for the startup
+  workspace, and `409 WORKSPACE_IN_USE` while a session in it is open or a
+  workflow run in it is active. A listed path whose directory no longer
+  exists can still be removed. Nothing on disk under the workspace changes.
 - A workspace newly loaded by any request that names it
   (`POST /v1/workspaces`, or a `workspace` on a session or workflow request)
   is added to `~/.otto/serve-workspaces.json` (`{"workspaces": [path...]}`,
@@ -1091,8 +1095,8 @@ admitted and the server behaves as a single-workspace process.
   `warning:` line on stderr and stays in the file. An unreadable or
   unparsable file is a warning and an empty list. If the file cannot be
   written, the workspace stays loaded and stderr gets
-  `warning: cannot save workspace list: <error>`. Entries are never removed
-  automatically; edit the file to drop one.
+  `warning: cannot save workspace list: <error>`. `DELETE /v1/workspaces`
+  removes an entry.
 
 ### Web UI
 
@@ -1120,7 +1124,8 @@ composer:
   `running` while a turn runs, `approval` while an elevated Bash command
   waits for approval, `error` when the last turn failed, and `N tasks` while
   sub-agent tasks are queued or running. A group header shows how many of its
-  sessions are running. The page reconnects 1s after the stream ends, and
+  sessions are running. The page reconnects 1s after the stream ends or
+  fails, except after a `401`, which it shows as an error; it
   re-reads the session list when a status names a session it does not list.
 - Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
   renders its history. The session id is kept in the URL fragment, so a reload
@@ -1130,8 +1135,11 @@ composer:
   creating in the currently open session's workspace.
 - Each group's **Changes** button opens the Changes view for that directory
   (`GET /v1/workspaces/diff`): the branch, then one collapsible entry per
-  changed file with its status and patch. **Refresh** fetches again; the
-  view does not refresh on its own. It is read-only.
+  changed file with its status and patch. It fetches again on **Refresh** and
+  when a session in that directory finishes a turn. It is read-only.
+- Each group other than the startup workspace has a **Remove** button, which
+  calls `DELETE /v1/workspaces`; a `409` message is shown next to the Add
+  workspace field.
 - The path field and **Add workspace** button at the bottom of the sidebar
   call `POST /v1/workspaces`; the directory then appears as a group. A
   `400`/`403`/`500` from that call is shown next to the field.
@@ -1220,6 +1228,7 @@ are served at the root. Request and error bodies are JSON.
 | --- | --- |
 | `GET /v1/workspaces` | List loaded workspaces, startup first: `{"startup", "roots", "workspaces": [{"path", "open_sessions", "workflows"}...]}`. |
 | `POST /v1/workspaces` | Admit and load a workspace (`{"path":"..."}`). `201` when newly loaded, `200` when already loaded. `400 INVALID_WORKSPACE` or `403 WORKSPACE_NOT_ADMITTED` otherwise. Returns one `workspaces` entry. |
+| `DELETE /v1/workspaces?path=...` | Unload a workspace and remove it from `~/.otto/serve-workspaces.json`. `204` on success; `404 WORKSPACE_NOT_FOUND`, `409 WORKSPACE_IS_STARTUP`, or `409 WORKSPACE_IN_USE` otherwise. |
 | `GET /v1/workspaces/diff?workspace=<path>` | Read-only changes of a working directory (default the startup workspace) against `HEAD`, or the empty tree before the first commit: staged, unstaged, and untracked files under that directory, ignored files excluded. `{"workspace", "repository", "branch", "files": [{"path", "old_path", "status", "binary", "patch", "truncated"}...], "truncated"}`. `status` is `modified`, `added`, `deleted`, `renamed`, or `untracked`; paths are relative to the directory. `repository:false` when the directory is not in a git work tree. git runs through the workspace's sandbox with external diff and textconv drivers disabled. Limits: 256 KiB of patch per file, about 1 MiB in total, patches for the first 200 untracked files, 10 s for all git commands. `400`/`403` as `POST /v1/workspaces`; `501 diff_unavailable` without a usable sandbox; `500 git_failed`; `504 git_timeout`. |
 | `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or attach to one already open in this process (`{"resume":"<id>"}`, searched in `workspace` if given, else every loaded workspace). `201` for a new session, `200` for an already-open one. Returns the session object. |
 | `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `approvals` counts unexpired pending Bash approvals; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. An approval that expires is dropped from the count at the next change for any other reason. The stream ends when the server shuts down. |

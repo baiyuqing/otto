@@ -23,6 +23,7 @@ pub mod sandbox_switch;
 pub mod serve;
 #[cfg(test)]
 pub mod testutil;
+pub mod trust;
 pub mod wiring;
 pub mod workflow;
 pub mod workspace_context;

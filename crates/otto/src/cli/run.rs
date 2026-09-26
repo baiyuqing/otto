@@ -8,8 +8,9 @@
 //! [`SandboxSwitch`], so `/sandbox reload`, `POST /v1/sandbox/reload` and the
 //! TUI all re-point bash at a new runtime without restarting the process.
 //!
-//! `sandbox`, `memory`, `login` and `logout` dispatch before flag parsing,
-//! because their argument grammars are their own; nothing is left unported.
+//! `sandbox`, `memory`, `login`, `logout` and `trust` dispatch before flag
+//! parsing, because their argument grammars are their own; nothing is left
+//! unported.
 //!
 //! The TUI (`--ui tui`, or `--ui auto` on a terminal) dispatches to
 //! [`crate::tui::run`].
@@ -256,6 +257,19 @@ pub async fn run(
             Err(message) => return fail(stderr, &message),
         };
         return super::login::run_auth_command(args, stdout, stderr, &home, cancel).await;
+    }
+    if let Some(first) = args.first()
+        && first == "trust"
+    {
+        let host_entries = match capture_environment(environment_entries) {
+            Ok(entries) => entries,
+            Err(message) => return fail(stderr, &message),
+        };
+        let lookup = match environment_lookup(&host_entries) {
+            Ok(lookup) => lookup,
+            Err(message) => return fail(stderr, &message),
+        };
+        return super::trust::run(&args[1..], stdout, stderr, &lookup);
     }
 
     let workflow_command = if args.first().is_some_and(|first| first == "workflow") {
@@ -660,6 +674,7 @@ pub async fn run(
                     return fail(stderr, &builder.redact_error(&error.to_string(), None));
                 }
             };
+        let exit_on_stdin_close = options.exit_on_stdin_close.then_some(stdin);
         let exit = serve::run(
             serve::ServeOptions {
                 builder,
@@ -668,6 +683,7 @@ pub async fn run(
                 control,
                 reloader,
                 open: options.open,
+                exit_on_stdin_close,
             },
             stdout,
             stderr,

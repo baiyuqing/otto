@@ -343,10 +343,17 @@ impl Controller {
         &self.builder.auth_path
     }
 
-    /// The process-wide memory service and its scopes. `/memory` and
-    /// `/remember` read them through `Controller::memory_manager`.
+    /// The process-wide memory service, its user scope, and the recall
+    /// limits. `/memory` and `/remember` read them through
+    /// `Controller::memory_manager`.
     pub(crate) fn memory_wiring(&self) -> &crate::cli::wiring::MemoryWiring {
         &self.builder.memory
+    }
+
+    /// This session's memory workspace scope, unlike `memory_wiring`'s
+    /// process-wide service and user scope.
+    pub(crate) fn workspace_memory_scope(&self) -> &crate::memory::Scope {
+        &self.builder.workspace_scope
     }
 
     /// The runner currently in force. `/tasks` and `/task` read its sub-agent
@@ -1970,7 +1977,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let mut builder = builder(workspace.path(), sessions.path());
-        builder.config.agents.enabled = Some(false);
+        builder.shared_mut().config.agents.enabled = Some(false);
         let runtime = initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder

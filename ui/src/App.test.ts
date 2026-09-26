@@ -17,6 +17,8 @@ const api = vi.hoisted(() => ({
   listTasks: vi.fn(),
   listMcp: vi.fn(),
   cancelTurn: vi.fn(),
+  listWorkspaces: vi.fn(),
+  addWorkspace: vi.fn(),
 }))
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
@@ -102,6 +104,7 @@ describe('idle wake follow', () => {
     api.listMcp.mockResolvedValue({ servers: [] })
     api.attach.mockResolvedValue(new Response('', { headers: { 'Content-Type': 'text/event-stream' } }))
     api.cancelTurn.mockResolvedValue(new Response(null, { status: 204 }))
+    api.listWorkspaces.mockResolvedValue({ startup: '/tmp/otto-work', roots: [], workspaces: [{ path: '/tmp/otto-work', open_sessions: 1, workflows: true }] })
   })
 
   afterEach(() => {

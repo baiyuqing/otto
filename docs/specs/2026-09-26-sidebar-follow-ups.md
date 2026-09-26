@@ -1,6 +1,6 @@
 # Sidebar follow-ups: remove a workspace, stop status reconnects on 401, refresh Changes after a turn
 
-Status: draft, awaiting approval.
+Status: approved 2026-09-27.
 
 Three items left open by
 [2026-09-26-web-sidebar-by-workspace.md](2026-09-26-web-sidebar-by-workspace.md),

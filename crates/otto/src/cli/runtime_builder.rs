@@ -560,47 +560,57 @@ impl Runner {
     }
 }
 
-/// The composition root.
+/// Everything the composition root builds once per process, independent of
+/// any one workspace: config, environment, provider-runtime inputs, auth,
+/// usage, task recording, the skill checker, and the session root. `Builder`
+/// holds one of these behind an `Arc` and adds what one workspace needs.
 ///
-/// Optional seams: memory, skills, sub-agents, ChatGPT credentials, and the
-/// `OTTO_TRACE` writer. None of them changes the order below; each only appends
-/// tools or wraps the client.
-pub struct Builder {
+/// See `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server
+/// structure") for why the split exists: a server process that later loads
+/// more than one workspace builds this once and calls
+/// [`Builder::for_workspace`] once per workspace.
+pub struct Shared {
     pub config_path: PathBuf,
     pub config: File,
     pub environment: HashMap<String, String>,
     /// The resolved home directory, used to locate MCP OAuth token files
     /// (`crate::mcp::oauth::token_path`).
     pub home: String,
-    /// Leaked for the process lifetime so the file tools, which borrow it,
-    /// satisfy the registry's `'static` bound. See `leaked_workspace`.
-    pub workspace: &'static Workspace,
-    pub workspace_path: String,
     pub session_root: PathBuf,
     pub shell: String,
     pub no_session: bool,
     pub overrides: Overrides,
-    pub command_executor: Option<Arc<dyn CommandExecutor>>,
-    pub bash_approvals: Option<Arc<bash::BashApprovals>>,
-    pub sandbox_environment: Option<Vec<String>>,
-    pub sandbox_info: SandboxInfo,
-    pub sandbox_secrets: Vec<String>,
-    pub sandbox_secrets_complete: bool,
+    /// The host environment as captured at startup, byte for byte. Loading a
+    /// second workspace's sandbox reuses this rather than re-reading the
+    /// process environment, so every loaded workspace classifies the same
+    /// snapshot.
+    pub host_entries: Vec<Vec<u8>>,
+    /// The redaction boundary's secret set before the sandbox for any one
+    /// workspace opens and may add its own. `Builder::for_workspace` seeds
+    /// the per-workspace `sandbox_secrets` from this.
+    ///
+    /// This baseline is captured once, from the startup workspace's own
+    /// sandbox, and reused as the seed for every workspace loaded later. A
+    /// workspace loaded at runtime does not get its own baseline recomputed
+    /// from its own sandbox.
+    pub sandbox_secrets_baseline: Vec<String>,
+    pub sandbox_secrets_baseline_complete: bool,
+    /// `--sandbox`, when the flag was passed. Process-wide: every workspace's
+    /// `resolve_sandbox_settings` call uses this same override, so `otto
+    /// serve --sandbox off` applies to a workspace loaded after startup too.
+    pub sandbox_driver_override: Option<String>,
+    /// Whether `--config` named the config file explicitly, vs. the default
+    /// path. Each workspace's `SandboxReloader` re-reads this same file on
+    /// `/sandbox reload`, so the flag is process-wide rather than per-workspace.
+    pub explicit_config: bool,
     /// The captured `~/.otto/auth/chatgpt.json`.
     pub auth_path: String,
     /// The captured credentials, valid only when loaded is true.
     pub auth_credentials: crate::auth::Credentials,
     pub auth_credentials_loaded: bool,
-    /// The process-wide memory service and its two scopes. The default is a
-    /// null service reporting memory as disabled.
-    pub memory: super::wiring::MemoryWiring,
     /// Process-wide append-only token usage storage. `None` keeps usage
     /// collection from affecting an otherwise usable runtime.
     pub usage: Option<Arc<crate::usage::Store>>,
-    /// The resolved `[mcp]` configuration. `connect_mcp` reads this at
-    /// `build_runner` time; the servers themselves are not connected until
-    /// then.
-    pub mcp: McpRuntime,
     /// Process-wide sub-agent task recorder (`~/.otto/tasks.db`). `None` keeps
     /// `build_subagents` from recording task history, matching today's
     /// behaviour; `build_subagents` injects it into every `Tasks` registry it
@@ -610,6 +620,99 @@ pub struct Builder {
     /// feature is disabled or its database could not be opened; either way
     /// `build_subagents` wires no checker in and delegation is unaffected.
     pub skill_checker: Option<Arc<crate::skill::check::Checker>>,
+    /// The process-wide memory service, its user scope, and the recall
+    /// limits: one SQLite/FTS5 store for the whole process, shared by every
+    /// loaded workspace. Each workspace's `Builder` keeps only its own
+    /// `workspace_scope`.
+    pub memory: super::wiring::MemoryWiring,
+}
+
+/// The composition root for one workspace.
+///
+/// Optional seams: memory, skills, sub-agents, ChatGPT credentials, and the
+/// `OTTO_TRACE` writer. None of them changes the order below; each only appends
+/// tools or wraps the client.
+pub struct Builder {
+    /// Everything built once per process. Field access on `Builder` reaches
+    /// these through `Deref`, so `self.config`, `self.environment`, and the
+    /// rest of `Shared`'s fields read the same as before the split.
+    pub shared: Arc<Shared>,
+    /// Leaked for the process lifetime so the file tools, which borrow it,
+    /// satisfy the registry's `'static` bound. See `leaked_workspace`.
+    pub workspace: &'static Workspace,
+    pub workspace_path: String,
+    pub command_executor: Option<Arc<dyn CommandExecutor>>,
+    pub bash_approvals: Option<Arc<bash::BashApprovals>>,
+    pub sandbox_environment: Option<Vec<String>>,
+    pub sandbox_info: SandboxInfo,
+    pub sandbox_secrets: Vec<String>,
+    pub sandbox_secrets_complete: bool,
+    /// This workspace's memory scope: a SHA-256 digest of its canonical path,
+    /// or the configured stable id (`workspace_memory_scope`). The service
+    /// itself and the user scope are process-wide and live on `Shared`.
+    pub workspace_scope: crate::memory::Scope,
+    /// The resolved `[mcp]` configuration. `connect_mcp` reads this at
+    /// `build_runner` time; the servers themselves are not connected until
+    /// then.
+    pub mcp: McpRuntime,
+}
+
+impl std::ops::Deref for Builder {
+    type Target = Shared;
+
+    fn deref(&self) -> &Shared {
+        &self.shared
+    }
+}
+
+impl Builder {
+    /// Assembles the workspace-scoped half of the composition root over an
+    /// already-built [`Shared`]. `cli::run` calls this once per process, for
+    /// the TUI, REPL, and serve alike.
+    ///
+    /// ponytail: `workspace` and `mcp` are passed in already resolved rather
+    /// than resolved here, because `cli::run` resolves them at specific
+    /// points in its startup sequence to keep today's error-reporting order
+    /// (the workspace lease happens before the archive/resume paths that
+    /// never use it; mcp resolution happens before the usage and
+    /// task-recorder stores open). A later slice that loads a second
+    /// workspace at runtime has no such fixed sequence to preserve and
+    /// should have `for_workspace` call `leaked_workspace` and `resolve_mcp`
+    /// itself.
+    pub fn for_workspace(
+        shared: Arc<Shared>,
+        workspace: &'static Workspace,
+        workspace_path: String,
+        mcp: McpRuntime,
+    ) -> Builder {
+        let sandbox_secrets = shared.sandbox_secrets_baseline.clone();
+        let sandbox_secrets_complete = shared.sandbox_secrets_baseline_complete;
+        Builder {
+            shared,
+            workspace,
+            workspace_path,
+            command_executor: None,
+            bash_approvals: None,
+            sandbox_environment: None,
+            sandbox_info: SandboxInfo::default(),
+            sandbox_secrets,
+            sandbox_secrets_complete,
+            workspace_scope: Default::default(),
+            mcp,
+        }
+    }
+
+    /// Mutable access to this `Builder`'s `Shared`, valid only while it is
+    /// still uniquely owned. Startup uses this to fill in the memory
+    /// service, its user scope, and the recall limits once they are resolved
+    /// (`cli::run`), before any second workspace clones the `Arc`; test
+    /// fixtures use it the same way, to tweak a field on a freshly built
+    /// `Shared` before use. Once a workspace load clones `shared`, this
+    /// panics rather than letting one `Builder` silently rewrite state every
+    /// other loaded workspace already reads.
+    pub(crate) fn shared_mut(&mut self) -> &mut Shared {
+        Arc::get_mut(&mut self.shared).expect("shared: not uniquely owned")
+    }
 }
 
 impl Builder {
@@ -1242,39 +1345,94 @@ mod tests {
     use otto_core::config::Profile;
     use std::time::Duration;
 
-    fn builder(root: &Path) -> Builder {
-        let workspace = leaked_workspace(root).expect("workspace");
-        Builder {
+    fn shared(root: &Path) -> Arc<Shared> {
+        Arc::new(Shared {
             config_path: root.join("config.toml"),
             config: File::default(),
             environment: HashMap::new(),
             home: root.to_string_lossy().into_owned(),
-            workspace,
-            workspace_path: workspace.root().to_string_lossy().into_owned(),
             session_root: root.join("sessions"),
             shell: "/bin/sh".to_string(),
             no_session: true,
+            host_entries: Vec::new(),
+            overrides: Overrides::default(),
+            sandbox_secrets_baseline: Vec::new(),
+            sandbox_secrets_baseline_complete: true,
+            sandbox_driver_override: None,
+            explicit_config: false,
             auth_path: String::new(),
             auth_credentials: crate::auth::Credentials::default(),
             auth_credentials_loaded: false,
-            overrides: Overrides::default(),
-            command_executor: None,
-            bash_approvals: None,
-            sandbox_environment: None,
-            sandbox_info: SandboxInfo::unavailable(SandboxReason::SeatbeltMissing),
-            sandbox_secrets: Vec::new(),
-            sandbox_secrets_complete: true,
-            memory: Default::default(),
             usage: None,
-            mcp: McpRuntime {
+            task_recorder: None,
+            skill_checker: None,
+            memory: Default::default(),
+        })
+    }
+
+    fn builder_for(shared: Arc<Shared>, root: &Path) -> Builder {
+        let workspace = leaked_workspace(root).expect("workspace");
+        let workspace_path = workspace.root().to_string_lossy().into_owned();
+        let mut builder = Builder::for_workspace(
+            shared,
+            workspace,
+            workspace_path,
+            McpRuntime {
                 enabled: false,
                 call_timeout_secs: 60,
                 connect_timeout_secs: 20,
                 servers: Vec::new(),
             },
-            task_recorder: None,
-            skill_checker: None,
-        }
+        );
+        builder.sandbox_info = SandboxInfo::unavailable(SandboxReason::SeatbeltMissing);
+        builder
+    }
+
+    fn builder(root: &Path) -> Builder {
+        builder_for(shared(root), root)
+    }
+
+    /// Two `Builder`s built from one `Shared` (`Builder::for_workspace`) stay
+    /// independent: each keeps its own workspace path, its own file-tool
+    /// root, and its own sandbox executor, none of which leak from one
+    /// `Builder` into the other.
+    #[test]
+    fn two_builders_from_one_shared_stay_independent_per_workspace() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace_a = tempfile::tempdir().expect("workspace a");
+        let workspace_b = tempfile::tempdir().expect("workspace b");
+        let shared = shared(shared_root.path());
+
+        let mut a = builder_for(Arc::clone(&shared), workspace_a.path());
+        let b = builder_for(Arc::clone(&shared), workspace_b.path());
+
+        assert_ne!(a.workspace_path, b.workspace_path);
+        assert_ne!(a.workspace.root(), b.workspace.root());
+        assert_eq!(a.workspace_path, a.workspace.root().to_string_lossy());
+        assert_eq!(b.workspace_path, b.workspace.root().to_string_lossy());
+
+        with_bash(&mut a, workspace_a.path());
+        assert!(a.command_executor.is_some());
+        assert!(b.command_executor.is_none());
+
+        // Both still share the one process-wide `Shared`.
+        assert!(Arc::ptr_eq(&a.shared, &b.shared));
+    }
+
+    /// Loading a second workspace must not open a second memory service: the
+    /// service lives on `Shared`, so every `Builder` built from one `Shared`
+    /// sees the identical `Arc`.
+    #[test]
+    fn two_builders_from_one_shared_use_the_same_memory_service() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace_a = tempfile::tempdir().expect("workspace a");
+        let workspace_b = tempfile::tempdir().expect("workspace b");
+        let shared = shared(shared_root.path());
+
+        let a = builder_for(Arc::clone(&shared), workspace_a.path());
+        let b = builder_for(Arc::clone(&shared), workspace_b.path());
+
+        assert!(Arc::ptr_eq(&a.memory.service, &b.memory.service));
     }
 
     fn with_bash(builder: &mut Builder, root: &Path) {
@@ -1389,13 +1547,14 @@ mod tests {
     async fn a_chatgpt_runtime_registers_remind() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut builder = builder(dir.path());
-        builder.auth_credentials_loaded = true;
-        builder.auth_path = dir
+        let shared = builder.shared_mut();
+        shared.auth_credentials_loaded = true;
+        shared.auth_path = dir
             .path()
             .join("chatgpt.json")
             .to_string_lossy()
             .into_owned();
-        builder.auth_credentials = crate::auth::Credentials {
+        shared.auth_credentials = crate::auth::Credentials {
             account_id: "acct".into(),
             access_token: "tok".into(),
             ..crate::auth::Credentials::default()
@@ -1657,7 +1816,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut builder = builder(dir.path());
         let store = Arc::new(crate::usage::Store::open_in_memory().expect("usage store"));
-        builder.usage = Some(Arc::clone(&store));
+        builder.shared_mut().usage = Some(Arc::clone(&store));
         let runtime = runtime();
         let session = SharedSession::memory(Header {
             id: "session-1".into(),

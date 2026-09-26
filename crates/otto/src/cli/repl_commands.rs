@@ -67,7 +67,7 @@ impl Controller {
             true => Some((
                 Arc::clone(&wiring.service),
                 wiring.user_scope.clone(),
-                wiring.workspace_scope.clone(),
+                self.workspace_memory_scope().clone(),
             )),
             false => None,
         }
@@ -663,18 +663,16 @@ mod tests {
             super::super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
                 .expect("open memory service");
         assert!(usable, "the test store must be usable");
-        builder.memory = super::super::wiring::MemoryWiring {
+        builder.shared_mut().memory = super::super::wiring::MemoryWiring {
             service,
             usable,
             user_scope,
-            workspace_scope: super::super::wiring::workspace_memory_scope(
-                &runtime,
-                &workspace.to_string_lossy(),
-            )
-            .expect("workspace scope"),
             recall_limit: 8,
             recall_token_budget: 1000,
         };
+        builder.workspace_scope =
+            super::super::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
+                .expect("workspace scope");
         let runtime = testutil::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder
@@ -1106,7 +1104,7 @@ mod tests {
         store: Arc<record::Store>,
     ) -> Controller {
         let mut builder = testutil::builder(workspace, sessions);
-        builder.task_recorder = Some(store);
+        builder.shared_mut().task_recorder = Some(store);
         let runtime = testutil::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder
@@ -1452,7 +1450,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let mut builder = testutil::builder(workspace.path(), sessions.path());
-        builder.config.agents.enabled = Some(false);
+        builder.shared_mut().config.agents.enabled = Some(false);
         let runtime = testutil::initial_runtime(&builder);
         let session_store = builder.create_session(&runtime).expect("session");
         let runner = builder

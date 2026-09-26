@@ -396,7 +396,7 @@ mod tests {
         store: Arc<record::Store>,
     ) -> Controller {
         let mut builder = testutil::builder(workspace, sessions);
-        builder.task_recorder = Some(store);
+        builder.shared_mut().task_recorder = Some(store);
         let runtime = testutil::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder

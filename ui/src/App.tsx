@@ -147,11 +147,11 @@ export function App() {
   )
 
   const open = useCallback(
-    async (id?: string) => {
+    async (id?: string, workspace?: string) => {
       setError('')
       compactAbort.current?.abort()
       try {
-        const s = await api.createSession(id)
+        const s = await api.createSession(id, workspace)
         location.hash = s.id
         setSession(s)
         setItems(fromHistory(await api.history(s.id)))
@@ -256,7 +256,9 @@ export function App() {
       return
     }
     if (command.kind === 'new') {
-      await open()
+      // Keep creating in the currently open session's workspace; the request
+      // only needs "workspace" when that differs from the startup one.
+      await open(undefined, info && session.workspace !== info.workspace ? session.workspace : undefined)
       return
     }
     if (command.kind === 'resume') {

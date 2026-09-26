@@ -9,7 +9,7 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use super::{Server, error_response, json_response};
+use super::{Server, error_response, json_response, workspace_load_error_response};
 use crate::workflow::{ApprovalRequest, Run};
 
 #[derive(Serialize)]
@@ -50,8 +50,12 @@ pub struct EventsQuery {
     after: i64,
 }
 
-fn controller(server: &Server) -> Option<&Arc<crate::workflow::Controller>> {
-    server.workflows.as_ref()
+/// Query for the workspace-scoped routes (`GET`/`POST /v1/workflows`).
+/// Absent `workspace` means the startup workspace.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowsQuery {
+    workspace: Option<String>,
 }
 
 fn unavailable() -> Response {
@@ -60,6 +64,19 @@ fn unavailable() -> Response {
         "workflow_unavailable",
         "workflow runtime unavailable",
     )
+}
+
+/// Admits and loads `workspace` (a caller-named `?workspace=`), or leaves it
+/// as the startup workspace when absent. Shared by `list` and `start`.
+#[allow(clippy::result_large_err)]
+async fn admit(server: &Server, workspace: &Option<String>) -> Result<Option<String>, Response> {
+    match workspace {
+        Some(path) => match server.factory.load_workspace(path).await {
+            Ok((info, _newly_loaded)) => Ok(Some(info.path)),
+            Err(error) => Err(workspace_load_error_response(error)),
+        },
+        None => Ok(None),
+    }
 }
 
 fn view(controller: &crate::workflow::Controller, run_id: &str) -> Result<View, String> {
@@ -77,8 +94,45 @@ fn map_error(message: String) -> Response {
     error_response(status, "workflow_failed", &message)
 }
 
-pub async fn list(State(server): State<Arc<Server>>) -> Response {
-    let controller = match controller(&server) {
+/// The controller owning `run_id`, searched startup first then the other
+/// loaded workspaces in path order. Only a "not found" error tries the next
+/// controller; any other error is this run's own workspace reporting a real
+/// failure and is returned immediately, so a broken workspace is never
+/// masked as "not this one" (see the same principle applied to session
+/// listing in `cli/serve.rs`).
+#[allow(clippy::result_large_err)]
+async fn find_by_run(
+    server: &Server,
+    run_id: &str,
+) -> Result<Arc<crate::workflow::Controller>, Response> {
+    let controllers = server.factory.workflow_controllers().await;
+    if controllers.is_empty() {
+        return Err(unavailable());
+    }
+    let mut last_error = "workflow run not found".to_string();
+    for controller in controllers {
+        match controller.get(run_id) {
+            Ok(_) => return Ok(controller),
+            Err(error) if error.ends_with("not found") => last_error = error,
+            Err(error) => return Err(map_error(error)),
+        }
+    }
+    Err(map_error(last_error))
+}
+
+pub async fn list(
+    State(server): State<Arc<Server>>,
+    Query(query): Query<WorkflowsQuery>,
+) -> Response {
+    let workspace = match admit(&server, &query.workspace).await {
+        Ok(workspace) => workspace,
+        Err(response) => return response,
+    };
+    let controller = match server
+        .factory
+        .workflow_controller(workspace.as_deref())
+        .await
+    {
         Some(controller) => controller,
         None => return unavailable(),
     };
@@ -90,9 +144,18 @@ pub async fn list(State(server): State<Arc<Server>>) -> Response {
 
 pub async fn start(
     State(server): State<Arc<Server>>,
+    Query(query): Query<WorkflowsQuery>,
     Json(request): Json<StartRequest>,
 ) -> Response {
-    let controller = match controller(&server) {
+    let workspace = match admit(&server, &query.workspace).await {
+        Ok(workspace) => workspace,
+        Err(response) => return response,
+    };
+    let controller = match server
+        .factory
+        .workflow_controller(workspace.as_deref())
+        .await
+    {
         Some(controller) => controller,
         None => return unavailable(),
     };
@@ -106,11 +169,11 @@ pub async fn start(
 }
 
 pub async fn get(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
-    let controller = match controller(&server) {
-        Some(controller) => controller,
-        None => return unavailable(),
+    let controller = match find_by_run(&server, &id).await {
+        Ok(controller) => controller,
+        Err(response) => return response,
     };
-    match view(controller, &id) {
+    match view(&controller, &id) {
         Ok(view) => json_response(StatusCode::OK, &view),
         Err(error) => map_error(error),
     }
@@ -121,12 +184,12 @@ pub async fn resume(
     Path(id): Path<String>,
     Json(request): Json<ResumeRequest>,
 ) -> Response {
-    let controller = match controller(&server) {
-        Some(controller) => controller,
-        None => return unavailable(),
+    let controller = match find_by_run(&server, &id).await {
+        Ok(controller) => controller,
+        Err(response) => return response,
     };
     match controller.resume(&id, request.retry.as_deref()).await {
-        Ok(_) => match view(controller, &id) {
+        Ok(_) => match view(&controller, &id) {
             Ok(view) => json_response(StatusCode::OK, &view),
             Err(error) => map_error(error),
         },
@@ -139,9 +202,9 @@ pub async fn fork(
     Path(id): Path<String>,
     Json(request): Json<ForkRequest>,
 ) -> Response {
-    let controller = match controller(&server) {
-        Some(controller) => controller,
-        None => return unavailable(),
+    let controller = match find_by_run(&server, &id).await {
+        Ok(controller) => controller,
+        Err(response) => return response,
     };
     match controller.fork(&id, &request.after_step).await {
         Ok(run) => match controller.requests(&run.id) {
@@ -153,9 +216,9 @@ pub async fn fork(
 }
 
 pub async fn cancel(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
-    let controller = match controller(&server) {
-        Some(controller) => controller,
-        None => return unavailable(),
+    let controller = match find_by_run(&server, &id).await {
+        Ok(controller) => controller,
+        Err(response) => return response,
     };
     match controller.cancel(&id).await {
         Ok(run) => match controller.requests(&run.id) {
@@ -167,25 +230,36 @@ pub async fn cancel(State(server): State<Arc<Server>>, Path(id): Path<String>) -
 }
 
 pub async fn approve(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
-    respond(server, id, true)
+    respond(server, id, true).await
 }
 
 pub async fn reject(State(server): State<Arc<Server>>, Path(id): Path<String>) -> Response {
-    respond(server, id, false)
+    respond(server, id, false).await
 }
 
-fn respond(server: Arc<Server>, id: String, approved: bool) -> Response {
-    let controller = match controller(&server) {
-        Some(controller) => controller,
-        None => return unavailable(),
-    };
-    match controller.respond(&id, approved) {
-        Ok(run) => match controller.requests(&run.id) {
-            Ok(requests) => json_response(StatusCode::OK, &View { run, requests }),
-            Err(error) => map_error(error),
-        },
-        Err(error) => map_error(error),
+/// Searches every loaded workspace's controller for `request_id`, applying
+/// the response. `Controller::respond` itself checks the request's run
+/// against its own workspace before mutating anything, so trying it against
+/// the wrong workspace's controller first is side-effect free.
+async fn respond(server: Arc<Server>, id: String, approved: bool) -> Response {
+    let controllers = server.factory.workflow_controllers().await;
+    if controllers.is_empty() {
+        return unavailable();
     }
+    let mut last_error = "approval request not found".to_string();
+    for controller in controllers {
+        match controller.respond(&id, approved) {
+            Ok(run) => {
+                return match controller.requests(&run.id) {
+                    Ok(requests) => json_response(StatusCode::OK, &View { run, requests }),
+                    Err(error) => map_error(error),
+                };
+            }
+            Err(error) if error.ends_with("not found") => last_error = error,
+            Err(error) => return map_error(error),
+        }
+    }
+    map_error(last_error)
 }
 
 pub async fn events(
@@ -200,9 +274,9 @@ pub async fn events(
             "after must be non-negative",
         );
     }
-    let controller = match controller(&server) {
-        Some(controller) => controller,
-        None => return unavailable(),
+    let controller = match find_by_run(&server, &id).await {
+        Ok(controller) => controller,
+        Err(response) => return response,
     };
     let events = match controller.events(&id, query.after) {
         Ok(events) => events,

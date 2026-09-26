@@ -1128,6 +1128,10 @@ composer:
 - Each group's **New session** button creates a session in that directory;
   `"workspace"` is sent only for a non-startup directory. `/new` keeps
   creating in the currently open session's workspace.
+- Each group's **Changes** button opens the Changes view for that directory
+  (`GET /v1/workspaces/diff`): the branch, then one collapsible entry per
+  changed file with its status and patch. **Refresh** fetches again; the
+  view does not refresh on its own. It is read-only.
 - The path field and **Add workspace** button at the bottom of the sidebar
   call `POST /v1/workspaces`; the directory then appears as a group. A
   `400`/`403`/`500` from that call is shown next to the field.
@@ -1216,6 +1220,7 @@ are served at the root. Request and error bodies are JSON.
 | --- | --- |
 | `GET /v1/workspaces` | List loaded workspaces, startup first: `{"startup", "roots", "workspaces": [{"path", "open_sessions", "workflows"}...]}`. |
 | `POST /v1/workspaces` | Admit and load a workspace (`{"path":"..."}`). `201` when newly loaded, `200` when already loaded. `400 INVALID_WORKSPACE` or `403 WORKSPACE_NOT_ADMITTED` otherwise. Returns one `workspaces` entry. |
+| `GET /v1/workspaces/diff?workspace=<path>` | Read-only changes of a working directory (default the startup workspace) against `HEAD`, or the empty tree before the first commit: staged, unstaged, and untracked files under that directory, ignored files excluded. `{"workspace", "repository", "branch", "files": [{"path", "old_path", "status", "binary", "patch", "truncated"}...], "truncated"}`. `status` is `modified`, `added`, `deleted`, `renamed`, or `untracked`; paths are relative to the directory. `repository:false` when the directory is not in a git work tree. git runs through the workspace's sandbox with external diff and textconv drivers disabled. Limits: 256 KiB of patch per file, about 1 MiB in total, patches for the first 200 untracked files, 10 s for all git commands. `400`/`403` as `POST /v1/workspaces`; `501 diff_unavailable` without a usable sandbox; `500 git_failed`; `504 git_timeout`. |
 | `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or attach to one already open in this process (`{"resume":"<id>"}`, searched in `workspace` if given, else every loaded workspace). `201` for a new session, `200` for an already-open one. Returns the session object. |
 | `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `approvals` counts unexpired pending Bash approvals; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. An approval that expires is dropped from the count at the next change for any other reason. The stream ends when the server shuts down. |
 | `GET /v1/sessions?workspace=<path>` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. Without `workspace`, every loaded workspace; with it, that workspace only. |

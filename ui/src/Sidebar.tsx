@@ -32,6 +32,7 @@ export function Sidebar(props: {
   current: string
   disabled: boolean
   onOpen: (id?: string, workspace?: string) => void
+  onOpenChanges?: (workspace: string) => void
   status?: Map<string, SessionStatus>
 }) {
   const [startup, setStartup] = useState('')
@@ -81,6 +82,13 @@ export function Sidebar(props: {
               <div className="sidebar-group-header" title={group.path}>
                 <span>{workspaceName(group.path)}</span>
                 {runningCount > 0 && <span className="status-running-count">{runningCount} running</span>}
+                <button
+                  type="button"
+                  disabled={props.disabled}
+                  onClick={() => props.onOpenChanges?.(group.path)}
+                >
+                  Changes
+                </button>
                 <button
                   type="button"
                   disabled={props.disabled}

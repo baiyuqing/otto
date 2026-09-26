@@ -335,6 +335,30 @@ button.danger {
   .workflow-layout { grid-template-columns: 1fr; }
   .workflow-runs { border-right: 0; border-bottom: 1px solid var(--line); }
 }
+.changes-view { flex: 1; overflow-y: auto; padding: 28px 24px 48px; }
+.changes-heading { max-width: 76rem; margin: 0 auto 12px; display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }
+.changes-heading h1 { margin: 0; font-size: 24px; }
+.changes-path { margin: 5px 0 0; color: var(--muted); font: 12px var(--mono); }
+.changes-branch { max-width: 76rem; margin: 0 auto 14px; color: var(--muted); font: 12px var(--mono); }
+.changes-note, .changes-empty, .changes-loading { max-width: 76rem; margin: 0 auto 14px; color: var(--muted); }
+.changes-file { max-width: 76rem; margin: 0 auto 8px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.changes-file summary { display: flex; gap: 10px; cursor: pointer; padding: 8px 10px; font-family: var(--mono); font-size: 12px; }
+.changes-file-status { color: var(--muted); text-transform: uppercase; }
+.changes-file .changes-note { margin: 0; padding: 8px 12px; border-top: 1px solid var(--line); }
+.changes-patch {
+  font-size: 12px;
+  font-family: var(--mono);
+  overflow-x: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  white-space: pre-wrap;
+}
+.changes-patch .diff-add { color: var(--chart-cached); }
+.changes-patch .diff-del { color: var(--danger); }
+.changes-patch .diff-hunk { color: var(--muted); }
 .agents-view {
   flex: 1;
   min-width: 0;

@@ -679,6 +679,40 @@ components:
         step_id: {type: string}
         status: {type: string}
       required: [seq, run_id, occurred_at, kind, step_id, status]
+    DiffFile:
+      type: object
+      properties:
+        path: {type: string}
+        old_path:
+          type: [string, "null"]
+          description: Set only when status is renamed.
+        status:
+          type: string
+          enum: [modified, added, deleted, renamed, untracked]
+        binary: {type: boolean}
+        patch:
+          type: string
+          description: The file's hunks without the diff --git header lines. Empty for a binary file or a file past the response's patch-byte limits.
+        truncated: {type: boolean}
+      required: [path, old_path, status, binary, patch, truncated]
+    WorkspaceDiff:
+      type: object
+      properties:
+        workspace: {type: string}
+        repository:
+          type: boolean
+          description: False when the workspace is not inside a git work tree.
+        branch:
+          type: [string, "null"]
+          description: null when detached or before the first commit.
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiffFile"
+        truncated:
+          type: boolean
+          description: True when any file's patch, the response's total patch bytes, or the untracked file count was cut.
+      required: [workspace, repository, branch, files, truncated]
     WorkspaceEntry:
       type: object
       properties:
@@ -1548,6 +1582,56 @@ paths:
           description: Outside the startup workspace and configured roots
         "500":
           description: Admitted, but opening it failed
+  /v1/workspaces/diff:
+    get:
+      summary: A read-only diff of the workspace's changes against HEAD
+      description: >-
+        Staged and unstaged changes, plus untracked files, in one list sorted
+        by path. Writes nothing to the repository or the working tree.
+      parameters:
+        - name: workspace
+          in: query
+          required: false
+          schema:
+            type: string
+          description: An admitted workspace path, loaded if not already. Defaults to the startup workspace.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceDiff"
+        "400":
+          description: workspace not an absolute, existing directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: workspace is outside the startup workspace and configured roots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "501":
+          description: The workspace has no usable sandbox to run git through
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: A git command failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "504":
+          description: The git commands did not finish within the deadline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/info:
     get:
       summary: Process-level static info

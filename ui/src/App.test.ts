@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Info, Session } from './wire'
@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   cancelTurn: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
+  getWorkspaceDiff: vi.fn(),
 }))
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
@@ -238,5 +239,37 @@ describe('idle wake follow', () => {
 
     expect(api.listMcp).toHaveBeenCalledWith('sess1')
     expect(screen.getByText('docs: connected (3 tools) (http, 2026-07-28)')).toBeTruthy()
+  })
+})
+
+describe('Changes view', () => {
+  beforeEach(() => {
+    api.info.mockResolvedValue(info)
+    api.usage.mockResolvedValue({
+      requests: 0,
+      reported_requests: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cached_input_tokens: 0,
+      cache_hit_rate: 0,
+    })
+    api.listSessions.mockResolvedValue({ sessions: [] })
+    api.listWorkspaces.mockResolvedValue({ startup: '/tmp/otto-work', roots: [], workspaces: [{ path: '/tmp/otto-work', open_sessions: 0, workflows: true }] })
+    api.getWorkspaceDiff.mockResolvedValue({ workspace: '/tmp/otto-work', repository: true, branch: 'main', files: [], truncated: false })
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  it('opens the Changes view for a group when its Changes button is clicked', async () => {
+    render(createElement(App))
+    const header = await screen.findByTitle('/tmp/otto-work')
+    fireEvent.click(within(header).getByRole('button', { name: 'Changes' }))
+
+    expect(await screen.findByRole('heading', { name: 'Changes' })).toBeTruthy()
+    expect(await screen.findByText('main')).toBeTruthy()
+    expect(api.getWorkspaceDiff).toHaveBeenCalledWith('/tmp/otto-work')
   })
 })

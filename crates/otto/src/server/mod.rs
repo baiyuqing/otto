@@ -139,6 +139,16 @@ pub trait Factory: Send + Sync {
     /// already loaded.
     async fn load_workspace(&self, path: &str)
     -> Result<(WorkspaceInfo, bool), WorkspaceLoadError>;
+    /// The workflow controller for `workspace` (`None`: the startup
+    /// workspace). `None` when that workspace has no controller (workflows
+    /// disabled there).
+    async fn workflow_controller(
+        &self,
+        workspace: Option<&str>,
+    ) -> Option<Arc<crate::workflow::Controller>>;
+    /// Every loaded workspace's workflow controller, startup first then by
+    /// path. A workspace with workflows disabled is left out.
+    async fn workflow_controllers(&self) -> Vec<Arc<crate::workflow::Controller>>;
 }
 
 /// One workspace's registration state, independent of any open session.
@@ -1825,6 +1835,9 @@ mod tests {
         /// Canned `Factory::list` answer for a named workspace (`?workspace=`).
         /// An absent key falls back to `list`.
         list_by_workspace: HashMap<String, ListResult>,
+        /// Workflow controllers keyed by workspace path. The entry at the
+        /// harness's own workspace path is the startup controller.
+        workflows: HashMap<String, Arc<crate::workflow::Controller>>,
         create_calls: AtomicUsize,
         open_calls: AtomicUsize,
     }
@@ -1990,6 +2003,33 @@ mod tests {
                 true,
             ))
         }
+
+        async fn workflow_controller(
+            &self,
+            workspace: Option<&str>,
+        ) -> Option<Arc<crate::workflow::Controller>> {
+            let path = workspace.unwrap_or(&self.builder.workspace_path);
+            self.workflows.get(path).cloned()
+        }
+
+        async fn workflow_controllers(&self) -> Vec<Arc<crate::workflow::Controller>> {
+            let startup = &self.builder.workspace_path;
+            let mut rest: Vec<(&String, &Arc<crate::workflow::Controller>)> = self
+                .workflows
+                .iter()
+                .filter(|(path, _)| *path != startup)
+                .collect();
+            rest.sort_by(|a, b| a.0.cmp(b.0));
+            let mut all = Vec::with_capacity(self.workflows.len());
+            if let Some(controller) = self.workflows.get(startup) {
+                all.push(Arc::clone(controller));
+            }
+            all.extend(
+                rest.into_iter()
+                    .map(|(_, controller)| Arc::clone(controller)),
+            );
+            all
+        }
     }
 
     // ---- the harness ----
@@ -2023,6 +2063,9 @@ mod tests {
         tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
         task_recorder: Option<Arc<crate::subagent::record::Store>>,
         workflows: Option<Arc<crate::workflow::Controller>>,
+        /// Extra workflow controllers keyed by workspace path, for a second
+        /// (non-startup) workspace's workflow routes.
+        workflow_workspaces: HashMap<String, Arc<crate::workflow::Controller>>,
         /// `startup` is always overwritten with the harness's own workspace;
         /// set `admitted`/`error`/`gate` for `/v1/workspaces` tests.
         workspaces: FakeWorkspaces,
@@ -2052,6 +2095,10 @@ mod tests {
             let provider = ScriptedProvider::new(options.script);
             let mut workspaces = options.workspaces;
             workspaces.startup = builder.workspace_path.clone();
+            let mut workflows = options.workflow_workspaces;
+            if let Some(controller) = &options.workflows {
+                workflows.insert(builder.workspace_path.clone(), Arc::clone(controller));
+            }
             let factory = Arc::new(TestFactory {
                 builder,
                 provider: Arc::clone(&provider),
@@ -2064,6 +2111,7 @@ mod tests {
                 tasks: options.tasks,
                 task_recorder: options.task_recorder,
                 workspaces,
+                workflows,
                 create_calls: AtomicUsize::new(0),
                 open_calls: AtomicUsize::new(0),
             });
@@ -3275,11 +3323,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn workflow_routes_start_and_report_a_durable_run() {
+    /// A real, workspace-scoped workflow controller backed by an in-memory
+    /// store, for exercising the HTTP routes end to end.
+    fn workflow_test_controller(workspace: &str) -> Arc<crate::workflow::Controller> {
         let store = Arc::new(crate::workflow::Store::open_in_memory());
-        let transcripts = tempfile::tempdir().expect("transcripts");
-        let controller = crate::workflow::Controller::new(
+        let transcripts = tempfile::tempdir().expect("transcripts").keep();
+        crate::workflow::Controller::new(
             store,
             crate::workflow::Catalog::from_definitions(vec![crate::workflow::Definition {
                 name: "review".to_string(),
@@ -3298,11 +3347,16 @@ mod tests {
                 }],
             }]),
             Arc::new(TestWorkflowExecutor),
-            "/workspace".to_string(),
-            transcripts.path().to_path_buf(),
+            workspace.to_string(),
+            transcripts,
             crate::workflow::RuntimeIdentity::default(),
             1,
-        );
+        )
+    }
+
+    #[tokio::test]
+    async fn workflow_routes_start_and_report_a_durable_run() {
+        let controller = workflow_test_controller("/workspace");
         let harness = Harness::with(HarnessOptions {
             workflows: Some(controller),
             ..HarnessOptions::default()
@@ -3361,6 +3415,112 @@ mod tests {
             fork.json()["run"]["forked_from_step_id"].as_str(),
             Some("work")
         );
+    }
+
+    #[tokio::test]
+    async fn workflow_routes_scope_runs_and_lists_by_workspace_query() {
+        let harness = Harness::with(HarnessOptions {
+            workflows: Some(workflow_test_controller("/a")),
+            workflow_workspaces: HashMap::from([(
+                "/other".to_string(),
+                workflow_test_controller("/other"),
+            )]),
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let start = harness
+            .send_with(
+                "POST",
+                "/v1/workflows?workspace=/other",
+                Some(r#"{"name":"review","input":"request"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(start.status, StatusCode::CREATED, "{}", start.body);
+        let id = start.json()["run"]["id"]
+            .as_str()
+            .expect("run id")
+            .to_string();
+
+        let list_startup = harness.send("GET", "/v1/workflows", None).await;
+        assert_eq!(list_startup.status, StatusCode::OK, "{}", list_startup.body);
+        assert!(
+            list_startup.json()["runs"]
+                .as_array()
+                .expect("runs")
+                .is_empty()
+        );
+
+        let list_other = harness
+            .send("GET", "/v1/workflows?workspace=/other", None)
+            .await;
+        assert_eq!(list_other.status, StatusCode::OK, "{}", list_other.body);
+        let runs = list_other.json()["runs"].as_array().expect("runs").clone();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["id"].as_str(), Some(id.as_str()));
+
+        // Run-scoped routes find the run without a `?workspace=` hint.
+        let mut status = String::new();
+        for _ in 0..20 {
+            let reply = harness
+                .send("GET", &format!("/v1/workflows/{id}"), None)
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+            status = reply.json()["run"]["status"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if status == "succeeded" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(status, "succeeded");
+
+        let cancel = harness
+            .send("POST", &format!("/v1/workflows/{id}/cancel"), None)
+            .await;
+        assert_eq!(cancel.status, StatusCode::CONFLICT, "{}", cancel.body);
+        assert_eq!(
+            cancel.json()["error"]["message"],
+            "workflow run already finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn workflow_routes_report_the_disabled_error_for_a_workspace_with_no_controller() {
+        let harness = Harness::with(HarnessOptions {
+            workflows: Some(workflow_test_controller("/a")),
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let list = harness
+            .send("GET", "/v1/workflows?workspace=/other", None)
+            .await;
+        assert_eq!(list.status, StatusCode::NOT_IMPLEMENTED, "{}", list.body);
+        assert_eq!(list.json()["error"]["code"], "workflow_unavailable");
+
+        let start = harness
+            .send_with(
+                "POST",
+                "/v1/workflows?workspace=/other",
+                Some(r#"{"name":"review","input":"request"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(start.status, StatusCode::NOT_IMPLEMENTED, "{}", start.body);
+
+        // The startup workspace, with its own controller, is unaffected.
+        let default_list = harness.send("GET", "/v1/workflows", None).await;
+        assert_eq!(default_list.status, StatusCode::OK, "{}", default_list.body);
     }
 
     /// Every API path the router serves.

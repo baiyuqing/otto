@@ -413,6 +413,26 @@ impl Factory for ServeFactory {
             newly_loaded,
         ))
     }
+
+    async fn workflow_controller(
+        &self,
+        workspace: Option<&str>,
+    ) -> Option<Arc<crate::workflow::Controller>> {
+        let host = match workspace {
+            Some(path) => self.workspaces.host(path).await?,
+            None => Arc::clone(self.workspaces.startup_host()),
+        };
+        host.workflows.clone()
+    }
+
+    async fn workflow_controllers(&self) -> Vec<Arc<crate::workflow::Controller>> {
+        self.workspaces
+            .list()
+            .await
+            .into_iter()
+            .filter_map(|(_, host)| host.workflows.clone())
+            .collect()
+    }
 }
 
 // ---- the command ----

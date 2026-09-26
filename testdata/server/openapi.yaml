@@ -629,6 +629,25 @@ components:
         step_id: {type: string}
         status: {type: string}
       required: [seq, run_id, occurred_at, kind, step_id, status]
+    WorkspaceEntry:
+      type: object
+      properties:
+        path: {type: string}
+        open_sessions: {type: integer}
+        workflows: {type: boolean}
+      required: [path, open_sessions, workflows]
+    WorkspaceList:
+      type: object
+      properties:
+        startup: {type: string}
+        roots:
+          type: array
+          items: {type: string}
+        workspaces:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceEntry"
+      required: [startup, roots, workspaces]
   parameters:
     sessionID:
       name: id
@@ -1402,6 +1421,46 @@ paths:
                 $ref: "#/components/schemas/WorkflowView"
         "409":
           description: Request conflict
+  /v1/workspaces:
+    get:
+      summary: List loaded workspaces, startup first then by path
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceList"
+    post:
+      summary: Load a workspace, or return it if already loaded
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                path: {type: string}
+              required: [path]
+      responses:
+        "201":
+          description: Newly loaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceEntry"
+        "200":
+          description: Already loaded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceEntry"
+        "400":
+          description: Not an absolute, existing directory
+        "403":
+          description: Outside the startup workspace and configured roots
+        "500":
+          description: Admitted, but opening it failed
   /v1/info:
     get:
       summary: Process-level static info

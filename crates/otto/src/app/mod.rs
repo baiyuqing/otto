@@ -343,10 +343,17 @@ impl Controller {
         &self.builder.auth_path
     }
 
-    /// The process-wide memory service and its scopes. `/memory` and
-    /// `/remember` read them through `Controller::memory_manager`.
+    /// The process-wide memory service, its user scope, and the recall
+    /// limits. `/memory` and `/remember` read them through
+    /// `Controller::memory_manager`.
     pub(crate) fn memory_wiring(&self) -> &crate::cli::wiring::MemoryWiring {
         &self.builder.memory
+    }
+
+    /// This session's memory workspace scope, unlike `memory_wiring`'s
+    /// process-wide service and user scope.
+    pub(crate) fn workspace_memory_scope(&self) -> &crate::memory::Scope {
+        &self.builder.workspace_scope
     }
 
     /// The runner currently in force. `/tasks` and `/task` read its sub-agent

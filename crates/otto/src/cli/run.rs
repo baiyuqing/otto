@@ -497,6 +497,7 @@ pub async fn run(
         shell: shell.clone(),
         no_session: options.no_session,
         overrides: overrides_from(&options),
+        host_entries: host_entries.clone(),
         sandbox_secrets_baseline: startup.sandbox_secrets.clone(),
         sandbox_secrets_baseline_complete: startup.complete,
         auth_path: captured_auth.path.clone(),
@@ -505,6 +506,7 @@ pub async fn run(
         usage,
         task_recorder,
         skill_checker,
+        memory: Default::default(),
     });
     let mut builder = Builder::for_workspace(shared, workspace, workspace_path.clone(), mcp_config);
 
@@ -647,9 +649,10 @@ pub async fn run(
         let secrets = builder.secret_values(Some(&resolved));
         match super::wiring::open_memory_service(&memory_config, &secrets, stderr) {
             Ok((service, user_scope, usable)) => {
-                builder.memory.service = service;
-                builder.memory.user_scope = user_scope;
-                builder.memory.usable = usable;
+                let shared = builder.shared_mut();
+                shared.memory.service = service;
+                shared.memory.user_scope = user_scope;
+                shared.memory.usable = usable;
             }
             Err(error) => {
                 let _ = control.close().await;
@@ -657,7 +660,7 @@ pub async fn run(
             }
         }
         match super::wiring::workspace_memory_scope(&memory_config, &workspace_path) {
-            Ok(scope) => builder.memory.workspace_scope = scope,
+            Ok(scope) => builder.workspace_scope = scope,
             Err(error) => {
                 let _ = control.close().await;
                 return fail(stderr, &error);
@@ -665,8 +668,11 @@ pub async fn run(
         }
     }
     startup_trace.mark("memory/open");
-    builder.memory.recall_limit = memory_config.max_results;
-    builder.memory.recall_token_budget = memory_config.recall_tokens;
+    {
+        let shared = builder.shared_mut();
+        shared.memory.recall_limit = memory_config.max_results;
+        shared.memory.recall_token_budget = memory_config.recall_tokens;
+    }
     let memory_service = Arc::clone(&builder.memory.service);
     if cancel.is_cancelled() {
         let _ = control.close().await;
@@ -1250,6 +1256,75 @@ pub(super) fn resolve_sandbox_settings(
     resolve_sandbox(&raw, driver_override).map_err(|error| error.to_string())
 }
 
+/// Builds a `Builder` for a workspace admitted after startup: `serve.rs`'s
+/// workspace registry calls this the first time a path is loaded.
+///
+/// Reuses the startup sequence's pieces rather than duplicating them:
+/// `leaked_workspace` and `resolve_mcp` resolve against `canonical_path`
+/// instead of the ones `cli::run` resolved for the startup workspace, then
+/// `resolve_sandbox_settings`/`OpenOptions`/`open_sandbox_runtime` open this
+/// workspace's own sandbox the same way startup opens its own. The memory
+/// service stays the one already on `shared`; only this workspace's
+/// `workspace_scope` is computed.
+///
+/// ponytail: skips the elevated bash-approval executor and the
+/// `SandboxReloader`/`SandboxSwitch` indirection startup wires for `/sandbox
+/// reload` and interactive-elevation support. Neither has a caller yet for a
+/// runtime-loaded workspace; add both if a later slice needs `/v1/sandbox
+/// reload` or elevation to reach every loaded workspace.
+pub(super) async fn load_workspace(
+    shared: Arc<Shared>,
+    canonical_path: &Path,
+    cancel: &CancellationToken,
+    stderr: &mut (dyn Write + Send),
+) -> Result<Builder, String> {
+    let workspace_path = canonical_path.to_string_lossy().into_owned();
+    let workspace = leaked_workspace(canonical_path).map_err(|error| error.to_string())?;
+    let mcp_config = resolve_mcp(&shared.config, &shared.environment, &workspace_path)
+        .map_err(|error| error.to_string())?;
+    let mut builder = Builder::for_workspace(
+        Arc::clone(&shared),
+        workspace,
+        workspace_path.clone(),
+        mcp_config,
+    );
+
+    let sandbox_settings =
+        resolve_sandbox_settings(&shared.config, &shared.environment, &workspace_path, None)?;
+    let resolved =
+        resolve_initial_runtime(&shared.config, &shared.environment, None, &shared.overrides)
+            .map_err(|error| error.to_string())?;
+    let open_options = OpenOptions {
+        settings: settings_from_config(&sandbox_settings),
+        workspace: workspace_path.clone(),
+        shell: shared.shell.clone(),
+        home: shared.home.clone(),
+        host_entries: shared.host_entries.clone(),
+        provider_names: sandbox_provider_environment_names(&shared.config, &resolved.api_key_env),
+    };
+    let sandbox = normalize_sandbox_runtime(open_sandbox_runtime(&open_options, cancel).await);
+    if let Some(executor) = sandbox.executor.clone() {
+        builder.command_executor = Some(executor as Arc<dyn crate::sandbox::CommandExecutor>);
+    }
+    builder.sandbox_environment = sandbox.environment.clone();
+    builder.sandbox_info = sandbox.info;
+    let (merged, merged_complete) =
+        merge_redactions(&builder.sandbox_secrets, &sandbox.redaction_values);
+    builder.sandbox_secrets = merged;
+    builder.sandbox_secrets_complete =
+        builder.sandbox_secrets_complete && sandbox.redactions_complete && merged_complete;
+    if let Some(warning) = sandbox_runtime_warning(builder.effective_sandbox_info()) {
+        let _ = stderr.write_all(warning.as_bytes());
+    }
+
+    let memory_config =
+        resolve_memory(&shared.config, &shared.environment).map_err(|error| error.to_string())?;
+    builder.workspace_scope =
+        super::wiring::workspace_memory_scope(&memory_config, &workspace_path)?;
+
+    Ok(builder)
+}
+
 fn select_frontend(mode: UiMode, terminal: bool) -> Result<Frontend, String> {
     match mode {
         UiMode::Auto if terminal => Ok(Frontend::Tui),
@@ -1604,5 +1679,52 @@ driver = "off"
         assert_eq!(code, 0);
         assert!(String::from_utf8_lossy(&stdout).starts_with("Usage: otto [options]"));
         assert!(stderr.is_empty());
+    }
+
+    // ---- load_workspace ----
+
+    use crate::cli::testutil::shared_with_offline_sandbox;
+
+    /// Loading a second workspace must not open a second memory service: the
+    /// service lives on `Shared`, and `load_workspace` only computes the new
+    /// workspace's own scope.
+    #[tokio::test]
+    async fn load_workspace_reuses_the_shared_memory_service() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let canonical = canonical_directory(workspace.path()).expect("canonical");
+        let shared = shared_with_offline_sandbox(shared_root.path());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let builder = load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+            .await
+            .expect("load workspace");
+
+        assert!(Arc::ptr_eq(&builder.memory.service, &shared.memory.service));
+        assert_eq!(builder.workspace_path, canonical.to_string_lossy());
+    }
+
+    /// The new workspace opens its own sandbox with the shared `host_entries`
+    /// and shell, the same as startup does for its own workspace.
+    #[tokio::test]
+    async fn load_workspace_opens_its_own_sandbox() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let canonical = canonical_directory(workspace.path()).expect("canonical");
+        let shared = shared_with_offline_sandbox(shared_root.path());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let builder = load_workspace(Arc::clone(&shared), &canonical, &cancel, &mut stderr)
+            .await
+            .expect("load workspace");
+
+        assert_eq!(
+            builder.sandbox_info.mode,
+            super::super::info::SandboxMode::Off
+        );
+        assert!(builder.sandbox_info.bash_available);
+        assert!(builder.command_executor.is_some());
     }
 }

@@ -580,6 +580,11 @@ pub struct Shared {
     pub shell: String,
     pub no_session: bool,
     pub overrides: Overrides,
+    /// The host environment as captured at startup, byte for byte. Loading a
+    /// second workspace's sandbox reuses this rather than re-reading the
+    /// process environment, so every loaded workspace classifies the same
+    /// snapshot.
+    pub host_entries: Vec<Vec<u8>>,
     /// The redaction boundary's secret set before the sandbox for any one
     /// workspace opens and may add its own. `Builder::for_workspace` seeds
     /// the per-workspace `sandbox_secrets` from this.
@@ -602,6 +607,11 @@ pub struct Shared {
     /// feature is disabled or its database could not be opened; either way
     /// `build_subagents` wires no checker in and delegation is unaffected.
     pub skill_checker: Option<Arc<crate::skill::check::Checker>>,
+    /// The process-wide memory service, its user scope, and the recall
+    /// limits: one SQLite/FTS5 store for the whole process, shared by every
+    /// loaded workspace. Each workspace's `Builder` keeps only its own
+    /// `workspace_scope`.
+    pub memory: super::wiring::MemoryWiring,
 }
 
 /// The composition root for one workspace.
@@ -624,15 +634,10 @@ pub struct Builder {
     pub sandbox_info: SandboxInfo,
     pub sandbox_secrets: Vec<String>,
     pub sandbox_secrets_complete: bool,
-    /// This workspace's memory service handle and its two scopes. The
-    /// default is a null service reporting memory as disabled.
-    ///
-    /// ponytail: the memory `Service` itself is process-wide (per the spec,
-    /// it belongs on `Shared`), but it is opened using secrets that depend on
-    /// the sandbox this `Builder` opens for its own workspace, so splitting
-    /// it out is left for the slice that actually loads a second workspace
-    /// (docs/specs/2026-09-26-serve-multiple-workspaces.md, slice 3).
-    pub memory: super::wiring::MemoryWiring,
+    /// This workspace's memory scope: a SHA-256 digest of its canonical path,
+    /// or the configured stable id (`workspace_memory_scope`). The service
+    /// itself and the user scope are process-wide and live on `Shared`.
+    pub workspace_scope: crate::memory::Scope,
     /// The resolved `[mcp]` configuration. `connect_mcp` reads this at
     /// `build_runner` time; the servers themselves are not connected until
     /// then.
@@ -679,19 +684,19 @@ impl Builder {
             sandbox_info: SandboxInfo::default(),
             sandbox_secrets,
             sandbox_secrets_complete,
-            memory: Default::default(),
+            workspace_scope: Default::default(),
             mcp,
         }
     }
 
-    /// Mutable access to this `Builder`'s `Shared`, for test fixtures that
-    /// build one `Builder` around a freshly constructed, uniquely owned
-    /// `Shared` and then tweak a field before use. Production code never
-    /// mutates `Shared` through a live `Builder`: it is process-wide state,
-    /// and a later slice that shares one `Shared` across several `Builder`s
-    /// must not let one workspace's `Builder` silently rewrite it for every
-    /// other loaded workspace.
-    #[cfg(test)]
+    /// Mutable access to this `Builder`'s `Shared`, valid only while it is
+    /// still uniquely owned. Startup uses this to fill in the memory
+    /// service, its user scope, and the recall limits once they are resolved
+    /// (`cli::run`), before any second workspace clones the `Arc`; test
+    /// fixtures use it the same way, to tweak a field on a freshly built
+    /// `Shared` before use. Once a workspace load clones `shared`, this
+    /// panics rather than letting one `Builder` silently rewrite state every
+    /// other loaded workspace already reads.
     pub(crate) fn shared_mut(&mut self) -> &mut Shared {
         Arc::get_mut(&mut self.shared).expect("shared: not uniquely owned")
     }
@@ -1336,6 +1341,7 @@ mod tests {
             session_root: root.join("sessions"),
             shell: "/bin/sh".to_string(),
             no_session: true,
+            host_entries: Vec::new(),
             overrides: Overrides::default(),
             sandbox_secrets_baseline: Vec::new(),
             sandbox_secrets_baseline_complete: true,
@@ -1345,6 +1351,7 @@ mod tests {
             usage: None,
             task_recorder: None,
             skill_checker: None,
+            memory: Default::default(),
         })
     }
 
@@ -1395,6 +1402,22 @@ mod tests {
 
         // Both still share the one process-wide `Shared`.
         assert!(Arc::ptr_eq(&a.shared, &b.shared));
+    }
+
+    /// Loading a second workspace must not open a second memory service: the
+    /// service lives on `Shared`, so every `Builder` built from one `Shared`
+    /// sees the identical `Arc`.
+    #[test]
+    fn two_builders_from_one_shared_use_the_same_memory_service() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace_a = tempfile::tempdir().expect("workspace a");
+        let workspace_b = tempfile::tempdir().expect("workspace b");
+        let shared = shared(shared_root.path());
+
+        let a = builder_for(Arc::clone(&shared), workspace_a.path());
+        let b = builder_for(Arc::clone(&shared), workspace_b.path());
+
+        assert!(Arc::ptr_eq(&a.memory.service, &b.memory.service));
     }
 
     fn with_bash(builder: &mut Builder, root: &Path) {

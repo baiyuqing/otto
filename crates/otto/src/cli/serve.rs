@@ -47,33 +47,88 @@ struct WorkspaceHost {
 
 /// The workspaces this server process has loaded, keyed by canonical path.
 ///
-/// This slice loads only the startup workspace, so `loaded` always holds
-/// exactly the one entry named by `startup`. Loading a second workspace on
-/// first use, and wiring `admit_workspace` to an HTTP route, are later
-/// slices; see `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server
-/// structure").
+/// The startup workspace is loaded before this struct exists and never
+/// leaves `loaded`, so it is cached separately in `startup_host`: every
+/// existing `Factory` method that reads it (`builder`, `usage_summary`,
+/// ...) stays synchronous rather than taking the async registry lock.
+/// `loaded` is a `tokio::sync::Mutex` (safe to hold across `.await`, unlike
+/// `std::sync::Mutex`) so [`Workspaces::load`] can build a new workspace's
+/// sandbox and workflow controller while holding it, making two concurrent
+/// loads of one path build exactly one host.
 struct Workspaces {
     startup: String,
-    /// Canonical `[server].workspace_roots`. Not yet read by any route: it
-    /// exists so `admit_workspace` has something to check once slice 3 adds
-    /// `GET/POST /v1/workspaces`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    startup_host: Arc<WorkspaceHost>,
+    /// Canonical `[server].workspace_roots`.
     roots: Vec<PathBuf>,
-    loaded: BTreeMap<String, Arc<WorkspaceHost>>,
+    loaded: tokio::sync::Mutex<BTreeMap<String, Arc<WorkspaceHost>>>,
 }
 
 impl Workspaces {
     fn startup_host(&self) -> &Arc<WorkspaceHost> {
-        self.loaded
-            .get(&self.startup)
-            .expect("the startup workspace is always loaded")
+        &self.startup_host
     }
 
     /// Whether `requested` may be opened: the startup workspace or a
-    /// descendant of one of `self.roots`. No route calls this yet.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// descendant of one of `self.roots`.
     fn admit(&self, requested: &str) -> Result<PathBuf, Admission> {
         admit_workspace(requested, Path::new(&self.startup), &self.roots)
+    }
+
+    /// Every loaded workspace, startup first then by path.
+    async fn list(&self) -> Vec<(String, Arc<WorkspaceHost>)> {
+        let loaded = self.loaded.lock().await;
+        let mut rest: Vec<(String, Arc<WorkspaceHost>)> = loaded
+            .iter()
+            .filter(|(path, _)| **path != self.startup)
+            .map(|(path, host)| (path.clone(), Arc::clone(host)))
+            .collect();
+        rest.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut all = vec![(self.startup.clone(), Arc::clone(&self.startup_host))];
+        all.append(&mut rest);
+        all
+    }
+
+    /// Loads `canonical`, or returns the host already loaded for it.
+    /// `(_, true)` when this call built a new host; the registry mutex is
+    /// held across the build, so a second concurrent call for the same path
+    /// waits for the first and then sees `(_, false)`.
+    ///
+    /// A failed load (`load_workspace`'s sandbox/MCP errors) returns without
+    /// touching `loaded`, matching the spec's "leaves nothing in the
+    /// registry". A failed workflow-controller lock is not this kind of
+    /// failure: it mirrors startup's own handling, where the workspace loads
+    /// with `workflows: None` and a stderr warning.
+    async fn load(
+        &self,
+        canonical: &Path,
+        shared: &Arc<super::runtime_builder::Shared>,
+        runtime: &Runtime,
+        cancel: &CancellationToken,
+        stderr: &mut (dyn Write + Send),
+    ) -> Result<(Arc<WorkspaceHost>, bool), String> {
+        let path = canonical.to_string_lossy().into_owned();
+        let mut loaded = self.loaded.lock().await;
+        if let Some(host) = loaded.get(&path) {
+            return Ok((Arc::clone(host), false));
+        }
+        let builder = Arc::new(
+            super::run::load_workspace(Arc::clone(shared), canonical, cancel, stderr).await?,
+        );
+        let workflows =
+            match super::workflow::build_controller(Arc::clone(&builder), runtime, stderr).await {
+                Ok(controller) => Some(controller),
+                Err(error) => {
+                    let redacted = builder.redact_error(&error, Some(runtime));
+                    if !redacted.is_empty() {
+                        let _ =
+                            writeln!(stderr, "warning: workflows disabled for {path}: {redacted}");
+                    }
+                    None
+                }
+            };
+        let host = Arc::new(WorkspaceHost { builder, workflows });
+        loaded.insert(path, Arc::clone(&host));
+        Ok((host, true))
     }
 }
 
@@ -81,7 +136,6 @@ impl Workspaces {
 
 /// Why a requested workspace path was rejected.
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 enum Admission {
     /// The path does not resolve to an existing directory.
     Invalid,
@@ -96,13 +150,17 @@ enum Admission {
 /// inside a root that points outside it is rejected as `NotAdmitted`, and a
 /// missing path or a file is rejected as `Invalid`. The comparison is by path
 /// component (`Path::starts_with`), so `/root-x` is not a descendant of
-/// `/root`.
-#[cfg_attr(not(test), allow(dead_code))]
+/// `/root`. `requested` must already be absolute: it arrives over HTTP, so
+/// resolving a relative path against the server process's working directory
+/// would let a client name a directory it never typed.
 fn admit_workspace(
     requested: &str,
     startup: &Path,
     roots: &[PathBuf],
 ) -> Result<PathBuf, Admission> {
+    if !Path::new(requested).is_absolute() {
+        return Err(Admission::Invalid);
+    }
     let canonical = canonical_directory(Path::new(requested)).map_err(|_| Admission::Invalid)?;
     if canonical == startup || roots.iter().any(|root| canonical.starts_with(root)) {
         Ok(canonical)
@@ -132,6 +190,9 @@ struct ServeFactory {
     workspaces: Workspaces,
     runtime: Runtime,
     sandbox: Option<Arc<SandboxReloader>>,
+    /// Cancels a workspace load in progress when the server shuts down;
+    /// otherwise never fired during normal operation.
+    cancel: CancellationToken,
 }
 
 impl ServeFactory {
@@ -223,6 +284,70 @@ impl Factory for ServeFactory {
     ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
         self.builder().tasks_get(parent_session, task_id)
     }
+
+    async fn workspaces(&self) -> server::WorkspaceList {
+        let loaded = self.workspaces.list().await;
+        server::WorkspaceList {
+            startup: self.workspaces.startup.clone(),
+            roots: self
+                .workspaces
+                .roots
+                .iter()
+                .map(|root| root.to_string_lossy().into_owned())
+                .collect(),
+            loaded: loaded
+                .into_iter()
+                .map(|(path, host)| server::WorkspaceInfo {
+                    path,
+                    workflows: host.workflows.is_some(),
+                })
+                .collect(),
+        }
+    }
+
+    async fn load_workspace(
+        &self,
+        path: &str,
+    ) -> Result<(server::WorkspaceInfo, bool), server::WorkspaceLoadError> {
+        let canonical = self
+            .workspaces
+            .admit(path)
+            .map_err(|admission| match admission {
+                Admission::Invalid => server::WorkspaceLoadError::Invalid(format!(
+                    "{path}: not an existing directory"
+                )),
+                Admission::NotAdmitted => server::WorkspaceLoadError::NotAdmitted(format!(
+                    "{path}: outside the startup workspace and configured roots"
+                )),
+            })?;
+        let shared = Arc::clone(&self.builder().shared);
+        // ponytail: no writer is threaded through `Factory::load_workspace`,
+        // so a workflow-lock warning goes straight to the process stderr,
+        // matching `runtime_builder.rs`'s own `build_runner` warnings.
+        let mut stderr = std::io::stderr();
+        let (host, newly_loaded) = self
+            .workspaces
+            .load(
+                &canonical,
+                &shared,
+                &self.runtime,
+                &self.cancel,
+                &mut stderr,
+            )
+            .await
+            .map_err(|error| {
+                server::WorkspaceLoadError::Failed(
+                    self.builder().redact_error(&error, Some(&self.runtime)),
+                )
+            })?;
+        Ok((
+            server::WorkspaceInfo {
+                path: canonical.to_string_lossy().into_owned(),
+                workflows: host.workflows.is_some(),
+            },
+            newly_loaded,
+        ))
+    }
 }
 
 // ---- the command ----
@@ -308,8 +433,9 @@ pub async fn run(
     });
     let workspaces = Workspaces {
         startup: workspace_path.clone(),
+        startup_host: Arc::clone(&host),
         roots: workspace_roots,
-        loaded: BTreeMap::from([(workspace_path, Arc::clone(&host))]),
+        loaded: tokio::sync::Mutex::new(BTreeMap::from([(workspace_path, Arc::clone(&host))])),
     };
     let server = Server::new(Options {
         info: Info {
@@ -325,6 +451,7 @@ pub async fn run(
             workspaces,
             runtime: runtime.clone(),
             sandbox: reloader,
+            cancel: serve_cancel.clone(),
         }),
         token,
         // ponytail: `Logger` owns its sink, so the request log goes to the
@@ -620,6 +747,20 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_path_is_invalid() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        assert_eq!(
+            admit_workspace(".", &startup_path, &[]),
+            Err(Admission::Invalid)
+        );
+        assert_eq!(
+            admit_workspace("rel/dir", &startup_path, &[]),
+            Err(Admission::Invalid)
+        );
+    }
+
+    #[test]
     fn empty_roots_admits_only_the_startup_path() {
         let startup = tempfile::tempdir().expect("startup");
         let startup_path = canonical_directory(startup.path()).expect("canonical");
@@ -632,22 +773,131 @@ mod tests {
         );
     }
 
+    /// A `WorkspaceHost` for tests that need one but never open a real
+    /// sandbox or workflow controller.
+    fn dummy_host(workspace_root: &Path, session_root: &Path) -> Arc<WorkspaceHost> {
+        Arc::new(WorkspaceHost {
+            builder: Arc::new(crate::cli::testutil::builder(workspace_root, session_root)),
+            workflows: None,
+        })
+    }
+
     #[test]
     fn workspaces_admit_reads_startup_and_roots() {
         let startup = tempfile::tempdir().expect("startup");
         let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
         let root = tempfile::tempdir().expect("root");
         let root_path = canonical_directory(root.path()).expect("canonical");
         let workspaces = Workspaces {
             startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
             roots: vec![root_path.clone()],
-            loaded: BTreeMap::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         assert!(workspaces.admit(&startup_path.to_string_lossy()).is_ok());
         assert_eq!(
             workspaces.admit(&root_path.to_string_lossy()),
             Ok(root_path)
         );
+    }
+
+    /// Every concurrent caller loading the same path gets the same host, and
+    /// only one of them built it: the registry mutex is held across the
+    /// build, so a caller that loses the race sees the path already loaded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn load_builds_the_workspace_once_under_concurrent_callers() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let canonical = canonical_directory(workspace.path()).expect("canonical");
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(shared_root.path());
+        let runtime = crate::cli::runtime_builder::resolve_initial_runtime(
+            &shared.config,
+            &shared.environment,
+            None,
+            &shared.overrides,
+        )
+        .expect("runtime");
+        let workspaces = Arc::new(Workspaces {
+            startup: shared.home.clone(),
+            startup_host: dummy_host(Path::new(&shared.home), sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        });
+        let cancel = CancellationToken::new();
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let workspaces = Arc::clone(&workspaces);
+            let shared = Arc::clone(&shared);
+            let runtime = runtime.clone();
+            let cancel = cancel.clone();
+            let canonical = canonical.clone();
+            handles.push(tokio::spawn(async move {
+                let mut stderr = Vec::new();
+                workspaces
+                    .load(&canonical, &shared, &runtime, &cancel, &mut stderr)
+                    .await
+                    .expect("load")
+            }));
+        }
+        let mut newly_loaded_count = 0;
+        let mut hosts = Vec::new();
+        for handle in handles {
+            let (host, newly_loaded) = handle.await.expect("join");
+            if newly_loaded {
+                newly_loaded_count += 1;
+            }
+            hosts.push(host);
+        }
+        assert_eq!(newly_loaded_count, 1, "exactly one caller builds the host");
+        for host in &hosts[1..] {
+            assert!(Arc::ptr_eq(&hosts[0], host));
+        }
+    }
+
+    /// A failed load (here: the workspace directory does not exist) leaves
+    /// the registry untouched, so a later, valid load of the same path is
+    /// still `newly_loaded`.
+    #[tokio::test]
+    async fn a_failed_load_leaves_the_registry_unchanged() {
+        let shared_root = tempfile::tempdir().expect("shared root");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let missing = shared_root.path().join("does-not-exist");
+        let shared = crate::cli::testutil::shared_with_offline_sandbox(shared_root.path());
+        let runtime = crate::cli::runtime_builder::resolve_initial_runtime(
+            &shared.config,
+            &shared.environment,
+            None,
+            &shared.overrides,
+        )
+        .expect("runtime");
+        let workspaces = Workspaces {
+            startup: shared.home.clone(),
+            startup_host: dummy_host(Path::new(&shared.home), sessions.path()),
+            roots: Vec::new(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        let cancel = CancellationToken::new();
+        let mut stderr = Vec::new();
+
+        let error = match workspaces
+            .load(&missing, &shared, &runtime, &cancel, &mut stderr)
+            .await
+        {
+            Ok(_) => panic!("a missing directory must fail to load"),
+            Err(error) => error,
+        };
+        assert!(!error.is_empty());
+        assert!(workspaces.loaded.lock().await.is_empty());
+
+        std::fs::create_dir(&missing).expect("create the workspace directory");
+        let (_, newly_loaded) = workspaces
+            .load(&missing, &shared, &runtime, &cancel, &mut stderr)
+            .await
+            .expect("load after fixing the path");
+        assert!(newly_loaded);
     }
 
     #[test]

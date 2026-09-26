@@ -62,6 +62,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         session_root: session_root.to_path_buf(),
         shell: "/bin/sh".to_string(),
         no_session: false,
+        host_entries: Vec::new(),
         overrides: Overrides {
             shell_timeout: Duration::from_secs(30),
             max_output_bytes: 65536,
@@ -75,6 +76,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         usage: None,
         task_recorder: None,
         skill_checker: None,
+        memory: Default::default(),
     });
     let mut builder = Builder::for_workspace(
         shared,
@@ -94,6 +96,37 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
         reason: SandboxReason::None,
     };
     builder
+}
+
+/// A [`Shared`] with an offline (`driver = "off"`) sandbox, for tests that
+/// load a workspace at runtime (`run::load_workspace`,
+/// `serve::Workspaces::load`) without a Seatbelt subprocess or a dependence
+/// on the host running the tests.
+pub fn shared_with_offline_sandbox(root: &Path) -> Arc<Shared> {
+    let mut config = config();
+    config.sandbox.driver = Some("off".to_string());
+    let mut environment = environment();
+    environment.insert("HOME".to_string(), root.to_string_lossy().into_owned());
+    Arc::new(Shared {
+        config_path: root.join("config.toml"),
+        config,
+        environment,
+        home: root.to_string_lossy().into_owned(),
+        session_root: root.join("sessions"),
+        shell: "/bin/sh".to_string(),
+        no_session: true,
+        overrides: Overrides::default(),
+        host_entries: vec![b"HOME=/tmp".to_vec()],
+        sandbox_secrets_baseline: Vec::new(),
+        sandbox_secrets_baseline_complete: true,
+        auth_path: String::new(),
+        auth_credentials: crate::auth::Credentials::default(),
+        auth_credentials_loaded: false,
+        usage: None,
+        task_recorder: None,
+        skill_checker: None,
+        memory: Default::default(),
+    })
 }
 
 /// The startup resolution path: no stored session metadata.
@@ -139,18 +172,16 @@ pub async fn controller_with_memory(
         super::wiring::open_memory_service(&runtime, &[], &mut Vec::new())
             .expect("open memory service");
     assert!(usable, "the test store must be usable");
-    builder.memory = super::wiring::MemoryWiring {
+    builder.shared_mut().memory = super::wiring::MemoryWiring {
         service,
         usable,
         user_scope,
-        workspace_scope: super::wiring::workspace_memory_scope(
-            &runtime,
-            &workspace.to_string_lossy(),
-        )
-        .expect("workspace scope"),
         recall_limit: 8,
         recall_token_budget: 1000,
     };
+    builder.workspace_scope =
+        super::wiring::workspace_memory_scope(&runtime, &workspace.to_string_lossy())
+            .expect("workspace scope");
     let runtime = initial_runtime(&builder);
     let session = builder.create_session(&runtime).expect("session");
     let runner = builder

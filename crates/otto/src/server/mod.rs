@@ -22,6 +22,7 @@ pub mod timers;
 pub mod turn;
 pub mod ui;
 pub mod workflows;
+pub mod workspaces;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -126,6 +127,41 @@ pub trait Factory: Send + Sync {
     ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
         Ok(None)
     }
+    /// Every loaded workspace, startup first then by path, for `GET
+    /// /v1/workspaces`.
+    async fn workspaces(&self) -> WorkspaceList;
+    /// Admits and loads `path`, or returns the already-loaded workspace.
+    /// `(_, true)` when this call built a new host, `(_, false)` when it was
+    /// already loaded.
+    async fn load_workspace(&self, path: &str)
+    -> Result<(WorkspaceInfo, bool), WorkspaceLoadError>;
+}
+
+/// One workspace's registration state, independent of any open session.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceInfo {
+    pub path: String,
+    pub workflows: bool,
+}
+
+/// [`Factory::workspaces`]'s result.
+pub struct WorkspaceList {
+    pub startup: String,
+    pub roots: Vec<String>,
+    /// Startup first, then by path.
+    pub loaded: Vec<WorkspaceInfo>,
+}
+
+/// Why [`Factory::load_workspace`] refused or failed a path.
+pub enum WorkspaceLoadError {
+    /// Not an absolute, existing directory.
+    Invalid(String),
+    /// A real directory, but neither the startup workspace nor a descendant
+    /// of a configured root.
+    NotAdmitted(String),
+    /// Admitted, but opening it failed (sandbox, MCP config, ...). Nothing
+    /// was registered.
+    Failed(String),
 }
 
 /// Configures a [`Server`].
@@ -440,6 +476,10 @@ impl Server {
             .route(
                 "/v1/workflows/requests/{id}/reject",
                 post(workflows::reject),
+            )
+            .route(
+                "/v1/workspaces",
+                get(workspaces::list).post(workspaces::register),
             )
             .route("/v1/info", get(info))
             .route("/v1/usage", get(usage))
@@ -1524,6 +1564,8 @@ fn stream_sse(metrics: &Arc<Metrics>, turn: Arc<Turn>, after: usize) -> Response
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::cli::runtime_builder::{Builder, Runner, RuntimeInfo, SharedSession};
     use crate::cli::testutil;
@@ -1668,6 +1710,39 @@ mod tests {
         }
     }
 
+    // ---- the workspace registry double ----
+
+    /// A fake, in-memory workspace registry for `/v1/workspaces` tests. Real
+    /// admission and the real load-once registry mutex live in
+    /// `cli::serve::Workspaces` and its own tests; this only exercises the
+    /// `Factory`/route wiring, so admission here is a plain allowlist rather
+    /// than a filesystem check.
+    struct FakeWorkspaces {
+        startup: String,
+        /// Paths besides `startup` this fake admits.
+        admitted: Vec<String>,
+        /// A path that fails to load, with the message to fail it with.
+        /// Checked before the path is registered, so a repeat call for the
+        /// same path after this fires once can still succeed.
+        error: Option<(String, String)>,
+        /// Held before a load registers its path, so a test can pile up
+        /// concurrent loads of one path.
+        gate: Option<CancellationToken>,
+        loaded: tokio::sync::Mutex<BTreeMap<String, bool>>,
+    }
+
+    impl Default for FakeWorkspaces {
+        fn default() -> Self {
+            Self {
+                startup: String::new(),
+                admitted: Vec::new(),
+                error: None,
+                gate: None,
+                loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+            }
+        }
+    }
+
     // ---- the factory double ----
 
     struct TestFactory {
@@ -1686,6 +1761,7 @@ mod tests {
         /// Backs `Factory::tasks_list`/`tasks_get`. `None` keeps the trait's
         /// empty defaults, matching a process with no recorder wired.
         task_recorder: Option<Arc<crate::subagent::record::Store>>,
+        workspaces: FakeWorkspaces,
         create_calls: AtomicUsize,
         open_calls: AtomicUsize,
     }
@@ -1776,6 +1852,73 @@ mod tests {
                 None => Ok(None),
             }
         }
+
+        async fn workspaces(&self) -> WorkspaceList {
+            let loaded = self.workspaces.loaded.lock().await;
+            let mut rest: Vec<WorkspaceInfo> = loaded
+                .iter()
+                .filter(|(path, _)| **path != self.workspaces.startup)
+                .map(|(path, workflows)| WorkspaceInfo {
+                    path: path.clone(),
+                    workflows: *workflows,
+                })
+                .collect();
+            rest.sort_by(|a, b| a.path.cmp(&b.path));
+            let mut all = vec![WorkspaceInfo {
+                path: self.workspaces.startup.clone(),
+                workflows: *loaded.get(&self.workspaces.startup).unwrap_or(&false),
+            }];
+            all.extend(rest);
+            WorkspaceList {
+                startup: self.workspaces.startup.clone(),
+                roots: self.workspaces.admitted.clone(),
+                loaded: all,
+            }
+        }
+
+        async fn load_workspace(
+            &self,
+            path: &str,
+        ) -> Result<(WorkspaceInfo, bool), WorkspaceLoadError> {
+            if !path.starts_with('/') {
+                return Err(WorkspaceLoadError::Invalid(format!(
+                    "{path}: not an existing directory"
+                )));
+            }
+            if path != self.workspaces.startup
+                && !self.workspaces.admitted.contains(&path.to_string())
+            {
+                return Err(WorkspaceLoadError::NotAdmitted(format!(
+                    "{path}: outside the startup workspace and configured roots"
+                )));
+            }
+            let mut loaded = self.workspaces.loaded.lock().await;
+            if let Some(workflows) = loaded.get(path) {
+                return Ok((
+                    WorkspaceInfo {
+                        path: path.to_string(),
+                        workflows: *workflows,
+                    },
+                    false,
+                ));
+            }
+            if let Some((error_path, message)) = &self.workspaces.error
+                && error_path == path
+            {
+                return Err(WorkspaceLoadError::Failed(message.clone()));
+            }
+            if let Some(gate) = &self.workspaces.gate {
+                gate.cancelled().await;
+            }
+            loaded.insert(path.to_string(), true);
+            Ok((
+                WorkspaceInfo {
+                    path: path.to_string(),
+                    workflows: true,
+                },
+                true,
+            ))
+        }
     }
 
     // ---- the harness ----
@@ -1808,6 +1951,9 @@ mod tests {
         tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
         task_recorder: Option<Arc<crate::subagent::record::Store>>,
         workflows: Option<Arc<crate::workflow::Controller>>,
+        /// `startup` is always overwritten with the harness's own workspace;
+        /// set `admitted`/`error`/`gate` for `/v1/workspaces` tests.
+        workspaces: FakeWorkspaces,
         token: String,
         info: Info,
     }
@@ -1832,6 +1978,8 @@ mod tests {
             let sessions = tempfile::tempdir().expect("sessions");
             let builder = Arc::new(testutil::builder(workspace.path(), sessions.path()));
             let provider = ScriptedProvider::new(options.script);
+            let mut workspaces = options.workspaces;
+            workspaces.startup = builder.workspace_path.clone();
             let factory = Arc::new(TestFactory {
                 builder,
                 provider: Arc::clone(&provider),
@@ -1842,6 +1990,7 @@ mod tests {
                 list: options.list,
                 tasks: options.tasks,
                 task_recorder: options.task_recorder,
+                workspaces,
                 create_calls: AtomicUsize::new(0),
                 open_calls: AtomicUsize::new(0),
             });
@@ -3019,6 +3168,7 @@ mod tests {
         "/v1/workflows/{id}/cancel",
         "/v1/workflows/requests/{id}/approve",
         "/v1/workflows/requests/{id}/reject",
+        "/v1/workspaces",
         "/v1/info",
         "/v1/usage",
         "/v1/usage/daily",
@@ -3285,6 +3435,125 @@ mod tests {
             .await;
         assert_eq!(repeat.status, StatusCode::CONFLICT);
         assert_eq!(repeat.json()["error"]["code"], "task_done");
+    }
+
+    // ---- workspaces ----
+
+    #[tokio::test]
+    async fn listing_workspaces_answers_the_startup_workspace_alone() {
+        let harness = Harness::new();
+        let reply = harness.send("GET", "/v1/workspaces", None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
+        let body = reply.json();
+        let startup = harness.factory.workspaces.startup.clone();
+        assert_eq!(body["startup"], startup);
+        assert_eq!(body["roots"].as_array().expect("roots").len(), 0);
+        let workspaces = body["workspaces"].as_array().expect("workspaces");
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0]["path"], startup);
+        assert_eq!(workspaces[0]["open_sessions"], 0);
+        assert_eq!(workspaces[0]["workflows"], false);
+    }
+
+    #[tokio::test]
+    async fn registering_a_relative_path_answers_400() {
+        let harness = Harness::new();
+        let reply = harness
+            .send_with(
+                "POST",
+                "/v1/workspaces",
+                Some(r#"{"path":"relative"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "INVALID_WORKSPACE");
+    }
+
+    #[tokio::test]
+    async fn registering_an_unadmitted_path_answers_403() {
+        let harness = Harness::new();
+        let reply = harness
+            .send_with(
+                "POST",
+                "/v1/workspaces",
+                Some(r#"{"path":"/elsewhere"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_ADMITTED");
+    }
+
+    #[tokio::test]
+    async fn registering_an_admitted_path_answers_201_then_200_on_repeat() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let first = harness
+            .send_with(
+                "POST",
+                "/v1/workspaces",
+                Some(r#"{"path":"/other"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+        assert_eq!(first.json()["path"], "/other");
+        assert_eq!(first.json()["open_sessions"], 0);
+        assert_eq!(first.json()["workflows"], true);
+
+        let repeat = harness
+            .send_with(
+                "POST",
+                "/v1/workspaces",
+                Some(r#"{"path":"/other"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(repeat.status, StatusCode::OK, "{}", repeat.body);
+        assert_eq!(repeat.json()["path"], "/other");
+
+        let list = harness.send("GET", "/v1/workspaces", None).await.json();
+        let workspaces = list["workspaces"].as_array().expect("workspaces");
+        assert_eq!(workspaces.len(), 2);
+        assert_eq!(workspaces[0]["path"], harness.factory.workspaces.startup);
+        assert_eq!(workspaces[1]["path"], "/other");
+    }
+
+    #[tokio::test]
+    async fn a_failed_load_answers_500_with_the_real_message() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/broken".to_string()],
+                error: Some(("/broken".to_string(), "sandbox open failed".to_string())),
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let reply = harness
+            .send_with(
+                "POST",
+                "/v1/workspaces",
+                Some(r#"{"path":"/broken"}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{}",
+            reply.body
+        );
+        assert_eq!(reply.json()["error"]["code"], "internal");
+        assert_eq!(reply.json()["error"]["message"], "sandbox open failed");
     }
 
     // ---- cross-process task routes (tasks.db) ----

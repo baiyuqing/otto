@@ -12,6 +12,7 @@ vi.mock('./api', () => ({ api }))
 
 import { groupSessions, Sidebar } from './Sidebar'
 import type { SessionListRow } from './wire'
+import type { SessionStatus } from './api'
 
 const workspaces = [
   { path: '/Users/me/src/app', open_sessions: 2, workflows: true },
@@ -113,5 +114,56 @@ describe('Sidebar', () => {
 
     for (const button of screen.getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByLabelText('Add workspace path') as HTMLInputElement).disabled).toBe(true)
+  })
+})
+
+describe('Sidebar status badges', () => {
+  beforeEach(() => {
+    api.listWorkspaces.mockResolvedValue(workspaceList)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  const statusSessions: SessionListRow[] = [
+    { id: '1', name: 'alpha', open: true, model: 'gpt-5.1', workspace: '/Users/me/src/app' } as SessionListRow,
+    { id: '2', name: 'beta', open: true, model: 'gpt-5.1', workspace: '/Users/me/src/app' } as SessionListRow,
+    { id: '3', name: 'gamma', open: false, model: 'gpt-5.1', workspace: '/Users/me/src/app' } as SessionListRow,
+  ]
+
+  it('shows a badge per status field, and no badge for a session without status', async () => {
+    const status = new Map<string, SessionStatus>([
+      ['1', { id: '1', workspace: '/Users/me/src/app', turn: 'running', approvals: 0, tasks: 0 }],
+      ['2', { id: '2', workspace: '/Users/me/src/app', turn: 'error', approvals: 2, tasks: 3 }],
+    ])
+    render(createElement(Sidebar, { sessions: statusSessions, current: '', disabled: false, onOpen: vi.fn(), status }))
+    await screen.findByText('alpha')
+
+    const alphaRow = screen.getByText('alpha').closest('button') as HTMLElement
+    expect(within(alphaRow).getByLabelText('Turn running').textContent).toBe('running')
+
+    const betaRow = screen.getByText('beta').closest('button') as HTMLElement
+    expect(within(betaRow).getByLabelText('Turn failed').textContent).toBe('error')
+    expect(within(betaRow).getByLabelText('Approval pending').textContent).toBe('approval')
+    expect(within(betaRow).getByLabelText('3 sub-agent tasks running').textContent).toBe('3 tasks')
+
+    const gammaRow = screen.getByText('gamma').closest('button') as HTMLElement
+    expect(within(gammaRow).queryByLabelText(/Turn running|Turn failed|Approval pending|sub-agent tasks running/)).toBeNull()
+  })
+
+  it('shows the running count in the group header when greater than zero', async () => {
+    const status = new Map<string, SessionStatus>([
+      ['1', { id: '1', workspace: '/Users/me/src/app', turn: 'running', approvals: 0, tasks: 0 }],
+      ['2', { id: '2', workspace: '/Users/me/src/app', turn: 'running', approvals: 0, tasks: 0 }],
+    ])
+    render(createElement(Sidebar, { sessions: statusSessions, current: '', disabled: false, onOpen: vi.fn(), status }))
+
+    const appHeader = await screen.findByTitle('/Users/me/src/app')
+    expect(within(appHeader).getByText('2 running')).toBeTruthy()
+
+    const otherHeader = screen.getByTitle('/Users/me/src/other')
+    expect(within(otherHeader).queryByText(/running/)).toBeNull()
   })
 })

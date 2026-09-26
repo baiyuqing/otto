@@ -40,6 +40,7 @@ use otto_core::model::{Block, MAX_IMAGE_BYTES, Message, Usage};
 use otto_core::session::ListResult;
 use otto_core::wire::sse::format_frame;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{self, Controller};
@@ -348,6 +349,10 @@ pub struct Server {
     wake_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     cancel: CancellationToken,
     workflows: Option<Arc<crate::workflow::Controller>>,
+    /// Bumped whenever a `GET /v1/status` snapshot could change: a session
+    /// opened or closed, a turn started or finished, a task registry update,
+    /// or a granted Bash approval. See [`Server::status_snapshot`].
+    status_changed: watch::Sender<u64>,
 }
 
 impl Server {
@@ -363,6 +368,7 @@ impl Server {
             wake_loops: Mutex::new(Vec::new()),
             cancel: CancellationToken::new(),
             workflows: options.workflows,
+            status_changed: watch::channel(0).0,
         })
     }
 
@@ -510,6 +516,7 @@ impl Server {
                 get(workspaces::list).post(workspaces::register),
             )
             .route("/v1/info", get(info))
+            .route("/v1/status", get(status))
             .route("/v1/usage", get(usage))
             .route("/v1/usage/daily", get(daily_usage))
             .route("/v1/openapi.yaml", get(openapi))
@@ -539,10 +546,15 @@ impl Server {
     }
 
     fn remove(&self, id: &str) -> Option<Arc<OpenSession>> {
-        self.sessions
+        let removed = self
+            .sessions
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .remove(id)
+            .remove(id);
+        if removed.is_some() {
+            self.status_changed.send_modify(|version| *version += 1);
+        }
+        removed
     }
 
     fn all_sessions(&self) -> Vec<Arc<OpenSession>> {
@@ -562,6 +574,7 @@ impl Server {
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(id, Arc::clone(&session));
         self.metrics.sessions_open(1);
+        self.status_changed.send_modify(|version| *version += 1);
         self.start_wake_loop(&session);
         session
     }
@@ -645,6 +658,45 @@ impl Server {
         })
     }
 
+    /// The full `GET /v1/status` payload: every open session in this
+    /// process, sorted by workspace then id.
+    fn status_snapshot(&self) -> StatusSnapshotWire {
+        let mut sessions: Vec<StatusSessionWire> = self
+            .all_sessions()
+            .iter()
+            .map(|session| {
+                let info = session.ctrl.info();
+                let turn = session.current_turn().map(|turn| turn.summary().status);
+                let approvals = session
+                    .ctrl
+                    .builder()
+                    .bash_approvals
+                    .as_ref()
+                    .map_or(0, |approvals| approvals.pending_count(&info.session_id));
+                let tasks = session
+                    .ctrl
+                    .tasks()
+                    .map(|tasks| {
+                        tasks
+                            .list()
+                            .iter()
+                            .filter(|task| !task.status.final_status())
+                            .count()
+                    })
+                    .unwrap_or(0);
+                StatusSessionWire {
+                    id: info.session_id,
+                    workspace: info.workspace,
+                    turn,
+                    approvals,
+                    tasks,
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| (&a.workspace, &a.id).cmp(&(&b.workspace, &b.id)));
+        StatusSnapshotWire { sessions }
+    }
+
     // ---- turns ----
 
     /// Drains `session`'s pending sub-agent notifications for as long as it is
@@ -679,6 +731,7 @@ impl Server {
                         if let Some(view) = session.ctrl.tasks() {
                             server.metrics.diff_tasks(&mut seen, &view.list());
                         }
+                        server.status_changed.send_modify(|version| *version += 1);
                     }
                     () = session.turn_finished.notified() => {}
                     () = session.closed.cancelled() => return,
@@ -736,6 +789,7 @@ impl Server {
             }
             Some(Ok(prepared)) => prepared,
         };
+        self.status_changed.send_modify(|version| *version += 1);
 
         self.metrics.turn_started();
         let mut fields = vec![
@@ -762,6 +816,7 @@ impl Server {
             Err(error) => (Some(error.to_string()), error.is_cancelled()),
         };
         turn.finish(error.clone(), canceled);
+        self.status_changed.send_modify(|version| *version += 1);
         let summary = turn.summary();
         self.metrics.turn_finished(&summary.status, turn.elapsed());
         if let Some(message) = error.filter(|_| !canceled) {
@@ -806,6 +861,7 @@ impl Server {
             state.turn = Some(Arc::clone(&turn));
             turn
         };
+        self.status_changed.send_modify(|version| *version += 1);
 
         self.metrics.turn_started();
         let server = Arc::clone(self);
@@ -830,6 +886,7 @@ impl Server {
                 Err(error) => (Some(error.to_string()), error.is_cancelled()),
             };
             spawned.finish(error.clone(), canceled);
+            server.status_changed.send_modify(|version| *version += 1);
             let summary = spawned.summary();
             server
                 .metrics
@@ -1137,6 +1194,22 @@ struct SessionListResponse {
 struct HealthzWire {
     status: String,
     sessions_open: usize,
+}
+
+/// One row of `GET /v1/status`. `turn` is `null` until the session's first
+/// turn starts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StatusSessionWire {
+    id: String,
+    workspace: String,
+    turn: Option<String>,
+    approvals: usize,
+    tasks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StatusSnapshotWire {
+    sessions: Vec<StatusSessionWire>,
 }
 
 // ---- handlers ----
@@ -1492,6 +1565,10 @@ async fn info(State(server): State<Arc<Server>>) -> Response {
     json_response(StatusCode::OK, &server.info)
 }
 
+async fn status(State(server): State<Arc<Server>>) -> Response {
+    stream_status(server)
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct UsageFilter {
     session_id: Option<String>,
@@ -1632,6 +1709,46 @@ fn stream_sse(metrics: &Arc<Metrics>, turn: Arc<Turn>, after: usize) -> Response
                 }
                 if changed.changed().await.is_err() {
                     return None;
+                }
+            }
+        },
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(stream))
+        .expect("static header values")
+}
+
+/// Writes a full `GET /v1/status` snapshot as an SSE frame whenever it
+/// differs from the last one sent on this connection. No `id:` field and no
+/// replay: a reconnecting client's first frame is the current snapshot,
+/// which is all it needs.
+fn stream_status(server: Arc<Server>) -> Response {
+    let changed = server.status_changed.subscribe();
+    let stream = futures_util::stream::unfold(
+        (server, changed, None::<StatusSnapshotWire>),
+        |(server, mut changed, last)| async move {
+            loop {
+                let snapshot = server.status_snapshot();
+                if last.as_ref() != Some(&snapshot) {
+                    let data = serde_json::to_string(&snapshot).unwrap_or_default();
+                    let frame = format!("event: status\ndata: {data}\n\n");
+                    return Some((
+                        Ok::<String, std::io::Error>(frame),
+                        (server, changed, Some(snapshot)),
+                    ));
+                }
+                tokio::select! {
+                    result = changed.changed() => {
+                        if result.is_err() {
+                            return None;
+                        }
+                    }
+                    () = server.cancel.cancelled() => return None,
                 }
             }
         },
@@ -1864,11 +1981,17 @@ mod tests {
     }
 
     impl TestFactory {
-        fn controller(&self, id: &str) -> Controller {
+        /// `workspace` overrides the session header's workspace, matching a
+        /// real `Factory::create`/`open` given a non-startup workspace; every
+        /// other test-double detail (provider, tasks) stays on the one shared
+        /// builder.
+        fn controller_for(&self, id: &str, workspace: Option<&str>) -> Controller {
             let session = SharedSession::memory(Header {
                 version: CURRENT_VERSION,
                 id: id.to_string(),
-                workspace: self.builder.workspace_path.clone(),
+                workspace: workspace
+                    .unwrap_or(&self.builder.workspace_path)
+                    .to_string(),
                 provider: "openai-compatible".to_string(),
                 profile: "alpha".to_string(),
                 model: "test-model".to_string(),
@@ -1900,7 +2023,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Factory for TestFactory {
-        async fn create(&self, _workspace: Option<&str>) -> Result<Controller, String> {
+        async fn create(&self, workspace: Option<&str>) -> Result<Controller, String> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(error) = &self.create_error {
                 return Err(error.clone());
@@ -1909,10 +2032,10 @@ mod tests {
                 .fixed_id
                 .clone()
                 .unwrap_or_else(|| new_id().expect("id"));
-            Ok(self.controller(&id))
+            Ok(self.controller_for(&id, workspace))
         }
 
-        async fn open(&self, id: &str, _workspace: Option<&str>) -> Result<Controller, String> {
+        async fn open(&self, id: &str, workspace: Option<&str>) -> Result<Controller, String> {
             self.open_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = &self.open_gate {
                 gate.cancelled().await;
@@ -1920,7 +2043,7 @@ mod tests {
             if let Some(error) = &self.open_error {
                 return Err(error.clone());
             }
-            Ok(self.controller(id))
+            Ok(self.controller_for(id, workspace))
         }
 
         async fn list(&self, workspace: Option<&str>) -> Option<Result<ListResult, String>> {
@@ -3602,6 +3725,7 @@ mod tests {
         "/v1/workflows/requests/{id}/reject",
         "/v1/workspaces",
         "/v1/info",
+        "/v1/status",
         "/v1/usage",
         "/v1/usage/daily",
         "/v1/openapi.yaml",
@@ -3632,7 +3756,9 @@ mod tests {
             // An unmatched path logs the route label "unmatched"; a matched
             // one logs its own pattern. That is the reachability check.
             let before = harness.logged().len();
-            harness.send("GET", &probe, None).await;
+            // `raw`, not `send`: `/v1/status`'s body is an infinite SSE
+            // stream, and `send` awaits the full body.
+            harness.raw("GET", &probe, None, &[]).await;
             assert!(
                 !harness.logged()[before..].contains("route=unmatched"),
                 "GET {probe} matched no route"
@@ -4651,6 +4777,196 @@ mod tests {
             .await
             .expect("close did not return; the wake loop leaked")
             .expect("close");
+    }
+
+    // ---- status ----
+
+    /// Reads the next frame off a `/v1/status` reader and decodes its data.
+    async fn status_snapshot(reader: &mut SseReader) -> Value {
+        let frame = reader.next().await.expect("status frame");
+        assert_eq!(frame.event, "status");
+        assert_eq!(frame.id, None, "the status stream sends no id");
+        serde_json::from_str(&frame.data).expect("status json")
+    }
+
+    #[tokio::test]
+    async fn status_stream_without_a_token_is_401() {
+        let harness = Harness::with(HarnessOptions {
+            token: "secret".to_string(),
+            ..HarnessOptions::default()
+        });
+        assert_eq!(
+            harness.send("GET", "/v1/status", None).await.status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn status_stream_with_no_open_sessions_is_an_empty_snapshot() {
+        let harness = Harness::new();
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let mut reader = SseReader::new(response);
+        let snapshot = status_snapshot(&mut reader).await;
+        assert_eq!(snapshot, serde_json::json!({"sessions": []}));
+    }
+
+    #[tokio::test]
+    async fn status_stream_ends_when_the_server_is_cancelled() {
+        let harness = Harness::new();
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        status_snapshot(&mut reader).await;
+
+        harness.server.cancel_token().cancel();
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), reader.next())
+            .await
+            .expect("the status stream should end once the server is cancelled");
+        assert!(frame.is_none(), "expected end of stream, got {frame:?}");
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_appears_in_the_status_stream() {
+        let harness = Harness::new();
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        let empty = status_snapshot(&mut reader).await;
+        assert_eq!(empty["sessions"].as_array().expect("rows").len(), 0);
+
+        let id = harness.create().await;
+        let snapshot = status_snapshot(&mut reader).await;
+        let rows = snapshot["sessions"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], id.as_str());
+        assert!(rows[0]["turn"].is_null());
+        assert_eq!(rows[0]["approvals"], 0);
+        assert_eq!(rows[0]["tasks"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn starting_a_turn_shows_running_then_finishing_shows_ok() {
+        let (gate, options) = gated();
+        let harness = Harness::with(options);
+        let id = harness.create().await;
+
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        let before = status_snapshot(&mut reader).await;
+        assert!(before["sessions"][0]["turn"].is_null());
+
+        let (_stream, turn_id) = start_stream(&harness, &id).await;
+        harness.provider.wait_started(1).await;
+
+        let running = status_snapshot(&mut reader).await;
+        assert_eq!(running["sessions"][0]["turn"], turn::TURN_RUNNING);
+
+        gate.cancel();
+        harness.wait_turn_done(&id, &turn_id).await;
+
+        let done = status_snapshot(&mut reader).await;
+        assert_eq!(done["sessions"][0]["turn"], turn::TURN_OK);
+    }
+
+    #[tokio::test]
+    async fn a_failing_turn_shows_error_in_the_status_stream() {
+        let harness = Harness::with(HarnessOptions {
+            script: Script {
+                error: Some("boom".to_string()),
+                ..Script::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        status_snapshot(&mut reader).await; // the session with no turn yet
+
+        harness
+            .send(
+                "POST",
+                &format!("/v1/sessions/{id}/turns"),
+                Some(r#"{"text":"hi","stream":false}"#),
+            )
+            .await;
+
+        let after = status_snapshot(&mut reader).await;
+        assert_eq!(after["sessions"][0]["turn"], turn::TURN_ERROR);
+    }
+
+    #[tokio::test]
+    async fn a_session_in_a_second_workspace_appears_with_its_workspace() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        status_snapshot(&mut reader).await;
+
+        let reply = harness
+            .send("POST", "/v1/sessions", Some(r#"{"workspace":"/other"}"#))
+            .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+        let snapshot = status_snapshot(&mut reader).await;
+        let rows = snapshot["sessions"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["workspace"], "/other");
+    }
+
+    #[tokio::test]
+    async fn closing_a_session_removes_it_from_the_status_stream() {
+        let harness = Harness::new();
+        harness.create().await;
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        let first = status_snapshot(&mut reader).await;
+        assert_eq!(first["sessions"].as_array().expect("rows").len(), 1);
+
+        let id = first["sessions"][0]["id"].as_str().expect("id").to_string();
+        harness
+            .send("DELETE", &format!("/v1/sessions/{id}"), None)
+            .await;
+
+        let after = status_snapshot(&mut reader).await;
+        assert_eq!(after["sessions"].as_array().expect("rows").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn identical_snapshots_in_a_row_are_sent_once() {
+        let harness = Harness::new();
+        let response = harness.raw("GET", "/v1/status", None, &[]).await;
+        let mut reader = SseReader::new(response);
+        status_snapshot(&mut reader).await;
+
+        // Two bumps that leave the snapshot unchanged must coalesce into no
+        // further frame; the reader only sees a change.
+        harness
+            .server
+            .status_changed
+            .send_modify(|version| *version += 1);
+        harness
+            .server
+            .status_changed
+            .send_modify(|version| *version += 1);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), reader.next())
+                .await
+                .is_err(),
+            "an unchanged snapshot must not be resent"
+        );
     }
 
     // ---- the web UI ----

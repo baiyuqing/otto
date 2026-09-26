@@ -130,6 +130,21 @@ export interface WorkspaceList {
   workspaces: WorkspaceEntry[]
 }
 
+// SessionStatus is one row of GET /v1/status's snapshot: the status of one
+// open session in this process. `turn` is null when the session has had no
+// turn since it was opened.
+export interface SessionStatus {
+  id: string
+  workspace: string
+  turn: 'running' | 'ok' | 'error' | 'canceled' | null
+  approvals: number
+  tasks: number
+}
+
+export interface StatusSnapshot {
+  sessions: SessionStatus[]
+}
+
 const TOKEN_KEY = 'otto.token'
 
 // loadToken takes the token from the startup URL's query string, keeps it
@@ -266,5 +281,16 @@ export async function* events(res: Response): AsyncGenerator<TurnEvent> {
   if (!res.body) return
   for await (const frame of readSSE(res.body) as AsyncGenerator<Frame>) {
     yield { seq: frame.id ?? -1, event: JSON.parse(frame.data) as WireEvent, raw: frame.data }
+  }
+}
+
+// streamStatus opens GET /v1/status and decodes each event into a full
+// snapshot. The token goes through as a header, so this goes through fetch
+// (via request()) rather than EventSource, which cannot set one.
+export async function* streamStatus(signal?: AbortSignal): AsyncGenerator<StatusSnapshot> {
+  const res = await request('/v1/status', { signal })
+  if (!res.body) return
+  for await (const frame of readSSE(res.body) as AsyncGenerator<Frame>) {
+    yield JSON.parse(frame.data) as StatusSnapshot
   }
 }

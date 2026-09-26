@@ -1116,6 +1116,12 @@ composer:
   directory basename, with the full path in a tooltip. Each row shows the
   session name, `●` when the session is open on the server, and the model;
   the current session is highlighted.
+- The sidebar reads `GET /v1/status` and marks open sessions with badges:
+  `running` while a turn runs, `approval` while an elevated Bash command
+  waits for approval, `error` when the last turn failed, and `N tasks` while
+  sub-agent tasks are queued or running. A group header shows how many of its
+  sessions are running. The page reconnects 1s after the stream ends, and
+  re-reads the session list when a status names a session it does not list.
 - Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
   renders its history. The session id is kept in the URL fragment, so a reload
   reopens the same session.
@@ -1211,6 +1217,7 @@ are served at the root. Request and error bodies are JSON.
 | `GET /v1/workspaces` | List loaded workspaces, startup first: `{"startup", "roots", "workspaces": [{"path", "open_sessions", "workflows"}...]}`. |
 | `POST /v1/workspaces` | Admit and load a workspace (`{"path":"..."}`). `201` when newly loaded, `200` when already loaded. `400 INVALID_WORKSPACE` or `403 WORKSPACE_NOT_ADMITTED` otherwise. Returns one `workspaces` entry. |
 | `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or attach to one already open in this process (`{"resume":"<id>"}`, searched in `workspace` if given, else every loaded workspace). `201` for a new session, `200` for an already-open one. Returns the session object. |
+| `GET /v1/status` | `text/event-stream` of `event: status` snapshots of every session open in this process, in every loaded workspace: `{"sessions":[{"id","workspace","turn","approvals","tasks"}...]}`, sorted by workspace, then id. `turn` is `running`, the last finished turn's `ok`, `error`, or `canceled`, or `null` before the first turn; `approvals` counts unexpired pending Bash approvals; `tasks` counts queued or running sub-agent tasks. The current snapshot is sent on connect and again whenever it changes; there is no replay. An approval that expires is dropped from the count at the next change for any other reason. The stream ends when the server shuts down. |
 | `GET /v1/sessions?workspace=<path>` | List sessions: on-disk sessions merged with sessions currently open in this process, each flagged `open`. Without `workspace`, every loaded workspace; with it, that workspace only. |
 | `GET /v1/sessions/{id}` | Return one open session's info. `404` if the session is not open. |
 | `PATCH /v1/sessions/{id}` | Rename an open session with `{"name":"dev"}`. `409 turn_active` while a turn is running. |

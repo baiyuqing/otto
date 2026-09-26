@@ -1498,6 +1498,7 @@ mod catalog_tests {
         let workspace = std::fs::canonicalize(workspace_dir.path()).expect("canonical workspace");
         let mut builder = testutil::builder(&workspace, workspace_dir.path());
         builder
+            .shared_mut()
             .environment
             .insert("HOME".to_string(), home.to_string_lossy().into_owned());
         Fixture {
@@ -1620,7 +1621,7 @@ mod catalog_tests {
             "Extract pdfs.",
             "body\n",
         );
-        fixture.builder.config.skills.enabled = Some(false);
+        fixture.builder.shared_mut().config.skills.enabled = Some(false);
 
         let (wiring, tools, _) = catalogs(&fixture.builder);
         assert_eq!(wiring.skill_section, "");
@@ -1711,7 +1712,7 @@ mod catalog_tests {
             "Reviews code for style and correctness.",
             "body\n",
         );
-        fixture.builder.config.agents.enabled = Some(false);
+        fixture.builder.shared_mut().config.agents.enabled = Some(false);
 
         let (wiring, _, _) = catalogs(&fixture.builder);
         assert!(!wiring.agents.enabled);
@@ -1745,7 +1746,7 @@ mod catalog_tests {
     #[test]
     fn an_out_of_range_max_parallel_fails_the_build() {
         let mut fixture = fixture();
-        fixture.builder.config.agents.max_parallel = Some(17);
+        fixture.builder.shared_mut().config.agents.max_parallel = Some(17);
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         let error = match fixture
             .builder

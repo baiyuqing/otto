@@ -15,7 +15,7 @@ use otto_core::model::{Block, BlockType, Message, Role};
 
 use super::controller::Controller;
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
-use super::runtime_builder::{Builder, leaked_workspace, resolve_initial_runtime};
+use super::runtime_builder::{Builder, Shared, leaked_workspace, resolve_initial_runtime};
 
 pub fn config() -> File {
     let mut profiles = HashMap::new();
@@ -54,13 +54,11 @@ pub fn environment() -> HashMap<String, String> {
 }
 
 pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
-    Builder {
+    let shared = Arc::new(Shared {
         config_path: workspace_root.join("config.toml"),
         config: config(),
         environment: environment(),
         home: workspace_root.to_string_lossy().into_owned(),
-        workspace: leaked_workspace(workspace_root).expect("workspace"),
-        workspace_path: workspace_root.to_string_lossy().into_owned(),
         session_root: session_root.to_path_buf(),
         shell: "/bin/sh".to_string(),
         no_session: false,
@@ -69,31 +67,33 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
             max_output_bytes: 65536,
             ..Overrides::default()
         },
-        command_executor: None,
-        bash_approvals: None,
-        sandbox_environment: None,
-        sandbox_info: SandboxInfo {
-            mode: SandboxMode::Off,
-            network: SandboxNetwork::Unconfined,
-            bash_available: false,
-            reason: SandboxReason::None,
-        },
-        sandbox_secrets: Vec::new(),
-        sandbox_secrets_complete: true,
+        sandbox_secrets_baseline: Vec::new(),
+        sandbox_secrets_baseline_complete: true,
         auth_path: String::new(),
         auth_credentials: crate::auth::Credentials::default(),
         auth_credentials_loaded: false,
-        memory: Default::default(),
         usage: None,
-        mcp: otto_core::config::McpRuntime {
+        task_recorder: None,
+        skill_checker: None,
+    });
+    let mut builder = Builder::for_workspace(
+        shared,
+        leaked_workspace(workspace_root).expect("workspace"),
+        workspace_root.to_string_lossy().into_owned(),
+        otto_core::config::McpRuntime {
             enabled: false,
             call_timeout_secs: 60,
             connect_timeout_secs: 20,
             servers: Vec::new(),
         },
-        task_recorder: None,
-        skill_checker: None,
-    }
+    );
+    builder.sandbox_info = SandboxInfo {
+        mode: SandboxMode::Off,
+        network: SandboxNetwork::Unconfined,
+        bash_available: false,
+        reason: SandboxReason::None,
+    };
+    builder
 }
 
 /// The startup resolution path: no stored session metadata.

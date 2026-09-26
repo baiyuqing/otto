@@ -44,7 +44,8 @@ use super::controller::{Controller, PROMPT_ACTIVE, SESSION_OPERATION_UNAVAILABLE
 use super::flags::{CliOptions, ParseFailure, Parsed, parse_flags};
 use super::repl::{self, Repl};
 use super::runtime_builder::{
-    Builder, SharedSession, leaked_workspace, resolve_initial_runtime, validate_session_workspace,
+    Builder, Shared, SharedSession, leaked_workspace, resolve_initial_runtime,
+    validate_session_workspace,
 };
 use super::sandbox_runtime::{
     OpenOptions, canonical_directory, canonical_executable_file, normalize_sandbox_runtime,
@@ -487,32 +488,25 @@ pub async fn run(
         };
     let skill_checker = skill_checker(&config_file, &environment, &home, &mut *stderr);
 
-    let mut builder = Builder {
+    let shared = Arc::new(Shared {
         config_path: PathBuf::from(&config_path),
         config: config_file.clone(),
         environment: environment.clone(),
         home: home.clone(),
-        workspace,
-        workspace_path: workspace_path.clone(),
         session_root: session_root.clone(),
         shell: shell.clone(),
         no_session: options.no_session,
         overrides: overrides_from(&options),
-        command_executor: None,
-        bash_approvals: None,
-        sandbox_environment: None,
-        sandbox_info: super::info::SandboxInfo::default(),
-        sandbox_secrets: startup.sandbox_secrets.clone(),
-        sandbox_secrets_complete: startup.complete,
+        sandbox_secrets_baseline: startup.sandbox_secrets.clone(),
+        sandbox_secrets_baseline_complete: startup.complete,
         auth_path: captured_auth.path.clone(),
         auth_credentials: captured_auth.credentials.clone(),
         auth_credentials_loaded: captured_auth.loaded,
-        memory: Default::default(),
         usage,
-        mcp: mcp_config,
         task_recorder,
         skill_checker,
-    };
+    });
+    let mut builder = Builder::for_workspace(shared, workspace, workspace_path.clone(), mcp_config);
 
     let mut prepared_initial = None;
     let mut metadata = None;

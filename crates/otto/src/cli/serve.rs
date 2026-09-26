@@ -6,6 +6,7 @@
 //! [`SandboxSwitch`](super::sandbox_switch::SandboxSwitch) that `POST
 //! /v1/sandbox/reload` replaces.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -34,30 +35,64 @@ fn fail(stderr: &mut (dyn Write + Send), message: &str) -> i32 {
     1
 }
 
+// ---- the workspace registry ----
+
+/// One loaded workspace: its composition root and, when the workflow lock
+/// was acquired, its workflow controller.
+struct WorkspaceHost {
+    builder: Arc<Builder>,
+    workflows: Option<Arc<crate::workflow::Controller>>,
+}
+
+/// The workspaces this server process has loaded, keyed by canonical path.
+///
+/// This slice loads only the startup workspace, so `loaded` always holds
+/// exactly the one entry named by `startup`. Admission, `workspace_roots`,
+/// and loading a second workspace on first use are later slices; see
+/// `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server
+/// structure").
+struct Workspaces {
+    startup: String,
+    loaded: BTreeMap<String, Arc<WorkspaceHost>>,
+}
+
+impl Workspaces {
+    fn startup_host(&self) -> &Arc<WorkspaceHost> {
+        self.loaded
+            .get(&self.startup)
+            .expect("the startup workspace is always loaded")
+    }
+}
+
 // ---- the session factory ----
 
 /// Builds one [`Controller`] per server-side session on top of the same
 /// replacement plumbing the CLI's `/new` and `/resume` use.
 struct ServeFactory {
-    builder: Arc<Builder>,
+    workspaces: Workspaces,
     runtime: Runtime,
     sandbox: Option<Arc<SandboxReloader>>,
 }
 
 impl ServeFactory {
+    fn builder(&self) -> &Arc<Builder> {
+        &self.workspaces.startup_host().builder
+    }
+
     /// The sessions for the workspace, with a missing session root reported as
     /// no sessions.
     fn listed(&self) -> Result<ListResult, String> {
-        if !self.builder.session_root.exists() {
+        let builder = self.builder();
+        if !builder.session_root.exists() {
             return Ok(ListResult::default());
         }
         sessionfs::list(
-            &self.builder.session_root,
-            &self.builder.workspace_path,
+            &builder.session_root,
+            &builder.workspace_path,
             "",
             MAX_LIST_SESSIONS,
         )
-        .map_err(|error| self.builder.redact_error(&error.to_string(), None))
+        .map_err(|error| builder.redact_error(&error.to_string(), None))
     }
 
     fn wire(&self, controller: Controller) -> Controller {
@@ -73,7 +108,7 @@ impl ServeFactory {
 #[async_trait::async_trait]
 impl Factory for ServeFactory {
     async fn create(&self) -> Result<Controller, String> {
-        let controller = Controller::create(Arc::clone(&self.builder), &self.runtime).await?;
+        let controller = Controller::create(Arc::clone(self.builder()), &self.runtime).await?;
         Ok(self.wire(controller))
     }
 
@@ -85,7 +120,7 @@ impl Factory for ServeFactory {
         // The repair warnings the CLI prints have no channel here; the web UI
         // reads the repaired history like any other.
         let (controller, _warnings) =
-            Controller::open(Arc::clone(&self.builder), Path::new(&entry.path)).await?;
+            Controller::open(Arc::clone(self.builder()), Path::new(&entry.path)).await?;
         Ok(self.wire(controller))
     }
 
@@ -103,7 +138,7 @@ impl Factory for ServeFactory {
     }
 
     fn usage_summary(&self, session_id: Option<&str>) -> Result<crate::usage::Summary, String> {
-        self.builder.usage_summary(session_id)
+        self.builder().usage_summary(session_id)
     }
 
     fn usage_analysis(
@@ -111,14 +146,14 @@ impl Factory for ServeFactory {
         days: u16,
         session_id: Option<&str>,
     ) -> Result<crate::usage::Analysis, String> {
-        self.builder.usage_analysis(days, session_id)
+        self.builder().usage_analysis(days, session_id)
     }
 
     fn tasks_list(
         &self,
         query: &crate::subagent::record::ListQuery,
     ) -> Result<crate::subagent::record::ListResult, String> {
-        self.builder.tasks_list(query)
+        self.builder().tasks_list(query)
     }
 
     fn tasks_get(
@@ -126,7 +161,7 @@ impl Factory for ServeFactory {
         parent_session: &str,
         task_id: &str,
     ) -> Result<Option<crate::subagent::record::TaskRow>, String> {
-        self.builder.tasks_get(parent_session, task_id)
+        self.builder().tasks_get(parent_session, task_id)
     }
 }
 
@@ -198,6 +233,15 @@ pub async fn run(
     let feishu = resolve_feishu(&builder.config);
     let mut profiles: Vec<String> = builder.config.profiles.keys().cloned().collect();
     profiles.sort();
+    let workspace_path = builder.workspace_path.clone();
+    let host = Arc::new(WorkspaceHost {
+        builder: Arc::clone(&builder),
+        workflows,
+    });
+    let workspaces = Workspaces {
+        startup: workspace_path.clone(),
+        loaded: BTreeMap::from([(workspace_path, Arc::clone(&host))]),
+    };
     let server = Server::new(Options {
         info: Info {
             workspace: builder.workspace_path.clone(),
@@ -209,7 +253,7 @@ pub async fn run(
             profiles,
         },
         factory: Arc::new(ServeFactory {
-            builder: Arc::clone(&builder),
+            workspaces,
             runtime: runtime.clone(),
             sandbox: reloader,
         }),
@@ -218,7 +262,7 @@ pub async fn run(
         // process stderr. Thread a shared writer through if a test ever has to
         // read it.
         logger: None,
-        workflows,
+        workflows: host.workflows.clone(),
     });
     let inbound = inbound::maybe_start(Arc::clone(&server), feishu, serve_cancel.clone());
 

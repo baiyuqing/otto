@@ -1106,7 +1106,7 @@ mod tests {
         store: Arc<record::Store>,
     ) -> Controller {
         let mut builder = testutil::builder(workspace, sessions);
-        builder.task_recorder = Some(store);
+        builder.shared_mut().task_recorder = Some(store);
         let runtime = testutil::initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder
@@ -1452,7 +1452,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let mut builder = testutil::builder(workspace.path(), sessions.path());
-        builder.config.agents.enabled = Some(false);
+        builder.shared_mut().config.agents.enabled = Some(false);
         let runtime = testutil::initial_runtime(&builder);
         let session_store = builder.create_session(&runtime).expect("session");
         let runner = builder

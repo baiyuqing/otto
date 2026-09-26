@@ -1970,7 +1970,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let mut builder = builder(workspace.path(), sessions.path());
-        builder.config.agents.enabled = Some(false);
+        builder.shared_mut().config.agents.enabled = Some(false);
         let runtime = initial_runtime(&builder);
         let session = builder.create_session(&runtime).expect("session");
         let runner = builder

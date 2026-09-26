@@ -27,7 +27,7 @@ export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/session', description: 'show current session details' },
   { name: '/new', description: 'start a new session' },
   { name: '/clear', description: 'start a new session' },
-  { name: '/resume', description: 'resume a session from the picker' },
+  { name: '/resume', description: 'resume a session from the sidebar' },
   { name: '/model', description: 'show current model and configured profiles' },
   { name: '/rename', description: 'rename the current session' },
   { name: '/compact', description: 'compact context with optional focus' },

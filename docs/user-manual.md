@@ -211,7 +211,8 @@ Otto also has subcommands that run before the flags below are parsed:
 | `otto mcp enable <server>` / `otto mcp disable <server>` | Toggle one configured MCP server. |
 | `otto mcp login <server>` | Run the OAuth sign-in flow for one configured MCP server. See [MCP servers](#mcp-servers). |
 | `otto mcp logout <server>` | Remove the stored OAuth token for one configured MCP server. |
-| `otto serve [--socket PATH \| --listen HOST:PORT [--open]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
+| `otto trust <dir> [--config PATH]` | Record `<dir>` (canonicalized) as a trusted directory in the config file, so `otto serve` admits it and its descendants as workspaces. See [Workspaces](#workspaces). |
+| `otto serve [--socket PATH \| --listen HOST:PORT [--open] [--exit-on-stdin-close]]` | Run Otto as an HTTP+JSON+SSE agent server, over a Unix domain socket or a loopback TCP port, instead of an interactive frontend. See [Agent server](#agent-server). |
 
 | Flag | Description |
 | --- | --- |
@@ -235,6 +236,7 @@ Otto also has subcommands that run before the flags below are parsed:
 | `--socket PATH` | `serve` only. Unix domain socket path for `otto serve`. Defaults to `[server].socket`, then `~/.otto/otto.sock`. Cannot be combined with `--listen`. |
 | `--listen HOST:PORT` | `serve` only. Listen on a loopback TCP address instead of a socket and print the URL with the access token. Port `0` picks a free port. Cannot be combined with `--socket`. |
 | `--open` | `serve` only. After printing the TCP URL, open it in the default browser (`/usr/bin/open` on macOS, `xdg-open` on Linux). Requires a TCP listener (`--listen` or `[server].listen`). Cannot be combined with `--socket`. A failed launch is not fatal: the URL is still printed. |
+| `--exit-on-stdin-close` | `serve` only. Read stdin and shut down, as on `SIGTERM`, when it reaches end of file or a read fails. Without the flag stdin is not read. Requires a TCP listener. Cannot be combined with `--socket`. |
 
 ## Environment variables
 
@@ -289,6 +291,10 @@ paths = ["~/.otto/skills", ".otto/skills"]
 socket = "~/.otto/otto.sock"
 # listen = "127.0.0.1:8787"  # loopback TCP instead of the socket
 # workspace_roots = ["~/Work"]  # directories another workspace may load from
+
+# Written by `otto trust <dir>`; one table per trusted directory.
+# [projects."/Users/me/src/app"]
+# trust_level = "trusted"
 
 [inbound.feishu]
 enabled = false
@@ -348,6 +354,12 @@ Key points:
   load another workspace besides the startup one (see
   [Workspaces](#workspaces)). Default empty: only the startup workspace is
   admitted. TOML-only, no CLI flag or environment variable.
+- `[projects."<path>"]` records a trusted directory: `otto serve` admits it
+  and its descendants as workspaces (see [Workspaces](#workspaces)).
+  `trust_level` is required and `"trusted"` is its only accepted value; any
+  other value fails config loading. `otto trust <dir>` appends the table as
+  text, so comments in the file are kept; there is no environment variable
+  and no HTTP route that adds one.
 - `[inbound.feishu]` is off by default. When `enabled = true`, `otto serve`
   spawns `lark-cli event consume im.message.receive_v1 --as bot` and delivers
   each text message to every open session inbox, which starts a wake turn
@@ -408,8 +420,9 @@ Startup resolution is field-specific:
   `[server].socket` > the built-in default `~/.otto/otto.sock`. A `listen`
   value at any level selects TCP and no socket is created. There is no
   environment variable. This applies only to `otto serve`.
-- **Agent server workspace admission:** `[server].workspace_roots` only;
-  there is no flag or environment variable, and no precedence chain.
+- **Agent server workspace admission:** `[server].workspace_roots` and the
+  `[projects]` tables only; there is no flag or environment variable, and no
+  precedence chain.
 
 Startup `--continue` / `--resume` restore session provider/model only as
 defaults; direct flags and `OTTO_*` variables can override them, and a stored
@@ -970,7 +983,7 @@ read the prompt from a file (bounded to 1 MiB).
 
 `otto serve` runs Otto as a long-lived HTTP+JSON+SSE frontend, instead of the
 TUI or REPL. One process holds the startup workspace (`--cwd`, default `.`)
-and, when `[server].workspace_roots` admits others, any number of additional
+and, when `[server].workspace_roots` or a trusted directory admits others, any number of additional
 workspaces loaded on first use; it manages any number of sessions across all
 loaded workspaces. Turns in different sessions run concurrently, and starting
 a second turn on a session that already has one active returns `409`. It
@@ -1048,12 +1061,31 @@ The startup workspace is loaded when the process starts. `[server].workspace_roo
 loaded on first use, from a session create naming it or from
 `POST /v1/workspaces`. A path is admitted when it is absolute and, after
 resolving symlinks and canonicalizing it, it is an existing directory that is either the startup
-workspace or a descendant of one canonicalized root (a root itself is
-admitted). An unadmitted path returns `403` with `code: "WORKSPACE_NOT_ADMITTED"`;
+workspace, a descendant of one canonicalized root (a root itself is
+admitted), or a trusted directory or its descendant. An unadmitted path returns `403` with `code: "WORKSPACE_NOT_ADMITTED"`;
 a relative, missing, or non-directory path returns `400` with
 `code: "INVALID_WORKSPACE"`.
-With the default empty `workspace_roots`, only the startup workspace is
-admitted and the server behaves as a single-workspace process.
+With the default empty `workspace_roots` and no trusted directories, only
+the startup workspace is admitted and the server behaves as a
+single-workspace process.
+
+Trusted directories come from the config file's `[projects]` tables, which
+`otto trust <dir>` writes:
+
+```bash
+otto trust ~/src/app   # prints: Trusted /Users/me/src/app.
+```
+
+`otto trust` requires an existing directory and stores its canonical path.
+Running it again for a directory already listed writes nothing. The write
+takes a backup and is refused if another process changed the file in
+between (see [Backups of the config file](#backups-of-the-config-file)).
+A running `otto serve` re-reads `[projects]` on every admission, so a
+directory trusted after it started is admitted without a restart. A trusted
+path that no longer resolves is skipped. If the config file cannot be read
+or parsed at that moment, no trusted directory is admitted until it can.
+Trust affects admission only; the sandbox and approval policy are the same
+for every workspace.
 
 - `GET /v1/workspaces` lists loaded workspaces, startup first, then by path:
   `{"startup": path, "roots": [path...], "workspaces": [{"path", "open_sessions", "workflows"}...]}`.
@@ -1425,7 +1457,9 @@ when the child reaches the next normal notification checkpoint.
 
 `otto serve` shuts down on `SIGINT` or `SIGTERM`: it stops accepting new
 requests, cancels every active turn and compaction, closes every session,
-removes the socket file (socket mode), and exits `0`.
+removes the socket file (socket mode), and exits `0`. With
+`--exit-on-stdin-close`, end of file on stdin, or a failed read, starts the
+same shutdown.
 
 ### Examples
 

@@ -7,7 +7,7 @@
 //! /v1/sandbox/reload` replaces.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
@@ -65,6 +65,12 @@ struct Workspaces {
     startup_host: Arc<WorkspaceHost>,
     /// Canonical `[server].workspace_roots`.
     roots: Vec<PathBuf>,
+    /// Where `otto trust` writes `[projects]`, re-read on every [`admit`]
+    /// call so a directory trusted after startup is admitted without a
+    /// restart.
+    ///
+    /// [`admit`]: Self::admit
+    config_path: PathBuf,
     loaded: tokio::sync::Mutex<BTreeMap<String, Arc<WorkspaceHost>>>,
 }
 
@@ -73,10 +79,12 @@ impl Workspaces {
         &self.startup_host
     }
 
-    /// Whether `requested` may be opened: the startup workspace or a
-    /// descendant of one of `self.roots`.
+    /// Whether `requested` may be opened: the startup workspace, a
+    /// descendant of one of `self.roots`, or a trusted directory (or its
+    /// descendant) from the config file's current `[projects]` tables.
     fn admit(&self, requested: &str) -> Result<PathBuf, Admission> {
-        admit_workspace(requested, Path::new(&self.startup), &self.roots)
+        let trusted = trusted_projects(&self.config_path);
+        admit_workspace(requested, Path::new(&self.startup), &self.roots, &trusted)
     }
 
     /// The host loaded for `path`, if any.
@@ -229,12 +237,16 @@ fn admit_workspace(
     requested: &str,
     startup: &Path,
     roots: &[PathBuf],
+    trusted: &[PathBuf],
 ) -> Result<PathBuf, Admission> {
     if !Path::new(requested).is_absolute() {
         return Err(Admission::Invalid);
     }
     let canonical = canonical_directory(Path::new(requested)).map_err(|_| Admission::Invalid)?;
-    if canonical == startup || roots.iter().any(|root| canonical.starts_with(root)) {
+    if canonical == startup
+        || roots.iter().any(|root| canonical.starts_with(root))
+        || trusted.iter().any(|dir| canonical.starts_with(dir))
+    {
         Ok(canonical)
     } else {
         Err(Admission::NotAdmitted)
@@ -261,6 +273,26 @@ fn canonicalize_workspace_roots(raw_roots: &[String]) -> Result<Vec<PathBuf>, St
             canonical_directory(Path::new(root))
                 .map_err(|error| format!("[server] workspace_roots: \"{root}\": {error}"))
         })
+        .collect()
+}
+
+/// Canonical directories trusted via `otto trust`, read fresh from
+/// `config_path` on every call. Unlike [`canonicalize_workspace_roots`], any
+/// failure — the file is missing or unparsable, or a `[projects]` entry has
+/// an invalid `trust_level` — resolves to no trusted directories rather than
+/// an error: trust only widens admission, so a config problem here must not
+/// break the startup workspace or configured roots. A trusted path that no
+/// longer resolves to a directory is likewise dropped rather than reported.
+fn trusted_projects(config_path: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+    let Ok(file) = otto_core::config::parse(&text) else {
+        return Vec::new();
+    };
+    file.projects
+        .keys()
+        .filter_map(|path| canonical_directory(Path::new(path)).ok())
         .collect()
 }
 
@@ -664,6 +696,12 @@ pub struct ServeOptions {
     /// Open the printed TCP URL in the default browser. Unix listeners have
     /// no URL; [`run`] rejects that combination before bind.
     pub open: bool,
+    /// `--exit-on-stdin-close`'s reader. `Some` only when the flag was given;
+    /// its EOF or a read error then cancels serve the same way SIGTERM does.
+    /// `None` means stdin is never read. Unix listeners have no desktop-app
+    /// caller to close it; [`run`] rejects that combination before bind, like
+    /// `open`.
+    pub exit_on_stdin_close: Option<Box<dyn BufRead + Send + 'static>>,
 }
 
 pub async fn run(
@@ -679,9 +717,16 @@ pub async fn run(
         control,
         reloader,
         open,
+        exit_on_stdin_close,
     } = options;
 
     if let Err(message) = require_tcp_for_open(open, &listen) {
+        let _ = control.close().await;
+        return fail(stderr, &message);
+    }
+    if let Err(message) =
+        require_tcp_for_exit_on_stdin_close(exit_on_stdin_close.is_some(), &listen)
+    {
         let _ = control.close().await;
         return fail(stderr, &message);
     }
@@ -733,6 +778,7 @@ pub async fn run(
         startup: workspace_path.clone(),
         startup_host: Arc::clone(&host),
         roots: workspace_roots,
+        config_path: builder.shared.config_path.clone(),
         loaded: tokio::sync::Mutex::new(BTreeMap::from([(workspace_path, Arc::clone(&host))])),
     };
     load_persisted_workspaces(
@@ -770,6 +816,7 @@ pub async fn run(
     // SIGTERM is how a long-running `otto serve` is asked to shut down; the
     // process token covers SIGINT already.
     let terminate = spawn_terminate(serve_cancel.clone());
+    let _stdin_watch = spawn_stdin_watch(exit_on_stdin_close, serve_cancel.clone());
     let serve_error = server::serve(listener, server.router(), serve_cancel.clone())
         .await
         .err();
@@ -802,6 +849,39 @@ fn require_tcp_for_open(open: bool, listen: &ServerRuntime) -> Result<(), String
         return Err("--open requires a TCP listener".into());
     }
     Ok(())
+}
+
+/// `--exit-on-stdin-close` requires a TCP listener, for the same reason
+/// `--open` does: it exists for the desktop app, which always uses one.
+fn require_tcp_for_exit_on_stdin_close(flag: bool, listen: &ServerRuntime) -> Result<(), String> {
+    if flag && listen.listen.is_empty() {
+        return Err("--exit-on-stdin-close requires a TCP listener".into());
+    }
+    Ok(())
+}
+
+/// `--exit-on-stdin-close`: spawns a thread that reads `stdin` until EOF or a
+/// read error, then cancels `token` — the same token SIGTERM cancels. `None`
+/// when the flag was not given, so stdin is never touched.
+///
+/// A detached `std::thread`, not `spawn_blocking`: dropping the tokio runtime
+/// waits for blocking tasks, so after SIGTERM with stdin still open the
+/// process would not exit. The handle is not joined for the same reason.
+fn spawn_stdin_watch(
+    stdin: Option<Box<dyn BufRead + Send + 'static>>,
+    token: CancellationToken,
+) -> Option<std::thread::JoinHandle<()>> {
+    let mut reader = stdin?;
+    Some(std::thread::spawn(move || {
+        let mut buffer = [0u8; 256];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        token.cancel();
+    }))
 }
 
 fn announce_listen(stdout: &mut (dyn Write + Send), address: &str, token: &str, open: bool) {
@@ -904,6 +984,92 @@ mod tests {
         assert!(require_tcp_for_open(true, &tcp).is_ok());
     }
 
+    #[test]
+    fn exit_on_stdin_close_without_a_tcp_listener_is_rejected() {
+        let unix = ServerRuntime {
+            socket: "/tmp/otto.sock".into(),
+            listen: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(
+            require_tcp_for_exit_on_stdin_close(true, &unix).unwrap_err(),
+            "--exit-on-stdin-close requires a TCP listener"
+        );
+        assert!(require_tcp_for_exit_on_stdin_close(false, &unix).is_ok());
+        let tcp = ServerRuntime {
+            socket: String::new(),
+            listen: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        assert!(require_tcp_for_exit_on_stdin_close(true, &tcp).is_ok());
+    }
+
+    #[tokio::test]
+    async fn stdin_eof_cancels_the_token() {
+        let reader: Box<dyn BufRead + Send + 'static> =
+            Box::new(std::io::Cursor::new(Vec::<u8>::new()));
+        let token = CancellationToken::new();
+        let handle = spawn_stdin_watch(Some(reader), token.clone()).expect("spawned");
+        handle.join().expect("join");
+        assert!(token.is_cancelled());
+    }
+
+    /// SIGTERM ends serve while the desktop app still holds stdin open; the
+    /// watch must not keep the runtime (and so the process) from exiting.
+    #[test]
+    fn an_open_stdin_does_not_hold_up_runtime_shutdown() {
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let reader: Box<dyn BufRead + Send + 'static> =
+                Box::new(std::io::BufReader::new(reader));
+            spawn_stdin_watch(Some(reader), CancellationToken::new()).expect("spawned");
+        });
+        let (done, dropped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            let _ = done.send(());
+        });
+        assert!(
+            dropped
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_ok(),
+            "dropping the runtime waited for the stdin watch"
+        );
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn stdin_read_error_cancels_the_token() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("boom"))
+            }
+        }
+        impl BufRead for FailingReader {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                Err(std::io::Error::other("boom"))
+            }
+            fn consume(&mut self, _amount: usize) {}
+        }
+        let reader: Box<dyn BufRead + Send + 'static> = Box::new(FailingReader);
+        let token = CancellationToken::new();
+        let handle = spawn_stdin_watch(Some(reader), token.clone()).expect("spawned");
+        handle.join().expect("join");
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn no_reader_spawns_no_watch() {
+        let token = CancellationToken::new();
+        assert!(spawn_stdin_watch(None, token.clone()).is_none());
+        assert!(!token.is_cancelled());
+    }
+
     fn with_launch_test<T>(body: impl FnOnce() -> T) -> T {
         let _guard = LAUNCH_TEST
             .lock()
@@ -947,8 +1113,8 @@ mod tests {
     fn the_startup_workspace_is_admitted_with_no_roots() {
         let startup = tempfile::tempdir().expect("startup");
         let startup_path = canonical_directory(startup.path()).expect("canonical");
-        let admitted =
-            admit_workspace(&startup_path.to_string_lossy(), &startup_path, &[]).expect("admitted");
+        let admitted = admit_workspace(&startup_path.to_string_lossy(), &startup_path, &[], &[])
+            .expect("admitted");
         assert_eq!(admitted, startup_path);
     }
 
@@ -962,6 +1128,7 @@ mod tests {
             &root_path.to_string_lossy(),
             &startup_path,
             std::slice::from_ref(&root_path),
+            &[],
         )
         .expect("admitted");
         assert_eq!(admitted, root_path);
@@ -975,8 +1142,8 @@ mod tests {
         let root_path = canonical_directory(root.path()).expect("canonical");
         let child = root_path.join("project");
         std::fs::create_dir(&child).expect("child");
-        let admitted =
-            admit_workspace(&child.to_string_lossy(), &startup_path, &[root_path]).expect("ok");
+        let admitted = admit_workspace(&child.to_string_lossy(), &startup_path, &[root_path], &[])
+            .expect("ok");
         assert_eq!(admitted, child);
     }
 
@@ -991,7 +1158,7 @@ mod tests {
         let sibling = parent.path().join("sibling");
         std::fs::create_dir(&sibling).expect("sibling");
         assert_eq!(
-            admit_workspace(&sibling.to_string_lossy(), &startup_path, &[root_path]),
+            admit_workspace(&sibling.to_string_lossy(), &startup_path, &[root_path], &[]),
             Err(Admission::NotAdmitted)
         );
     }
@@ -1007,7 +1174,12 @@ mod tests {
         let lookalike = parent.path().join("root-x");
         std::fs::create_dir(&lookalike).expect("lookalike");
         assert_eq!(
-            admit_workspace(&lookalike.to_string_lossy(), &startup_path, &[root_path]),
+            admit_workspace(
+                &lookalike.to_string_lossy(),
+                &startup_path,
+                &[root_path],
+                &[]
+            ),
             Err(Admission::NotAdmitted)
         );
     }
@@ -1023,7 +1195,7 @@ mod tests {
         let link = root_path.join("escape");
         std::os::unix::fs::symlink(&outside_path, &link).expect("symlink");
         assert_eq!(
-            admit_workspace(&link.to_string_lossy(), &startup_path, &[root_path]),
+            admit_workspace(&link.to_string_lossy(), &startup_path, &[root_path], &[]),
             Err(Admission::NotAdmitted)
         );
     }
@@ -1034,7 +1206,7 @@ mod tests {
         let startup_path = canonical_directory(startup.path()).expect("canonical");
         let missing = startup.path().join("does-not-exist");
         assert_eq!(
-            admit_workspace(&missing.to_string_lossy(), &startup_path, &[]),
+            admit_workspace(&missing.to_string_lossy(), &startup_path, &[], &[]),
             Err(Admission::Invalid)
         );
     }
@@ -1046,7 +1218,7 @@ mod tests {
         let file = startup.path().join("file.txt");
         std::fs::write(&file, b"hi").expect("write");
         assert_eq!(
-            admit_workspace(&file.to_string_lossy(), &startup_path, &[]),
+            admit_workspace(&file.to_string_lossy(), &startup_path, &[], &[]),
             Err(Admission::Invalid)
         );
     }
@@ -1056,11 +1228,11 @@ mod tests {
         let startup = tempfile::tempdir().expect("startup");
         let startup_path = canonical_directory(startup.path()).expect("canonical");
         assert_eq!(
-            admit_workspace(".", &startup_path, &[]),
+            admit_workspace(".", &startup_path, &[], &[]),
             Err(Admission::Invalid)
         );
         assert_eq!(
-            admit_workspace("rel/dir", &startup_path, &[]),
+            admit_workspace("rel/dir", &startup_path, &[], &[]),
             Err(Admission::Invalid)
         );
     }
@@ -1071,9 +1243,64 @@ mod tests {
         let startup_path = canonical_directory(startup.path()).expect("canonical");
         let other = tempfile::tempdir().expect("other");
         let other_path = canonical_directory(other.path()).expect("canonical");
-        assert!(admit_workspace(&startup_path.to_string_lossy(), &startup_path, &[]).is_ok());
+        assert!(admit_workspace(&startup_path.to_string_lossy(), &startup_path, &[], &[]).is_ok());
         assert_eq!(
-            admit_workspace(&other_path.to_string_lossy(), &startup_path, &[]),
+            admit_workspace(&other_path.to_string_lossy(), &startup_path, &[], &[]),
+            Err(Admission::NotAdmitted)
+        );
+    }
+
+    #[test]
+    fn a_trusted_directory_outside_every_root_is_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let trusted = tempfile::tempdir().expect("trusted");
+        let trusted_path = canonical_directory(trusted.path()).expect("canonical");
+        let admitted = admit_workspace(
+            &trusted_path.to_string_lossy(),
+            &startup_path,
+            &[],
+            std::slice::from_ref(&trusted_path),
+        )
+        .expect("admitted");
+        assert_eq!(admitted, trusted_path);
+    }
+
+    #[test]
+    fn a_descendant_of_a_trusted_directory_is_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let trusted = tempfile::tempdir().expect("trusted");
+        let trusted_path = canonical_directory(trusted.path()).expect("canonical");
+        let child = trusted_path.join("project");
+        std::fs::create_dir(&child).expect("child");
+        let admitted = admit_workspace(
+            &child.to_string_lossy(),
+            &startup_path,
+            &[],
+            &[trusted_path],
+        )
+        .expect("ok");
+        assert_eq!(admitted, child);
+    }
+
+    #[test]
+    fn a_prefix_lookalike_sibling_of_a_trusted_directory_is_not_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let parent = tempfile::tempdir().expect("parent");
+        let trusted = parent.path().join("app");
+        std::fs::create_dir(&trusted).expect("trusted");
+        let trusted_path = canonical_directory(&trusted).expect("canonical");
+        let lookalike = parent.path().join("app-x");
+        std::fs::create_dir(&lookalike).expect("lookalike");
+        assert_eq!(
+            admit_workspace(
+                &lookalike.to_string_lossy(),
+                &startup_path,
+                &[],
+                &[trusted_path]
+            ),
             Err(Admission::NotAdmitted)
         );
     }
@@ -1099,6 +1326,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: vec![root_path.clone()],
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         assert!(workspaces.admit(&startup_path.to_string_lossy()).is_ok());
@@ -1106,6 +1334,64 @@ mod tests {
             workspaces.admit(&root_path.to_string_lossy()),
             Ok(root_path)
         );
+    }
+
+    #[test]
+    fn a_directory_trusted_after_startup_is_admitted_without_a_restart() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let config_path = config_dir.path().join("config.toml");
+        std::fs::write(&config_path, b"").expect("write empty config");
+        let trusted = tempfile::tempdir().expect("trusted");
+        let trusted_path = canonical_directory(trusted.path()).expect("canonical");
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            startup_host: dummy_host(&startup_path, sessions.path()),
+            roots: Vec::new(),
+            config_path: config_path.clone(),
+            loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+        };
+        assert_eq!(
+            workspaces.admit(&trusted_path.to_string_lossy()),
+            Err(Admission::NotAdmitted)
+        );
+
+        std::fs::write(
+            &config_path,
+            format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                trusted_path.display()
+            ),
+        )
+        .expect("trust it");
+
+        assert_eq!(
+            workspaces.admit(&trusted_path.to_string_lossy()),
+            Ok(trusted_path)
+        );
+    }
+
+    #[test]
+    fn a_trusted_path_that_no_longer_exists_is_skipped() {
+        let holder = tempfile::tempdir().expect("holder");
+        let target = holder.path().join("gone");
+        std::fs::create_dir(&target).expect("create");
+        let target_path = canonical_directory(&target).expect("canonical");
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let config_path = config_dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                target_path.display()
+            ),
+        )
+        .expect("write config");
+        std::fs::remove_dir(&target).expect("remove");
+
+        assert_eq!(trusted_projects(&config_path), Vec::<PathBuf>::new());
     }
 
     /// Every concurrent caller loading the same path gets the same host, and
@@ -1129,6 +1415,7 @@ mod tests {
             startup: shared.home.clone(),
             startup_host: dummy_host(Path::new(&shared.home), sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         });
         let cancel = CancellationToken::new();
@@ -1183,6 +1470,7 @@ mod tests {
             startup: shared.home.clone(),
             startup_host: dummy_host(Path::new(&shared.home), sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let cancel = CancellationToken::new();
@@ -1233,6 +1521,7 @@ mod tests {
                 startup: startup_path.to_string_lossy().into_owned(),
                 startup_host,
                 roots: Vec::new(),
+                config_path: PathBuf::new(),
                 loaded: tokio::sync::Mutex::new(loaded),
             },
             runtime,
@@ -1274,6 +1563,7 @@ mod tests {
                 startup: startup_path.to_string_lossy().into_owned(),
                 startup_host,
                 roots: Vec::new(),
+                config_path: PathBuf::new(),
                 loaded: tokio::sync::Mutex::new(loaded),
             },
             runtime,
@@ -1320,6 +1610,7 @@ mod tests {
                 startup: startup_path.to_string_lossy().into_owned(),
                 startup_host,
                 roots: Vec::new(),
+                config_path: PathBuf::new(),
                 loaded: tokio::sync::Mutex::new(loaded),
             },
             runtime,
@@ -1388,6 +1679,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: vec![roots_path.clone()],
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         first_run
@@ -1408,6 +1700,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: vec![roots_path],
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         load_persisted_workspaces(&restarted, &shared, &runtime, &cancel, &mut stderr).await;
@@ -1451,6 +1744,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: vec![roots_path],
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let cancel = CancellationToken::new();
@@ -1493,6 +1787,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let cancel = CancellationToken::new();
@@ -1528,6 +1823,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let cancel = CancellationToken::new();
@@ -1559,6 +1855,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: Arc::clone(&startup_host),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::from([(
                 startup_path.to_string_lossy().into_owned(),
                 startup_host,
@@ -1622,6 +1919,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(loaded),
         };
         let mut stderr = Vec::new();
@@ -1661,6 +1959,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let mut stderr = Vec::new();
@@ -1688,6 +1987,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let mut stderr = Vec::new();
@@ -1712,6 +2012,7 @@ mod tests {
             startup: startup_path.to_string_lossy().into_owned(),
             startup_host: dummy_host(&startup_path, sessions.path()),
             roots: Vec::new(),
+            config_path: PathBuf::new(),
             loaded: tokio::sync::Mutex::new(BTreeMap::new()),
         };
         let mut stderr = Vec::new();

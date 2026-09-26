@@ -333,7 +333,7 @@ button.danger {
 .agents-detail code { color: var(--muted); font-family: var(--mono); font-size: 12px; }
 .agents-detail p { overflow-wrap: anywhere; }
 .agents-detail pre { overflow: auto; padding: 12px; border-radius: 8px; background: var(--code-bg); color: var(--code-fg); }
-.agents-status { align-self: center; border: 1px solid var(--line); border-radius: 999px; padding: 3px 8px; font: 700 11px/1.2 var(--mono); text-transform: uppercase; }
+.agents-status { align-self: center; border: 1px solid var(--line); border-radius: var(--radius); padding: 3px 8px; font: 700 11px/1.2 var(--mono); text-transform: uppercase; }
 .agents-status.running,
 .agents-status.queued { border-color: var(--accent); color: var(--accent); }
 .agents-status.failed,

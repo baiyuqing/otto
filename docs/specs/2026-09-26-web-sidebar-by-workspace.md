@@ -111,8 +111,9 @@ process; after a restart the sidebar shows only the startup workspace.
 - **File.** `~/.otto/serve-workspaces.json`, `{"workspaces": ["/abs/path", ...]}`,
   canonical paths, sorted, no duplicates. One file per user, shared by every
   `otto serve` process.
-- **Write.** After `POST /v1/workspaces` newly loads a workspace (the `201`
-  case), the server reads the file, adds the path, and writes it to a
+- **Write.** After any request newly loads a workspace (`POST /v1/workspaces`
+  with `201`, or a `workspace` on a session or workflow request, which load
+  through the same `Factory::load_workspace`), the server reads the file, adds the path, and writes it to a
   temporary file in `~/.otto` followed by `rename`, while still holding the
   registry mutex. The startup workspace is not written. A write failure does
   not fail the request: the workspace stays loaded and stderr gets

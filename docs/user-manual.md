@@ -1081,6 +1081,18 @@ admitted and the server behaves as a single-workspace process.
   are disabled), while its sessions and turns still work.
 - A workspace stays loaded for the life of the process; there is no route to
   unload one.
+- A workspace newly loaded by any request that names it
+  (`POST /v1/workspaces`, or a `workspace` on a session or workflow request)
+  is added to `~/.otto/serve-workspaces.json` (`{"workspaces": [path...]}`,
+  sorted, one file shared by every `otto serve` process). The startup
+  workspace is not written. At startup, after the startup workspace, each
+  listed path is admitted against the current `workspace_roots` and loaded;
+  a path that is missing, not admitted, or fails to load is skipped with a
+  `warning:` line on stderr and stays in the file. An unreadable or
+  unparsable file is a warning and an empty list. If the file cannot be
+  written, the workspace stays loaded and stderr gets
+  `warning: cannot save workspace list: <error>`. Entries are never removed
+  automatically; edit the file to drop one.
 
 ### Web UI
 
@@ -1094,28 +1106,34 @@ URL yourself. The page moves the token from the query string into the tab's
 `Authorization` header on every API call. Closing the tab discards it; open
 the printed URL again to get back in.
 
-The page has a session picker (`GET /v1/sessions`), a **New session** button,
-the transcript, and a composer:
+In the Chat view the page has a sessions sidebar, the transcript, and a
+composer:
 
+- The sidebar groups sessions (`GET /v1/sessions`) by working directory,
+  the session's `workspace`. Groups are the loaded workspaces
+  (`GET /v1/workspaces`) plus any directory a listed session reports; the
+  startup workspace comes first, the rest by path. A group header shows the
+  directory basename, with the full path in a tooltip. Each row shows the
+  session name, `●` when the session is open on the server, and the model;
+  the current session is highlighted.
 - Selecting a session opens it with `POST /v1/sessions {"resume": id}` and
   renders its history. The session id is kept in the URL fragment, so a reload
-  reopens the same session. Each entry shows the session's workspace basename
-  next to its name, with the full path in a tooltip; a session with no
-  recorded workspace renders as before.
-- **New session** offers a workspace picker, populated from
-  `GET /v1/workspaces` with the startup workspace selected by default, plus a
-  path field and button that call `POST /v1/workspaces` and select the
-  newly loaded (or already loaded) entry; a `400`/`403`/`500` from that call
-  is shown next to the field. Creating a session sends `"workspace"` only
-  when a non-startup workspace is selected. `/new` keeps creating in the
-  currently open session's workspace.
+  reopens the same session.
+- Each group's **New session** button creates a session in that directory;
+  `"workspace"` is sent only for a non-startup directory. `/new` keeps
+  creating in the currently open session's workspace.
+- The path field and **Add workspace** button at the bottom of the sidebar
+  call `POST /v1/workspaces`; the directory then appears as a group. A
+  `400`/`403`/`500` from that call is shown next to the field.
+- Below 720px wide the sidebar is hidden; the **Sessions** button in the top
+  bar shows it as an overlay, and opening a session hides it again.
 - Typing `/` in the composer shows local suggestions for supported Web slash
   commands; Tab or click completes the highlighted command. Web commands backed
   by existing server APIs run locally instead of starting a provider turn:
   `/help`, `/session`, `/new`, `/clear`, `/resume`, `/model`, `/rename <name>`,
   `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/approve <id>`,
   `/tasks`, `/task <id|name>`, `/task cancel <id|name>`, `/mcp`, and `/exit`.
-  `/resume` asks you to choose a session from the picker; `/exit` asks you to
+  `/resume` asks you to choose a session from the sidebar; `/exit` asks you to
   close the browser tab because a page cannot reliably close a tab it did not
   open. `/approve <id>` grants one pending elevated Bash command through
   `POST /v1/sessions/{id}/approvals/{approval_id}` and then submits the retry

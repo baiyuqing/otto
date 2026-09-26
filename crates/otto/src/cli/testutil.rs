@@ -92,6 +92,7 @@ pub fn builder(workspace_root: &Path, session_root: &Path) -> Builder {
             servers: Vec::new(),
         },
         task_recorder: None,
+        skill_checker: None,
     }
 }
 

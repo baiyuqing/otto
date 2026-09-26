@@ -205,6 +205,18 @@ impl Tool for AgentTool {
             Err(error) => return error_result(error),
         };
 
+        if !task.agent.is_empty()
+            && let Some(checker) = self.runner.checker()
+            && let Some(definition) = self.runner.catalog().lookup(&task.agent)
+            && definition.is_skill_derived
+        {
+            checker.trigger(
+                definition.name.clone(),
+                definition.directory.clone(),
+                definition.path.clone(),
+            );
+        }
+
         let name = agent_label(&task);
         let started = if running_before >= self.runner.max_parallel() {
             format!(
@@ -1016,6 +1028,105 @@ mod tests {
         .await;
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(result.content, "task t1 (reviewer) started");
+    }
+
+    fn write_skill_with_vague_output(directory: &std::path::Path) {
+        std::fs::create_dir_all(directory).expect("mkdir");
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: reviewer\ndescription: reviews things\ninput: a path\noutput: the result\n---\nBody.\n",
+        )
+        .expect("write SKILL.md");
+    }
+
+    fn checked_skill(directory: &std::path::Path) -> crate::skill::Skill {
+        crate::skill::Skill {
+            name: "reviewer".to_string(),
+            description: String::new(),
+            contract: None,
+            directory: directory.to_path_buf(),
+            path: directory.join("SKILL.md"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_triggers_one_check_for_a_skill_derived_definition() {
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_skill_with_vague_output(dir.path());
+        // The base URL is never contacted: the vague `output` field fires a
+        // rule, so this checks the trigger wiring without a network stub.
+        let checker = Arc::new(crate::skill::check::Checker::open_in_memory(
+            "http://127.0.0.1:1",
+            "key",
+        ));
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.catalog = Catalog::from_definitions(vec![Definition {
+            name: "reviewer".into(),
+            directory: dir.path().to_path_buf(),
+            path: dir.path().join("SKILL.md"),
+            is_skill_derived: true,
+            ..Definition::default()
+        }]);
+        config.checker = Some(Arc::clone(&checker));
+        let runner = runner(config);
+
+        let result = run(
+            tool_named(&runner, "agent").as_ref(),
+            r#"{"prompt":"go","agent":"reviewer"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+
+        let skill = checked_skill(dir.path());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if checker.display(&skill) != "not checked yet" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background check did not complete in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let text = checker.display(&skill);
+        assert!(text.starts_with("rules"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn agent_tool_triggers_no_check_for_a_real_agent_definition() {
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_skill_with_vague_output(dir.path());
+        let checker = Arc::new(crate::skill::check::Checker::open_in_memory(
+            "http://127.0.0.1:1",
+            "key",
+        ));
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.catalog = Catalog::from_definitions(vec![Definition {
+            name: "reviewer".into(),
+            directory: dir.path().to_path_buf(),
+            path: dir.path().join("SKILL.md"),
+            is_skill_derived: false,
+            ..Definition::default()
+        }]);
+        config.checker = Some(Arc::clone(&checker));
+        let runner = runner(config);
+
+        let result = run(
+            tool_named(&runner, "agent").as_ref(),
+            r#"{"prompt":"go","agent":"reviewer"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+
+        let skill = checked_skill(dir.path());
+        assert_eq!(checker.display(&skill), "not checked yet");
     }
 
     #[tokio::test]

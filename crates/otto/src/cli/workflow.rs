@@ -218,6 +218,7 @@ impl Executor for AgentExecutor {
             body: attempt.agent_definition.body,
             directory: PathBuf::new(),
             path: PathBuf::new(),
+            is_skill_derived: false,
         };
         let task = self
             .runner

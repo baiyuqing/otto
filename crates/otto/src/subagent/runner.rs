@@ -294,6 +294,9 @@ pub struct Config {
     /// Builds a persisted transcript for each [`Runner::start`] child. `None`
     /// keeps every child in memory.
     pub child_session: Option<ChildSession>,
+    /// The automatic skill contract check. `None` disables it: `AgentTool`
+    /// then triggers no check, regardless of the definition delegated to.
+    pub checker: Option<Arc<crate::skill::check::Checker>>,
 }
 
 /// One delegation request.
@@ -396,6 +399,12 @@ impl Runner {
     /// The runner's clock, which the status tool uses for elapsed columns.
     pub fn now(&self) -> DateTime<Utc> {
         (self.config.template.now)()
+    }
+
+    /// The automatic skill contract checker, when the experimental feature is
+    /// enabled.
+    pub fn checker(&self) -> Option<&Arc<crate::skill::check::Checker>> {
+        self.config.checker.as_ref()
     }
 
     /// The tool definitions a child with no named definition would see.

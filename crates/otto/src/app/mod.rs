@@ -471,6 +471,16 @@ impl Controller {
             .unwrap_or_default()
     }
 
+    /// The automatic skill contract checker (experimental), when the
+    /// feature is enabled and the current runner has sub-agents built.
+    pub fn skill_checker(&self) -> Option<Arc<crate::skill::check::Checker>> {
+        self.lock()
+            .current
+            .as_ref()
+            .and_then(|current| current.runner.subagents())
+            .and_then(|subagents| subagents.checker().cloned())
+    }
+
     /// The MCP server status rows for `/mcp`, in configuration order. Empty
     /// for a closed controller.
     pub fn mcp(&self) -> Vec<crate::mcp::ServerStatus> {

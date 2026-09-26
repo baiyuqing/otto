@@ -29,6 +29,16 @@ describe('TranscriptView markdown extensions', () => {
     expect(container.textContent).toContain('E')
   })
 
+  it('opens assistant markdown links in a new tab', () => {
+    const text = 'See [docs](https://example.com/docs).'
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items: [{ kind: 'assistant', text }] }))
+
+    const link = container.querySelector('a')
+    expect(link?.getAttribute('href')).toBe('https://example.com/docs')
+    expect(link?.getAttribute('target')).toBe('_blank')
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
   it('renders mermaid code fences as diagrams', async () => {
     const text = '```mermaid\ngraph TD\n  A[Start] --> B[Done]\n```'
     const { container } = render(createElement(TranscriptView, { activeSession: true, items: [{ kind: 'assistant', text }] }))

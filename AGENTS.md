@@ -64,6 +64,6 @@ Full host validation requires macOS 26+ and standalone Command Line Tools;
 see the development guide.
 
 Keep README and user-facing docs limited to implemented, tested behavior. Do
-not describe `agent_send`, `agent_cancel`, `agent_report`, automatic memory
+not describe `agent_cancel`, automatic memory
 extraction, memory backup/restore/verify, or `allowed-tools` enforcement as
 working features.

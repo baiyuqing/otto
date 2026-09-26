@@ -1087,7 +1087,10 @@ the transcript, and a composer:
 - A **Tasks** panel appears above the composer when the session has sub-agent
   tasks (`GET /v1/sessions/{id}/tasks`). It re-reads on `notification` events
   and at turn end, polls every 3 seconds while a task is queued or running,
-  and offers **Cancel** for those.
+  and offers **Cancel** for those. The model-facing `agent_send` tool can send
+  task updates to a queued or running child from a parent turn; child agents can
+  send in-progress `agent_report` notifications back to the parent before they
+  finish. The Web UI has no separate task-send button.
 - **Context** in the session bar opens a side panel with the same report as
   the TUI `/context` modal (`GET /v1/sessions/{id}/context`): one bar per
   section, and each section and item expands to show its text. It re-reads
@@ -1309,6 +1312,11 @@ If `tasks.db` cannot be opened, or was written by a newer Otto with a schema
 this build does not know, Otto prints one warning at startup and runs without
 recording. A write error later in the process stops recording for that
 process without output. Neither affects the task.
+
+`agent_send` messages and `agent_report` progress reports are runtime delivery
+only: they are not rows in `tasks.db`. If the child receives an `agent_send`
+message, it is written into that child's transcript as parent-message context
+when the child reaches the next normal notification checkpoint.
 
 ### Shutdown
 

@@ -130,6 +130,28 @@ export interface WorkspaceList {
   workspaces: WorkspaceEntry[]
 }
 
+// DiffFile is one file entry of GET /v1/workspaces/diff.
+export interface DiffFile {
+  path: string
+  old_path: string | null
+  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked'
+  binary: boolean
+  patch: string
+  truncated: boolean
+}
+
+// WorkspaceDiff is the body of GET /v1/workspaces/diff: the working
+// directory's changes against HEAD (or the empty tree before the first
+// commit). `repository: false` means the directory is not inside a git work
+// tree, not an error.
+export interface WorkspaceDiff {
+  workspace: string
+  repository: boolean
+  branch: string | null
+  files: DiffFile[]
+  truncated: boolean
+}
+
 // SessionStatus is one row of GET /v1/status's snapshot: the status of one
 // open session in this process. `turn` is null when the session has had no
 // turn since it was opened.
@@ -214,6 +236,7 @@ export const api = {
     }),
   listWorkspaces: () => json<WorkspaceList>('/v1/workspaces'),
   addWorkspace: (path: string) => json<WorkspaceEntry>('/v1/workspaces', { method: 'POST', body: JSON.stringify({ path }) }),
+  getWorkspaceDiff: (workspace: string) => json<WorkspaceDiff>(`/v1/workspaces/diff?workspace=${encodeURIComponent(workspace)}`),
   renameSession: (id: string, name: string) =>
     json<Session>(`/v1/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   getSession: (id: string) => json<Session>(`/v1/sessions/${id}`),

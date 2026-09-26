@@ -85,6 +85,16 @@ describe('Sidebar', () => {
     expect(onOpen).toHaveBeenLastCalledWith(undefined, undefined)
   })
 
+  it('calls onOpenChanges(path) when a group header Changes button is clicked', async () => {
+    const onOpenChanges = vi.fn()
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn(), onOpenChanges }))
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Changes' })).toHaveLength(2))
+
+    const appHeader = screen.getByTitle('/Users/me/src/app')
+    fireEvent.click(within(appHeader).getByRole('button', { name: 'Changes' }))
+    expect(onOpenChanges).toHaveBeenCalledWith('/Users/me/src/app')
+  })
+
   it('adds a group on a successful workspace add', async () => {
     api.addWorkspace.mockResolvedValue({ path: '/Users/me/src/new', open_sessions: 0, workflows: true })
     render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))

@@ -63,6 +63,16 @@ export function AgentsView(props: { onError: (e: unknown) => void; onOpenSession
   }, [polling, load, tasks.length])
 
   const selectTask = (t: AgentTask) => api.getAgentTask(t.parent_session, t.task_id).then(setSelected).catch(onError)
+  const closeTask = useCallback(() => setSelected(null), [])
+
+  useEffect(() => {
+    if (!selected) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeTask()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [closeTask, selected])
 
   const cancel = (t: AgentTask) =>
     api
@@ -189,6 +199,9 @@ export function AgentsView(props: { onError: (e: unknown) => void; onOpenSession
                     Cancel
                   </button>
                 )}
+                <button type="button" className="agents-detail-close" onClick={closeTask} aria-label="Close task detail">
+                  ×
+                </button>
               </header>
               <p>{selected.task.prompt}</p>
               {(selected.task.error || selected.task.result) && <pre>{selected.task.error || selected.task.result}</pre>}

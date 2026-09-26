@@ -16,6 +16,10 @@ pub struct Server {
     pub socket: String,
     #[serde(default)]
     pub listen: String,
+    /// Directories, besides the startup workspace, a client may open. Empty
+    /// by default, which admits only the startup workspace.
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
 }
 
 /// The resolved `[server]` configuration for one process. Exactly one of
@@ -27,6 +31,11 @@ pub struct ServerRuntime {
     pub socket: String,
     /// `host:port`, when set.
     pub listen: String,
+    /// `workspace_roots` with `~` expanded, in file order. Not yet
+    /// canonicalized: `otto-core` stays wasm-safe and does no filesystem
+    /// access, so the native caller resolves symlinks and checks each entry
+    /// is an existing directory.
+    pub workspace_roots: Vec<String>,
 }
 
 /// Picks the listener: `listen_override` (`--listen`) > `socket_override`
@@ -40,47 +49,59 @@ pub fn resolve_server(
     socket_override: &str,
     listen_override: &str,
 ) -> Result<ServerRuntime, ConfigError> {
-    if !listen_override.is_empty() {
-        return Ok(ServerRuntime {
+    let mut runtime = if !listen_override.is_empty() {
+        ServerRuntime {
             listen: listen_override.to_string(),
             ..Default::default()
-        });
-    }
-    if !socket_override.is_empty() {
-        return resolve_socket(socket_override, env);
-    }
-    if !file.server.listen.is_empty() {
-        return Ok(ServerRuntime {
+        }
+    } else if !socket_override.is_empty() {
+        resolve_socket(socket_override, env)?
+    } else if !file.server.listen.is_empty() {
+        ServerRuntime {
             listen: file.server.listen.clone(),
             ..Default::default()
-        });
-    }
-    if !file.server.socket.is_empty() {
-        return resolve_socket(&file.server.socket, env);
-    }
-    resolve_socket(DEFAULT_SERVER_SOCKET, env)
+        }
+    } else if !file.server.socket.is_empty() {
+        resolve_socket(&file.server.socket, env)?
+    } else {
+        resolve_socket(DEFAULT_SERVER_SOCKET, env)?
+    };
+    runtime.workspace_roots = file
+        .server
+        .workspace_roots
+        .iter()
+        .map(|root| expand_tilde(root, env, "workspace root"))
+        .collect::<Result<_, _>>()?;
+    Ok(runtime)
 }
 
 fn resolve_socket(
     socket: &str,
     env: &HashMap<String, String>,
 ) -> Result<ServerRuntime, ConfigError> {
-    let Some(rest) = socket.strip_prefix("~/") else {
-        return Ok(ServerRuntime {
-            socket: paths::clean(socket),
-            ..Default::default()
-        });
+    Ok(ServerRuntime {
+        socket: expand_tilde(socket, env, "server socket")?,
+        ..Default::default()
+    })
+}
+
+/// Expands a leading `~/` against `env`'s home directory, like `--cwd` and
+/// `[server].socket` both do; a plain path is only cleaned.
+fn expand_tilde(
+    path: &str,
+    env: &HashMap<String, String>,
+    what: &str,
+) -> Result<String, ConfigError> {
+    let Some(rest) = path.strip_prefix("~/") else {
+        return Ok(paths::clean(path));
     };
     let home = paths::home_from_env(env);
     if home.is_empty() {
         return Err(ConfigError::new(format!(
-            "resolve home directory for server socket \"{socket}\""
+            "resolve home directory for {what} \"{path}\""
         )));
     }
-    Ok(ServerRuntime {
-        socket: paths::clean(&paths::join(home, rest)),
-        ..Default::default()
-    })
+    Ok(paths::clean(&paths::join(home, rest)))
 }
 
 #[cfg(test)]
@@ -105,7 +126,8 @@ mod tests {
             runtime,
             ServerRuntime {
                 socket: "/override/otto.sock".into(),
-                listen: String::new()
+                listen: String::new(),
+                workspace_roots: Vec::new(),
             }
         );
     }
@@ -153,7 +175,8 @@ mod tests {
             runtime,
             ServerRuntime {
                 socket: String::new(),
-                listen: "127.0.0.1:2".into()
+                listen: "127.0.0.1:2".into(),
+                workspace_roots: Vec::new(),
             }
         );
     }
@@ -169,7 +192,8 @@ mod tests {
             runtime,
             ServerRuntime {
                 socket: "/override/otto.sock".into(),
-                listen: String::new()
+                listen: String::new(),
+                workspace_roots: Vec::new(),
             }
         );
     }
@@ -185,7 +209,8 @@ mod tests {
             runtime,
             ServerRuntime {
                 socket: String::new(),
-                listen: "127.0.0.1:1".into()
+                listen: "127.0.0.1:1".into(),
+                workspace_roots: Vec::new(),
             }
         );
     }
@@ -205,5 +230,44 @@ mod tests {
         let err = super::super::parse("[server]\nsocket = \"/x/otto.sock\"\nunknown = true\n")
             .unwrap_err();
         assert!(err.to_string().contains("unknown"), "{err}");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn workspace_roots_default_to_empty() {
+        assert!(File::default().server.workspace_roots.is_empty());
+        let runtime = resolve_server(&File::default(), &env("/home"), "", "").expect("resolve");
+        assert!(runtime.workspace_roots.is_empty());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn workspace_roots_parse_from_toml() {
+        let file = super::super::parse("[server]\nworkspace_roots = [\"/a\", \"~/Work\"]\n")
+            .expect("parse");
+        assert_eq!(
+            file.server.workspace_roots,
+            vec!["/a".to_string(), "~/Work".to_string()]
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn workspace_roots_expand_tilde_like_the_socket() {
+        let mut file = File::default();
+        file.server.workspace_roots = vec!["/a".into(), "~/Work".into()];
+        let runtime = resolve_server(&file, &env("/home"), "", "").expect("resolve");
+        assert_eq!(
+            runtime.workspace_roots,
+            vec!["/a".to_string(), "/home/Work".to_string()]
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn workspace_roots_tilde_with_no_home_errors() {
+        let mut file = File::default();
+        file.server.workspace_roots = vec!["~/Work".into()];
+        assert!(resolve_server(&file, &HashMap::new(), "", "").is_err());
     }
 }

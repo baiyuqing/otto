@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
@@ -27,6 +27,7 @@ use crate::session::{self as sessionfs, MAX_LIST_SESSIONS};
 
 use super::info::SandboxInfo;
 use super::runtime_builder::Builder;
+use super::sandbox_runtime::canonical_directory;
 use super::sandbox_switch::{SandboxReloader, SandboxSwitch};
 
 /// Writes `otto: {message}\n` and returns exit code 1.
@@ -47,12 +48,17 @@ struct WorkspaceHost {
 /// The workspaces this server process has loaded, keyed by canonical path.
 ///
 /// This slice loads only the startup workspace, so `loaded` always holds
-/// exactly the one entry named by `startup`. Admission, `workspace_roots`,
-/// and loading a second workspace on first use are later slices; see
-/// `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server
+/// exactly the one entry named by `startup`. Loading a second workspace on
+/// first use, and wiring `admit_workspace` to an HTTP route, are later
+/// slices; see `docs/specs/2026-09-26-serve-multiple-workspaces.md` ("Server
 /// structure").
 struct Workspaces {
     startup: String,
+    /// Canonical `[server].workspace_roots`. Not yet read by any route: it
+    /// exists so `admit_workspace` has something to check once slice 3 adds
+    /// `GET/POST /v1/workspaces`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    roots: Vec<PathBuf>,
     loaded: BTreeMap<String, Arc<WorkspaceHost>>,
 }
 
@@ -62,6 +68,60 @@ impl Workspaces {
             .get(&self.startup)
             .expect("the startup workspace is always loaded")
     }
+
+    /// Whether `requested` may be opened: the startup workspace or a
+    /// descendant of one of `self.roots`. No route calls this yet.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn admit(&self, requested: &str) -> Result<PathBuf, Admission> {
+        admit_workspace(requested, Path::new(&self.startup), &self.roots)
+    }
+}
+
+// ---- admission ----
+
+/// Why a requested workspace path was rejected.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum Admission {
+    /// The path does not resolve to an existing directory.
+    Invalid,
+    /// A real directory, but neither the startup workspace nor a descendant
+    /// of any `workspace_roots` entry.
+    NotAdmitted,
+}
+
+/// Canonicalizes `requested` and admits it when it is `startup` or a
+/// descendant of one entry in `roots` (a root itself is admitted).
+/// `canonical_directory` resolves symlinks before the comparison, so a link
+/// inside a root that points outside it is rejected as `NotAdmitted`, and a
+/// missing path or a file is rejected as `Invalid`. The comparison is by path
+/// component (`Path::starts_with`), so `/root-x` is not a descendant of
+/// `/root`.
+#[cfg_attr(not(test), allow(dead_code))]
+fn admit_workspace(
+    requested: &str,
+    startup: &Path,
+    roots: &[PathBuf],
+) -> Result<PathBuf, Admission> {
+    let canonical = canonical_directory(Path::new(requested)).map_err(|_| Admission::Invalid)?;
+    if canonical == startup || roots.iter().any(|root| canonical.starts_with(root)) {
+        Ok(canonical)
+    } else {
+        Err(Admission::NotAdmitted)
+    }
+}
+
+/// Canonicalizes `[server].workspace_roots` once at startup. A root that does
+/// not resolve to an existing directory is a startup error naming the config
+/// key and the offending path, not a per-request admission failure.
+fn canonicalize_workspace_roots(raw_roots: &[String]) -> Result<Vec<PathBuf>, String> {
+    raw_roots
+        .iter()
+        .map(|root| {
+            canonical_directory(Path::new(root))
+                .map_err(|error| format!("[server] workspace_roots: \"{root}\": {error}"))
+        })
+        .collect()
 }
 
 // ---- the session factory ----
@@ -204,6 +264,14 @@ pub async fn run(
         return fail(stderr, &message);
     }
 
+    let workspace_roots = match canonicalize_workspace_roots(&listen.workspace_roots) {
+        Ok(roots) => roots,
+        Err(message) => {
+            let _ = control.close().await;
+            return fail(stderr, &builder.redact_error(&message, Some(&runtime)));
+        }
+    };
+
     let serve_cancel = cancel.child_token();
     let bound = match bind(&listen) {
         Ok(bound) => bound,
@@ -240,6 +308,7 @@ pub async fn run(
     });
     let workspaces = Workspaces {
         startup: workspace_path.clone(),
+        roots: workspace_roots,
         loaded: BTreeMap::from([(workspace_path, Arc::clone(&host))]),
     };
     let server = Server::new(Options {
@@ -388,6 +457,7 @@ mod tests {
         let unix = ServerRuntime {
             socket: "/tmp/otto.sock".into(),
             listen: String::new(),
+            ..Default::default()
         };
         assert_eq!(
             require_tcp_for_open(true, &unix).unwrap_err(),
@@ -397,6 +467,7 @@ mod tests {
         let tcp = ServerRuntime {
             socket: String::new(),
             listen: "127.0.0.1:0".into(),
+            ..Default::default()
         };
         assert!(require_tcp_for_open(true, &tcp).is_ok());
     }
@@ -436,5 +507,167 @@ mod tests {
                 "otto serve: http://127.0.0.1:8787/?token=tok\n"
             );
         });
+    }
+
+    // ---- admission ----
+
+    #[test]
+    fn the_startup_workspace_is_admitted_with_no_roots() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let admitted =
+            admit_workspace(&startup_path.to_string_lossy(), &startup_path, &[]).expect("admitted");
+        assert_eq!(admitted, startup_path);
+    }
+
+    #[test]
+    fn a_root_itself_is_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let root = tempfile::tempdir().expect("root");
+        let root_path = canonical_directory(root.path()).expect("canonical");
+        let admitted = admit_workspace(
+            &root_path.to_string_lossy(),
+            &startup_path,
+            std::slice::from_ref(&root_path),
+        )
+        .expect("admitted");
+        assert_eq!(admitted, root_path);
+    }
+
+    #[test]
+    fn a_descendant_of_a_root_is_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let root = tempfile::tempdir().expect("root");
+        let root_path = canonical_directory(root.path()).expect("canonical");
+        let child = root_path.join("project");
+        std::fs::create_dir(&child).expect("child");
+        let admitted =
+            admit_workspace(&child.to_string_lossy(), &startup_path, &[root_path]).expect("ok");
+        assert_eq!(admitted, child);
+    }
+
+    #[test]
+    fn a_sibling_of_a_root_is_not_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let parent = tempfile::tempdir().expect("parent");
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let root_path = canonical_directory(&root).expect("canonical");
+        let sibling = parent.path().join("sibling");
+        std::fs::create_dir(&sibling).expect("sibling");
+        assert_eq!(
+            admit_workspace(&sibling.to_string_lossy(), &startup_path, &[root_path]),
+            Err(Admission::NotAdmitted)
+        );
+    }
+
+    #[test]
+    fn a_prefix_lookalike_sibling_is_not_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let parent = tempfile::tempdir().expect("parent");
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let root_path = canonical_directory(&root).expect("canonical");
+        let lookalike = parent.path().join("root-x");
+        std::fs::create_dir(&lookalike).expect("lookalike");
+        assert_eq!(
+            admit_workspace(&lookalike.to_string_lossy(), &startup_path, &[root_path]),
+            Err(Admission::NotAdmitted)
+        );
+    }
+
+    #[test]
+    fn a_symlink_inside_a_root_pointing_outside_is_not_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let root = tempfile::tempdir().expect("root");
+        let root_path = canonical_directory(root.path()).expect("canonical");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_path = canonical_directory(outside.path()).expect("canonical");
+        let link = root_path.join("escape");
+        std::os::unix::fs::symlink(&outside_path, &link).expect("symlink");
+        assert_eq!(
+            admit_workspace(&link.to_string_lossy(), &startup_path, &[root_path]),
+            Err(Admission::NotAdmitted)
+        );
+    }
+
+    #[test]
+    fn a_missing_path_is_invalid() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let missing = startup.path().join("does-not-exist");
+        assert_eq!(
+            admit_workspace(&missing.to_string_lossy(), &startup_path, &[]),
+            Err(Admission::Invalid)
+        );
+    }
+
+    #[test]
+    fn a_file_is_invalid_not_a_directory() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let file = startup.path().join("file.txt");
+        std::fs::write(&file, b"hi").expect("write");
+        assert_eq!(
+            admit_workspace(&file.to_string_lossy(), &startup_path, &[]),
+            Err(Admission::Invalid)
+        );
+    }
+
+    #[test]
+    fn empty_roots_admits_only_the_startup_path() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let other = tempfile::tempdir().expect("other");
+        let other_path = canonical_directory(other.path()).expect("canonical");
+        assert!(admit_workspace(&startup_path.to_string_lossy(), &startup_path, &[]).is_ok());
+        assert_eq!(
+            admit_workspace(&other_path.to_string_lossy(), &startup_path, &[]),
+            Err(Admission::NotAdmitted)
+        );
+    }
+
+    #[test]
+    fn workspaces_admit_reads_startup_and_roots() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let root = tempfile::tempdir().expect("root");
+        let root_path = canonical_directory(root.path()).expect("canonical");
+        let workspaces = Workspaces {
+            startup: startup_path.to_string_lossy().into_owned(),
+            roots: vec![root_path.clone()],
+            loaded: BTreeMap::new(),
+        };
+        assert!(workspaces.admit(&startup_path.to_string_lossy()).is_ok());
+        assert_eq!(
+            workspaces.admit(&root_path.to_string_lossy()),
+            Ok(root_path)
+        );
+    }
+
+    #[test]
+    fn a_nonexistent_root_is_a_startup_error_naming_the_key_and_path() {
+        let error = canonicalize_workspace_roots(&["/does/not/exist".to_string()]).unwrap_err();
+        assert!(error.contains("workspace_roots"), "{error}");
+        assert!(error.contains("/does/not/exist"), "{error}");
+    }
+
+    #[test]
+    fn valid_roots_canonicalize_in_order() {
+        let a = tempfile::tempdir().expect("a");
+        let b = tempfile::tempdir().expect("b");
+        let canonical_a = canonical_directory(a.path()).expect("canonical");
+        let canonical_b = canonical_directory(b.path()).expect("canonical");
+        let roots = canonicalize_workspace_roots(&[
+            a.path().to_string_lossy().into_owned(),
+            b.path().to_string_lossy().into_owned(),
+        ])
+        .expect("canonicalize");
+        assert_eq!(roots, vec![canonical_a, canonical_b]);
     }
 }

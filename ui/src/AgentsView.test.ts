@@ -150,6 +150,25 @@ describe('AgentsView', () => {
     await waitFor(() => expect(api.cancelTask).toHaveBeenCalledWith('01JRUNNING', 't1'))
   })
 
+  it('closes the selected task detail with the close button or Escape', async () => {
+    render(createElement(AgentsView, { onError: vi.fn(), onOpenSession: vi.fn() }))
+    await screen.findByText('review the diff')
+
+    fireEvent.click(screen.getByText('review the diff'))
+    expect(await screen.findByText('review this')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /close task detail/i }))
+    expect(screen.queryByText('review this')).toBeNull()
+    expect(screen.getByText('Select a task.')).toBeTruthy()
+
+    fireEvent.click(screen.getByText('review the diff'))
+    expect(await screen.findByText('review this')).toBeTruthy()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByText('review this')).toBeNull()
+    expect(screen.getByText('Select a task.')).toBeTruthy()
+  })
+
   it('opens the parent session in Chat when the server owns it, otherwise shows the path', async () => {
     const onOpenSession = vi.fn()
     render(createElement(AgentsView, { onError: vi.fn(), onOpenSession }))

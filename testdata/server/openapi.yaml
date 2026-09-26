@@ -715,6 +715,9 @@ paths:
                 resume:
                   type: string
                   description: An existing session id. Omit to create a new session.
+                workspace:
+                  type: string
+                  description: An admitted workspace path to create or resume in. Defaults to the startup workspace; loaded if not already.
       responses:
         "201":
           description: New session created
@@ -729,7 +732,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Session"
         "400":
-          description: Invalid JSON body
+          description: Invalid JSON body, or workspace not an absolute, existing directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: workspace is outside the startup workspace and configured roots
           content:
             application/json:
               schema:
@@ -748,6 +757,13 @@ paths:
                 $ref: "#/components/schemas/Error"
     get:
       summary: List sessions (disk sessions merged with open sessions)
+      parameters:
+        - name: workspace
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Restrict to one admitted workspace, loaded if not already. Omit to list every loaded workspace's sessions.
       responses:
         "200":
           description: OK
@@ -755,6 +771,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionList"
+        "400":
+          description: workspace not an absolute, existing directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: workspace is outside the startup workspace and configured roots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/sessions/{id}:
     parameters:
       - $ref: "#/components/parameters/sessionID"

@@ -80,13 +80,17 @@ pub struct Info {
 /// such capability.
 #[async_trait::async_trait]
 pub trait Factory: Send + Sync {
-    /// A brand new session.
-    async fn create(&self) -> Result<Controller, String>;
+    /// A brand new session. `workspace` is the canonical path of an already
+    /// admitted-and-loaded workspace; `None` means the startup workspace.
+    async fn create(&self, workspace: Option<&str>) -> Result<Controller, String>;
     /// An existing session by id. [`SESSION_NOT_FOUND`] means 404.
-    async fn open(&self, id: &str) -> Result<Controller, String>;
-    /// The sessions on disk. `None` disables the disk half of `GET
-    /// /v1/sessions`.
-    fn list(&self) -> Option<Result<ListResult, String>> {
+    /// `workspace` searches just that workspace; `None` searches every
+    /// loaded workspace.
+    async fn open(&self, id: &str, workspace: Option<&str>) -> Result<Controller, String>;
+    /// The sessions on disk for `workspace` (`None`: every loaded workspace,
+    /// merged newest-first and capped at `MAX_LIST_SESSIONS`). `None` at the
+    /// outer `Option` disables the disk half of `GET /v1/sessions`.
+    async fn list(&self, _workspace: Option<&str>) -> Option<Result<ListResult, String>> {
         None
     }
     /// Whether `POST /v1/sandbox/reload` is wired at all. Checked before the
@@ -543,9 +547,10 @@ impl Server {
     async fn resume_or_create(
         self: &Arc<Self>,
         id: &str,
+        workspace: Option<&str>,
     ) -> Result<(Arc<OpenSession>, bool), String> {
         if id.is_empty() {
-            let ctrl = self.factory.create().await?;
+            let ctrl = self.factory.create(workspace).await?;
             return Ok((self.register(ctrl), true));
         }
         if let Some(existing) = self.lookup(id) {
@@ -557,7 +562,7 @@ impl Server {
         if let Some(existing) = self.lookup(id) {
             return Ok((existing, false));
         }
-        let ctrl = self.factory.open(id).await?;
+        let ctrl = self.factory.open(id, workspace).await?;
         Ok((self.register(ctrl), false))
     }
 
@@ -1020,6 +1025,22 @@ fn bad_request(message: &str) -> Response {
     error_response(StatusCode::BAD_REQUEST, "bad_request", message)
 }
 
+/// The response for a [`WorkspaceLoadError`], shared by every route that
+/// admits a caller-named workspace before acting on it.
+pub(crate) fn workspace_load_error_response(error: WorkspaceLoadError) -> Response {
+    match error {
+        WorkspaceLoadError::Invalid(message) => {
+            error_response(StatusCode::BAD_REQUEST, "INVALID_WORKSPACE", &message)
+        }
+        WorkspaceLoadError::NotAdmitted(message) => {
+            error_response(StatusCode::FORBIDDEN, "WORKSPACE_NOT_ADMITTED", &message)
+        }
+        WorkspaceLoadError::Failed(message) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &message)
+        }
+    }
+}
+
 fn turn_active(message: &str) -> Response {
     error_response(StatusCode::CONFLICT, "turn_active", message)
 }
@@ -1100,6 +1121,11 @@ struct HealthzWire {
 struct CreateBody {
     #[serde(default)]
     resume: String,
+    /// Admitted and loaded before use; absent means the startup workspace.
+    /// With `resume`, the session is searched in this workspace, or in
+    /// every loaded workspace when absent.
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 async fn create_session(State(server): State<Arc<Server>>, body: Bytes) -> Response {
@@ -1113,7 +1139,18 @@ async fn create_session(State(server): State<Arc<Server>>, body: Bytes) -> Respo
         }
     };
 
-    match server.resume_or_create(&parsed.resume).await {
+    let workspace = match &parsed.workspace {
+        Some(path) => match server.factory.load_workspace(path).await {
+            Ok((info, _newly_loaded)) => Some(info.path),
+            Err(error) => return workspace_load_error_response(error),
+        },
+        None => None,
+    };
+
+    match server
+        .resume_or_create(&parsed.resume, workspace.as_deref())
+        .await
+    {
         Ok((session, created)) => {
             let status = if created {
                 StatusCode::CREATED
@@ -1127,8 +1164,25 @@ async fn create_session(State(server): State<Arc<Server>>, body: Bytes) -> Respo
     }
 }
 
-async fn list_sessions(State(server): State<Arc<Server>>) -> Response {
-    let disk = match server.factory.list() {
+#[derive(Debug, Default, Deserialize)]
+struct ListSessionsQuery {
+    /// Admitted and loaded before use; absent lists every loaded workspace.
+    workspace: Option<String>,
+}
+
+async fn list_sessions(
+    State(server): State<Arc<Server>>,
+    Query(query): Query<ListSessionsQuery>,
+) -> Response {
+    let workspace = match &query.workspace {
+        Some(path) => match server.factory.load_workspace(path).await {
+            Ok((info, _newly_loaded)) => Some(info.path),
+            Err(error) => return workspace_load_error_response(error),
+        },
+        None => None,
+    };
+
+    let disk = match server.factory.list(workspace.as_deref()).await {
         Some(Ok(result)) => result,
         Some(Err(error)) => return internal_error(&server.log, &error),
         None => ListResult::default(),
@@ -1138,7 +1192,13 @@ async fn list_sessions(State(server): State<Arc<Server>>) -> Response {
         .sessions
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
+        .iter()
+        .filter(|(_, session)| match &workspace {
+            Some(path) => session.ctrl.workspace() == path,
+            None => true,
+        })
+        .map(|(id, session)| (id.clone(), Arc::clone(session)))
+        .collect();
 
     let mut rows = Vec::with_capacity(disk.sessions.len() + open.len());
     let mut seen = std::collections::HashSet::new();
@@ -1579,7 +1639,7 @@ mod tests {
         Provider, ProviderError, Request as ProviderRequest, Response as ProviderResponse,
         StreamEvent, StreamSink,
     };
-    use otto_core::session::{CURRENT_VERSION, Header, ListResult};
+    use otto_core::session::{CURRENT_VERSION, Header, ListResult, SessionInfo};
     use otto_core::wire::sse::{Frame, parse_frames};
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1762,6 +1822,9 @@ mod tests {
         /// empty defaults, matching a process with no recorder wired.
         task_recorder: Option<Arc<crate::subagent::record::Store>>,
         workspaces: FakeWorkspaces,
+        /// Canned `Factory::list` answer for a named workspace (`?workspace=`).
+        /// An absent key falls back to `list`.
+        list_by_workspace: HashMap<String, ListResult>,
         create_calls: AtomicUsize,
         open_calls: AtomicUsize,
     }
@@ -1803,7 +1866,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Factory for TestFactory {
-        async fn create(&self) -> Result<Controller, String> {
+        async fn create(&self, _workspace: Option<&str>) -> Result<Controller, String> {
             self.create_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(error) = &self.create_error {
                 return Err(error.clone());
@@ -1815,7 +1878,7 @@ mod tests {
             Ok(self.controller(&id))
         }
 
-        async fn open(&self, id: &str) -> Result<Controller, String> {
+        async fn open(&self, id: &str, _workspace: Option<&str>) -> Result<Controller, String> {
             self.open_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = &self.open_gate {
                 gate.cancelled().await;
@@ -1826,8 +1889,16 @@ mod tests {
             Ok(self.controller(id))
         }
 
-        fn list(&self) -> Option<Result<ListResult, String>> {
-            self.list.clone().map(Ok)
+        async fn list(&self, workspace: Option<&str>) -> Option<Result<ListResult, String>> {
+            match workspace {
+                Some(path) => self
+                    .list_by_workspace
+                    .get(path)
+                    .cloned()
+                    .map(Ok)
+                    .or_else(|| self.list.clone().map(Ok)),
+                None => self.list.clone().map(Ok),
+            }
         }
 
         fn tasks_list(
@@ -1948,6 +2019,7 @@ mod tests {
         open_error: Option<String>,
         open_gate: Option<CancellationToken>,
         list: Option<ListResult>,
+        list_by_workspace: HashMap<String, ListResult>,
         tasks: Option<Arc<crate::subagent::tasks::Tasks>>,
         task_recorder: Option<Arc<crate::subagent::record::Store>>,
         workflows: Option<Arc<crate::workflow::Controller>>,
@@ -1988,6 +2060,7 @@ mod tests {
                 open_error: options.open_error,
                 open_gate: options.open_gate,
                 list: options.list,
+                list_by_workspace: options.list_by_workspace,
                 tasks: options.tasks,
                 task_recorder: options.task_recorder,
                 workspaces,
@@ -2479,6 +2552,160 @@ mod tests {
             rows[0].get("path").is_none(),
             "an open-only row has no path"
         );
+    }
+
+    // ---- sessions across workspaces ----
+
+    #[tokio::test]
+    async fn creating_a_session_in_an_unadmitted_workspace_answers_403() {
+        let harness = Harness::new();
+        let reply = harness
+            .send(
+                "POST",
+                "/v1/sessions",
+                Some(r#"{"workspace":"/elsewhere"}"#),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_ADMITTED");
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_in_an_invalid_workspace_answers_400() {
+        let harness = Harness::new();
+        let reply = harness
+            .send("POST", "/v1/sessions", Some(r#"{"workspace":"relative"}"#))
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "INVALID_WORKSPACE");
+    }
+
+    #[tokio::test]
+    async fn creating_a_session_in_an_admitted_workspace_succeeds() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let reply = harness
+            .send("POST", "/v1/sessions", Some(r#"{"workspace":"/other"}"#))
+            .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    }
+
+    #[tokio::test]
+    async fn resuming_by_id_finds_the_session_with_or_without_a_workspace_field() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let id = harness.create().await;
+
+        let without = harness
+            .send(
+                "POST",
+                "/v1/sessions",
+                Some(&format!(r#"{{"resume":"{id}"}}"#)),
+            )
+            .await;
+        assert_eq!(without.status, StatusCode::OK, "{}", without.body);
+        assert_eq!(without.json()["id"], id.as_str());
+
+        // Already open, so the registry answers without consulting the
+        // named workspace at all.
+        let with = harness
+            .send(
+                "POST",
+                "/v1/sessions",
+                Some(&format!(r#"{{"resume":"{id}","workspace":"/other"}}"#)),
+            )
+            .await;
+        assert_eq!(with.status, StatusCode::OK, "{}", with.body);
+        assert_eq!(with.json()["id"], id.as_str());
+    }
+
+    #[tokio::test]
+    async fn listing_sessions_returns_every_workspace_tagged_by_default() {
+        let harness = Harness::with(HarnessOptions {
+            list: Some(ListResult {
+                sessions: vec![
+                    SessionInfo {
+                        id: "a1".to_string(),
+                        cwd: "/workspace-a".to_string(),
+                        ..SessionInfo::default()
+                    },
+                    SessionInfo {
+                        id: "b1".to_string(),
+                        cwd: "/workspace-b".to_string(),
+                        ..SessionInfo::default()
+                    },
+                ],
+                skipped: 0,
+            }),
+            ..HarnessOptions::default()
+        });
+        let body = harness.send("GET", "/v1/sessions", None).await.json();
+        let rows = body["sessions"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        let row = |id: &str| rows.iter().find(|row| row["id"] == id).expect("row");
+        assert_eq!(row("a1")["workspace"], "/workspace-a");
+        assert_eq!(row("b1")["workspace"], "/workspace-b");
+    }
+
+    #[tokio::test]
+    async fn listing_sessions_with_a_workspace_query_filters_to_that_workspace() {
+        let mut list_by_workspace = HashMap::new();
+        list_by_workspace.insert(
+            "/other".to_string(),
+            ListResult {
+                sessions: vec![SessionInfo {
+                    id: "b1".to_string(),
+                    cwd: "/other".to_string(),
+                    ..SessionInfo::default()
+                }],
+                skipped: 0,
+            },
+        );
+        let harness = Harness::with(HarnessOptions {
+            list: Some(ListResult {
+                sessions: vec![SessionInfo {
+                    id: "a1".to_string(),
+                    cwd: "/workspace-a".to_string(),
+                    ..SessionInfo::default()
+                }],
+                skipped: 0,
+            }),
+            list_by_workspace,
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let body = harness
+            .send("GET", "/v1/sessions?workspace=/other", None)
+            .await
+            .json();
+        let rows = body["sessions"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "b1");
+        assert_eq!(rows[0]["workspace"], "/other");
+    }
+
+    #[tokio::test]
+    async fn listing_sessions_with_an_unadmitted_workspace_answers_403() {
+        let harness = Harness::new();
+        let reply = harness
+            .send("GET", "/v1/sessions?workspace=/elsewhere", None)
+            .await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "WORKSPACE_NOT_ADMITTED");
     }
 
     // ---- turns ----

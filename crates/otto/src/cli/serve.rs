@@ -79,6 +79,14 @@ impl Workspaces {
         admit_workspace(requested, Path::new(&self.startup), &self.roots)
     }
 
+    /// The host loaded for `path`, if any.
+    async fn host(&self, path: &str) -> Option<Arc<WorkspaceHost>> {
+        if path == self.startup {
+            return Some(Arc::clone(&self.startup_host));
+        }
+        self.loaded.lock().await.get(path).cloned()
+    }
+
     /// Every loaded workspace, startup first then by path.
     async fn list(&self) -> Vec<(String, Arc<WorkspaceHost>)> {
         let loaded = self.loaded.lock().await;
@@ -203,25 +211,24 @@ struct ServeFactory {
     cancel: CancellationToken,
 }
 
+/// The sessions for one workspace's builder, with a missing session root
+/// reported as no sessions.
+fn listed_for(builder: &Builder) -> Result<ListResult, String> {
+    if !builder.session_root.exists() {
+        return Ok(ListResult::default());
+    }
+    sessionfs::list(
+        &builder.session_root,
+        &builder.workspace_path,
+        "",
+        MAX_LIST_SESSIONS,
+    )
+    .map_err(|error| builder.redact_error(&error.to_string(), None))
+}
+
 impl ServeFactory {
     fn builder(&self) -> &Arc<Builder> {
         &self.workspaces.startup_host().builder
-    }
-
-    /// The sessions for the workspace, with a missing session root reported as
-    /// no sessions.
-    fn listed(&self) -> Result<ListResult, String> {
-        let builder = self.builder();
-        if !builder.session_root.exists() {
-            return Ok(ListResult::default());
-        }
-        sessionfs::list(
-            &builder.session_root,
-            &builder.workspace_path,
-            "",
-            MAX_LIST_SESSIONS,
-        )
-        .map_err(|error| builder.redact_error(&error.to_string(), None))
     }
 
     fn wire(&self, controller: Controller) -> Controller {
@@ -232,29 +239,80 @@ impl ServeFactory {
             None => controller,
         }
     }
+
+    /// The hosts `open`/`list` search: just `workspace`'s host when named,
+    /// every loaded host otherwise. `None` when a named workspace is not
+    /// loaded.
+    async fn hosts_for(&self, workspace: Option<&str>) -> Option<Vec<Arc<WorkspaceHost>>> {
+        match workspace {
+            Some(path) => Some(vec![self.workspaces.host(path).await?]),
+            None => Some(
+                self.workspaces
+                    .list()
+                    .await
+                    .into_iter()
+                    .map(|(_, host)| host)
+                    .collect(),
+            ),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl Factory for ServeFactory {
-    async fn create(&self) -> Result<Controller, String> {
-        let controller = Controller::create(Arc::clone(self.builder()), &self.runtime).await?;
-        Ok(self.wire(controller))
-    }
-
-    async fn open(&self, id: &str) -> Result<Controller, String> {
-        let listed = self.listed()?;
-        let Some(entry) = listed.sessions.into_iter().find(|entry| entry.id == id) else {
-            return Err(SESSION_NOT_FOUND.to_string());
+    async fn create(&self, workspace: Option<&str>) -> Result<Controller, String> {
+        let host = match workspace {
+            Some(path) => self
+                .workspaces
+                .host(path)
+                .await
+                .ok_or_else(|| format!("workspace not loaded: {path}"))?,
+            None => Arc::clone(self.workspaces.startup_host()),
         };
-        // The repair warnings the CLI prints have no channel here; the web UI
-        // reads the repaired history like any other.
-        let (controller, _warnings) =
-            Controller::open(Arc::clone(self.builder()), Path::new(&entry.path)).await?;
+        let controller = Controller::create(Arc::clone(&host.builder), &self.runtime).await?;
         Ok(self.wire(controller))
     }
 
-    fn list(&self) -> Option<Result<ListResult, String>> {
-        Some(self.listed())
+    async fn open(&self, id: &str, workspace: Option<&str>) -> Result<Controller, String> {
+        let hosts = self
+            .hosts_for(workspace)
+            .await
+            .ok_or_else(|| SESSION_NOT_FOUND.to_string())?;
+        for host in &hosts {
+            let Ok(listed) = listed_for(&host.builder) else {
+                continue;
+            };
+            if let Some(entry) = listed.sessions.into_iter().find(|entry| entry.id == id) {
+                // The repair warnings the CLI prints have no channel here;
+                // the web UI reads the repaired history like any other.
+                let (controller, _warnings) =
+                    Controller::open(Arc::clone(&host.builder), Path::new(&entry.path)).await?;
+                return Ok(self.wire(controller));
+            }
+        }
+        Err(SESSION_NOT_FOUND.to_string())
+    }
+
+    async fn list(&self, workspace: Option<&str>) -> Option<Result<ListResult, String>> {
+        let hosts = self.hosts_for(workspace).await?;
+        let mut sessions = Vec::new();
+        let mut skipped = 0i64;
+        for host in &hosts {
+            match listed_for(&host.builder) {
+                Ok(result) => {
+                    sessions.extend(result.sessions);
+                    skipped += result.skipped;
+                }
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        if workspace.is_none() {
+            // Each host's own list is already newest-first and capped; the
+            // merge needs the same cap re-applied across all of them.
+            sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
+            sessions.truncate(MAX_LIST_SESSIONS);
+        }
+        Some(Ok(ListResult { sessions, skipped }))
     }
 
     fn sandbox_reload_available(&self) -> bool {
@@ -908,6 +966,48 @@ mod tests {
             .await
             .expect("load after fixing the path");
         assert!(newly_loaded);
+    }
+
+    /// A session created for a named, already-loaded workspace uses that
+    /// workspace's own `Builder`: its `Controller::workspace()` and its
+    /// file-tool `Workspace` root are both that workspace, not the startup
+    /// one.
+    #[tokio::test]
+    async fn create_in_a_named_workspace_uses_that_workspaces_builder() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let startup_sessions = tempfile::tempdir().expect("startup sessions");
+        let startup_host = dummy_host(&startup_path, startup_sessions.path());
+
+        let other = tempfile::tempdir().expect("other workspace");
+        let other_path = canonical_directory(other.path()).expect("canonical");
+        let other_sessions = tempfile::tempdir().expect("other sessions");
+        let other_host = dummy_host(&other_path, other_sessions.path());
+
+        let mut loaded = BTreeMap::new();
+        loaded.insert(
+            other_path.to_string_lossy().into_owned(),
+            Arc::clone(&other_host),
+        );
+        let runtime = crate::cli::testutil::initial_runtime(&other_host.builder);
+        let factory = ServeFactory {
+            workspaces: Workspaces {
+                startup: startup_path.to_string_lossy().into_owned(),
+                startup_host,
+                roots: Vec::new(),
+                loaded: tokio::sync::Mutex::new(loaded),
+            },
+            runtime,
+            cancel: CancellationToken::new(),
+        };
+
+        let controller = factory
+            .create(Some(&other_path.to_string_lossy()))
+            .await
+            .expect("create in workspace B");
+
+        assert_eq!(controller.workspace(), other_path.to_string_lossy());
+        assert_eq!(other_host.builder.workspace.root(), other_path);
     }
 
     #[test]

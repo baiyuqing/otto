@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use super::{Server, WorkspaceLoadError, error_response, json_response};
+use super::{Server, json_response, workspace_load_error_response};
 
 #[derive(Serialize)]
 struct Entry {
@@ -79,14 +79,6 @@ pub async fn register(
             };
             json_response(status, &entry)
         }
-        Err(WorkspaceLoadError::Invalid(message)) => {
-            error_response(StatusCode::BAD_REQUEST, "INVALID_WORKSPACE", &message)
-        }
-        Err(WorkspaceLoadError::NotAdmitted(message)) => {
-            error_response(StatusCode::FORBIDDEN, "WORKSPACE_NOT_ADMITTED", &message)
-        }
-        Err(WorkspaceLoadError::Failed(message)) => {
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal", &message)
-        }
+        Err(error) => workspace_load_error_response(error),
     }
 }

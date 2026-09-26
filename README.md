@@ -165,8 +165,12 @@ Interactive task commands:
 /task cancel <id|name> cancel a queued or running task
 ```
 
-Child agents cannot start nested agents, and their transcripts are not
-persisted.
+Child agents cannot start nested agents. They can use their child-only
+`agent_report` tool to send progress updates, blockers, plans, or interim
+findings to the parent before they finish. The parent can send a follow-up
+task update to a queued or running child with the `agent_send` tool; the child
+reads it at the next safe checkpoint, not by interrupting an in-flight provider
+or tool call. Child transcripts are not persisted.
 
 ### Run a durable workflow
 
@@ -220,7 +224,10 @@ never retried automatically.
   deletion, or search.
 - No automatic memory extraction or memory backup/restore/verify commands.
 - No per-skill `allowed-tools` enforcement.
-- No nested sub-agent delegation; child transcripts are not persisted.
+- No nested sub-agent delegation; child agents can send in-progress reports to
+  the parent with `agent_report`; parent-to-child `agent_send` delivery waits
+  for the child's next safe checkpoint and does not interrupt an in-flight
+  provider or tool call; child transcripts are not persisted.
 - Durable workflows are acyclic: no loops, conditions, group chat, nested
   workflows, or automatic retry. Static `handoff` steps can pass control to a
   named next agent; `fork` creates a new run from a committed step boundary

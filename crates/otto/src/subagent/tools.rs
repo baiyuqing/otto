@@ -30,11 +30,13 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 const DEFAULT_WAIT_TIMEOUT_SECONDS: i64 = 600;
 const MAX_WAIT_TIMEOUT_SECONDS: i64 = 3600;
 
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and never sees what you do after this call. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress. Put everything the sub-agent needs into prompt: goal, relevant paths, what to report back. Pass agent to use a named definition from the Agents list.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
 const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown.";
 
 const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error.";
+
+const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the user adds constraints, clarifies priorities, provides new facts, or asks the child to adjust direction. The child reads updates at the next safe checkpoint; this does not interrupt an in-flight provider or tool call. It cannot be sent to a finished task.";
 
 const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): it sees only prompt. inherit: it also receives a copy of this conversation up to this call. Prefer, in order: (1) fresh with a self-contained prompt: goal, paths, constraints, what to report back; (2) fresh, with the context you already obtained pasted into prompt (file excerpts, tool output, decisions), so the sub-agent skips the tool calls that produced it; (3) inherit, when that context is too large or too scattered to paste and the sub-agent would otherwise repeat expensive tool calls. A sub-agent never shares your prompt cache, so inherit costs one full uncached pass over this conversation per sub-agent, and everything irrelevant to the task goes in with it.";
 
@@ -48,6 +50,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         agent_definition(),
         agent_wait_definition(),
         agent_status_definition(),
+        agent_send_definition(),
     ]
 }
 
@@ -61,6 +64,9 @@ pub fn tools(runner: &Arc<Runner>) -> Vec<Box<dyn Tool + Send + Sync>> {
             runner: Arc::clone(runner),
         }),
         Box::new(AgentStatusTool {
+            runner: Arc::clone(runner),
+        }),
+        Box::new(AgentSendTool {
             runner: Arc::clone(runner),
         }),
     ]
@@ -143,6 +149,28 @@ fn agent_status_definition() -> ToolDefinition {
                     "description": "Task id or name; show one task's detail, including its recent steps."
                 }
             }
+        }),
+    )
+}
+
+fn agent_send_definition() -> ToolDefinition {
+    definition(
+        "agent_send",
+        AGENT_SEND_DESCRIPTION,
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task id or name of the queued or running sub-agent."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The task update, clarification, new fact, or direction change to deliver to the sub-agent."
+                }
+            },
+            "required": ["task_id", "message"]
         }),
     )
 }
@@ -441,6 +469,57 @@ impl Tool for AgentStatusTool {
             }
         }
         text_result(lines.join("\n"))
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSendArgs {
+    #[serde(default)]
+    task_id: String,
+    #[serde(default)]
+    message: String,
+}
+
+struct AgentSendTool {
+    runner: Arc<Runner>,
+}
+
+#[async_trait::async_trait]
+impl Tool for AgentSendTool {
+    fn definition(&self) -> ToolDefinition {
+        agent_send_definition()
+    }
+
+    async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
+        let args: AgentSendArgs = match decode_strict_json(arguments.get(), &["task_id", "message"])
+        {
+            Ok(args) => args,
+            Err(message) => return error_result(message),
+        };
+        if cancel.is_cancelled() {
+            return error_result(CONTEXT_CANCELED);
+        }
+        let task_id = args.task_id.trim();
+        if task_id.is_empty() {
+            return error_result("task_id is required");
+        }
+        let message = args.message.trim();
+        if message.is_empty() {
+            return error_result("message is required");
+        }
+        match self.runner.tasks().send_message(task_id, message) {
+            Ok(id) => text_result(format!(
+                "message queued for task {id}; it will be read at the next checkpoint"
+            )),
+            Err(super::tasks::TaskError::NotFound(_)) => {
+                error_result(format!("unknown task: {task_id}"))
+            }
+            Err(super::tasks::TaskError::Finished(_)) => error_result(format!(
+                "task {task_id} is already completed; cannot send message"
+            )),
+            Err(error) => error_result(error.to_string()),
+        }
     }
 }
 
@@ -1199,6 +1278,141 @@ mod tests {
             completion_text(&final_task, runner.max_output_bytes())
         );
         assert_eq!(tasks.pending(), 0);
+    }
+
+    #[tokio::test]
+    async fn agent_send_queues_message_for_running_task() {
+        let provider = FakeProvider::new();
+        let release = CancellationToken::new();
+        provider.set_hook(block_until(release.clone()));
+        provider.add_route(
+            match_any,
+            vec![
+                assistant_tool_call("call-1", "noop", "{}", Usage::default()),
+                assistant_text("saw update", Usage::default()),
+            ],
+        );
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, vec![stub("noop")]));
+        runner
+            .start(StartRequest {
+                prompt: "start".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        let result = run(
+            tool_named(&runner, "agent_send").as_ref(),
+            r#"{"task_id":"t1","message":"use the new constraint"}"#,
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            result.content,
+            "message queued for task t1; it will be read at the next checkpoint"
+        );
+        release.cancel();
+        wait_final(&tasks, "t1").await;
+
+        let requests = provider.requests();
+        let second = requests.get(1).expect("a second provider request was made");
+        assert!(
+            second.messages.iter().any(|message| {
+                message.role == otto_core::model::Role::Context
+                    && message.context_type == "parent_message"
+                    && message.text().contains("use the new constraint")
+            }),
+            "second request should include the parent message: {second:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_send_rejects_unknown_blank_and_finished_tasks() {
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let runner = runner(test_config(&provider, &tasks, Vec::new()));
+        let send = tool_named(&runner, "agent_send");
+
+        let unknown = run(send.as_ref(), r#"{"task_id":"missing","message":"hello"}"#).await;
+        assert!(unknown.is_error);
+        assert_eq!(unknown.content, "unknown task: missing");
+
+        let blank = run(send.as_ref(), r#"{"task_id":"t1","message":"   "}"#).await;
+        assert!(blank.is_error);
+        assert_eq!(blank.content, "message is required");
+
+        runner
+            .start(StartRequest {
+                prompt: "finish".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_final(&tasks, "t1").await;
+        let finished = run(send.as_ref(), r#"{"task_id":"t1","message":"too late"}"#).await;
+        assert!(finished.is_error);
+        assert_eq!(
+            finished.content,
+            "task t1 is already completed; cannot send message"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_send_can_address_named_queued_task() {
+        let provider = FakeProvider::new();
+        let release = CancellationToken::new();
+        provider.set_hook(block_until(release.clone()));
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.max_parallel = 1;
+        let runner = runner(config);
+        for (name, prompt) in [("first", "a"), ("second", "b")] {
+            runner
+                .start(StartRequest {
+                    prompt: prompt.into(),
+                    name: name.into(),
+                    ..StartRequest::default()
+                })
+                .expect("start succeeds");
+        }
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+        assert_eq!(
+            tasks.get("second").expect("named task").status,
+            TaskStatus::Queued
+        );
+
+        let sent = run(
+            tool_named(&runner, "agent_send").as_ref(),
+            r#"{"task_id":"second","message":"queued context"}"#,
+        )
+        .await;
+        assert!(!sent.is_error, "{}", sent.content);
+        assert!(sent.content.starts_with("message queued for task t2"));
+        release.cancel();
+        wait_final(&tasks, "t1").await;
+        wait_final(&tasks, "t2").await;
+
+        let queued_request = provider
+            .requests()
+            .into_iter()
+            .find(|request| crate::subagent::testsupport::last_user_text(request) == "b")
+            .expect("queued task eventually ran");
+        assert!(queued_request.messages.iter().any(|message| {
+            message.role == otto_core::model::Role::Context
+                && message.context_type == "parent_message"
+                && message.text().contains("queued context")
+        }));
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_include_agent_send() {
+        let names: Vec<String> = tool_definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+        assert_eq!(names, ["agent", "agent_wait", "agent_status", "agent_send"]);
     }
 
     #[tokio::test]

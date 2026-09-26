@@ -30,13 +30,13 @@ use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result}
 const DEFAULT_WAIT_TIMEOUT_SECONDS: i64 = 600;
 const MAX_WAIT_TIMEOUT_SECONDS: i64 = 3600;
 
-const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent messages only when you call agent_send. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress, and agent_send to provide new information to a queued or running task at its next safe checkpoint. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
+const AGENT_DESCRIPTION: &str = "Start a sub-agent on a self-contained task and return immediately with its task id. The sub-agent runs in parallel with you, has its own context (fresh unless context is \"inherit\"), the same workspace and file tools, and receives follow-up parent task updates only when you call agent_send. Its final report arrives later as a [task-notification] message. Use agent_wait when you need the result before continuing, agent_status to check progress, and agent_send when the user adds constraints, priorities, facts, or direction changes for a queued or running task. Put the initial goal, relevant paths, constraints, and requested report format in prompt; pass agent to use a named definition from the Agents list.";
 
 const AGENT_WAIT_DESCRIPTION: &str = "Wait for a sub-agent task to finish. With task_id, waits for that task; without it, waits for every task that is queued or running. Blocks up to timeout_seconds (default 600, max 3600) and returns each task's completion report. Errors if the wait times out or is canceled, naming the tasks still running, or if task_id is unknown.";
 
 const AGENT_STATUS_DESCRIPTION: &str = "Show sub-agent task status. Without task_id, one line per task in this session: id, status, elapsed time, and current activity or token total. With task_id, that line plus the task's recent steps and, once finished, its result or error.";
 
-const AGENT_SEND_DESCRIPTION: &str = "Send a follow-up message to a queued or running sub-agent. The message is delivered into the child context at its next safe checkpoint: before its first provider request if queued, or after its current provider/tool step completes if running. It cannot be sent to a finished task.";
+const AGENT_SEND_DESCRIPTION: &str = "Send a task update to a queued or running sub-agent. Use this when the user adds constraints, clarifies priorities, provides new facts, or asks the child to adjust direction. The child reads updates at the next safe checkpoint; this does not interrupt an in-flight provider or tool call. It cannot be sent to a finished task.";
 
 const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (default, or the definition's setting): it sees only prompt. inherit: it also receives a copy of this conversation up to this call. Prefer, in order: (1) fresh with a self-contained prompt: goal, paths, constraints, what to report back; (2) fresh, with the context you already obtained pasted into prompt (file excerpts, tool output, decisions), so the sub-agent skips the tool calls that produced it; (3) inherit, when that context is too large or too scattered to paste and the sub-agent would otherwise repeat expensive tool calls. A sub-agent never shares your prompt cache, so inherit costs one full uncached pass over this conversation per sub-agent, and everything irrelevant to the task goes in with it.";
 
@@ -167,7 +167,7 @@ fn agent_send_definition() -> ToolDefinition {
                 },
                 "message": {
                     "type": "string",
-                    "description": "The follow-up prompt or context to deliver to the sub-agent."
+                    "description": "The task update, clarification, new fact, or direction change to deliver to the sub-agent."
                 }
             },
             "required": ["task_id", "message"]

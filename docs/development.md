@@ -35,7 +35,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `memory`: neutral memory contracts, validation/secret guards, conservative policy, the `Service` implementation, a null fallback, and the SQLite/FTS5 store and retriever
   - `usage`: native collection of parent, sub-agent, and compaction token events; append-only SQLite storage; and total/daily aggregate queries consumed by the server
   - `skill`: SKILL.md frontmatter parsing, name/description validation, discovery across configured roots, and rendering of the system-prompt listing
-  - `subagent`: child agent construction (`Runner`), task lifecycle, the `agent`/`agent_wait`/`agent_status`/`agent_send` tools, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
+  - `subagent`: child agent construction (`Runner`), task lifecycle, the parent-facing `agent`/`agent_wait`/`agent_status`/`agent_send` tools, the child-only `agent_report` tool, shared task-formatting helpers used by both the REPL and the TUI, and AGENT.md definition discovery
   - `workflow`: workspace-scoped TOML DAG discovery, SQLite run/step/attempt/approval/event state, committed-boundary recovery, and the shared CLI/server workflow controller
   - `inbound`: host adapters that turn external event streams into session inbox notifications. Feishu inbound spawns `lark-cli event consume im.message.receive_v1 --as bot`, parses NDJSON, expands `merge_forward` via `lark-cli im +messages-mget --as bot`, and fans messages out through `Controller::notify`
   - `server`: HTTP/JSON/SSE frontend, wire DTOs, per-session turn buffering, metrics, the Unix-socket and loopback-TCP listeners, bearer-token gating of `/v1/`, and the embedded web UI (`ui/dist`, written by `make ui`)
@@ -72,12 +72,13 @@ children are built only through it; the agent loop knows tasks only through
 its own task registry and never imports `subagent` directly; frontends reach
 tasks only through the shared task-lister facade; children never receive
 `agent*`, `remember`, `forget`, `memory_search`, or `remind*`; child transcripts are not
-persisted. `agent_send` queues parent messages in a child's private inbox and
-child agents read them only at normal agent-loop notification checkpoints; it
-does not interrupt an in-flight provider or tool call. Definitions cannot add
-tools outside the child tool set; `tools` only narrows it. `[agents]` is TOML
-only, like `[skills]`. Do not document `agent_cancel`/`agent_report` as working
-features.
+persisted. `agent_send` queues parent task updates in a child's private inbox
+and child agents read them only at normal agent-loop notification checkpoints;
+it does not interrupt an in-flight provider or tool call. `agent_report` is a
+child-only tool that queues progress reports in the parent's task inbox without
+finishing the task. Definitions cannot add tools outside the child tool set;
+`tools` only narrows it. `[agents]` is TOML only, like `[skills]`. Do not
+document `agent_cancel` as a working feature.
 
 Keep durable workflows separate from ad-hoc sub-agent tasks. Workflow
 definitions snapshot their referenced `AGENT.md` bodies, model choices, and

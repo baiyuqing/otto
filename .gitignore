@@ -16,6 +16,12 @@ ui/node_modules/
 target/
 crates/otto-web/pkg/
 
+# Desktop shell: the copied otto sidecar binary Tauri's build script requires
+# on disk (`make desktop-check`/`desktop-release` copy it in before building),
+# and the capability schemas tauri-build regenerates on every build.
+desktop/src-tauri/binaries/
+desktop/src-tauri/gen/
+
 # Secrets — never commit credentials or config that may hold them.
 # Defensive/broad on purpose: better to ignore too much than leak one file.
 

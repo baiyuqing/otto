@@ -1486,6 +1486,31 @@ curl -s -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8787/v1/sessi
 - Idle session eviction or a limit on how many sessions can stay open.
 - SSE heartbeats.
 
+### Desktop app (macOS)
+
+The desktop app (`desktop/`) is a native macOS window around `otto serve`. On
+launch it captures the login shell's environment, asks for a folder the
+first time it runs (or when the saved folder no longer exists), runs `otto
+trust` on it, starts `otto serve --exit-on-stdin-close` as a child process,
+and loads the child's HTTP address in its main window once the child
+announces it. The window loads only that address; it has no Tauri IPC
+exposed to the page, so the page is a plain client of the same HTTP API
+described in this section.
+
+**File > Open Folder…** (`⌘O`) picks another directory, runs `otto trust` on
+it, registers it with the running server over `POST /v1/workspaces`, and
+reloads the window. Quitting the app sends the child `SIGTERM`, then
+`SIGKILL` after 10 seconds if it has not exited.
+
+State (the last opened folder) is stored at `~/Library/Application
+Support/com.otto.desktop/state.json`. The child's stderr is appended to
+`~/Library/Logs/com.otto.desktop/serve.log`; if the child exits before
+announcing its address, or does not announce one within 30 seconds, the app
+shows the exit status and the last 50 lines of that log.
+
+Building, checking, and releasing the app are covered in
+[`desktop/README.md`](../desktop/README.md).
+
 ## Durable workflows
 
 Durable workflows are explicit DAGs for work whose order, concurrency, human

@@ -388,7 +388,7 @@ pub struct Server {
     metrics: Arc<Metrics>,
     sessions: Mutex<HashMap<String, Arc<OpenSession>>>,
     /// Serializes every `Factory::open`, so two concurrent resumes of one id
-    /// cannot open the same session file twice (the store takes no flock).
+    /// cannot build two controllers for the same session file at once.
     ///
     /// ponytail: one gate for every id instead of a per-id gate. Resuming is an
     /// admin-rate path; make it per-id if it ever contends.

@@ -435,7 +435,7 @@ async fn run_app<B: Backend>(
                     {
                         propagate_turn_error(error)?;
                     } else {
-                        action = app.submit_input(controller, cancel);
+                        action = app.submit_queued_input(controller, cancel);
                     }
                 }
                 Action::Image(path) => match image_block_from_path(&path) {

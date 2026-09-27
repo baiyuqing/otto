@@ -17,6 +17,8 @@ const api = vi.hoisted(() => ({
   listTasks: vi.fn(),
   listMcp: vi.fn(),
   cancelTurn: vi.fn(),
+  startTurn: vi.fn(),
+  compact: vi.fn(),
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
   getWorkspaceDiff: vi.fn(),
@@ -105,6 +107,8 @@ describe('idle wake follow', () => {
     api.listMcp.mockResolvedValue({ servers: [] })
     api.attach.mockResolvedValue(new Response('', { headers: { 'Content-Type': 'text/event-stream' } }))
     api.cancelTurn.mockResolvedValue(new Response(null, { status: 204 }))
+    api.startTurn.mockResolvedValue(new Response('', { headers: { 'Content-Type': 'text/event-stream' } }))
+    api.compact.mockResolvedValue({ noop: true })
     api.listWorkspaces.mockResolvedValue({ startup: '/tmp/otto-work', roots: [], workspaces: [{ path: '/tmp/otto-work', open_sessions: 1, workflows: true }] })
   })
 
@@ -158,6 +162,50 @@ describe('idle wake follow', () => {
     fireEvent.keyDown(window, { key: 'Escape' })
 
     expect(api.cancelTurn).toHaveBeenCalledWith('sess1', 'turn1')
+  })
+
+  it('queues editable input while a turn is running and sends it after success', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    const done: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'ok' } }
+    const nextRunning: Session = { ...idle, turn: { id: 'turn2', trigger: 'user', status: 'running' } }
+    let closeStream = () => {}
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        closeStream = () => controller.close()
+      },
+    })
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } }))
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…')
+    fireEvent.change(input, { target: { value: 'follow up' } })
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
+    expect(api.startTurn).not.toHaveBeenCalled()
+    api.getSession.mockResolvedValueOnce(done).mockResolvedValue(nextRunning)
+    api.startTurn.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    closeStream()
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(api.startTurn).toHaveBeenCalledWith('sess1', 'follow up', undefined)
+  })
+
+  it('withdraws queued input while a turn is running', async () => {
+    const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
+    api.createSession.mockResolvedValue(running)
+    api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
+    await openIdleSession()
+
+    const input = screen.getByPlaceholderText('Queue next input…')
+    fireEvent.change(input, { target: { value: 'follow up' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw queued input' }))
+
+    expect((input as HTMLTextAreaElement).value).toBe('')
+    expect(api.startTurn).not.toHaveBeenCalled()
   })
 
   it('reloads history when a wake finished between polls', async () => {

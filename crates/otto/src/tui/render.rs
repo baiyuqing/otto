@@ -294,14 +294,23 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.busy() && !app.input.is_empty() {
-        "Queued input (Esc cancels turn)"
+    let (title, style) = if app.busy() && !app.input.is_empty() {
+        (
+            "Queued next input · edit below · Ctrl+U withdraw · Esc cancels turn",
+            Style::default().fg(Color::Cyan),
+        )
     } else if app.busy() {
-        "Working (Esc to cancel)"
+        (
+            "Working — type to queue next input · Esc cancels turn",
+            Style::default().fg(Color::Magenta),
+        )
     } else {
-        "Otto"
+        ("Otto", Style::default())
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(style)
+        .title(Span::styled(title, style));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -635,6 +635,24 @@ button.danger {
   border-radius: var(--radius);
   background: var(--panel-strong);
 }
+.composer.running .composer-card {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+}
+.composer.queued .composer-card {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.queued-input-label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+.queued-input-label strong { color: var(--accent); }
 .composer textarea {
   display: block;
   width: 100%;

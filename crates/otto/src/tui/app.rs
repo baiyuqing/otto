@@ -579,11 +579,11 @@ impl App {
             return None;
         }
         if self.busy() {
-            // While a turn runs, the composer is the single queued draft for
-            // the next input. Enter only marks the current draft as queued;
-            // the run loop dispatches its final contents after the turn
-            // finishes successfully. Esc/Ctrl+C are intercepted by the caller
-            // as cancellation before this method is invoked.
+            // While a turn runs, the composer is the single editable queued
+            // draft for the next input. The run loop dispatches its final
+            // contents after the turn finishes successfully; Ctrl+U withdraws
+            // the draft. Esc/Ctrl+C are intercepted by the caller as
+            // cancellation before this method is invoked.
             self.handle_busy_composer_key(key);
             return None;
         }
@@ -706,6 +706,11 @@ impl App {
                 self.edited();
             }
             KeyCode::Enter => {}
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input.clear();
+                self.cursor = 0;
+                self.edited();
+            }
             KeyCode::Backspace => {
                 if self.cursor > 0 {
                     self.cursor -= 1;
@@ -1731,6 +1736,29 @@ mod tests {
             app.entries.is_empty(),
             "queued drafts are not transcript history"
         );
+    }
+
+    #[tokio::test]
+    async fn busy_composer_ctrl_u_withdraws_the_queued_draft() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.start_turn();
+        app.insert_text("queued draft");
+
+        let action = app.handle_key(
+            key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &controller,
+            &cancel,
+        );
+
+        assert!(action.is_none());
+        assert!(app.input.is_empty());
+        assert_eq!(app.cursor, 0);
+        assert!(app.history.previous("").is_none());
+        assert!(app.entries.is_empty());
     }
 
     #[tokio::test]

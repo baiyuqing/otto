@@ -8,6 +8,7 @@
 #![allow(unsafe_code)]
 
 use std::fs;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -152,6 +153,14 @@ fn mode(path: &Path) -> u32 {
     fs::metadata(path).expect("stat").permissions().mode() & 0o777
 }
 
+fn assert_close_on_exec(store: &Store) {
+    let guard = store.lock().expect("lock store");
+    let file = guard.file.as_ref().expect("open session file");
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0, "fcntl(F_GETFD) failed");
+    assert_ne!(flags & libc::FD_CLOEXEC, 0, "session fd must be CLOEXEC");
+}
+
 // ---------------------------------------------------------------------------
 // create and header
 // ---------------------------------------------------------------------------
@@ -193,7 +202,45 @@ fn create_uses_expected_permissions_and_path() {
     assert_eq!(store.path(), want.to_string_lossy());
     assert_eq!(mode(want.parent().expect("parent")), 0o700);
     assert_eq!(mode(&want), 0o600);
+    assert_close_on_exec(&store);
     store.close().expect("close");
+}
+
+const SESSION_FD_INHERIT_TEST_CHILD: &str = "OTTO_SESSION_FD_INHERIT_TEST_CHILD";
+
+#[test]
+fn session_file_descriptors_are_not_inherited_by_spawned_children() {
+    if std::env::var_os(SESSION_FD_INHERIT_TEST_CHILD).is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return;
+    }
+
+    let temp = TempDir::new();
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let root = temp.join("root");
+    let store = Store::create(&root, test_header(&workspace)).expect("create store");
+    store.append_message(&user("hello")).expect("append");
+    let path = store.path();
+
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "session::tests::session_file_descriptors_are_not_inherited_by_spawned_children",
+            "--nocapture",
+        ])
+        .env(SESSION_FD_INHERIT_TEST_CHILD, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn child");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    store.close().expect("close parent store");
+
+    archive(&root, &workspace.to_string_lossy(), Path::new(&path))
+        .expect("child must not inherit the session lock");
+    assert!(child.wait().expect("wait child").success());
 }
 
 #[test]

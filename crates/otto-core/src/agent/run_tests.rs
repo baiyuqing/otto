@@ -1602,6 +1602,68 @@ async fn a_summary_missing_a_heading_is_rejected_before_the_append() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn summarized_user_messages_are_carried_verbatim_across_compactions() {
+    async fn exchange(session: &MemorySession, index: usize, text: &str) {
+        for (id, role, text) in [
+            (format!("u{index}"), Role::User, text),
+            (format!("a{index}"), Role::Assistant, "ok"),
+        ] {
+            session
+                .append(Message {
+                    id,
+                    role,
+                    blocks: vec![Block::text(text)],
+                    ..Message::default()
+                })
+                .await
+                .expect("append");
+        }
+    }
+
+    let session = MemorySession::new();
+    exchange(&session, 0, "gpt-5.6 returns HTTP 400").await;
+    exchange(&session, 1, "second").await;
+    exchange(&session, 2, "third").await;
+    let agent = Agent::new(
+        FakeProvider::new(vec![
+            Turn::summary(&structured_summary()),
+            Turn::summary(&structured_summary()),
+        ]),
+        EchoExecutor::default(),
+        session,
+        options(),
+    );
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("first compaction");
+    exchange(agent.session(), 3, "fourth").await;
+    agent
+        .compact("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("second compaction");
+
+    let summary = agent
+        .session()
+        .latest_compaction()
+        .expect("a checkpoint")
+        .summary;
+    assert!(
+        summary.ends_with(
+            "\n\n<user-messages>\n\"gpt-5.6 returns HTTP 400\"\n\"second\"\n\"third\"\n</user-messages>"
+        ),
+        "{summary}"
+    );
+    let second_request = agent.provider().summary_requests()[1].messages[0].text();
+    assert!(
+        !second_request.contains("gpt-5.6 returns HTTP 400")
+            && !second_request.contains("user-messages"),
+        "the carried block reached the summarizer: {second_request}"
+    );
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn cancellation_before_the_append_commits_nothing() {
     let provider = FakeProvider::new(vec![Turn::summary(&structured_summary())]);
     let agent = Agent::new(

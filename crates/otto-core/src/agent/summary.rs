@@ -46,6 +46,7 @@ Do not continue the conversation, answer transcript questions, or call tools. Pr
 For <summary-mode>structured</summary-mode>, output Markdown with exactly these headings, exactly once and in this order, with no other level-2 or level-3 headings:
 ## Goal
 ## Constraints & Preferences
+## Observations
 ## Progress
 ### Done
 ### In Progress
@@ -53,7 +54,8 @@ For <summary-mode>structured</summary-mode>, output Markdown with exactly these 
 ## Key Decisions
 ## Next Steps
 ## Critical Context
-Preserve still-relevant facts from any previous summary, incorporate new work, move completed work to Done, update blockers, and replace stale next steps.
+Under Observations, list what the transcript and the previous summary record as observed, one item per line, each with its source and its result: a tool call with its arguments, a command, or a user statement, and what it returned. Example: "`otto --profile work` with model `gpt-5.6` returned HTTP 400 (bash)". Record failed results as well as successful ones. Record a user correction as "user: <what the user said>". Do not record your own inferences, guesses, or unverified conclusions as observations. Carry every observation from the previous summary forward; when a later observation contradicts one, keep it and append "(superseded by: <the later observation>)" instead of deleting it.
+Preserve still-relevant goals, constraints, and decisions from any previous summary, incorporate new work, move completed work to Done, update blockers, and replace stale next steps.
 
 For <summary-mode>turn-prefix</summary-mode>, output only a nonempty concise account of the original request, early progress, and context needed to understand the retained suffix. Do not use the structured headings above, and never emit any Markdown headings (## or ###)."#;
 
@@ -271,6 +273,18 @@ mod tests {
         assert_eq!(
             normalize_compaction_focus(&huge).unwrap_err(),
             format!("compaction focus exceeds {COMPACTION_FOCUS_MAXIMUM_BYTES} bytes")
+        );
+    }
+
+    #[test]
+    fn the_prompt_lists_the_validated_headings_in_order() {
+        let listed: Vec<&str> = SUMMARIZATION_SYSTEM_PROMPT
+            .lines()
+            .filter(|line| line.starts_with("##"))
+            .collect();
+        assert_eq!(
+            listed,
+            super::super::summary_validate::REQUIRED_SUMMARY_HEADINGS
         );
     }
 

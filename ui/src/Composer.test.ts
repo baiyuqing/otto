@@ -9,6 +9,8 @@ const props = () => ({
   running: false,
   compacting: false,
   onSend: vi.fn(),
+  onQueue: vi.fn(),
+  onWithdrawQueue: vi.fn(),
   onCancel: vi.fn(),
   onCompact: vi.fn(),
 })
@@ -33,6 +35,31 @@ describe('Composer text input', () => {
     fireEvent.change(composer, { target: { value: 'one\ntwo\nthree' } })
 
     await waitFor(() => expect(composer.style.height).toBe('84px'))
+  })
+  it('keeps a running-turn draft editable and withdrawable', () => {
+    const p = { ...props(), running: true }
+    render(createElement(Composer, p))
+    const composer = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+
+    fireEvent.change(composer, { target: { value: 'follow up' } })
+
+    expect(p.onQueue).toHaveBeenLastCalledWith('follow up')
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/edit below/i)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw queued input' }))
+
+    expect(p.onWithdrawQueue).toHaveBeenCalled()
+  })
+
+  it('withdraws a running-turn draft with Ctrl+U', () => {
+    const p = { ...props(), running: true }
+    render(createElement(Composer, p))
+    const composer = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
+
+    fireEvent.change(composer, { target: { value: 'follow up' } })
+    fireEvent.keyDown(composer, { key: 'u', ctrlKey: true })
+
+    expect(p.onWithdrawQueue).toHaveBeenCalled()
   })
 })
 

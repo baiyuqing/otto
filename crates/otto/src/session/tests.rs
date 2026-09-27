@@ -703,6 +703,43 @@ fn seeded_session(temp: &TempDir) -> String {
     path
 }
 
+const SESSION_LOCK_TEST_PATH: &str = "OTTO_SESSION_LOCK_TEST_PATH";
+
+#[test]
+fn open_rejects_a_session_held_by_another_process() {
+    if let Some(path) = std::env::var_os(SESSION_LOCK_TEST_PATH) {
+        let error = Store::open(path).expect_err("another process holds the session");
+        assert!(error.to_string().contains("already open"), "{error}");
+        return;
+    }
+
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let (store, _) = Store::open(&path).expect("open first store");
+    let before = fs::read(&path).expect("read before second open");
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "session::tests::open_rejects_a_session_held_by_another_process",
+            "--nocapture",
+        ])
+        .env(SESSION_LOCK_TEST_PATH, &path)
+        .status()
+        .expect("run second process");
+    assert!(
+        status.success(),
+        "second process unexpectedly opened session"
+    );
+    assert_eq!(fs::read(&path).expect("read after second open"), before);
+
+    store.close().expect("close first store");
+    Store::open(&path)
+        .expect("open after first store closes")
+        .0
+        .close()
+        .expect("close");
+}
+
 #[test]
 fn open_repairs_missing_final_lf_before_append() {
     let temp = TempDir::new();

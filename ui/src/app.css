@@ -251,8 +251,56 @@ button.danger {
 .status-badge.status-running { border-color: var(--accent); color: var(--accent); }
 .status-badge.status-error { border-color: var(--danger); color: var(--danger); }
 .status-badge.status-approval { border-color: var(--danger); color: var(--danger); }
-.sidebar-add { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; border-top: 1px solid var(--line); }
+.sidebar-add { display: grid; gap: 6px; padding: 10px; border-top: 1px solid var(--line); }
+.sidebar-add > button { width: 100%; }
+.sidebar-add summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.sidebar-add form { display: flex; gap: 6px; margin-top: 6px; }
 .sidebar-add input { flex: 1; min-width: 0; }
+.trust-dialog { grid-template-columns: 1fr; }
+.trust-dialog code { overflow-wrap: anywhere; }
+.folder-picker {
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  width: min(520px, 100%);
+  max-height: min(620px, 100%);
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 18px;
+  background: var(--panel-strong);
+  box-shadow: 0 22px 70px color-mix(in srgb, #000 24%, transparent), 0 2px 12px color-mix(in srgb, #000 10%, transparent);
+  animation: dialog-enter 160ms ease-out;
+}
+.folder-picker h2 { margin: 0; font-size: 19px; letter-spacing: -0.02em; }
+.folder-picker-location { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.folder-picker-path {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-picker-roots { display: flex; flex-wrap: wrap; gap: 6px; }
+.folder-picker-list {
+  display: grid;
+  align-content: start;
+  min-height: 160px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.folder-picker-list button {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  padding: 9px 12px;
+  text-align: left;
+}
+.folder-picker-list button:last-child { border-bottom: 0; }
+.folder-picker-list button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.folder-picker-empty { margin: 0; padding: 12px; color: var(--muted); }
 .usage-view {
   flex: 1;
   overflow-y: auto;
@@ -755,6 +803,7 @@ button.danger {
   .rename-dialog-icon { width: 38px; height: 38px; }
   .rename-actions { flex-direction: column-reverse; }
   .rename-actions button { width: 100%; }
+  .folder-picker { padding: 16px; }
   .transcript { padding: 16px 10px; }
   .item.user { max-width: 94%; }
   .composer, .footer, .tasks { padding-left: 10px; padding-right: 10px; }
@@ -787,5 +836,5 @@ button.danger {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .usage-view, .rename-dialog { animation: none; }
+  .usage-view, .rename-dialog, .folder-picker { animation: none; }
 }

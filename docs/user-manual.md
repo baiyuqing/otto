@@ -1091,7 +1091,19 @@ for every workspace.
   `{"startup": path, "roots": [path...], "workspaces": [{"path", "open_sessions", "workflows"}...]}`.
 - `POST /v1/workspaces {"path": "..."}` admits and loads a workspace,
   returning one `workspaces` entry: `201` when it was newly loaded, `200`
-  when it was already loaded.
+  when it was already loaded. With `"trust": true`, a path refused as
+  `403 WORKSPACE_NOT_ADMITTED` is first recorded as trusted in the config
+  file, as `otto trust` does, and then loaded; an already admitted path
+  records nothing. A path that is not an existing directory is still `400`.
+- `GET /v1/fs/dirs?path=...` lists the subdirectories of an absolute
+  directory for the web UI's folder picker:
+  `{"path", "parent", "roots": [path...], "dirs": [{"name", "path"}...]}`.
+  Listing is limited to the home directory, the `workspace_roots`, and their
+  descendants, checked after resolving symlinks; without `path` it lists the
+  home directory. Only directory names are returned, names starting with `.`
+  are left out, and `parent` is `null` at the top of a root. `400
+  INVALID_PATH` for a relative path or a non-directory, `403
+  PATH_NOT_ALLOWED` outside those directories.
 - `POST /v1/sessions` takes an optional `"workspace"`; the default is the
   startup workspace. `GET /v1/sessions` and `GET/POST /v1/workflows` take an
   optional `?workspace=`; absent, `GET /v1/sessions` covers every loaded
@@ -1170,11 +1182,17 @@ composer:
   changed file with its status and patch. It fetches again on **Refresh** and
   when a session in that directory finishes a turn. It is read-only.
 - Each group other than the startup workspace has a **Remove** button, which
-  calls `DELETE /v1/workspaces`; a `409` message is shown next to the Add
-  workspace field.
-- The path field and **Add workspace** button at the bottom of the sidebar
-  call `POST /v1/workspaces`; the directory then appears as a group. A
-  `400`/`403`/`500` from that call is shown next to the field.
+  calls `DELETE /v1/workspaces`; a `409` message is shown next to the
+  **Add workspace…** button.
+- **Add workspace…** at the bottom of the sidebar opens a folder picker. In
+  a browser it browses the server's directories through `GET /v1/fs/dirs`;
+  in the desktop app it is the native macOS folder dialog. The chosen folder
+  is registered with `POST /v1/workspaces` and appears as a group. If the
+  server answers `403 WORKSPACE_NOT_ADMITTED`, a **Trust this folder?**
+  dialog shows the path; **Trust and add** repeats the request with
+  `"trust": true`, and **Cancel** adds nothing. **Enter a path** below the
+  button expands a field for typing an absolute path, handled the same way.
+  Other `400`/`500` errors are shown below the button.
 - Below 720px wide the sidebar is hidden; the **Sessions** button in the top
   bar shows it as an overlay, and opening a session hides it again.
 - Typing `/` in the composer shows local suggestions for supported Web slash
@@ -1259,7 +1277,8 @@ are served at the root. Request and error bodies are JSON.
 | Method and path | Behavior |
 | --- | --- |
 | `GET /v1/workspaces` | List loaded workspaces, startup first: `{"startup", "roots", "workspaces": [{"path", "open_sessions", "workflows"}...]}`. |
-| `POST /v1/workspaces` | Admit and load a workspace (`{"path":"..."}`). `201` when newly loaded, `200` when already loaded. `400 INVALID_WORKSPACE` or `403 WORKSPACE_NOT_ADMITTED` otherwise. Returns one `workspaces` entry. |
+| `POST /v1/workspaces` | Admit and load a workspace (`{"path":"...","trust":false}`). `201` when newly loaded, `200` when already loaded. `400 INVALID_WORKSPACE` or `403 WORKSPACE_NOT_ADMITTED` otherwise; with `"trust": true` a not-admitted directory is recorded as trusted in the config file, then loaded. Returns one `workspaces` entry. |
+| `GET /v1/fs/dirs?path=...` | List subdirectories for the folder picker: `{"path", "parent", "roots", "dirs": [{"name", "path"}...]}`. Limited to the home directory and `workspace_roots`; `400 INVALID_PATH`, `403 PATH_NOT_ALLOWED`. |
 | `DELETE /v1/workspaces?path=...` | Unload a workspace and remove it from `~/.otto/serve-workspaces.json`. `204` on success; `404 WORKSPACE_NOT_FOUND`, `409 WORKSPACE_IS_STARTUP`, or `409 WORKSPACE_IN_USE` otherwise. |
 | `GET /v1/workspaces/diff?workspace=<path>` | Read-only changes of a working directory (default the startup workspace) against `HEAD`, or the empty tree before the first commit: staged, unstaged, and untracked files under that directory, ignored files excluded. `{"workspace", "repository", "branch", "files": [{"path", "old_path", "status", "binary", "patch", "truncated"}...], "truncated"}`. `status` is `modified`, `added`, `deleted`, `renamed`, or `untracked`; paths are relative to the directory. `repository:false` when the directory is not in a git work tree. git runs through the workspace's sandbox with external diff and textconv drivers disabled. Limits: 256 KiB of patch per file, about 1 MiB in total, patches for the first 200 untracked files, 10 s for all git commands. `400`/`403` as `POST /v1/workspaces`; `501 diff_unavailable` without a usable sandbox; `500 git_failed`; `504 git_timeout`. |
 | `POST /v1/sessions` | Create a session (`{}`, optionally `"workspace":"<path>"`, default the startup workspace) or attach to one already open in this process (`{"resume":"<id>"}`, searched in `workspace` if given, else every loaded workspace). `201` for a new session, `200` for an already-open one. Returns the session object. |
@@ -1493,9 +1512,10 @@ launch it captures the login shell's environment, asks for a folder the
 first time it runs (or when the saved folder no longer exists), runs `otto
 trust` on it, starts `otto serve --exit-on-stdin-close` as a child process,
 and loads the child's HTTP address in its main window once the child
-announces it. The window loads only that address; it has no Tauri IPC
-exposed to the page, so the page is a plain client of the same HTTP API
-described in this section.
+announces it. The window loads only that address. The page is a client of
+the same HTTP API described in this section; the one Tauri command exposed
+to it is `pick_directory`, which shows the native folder dialog for the
+sidebar's **Add workspace…** button and returns the chosen path.
 
 **File > Open Folder…** (`⌘O`) picks another directory, runs `otto trust` on
 it, registers it with the running server over `POST /v1/workspaces`, and

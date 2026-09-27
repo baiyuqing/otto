@@ -66,6 +66,7 @@ pub fn run() {
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![pick_directory])
         .on_menu_event(on_menu_event)
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
@@ -347,6 +348,28 @@ fn open_folder(app_handle: &AppHandle) {
             MessageDialogKind::Error,
         ),
     }
+}
+
+/// Called by the web UI's "Add workspace…" button as
+/// `window.__TAURI__.core.invoke('pick_directory')`: shows the native folder
+/// picker attached to the calling window and returns the picked absolute
+/// path, or `None` on cancel. It does not trust, register, or remember the
+/// folder; the web UI does that over the HTTP API. `capabilities/main.json`
+/// allows it from the main window's `http://127.0.0.1:*` page only.
+///
+/// Async commands run off the main thread, which `blocking_pick_folder`
+/// requires.
+#[tauri::command]
+async fn pick_directory(window: tauri::WebviewWindow) -> Option<String> {
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Choose a folder for Otto to work in")
+        .blocking_pick_folder()?
+        .into_path()
+        .ok()
+        .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 fn show_message(app_handle: &AppHandle, title: &str, message: &str, kind: MessageDialogKind) {

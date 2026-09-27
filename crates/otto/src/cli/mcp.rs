@@ -144,7 +144,7 @@ fn config_path_for(lookup: &HashMap<String, String>) -> Result<PathBuf, String> 
 /// The config file's path, its parsed contents, and the exact bytes they were
 /// parsed from.
 ///
-/// [`save_editable_config`] passes those bytes back, so an edit another Otto
+/// [`write_edited_config`] passes those bytes back, so an edit another Otto
 /// process wrote in between is reported instead of overwritten.
 fn load_editable_config(
     lookup: &HashMap<String, String>,
@@ -162,12 +162,19 @@ fn load_editable_config(
     }
 }
 
-fn save_editable_config(
+/// Applies `edit` to the text [`load_editable_config`] read as `original` and
+/// writes the result in its place. `edit` changes one key or table in the
+/// text (see `otto_core::config::edit`), so the rest of the file keeps its
+/// bytes, comments included.
+fn write_edited_config(
     path: &Path,
-    file: &otto_core::config::File,
-    replacing: &[u8],
+    original: &[u8],
+    edit: impl FnOnce(&str) -> Result<String, otto_core::config::ConfigError>,
 ) -> Result<(), String> {
-    crate::config::save(path, file, replacing).map_err(|error| format!("write config: {error}"))
+    let updated = edit(&String::from_utf8_lossy(original))
+        .map_err(|error| format!("edit config: {error}"))?;
+    crate::config::write_bytes(path, original, updated.as_bytes())
+        .map_err(|error| format!("write config: {error}"))
 }
 
 fn valid_server_name(name: &str) -> bool {
@@ -314,7 +321,7 @@ fn run_add(
         Ok(parsed) => parsed,
         Err(message) => return fail(stderr, &message),
     };
-    let Ok((path, mut file, original)) = load_editable_config(lookup) else {
+    let Ok((path, file, original)) = load_editable_config(lookup) else {
         return fail(
             stderr,
             "load config: configuration is invalid or unavailable",
@@ -328,10 +335,14 @@ fn run_add(
     }
     let name = parsed.name.clone();
     let uses_oauth = parsed.transport == "http" && parsed.auth.as_deref() == Some("oauth");
-    file.mcp
-        .servers
-        .insert(name.clone(), server_from_add(parsed));
-    if let Err(message) = save_editable_config(&path, &file, &original) {
+    let body = match toml::Table::try_from(server_from_add(parsed)) {
+        Ok(body) => body,
+        Err(error) => return fail(stderr, &format!("edit config: {error}")),
+    };
+    let written = write_edited_config(&path, &original, |text| {
+        otto_core::config::edit::insert_table(text, &["mcp", "servers", &name], body)
+    });
+    if let Err(message) = written {
         return fail(stderr, &message);
     }
     let _ = writeln!(
@@ -356,16 +367,19 @@ fn run_remove(
     let [_, name] = args else {
         return fail(stderr, USAGE);
     };
-    let Ok((path, mut file, original)) = load_editable_config(lookup) else {
+    let Ok((path, file, original)) = load_editable_config(lookup) else {
         return fail(
             stderr,
             "load config: configuration is invalid or unavailable",
         );
     };
-    if file.mcp.servers.remove(name).is_none() {
+    if !file.mcp.servers.contains_key(name) {
         return fail(stderr, &format!("unknown MCP server: {name}"));
     }
-    if let Err(message) = save_editable_config(&path, &file, &original) {
+    let written = write_edited_config(&path, &original, |text| {
+        otto_core::config::edit::remove_table(text, &["mcp", "servers", name])
+    });
+    if let Err(message) = written {
         return fail(stderr, &message);
     }
     let _ = writeln!(
@@ -385,17 +399,24 @@ fn run_enabled(
     let [_, name] = args else {
         return fail(stderr, USAGE);
     };
-    let Ok((path, mut file, original)) = load_editable_config(lookup) else {
+    let Ok((path, file, original)) = load_editable_config(lookup) else {
         return fail(
             stderr,
             "load config: configuration is invalid or unavailable",
         );
     };
-    let Some(server) = file.mcp.servers.get_mut(name) else {
+    if !file.mcp.servers.contains_key(name) {
         return fail(stderr, &format!("unknown MCP server: {name}"));
-    };
-    server.enabled = Some(enabled);
-    if let Err(message) = save_editable_config(&path, &file, &original) {
+    }
+    let written = write_edited_config(&path, &original, |text| {
+        otto_core::config::edit::set_value(
+            text,
+            &["mcp", "servers", name],
+            "enabled",
+            Some(&enabled.to_string()),
+        )
+    });
+    if let Err(message) = written {
         return fail(stderr, &message);
     }
     let verb = if enabled { "enabled" } else { "disabled" };
@@ -634,13 +655,15 @@ mod tests {
             "docs",
             "transport = \"http\"\nurl = \"https://mcp.example.com\"\n",
         );
-        let (path, mut file, original) = load_editable_config(&lookup).expect("load");
-        file.mcp.servers.remove("docs");
+        let (path, _, original) = load_editable_config(&lookup).expect("load");
 
         let concurrent = "default_profile = \"written by another otto\"\n";
         std::fs::write(&path, concurrent).expect("concurrent write");
 
-        let error = save_editable_config(&path, &file, &original).expect_err("stale write");
+        let error = write_edited_config(&path, &original, |text| {
+            otto_core::config::edit::remove_table(text, &["mcp", "servers", "docs"])
+        })
+        .expect_err("stale write");
 
         assert!(error.contains("changed on disk"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), concurrent);
@@ -675,6 +698,62 @@ mod tests {
         let text =
             std::fs::read_to_string(home.path().join(".config/otto/config.toml")).expect("config");
         assert!(!text.contains("mcp.servers.docs"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn edits_keep_every_other_byte_of_the_file() {
+        let home = tempfile::tempdir().expect("home");
+        let directory = home.path().join(".config").join("otto");
+        std::fs::create_dir_all(&directory).expect("config dir");
+        let path = directory.join("config.toml");
+        let original = "# my config\ndefault_profile = \"a\"\n\n# servers\n[mcp.servers.docs]\ntransport = \"http\" # remote\nurl = \"https://mcp.example.com\"\n\n# profiles\n[profiles.a]\nprovider = \"chatgpt\"\n";
+        std::fs::write(&path, original).expect("write config");
+        let lookup = HashMap::from([(
+            "HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        )]);
+        let read = || std::fs::read_to_string(&path).expect("config");
+
+        let (code, _, stderr) = mcp(&["disable", "docs"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        let disabled = original.replace(
+            "url = \"https://mcp.example.com\"\n",
+            "url = \"https://mcp.example.com\"\nenabled = false\n",
+        );
+        assert_eq!(read(), disabled);
+
+        let (code, _, stderr) = mcp(&["enable", "docs"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        let enabled = disabled.replace("enabled = false", "enabled = true");
+        assert_eq!(read(), enabled);
+
+        let (code, _, stderr) = mcp(
+            &["add", "fs", "--transport", "stdio", "--command", "true"],
+            &lookup,
+        )
+        .await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        let added = read();
+        assert!(added.starts_with(&enabled), "{added}");
+        assert!(
+            otto_core::config::parse(&added)
+                .expect("parse")
+                .mcp
+                .servers
+                .contains_key("fs"),
+            "{added}"
+        );
+
+        let (code, _, stderr) = mcp(&["remove", "fs"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert_eq!(read(), enabled);
+
+        let (code, _, stderr) = mcp(&["remove", "docs"], &lookup).await;
+        assert_eq!(code, 0, "stderr = {stderr}");
+        assert_eq!(
+            read(),
+            "# my config\ndefault_profile = \"a\"\n\n# servers\n\n# profiles\n[profiles.a]\nprovider = \"chatgpt\"\n"
+        );
     }
 
     #[tokio::test]

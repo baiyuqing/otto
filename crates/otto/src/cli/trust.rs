@@ -2,8 +2,8 @@
 //!
 //! Dispatched before the main flag set is parsed, like `otto sandbox setup`
 //! and `otto mcp`, because its argument grammar is its own. The table is
-//! appended to the file as text, not written through a schema round trip, so
-//! existing comments and formatting survive; [`otto_core::config::projects`]
+//! appended to the file as text through `otto_core::config::edit`, not written
+//! through a schema round trip, so existing comments and formatting survive; [`otto_core::config::projects`]
 //! is only the schema `otto serve`'s admission reads back. The write goes
 //! through [`crate::config::write_bytes`], so it takes a backup and refuses
 //! when another process changed the file in between.
@@ -125,7 +125,9 @@ pub(crate) fn trust_directory(config_path: &Path, dir: &Path) -> Result<String, 
 ///
 /// `original` is parsed rather than assumed empty so a directory already
 /// present under `[projects]` — trusted or not — is never appended a second
-/// time, which would otherwise produce a duplicate TOML table.
+/// time, which would otherwise produce a duplicate TOML table. The appended
+/// table is checked to parse as that one project, so a `projects` written as
+/// an inline table is refused instead of turned into an invalid file.
 fn compute_update(original: &[u8], canonical: &str) -> Result<Option<Vec<u8>>, String> {
     let text = String::from_utf8_lossy(original);
     let file = otto_core::config::parse(&text)
@@ -133,36 +135,11 @@ fn compute_update(original: &[u8], canonical: &str) -> Result<Option<Vec<u8>>, S
     if file.projects.contains_key(canonical) {
         return Ok(None);
     }
-    let mut updated = text.into_owned();
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated.push_str(&format!(
-        "[projects.{}]\ntrust_level = \"trusted\"\n",
-        quote_toml_key(canonical)
-    ));
+    let mut body = toml::Table::new();
+    body.insert("trust_level".into(), "trusted".into());
+    let updated = otto_core::config::edit::insert_table(&text, &["projects", canonical], body)
+        .map_err(|error| error.to_string())?;
     Ok(Some(updated.into_bytes()))
-}
-
-/// Renders `value` as a double-quoted TOML basic string for a table-header
-/// key.
-///
-/// Backslash and double quote are escaped, and every control character is
-/// written as `\uXXXX`, so any directory name yields a file that still
-/// parses.
-fn quote_toml_key(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            ch if ch.is_control() => out.push_str(&format!("\\u{:04X}", ch as u32)),
-            ch => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]
@@ -273,10 +250,7 @@ mod tests {
             .expect("canonical")
             .to_string_lossy()
             .into_owned();
-        let original = format!(
-            "[projects.{}]\ntrust_level = \"trusted\"\n",
-            quote_toml_key(&canonical)
-        );
+        let original = format!("[projects.{canonical:?}]\ntrust_level = \"trusted\"\n");
         assert_eq!(
             compute_update(original.as_bytes(), &canonical).expect("compute"),
             None
@@ -292,6 +266,12 @@ mod tests {
         let file = otto_core::config::parse(&String::from_utf8(updated).expect("utf-8"))
             .expect("the written file parses");
         assert!(file.projects.contains_key(canonical));
+    }
+
+    #[test]
+    fn an_inline_projects_table_is_refused_instead_of_written_invalid() {
+        let err = compute_update(b"projects = {}\n", "/tmp/whatever").unwrap_err();
+        assert!(err.contains("configuration was not changed"), "{err}");
     }
 
     #[test]

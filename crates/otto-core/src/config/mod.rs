@@ -1,8 +1,8 @@
 //! Configuration schema, parsing, and resolution.
 //!
 //! This module is pure: it has no filesystem or environment access. [`parse`]
-//! turns TOML text into a [`File`], and [`set_default_profile`] rewrites the
-//! `default_profile` line in already-read text. The native crate's
+//! turns TOML text into a [`File`], and [`edit`] changes one key or table of
+//! already-read text in place. The native crate's
 //! `otto::config` reads and writes the files, reads the environment, and calls
 //! back into this module for the schema and the resolution logic in
 //! [`resolve`].
@@ -15,6 +15,7 @@
 
 pub mod agents;
 pub mod duration;
+pub mod edit;
 pub mod inbound;
 pub mod mcp;
 pub mod memory;
@@ -30,7 +31,6 @@ pub mod ui;
 
 use std::collections::HashMap;
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
@@ -187,12 +187,6 @@ pub fn parse(text: &str) -> Result<File, ConfigError> {
     }
 }
 
-/// Serializes `file` back to TOML text, for `Save`. The text production is
-/// pure; the native crate writes it to disk.
-pub fn to_toml_string(file: &File) -> Result<String, ConfigError> {
-    toml::to_string(file).map_err(|err| ConfigError::new(err.to_string()))
-}
-
 /// One line per unknown `[experimental]` key, for a caller to print as a
 /// startup warning. Empty when the table has none.
 pub fn experimental_warnings(file: &File) -> Vec<String> {
@@ -203,29 +197,10 @@ pub fn experimental_warnings(file: &File) -> Vec<String> {
         .collect()
 }
 
-static DEFAULT_PROFILE_LINE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r#"(?m)^\s*default_profile\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(#.*)?$"#)
-        .expect("static pattern compiles")
-});
-
-/// Rewrites the `default_profile` line of `content` to name `profile`,
-/// preserving every other line and its comments. Inserts a new line at the top
-/// when no `default_profile` line exists.
-pub fn set_default_profile(content: &str, profile: &str) -> String {
-    let line = format!("default_profile = {}", go_quote(profile));
-    if DEFAULT_PROFILE_LINE.is_match(content) {
-        return DEFAULT_PROFILE_LINE
-            .replace_all(content, line.as_str())
-            .into_owned();
-    }
-    if content.trim().is_empty() {
-        return format!("{line}\n");
-    }
-    if content.ends_with('\n') {
-        format!("{line}\n{content}")
-    } else {
-        format!("{line}\n{content}\n")
-    }
+/// Sets the top-level `default_profile` of `content` to `profile`, changing
+/// only that value; see [`edit::set_value`] for the layout and errors.
+pub fn set_default_profile(content: &str, profile: &str) -> Result<String, ConfigError> {
+    edit::set_value(content, &[], "default_profile", Some(&go_quote(profile)))
 }
 
 /// Renders `value` as a double-quoted string literal for the identifier-like
@@ -419,7 +394,7 @@ api_key_env = "OLD_KEY"
 provider = "chatgpt"
 model = "gpt-5-codex"
 "#;
-        let updated = set_default_profile(content, "new");
+        let updated = set_default_profile(content, "new").expect("set");
         assert!(updated.contains("default_profile = \"new\""));
         assert!(!updated.contains("default_profile = \"old\""));
         let file = parse(&updated).expect("parse");
@@ -432,7 +407,7 @@ model = "gpt-5-codex"
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn set_default_profile_inserts_missing_line() {
         let content = "[profiles.new]\nprovider = \"chatgpt\"\nmodel = \"gpt-5-codex\"\n";
-        let updated = set_default_profile(content, "new");
+        let updated = set_default_profile(content, "new").expect("set");
         assert!(updated.starts_with("default_profile = \"new\"\n"));
     }
 
@@ -459,31 +434,5 @@ future_thing = "x"
             experimental_warnings(&file),
             vec!["unknown [experimental] key: future_thing".to_string()]
         );
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn experimental_table_omitted_when_default_on_serialize() {
-        let file = parse("").expect("parse");
-        let text = to_toml_string(&file).expect("serialize");
-        assert!(!text.contains("experimental"), "{text}");
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn round_trips_through_to_toml_string() {
-        let file = parse(
-            r#"default_profile = "local"
-[profiles.local]
-provider = "openai-compatible"
-model = "test-model"
-base_url = "http://localhost:8080/v1"
-api_key_env = "TEST_KEY"
-"#,
-        )
-        .expect("parse");
-        let text = to_toml_string(&file).expect("serialize");
-        let reparsed = parse(&text).expect("reparse");
-        assert_eq!(file, reparsed);
     }
 }

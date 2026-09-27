@@ -1259,17 +1259,23 @@ fn bash_approval_request(tool_name: &str, result: &ToolResult) -> Option<Approva
         .content
         .lines()
         .find_map(|line| line.strip_prefix("Command: "))
-        .unwrap_or("");
+        .map(decode_approval_field)
+        .unwrap_or_default();
     let justification = result
         .content
         .lines()
         .find_map(|line| line.strip_prefix("Justification: "))
-        .unwrap_or("");
+        .map(decode_approval_field)
+        .unwrap_or_default();
     Some(ApprovalDialog {
         id: id.to_string(),
-        command: command.to_string(),
-        justification: justification.to_string(),
+        command,
+        justification,
     })
+}
+
+fn decode_approval_field(value: &str) -> String {
+    serde_json::from_str::<String>(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn approval_hint(approval: &ApprovalDialog) -> String {
@@ -1931,7 +1937,7 @@ mod tests {
             tool_name: "bash".to_string(),
             tool_call_id: "call-1".to_string(),
             result: otto_core::tool::ToolResult {
-                content: "approval required for unsandboxed bash execution.\nApprove in Otto: /approve approval-1\nCommand: \"git push\"".to_string(),
+                content: "approval required for unsandboxed bash execution.\nApprove in Otto: /approve approval-1\nCommand: \"git push\"\nJustification: \"push branch\"".to_string(),
                 is_error: true,
                 ..Default::default()
             },
@@ -1945,7 +1951,8 @@ mod tests {
         assert!(added[1].raw.contains("git push"), "{}", added[1].raw);
         let approval = app.approval.as_ref().expect("approval dialog");
         assert_eq!(approval.id, "approval-1");
-        assert!(approval.command.contains("git push"), "{approval:?}");
+        assert_eq!(approval.command, "git push");
+        assert_eq!(approval.justification, "push branch");
     }
 
     #[tokio::test]

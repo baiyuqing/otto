@@ -19,6 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use otto_core::agent::{CompactionResult, Event};
 use otto_core::model::Usage;
 use otto_core::session::types::SessionInfo;
+use otto_core::tool::ToolResult;
 use otto_core::wire::events::to_wire;
 use otto_core::wire::transcript;
 use tokio_util::sync::CancellationToken;
@@ -1159,16 +1160,20 @@ impl App {
                 false
             }
             Event::ToolCallFinished {
+                tool_name,
                 tool_call_id,
                 result,
-                ..
             } => {
+                let approval_hint = bash_approval_hint(&tool_name, &result);
                 if let Some(entry) = self.entries.iter_mut().rev().find(|entry| {
                     entry.kind == Some(EntryKind::Tool) && entry.tool_call_id == tool_call_id
                 }) {
                     entry.tool_output = result.content;
                     entry.tool_error = result.is_error;
                     entry.tool_done = true;
+                }
+                if let Some(hint) = approval_hint {
+                    self.push_system(hint);
                 }
                 false
             }
@@ -1197,6 +1202,32 @@ impl App {
             | Event::CompactionPlanned { .. } => false,
         }
     }
+}
+
+fn bash_approval_hint(tool_name: &str, result: &ToolResult) -> Option<String> {
+    if tool_name != "bash" || !result.is_error {
+        return None;
+    }
+    let approve = result
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("Approve in Otto: "))?;
+    if !approve.starts_with("/approve ") || approve.split_whitespace().count() != 2 {
+        return None;
+    }
+    let command = result
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("Command: "))
+        .unwrap_or("");
+    let mut hint = format!(
+        "Bash approval requested. Review the command, then type `{approve}` in Otto to allow this exact elevated command."
+    );
+    if !command.is_empty() {
+        hint.push_str("\nCommand: ");
+        hint.push_str(command);
+    }
+    Some(hint)
 }
 
 fn picker_command_name(kind: PickerKind) -> &'static str {
@@ -1826,6 +1857,41 @@ mod tests {
             arguments: String::new(),
         });
         assert_eq!(app.scroll, Some(4));
+    }
+
+    #[tokio::test]
+    async fn bash_approval_errors_add_a_visible_system_hint() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let before = app.entries.len();
+
+        app.apply_event(Event::ToolCallStarted {
+            tool_name: "bash".to_string(),
+            tool_call_id: "call-1".to_string(),
+            arguments: r#"{"command":"git push"}"#.to_string(),
+        });
+        app.apply_event(Event::ToolCallFinished {
+            tool_name: "bash".to_string(),
+            tool_call_id: "call-1".to_string(),
+            result: otto_core::tool::ToolResult {
+                content: "approval required for unsandboxed bash execution.\nApprove in Otto: /approve approval-1\nCommand: \"git push\"".to_string(),
+                is_error: true,
+                ..Default::default()
+            },
+        });
+
+        let added = &app.entries[before..];
+        assert_eq!(added.len(), 2, "tool entry plus system hint: {added:?}");
+        assert_eq!(added[0].kind, Some(EntryKind::Tool));
+        assert_eq!(added[1].kind, Some(EntryKind::System));
+        assert!(
+            added[1].raw.contains("/approve approval-1"),
+            "{}",
+            added[1].raw
+        );
+        assert!(added[1].raw.contains("git push"), "{}", added[1].raw);
     }
 
     #[test]

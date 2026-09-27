@@ -188,7 +188,7 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
         output.status.code()
     );
     assert!(
-        stdout.contains("Only the user can approve it, by typing /approve approval-1 in Otto"),
+        stdout.contains("Approve in Otto: /approve approval-1"),
         "stdout:\n{stdout}"
     );
     assert!(stdout.contains("done"), "stdout:\n{stdout}");

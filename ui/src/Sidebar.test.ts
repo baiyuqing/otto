@@ -7,9 +7,10 @@ const api = vi.hoisted(() => ({
   listWorkspaces: vi.fn(),
   addWorkspace: vi.fn(),
   removeWorkspace: vi.fn(),
+  listDirs: vi.fn(),
 }))
 
-vi.mock('./api', () => ({ api }))
+vi.mock('./api', async (importOriginal) => ({ ...(await importOriginal<typeof import('./api')>()), api }))
 
 import { groupSessions, Sidebar } from './Sidebar'
 import type { SessionListRow } from './wire'
@@ -96,27 +97,146 @@ describe('Sidebar', () => {
     expect(onOpenChanges).toHaveBeenCalledWith('/Users/me/src/app')
   })
 
-  it('adds a group on a successful workspace add', async () => {
+  it('adds a group on a successful typed-path add', async () => {
     api.addWorkspace.mockResolvedValue({ path: '/Users/me/src/new', open_sessions: 0, workflows: true })
     render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
     await screen.findByText('other-session')
 
     fireEvent.change(screen.getByLabelText('Add workspace path'), { target: { value: '/Users/me/src/new' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add path' }))
 
     await waitFor(() => expect(screen.getByTitle('/Users/me/src/new')).toBeTruthy())
+    expect(api.addWorkspace).toHaveBeenCalledWith('/Users/me/src/new', false)
   })
 
   it('shows the server error inline when adding a workspace is rejected', async () => {
     const { ApiError } = await vi.importActual<typeof import('./api')>('./api')
-    api.addWorkspace.mockRejectedValue(new ApiError(403, 'WORKSPACE_NOT_ADMITTED', 'workspace not admitted'))
+    api.addWorkspace.mockRejectedValue(new ApiError(400, 'INVALID_WORKSPACE', '/nope: not an existing directory'))
     render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
     await screen.findByText('other-session')
 
-    fireEvent.change(screen.getByLabelText('Add workspace path'), { target: { value: '/etc' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add workspace' }))
+    fireEvent.change(screen.getByLabelText('Add workspace path'), { target: { value: '/nope' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add path' }))
 
-    expect(await screen.findByText('workspace not admitted')).toBeTruthy()
+    expect(await screen.findByText('/nope: not an existing directory')).toBeTruthy()
+  })
+
+  it('asks to trust a folder that is not admitted yet, then adds it with trust', async () => {
+    const { ApiError } = await vi.importActual<typeof import('./api')>('./api')
+    api.addWorkspace
+      .mockRejectedValueOnce(new ApiError(403, 'WORKSPACE_NOT_ADMITTED', 'not admitted'))
+      .mockResolvedValueOnce({ path: '/Users/me/src/new', open_sessions: 0, workflows: true })
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+    await screen.findByText('other-session')
+
+    fireEvent.change(screen.getByLabelText('Add workspace path'), { target: { value: '/Users/me/src/new' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add path' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Trust this folder?' })
+    expect(within(dialog).getByText('/Users/me/src/new')).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Trust and add' }))
+
+    await waitFor(() => expect(screen.getByTitle('/Users/me/src/new')).toBeTruthy())
+    expect(api.addWorkspace).toHaveBeenLastCalledWith('/Users/me/src/new', true)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('adds nothing when the trust question is cancelled', async () => {
+    const { ApiError } = await vi.importActual<typeof import('./api')>('./api')
+    api.addWorkspace.mockRejectedValueOnce(new ApiError(403, 'WORKSPACE_NOT_ADMITTED', 'not admitted'))
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+    await screen.findByText('other-session')
+
+    fireEvent.change(screen.getByLabelText('Add workspace path'), { target: { value: '/Users/me/src/new' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add path' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Trust this folder?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(api.addWorkspace).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTitle('/Users/me/src/new')).toBeNull()
+  })
+
+  it('in a browser, picks a folder by browsing the server and adds it', async () => {
+    api.listDirs
+      .mockResolvedValueOnce({
+        path: '/Users/me',
+        parent: null,
+        roots: ['/Users/me'],
+        dirs: [{ name: 'src', path: '/Users/me/src' }],
+      })
+      .mockResolvedValueOnce({
+        path: '/Users/me/src',
+        parent: '/Users/me',
+        roots: ['/Users/me'],
+        dirs: [{ name: 'new', path: '/Users/me/src/new' }],
+      })
+    api.addWorkspace.mockResolvedValue({ path: '/Users/me/src', open_sessions: 0, workflows: true })
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+    await screen.findByText('other-session')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace…' }))
+    const picker = await screen.findByRole('dialog', { name: 'Choose a folder' })
+    fireEvent.click(await within(picker).findByRole('button', { name: 'src' }))
+    await within(picker).findByRole('button', { name: 'new' })
+    expect(api.listDirs).toHaveBeenLastCalledWith('/Users/me/src')
+    fireEvent.click(within(picker).getByRole('button', { name: 'Choose this folder' }))
+
+    await waitFor(() => expect(api.addWorkspace).toHaveBeenCalledWith('/Users/me/src', false))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Choose a folder' })).toBeNull())
+  })
+
+  it('goes up to the parent folder in the picker', async () => {
+    api.listDirs
+      .mockResolvedValueOnce({ path: '/Users/me/src', parent: '/Users/me', roots: ['/Users/me'], dirs: [] })
+      .mockResolvedValueOnce({ path: '/Users/me', parent: null, roots: ['/Users/me'], dirs: [] })
+    render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+    await screen.findByText('other-session')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add workspace…' }))
+    const picker = await screen.findByRole('dialog', { name: 'Choose a folder' })
+    const up = await within(picker).findByRole('button', { name: 'Up' })
+    await waitFor(() => expect((up as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(up)
+
+    await waitFor(() => expect(api.listDirs).toHaveBeenLastCalledWith('/Users/me'))
+    await waitFor(() => expect((within(picker).getByRole('button', { name: 'Up' }) as HTMLButtonElement).disabled).toBe(true))
+  })
+
+  describe('in the desktop app', () => {
+    const invoke = vi.fn()
+    beforeEach(() => {
+      ;(window as unknown as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } }
+    })
+    afterEach(() => {
+      delete (window as unknown as { __TAURI__?: unknown }).__TAURI__
+      invoke.mockReset()
+    })
+
+    it('uses the native folder picker and adds the chosen folder', async () => {
+      invoke.mockResolvedValue('/Users/me/picked')
+      api.addWorkspace.mockResolvedValue({ path: '/Users/me/picked', open_sessions: 0, workflows: true })
+      render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+      await screen.findByText('other-session')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Add workspace…' }))
+
+      await waitFor(() => expect(screen.getByTitle('/Users/me/picked')).toBeTruthy())
+      expect(invoke).toHaveBeenCalledWith('pick_directory')
+      expect(api.addWorkspace).toHaveBeenCalledWith('/Users/me/picked', false)
+      expect(api.listDirs).not.toHaveBeenCalled()
+    })
+
+    it('does nothing when the native picker is cancelled', async () => {
+      invoke.mockResolvedValue(null)
+      render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
+      await screen.findByText('other-session')
+
+      fireEvent.click(screen.getByRole('button', { name: 'Add workspace…' }))
+
+      await waitFor(() => expect(invoke).toHaveBeenCalled())
+      expect(api.addWorkspace).not.toHaveBeenCalled()
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
   })
 
   it('disables every row and control while disabled', async () => {

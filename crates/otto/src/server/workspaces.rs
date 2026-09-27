@@ -1,4 +1,4 @@
-//! `GET/POST /v1/workspaces`.
+//! `GET/POST/DELETE /v1/workspaces`.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Server, error_response, json_response, workspace_load_error_response,
+    Server, WorkspaceLoadError, error_response, json_response, workspace_load_error_response,
     workspace_remove_error_response,
 };
 
@@ -63,13 +63,24 @@ pub async fn list(State(server): State<Arc<Server>>) -> Response {
 #[serde(deny_unknown_fields)]
 pub struct RegisterRequest {
     path: String,
+    /// Record `path` as trusted when it is not already admitted, then load
+    /// it. The UI sends this after the user confirms the folder they picked.
+    #[serde(default)]
+    trust: bool,
 }
 
 pub async fn register(
     State(server): State<Arc<Server>>,
     Json(request): Json<RegisterRequest>,
 ) -> Response {
-    match server.factory.load_workspace(&request.path).await {
+    let mut loaded = server.factory.load_workspace(&request.path).await;
+    if request.trust && matches!(loaded, Err(WorkspaceLoadError::NotAdmitted(_))) {
+        loaded = match server.factory.trust_workspace(&request.path).await {
+            Ok(()) => server.factory.load_workspace(&request.path).await,
+            Err(error) => Err(error),
+        };
+    }
+    match loaded {
         Ok((info, newly_loaded)) => {
             let status = if newly_loaded {
                 StatusCode::CREATED

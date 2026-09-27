@@ -130,6 +130,15 @@ export interface WorkspaceList {
   workspaces: WorkspaceEntry[]
 }
 
+// DirListing is the body of GET /v1/fs/dirs: one directory's subdirectories,
+// for the folder picker. parent is null at the top of a browsable root.
+export interface DirListing {
+  path: string
+  parent: string | null
+  roots: string[]
+  dirs: { name: string; path: string }[]
+}
+
 // DiffFile is one file entry of GET /v1/workspaces/diff.
 export interface DiffFile {
   path: string
@@ -235,7 +244,11 @@ export const api = {
       body: JSON.stringify({ ...(resume ? { resume } : {}), ...(workspace ? { workspace } : {}) }),
     }),
   listWorkspaces: () => json<WorkspaceList>('/v1/workspaces'),
-  addWorkspace: (path: string) => json<WorkspaceEntry>('/v1/workspaces', { method: 'POST', body: JSON.stringify({ path }) }),
+  // trust records a not-yet-admitted path as trusted before loading it; the
+  // UI sends it only after the user confirms.
+  addWorkspace: (path: string, trust: boolean) =>
+    json<WorkspaceEntry>('/v1/workspaces', { method: 'POST', body: JSON.stringify({ path, trust }) }),
+  listDirs: (path?: string) => json<DirListing>(`/v1/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`),
   // removeWorkspace returns 204 with no body, so this uses request() rather
   // than json() to avoid parsing an empty response.
   removeWorkspace: (path: string) => request(`/v1/workspaces?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),

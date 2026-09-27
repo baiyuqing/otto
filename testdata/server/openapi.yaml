@@ -720,6 +720,23 @@ components:
         open_sessions: {type: integer}
         workflows: {type: boolean}
       required: [path, open_sessions, workflows]
+    DirListing:
+      type: object
+      properties:
+        path: {type: string, description: The canonical directory listed}
+        parent: {type: [string, "null"], description: Its parent, or null when the parent is not browsable}
+        roots:
+          type: array
+          items: {type: string}
+        dirs:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              path: {type: string}
+            required: [name, path]
+      required: [path, parent, roots, dirs]
     WorkspaceList:
       type: object
       properties:
@@ -1562,6 +1579,14 @@ paths:
               type: object
               properties:
                 path: {type: string}
+                trust:
+                  type: boolean
+                  default: false
+                  description: >-
+                    When path is outside the startup workspace, the configured
+                    roots, and every trusted directory, record it as trusted in
+                    the config file (the same write as otto trust) and then load
+                    it. Ignored for a path that is already admitted.
               required: [path]
       responses:
         "201":
@@ -1579,9 +1604,9 @@ paths:
         "400":
           description: Not an absolute, existing directory
         "403":
-          description: Outside the startup workspace and configured roots
+          description: Outside the startup workspace, configured roots, and trusted directories, and trust was not requested
         "500":
-          description: Admitted, but opening it failed
+          description: Admitted, but opening it failed, or recording trust failed
     delete:
       summary: Unload a workspace and remove it from the persisted list
       description: >-
@@ -1658,6 +1683,52 @@ paths:
                 $ref: "#/components/schemas/Error"
         "504":
           description: The git commands did not finish within the deadline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/fs/dirs:
+    get:
+      summary: List subdirectories for the folder picker
+      description: >-
+        Lists the directory's subdirectories, never its files. Names starting
+        with a dot are left out. Only the user's home directory, the
+        configured workspace roots, and their descendants can be listed; the
+        check runs after symlinks are resolved.
+      parameters:
+        - name: path
+          in: query
+          required: false
+          schema:
+            type: string
+          description: An absolute directory path. Defaults to the first entry of roots (the home directory).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirListing"
+        "400":
+          description: INVALID_PATH, not an absolute path to an existing directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: PATH_NOT_ALLOWED, outside every browsable directory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: BROWSE_UNAVAILABLE, the server has no browsable directories
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Reading the directory failed
           content:
             application/json:
               schema:

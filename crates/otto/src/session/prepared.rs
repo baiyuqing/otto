@@ -15,8 +15,7 @@ use otto_core::session::{PiError, SessionInfo, Warning};
 
 use super::fsops;
 use super::list::{
-    inspect_opened_session, open_session_file_read_only_no_follow_at, open_session_root_no_follow,
-    open_workspace_session_directory_no_follow,
+    inspect_opened_session, open_session_root_no_follow, open_workspace_session_directory_no_follow,
 };
 use super::store::Store;
 
@@ -196,6 +195,32 @@ impl Prepared {
 /// workspace. The move is atomic and never replaces an existing archived
 /// session; on success the file exists only under `archive/`.
 pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResult, PiError> {
+    Prepared::prepare_listed(root, workspace, path)?.archive(root, workspace)
+}
+
+impl Prepared {
+    /// Archives the file this prepared handle already owns and locks.
+    pub(crate) fn archive(self, root: &Path, workspace: &str) -> Result<ArchiveResult, PiError> {
+        let path = self.path.clone();
+        let (mut file, metadata) = self
+            .handle
+            .lock()
+            .map_err(|_| PiError::other("prepared session mutex is poisoned"))?
+            .take()
+            .ok_or_else(|| PiError::other("prepared session is no longer available"))?;
+        self.verify_identity(&metadata)?;
+        archive_open_file(root, workspace, Path::new(&path), &mut file, &metadata)
+    }
+}
+
+/// Moves a session whose caller already holds its exclusive file lock.
+pub(crate) fn archive_open_file(
+    root: &Path,
+    workspace: &str,
+    path: &Path,
+    file: &mut File,
+    metadata: &Metadata,
+) -> Result<ArchiveResult, PiError> {
     let (_, workspace_canonical, basename, _) =
         validate_listed_candidate_path(root, workspace, path)?;
 
@@ -208,9 +233,11 @@ pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResul
         ));
     };
 
-    let (mut file, metadata, candidate_path) =
-        open_session_file_read_only_no_follow_at(&workspace_dir, &directory, &basename)?;
-    let (session_info, _) = inspect_opened_session(&candidate_path, &mut file, &metadata)?;
+    let candidate_path = Path::new(&directory)
+        .join(&basename)
+        .to_string_lossy()
+        .into_owned();
+    let (session_info, _) = inspect_opened_session(&candidate_path, file, metadata)?;
     match fsops::canonical_workspace(Path::new(&session_info.cwd)) {
         Ok(recorded) if recorded == workspace_canonical => {}
         _ => {
@@ -223,7 +250,7 @@ pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResul
     match std::fs::symlink_metadata(&candidate_path) {
         Ok(current)
             if current.is_file()
-                && fsops::file_identity(&metadata) == fsops::file_identity(&current) => {}
+                && fsops::file_identity(metadata) == fsops::file_identity(&current) => {}
         _ => {
             return Err(PiError::invalid(
                 "session path identity changed before archive",
@@ -356,6 +383,8 @@ fn open_listed_prepared_session_file(
         fsops::open_at_no_follow(&workspace_dir, basename, libc::O_RDWR).map_err(|error| {
             if fsops::is_eloop(&error) {
                 PiError::invalid("listed session file is a symlink")
+            } else if error.raw_os_error() == Some(libc::EISDIR) {
+                PiError::invalid("listed session file is not a regular file")
             } else {
                 PiError::other(format!("open listed session file: {error}"))
             }

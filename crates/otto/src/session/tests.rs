@@ -1496,6 +1496,51 @@ fn prepare_listed_rejects_candidates_outside_the_workspace_directory() {
 // archive
 // ---------------------------------------------------------------------------
 
+const ARCHIVE_LOCK_TEST_ROOT: &str = "OTTO_ARCHIVE_LOCK_TEST_ROOT";
+const ARCHIVE_LOCK_TEST_WORKSPACE: &str = "OTTO_ARCHIVE_LOCK_TEST_WORKSPACE";
+const ARCHIVE_LOCK_TEST_PATH: &str = "OTTO_ARCHIVE_LOCK_TEST_PATH";
+
+#[test]
+fn archive_rejects_a_session_held_by_another_process() {
+    if let (Some(root), Some(workspace), Some(path)) = (
+        std::env::var_os(ARCHIVE_LOCK_TEST_ROOT),
+        std::env::var_os(ARCHIVE_LOCK_TEST_WORKSPACE),
+        std::env::var_os(ARCHIVE_LOCK_TEST_PATH),
+    ) {
+        let error = archive(
+            Path::new(&root),
+            &workspace.to_string_lossy(),
+            Path::new(&path),
+        )
+        .expect_err("another process holds the session");
+        assert!(error.to_string().contains("already open"), "{error}");
+        return;
+    }
+
+    let temp = TempDir::new();
+    let (root, workspace, paths) = seeded_workspace(&temp, 1);
+    let (store, _) = Store::open(&paths[0]).expect("open active session");
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "session::tests::archive_rejects_a_session_held_by_another_process",
+            "--nocapture",
+        ])
+        .env(ARCHIVE_LOCK_TEST_ROOT, &root)
+        .env(ARCHIVE_LOCK_TEST_WORKSPACE, &workspace)
+        .env(ARCHIVE_LOCK_TEST_PATH, &paths[0])
+        .status()
+        .expect("run archive process");
+    assert!(status.success(), "archive moved an active session");
+    assert!(
+        Path::new(&paths[0]).exists(),
+        "active source must stay in place"
+    );
+
+    store.close().expect("close active session");
+    archive(&root, &workspace.to_string_lossy(), Path::new(&paths[0])).expect("archive closed");
+}
+
 #[test]
 fn archive_moves_active_session_preserving_bytes_and_mode() {
     let temp = TempDir::new();

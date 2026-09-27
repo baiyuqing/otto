@@ -941,21 +941,21 @@ impl Controller {
     /// the sidecar back.
     pub async fn archive_current_session(&self) -> Result<ArchiveResult, String> {
         let admission = self.begin_replacement()?;
-        let (path, info) = {
+        let (session, path, info) = {
             let state = self.lock();
             let current = state.current.as_ref().ok_or_else(|| CLOSED.to_string())?;
-            (current.session.path(), current.info.clone())
+            (
+                current.session.clone(),
+                current.session.path(),
+                current.info.clone(),
+            )
         };
         if path.is_empty() {
             return Err(PERSISTENCE_DISABLED.to_string());
         }
         let runtime = self.current_runtime_from_info(info)?;
         let replacement = self.fresh_replacement(&runtime).await?;
-        match sessionfs::archive(
-            &self.builder.session_root,
-            &self.builder.workspace_path,
-            Path::new(&path),
-        ) {
+        match session.archive(&self.builder.session_root, &self.builder.workspace_path) {
             Ok(result) => {
                 if let Some(reminders) = self.reminders() {
                     reminders.clear();

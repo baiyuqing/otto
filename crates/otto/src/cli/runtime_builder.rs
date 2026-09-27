@@ -36,7 +36,7 @@ use crate::session::Store;
 use crate::skill::Catalog;
 use crate::tool::registry::Registry;
 use crate::tool::workspace::Workspace;
-use crate::tool::{Tool, bash, edit, find, grep, ls, read, write};
+use crate::tool::{Tool, bash, edit, find, grep, ls, models, read, write};
 
 use super::boundary::{self, BoundaryInputs, FixedText};
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
@@ -836,6 +836,9 @@ impl Builder {
                 false => bash::bash_definition(),
             });
         }
+        if runtime.is_some_and(|runtime| runtime.provider != otto_core::config::PROVIDER_CHATGPT) {
+            definitions.push(models::list_models_definition());
+        }
         let dynamic =
             boundary::secret_redactor(&self.boundary_inputs(), runtime).allows_dynamic_content();
         definitions.extend(self.boundary_catalog_definitions(max_output, dynamic));
@@ -1039,6 +1042,12 @@ impl Builder {
         } else {
             ProviderClient::Compat(Arc::new(Client::new(&runtime.base_url, &runtime.api_key)))
         };
+        if let ProviderClient::Compat(client) = &client {
+            tools.push(Box::new(models::ListModelsTool::new(
+                Arc::clone(client),
+                max_output,
+            )));
+        }
         mark_build_trace(&mut trace, "runner/provider");
 
         // The workspace context runs `git status` through the sandbox, so it
@@ -1519,6 +1528,7 @@ mod tests {
                 "ls",
                 "write",
                 "edit",
+                "list_models",
                 "agent",
                 "agent_wait",
                 "agent_status",
@@ -1593,6 +1603,7 @@ mod tests {
         let names = tool_names(&runner);
         assert!(names.contains(&"remind".to_string()), "{names:?}");
         assert!(names.contains(&"agent".to_string()), "{names:?}");
+        assert!(!names.contains(&"list_models".to_string()), "{names:?}");
     }
 
     #[tokio::test]
@@ -1698,7 +1709,7 @@ mod tests {
         let prompt = runner.system_prompt();
         assert!(prompt.starts_with("You are Otto, a concise coding agent."));
         assert!(prompt.contains(
-            "Usable tools: read, grep, find, ls, write, edit, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel."
+            "Usable tools: read, grep, find, ls, write, edit, list_models, agent, agent_wait, agent_status, agent_send, remind, remind_status, remind_cancel."
         ));
         assert!(prompt.contains("<workspace-instructions"), "{prompt}");
         assert!(prompt.contains("house rules"), "{prompt}");

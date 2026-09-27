@@ -1,4 +1,4 @@
-//! Workspace-confined file tools, plus in-process `remind`.
+//! Workspace-confined file tools, plus in-process `remind` and `list_models`.
 //!
 //! Every filesystem tool resolves paths through [`workspace::Workspace`], which
 //! rejects escapes from the selected workspace after canonical-path and symlink
@@ -21,6 +21,7 @@ pub mod grep;
 pub mod ls;
 pub mod mcp;
 pub mod memory;
+pub mod models;
 pub mod read;
 pub mod registry;
 pub mod remind;

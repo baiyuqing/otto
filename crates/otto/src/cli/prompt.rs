@@ -14,16 +14,30 @@ use otto_core::model::ToolDefinition;
 use super::info::{SandboxInfo, SandboxMode, SandboxNetwork, SandboxReason};
 
 /// The two-line paragraph appended when the registry offers an `agent` tool.
-pub fn agent_guidance(provider: &str, endpoint_host: &str, session_model: &str) -> String {
+/// `can_list_models` says whether the registry also offers `list_models`.
+pub fn agent_guidance(
+    provider: &str,
+    endpoint_host: &str,
+    session_model: &str,
+    can_list_models: bool,
+) -> String {
     let line1 = "Use the agent tool to delegate self-contained tasks (exploration, review, independent edits). You keep working while sub-agents run; each finished task arrives as a [task-notification] message. Use agent_wait only when your next step depends on the result.";
     let endpoint_segment = if endpoint_host.is_empty() {
         String::new()
     } else {
         format!("endpoint: {endpoint_host}, ")
     };
-    let line2 = format!(
-        "A sub-agent can run on a different model: pass model with any model id this provider accepts (provider: {provider}, {endpoint_segment}this session's model: {session_model}). Otto keeps no model list or price data; pick the cheapest model adequate for the task from your own knowledge, and rerun on the session model if a task fails with a model error."
-    );
+    let identity =
+        format!("(provider: {provider}, {endpoint_segment}this session's model: {session_model})");
+    let line2 = if can_list_models {
+        format!(
+            "A sub-agent can run on a different model: pass model with an id list_models returned {identity}. Otto keeps no price data; pick the cheapest listed model adequate for the task, and rerun on the session model if a task fails with a model error."
+        )
+    } else {
+        format!(
+            "A sub-agent can run on a different model: pass model with an id the user named or this session's model {identity}. Otto cannot list this provider's models; do not write a model id from memory."
+        )
+    };
     format!("{line1}\n{line2}")
 }
 
@@ -58,6 +72,7 @@ pub fn system_prompt_for(
 
     let mut tool_names: Vec<&str> = Vec::with_capacity(definitions.len());
     let mut has_agent_tool = false;
+    let mut has_list_models = false;
     for definition in definitions {
         let name = definition.name.as_str();
         if name == "bash" && !bash_usable {
@@ -68,6 +83,9 @@ pub fn system_prompt_for(
         }
         if name == "agent" {
             has_agent_tool = true;
+        }
+        if name == "list_models" {
+            has_list_models = true;
         }
     }
     let tools = if tool_names.is_empty() {
@@ -84,15 +102,25 @@ pub fn system_prompt_for(
          Read README.md before answering questions about what the project is, how it is built, or how it is used; do not guess from file names.\n\
          Before each batch of tool calls, state in one sentence what you are about to do and why.\n\
          Inspect the workspace before changing it. Prefer exact, minimal changes.\n\
-         Report what changed and what verification ran.\n\
-         Usable tools: ",
+         Report what changed and what verification ran.\n",
     );
+    prompt.push_str(if has_list_models {
+        "Take model ids from list_models; do not write a model id from memory.\n"
+    } else {
+        "Do not write a model id from memory; if the user has not given one, tell them to check the provider's model list.\n"
+    });
+    prompt.push_str("Usable tools: ");
     prompt.push_str(&tools);
     prompt.push_str(". File tools are restricted to the workspace. ");
     prompt.push_str(policy);
     if has_agent_tool {
         prompt.push('\n');
-        prompt.push_str(&agent_guidance(provider, endpoint_host, session_model));
+        prompt.push_str(&agent_guidance(
+            provider,
+            endpoint_host,
+            session_model,
+            has_list_models,
+        ));
     }
     prompt
 }
@@ -254,7 +282,8 @@ mod tests {
         assert!(prompt.ends_with(&agent_guidance(
             "openai-compatible",
             "gw.example.com",
-            "gpt-test"
+            "gpt-test",
+            false
         )));
         assert!(prompt.contains(
             "provider: openai-compatible, endpoint: gw.example.com, this session's model: gpt-test"
@@ -266,6 +295,48 @@ mod tests {
             !prompt.contains("Use the agent tool to delegate"),
             "{prompt}"
         );
+    }
+
+    #[test]
+    fn model_ids_come_from_list_models_when_it_is_registered() {
+        let prompt = system_prompt_for(
+            &definitions(&["read", "list_models", "agent"]),
+            off(),
+            "openai-compatible",
+            "gw.example.com",
+            "gpt-test",
+        );
+        assert!(
+            prompt.contains(
+                "Take model ids from list_models; do not write a model id from memory.\nUsable tools:"
+            ),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with(
+            "A sub-agent can run on a different model: pass model with an id list_models returned (provider: openai-compatible, endpoint: gw.example.com, this session's model: gpt-test). Otto keeps no price data; pick the cheapest listed model adequate for the task, and rerun on the session model if a task fails with a model error."
+        ), "{prompt}");
+        assert!(!prompt.contains("from your own knowledge"), "{prompt}");
+    }
+
+    #[test]
+    fn without_list_models_no_model_id_is_taken_from_memory() {
+        let prompt = system_prompt_for(
+            &definitions(&["read", "agent"]),
+            off(),
+            "chatgpt",
+            "",
+            "gpt-test",
+        );
+        assert!(
+            prompt.contains(
+                "Do not write a model id from memory; if the user has not given one, tell them to check the provider's model list.\nUsable tools:"
+            ),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with(
+            "A sub-agent can run on a different model: pass model with an id the user named or this session's model (provider: chatgpt, this session's model: gpt-test). Otto cannot list this provider's models; do not write a model id from memory."
+        ), "{prompt}");
+        assert!(!prompt.contains("from your own knowledge"), "{prompt}");
     }
 
     #[test]
@@ -292,6 +363,7 @@ mod tests {
              Before each batch of tool calls, state in one sentence what you are about to do and why.\n\
              Inspect the workspace before changing it. Prefer exact, minimal changes.\n\
              Report what changed and what verification ran.\n\
+             Do not write a model id from memory; if the user has not given one, tell them to check the provider's model list.\n\
              Usable tools: read, grep, find, ls, write, edit, bash. File tools are restricted to the workspace. Sandbox policy: Bash is unsandboxed and has the current macOS user's access.";
         assert_eq!(system_prompt_for(&definitions, off(), "", "", ""), want);
     }

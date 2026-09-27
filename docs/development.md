@@ -290,8 +290,13 @@ integration tests in the crate's `tests/` directory. Prefer
 `#[test]`/`#[tokio::test]` and `tempfile::TempDir`. TTY-specific coverage must
 stay offline and automated, such as the PTY smoke test in
 `crates/otto/tests/tui_pty.rs`. Live provider tests are opt-in only and
-excluded from the default suite. Contract changes need focused coverage for
-ownership, invalid states, cancellation, and history/wire compatibility;
+excluded from the default suite. Tests that spawn subprocesses while the
+parent holds files, advisory locks, sockets, or other descriptors must ensure
+those descriptors are close-on-exec unless the child intentionally needs them;
+otherwise parallel tests can inherit locks and fail unrelated cases as “already
+open” or “resource busy.” Add focused regression coverage for descriptor
+inheritance when fixing this class of flake. Contract changes need focused
+coverage for ownership, invalid states, cancellation, and history/wire compatibility;
 verify both `Session` implementations (`MemorySession` and `Store`) where they
 share a contract. Report failing gates and reruns accurately, check the
 baseline for unchanged failures, and never weaken validation or safety checks

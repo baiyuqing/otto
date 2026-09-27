@@ -66,7 +66,6 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![pick_directory])
         .on_menu_event(on_menu_event)
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
@@ -194,11 +193,29 @@ fn try_start(app_handle: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         environment,
     });
 
+    let serve = parsed_url.clone();
+    let navigation_handle = app_handle.clone();
     WebviewWindowBuilder::new(
         app_handle,
         MAIN_WINDOW_LABEL,
         WebviewUrl::External(parsed_url),
     )
+    // `window.__OTTO_DESKTOP__` for the web UI (`ui/src/desktop.ts`). A
+    // navigation needs no Tauri IPC, so the page is granted no commands.
+    .initialization_script(format!(
+        "window.__OTTO_DESKTOP__ = Object.freeze({{ openFolder: () => window.location.assign('{}') }});",
+        serve_url::OPEN_FOLDER_PATH
+    ))
+    .on_navigation(move |url| {
+        if !serve_url::is_open_folder_request(url, &serve) {
+            return true;
+        }
+        // Same as the menu item: `blocking_pick_folder` must not run on
+        // the main thread, which calls this handler.
+        let app_handle = navigation_handle.clone();
+        std::thread::spawn(move || open_folder(&app_handle));
+        false
+    })
     .title("Otto")
     .inner_size(1200.0, 800.0)
     .build()?;
@@ -247,7 +264,7 @@ fn on_menu_event(app_handle: &AppHandle, event: MenuEvent) {
     }
 }
 
-/// **File > Open Folder…**: picks a directory, trusts it, registers it with
+/// **File > Open Folder…** and the web UI's **Add workspace…** button: picks a directory, trusts it, registers it with
 /// the running `otto serve` over the app's own `POST /v1/workspaces` call,
 /// remembers it, and reloads the webview so it reflects the new workspace.
 fn open_folder(app_handle: &AppHandle) {
@@ -348,28 +365,6 @@ fn open_folder(app_handle: &AppHandle) {
             MessageDialogKind::Error,
         ),
     }
-}
-
-/// Called by the web UI's "Add workspace…" button as
-/// `window.__TAURI__.core.invoke('pick_directory')`: shows the native folder
-/// picker attached to the calling window and returns the picked absolute
-/// path, or `None` on cancel. It does not trust, register, or remember the
-/// folder; the web UI does that over the HTTP API. `capabilities/main.json`
-/// allows it from the main window's `http://127.0.0.1:*` page only.
-///
-/// Async commands run off the main thread, which `blocking_pick_folder`
-/// requires.
-#[tauri::command]
-async fn pick_directory(window: tauri::WebviewWindow) -> Option<String> {
-    window
-        .dialog()
-        .file()
-        .set_parent(&window)
-        .set_title("Choose a folder for Otto to work in")
-        .blocking_pick_folder()?
-        .into_path()
-        .ok()
-        .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 fn show_message(app_handle: &AppHandle, title: &str, message: &str, kind: MessageDialogKind) {

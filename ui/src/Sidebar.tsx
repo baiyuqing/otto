@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { SessionListRow } from './wire'
 import { api, ApiError, type SessionStatus, type WorkspaceEntry } from './api'
-import { nativeFolderPicker } from './desktop'
+import { desktopOpenFolder } from './desktop'
 import { FolderPicker } from './FolderPicker'
 import { sessionLabel, workspaceName } from './uiText'
 
@@ -83,19 +83,11 @@ export function Sidebar(props: {
     }
   }
 
-  const chooseFolder = async () => {
+  const chooseFolder = () => {
     setAddError('')
-    const pick = nativeFolderPicker()
-    if (!pick) {
-      setBrowsing(true)
-      return
-    }
-    try {
-      const path = await pick()
-      if (path) await addWorkspace(path, false)
-    } catch (e) {
-      setAddError(e instanceof Error ? e.message : String(e))
-    }
+    const openFolder = desktopOpenFolder()
+    if (openFolder) openFolder()
+    else setBrowsing(true)
   }
 
   const removeWorkspace = async (path: string) => {
@@ -183,7 +175,7 @@ export function Sidebar(props: {
         })}
       </div>
       <div className="sidebar-add">
-        <button type="button" className="primary" disabled={props.disabled} onClick={() => void chooseFolder()}>
+        <button type="button" className="primary" disabled={props.disabled} onClick={chooseFolder}>
           Add workspace…
         </button>
         <details>

@@ -1,19 +1,16 @@
 // The bridge to the macOS desktop app (desktop/), which loads this UI from
-// otto serve and injects window.__TAURI__ (app.withGlobalTauri). Its
-// pick_directory command shows the native folder picker and resolves to the
-// chosen absolute path, or null when cancelled.
+// otto serve and injects window.__OTTO_DESKTOP__ with an initialization
+// script. Its openFolder navigates to a path the app intercepts, and the app
+// then runs File > Open Folder…: the native folder picker, otto trust,
+// POST /v1/workspaces, and a reload of this page.
 
-interface TauriGlobal {
-  core: { invoke: (command: string) => Promise<unknown> }
+interface OttoDesktop {
+  openFolder: () => void
 }
 
-// nativeFolderPicker returns the desktop app's folder picker, or null in a
-// plain browser, which has no way to learn an absolute folder path.
-export function nativeFolderPicker(): (() => Promise<string | null>) | null {
-  const tauri = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__
-  if (!tauri?.core?.invoke) return null
-  return async () => {
-    const picked = await tauri.core.invoke('pick_directory')
-    return typeof picked === 'string' ? picked : null
-  }
+// desktopOpenFolder returns the desktop app's Open Folder action, or null in
+// a plain browser, which has no way to learn an absolute folder path.
+export function desktopOpenFolder(): (() => void) | null {
+  const desktop = (window as unknown as { __OTTO_DESKTOP__?: OttoDesktop }).__OTTO_DESKTOP__
+  return desktop?.openFolder ?? null
 }

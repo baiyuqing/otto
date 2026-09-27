@@ -56,6 +56,7 @@ impl Prepared {
     /// Pins the session file at `path`, read-write, refusing a symlink.
     pub fn prepare(path: &Path) -> Result<Self, PiError> {
         let (file, metadata) = open_prepared_session_file_no_follow(path)?;
+        fsops::lock_session_exclusive(&file)?;
         let path = path.to_string_lossy().into_owned();
         Self::from_opened(path.clone(), file, metadata, Identity::Path(path))
     }
@@ -70,6 +71,7 @@ impl Prepared {
             validate_listed_candidate_path(root, workspace, path)?;
         let (file, metadata) =
             open_listed_prepared_session_file(&root_path, &workspace_canonical, &basename)?;
+        fsops::lock_session_exclusive(&file)?;
         let prepared = Self::from_opened(
             candidate_path,
             file,

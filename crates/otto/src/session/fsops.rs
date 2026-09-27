@@ -16,7 +16,7 @@
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -69,6 +69,23 @@ pub fn open_no_follow(path: &Path, flags: libc::c_int) -> io::Result<File> {
         open_result(unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) })?;
     // SAFETY: fd is a fresh descriptor this function now owns.
     Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// Acquires the session's non-blocking advisory write lock.
+pub fn lock_session_exclusive(file: &File) -> Result<(), PiError> {
+    // SAFETY: the borrowed descriptor stays open through this call.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        Err(PiError::other(
+            "session is already open by another Otto process",
+        ))
+    } else {
+        Err(PiError::other(format!("lock session file: {error}")))
+    }
 }
 
 /// `openat(dir, name, flags|O_CLOEXEC|O_NOFOLLOW)`. `name` must be a single

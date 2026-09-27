@@ -22,6 +22,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, ApprovalDialog, TurnStatus};
 use super::commands::{SLASH_COMMANDS, SlashCommand};
+use super::entries::Entry;
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN, escape_plain_text,
     escape_single_line_text, footer_workspace, format_context_percentage, format_token_count,
@@ -106,6 +107,21 @@ const STARTUP_LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ 
 
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
+    if let Some(queued) = &app.queued_input {
+        let queued = Entry {
+            kind: Some(super::entries::EntryKind::User),
+            raw: format!("Queued: {queued}"),
+            ..Entry::default()
+        };
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(transcript::lines(
+            &[queued],
+            app.show_details,
+            area.width as usize,
+        ));
+    }
     if lines.is_empty() {
         lines.extend(
             STARTUP_LOGO
@@ -294,14 +310,14 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let (title, style) = if app.busy() && !app.input.is_empty() {
+    let (title, style) = if app.busy() && app.queued_input.is_some() {
         (
-            "Queued next input · edit below · Ctrl+U withdraw · Esc cancels turn",
+            "Queued next input · Ctrl+U withdraw · Esc cancels turn",
             Style::default().fg(Color::Cyan),
         )
     } else if app.busy() {
         (
-            "Working — type to queue next input · Esc cancels turn",
+            "Working — type, then Enter to queue next input · Esc cancels turn",
             Style::default().fg(Color::Magenta),
         )
     } else {
@@ -764,6 +780,25 @@ mod tests {
             "tool transcript:\n{running}"
         );
         assert!(!rendered(&app, 50, 10).contains("turn"));
+    }
+
+    #[tokio::test]
+    async fn committed_queued_input_draws_in_transcript_not_composer() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.start_turn();
+        app.queued_input = Some("follow up".to_string());
+
+        let screen = rendered(&app, 72, 12);
+
+        assert!(screen.contains("❯ Queued: follow up"), "{screen}");
+        assert!(
+            screen.contains("Queued next input · Ctrl+U withdraw"),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("│follow up"),
+            "queued text should not remain in the composer:\n{screen}"
+        );
     }
 
     /// The drawn frame, not the row builder: a prompt, the reply after it,

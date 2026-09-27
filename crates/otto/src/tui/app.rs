@@ -243,8 +243,14 @@ pub(crate) struct App {
     pub entries: Vec<Entry>,
     pub usage: Usage,
     pub info: Info,
+    /// Draft text in the composer. While a turn is running this is only a
+    /// draft; Enter commits it to [`App::queued_input`] and clears the box.
     pub input: Vec<char>,
     pub cursor: usize,
+    /// A next prompt submitted while the current turn is still running. It is
+    /// drawn in the transcript immediately, but is not written to prompt
+    /// history or dispatched until the current turn finishes successfully.
+    pub queued_input: Option<String>,
     /// Bash-style prompt history for the composer's Up/Down keys.
     history: History,
     /// `None` follows the bottom of the transcript; `Some(top)` pins the view
@@ -302,6 +308,7 @@ impl App {
             info: controller.info(),
             input: Vec::new(),
             cursor: 0,
+            queued_input: None,
             history,
             scroll: None,
             max_scroll: Cell::new(0),
@@ -579,10 +586,12 @@ impl App {
             return None;
         }
         if self.busy() {
-            // While a turn runs, the composer is the single editable queued
-            // draft for the next input. The run loop dispatches its final
-            // contents after the turn finishes successfully; Ctrl+U withdraws
-            // the draft. Esc/Ctrl+C are intercepted by the caller as
+            // While a turn runs, the composer is an editable draft for the
+            // next input. Enter commits that draft to the transcript as the
+            // queued prompt; the run loop dispatches the committed prompt
+            // after the turn finishes successfully. Ctrl+U withdraws the
+            // committed prompt, or clears the current draft when nothing is
+            // committed. Esc/Ctrl+C are intercepted by the caller as
             // cancellation before this method is invoked.
             self.handle_busy_composer_key(key);
             return None;
@@ -705,8 +714,9 @@ impl App {
                 self.cursor += 1;
                 self.edited();
             }
-            KeyCode::Enter => {}
+            KeyCode::Enter => self.commit_queued_input(),
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.queued_input = None;
                 self.input.clear();
                 self.cursor = 0;
                 self.edited();
@@ -736,6 +746,34 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn commit_queued_input(&mut self) {
+        if self.input.is_empty() {
+            return;
+        }
+        let line = std::mem::take(&mut self.input)
+            .into_iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
+        self.cursor = 0;
+        self.suggestion = 0;
+        if line.is_empty() {
+            return;
+        }
+        self.queued_input = Some(line);
+        self.scroll = None;
+    }
+
+    pub(crate) fn submit_queued_input(
+        &mut self,
+        controller: &Controller,
+        cancel: &CancellationToken,
+    ) -> Option<Action> {
+        let queued = self.queued_input.take()?;
+        self.history.remember(&queued);
+        self.dispatch_line(&queued, controller, cancel)
     }
 
     pub(crate) fn submit_input(
@@ -1650,6 +1688,7 @@ mod tests {
             info: Info::default(),
             input: Vec::new(),
             cursor: 0,
+            queued_input: None,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
@@ -1679,6 +1718,7 @@ mod tests {
             info: Info::default(),
             input: "hello".chars().collect(),
             cursor: 5,
+            queued_input: None,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
@@ -1701,7 +1741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn busy_composer_keeps_one_editable_draft_out_of_history_until_dispatch() {
+    async fn busy_composer_moves_input_to_transcript_on_enter_without_history() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
@@ -1726,16 +1766,33 @@ mod tests {
         );
 
         assert!(action.is_none());
-        assert_eq!(app.input.iter().collect::<String>(), "hi");
-        assert_eq!(app.cursor, 2);
+        assert!(app.input.is_empty());
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.queued_input.as_deref(), Some("hi"));
         assert!(
             app.history.previous("").is_none(),
-            "queued drafts are not prompt history"
+            "queued input is not prompt history until dispatch"
         );
         assert!(
             app.entries.is_empty(),
-            "queued drafts are not transcript history"
+            "queued input is a pending transcript item, not persisted history"
         );
+    }
+
+    #[tokio::test]
+    async fn busy_composer_draft_stays_in_input_until_enter() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        app.start_turn();
+
+        app.insert_text("draft only");
+
+        assert_eq!(app.input.iter().collect::<String>(), "draft only");
+        assert!(app.queued_input.is_none());
+        assert!(app.entries.is_empty());
+        assert!(app.history.previous("").is_none());
     }
 
     #[tokio::test]
@@ -1747,6 +1804,12 @@ mod tests {
         let mut app = App::new(&controller);
         app.start_turn();
         app.insert_text("queued draft");
+        app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert_eq!(app.queued_input.as_deref(), Some("queued draft"));
 
         let action = app.handle_key(
             key(KeyCode::Char('u'), KeyModifiers::CONTROL),
@@ -1756,6 +1819,7 @@ mod tests {
 
         assert!(action.is_none());
         assert!(app.input.is_empty());
+        assert!(app.queued_input.is_none());
         assert_eq!(app.cursor, 0);
         assert!(app.history.previous("").is_none());
         assert!(app.entries.is_empty());
@@ -1771,11 +1835,18 @@ mod tests {
         app.start_turn();
 
         app.insert_text("next prompt");
+        app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+        assert!(app.input.is_empty());
+        assert_eq!(app.queued_input.as_deref(), Some("next prompt"));
         assert!(app.entries.is_empty());
         assert!(app.history.previous("").is_none());
 
         app.end_turn();
-        let action = app.submit_input(&controller, &cancel);
+        let action = app.submit_queued_input(&controller, &cancel);
 
         assert!(matches!(action, Some(Action::Prompt(line)) if line == "next prompt"));
         assert_eq!(app.entries.len(), 1);
@@ -1792,6 +1863,7 @@ mod tests {
             info: Info::default(),
             input: "abc".chars().collect(),
             cursor: 3,
+            queued_input: None,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
@@ -1824,6 +1896,7 @@ mod tests {
             info: Info::default(),
             input: "abcd".chars().collect(),
             cursor: 2,
+            queued_input: None,
             history: History::default(),
             scroll: None,
             max_scroll: Cell::new(0),
@@ -2471,10 +2544,8 @@ mod tests {
         );
     }
 
-    /// This frontend has no per-command guard or status bar, so
-    /// [`App::handle_key`]'s single [`App::busy`] check (shared by every slash
-    /// command, not memory-specific) silently declines to dispatch instead of
-    /// pushing a rejection message. What is verified here is the observable
+    /// Busy slash commands are queued as literal next input instead of being
+    /// dispatched immediately. What is verified here is the observable
     /// guarantee: the command never runs while a turn is active.
     #[tokio::test]
     async fn busy_guard_rejects_slash_commands_while_a_turn_is_active() {
@@ -2496,11 +2567,8 @@ mod tests {
 
         assert!(action.is_none());
         assert_eq!(app.entries.len(), before, "no command must run while busy");
-        assert_eq!(
-            app.input.iter().collect::<String>(),
-            "/memory search vim",
-            "the composer must be left untouched"
-        );
+        assert!(app.input.is_empty(), "queued Enter clears the composer");
+        assert_eq!(app.queued_input.as_deref(), Some("/memory search vim"));
     }
 
     /// The completion half; the help-overlay text containment half is

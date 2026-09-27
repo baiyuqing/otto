@@ -96,6 +96,14 @@ pub trait SessionHandle: Session + Send + Sync {
     fn update_runtime(&self, runtime: &RuntimeMetadata) -> Result<(), String>;
     fn close(&self) -> Result<(), String>;
 
+    fn archive(
+        &self,
+        _root: &Path,
+        _workspace: &str,
+    ) -> Result<crate::session::ArchiveResult, String> {
+        Err("session persistence is disabled".to_string())
+    }
+
     /// The usage and context-window counters a frontend displays. A transcript
     /// that keeps no counters reports zeroes.
     fn snapshot(&self) -> Snapshot {
@@ -134,6 +142,14 @@ impl SessionHandle for Store {
 
     fn close(&self) -> Result<(), String> {
         Store::close(self).map_err(|error| error.to_string())
+    }
+
+    fn archive(
+        &self,
+        root: &Path,
+        workspace: &str,
+    ) -> Result<crate::session::ArchiveResult, String> {
+        Store::archive(self, root, workspace).map_err(|error| error.to_string())
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -299,6 +315,14 @@ impl SharedSession {
 
     pub fn close(&self) -> Result<(), String> {
         self.0.close()
+    }
+
+    pub fn archive(
+        &self,
+        root: &Path,
+        workspace: &str,
+    ) -> Result<crate::session::ArchiveResult, String> {
+        self.0.archive(root, workspace)
     }
 
     pub fn snapshot(&self) -> Snapshot {

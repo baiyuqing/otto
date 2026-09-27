@@ -14,6 +14,7 @@ pub mod approvals;
 pub mod auth;
 pub mod compact;
 pub mod diff;
+pub mod fs;
 pub mod listen;
 pub mod mcp;
 pub mod metrics;
@@ -149,6 +150,23 @@ pub trait Factory: Send + Sync {
     /// already loaded.
     async fn load_workspace(&self, path: &str)
     -> Result<(WorkspaceInfo, bool), WorkspaceLoadError>;
+    /// Records `path` as trusted (the same config write as `otto trust`), so
+    /// a following [`Factory::load_workspace`] admits it. Only `POST
+    /// /v1/workspaces` with `trust: true` calls this, after a load answered
+    /// [`WorkspaceLoadError::NotAdmitted`]. The default refuses, for a
+    /// `Factory` with no config file to write.
+    async fn trust_workspace(&self, path: &str) -> Result<(), WorkspaceLoadError> {
+        Err(WorkspaceLoadError::Failed(format!(
+            "{path}: trusting a directory is not available"
+        )))
+    }
+    /// The canonical directories `GET /v1/fs/dirs` may list, with their
+    /// descendants: the user's home directory, then the configured workspace
+    /// roots. The first entry is where browsing starts. Empty (the default)
+    /// makes the route answer 404.
+    fn browse_roots(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
     /// Unloads `path` and removes it from the persisted workspace list.
     /// `path` is matched literally when it does not resolve (a deleted
     /// directory's persisted entry). The caller has already checked for open
@@ -193,6 +211,7 @@ pub struct WorkspaceList {
 }
 
 /// Why [`Factory::load_workspace`] refused or failed a path.
+#[derive(Debug)]
 pub enum WorkspaceLoadError {
     /// Not an absolute, existing directory.
     Invalid(String),
@@ -547,6 +566,7 @@ impl Server {
                     .delete(workspaces::remove),
             )
             .route("/v1/workspaces/diff", get(diff::get))
+            .route("/v1/fs/dirs", get(fs::dirs))
             .route("/v1/info", get(info))
             .route("/v1/status", get(status))
             .route("/v1/usage", get(usage))
@@ -1986,6 +2006,10 @@ mod tests {
         /// A loaded path with a simulated active workflow run, so
         /// `remove_workspace` answers `WorkspaceRemoveError::InUse` for it.
         in_use: Option<String>,
+        /// Paths `trust_workspace` recorded; admitted like `admitted`.
+        trusted: Mutex<Vec<String>>,
+        /// `Factory::browse_roots`'s answer.
+        browse_roots: Vec<std::path::PathBuf>,
     }
 
     impl Default for FakeWorkspaces {
@@ -1997,6 +2021,8 @@ mod tests {
                 gate: None,
                 loaded: tokio::sync::Mutex::new(BTreeMap::new()),
                 in_use: None,
+                trusted: Mutex::new(Vec::new()),
+                browse_roots: Vec::new(),
             }
         }
     }
@@ -2176,6 +2202,12 @@ mod tests {
             }
             if path != self.workspaces.startup
                 && !self.workspaces.admitted.contains(&path.to_string())
+                && !self
+                    .workspaces
+                    .trusted
+                    .lock()
+                    .expect("trusted")
+                    .contains(&path.to_string())
             {
                 return Err(WorkspaceLoadError::NotAdmitted(format!(
                     "{path}: outside the startup workspace and configured roots"
@@ -2207,6 +2239,24 @@ mod tests {
                 },
                 true,
             ))
+        }
+
+        async fn trust_workspace(&self, path: &str) -> Result<(), WorkspaceLoadError> {
+            if !path.starts_with('/') {
+                return Err(WorkspaceLoadError::Invalid(format!(
+                    "{path}: not an existing directory"
+                )));
+            }
+            self.workspaces
+                .trusted
+                .lock()
+                .expect("trusted")
+                .push(path.to_string());
+            Ok(())
+        }
+
+        fn browse_roots(&self) -> Vec<std::path::PathBuf> {
+            self.workspaces.browse_roots.clone()
         }
 
         async fn remove_workspace(&self, path: &str) -> Result<(), WorkspaceRemoveError> {
@@ -4286,6 +4336,113 @@ mod tests {
         assert_eq!(workspaces.len(), 2);
         assert_eq!(workspaces[0]["path"], harness.factory.workspaces.startup);
         assert_eq!(workspaces[1]["path"], "/other");
+    }
+
+    #[tokio::test]
+    async fn registering_an_unadmitted_path_with_trust_records_trust_then_answers_201() {
+        let harness = Harness::new();
+        let reply = harness
+            .send_with(
+                "POST",
+                "/v1/workspaces",
+                Some(r#"{"path":"/elsewhere","trust":true}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        assert_eq!(reply.json()["path"], "/elsewhere");
+        assert_eq!(
+            *harness.factory.workspaces.trusted.lock().expect("trusted"),
+            ["/elsewhere"]
+        );
+    }
+
+    #[tokio::test]
+    async fn registering_an_admitted_path_with_trust_records_nothing() {
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                admitted: vec!["/other".to_string()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        let reply = harness
+            .send_with(
+                "POST",
+                "/v1/workspaces",
+                Some(r#"{"path":"/other","trust":true}"#),
+                &[("content-type", b"application/json")],
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        assert!(
+            harness
+                .factory
+                .workspaces
+                .trusted
+                .lock()
+                .expect("trusted")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn browsing_directories_lists_subdirectories_of_the_first_root() {
+        let home = tempfile::tempdir().expect("home");
+        let root = std::fs::canonicalize(home.path()).expect("canonical");
+        std::fs::create_dir(root.join("project")).expect("mkdir");
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                browse_roots: vec![root.clone()],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+
+        let reply = harness.send("GET", "/v1/fs/dirs", None).await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let body = reply.json();
+        assert_eq!(body["path"], root.to_string_lossy().as_ref());
+        assert_eq!(body["dirs"][0]["name"], "project");
+    }
+
+    #[tokio::test]
+    async fn browsing_outside_the_roots_answers_403() {
+        let home = tempfile::tempdir().expect("home");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let harness = Harness::with(HarnessOptions {
+            workspaces: FakeWorkspaces {
+                browse_roots: vec![std::fs::canonicalize(home.path()).expect("canonical")],
+                ..FakeWorkspaces::default()
+            },
+            ..HarnessOptions::default()
+        });
+        // A temp directory path has no characters that need escaping.
+        let query = format!("/v1/fs/dirs?path={}", elsewhere.path().display());
+
+        let reply = harness.send("GET", &query, None).await;
+
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "PATH_NOT_ALLOWED");
+    }
+
+    #[tokio::test]
+    async fn browsing_with_no_roots_answers_404() {
+        let harness = Harness::new();
+        let reply = harness.send("GET", "/v1/fs/dirs", None).await;
+        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{}", reply.body);
+        assert_eq!(reply.json()["error"]["code"], "BROWSE_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn browsing_without_a_token_answers_401() {
+        let harness = Harness::with(HarnessOptions {
+            token: "secret".to_string(),
+            ..HarnessOptions::default()
+        });
+        let reply = harness.send("GET", "/v1/fs/dirs", None).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{}", reply.body);
     }
 
     #[tokio::test]

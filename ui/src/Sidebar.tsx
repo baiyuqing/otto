@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { SessionListRow } from './wire'
-import { api, type SessionStatus, type WorkspaceEntry } from './api'
+import { api, ApiError, type SessionStatus, type WorkspaceEntry } from './api'
+import { nativeFolderPicker } from './desktop'
+import { FolderPicker } from './FolderPicker'
 import { sessionLabel, workspaceName } from './uiText'
 
 export interface SidebarGroup {
@@ -40,6 +42,10 @@ export function Sidebar(props: {
   const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([])
   const [newPath, setNewPath] = useState('')
   const [addError, setAddError] = useState('')
+  const [browsing, setBrowsing] = useState(false)
+  // A path the server refused as not admitted, waiting on the user's
+  // confirmation to trust it.
+  const [confirmTrust, setConfirmTrust] = useState<string | null>(null)
 
   useEffect(() => {
     let canceled = false
@@ -58,14 +64,35 @@ export function Sidebar(props: {
     }
   }, [])
 
-  const addWorkspace = async () => {
-    const path = newPath.trim()
-    if (!path) return
+  // addWorkspace registers path. A folder outside the startup workspace,
+  // the configured roots, and every trusted directory is refused with 403
+  // WORKSPACE_NOT_ADMITTED; the user is then asked to trust it, and the
+  // retry sends trust so the server records it before loading.
+  const addWorkspace = async (path: string, trust: boolean) => {
     setAddError('')
     try {
-      const entry = await api.addWorkspace(path)
+      const entry = await api.addWorkspace(path, trust)
       setWorkspaces((prev) => (prev.some((w) => w.path === entry.path) ? prev : [...prev, entry]))
       setNewPath('')
+    } catch (e) {
+      if (!trust && e instanceof ApiError && e.code === 'WORKSPACE_NOT_ADMITTED') {
+        setConfirmTrust(path)
+        return
+      }
+      setAddError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const chooseFolder = async () => {
+    setAddError('')
+    const pick = nativeFolderPicker()
+    if (!pick) {
+      setBrowsing(true)
+      return
+    }
+    try {
+      const path = await pick()
+      if (path) await addWorkspace(path, false)
     } catch (e) {
       setAddError(e instanceof Error ? e.message : String(e))
     }
@@ -156,18 +183,80 @@ export function Sidebar(props: {
         })}
       </div>
       <div className="sidebar-add">
-        <input
-          aria-label="Add workspace path"
-          placeholder="Add workspace path…"
-          value={newPath}
-          disabled={props.disabled}
-          onChange={(e) => setNewPath(e.target.value)}
-        />
-        <button type="button" disabled={props.disabled} onClick={() => void addWorkspace()}>
-          Add workspace
+        <button type="button" className="primary" disabled={props.disabled} onClick={() => void chooseFolder()}>
+          Add workspace…
         </button>
+        <details>
+          <summary>Enter a path</summary>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              const path = newPath.trim()
+              if (path) void addWorkspace(path, false)
+            }}
+          >
+            <input
+              aria-label="Add workspace path"
+              placeholder="/absolute/path"
+              value={newPath}
+              disabled={props.disabled}
+              onChange={(e) => setNewPath(e.target.value)}
+            />
+            <button type="submit" disabled={props.disabled}>
+              Add path
+            </button>
+          </form>
+        </details>
         {addError && <span role="alert">{addError}</span>}
       </div>
+      {browsing && (
+        <FolderPicker
+          onCancel={() => setBrowsing(false)}
+          onChoose={(path) => {
+            setBrowsing(false)
+            void addWorkspace(path, false)
+          }}
+        />
+      )}
+      {confirmTrust !== null && (
+        <div className="modal-backdrop" onMouseDown={() => setConfirmTrust(null)}>
+          <div
+            className="rename-dialog trust-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="trust-title"
+            onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setConfirmTrust(null)
+            }}
+          >
+            <div className="rename-dialog-copy">
+              <h2 id="trust-title">Trust this folder?</h2>
+              <p>
+                Otto will read and edit files and run commands in <code>{confirmTrust}</code>. It is recorded as
+                trusted in your config, the same as <code>otto trust</code>.
+              </p>
+            </div>
+            <div className="rename-actions">
+              <button type="button" className="secondary" onClick={() => setConfirmTrust(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                autoFocus
+                onClick={() => {
+                  const path = confirmTrust
+                  setConfirmTrust(null)
+                  void addWorkspace(path, true)
+                }}
+              >
+                Trust and add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

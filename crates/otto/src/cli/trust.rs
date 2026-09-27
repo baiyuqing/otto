@@ -77,11 +77,6 @@ pub fn run(
         }
         Err(()) => return fail(stderr, USAGE),
     };
-    let Ok(canonical) = canonical_directory(Path::new(&flags.dir)) else {
-        return fail(stderr, &format!("not a directory: {}", flags.dir));
-    };
-    let canonical = canonical.to_string_lossy().into_owned();
-
     let path = match flags.config_path.is_empty() {
         true => {
             let Ok(home) = super::run::resolve_home_for(lookup) else {
@@ -95,23 +90,34 @@ pub fn run(
     let Ok(path) = std::path::absolute(&path) else {
         return fail(stderr, "invalid configuration path");
     };
+    match trust_directory(&path, Path::new(&flags.dir)) {
+        Ok(canonical) => {
+            let _ = writeln!(stdout, "Trusted {canonical}.");
+            0
+        }
+        Err(message) => fail(stderr, &message),
+    }
+}
 
-    let original = match std::fs::read(&path) {
+/// Records `dir` as trusted in the config file at `config_path` (absolute)
+/// and returns its canonical path. Shared by `otto trust` and `otto serve`'s
+/// `POST /v1/workspaces` with `trust: true`. Nothing is written when `dir` is
+/// already listed under `[projects]`.
+pub(crate) fn trust_directory(config_path: &Path, dir: &Path) -> Result<String, String> {
+    let Ok(canonical) = canonical_directory(dir) else {
+        return Err(format!("not a directory: {}", dir.display()));
+    };
+    let canonical = canonical.to_string_lossy().into_owned();
+    let original = match std::fs::read(config_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(_) => return fail(stderr, "cannot read configuration"),
+        Err(_) => return Err("cannot read configuration".to_string()),
     };
-    let updated = match compute_update(&original, &canonical) {
-        Ok(updated) => updated,
-        Err(message) => return fail(stderr, &message),
-    };
-    if let Some(updated) = updated
-        && let Err(message) = crate::config::write_bytes(&path, &original, &updated)
-    {
-        return fail(stderr, &format!("cannot save configuration: {message}"));
+    if let Some(updated) = compute_update(&original, &canonical)? {
+        crate::config::write_bytes(config_path, &original, &updated)
+            .map_err(|message| format!("cannot save configuration: {message}"))?;
     }
-    let _ = writeln!(stdout, "Trusted {canonical}.");
-    0
+    Ok(canonical)
 }
 
 /// The bytes to write for `canonical`, or `None` when it is already trusted

@@ -604,6 +604,31 @@ impl Factory for ServeFactory {
         }
     }
 
+    async fn trust_workspace(&self, path: &str) -> Result<(), server::WorkspaceLoadError> {
+        // Relative paths are refused for the same reason `admit_workspace`
+        // refuses them: they would resolve against serve's working directory.
+        if !Path::new(path).is_absolute() || canonical_directory(Path::new(path)).is_err() {
+            return Err(server::WorkspaceLoadError::Invalid(format!(
+                "{path}: not an existing directory"
+            )));
+        }
+        super::trust::trust_directory(&self.workspaces.config_path, Path::new(path))
+            .map(|_| ())
+            .map_err(server::WorkspaceLoadError::Failed)
+    }
+
+    fn browse_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = canonical_directory(Path::new(&self.builder().shared.home))
+            .into_iter()
+            .collect();
+        for root in &self.workspaces.roots {
+            if !roots.contains(root) {
+                roots.push(root.clone());
+            }
+        }
+        roots
+    }
+
     async fn load_workspace(
         &self,
         path: &str,
@@ -1371,6 +1396,100 @@ mod tests {
             workspaces.admit(&trusted_path.to_string_lossy()),
             Ok(trusted_path)
         );
+    }
+
+    fn factory_with(
+        startup: &Path,
+        sessions: &Path,
+        roots: Vec<PathBuf>,
+        config_path: PathBuf,
+    ) -> ServeFactory {
+        let startup_host = dummy_host(startup, sessions);
+        let runtime = crate::cli::testutil::initial_runtime(&startup_host.builder);
+        ServeFactory {
+            workspaces: Workspaces {
+                startup: startup.to_string_lossy().into_owned(),
+                startup_host,
+                roots,
+                config_path,
+                loaded: tokio::sync::Mutex::new(BTreeMap::new()),
+            },
+            runtime,
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn trusting_a_workspace_writes_the_config_so_it_is_admitted() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let config_path = config_dir.path().join("config.toml");
+        let picked = tempfile::tempdir().expect("picked");
+        let picked_path = canonical_directory(picked.path()).expect("canonical");
+        let factory = factory_with(
+            &startup_path,
+            sessions.path(),
+            Vec::new(),
+            config_path.clone(),
+        );
+
+        factory
+            .trust_workspace(&picked_path.to_string_lossy())
+            .await
+            .expect("trusted");
+
+        assert_eq!(
+            factory.workspaces.admit(&picked_path.to_string_lossy()),
+            Ok(picked_path)
+        );
+        assert!(
+            std::fs::read_to_string(&config_path)
+                .expect("config")
+                .contains("trust_level = \"trusted\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn trusting_a_missing_directory_is_invalid() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let config_dir = tempfile::tempdir().expect("config dir");
+        let factory = factory_with(
+            &startup_path,
+            sessions.path(),
+            Vec::new(),
+            config_dir.path().join("config.toml"),
+        );
+
+        let got = factory
+            .trust_workspace(&startup_path.join("missing").to_string_lossy())
+            .await;
+
+        assert!(
+            matches!(got, Err(server::WorkspaceLoadError::Invalid(_))),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn browse_roots_are_the_home_directory_then_the_configured_roots() {
+        let startup = tempfile::tempdir().expect("startup");
+        let startup_path = canonical_directory(startup.path()).expect("canonical");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let root = tempfile::tempdir().expect("root");
+        let root_path = canonical_directory(root.path()).expect("canonical");
+        // `testutil::builder` uses the workspace directory as home.
+        let factory = factory_with(
+            &startup_path,
+            sessions.path(),
+            vec![root_path.clone()],
+            PathBuf::new(),
+        );
+
+        assert_eq!(factory.browse_roots(), vec![startup_path, root_path]);
     }
 
     #[test]

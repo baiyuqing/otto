@@ -763,8 +763,21 @@ fn render_event(stdout: &mut dyn Write, stderr: &mut dyn Write, event: &Event) -
         } => {
             let _ = writeln!(stdout, "\n[tool] {tool_name} ({tool_call_id})");
         }
-        Event::ToolCallFinished { result, .. } => {
+        Event::ToolCallFinished {
+            tool_name, result, ..
+        } => {
             let _ = writeln!(stdout, "[tool result] {}", first_line(&result.content));
+            // A bash approval request puts the /approve command, the command,
+            // and the justification on their own lines after the first.
+            if tool_name == "bash" && result.is_error {
+                for line in result.content.lines().filter(|line| {
+                    ["Approve in Otto: ", "Command: ", "Justification: "]
+                        .iter()
+                        .any(|prefix| line.starts_with(prefix))
+                }) {
+                    let _ = writeln!(stdout, "{line}");
+                }
+            }
         }
         Event::CompactionCompleted { compaction } => {
             let _ = write!(stdout, "{}", compaction_line(compaction));
@@ -1523,6 +1536,37 @@ mod tests {
 
         let error = result.expect_err("oversized line");
         assert!(error.to_string().contains("input line too long"), "{error}");
+    }
+
+    #[test]
+    fn a_bash_approval_request_renders_the_approval_lines() {
+        let mut stdout = Buffer::default();
+        let mut stderr = Buffer::default();
+        render_event(
+            &mut stdout,
+            &mut stderr,
+            &Event::ToolCallFinished {
+                tool_name: "bash".to_string(),
+                tool_call_id: "call-1".to_string(),
+                result: ToolResult {
+                    content: "approval required for unsandboxed bash execution.\n\
+Approve in Otto: /approve approval-1\n\
+Command: \"git push\"\n\
+Justification: \"push branch\"\n\
+The command did not run."
+                        .to_string(),
+                    is_error: true,
+                    ..ToolResult::default()
+                },
+            },
+        );
+        assert_eq!(
+            stdout.text(),
+            "[tool result] approval required for unsandboxed bash execution.\n\
+Approve in Otto: /approve approval-1\n\
+Command: \"git push\"\n\
+Justification: \"push branch\"\n"
+        );
     }
 
     #[test]

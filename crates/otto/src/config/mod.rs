@@ -1,6 +1,6 @@
 //! Native filesystem and environment layer for configuration.
 //!
-//! Loading, saving, and the default path; the pure schema, parsing, and
+//! Loading, in-place edits, and the default path; the pure schema, parsing, and
 //! resolution logic lives in `otto_core::config`.
 //!
 //! ponytail: `default_path`, `load`, and `set_default_profile_file` each
@@ -96,18 +96,6 @@ fn load_with_bytes(path: &Path, default_path: &Path) -> Result<(Vec<u8>, File), 
 /// How many replaced versions of the configuration [`write_bytes`] keeps in
 /// the `backups` directory beside it.
 const BACKUP_LIMIT: usize = 10;
-
-/// Serializes and writes `file` to `path` through [`write_bytes`], replacing
-/// `replacing` — the bytes the caller read `file` from, empty for a file that
-/// did not exist.
-///
-/// Serialization is a full round trip through the schema, so comments and
-/// formatting in a hand-edited file are not preserved; the backup
-/// [`write_bytes`] takes is what the previous contents can be recovered from.
-pub fn save(path: &Path, file: &File, replacing: &[u8]) -> Result<(), NativeConfigError> {
-    let text = otto_core::config::to_toml_string(file)?;
-    write_bytes(path, replacing, text.as_bytes()).map_err(io_error)
-}
 
 /// Replaces `path` with `updated`, after copying the contents it replaces into
 /// `backups` beside it.
@@ -264,8 +252,8 @@ fn io_error(message: &'static str) -> NativeConfigError {
     NativeConfigError::Io(io::Error::other(message))
 }
 
-/// Rewrites `path`'s `default_profile` line to name `profile`, after checking
-/// the profile exists in the file.
+/// Sets `path`'s `default_profile` to `profile`, after checking the profile
+/// exists in the file, changing only that value.
 pub fn set_default_profile_file(path: &Path, profile: &str) -> Result<(), NativeConfigError> {
     set_default_profile_file_impl(path, &default_path(), profile)
 }
@@ -278,19 +266,17 @@ fn set_default_profile_file_impl(
     if profile.is_empty() {
         return Err(ConfigError::new("missing profile").into());
     }
-    let (original, mut file) = load_with_bytes(path, default_path)?;
+    let (original, file) = load_with_bytes(path, default_path)?;
     if !file.profiles.contains_key(profile) {
         return Err(ConfigError::new(format!("profile {profile:?} not found")).into());
     }
-    if original.is_empty() {
-        file.default_profile = profile.to_string();
-        return save(path, &file, &original);
-    }
     let content = String::from_utf8_lossy(&original);
-    let updated = otto_core::config::set_default_profile(&content, profile);
+    let updated = otto_core::config::set_default_profile(&content, profile)?;
     write_bytes(path, &original, updated.as_bytes()).map_err(io_error)
 }
 
+/// Sets the `thinking` key of `path`'s `[profiles.<profile>]` table, or
+/// removes it when `thinking` is empty, changing only that statement.
 pub fn set_profile_thinking_file(
     path: &Path,
     profile: &str,
@@ -305,12 +291,19 @@ pub fn set_profile_thinking_file(
         )
         .into());
     }
-    let (original, mut file) = load_with_bytes(path, &default_path())?;
-    let Some(entry) = file.profiles.get_mut(profile) else {
+    let (original, file) = load_with_bytes(path, &default_path())?;
+    if !file.profiles.contains_key(profile) {
         return Err(ConfigError::new(format!("profile {profile:?} not found")).into());
-    };
-    entry.thinking = thinking.to_string();
-    save(path, &file, &original)
+    }
+    let content = String::from_utf8_lossy(&original);
+    let value = (!thinking.is_empty()).then(|| format!("{thinking:?}"));
+    let updated = otto_core::config::edit::set_value(
+        &content,
+        &["profiles", profile],
+        "thinking",
+        value.as_deref(),
+    )?;
+    write_bytes(path, &original, updated.as_bytes()).map_err(io_error)
 }
 
 /// The environment `otto_core::config::resolve` and `resolve_memory` may
@@ -367,11 +360,8 @@ mod tests {
         paths
     }
 
-    fn profile_file(name: &str) -> File {
-        File {
-            default_profile: name.into(),
-            ..File::default()
-        }
+    fn profile_file(name: &str) -> Vec<u8> {
+        format!("default_profile = \"{name}\"\n").into_bytes()
     }
 
     #[test]
@@ -384,13 +374,13 @@ mod tests {
     }
 
     #[test]
-    fn save_refuses_a_write_when_the_file_changed_since_it_was_read() {
+    fn write_refuses_a_write_when_the_file_changed_since_it_was_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         let concurrent = "default_profile = \"written by another otto\"\n";
         let path = write(dir.path(), "config.toml", concurrent);
 
-        let error =
-            save(&path, &profile_file("mine"), b"what this process read").expect_err("stale write");
+        let error = write_bytes(&path, b"what this process read", &profile_file("mine"))
+            .expect_err("stale write");
 
         assert!(error.to_string().contains("changed on disk"), "{error}");
         assert_eq!(fs::read_to_string(&path).expect("read"), concurrent);
@@ -398,12 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn save_backs_up_the_replaced_contents() {
+    fn write_backs_up_the_replaced_contents() {
         let dir = tempfile::tempdir().expect("tempdir");
         let original = "default_profile = \"old\"\n# a comment worth recovering\n";
         let path = write(dir.path(), "config.toml", original);
 
-        save(&path, &profile_file("new"), original.as_bytes()).expect("save");
+        write_bytes(&path, original.as_bytes(), &profile_file("new")).expect("write");
 
         let backups = backups(dir.path());
         assert_eq!(backups.len(), 1, "{backups:?}");
@@ -420,11 +410,11 @@ mod tests {
     }
 
     #[test]
-    fn save_writes_no_backup_when_there_was_no_file() {
+    fn write_writes_no_backup_when_there_was_no_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
 
-        save(&path, &profile_file("first"), b"").expect("save");
+        write_bytes(&path, b"", &profile_file("first")).expect("write");
 
         assert!(backups(dir.path()).is_empty());
     }
@@ -432,7 +422,7 @@ mod tests {
     /// Backups are pruned by name, so the names of writes that land in the
     /// same millisecond have to sort in write order like every other pair.
     #[test]
-    fn save_keeps_the_newest_backups_of_a_shared_millisecond() {
+    fn write_keeps_the_newest_backups_of_a_shared_millisecond() {
         let dir = tempfile::tempdir().expect("tempdir");
         let directory = dir.path().join("backups");
         fs::create_dir_all(&directory).expect("create backups");
@@ -464,12 +454,12 @@ mod tests {
     }
 
     #[test]
-    fn save_keeps_only_the_most_recent_backups() {
+    fn write_keeps_only_the_most_recent_backups() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
         for index in 0..13 {
             let current = fs::read(&path).unwrap_or_default();
-            save(&path, &profile_file(&format!("p{index}")), &current).expect("save");
+            write_bytes(&path, &current, &profile_file(&format!("p{index}"))).expect("write");
         }
 
         let backups = backups(dir.path());
@@ -568,14 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn save_round_trips_and_restricts_permissions() {
+    fn write_creates_the_directory_and_restricts_permissions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nested").join("config.toml");
-        let file = File {
-            default_profile: "local".into(),
-            ..File::default()
-        };
-        save(&path, &file, b"").expect("save");
+        write_bytes(&path, b"", &profile_file("local")).expect("write");
 
         let reloaded = load_required(&path).expect("load_required");
         assert_eq!(reloaded.default_profile, "local");
@@ -603,6 +589,41 @@ mod tests {
         assert_eq!(file.default_profile, "new");
         assert_eq!(file.profiles["old"].model, "old-model");
         assert_eq!(file.profiles["new"].provider, "chatgpt");
+    }
+
+    #[test]
+    fn set_default_profile_changes_only_the_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let default = dir.path().join("unrelated-default.toml");
+        let original = "# settings\n\ndefault_profile = \"old\" # picked by /model\n\n# profiles below\n[profiles.old]\nprovider = \"chatgpt\"\n[profiles.new]\nprovider = \"chatgpt\"\n";
+        let path = write(dir.path(), "config.toml", original);
+
+        set_default_profile_file_impl(&path, &default, "new").expect("set_default_profile_file");
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read back"),
+            original.replace("\"old\" #", "\"new\" #")
+        );
+    }
+
+    #[test]
+    fn set_profile_thinking_changes_only_the_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let original = "default_profile = \"a\"\n\n# the main profile\n[profiles.a]\nprovider = \"chatgpt\"\nmodel = \"m\" # fast\nthinking = \"low\"   # cheap\n\n# a second one\n[profiles.b]\nprovider = \"chatgpt\"\n\n# trailing note\n";
+        let path = write(dir.path(), "config.toml", original);
+
+        set_profile_thinking_file(&path, "a", "high").expect("set thinking");
+        let replaced = original.replace("\"low\"   #", "\"high\"   #");
+        assert_eq!(fs::read_to_string(&path).expect("read back"), replaced);
+
+        set_profile_thinking_file(&path, "b", "max").expect("insert thinking");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read back"),
+            replaced.replace(
+                "[profiles.b]\nprovider = \"chatgpt\"\n",
+                "[profiles.b]\nprovider = \"chatgpt\"\nthinking = \"max\"\n"
+            )
+        );
     }
 
     #[test]

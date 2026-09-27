@@ -36,27 +36,27 @@ describe('Composer text input', () => {
 
     await waitFor(() => expect(composer.style.height).toBe('84px'))
   })
-  it('keeps a running-turn draft editable and withdrawable', () => {
+  it('queues a running-turn draft on Enter and clears the input', () => {
     const p = { ...props(), running: true }
     render(createElement(Composer, p))
     const composer = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
 
     fireEvent.change(composer, { target: { value: 'follow up' } })
+
+    expect(p.onQueue).not.toHaveBeenCalled()
+    expect(composer.value).toBe('follow up')
+    fireEvent.keyDown(composer, { key: 'Enter' })
 
     expect(p.onQueue).toHaveBeenLastCalledWith('follow up')
-    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
-    expect(screen.getByText(/edit below/i)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Withdraw queued input' }))
-
-    expect(p.onWithdrawQueue).toHaveBeenCalled()
+    expect(composer.value).toBe('')
   })
 
-  it('withdraws a running-turn draft with Ctrl+U', () => {
-    const p = { ...props(), running: true }
+  it('withdraws queued input with Ctrl+U', () => {
+    const p = { ...props(), running: true, queuedText: 'follow up' }
     render(createElement(Composer, p))
     const composer = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
 
-    fireEvent.change(composer, { target: { value: 'follow up' } })
+    expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
     fireEvent.keyDown(composer, { key: 'u', ctrlKey: true })
 
     expect(p.onWithdrawQueue).toHaveBeenCalled()

@@ -58,6 +58,16 @@ describe('TranscriptView empty state', () => {
   })
 })
 
+describe('TranscriptView queued input', () => {
+  it('renders queued input in the transcript area', () => {
+    const { container } = render(createElement(TranscriptView, { activeSession: true, items: [], queuedInput: 'follow up' }))
+
+    expect(container.querySelector('.empty-state')).toBeNull()
+    expect(container.querySelector('.queued-input')?.textContent).toContain('Queued')
+    expect(container.querySelector('.queued-input')?.textContent).toContain('follow up')
+  })
+})
+
 describe('TranscriptView item metadata', () => {
   it('renders request and response timestamps', () => {
     const items: Item[] = [

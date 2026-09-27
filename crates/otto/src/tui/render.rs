@@ -20,7 +20,7 @@ use ratatui::widgets::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use super::app::{App, TurnStatus};
+use super::app::{App, ApprovalDialog, TurnStatus};
 use super::commands::{SLASH_COMMANDS, SlashCommand};
 use super::layout::{
     INPUT_BOX_THRESHOLD, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH, SIDE_MARGIN, escape_plain_text,
@@ -61,7 +61,11 @@ pub(crate) fn draw(frame: &mut Frame, app: &App) {
     draw_suggestions(frame, app, &suggestions, chunks[2]);
     draw_composer(frame, app, chunks[3]);
 
-    if app.show_help {
+    if !app.busy()
+        && let Some(approval) = &app.approval
+    {
+        draw_approval(frame, area, approval);
+    } else if app.show_help {
         draw_help(frame, area);
     } else if let Some(view) = &app.context {
         draw_context(frame, area, view);
@@ -338,6 +342,41 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
     let mut state = ListState::default().with_selected(Some(picker.selected));
     frame.render_widget(Clear, popup);
     frame.render_stateful_widget(list, popup, &mut state);
+}
+
+fn draw_approval(frame: &mut Frame, area: Rect, approval: &ApprovalDialog) {
+    let popup = centered_rect(76, 48, area);
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![
+        Line::from("Approve elevated Bash command"),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("Approve: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(approval.action()),
+        ]),
+    ];
+    if !approval.command.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Command: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(escape_single_line_text(&approval.command)),
+        ]));
+    }
+    if !approval.justification.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Justification: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(escape_single_line_text(&approval.justification)),
+        ]));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from("Enter/y approve · Esc/n cancel"));
+
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Approval"));
+    frame.render_widget(paragraph, popup);
 }
 
 /// The `/context` overlay: the section list, or one item's full text over it.
@@ -764,6 +803,24 @@ mod tests {
             );
             x += cell.symbol().width().max(1) as u16;
         }
+    }
+
+    #[tokio::test]
+    async fn approval_dialog_is_drawn_with_actions() {
+        let (_workspace, _sessions, mut app) = app_fixture().await;
+        app.approval = Some(ApprovalDialog {
+            id: "approval-1".to_string(),
+            command: "git push".to_string(),
+            justification: "push branch".to_string(),
+        });
+
+        let screen = rendered(&app, 100, 30);
+
+        assert!(screen.contains("Approve elevated Bash command"), "{screen}");
+        assert!(screen.contains("/approve approval-1"), "{screen}");
+        assert!(screen.contains("git push"), "{screen}");
+        assert!(screen.contains("Enter/y approve"), "{screen}");
+        assert!(screen.contains("Esc/n cancel"), "{screen}");
     }
 
     #[tokio::test]

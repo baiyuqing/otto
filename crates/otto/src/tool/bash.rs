@@ -472,11 +472,13 @@ impl Tool for BashTool {
                     let justification =
                         serde_json::to_string(&args.justification).expect("string encodes");
                     return self.argument_error(&format!(
-                        "unsandboxed execution was not approved; the command did not run. \
-Only the user can approve it, by typing /approve {id} in Otto. That is not a shell \
-command, so do not try to run it yourself. Ask the user for approval and then reissue \
-this exact command; if you continue without it, tell the user what you are doing \
-instead. command={command}; justification={justification}"
+                        "approval required for unsandboxed bash execution.\n\
+Approve in Otto: /approve {id}\n\
+Command: {command}\n\
+Justification: {justification}\n\
+The command did not run. Only the user can approve it in Otto; do not run \
+/approve in a shell. Ask the user to review the command above, then retry \
+this exact elevated Bash command after approval."
                     ));
                 }
                 (&approvals.executor, approvals.environment.as_slice())
@@ -788,7 +790,11 @@ mod tests {
         assert!(requested.is_error);
         assert_eq!(
             requested.content,
-            "unsandboxed execution was not approved; the command did not run. Only the user can approve it, by typing /approve approval-1 in Otto. That is not a shell command, so do not try to run it yourself. Ask the user for approval and then reissue this exact command; if you continue without it, tell the user what you are doing instead. command=\"git push\"; justification=\"push the reviewed branch\""
+            "approval required for unsandboxed bash execution.\n\
+Approve in Otto: /approve approval-1\n\
+Command: \"git push\"\n\
+Justification: \"push the reviewed branch\"\n\
+The command did not run. Only the user can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
         );
         assert_eq!(confined.calls(), 0);
         assert_eq!(elevated.calls(), 0);
@@ -803,7 +809,11 @@ mod tests {
         let requested = run_escalated(&tool, "git push", "push the reviewed branch").await;
         assert_eq!(
             requested.content,
-            "unsandboxed execution was not approved; the command did not run. Only the user can approve it, by typing /approve approval-3 in Otto. That is not a shell command, so do not try to run it yourself. Ask the user for approval and then reissue this exact command; if you continue without it, tell the user what you are doing instead. command=\"git push\"; justification=\"push the reviewed branch\""
+            "approval required for unsandboxed bash execution.\n\
+Approve in Otto: /approve approval-3\n\
+Command: \"git push\"\n\
+Justification: \"push the reviewed branch\"\n\
+The command did not run. Only the user can approve it in Otto; do not run /approve in a shell. Ask the user to review the command above, then retry this exact elevated Bash command after approval."
         );
         approvals
             .approve("session-1", "approval-3")

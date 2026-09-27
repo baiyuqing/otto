@@ -268,6 +268,25 @@ impl Store {
         self.lock().expect("session mutex").path.clone()
     }
 
+    /// Archives this store's locked session file without releasing ownership.
+    pub fn archive(
+        &self,
+        root: &Path,
+        workspace: &str,
+    ) -> Result<super::prepared::ArchiveResult, PiError> {
+        let mut state = self.lock()?;
+        state.writable()?;
+        let path = state.path.clone();
+        let file = state
+            .file
+            .as_mut()
+            .ok_or_else(|| PiError::other("session file is not open"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| PiError::other(format!("stat session file: {error}")))?;
+        super::prepared::archive_open_file(root, workspace, Path::new(&path), file, &metadata)
+    }
+
     /// The compaction currently in force on the active path.
     pub fn latest_compaction(&self) -> Option<CompactionMetadata> {
         self.lock()

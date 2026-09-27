@@ -780,6 +780,24 @@ Rules and defaults:
 The optional `focus` text is sanitized, bounded to 8 KiB, and appended only to
 the hidden summary-system prompt.
 
+What a checkpoint keeps:
+
+- The model-written summary has an `## Observations` section. The summary
+  prompt asks it to list each observed result with its source (tool call,
+  command, or user statement), including failed results, and to record user
+  corrections as `user: ...`. It asks the model to carry every observation from
+  the previous summary forward and to mark a contradicted one
+  `(superseded by: ...)` rather than delete it. A summary without the section is
+  rejected. Otto checks that the section is present, not what it contains.
+- The text of every summarized user message is appended to the summary
+  verbatim, one JSON string per line, in a `<user-messages>` block. Otto builds
+  this block itself, so the summary model cannot change or drop its lines. The
+  block carries forward across later compactions. When it would exceed 16 KiB,
+  the oldest messages are dropped. A message longer than 2,000 characters is
+  cut and marked `[user message truncated for compaction]`.
+- The paths the summarized tool calls read and modified are appended in
+  `<read-files>` and `<modified-files>` blocks.
+
 ### Model window metadata
 
 Otto ships a static limit catalog for common GPT, o-series, and Claude model IDs

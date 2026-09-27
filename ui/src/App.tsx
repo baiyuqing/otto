@@ -81,6 +81,7 @@ export function App() {
   const [turnUsage, setTurnUsage] = useState<Usage | null>(null)
   const [recordedUsage, setRecordedUsage] = useState<UsageSummary | null>(null)
   const [compacting, setCompacting] = useState(false)
+  const [queuedInput, setQueuedInput] = useState('')
   const [tasksKey, setTasksKey] = useState(0)
   const [showContext, setShowContext] = useState(false)
   const [renameDraft, setRenameDraft] = useState<string | null>(null)
@@ -140,6 +141,15 @@ export function App() {
           setSession(s)
           if (!s.turn || s.turn.status !== 'running') {
             if (s.turn?.status === 'canceled') setItems((prev) => [...prev, { kind: 'notice', text: 'Turn canceled' }])
+            const queued = queuedInputRef.current.trim()
+            const shouldSendQueued = s.turn?.status === 'ok' && queued
+            if (shouldSendQueued) {
+              queuedInputRef.current = ''
+              setQueuedInput('')
+              turnIdRef.current = null
+              setTurnId(null)
+            }
+            if (shouldSendQueued) void sendRef.current?.(queued)
             return
           }
           res = await api.attach(sessionId, s.turn.id, last >= 0 ? last : undefined)
@@ -204,6 +214,9 @@ export function App() {
   sessionRef.current = session
   const turnIdRef = useRef(turnId)
   turnIdRef.current = turnId
+  const queuedInputRef = useRef(queuedInput)
+  queuedInputRef.current = queuedInput
+  const sendRef = useRef<((text: string, image?: { data: string; mime_type: string }) => Promise<void>) | null>(null)
   const compactingRef = useRef(compacting)
   compactingRef.current = compacting
 
@@ -245,6 +258,10 @@ export function App() {
 
   const send = async (text: string, image?: { data: string; mime_type: string }): Promise<void> => {
     if (!session) return
+    if (turnIdRef.current !== null) {
+      setQueuedInput(text)
+      return
+    }
     setError('')
     const command = parseWebCommand(text)
     if (command.kind === 'error') {
@@ -404,6 +421,8 @@ export function App() {
       }
     }
   }
+
+  sendRef.current = send
 
   const cancel = useCallback(() => {
     if (session && turnId) api.cancelTurn(session.id, turnId).catch(fail)
@@ -580,7 +599,10 @@ export function App() {
           disabled={!session}
           running={turnId !== null}
           compacting={compacting}
+          queuedText={queuedInput}
           onSend={send}
+          onQueue={setQueuedInput}
+          onWithdrawQueue={() => setQueuedInput('')}
           onCancel={cancel}
           onCompact={compact}
         />

@@ -102,8 +102,17 @@ fn composer_height(app: &App, width: u16) -> u16 {
     (lines.len() as u16).clamp(1, INPUT_BOX_THRESHOLD) + 2
 }
 
+const STARTUP_LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/";
+
 fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = transcript::lines(&app.entries, app.show_details, area.width as usize);
+    if lines.is_empty() {
+        lines.extend(
+            STARTUP_LOGO
+                .lines()
+                .map(|line| Line::from(line.to_string())),
+        );
+    }
     if let Some(status) = app.thinking() {
         if !lines.is_empty() {
             lines.push(Line::default());
@@ -656,6 +665,18 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn empty_startup_transcript_shows_the_otto_logo() {
+        let (_workspace, _sessions, app) = app_fixture().await;
+
+        let screen = screen_rows(&app, 80, 20).join("\n");
+
+        assert!(screen.contains("____  __  __"), "{screen}");
+        assert!(screen.contains("/ __ \\/ /_/ /____"), "{screen}");
+        assert!(screen.contains("/ /_/ / __/ __/ __ \\"), "{screen}");
+        assert!(screen.contains("\\____/\\__/\\__/\\____/"), "{screen}");
     }
 
     /// The drawn frame's buffer, for the tests that assert on colour rather

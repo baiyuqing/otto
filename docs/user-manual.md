@@ -358,7 +358,7 @@ Key points:
   and its descendants as workspaces (see [Workspaces](#workspaces)).
   `trust_level` is required and `"trusted"` is its only accepted value; any
   other value fails config loading. `otto trust <dir>` appends the table as
-  text, so comments in the file are kept; there is no environment variable
+  text, so the rest of the file is kept byte for byte; there is no environment variable
   and no HTTP route that adds one.
 - `[inbound.feishu]` is off by default. When `enabled = true`, `otto serve`
   spawns `lark-cli event consume im.message.receive_v1 --as bot` and delivers
@@ -448,9 +448,10 @@ Sandbox-driver precedence:
 ### Backups of the config file
 
 Commands that write the config file — `otto mcp add`/`remove`/`enable`/
-`disable`, `otto sandbox setup`, `/model --save`, `/thinking --save`,
-`/sandbox allow`, and `/sandbox network` — first copy the contents they
-replace into `backups/` beside the file, named `config-<UTC timestamp>.toml`.
+`disable`, `otto sandbox setup`, `otto trust`, `/model` (which records the
+chosen profile as `default_profile`), `/thinking --save`, `/sandbox allow`,
+and `/sandbox network` — first copy the contents they replace into
+`backups/` beside the file, named `config-<UTC timestamp>.toml`.
 The ten most recent copies are kept; older ones are deleted. Restore one by
 copying it back:
 
@@ -462,6 +463,17 @@ cp ~/.config/otto/backups/config-20260921T143001.417Z.toml ~/.config/otto/config
 Writes go to a temporary file that is renamed over the config file, so an
 interrupted write leaves the previous file intact. Editing the file yourself is
 not backed up — Otto only sees the change when it next reads the file.
+
+Each command changes only the key or table it is about in the file's text:
+`default_profile`, one profile's `thinking`, one `[mcp.servers.<name>]`
+table or its `enabled` key, the four `[sandbox]` keys, or one appended
+`[projects."<path>"]` table. Comments, blank lines, key order, and every other
+table keep their exact bytes. The command then parses the result and compares
+it with the intended change; if the target is written in a form it cannot edit
+in place, such as dotted keys (`sandbox.network = "deny"`) or an inline table
+(`projects = {}`), it fails with a message ending in `the configuration was
+not changed` and writes nothing. Rewrite that part as its own `[table]` header
+and rerun the command.
 
 Each of these commands reads the whole file, edits it, and writes it back, so
 two Otto processes writing at the same time could drop one another's edits. A

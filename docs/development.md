@@ -19,7 +19,7 @@ Keep responsibilities split along the current Rust crate/module layout:
   - `tool`: tool definitions and schema assembly
   - `session`: the Pi v3 JSONL codec, compaction, and context association types
   - `agent`: provider/tool orchestration and event emission
-  - `config`: TOML loading and runtime resolution, including `[inbound.feishu]`
+  - `config`: TOML loading and runtime resolution, including `[inbound.feishu]`, and `config::edit`, the in-place text edits every config write uses: each changes one key or table, keeps every other byte, and returns an error instead of a result that parses to anything besides the intended change
   - `wire`: shared wire DTOs
   - `safetext`: redaction and secret-form detection shared by native and wasm code
 - `crates/otto` (native binary):

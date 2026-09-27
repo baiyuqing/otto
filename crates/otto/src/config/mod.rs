@@ -12,12 +12,16 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::fs::File as FsFile;
 use std::io;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::Utc;
+use nix::errno::Errno;
+use nix::fcntl::{FcntlArg, fcntl};
 
 use otto_core::config::{ConfigError, File};
 
@@ -97,6 +101,8 @@ fn load_with_bytes(path: &Path, default_path: &Path) -> Result<(Vec<u8>, File), 
 /// the `backups` directory beside it.
 const BACKUP_LIMIT: usize = 10;
 
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
 /// Replaces `path` with `updated`, after copying the contents it replaces into
 /// `backups` beside it.
 ///
@@ -105,10 +111,14 @@ const BACKUP_LIMIT: usize = 10;
 /// means another process wrote the file in between, so the write is refused
 /// rather than overwriting that change. Several Otto processes can run at
 /// once, and each one reads, edits, and writes the whole file, so without this
-/// check the last writer would silently drop the others' edits. The check is
-/// not atomic against the rename below — a write landing inside that
-/// millisecond-scale window is still lost — but it turns the common case
-/// (two commands seconds apart) from silent loss into a reported error.
+/// check the last writer would silently drop the others' edits.
+///
+/// The write is protected by a POSIX advisory lock on a sibling lock file, so
+/// Otto processes serialize the compare/back-up/rename sequence. The lock file
+/// is only the kernel lock's anchor: it may remain on disk, and a crashed
+/// writer's lock is released when the kernel closes its file descriptor. The
+/// compare-and-swap check remains necessary for editors or other processes that
+/// do not take Otto's lock.
 ///
 /// The write is atomic and never follows a symlink: a `0o600` temporary file
 /// in the same directory is written, synced, and renamed over `path`, so an
@@ -120,6 +130,10 @@ pub(crate) fn write_bytes(
     replacing: &[u8],
     updated: &[u8],
 ) -> Result<(), &'static str> {
+    let _process_lock = CONFIG_WRITE_LOCK
+        .lock()
+        .map_err(|_| "cannot lock configuration")?;
+    let _lock = lock_config(path)?;
     let current = match fs::read(path) {
         Ok(content) => Some(content),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -157,12 +171,76 @@ pub(crate) fn write_bytes(
                 .and_then(|()| file.sync_all())
                 .map_err(|_| "cannot write configuration")
         });
-    let result =
-        write.and_then(|()| fs::rename(&temp, path).map_err(|_| "cannot replace configuration"));
+    let result = write
+        .and_then(|()| fs::rename(&temp, path).map_err(|_| "cannot replace configuration"))
+        .and_then(|()| sync_directory(directory));
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+struct ConfigLock {
+    file: FsFile,
+}
+
+fn lock_config(path: &Path) -> Result<ConfigLock, &'static str> {
+    let directory = parent_directory(path);
+    if fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .is_err()
+    {
+        return Err("cannot create configuration directory");
+    }
+    let lock_path = path.with_file_name(format!(
+        "{}.lock",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config.toml")
+    ));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(lock_path)
+        .map_err(|_| "cannot lock configuration")?;
+    let lock = libc::flock {
+        l_type: libc::F_WRLCK as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0,
+        l_len: 0,
+        l_pid: 0,
+    };
+    loop {
+        match fcntl(&file, FcntlArg::F_SETLKW(&lock)) {
+            Ok(_) => return Ok(ConfigLock { file }),
+            Err(Errno::EINTR) => continue,
+            Err(_) => return Err("cannot lock configuration"),
+        }
+    }
+}
+
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let lock = libc::flock {
+            l_type: libc::F_UNLCK as libc::c_short,
+            l_whence: libc::SEEK_SET as libc::c_short,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        let _ = fcntl(&self.file, FcntlArg::F_SETLK(&lock));
+    }
+}
+
+fn sync_directory(directory: &Path) -> Result<(), &'static str> {
+    FsFile::open(directory)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| "cannot sync configuration directory")
 }
 
 /// The directory `path` lives in: the working directory for a bare file name,
@@ -342,6 +420,10 @@ pub fn resolution_environment(file: &File) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -385,6 +467,130 @@ mod tests {
         assert!(error.to_string().contains("changed on disk"), "{error}");
         assert_eq!(fs::read_to_string(&path).expect("read"), concurrent);
         assert!(backups(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn write_creates_a_persistent_lock_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        write_bytes(&path, b"", &profile_file("first")).expect("write");
+
+        let lock = dir.path().join("config.toml.lock");
+        let mode = fs::metadata(&lock)
+            .expect("lock metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "mode = {mode:#o}");
+    }
+
+    #[test]
+    fn write_waits_for_the_configuration_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let result = dir.path().join("result.txt");
+        let held = lock_config(&path).expect("hold lock");
+        let mut child = config_lock_child(&path, &result);
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(300) {
+            assert!(
+                child.try_wait().expect("poll child").is_none(),
+                "writer must wait for the lock"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(held);
+        let status = child.wait().expect("wait child");
+        assert!(status.success(), "child status = {status}");
+        assert_eq!(fs::read_to_string(&result).expect("result"), "ok");
+        assert_eq!(fs::read(&path).expect("read"), profile_file("child"));
+    }
+
+    #[test]
+    fn write_serializes_stale_writers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        let mut first_child = config_lock_child(&path, &first);
+        let mut second_child = config_lock_child(&path, &second);
+
+        let first_status = first_child.wait().expect("first wait");
+        let second_status = second_child.wait().expect("second wait");
+        assert!(first_status.success(), "first status = {first_status}");
+        assert!(second_status.success(), "second status = {second_status}");
+        let mut results = [
+            fs::read_to_string(&first).expect("first result"),
+            fs::read_to_string(&second).expect("second result"),
+        ];
+        results.sort();
+        assert_eq!(
+            results,
+            [
+                "err:the configuration changed on disk; rerun to apply this change".to_string(),
+                "ok".to_string(),
+            ]
+        );
+        assert_eq!(fs::read(&path).expect("read"), profile_file("child"));
+    }
+
+    #[test]
+    fn write_serializes_stale_threads_in_one_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let held = CONFIG_WRITE_LOCK.lock().expect("hold process lock");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let writer_path = path.clone();
+        let writer = thread::spawn(move || {
+            started_tx.send(()).expect("started");
+            let result = write_bytes(&writer_path, b"", &profile_file("thread"));
+            done_tx.send(result).expect("done");
+        });
+
+        started_rx.recv().expect("writer started");
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            done_rx.try_recv().is_err(),
+            "writer must wait for the process lock"
+        );
+        drop(held);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer finished")
+            .expect("write succeeds after unlock");
+        writer.join().expect("writer thread");
+        assert_eq!(fs::read(&path).expect("read"), profile_file("thread"));
+    }
+
+    fn config_lock_child(path: &Path, result: &Path) -> std::process::Child {
+        Command::new(std::env::current_exe().expect("current exe"))
+            .arg("--exact")
+            .arg("config::tests::config_lock_child_entry")
+            .arg("--nocapture")
+            .env("OTTO_CONFIG_LOCK_CHILD_PATH", path)
+            .env("OTTO_CONFIG_LOCK_CHILD_RESULT", result)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child")
+    }
+
+    #[test]
+    fn config_lock_child_entry() {
+        let Some(path) = std::env::var_os("OTTO_CONFIG_LOCK_CHILD_PATH").map(PathBuf::from) else {
+            return;
+        };
+        let result =
+            PathBuf::from(std::env::var_os("OTTO_CONFIG_LOCK_CHILD_RESULT").expect("result path"));
+        let text = match write_bytes(&path, b"", &profile_file("child")) {
+            Ok(()) => "ok".to_string(),
+            Err(error) => format!("err:{error}"),
+        };
+        fs::write(result, text).expect("write result");
     }
 
     #[test]

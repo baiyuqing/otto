@@ -526,6 +526,19 @@ button.danger {
 .mermaid-diagram svg { max-width: 100%; height: auto; }
 .mermaid-diagram.pending { color: var(--muted); font-size: 12px; }
 .mermaid-error { border-color: var(--danger); }
+.item.user.queued-input {
+  opacity: 0.82;
+  border-style: dashed;
+}
+.queued-input-badge {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .item.tool {
   overflow: hidden;
   border: 1px solid var(--line);

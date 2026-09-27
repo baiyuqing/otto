@@ -14,18 +14,18 @@ export function Composer(props: {
   // onCompact receives the composer text as the optional focus.
   onCompact: (focus: string) => void
 }) {
-  const [text, setText] = useState(props.queuedText ?? '')
+  const [text, setText] = useState('')
   const [image, setImage] = useState<{ name: string; data: string; mime_type: string } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const hint = sendHint()
   const busy = props.running || props.compacting
   const queueing = props.running
-  const queued = queueing && text.trim().length > 0
+  const queued = queueing && (props.queuedText?.trim().length ?? 0) > 0
   const suggestions = props.disabled || busy ? [] : webCommandSuggestions(text)
 
   useEffect(() => {
-    if (props.running) setText(props.queuedText ?? '')
-  }, [props.running, props.queuedText])
+    if (!props.running) setText('')
+  }, [props.running])
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current
@@ -40,7 +40,6 @@ export function Composer(props: {
 
   const changeText = (next: string) => {
     setText(next)
-    if (queueing) props.onQueue(next)
   }
 
   const withdraw = () => {
@@ -51,7 +50,12 @@ export function Composer(props: {
 
   const submit = () => {
     const t = text.trim()
-    if (queueing) return
+    if (queueing) {
+      if (!t) return
+      setText('')
+      props.onQueue(t)
+      return
+    }
     if ((!t && !image) || props.disabled || props.compacting) return
     setText('')
     const selected = image ? { data: image.data, mime_type: image.mime_type } : undefined
@@ -99,8 +103,8 @@ export function Composer(props: {
   const placeholder = props.disabled ? 'Open or create a session first' : queueing ? 'Queue next input…' : 'Message Otto…'
   const hintText = queueing
     ? queued
-      ? 'Queued next input · edit below · Ctrl+U withdraw · Esc cancels turn'
-      : 'Otto is working · type to queue next input · Esc cancels turn'
+      ? 'Queued next input · Enter replaces it · Ctrl+U withdraw · Esc cancels turn'
+      : 'Otto is working · type, then Enter to queue next input · Esc cancels turn'
     : props.compacting
       ? 'Compacting context…'
       : suggestions.length > 0
@@ -123,7 +127,7 @@ export function Composer(props: {
         {queueing && (
           <div className="queued-input-label" aria-live="polite">
             <strong>{queued ? 'Queued next input' : 'Working'}</strong>
-            <span>{queued ? 'Editable until the current turn finishes.' : 'Type below to queue the next input.'}</span>
+            <span>{queued ? 'It will send when the current turn finishes.' : 'Type below, then press Enter to queue the next input.'}</span>
           </div>
         )}
         <textarea

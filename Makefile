@@ -4,7 +4,12 @@
 BINARY := otto
 INSTALL_DIR ?= $(HOME)/.local/bin
 
-.PHONY: all build install check-fast check check-linux ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui clean help
+DESKTOP_DIR := desktop/src-tauri
+DESKTOP_TARGET := aarch64-apple-darwin
+DESKTOP_SIDECAR := $(DESKTOP_DIR)/binaries/otto-$(DESKTOP_TARGET)
+DESKTOP_APP := $(DESKTOP_DIR)/target/$(DESKTOP_TARGET)/release/bundle/macos/Otto.app
+
+.PHONY: all build install check-fast check check-linux ui ui-test rust-fmt rust-lint rust-test rust-wasm-check rust-wasm-test scripts-test test-tui desktop-check desktop-release clean help
 
 all: build
 
@@ -57,6 +62,25 @@ ui: ## build the web UI into ui/dist (needs Node 24+ and wasm-pack)
 ui-test: ## run the web UI unit tests (needs Node 24+ and wasm-pack)
 	wasm-pack build --target web crates/otto-web
 	cd ui && npm ci && npm test
+
+desktop-check: ## build, lint and test the macOS desktop shell (arm64; not part of `make check`)
+	cargo build --release --target $(DESKTOP_TARGET) -p otto
+	mkdir -p $(DESKTOP_DIR)/binaries
+	cp target/$(DESKTOP_TARGET)/release/otto $(DESKTOP_SIDECAR)
+	cd $(DESKTOP_DIR) && cargo fmt --all -- --check
+	cd $(DESKTOP_DIR) && cargo clippy --all-targets -- -D warnings
+	cd $(DESKTOP_DIR) && cargo test
+
+desktop-release: ## build, sign and notarize the macOS desktop app (needs APPLE_SIGNING_IDENTITY, NOTARY_PROFILE, and cargo-tauri)
+	@test -n "$(APPLE_SIGNING_IDENTITY)" || { echo "desktop-release: set APPLE_SIGNING_IDENTITY to a Developer ID Application identity"; exit 1; }
+	@test -n "$(NOTARY_PROFILE)" || { echo "desktop-release: set NOTARY_PROFILE to a notarytool keychain profile (see: xcrun notarytool store-credentials)"; exit 1; }
+	cargo build --release --target $(DESKTOP_TARGET) -p otto
+	mkdir -p $(DESKTOP_DIR)/binaries
+	cp target/$(DESKTOP_TARGET)/release/otto $(DESKTOP_SIDECAR)
+	cd $(DESKTOP_DIR) && APPLE_SIGNING_IDENTITY="$(APPLE_SIGNING_IDENTITY)" cargo tauri build --target $(DESKTOP_TARGET)
+	ditto -c -k --keepParent $(DESKTOP_APP) $(DESKTOP_APP).zip
+	xcrun notarytool submit $(DESKTOP_APP).zip --keychain-profile "$(NOTARY_PROFILE)" --wait
+	xcrun stapler staple $(DESKTOP_APP)
 
 clean: ## remove the built binary
 	rm -f ./$(BINARY)

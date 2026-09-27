@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Otto",
+  "version": "0.1.0",
+  "identifier": "com.otto.desktop",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png"],
+    "externalBin": ["binaries/otto"],
+    "macOS": {
+      "hardenedRuntime": true
+    }
+  }
+}

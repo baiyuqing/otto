@@ -23,6 +23,18 @@ pub fn parse_addr(url: &str) -> Option<SocketAddr> {
     format!("{host}:{port}").parse().ok()
 }
 
+/// The path the web UI's **Add workspace…** button navigates to (through
+/// `window.__OTTO_DESKTOP__.openFolder()`) to ask the app to run
+/// File > Open Folder…. The app cancels that navigation.
+pub const OPEN_FOLDER_PATH: &str = "/__otto_desktop/open-folder";
+
+/// Whether a main-window navigation to `url` is the web UI's Open Folder
+/// request: [`OPEN_FOLDER_PATH`] on the same origin as `serve`, the URL
+/// `otto serve` announced.
+pub fn is_open_folder_request(url: &tauri::Url, serve: &tauri::Url) -> bool {
+    url.origin() == serve.origin() && url.path() == OPEN_FOLDER_PATH
+}
+
 /// Why [`wait_for_serve_url`] gave up before seeing the announcement line.
 #[derive(Debug, PartialEq, Eq)]
 pub enum WaitError {
@@ -116,5 +128,27 @@ mod tests {
     #[test]
     fn rejects_a_url_with_no_port() {
         assert_eq!(parse_addr("http://127.0.0.1/?token=tok"), None);
+    }
+
+    #[test]
+    fn matches_the_open_folder_path_on_the_serve_origin_only() {
+        let serve = tauri::Url::parse("http://127.0.0.1:54321/?token=tok").unwrap();
+        let url = |s: &str| tauri::Url::parse(s).unwrap();
+        assert!(is_open_folder_request(
+            &url("http://127.0.0.1:54321/__otto_desktop/open-folder"),
+            &serve
+        ));
+        assert!(!is_open_folder_request(
+            &url("http://127.0.0.1:54321/"),
+            &serve
+        ));
+        assert!(!is_open_folder_request(
+            &url("http://127.0.0.1:9999/__otto_desktop/open-folder"),
+            &serve
+        ));
+        assert!(!is_open_folder_request(
+            &url("http://example.com:54321/__otto_desktop/open-folder"),
+            &serve
+        ));
     }
 }

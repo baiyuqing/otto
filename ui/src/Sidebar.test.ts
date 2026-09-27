@@ -203,38 +203,24 @@ describe('Sidebar', () => {
   })
 
   describe('in the desktop app', () => {
-    const invoke = vi.fn()
+    const openFolder = vi.fn()
     beforeEach(() => {
-      ;(window as unknown as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } }
+      ;(window as unknown as { __OTTO_DESKTOP__?: unknown }).__OTTO_DESKTOP__ = { openFolder }
     })
     afterEach(() => {
-      delete (window as unknown as { __TAURI__?: unknown }).__TAURI__
-      invoke.mockReset()
+      delete (window as unknown as { __OTTO_DESKTOP__?: unknown }).__OTTO_DESKTOP__
+      openFolder.mockReset()
     })
 
-    it('uses the native folder picker and adds the chosen folder', async () => {
-      invoke.mockResolvedValue('/Users/me/picked')
-      api.addWorkspace.mockResolvedValue({ path: '/Users/me/picked', open_sessions: 0, workflows: true })
+    it('hands Add workspace to the app, which picks, trusts, and registers the folder', async () => {
       render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
       await screen.findByText('other-session')
 
       fireEvent.click(screen.getByRole('button', { name: 'Add workspace…' }))
 
-      await waitFor(() => expect(screen.getByTitle('/Users/me/picked')).toBeTruthy())
-      expect(invoke).toHaveBeenCalledWith('pick_directory')
-      expect(api.addWorkspace).toHaveBeenCalledWith('/Users/me/picked', false)
-      expect(api.listDirs).not.toHaveBeenCalled()
-    })
-
-    it('does nothing when the native picker is cancelled', async () => {
-      invoke.mockResolvedValue(null)
-      render(createElement(Sidebar, { sessions, current: '', disabled: false, onOpen: vi.fn() }))
-      await screen.findByText('other-session')
-
-      fireEvent.click(screen.getByRole('button', { name: 'Add workspace…' }))
-
-      await waitFor(() => expect(invoke).toHaveBeenCalled())
+      expect(openFolder).toHaveBeenCalledTimes(1)
       expect(api.addWorkspace).not.toHaveBeenCalled()
+      expect(api.listDirs).not.toHaveBeenCalled()
       expect(screen.queryByRole('dialog')).toBeNull()
     })
   })

@@ -563,6 +563,7 @@ impl StoreState {
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC)
                 .open(&path)
                 .map_err(|error| PiError::other(format!("create session file: {error}")))?
         };

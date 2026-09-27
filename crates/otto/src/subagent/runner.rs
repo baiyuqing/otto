@@ -2015,10 +2015,12 @@ mod tests {
             .join(format!("{}-child.jsonl", task.id));
         assert_eq!(done.status, TaskStatus::Succeeded, "{}", done.error);
         assert_eq!(done.session_path, want.to_string_lossy());
-        let (store, _) = crate::session::Store::open(&want).expect("open child");
-        let texts: Vec<String> = store.messages().iter().map(Message::text).collect();
+        let texts: Vec<String> = crate::session::Store::read_transcript(&want)
+            .expect("read child")
+            .iter()
+            .map(Message::text)
+            .collect();
         assert_eq!(texts, ["first", "delegated task", "done"]);
-        store.close().expect("close");
     }
 
     #[tokio::test]

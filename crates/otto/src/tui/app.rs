@@ -19,6 +19,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use otto_core::agent::{CompactionResult, Event};
 use otto_core::model::Usage;
 use otto_core::session::types::SessionInfo;
+use otto_core::tool::ToolResult;
 use otto_core::wire::events::to_wire;
 use otto_core::wire::transcript;
 use tokio_util::sync::CancellationToken;
@@ -107,6 +108,20 @@ impl Picker {
         let len = self.rows.len() as isize;
         let next = (self.selected as isize + delta).rem_euclid(len);
         self.selected = next as usize;
+    }
+}
+
+/// A pending elevated Bash approval shown as an interactive modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApprovalDialog {
+    pub id: String,
+    pub command: String,
+    pub justification: String,
+}
+
+impl ApprovalDialog {
+    pub(crate) fn action(&self) -> String {
+        format!("/approve {}", self.id)
     }
 }
 
@@ -264,6 +279,8 @@ pub(crate) struct App {
     pub context: Option<ContextView>,
     /// The open `/agents` overlay.
     pub agents: Option<AgentsView>,
+    /// Pending elevated Bash approval modal.
+    pub approval: Option<ApprovalDialog>,
     /// The highlighted row of the slash-command suggestion panel (see
     /// [`App::suggestions`]). Every composer edit resets it to `0`, so it
     /// only ever indexes the match list the current value produces.
@@ -298,6 +315,7 @@ impl App {
             picker: None,
             context: None,
             agents: None,
+            approval: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -350,6 +368,7 @@ impl App {
         self.usage = usage;
         self.info = controller.info();
         self.scroll = None;
+        self.approval = None;
     }
 
     pub fn refresh_info(&mut self, controller: &Controller) {
@@ -465,6 +484,21 @@ impl App {
             self.clear_ctrl_c_arm();
         } else {
             return self.handle_ctrl_c();
+        }
+
+        if let Some(approval) = &self.approval {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let id = approval.id.clone();
+                    self.approval = None;
+                    return Some(Action::Approve(id));
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.approval = None;
+                    return None;
+                }
+                _ => return None,
+            }
         }
 
         if self.show_help {
@@ -750,6 +784,7 @@ impl App {
             || self.picker.is_some()
             || self.context.is_some()
             || self.agents.is_some()
+            || self.approval.is_some()
         {
             return Vec::new();
         }
@@ -1159,16 +1194,21 @@ impl App {
                 false
             }
             Event::ToolCallFinished {
+                tool_name,
                 tool_call_id,
                 result,
-                ..
             } => {
+                let approval = bash_approval_request(&tool_name, &result);
                 if let Some(entry) = self.entries.iter_mut().rev().find(|entry| {
                     entry.kind == Some(EntryKind::Tool) && entry.tool_call_id == tool_call_id
                 }) {
                     entry.tool_output = result.content;
                     entry.tool_error = result.is_error;
                     entry.tool_done = true;
+                }
+                if let Some(approval) = approval {
+                    self.push_system(approval_hint(&approval));
+                    self.approval = Some(approval);
                 }
                 false
             }
@@ -1197,6 +1237,54 @@ impl App {
             | Event::CompactionPlanned { .. } => false,
         }
     }
+}
+
+fn bash_approval_request(tool_name: &str, result: &ToolResult) -> Option<ApprovalDialog> {
+    if tool_name != "bash" || !result.is_error {
+        return None;
+    }
+    let approve = result
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("Approve in Otto: "))?;
+    let mut parts = approve.split_whitespace();
+    if parts.next()? != "/approve" {
+        return None;
+    }
+    let id = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let command = result
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("Command: "))
+        .map(decode_approval_field)
+        .unwrap_or_default();
+    let justification = result
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("Justification: "))
+        .map(decode_approval_field)
+        .unwrap_or_default();
+    Some(ApprovalDialog {
+        id: id.to_string(),
+        command,
+        justification,
+    })
+}
+
+fn decode_approval_field(value: &str) -> String {
+    serde_json::from_str::<String>(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn approval_hint(approval: &ApprovalDialog) -> String {
+    let mut hint = "Bash approval requested. Review the popup, then press Enter/y to approve or Esc/n to cancel.".to_string();
+    if !approval.command.is_empty() {
+        hint.push_str("\nCommand: ");
+        hint.push_str(&approval.command);
+    }
+    hint
 }
 
 fn picker_command_name(kind: PickerKind) -> &'static str {
@@ -1568,6 +1656,7 @@ mod tests {
             picker: None,
             context: None,
             agents: None,
+            approval: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1596,6 +1685,7 @@ mod tests {
             picker: None,
             context: None,
             agents: None,
+            approval: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1685,6 +1775,7 @@ mod tests {
             picker: None,
             context: None,
             agents: None,
+            approval: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1716,6 +1807,7 @@ mod tests {
             picker: None,
             context: None,
             agents: None,
+            approval: None,
             suggestion: 0,
             show_help: false,
             show_details: false,
@@ -1826,6 +1918,74 @@ mod tests {
             arguments: String::new(),
         });
         assert_eq!(app.scroll, Some(4));
+    }
+
+    #[tokio::test]
+    async fn bash_approval_errors_add_a_visible_system_hint() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let mut app = App::new(&controller);
+        let before = app.entries.len();
+
+        app.apply_event(Event::ToolCallStarted {
+            tool_name: "bash".to_string(),
+            tool_call_id: "call-1".to_string(),
+            arguments: r#"{"command":"git push"}"#.to_string(),
+        });
+        app.apply_event(Event::ToolCallFinished {
+            tool_name: "bash".to_string(),
+            tool_call_id: "call-1".to_string(),
+            result: otto_core::tool::ToolResult {
+                content: "approval required for unsandboxed bash execution.\nApprove in Otto: /approve approval-1\nCommand: \"git push\"\nJustification: \"push branch\"".to_string(),
+                is_error: true,
+                ..Default::default()
+            },
+        });
+
+        let added = &app.entries[before..];
+        assert_eq!(added.len(), 2, "tool entry plus system hint: {added:?}");
+        assert_eq!(added[0].kind, Some(EntryKind::Tool));
+        assert_eq!(added[1].kind, Some(EntryKind::System));
+        assert!(added[1].raw.contains("press Enter/y"), "{}", added[1].raw);
+        assert!(added[1].raw.contains("git push"), "{}", added[1].raw);
+        let approval = app.approval.as_ref().expect("approval dialog");
+        assert_eq!(approval.id, "approval-1");
+        assert_eq!(approval.command, "git push");
+        assert_eq!(approval.justification, "push branch");
+    }
+
+    #[tokio::test]
+    async fn approval_dialog_enter_approves_and_escape_closes() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = testutil::controller(workspace.path(), sessions.path()).await;
+        let cancel = CancellationToken::new();
+        let mut app = App::new(&controller);
+        app.approval = Some(ApprovalDialog {
+            id: "approval-1".to_string(),
+            command: "git push".to_string(),
+            justification: "push branch".to_string(),
+        });
+
+        let action = app.handle_key(
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(matches!(action, Some(Action::Approve(id)) if id == "approval-1"));
+        assert!(app.approval.is_none());
+
+        app.approval = Some(ApprovalDialog {
+            id: "approval-2".to_string(),
+            command: "rm -rf /tmp/nope".to_string(),
+            justification: "demo".to_string(),
+        });
+        let action = app.handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &controller, &cancel);
+
+        assert!(action.is_none());
+        assert!(app.approval.is_none());
     }
 
     #[test]

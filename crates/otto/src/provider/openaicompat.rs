@@ -60,6 +60,9 @@ const MAX_ATTEMPTS: u32 = 3;
 const BASE_BACKOFF: Duration = Duration::from_millis(250);
 /// The text an API key is replaced with when it is long enough to hold it.
 const REDACTED: &str = "[REDACTED]";
+/// Largest `GET /models` body read. A larger catalog is an error rather than
+/// an unbounded buffer.
+const MAX_MODELS_BODY: usize = 8 << 20;
 
 /// Waits out a retry backoff. Injected so tests observe the delays without
 /// waiting for them; production uses [`tokio::time::sleep`].
@@ -128,6 +131,99 @@ impl Client {
     fn with_sleeper(mut self, sleep: Sleeper) -> Self {
         self.sleep = sleep;
         self
+    }
+
+    /// Lists the model ids the endpoint reports at `GET {base}/models`, sorted
+    /// and without duplicates.
+    ///
+    /// One attempt with no retry: the caller is a tool the model can call
+    /// again. The body is read up to [`MAX_MODELS_BODY`] bytes and must be the
+    /// OpenAI shape `{"data":[{"id":…}]}`. Error text is redacted the same way
+    /// as `complete`'s.
+    pub async fn list_models(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<String>, ProviderError> {
+        let ready = match &self.state {
+            Ok(ready) => ready,
+            Err(error) => return Err(ProviderError::Other(error.clone())),
+        };
+        self.fetch_models(ready, cancel)
+            .await
+            .map_err(|error| self.safe_error(error))
+    }
+
+    async fn fetch_models(
+        &self,
+        ready: &Ready,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<String>, ProviderError> {
+        let send = ready
+            .http
+            .get(format!("{}/models", ready.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Accept", "application/json")
+            .send();
+        let response = match with_cancel(cancel, send).await {
+            None => return Err(ProviderError::Cancelled),
+            Some(Ok(response)) => response,
+            Some(Err(error)) => {
+                return Err(ProviderError::Other(format!(
+                    "send model list request: {}",
+                    error_chain(&error)
+                )));
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let status = status.as_u16();
+            return Err(match read_error_body(response, cancel).await {
+                ErrorBody::Cancelled => ProviderError::Cancelled,
+                ErrorBody::Unreadable => ProviderError::Other(format!(
+                    "OpenAI-compatible HTTP {status} (error body unreadable)"
+                )),
+                ErrorBody::Body(body) => ProviderError::Other(format!(
+                    "OpenAI-compatible HTTP {status}: {}",
+                    String::from_utf8_lossy(&body).trim()
+                )),
+            });
+        }
+
+        let mut body = Box::pin(response.bytes_stream());
+        let mut bytes: Vec<u8> = Vec::new();
+        loop {
+            match with_cancel(cancel, body.try_next()).await {
+                None => return Err(ProviderError::Cancelled),
+                Some(Ok(Some(chunk))) => bytes.extend_from_slice(&chunk),
+                Some(Ok(None)) => break,
+                Some(Err(error)) => {
+                    return Err(ProviderError::Other(format!(
+                        "read model list: {}",
+                        error_chain(&error)
+                    )));
+                }
+            }
+            if bytes.len() > MAX_MODELS_BODY {
+                return Err(ProviderError::Other(format!(
+                    "model list is larger than {MAX_MODELS_BODY} bytes"
+                )));
+            }
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ModelList {
+            data: Vec<Model>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Model {
+            id: String,
+        }
+        let list: ModelList = serde_json::from_slice(&bytes)
+            .map_err(|error| ProviderError::Other(format!("decode model list: {error}")))?;
+        let mut ids: Vec<String> = list.data.into_iter().map(|model| model.id).collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     /// One request/response round trip, including reading the whole stream.
@@ -1301,6 +1397,78 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_slice(&body).expect("the body is JSON");
         assert_eq!(decoded["model"], "model");
         assert_eq!(decoded["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn list_models_gets_the_models_path_and_returns_sorted_unique_ids() {
+        let observed = Arc::new(Mutex::new(String::new()));
+        let seen = Arc::clone(&observed);
+        let server = spawn_server(move |head, _body| {
+            *seen.lock().expect("request log is not poisoned") = head.to_string();
+            http_response(
+                200,
+                &[("Content-Type", "application/json")],
+                r#"{"object":"list","data":[{"id":"gpt-5.6","object":"model"},{"id":"deepseek-chat"},{"id":"gpt-5.6"}]}"#,
+            )
+        })
+        .await;
+
+        let client = Client::new(&format!("{}/gateway/v1/", server.base_url), "secret");
+        let ids = client
+            .list_models(&CancellationToken::new())
+            .await
+            .expect("the list is returned");
+
+        assert_eq!(ids, vec!["deepseek-chat", "gpt-5.6"]);
+        let head = observed
+            .lock()
+            .expect("request log is not poisoned")
+            .clone();
+        assert!(
+            head.starts_with("GET /gateway/v1/models HTTP/1.1\r\n"),
+            "request line = {:?}",
+            head.lines().next()
+        );
+        assert_eq!(header(&head, "authorization"), "Bearer secret");
+    }
+
+    #[tokio::test]
+    async fn list_models_reports_a_redacted_http_error_without_retrying() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let server = spawn_server(move |_head, _body| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            http_response(503, &[], "bad key sk-secret-value-123")
+        })
+        .await;
+
+        let client = Client::new(&server.base_url, "sk-secret-value-123");
+        let error = client
+            .list_models(&CancellationToken::new())
+            .await
+            .expect_err("a 503 is an error");
+
+        let ProviderError::Other(message) = error else {
+            panic!("unexpected error {error:?}");
+        };
+        assert_eq!(message, "OpenAI-compatible HTTP 503: bad key [REDACTED]");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn list_models_rejects_a_body_without_a_data_list() {
+        let server = spawn_server(|_head, _body| http_response(200, &[], r#"{"models":[]}"#)).await;
+
+        let client = Client::new(&server.base_url, "key");
+        let error = client
+            .list_models(&CancellationToken::new())
+            .await
+            .expect_err("the body has no data list");
+
+        let ProviderError::Other(message) = error else {
+            panic!("unexpected error {error:?}");
+        };
+        assert!(message.starts_with("decode model list: "), "{message}");
     }
 
     /// Returns the value of one request header, matched case-insensitively.

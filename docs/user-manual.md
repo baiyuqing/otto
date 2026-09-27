@@ -902,6 +902,20 @@ outstanding timers permanently: the stored timers are deleted with the
 archive, so resuming the archived session does not bring them back. Child
 agents do not get these tools.
 
+### `list_models`
+
+With the `openai-compatible` provider, `list_models` returns the model ids the
+endpoint reports at `GET {base_url}/models`, sorted, one per line. Otto sends
+the request itself, so the API key stays in the Otto process and never reaches
+`bash`. The request is made once, with no retry; a body larger than 8 MiB or
+one without a `data` list is an error.
+
+The system prompt tells the model to take model ids from `list_models`, both
+when it writes one into a reply or a configuration file and when it picks a
+`model` for a sub-agent. The `chatgpt` provider has no `list_models`; there the
+model is told not to write a model id from memory and to use an id you named or
+the session's model. Child agents do not get this tool.
+
 ### Interactive sandbox setup
 
 Run `otto sandbox setup` to choose network access and optionally add the built-in

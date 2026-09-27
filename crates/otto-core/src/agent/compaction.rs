@@ -34,7 +34,7 @@ use super::context_estimate::estimate_request;
 use super::summary::{
     SUMMARY_MAXIMUM_BYTES, SummaryRequest, TURN_SUMMARY_MAXIMUM_BYTES, build_summary_request,
 };
-use super::summary_details::append_compaction_file_blocks;
+use super::summary_details::{append_compaction_blocks, carry_user_messages};
 use super::summary_validate::{
     combine_summary, validate_structured_summary, validate_turn_summary,
 };
@@ -205,7 +205,14 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 combine_compaction_usage(usage, usage_present, turn_usage, turn_usage_present);
             details = turn_prepared.details;
         }
-        final_summary = append_compaction_file_blocks(&final_summary, &details)
+        let user_messages = carry_user_messages(
+            &prepared_selection.previous_user_messages,
+            prepared_selection
+                .historical_source
+                .iter()
+                .chain(&prepared_selection.turn_prefix_source),
+        );
+        final_summary = append_compaction_blocks(&final_summary, &user_messages, &details)
             .map_err(AgentError::InvalidCompactionSummary)?;
 
         let mut result = CompactionResult {
@@ -271,6 +278,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         };
         CompactionSelection {
             previous_summary: self.redactor.redact_string(&selection.previous_summary),
+            previous_user_messages: selection
+                .previous_user_messages
+                .iter()
+                .map(|message| self.redactor.redact_string(message))
+                .collect(),
             historical_source: redact_all(&selection.historical_source),
             turn_prefix_source: redact_all(&selection.turn_prefix_source),
             retained: redact_all(&selection.retained),

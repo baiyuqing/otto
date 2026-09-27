@@ -20,7 +20,7 @@ use crate::session::CompactionMetadata;
 
 use super::AgentError;
 use super::context_estimate::{estimate_message, saturating_add};
-use super::summary_details::strip_compaction_file_blocks;
+use super::summary_details::{compaction_user_messages, strip_compaction_blocks};
 
 /// The prefix a compaction summary message carries in the transcript, so a
 /// frontend can label it.
@@ -29,8 +29,10 @@ pub const COMPACTION_SUMMARY_DISPLAY_PREFIX: &str = "[Compaction summary]\n";
 /// What one compaction will summarize and keep.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompactionSelection {
-    /// The summary already in force, with its file blocks removed.
+    /// The summary already in force, with its trailing blocks removed.
     pub previous_summary: String,
+    /// The user messages the summary in force carries verbatim, oldest first.
+    pub previous_user_messages: Vec<String>,
     /// Messages before the current turn, summarized in structured mode.
     pub historical_source: Vec<Message>,
     /// The start of the current turn, summarized in turn-prefix mode.
@@ -66,7 +68,8 @@ pub fn select_compaction(
 ) -> Result<CompactionSelection, AgentError> {
     let (transcript, previous_summary) = compaction_transcript(messages, latest);
     let selection = CompactionSelection {
-        previous_summary,
+        previous_summary: strip_compaction_blocks(&previous_summary).to_owned(),
+        previous_user_messages: compaction_user_messages(&previous_summary),
         ..CompactionSelection::default()
     };
 
@@ -238,7 +241,7 @@ fn partition_compaction_source(
 }
 
 /// Removes compaction context messages from the transcript and recovers the
-/// summary currently in force.
+/// summary currently in force, trailing blocks included.
 fn compaction_transcript(
     messages: &[Message],
     latest: Option<&CompactionMetadata>,
@@ -260,14 +263,14 @@ fn compaction_transcript(
             let stripped = text
                 .strip_prefix(COMPACTION_SUMMARY_DISPLAY_PREFIX)
                 .unwrap_or(&text);
-            previous_summary = strip_compaction_file_blocks(stripped).to_owned();
+            previous_summary = stripped.to_owned();
             found_latest = true;
         }
     }
     if let Some(latest) = latest
         && !found_latest
     {
-        previous_summary = strip_compaction_file_blocks(&latest.summary).to_owned();
+        previous_summary = latest.summary.clone();
     }
     (transcript, previous_summary)
 }

@@ -1,13 +1,16 @@
-//! The file lists a compaction checkpoint carries forward.
+//! The user messages and file lists a compaction checkpoint carries forward.
 //!
-//! A summary loses the tool calls that read and wrote files, so the paths are
-//! extracted from the discarded transcript and appended to the summary as two
-//! tagged blocks. The blocks are also parsed back off an existing summary, so a
-//! second compaction does not duplicate them.
+//! A summary is model output and can omit what the user said and which files
+//! the discarded tool calls read and wrote. The text of the summarized user
+//! messages and those paths are therefore appended to the summary verbatim as
+//! three tagged blocks. The blocks are stripped off an existing summary before
+//! it is summarized again and rebuilt from the stored values, so the
+//! summarizer never rewrites them and a second compaction does not duplicate
+//! them.
 //!
 //! Ownership: every function takes borrowed input and returns owned data.
 //!
-//! Errors: only [`append_compaction_file_blocks`] can fail, with a message the
+//! Errors: only [`append_compaction_blocks`] can fail, with a message the
 //! caller wraps in [`crate::agent::AgentError::InvalidCompactionSummary`].
 //!
 //! `normalize_detail_path` only rejects empty and control-bearing paths; a Rust
@@ -20,23 +23,40 @@ use serde_json::value::RawValue;
 use crate::model::{BlockType, Message, Role};
 use crate::session::CompactionDetails;
 
+use super::redactor::encode_json_string;
 use super::summary::SUMMARY_MAXIMUM_BYTES;
 use super::summary_validate::normalize_summary_line_endings;
 
-/// The largest number of paths the two blocks may name together.
+/// The largest number of paths the two file blocks may name together.
 pub const FILE_DETAILS_MAXIMUM_PATHS: usize = 1_024;
-/// The largest number of path bytes the two blocks may hold together.
+/// The largest number of path bytes the two file blocks may hold together.
 pub const FILE_DETAILS_MAXIMUM_BYTES: usize = 64 * 1024;
+/// The largest number of encoded line bytes the `user-messages` block may hold.
+pub const USER_MESSAGES_MAXIMUM_BYTES: usize = 16 * 1024;
+/// How many characters of one user message the `user-messages` block keeps.
+pub const USER_MESSAGE_MAXIMUM_RUNES: usize = 2_000;
+/// Appended to a user message the `user-messages` block had to cut short.
+pub const USER_MESSAGE_TRUNCATION_MARKER: &str = "[user message truncated for compaction]";
 
-/// Replaces the trailing file blocks of `summary` with the ones `details`
-/// describes, and checks the result is nonempty and within bounds.
-pub fn append_compaction_file_blocks(
+/// Replaces the trailing blocks of `summary` with a `user-messages` block for
+/// `user_messages` and the file blocks `details` describes, and checks the
+/// result is nonempty and within bounds.
+pub fn append_compaction_blocks(
     summary: &str,
+    user_messages: &[String],
     details: &CompactionDetails,
 ) -> Result<String, String> {
-    let mut complete = strip_compaction_file_blocks(summary).to_owned();
+    let mut complete = strip_compaction_blocks(summary).to_owned();
     if complete.trim().is_empty() {
         return Err("complete compaction summary must be nonempty UTF-8".into());
+    }
+    if !user_messages.is_empty() {
+        complete.push_str("\n\n<user-messages>\n");
+        for message in user_messages {
+            complete.push_str(&encode_user_message_line(message));
+            complete.push('\n');
+        }
+        complete.push_str("</user-messages>");
     }
     let suffix = compaction_file_blocks(details);
     if !suffix.is_empty() {
@@ -79,12 +99,12 @@ pub fn compaction_file_blocks(details: &CompactionDetails) -> String {
     suffix
 }
 
-/// Removes the file blocks a previous compaction appended, so they are not
+/// Removes the blocks a previous compaction appended, so they are not
 /// summarized as prose or duplicated. Blocks inside a fenced code block are
 /// left alone.
-pub fn strip_compaction_file_blocks(summary: &str) -> &str {
+pub fn strip_compaction_blocks(summary: &str) -> &str {
     let mut end = summary.len();
-    while let Some(start) = trailing_compaction_file_block_start(&summary[..end]) {
+    while let Some(start) = trailing_compaction_block_start(&summary[..end]) {
         end = start;
     }
     if end == summary.len() || summary_position_inside_fence(summary, end + 2) {
@@ -93,8 +113,76 @@ pub fn strip_compaction_file_blocks(summary: &str) -> &str {
     &summary[..end]
 }
 
-fn trailing_compaction_file_block_start(summary: &str) -> Option<usize> {
-    for tag in ["read-files", "modified-files"] {
+/// Reads the user messages a previous compaction appended in its
+/// `user-messages` block. A line that is not a JSON string is skipped.
+pub fn compaction_user_messages(summary: &str) -> Vec<String> {
+    const OPENER: &str = "\n\n<user-messages>\n";
+    let blocks = &summary[strip_compaction_blocks(summary).len()..];
+    let Some(start) = blocks.find(OPENER) else {
+        return Vec::new();
+    };
+    let content = &blocks[start + OPENER.len()..];
+    let end = content.find("\n</user-messages>").unwrap_or(content.len());
+    content[..end]
+        .split('\n')
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// Appends the text of the user messages in `summarized` to the ones a
+/// previous compaction carried, and keeps the newest run whose encoded lines
+/// fit in [`USER_MESSAGES_MAXIMUM_BYTES`]. A new message longer than
+/// [`USER_MESSAGE_MAXIMUM_RUNES`] characters is cut and marked; a carried one
+/// was cut when it was first carried.
+pub fn carry_user_messages<'a>(
+    previous: &[String],
+    summarized: impl IntoIterator<Item = &'a Message>,
+) -> Vec<String> {
+    let mut messages = previous.to_vec();
+    for message in summarized {
+        if message.role != Role::User {
+            continue;
+        }
+        let text = message.text();
+        if text.trim().is_empty() {
+            continue;
+        }
+        messages.push(match text.char_indices().nth(USER_MESSAGE_MAXIMUM_RUNES) {
+            None => text,
+            Some((end, _)) => format!("{}\n{USER_MESSAGE_TRUNCATION_MARKER}", &text[..end]),
+        });
+    }
+    let mut remaining = USER_MESSAGES_MAXIMUM_BYTES;
+    let mut first_kept = messages.len();
+    while first_kept > 0 {
+        let line_bytes = encode_user_message_line(&messages[first_kept - 1]).len() + 1;
+        if line_bytes > remaining {
+            break;
+        }
+        remaining -= line_bytes;
+        first_kept -= 1;
+    }
+    messages.split_off(first_kept)
+}
+
+/// Encodes one message as a single-line JSON string. `encode_json_string`
+/// leaves DEL and the C1 controls as they are; they are escaped here too, so
+/// the line passes [`valid_compaction_block_content`] and the block is
+/// stripped again on the next compaction.
+fn encode_user_message_line(text: &str) -> String {
+    let mut line = String::new();
+    for character in encode_json_string(text).chars() {
+        if character.is_control() {
+            line.push_str(&format!("\\u{:04x}", u32::from(character)));
+        } else {
+            line.push(character);
+        }
+    }
+    line
+}
+
+fn trailing_compaction_block_start(summary: &str) -> Option<usize> {
+    for tag in ["user-messages", "read-files", "modified-files"] {
         let closing = format!("\n</{tag}>");
         if !summary.ends_with(&closing) {
             continue;
@@ -105,7 +193,7 @@ fn trailing_compaction_file_block_start(summary: &str) -> Option<usize> {
             continue;
         };
         let content = &summary[start + opener.len()..content_end];
-        if !valid_compaction_file_block_content(content) {
+        if !valid_compaction_block_content(content) {
             continue;
         }
         return Some(start);
@@ -113,7 +201,7 @@ fn trailing_compaction_file_block_start(summary: &str) -> Option<usize> {
     None
 }
 
-fn valid_compaction_file_block_content(content: &str) -> bool {
+fn valid_compaction_block_content(content: &str) -> bool {
     if content.is_empty() {
         return false;
     }
@@ -513,27 +601,89 @@ mod tests {
             modified_files: vec!["b.txt".into()],
             ..CompactionDetails::default()
         };
-        let complete = append_compaction_file_blocks("summary body", &details).expect("valid");
+        let complete = append_compaction_blocks("summary body", &[], &details).expect("valid");
         assert_eq!(
             complete,
             "summary body\n\n<read-files>\na.txt\n</read-files>\n\n<modified-files>\nb.txt\n</modified-files>"
         );
-        assert_eq!(strip_compaction_file_blocks(&complete), "summary body");
+        assert_eq!(strip_compaction_blocks(&complete), "summary body");
 
         let replaced =
-            append_compaction_file_blocks(&complete, &CompactionDetails::default()).expect("valid");
+            append_compaction_blocks(&complete, &[], &CompactionDetails::default()).expect("valid");
         assert_eq!(replaced, "summary body");
+    }
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            blocks: vec![Block::text(text)],
+            ..Message::default()
+        }
+    }
+
+    #[test]
+    fn user_messages_render_strip_and_parse_round_trip() {
+        let messages = vec!["plain".to_owned(), "two\nlines <tag> & \u{85}".to_owned()];
+        let details = CompactionDetails {
+            read_files: vec!["a.txt".into()],
+            ..CompactionDetails::default()
+        };
+        let complete =
+            append_compaction_blocks("summary body", &messages, &details).expect("valid");
+        assert_eq!(
+            complete,
+            "summary body\n\n<user-messages>\n\"plain\"\n\
+             \"two\\nlines \\u003ctag\\u003e \\u0026 \\u0085\"\n</user-messages>\n\n\
+             <read-files>\na.txt\n</read-files>"
+        );
+        assert_eq!(strip_compaction_blocks(&complete), "summary body");
+        assert_eq!(compaction_user_messages(&complete), messages);
+        assert!(compaction_user_messages("summary body").is_empty());
+    }
+
+    #[test]
+    fn carried_user_messages_keep_the_newest_within_the_byte_bound() {
+        // Each previous message encodes to a 1,002-byte line plus its newline.
+        let previous: Vec<String> = (0..20)
+            .map(|index| format!("{index:02}{}", "p".repeat(998)))
+            .collect();
+        let image_only = Message {
+            role: Role::User,
+            blocks: vec![Block {
+                block_type: BlockType::Image,
+                mime_type: "image/png".into(),
+                ..Block::default()
+            }],
+            ..Message::default()
+        };
+        let reply = Message {
+            role: Role::Assistant,
+            blocks: vec![Block::text("not carried")],
+            ..Message::default()
+        };
+        let carried = carry_user_messages(&previous, &[image_only, reply, user("newest")]);
+        assert_eq!(carried.len(), 17, "16 previous lines and the newest fit");
+        assert_eq!(carried[0], previous[4]);
+        assert_eq!(carried[16], "newest");
+    }
+
+    #[test]
+    fn a_long_user_message_is_truncated_once() {
+        let long = "é".repeat(USER_MESSAGE_MAXIMUM_RUNES + 5);
+        let carried = carry_user_messages(&[], &[user(&long)]);
+        assert!(carried[0].ends_with(USER_MESSAGE_TRUNCATION_MARKER));
+        assert_eq!(carry_user_messages(&carried, &[]), carried);
     }
 
     #[test]
     fn an_empty_summary_is_rejected() {
         assert_eq!(
-            append_compaction_file_blocks("  \n ", &CompactionDetails::default()).unwrap_err(),
+            append_compaction_blocks("  \n ", &[], &CompactionDetails::default()).unwrap_err(),
             "complete compaction summary must be nonempty UTF-8"
         );
         let only_blocks = "\n\n<read-files>\na.txt\n</read-files>";
         assert_eq!(
-            append_compaction_file_blocks(only_blocks, &CompactionDetails::default()).unwrap_err(),
+            append_compaction_blocks(only_blocks, &[], &CompactionDetails::default()).unwrap_err(),
             "complete compaction summary must be nonempty UTF-8"
         );
     }
@@ -541,15 +691,15 @@ mod tests {
     #[test]
     fn file_blocks_inside_an_open_fence_are_not_stripped() {
         let fenced = "body\n```\n\n<read-files>\na.txt\n</read-files>";
-        assert_eq!(strip_compaction_file_blocks(fenced), fenced);
+        assert_eq!(strip_compaction_blocks(fenced), fenced);
     }
 
     #[test]
     fn a_block_with_an_empty_or_control_path_is_not_stripped() {
         let broken = "body\n\n<read-files>\n\n</read-files>";
-        assert_eq!(strip_compaction_file_blocks(broken), broken);
+        assert_eq!(strip_compaction_blocks(broken), broken);
         let control = "body\n\n<read-files>\na\u{1}b\n</read-files>";
-        assert_eq!(strip_compaction_file_blocks(control), control);
+        assert_eq!(strip_compaction_blocks(control), control);
     }
 
     #[test]
@@ -560,7 +710,7 @@ mod tests {
             ..CompactionDetails::default()
         };
         assert_eq!(
-            append_compaction_file_blocks(&body, &details).unwrap_err(),
+            append_compaction_blocks(&body, &[], &details).unwrap_err(),
             format!("complete compaction summary exceeds {SUMMARY_MAXIMUM_BYTES} bytes")
         );
     }

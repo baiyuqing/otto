@@ -19,7 +19,23 @@ use super::summary::{
 
 /// The level-2 and level-3 headings a structured summary must contain, each
 /// exactly once and in this order.
-pub const REQUIRED_SUMMARY_HEADINGS: [&str; 9] = [
+pub const REQUIRED_SUMMARY_HEADINGS: [&str; 10] = [
+    "## Goal",
+    "## Constraints & Preferences",
+    "## Observations",
+    "## Progress",
+    "### Done",
+    "### In Progress",
+    "### Blocked",
+    "## Key Decisions",
+    "## Next Steps",
+    "## Critical Context",
+];
+
+/// The headings of a structured summary stored before `## Observations` was
+/// required. [`combine_summary`] accepts them for a stored previous summary; a
+/// new summary must have every heading in [`REQUIRED_SUMMARY_HEADINGS`].
+const PRE_OBSERVATIONS_SUMMARY_HEADINGS: [&str; 9] = [
     "## Goal",
     "## Constraints & Preferences",
     "## Progress",
@@ -32,7 +48,7 @@ pub const REQUIRED_SUMMARY_HEADINGS: [&str; 9] = [
 ];
 
 /// Validates a structured summary response: bounded text, no tool call, and
-/// the nine required headings in order.
+/// the required headings in order.
 pub fn validate_structured_summary(message: &Message) -> Result<String, String> {
     let summary = validate_summary_message(message, SUMMARY_MAXIMUM_BYTES)?;
     validate_summary_headings(&summary)?;
@@ -84,6 +100,10 @@ fn text_message(text: &str) -> Message {
 /// exactly [`REQUIRED_SUMMARY_HEADINGS`], in order. Headings inside a fenced
 /// code block do not count, so a summary may quote them.
 pub fn validate_summary_headings(summary: &str) -> Result<(), String> {
+    validate_heading_sequence(summary, &REQUIRED_SUMMARY_HEADINGS)
+}
+
+fn validate_heading_sequence(summary: &str, headings: &[&str]) -> Result<(), String> {
     let mut expected = 0;
     let mut fence = FenceScanner::default();
     for line in normalize_summary_line_endings(summary).split('\n') {
@@ -93,17 +113,15 @@ pub fn validate_summary_headings(summary: &str) -> Result<(), String> {
         if fence.is_open() || !is_level_two_or_three_heading(line) {
             continue;
         }
-        if expected >= REQUIRED_SUMMARY_HEADINGS.len()
-            || line != REQUIRED_SUMMARY_HEADINGS[expected]
-        {
+        if expected >= headings.len() || line != headings[expected] {
             return Err("compaction summary has an unexpected or out-of-order heading".into());
         }
         expected += 1;
     }
-    if expected != REQUIRED_SUMMARY_HEADINGS.len() {
+    if expected != headings.len() {
         return Err(format!(
             "compaction summary has {expected} of {} required headings",
-            REQUIRED_SUMMARY_HEADINGS.len()
+            headings.len()
         ));
     }
     Ok(())
@@ -242,9 +260,16 @@ fn is_level_two_or_three_heading(line: &str) -> bool {
 }
 
 /// Joins a validated historical summary and a validated turn summary with the
-/// split-turn separator, rejecting a combination that is over the bound.
+/// split-turn separator, rejecting a combination that is over the bound. The
+/// historical half may be a stored summary with the headings of
+/// [`PRE_OBSERVATIONS_SUMMARY_HEADINGS`].
 pub fn combine_summary(historical: &str, turn: &str) -> Result<String, String> {
-    let validated_historical = validate_structured_summary(&text_message(historical))?;
+    let validated_historical =
+        validate_summary_message(&text_message(historical), SUMMARY_MAXIMUM_BYTES)?;
+    validate_summary_headings(&validated_historical).or_else(|error| {
+        validate_heading_sequence(&validated_historical, &PRE_OBSERVATIONS_SUMMARY_HEADINGS)
+            .map_err(|_| error)
+    })?;
     let validated_turn = validate_turn_summary(&text_message(turn))?;
     let combined = validated_historical + SPLIT_TURN_SUMMARY_SEPARATOR + &validated_turn;
     if combined.len() > SUMMARY_MAXIMUM_BYTES {
@@ -332,7 +357,7 @@ mod tests {
             .collect();
         assert_eq!(
             validate_structured_summary(&message(&partial)).unwrap_err(),
-            "compaction summary has 4 of 9 required headings"
+            "compaction summary has 4 of 10 required headings"
         );
     }
 
@@ -351,6 +376,26 @@ mod tests {
             validate_structured_summary(&message(&extra)).unwrap_err(),
             "compaction summary has an unexpected or out-of-order heading"
         );
+    }
+
+    fn without_observations() -> String {
+        REQUIRED_SUMMARY_HEADINGS
+            .iter()
+            .filter(|heading| **heading != "## Observations")
+            .map(|heading| format!("{heading}\nbody\n"))
+            .collect()
+    }
+
+    #[test]
+    fn a_new_summary_without_observations_is_rejected() {
+        assert!(REQUIRED_SUMMARY_HEADINGS.contains(&"## Observations"));
+        assert!(validate_structured_summary(&message(&without_observations())).is_err());
+    }
+
+    #[test]
+    fn a_stored_summary_from_before_observations_still_combines() {
+        let combined = combine_summary(&without_observations(), "the turn so far").expect("valid");
+        assert!(combined.ends_with("the turn so far"));
     }
 
     #[test]
@@ -408,7 +453,7 @@ mod tests {
     fn combine_rejects_an_invalid_half() {
         assert_eq!(
             combine_summary("## Goal", "turn").unwrap_err(),
-            "compaction summary has 1 of 9 required headings"
+            "compaction summary has 1 of 10 required headings"
         );
         assert_eq!(
             combine_summary(&structured(), "   ").unwrap_err(),

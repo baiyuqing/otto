@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, ApprovalDialog, TurnStatus};
 use super::commands::{SLASH_COMMANDS, SlashCommand};
@@ -345,38 +345,73 @@ fn draw_picker(frame: &mut Frame, area: Rect, picker: &super::app::Picker) {
 }
 
 fn draw_approval(frame: &mut Frame, area: Rect, approval: &ApprovalDialog) {
-    let popup = centered_rect(76, 48, area);
+    let popup = centered_rect_sized(76, 8, area);
     frame.render_widget(Clear, popup);
+    let inner_width = popup.width.saturating_sub(4) as usize;
     let mut lines = vec![
-        Line::from("Approve elevated Bash command"),
-        Line::default(),
-        Line::from(vec![
-            Span::styled("Approve: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(approval.action()),
-        ]),
+        Line::from(Span::styled(
+            "Run elevated Bash?",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from("This command would run outside the sandbox."),
     ];
     if !approval.command.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Command: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(escape_single_line_text(&approval.command)),
-        ]));
+        lines.push(label_value_line(
+            "Command: ",
+            &approval.command,
+            inner_width,
+        ));
     }
     if !approval.justification.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Justification: ",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(escape_single_line_text(&approval.justification)),
-        ]));
+        lines.push(label_value_line(
+            "Reason: ",
+            &approval.justification,
+            inner_width,
+        ));
     }
     lines.push(Line::default());
-    lines.push(Line::from("Enter/y approve · Esc/n cancel"));
+    lines.push(Line::from(vec![
+        Span::styled("y = yes", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" · "),
+        Span::styled("n/Esc = no", Style::default().add_modifier(Modifier::BOLD)),
+    ]));
 
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Approval"));
     frame.render_widget(paragraph, popup);
+}
+
+fn label_value_line<'a>(label: &'static str, value: &str, width: usize) -> Line<'a> {
+    let label_width = UnicodeWidthStr::width(label);
+    let value_width = width.saturating_sub(label_width);
+    Line::from(vec![
+        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(ellipsis_single_line(value, value_width)),
+    ])
+}
+
+fn ellipsis_single_line(value: &str, max_width: usize) -> String {
+    let escaped = escape_single_line_text(value);
+    if UnicodeWidthStr::width(escaped.as_str()) <= max_width {
+        return escaped;
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+    let keep = max_width - 3;
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in escaped.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > keep {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push_str("...");
+    out
 }
 
 /// The `/context` overlay: the section list, or one item's full text over it.
@@ -543,6 +578,27 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
+fn centered_rect_sized(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let height = height.min(area.height);
+    let top = area.height.saturating_sub(height) / 2;
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
 /// Terminal-size and wrapping cases, against ratatui's own render loop.
 ///
 /// Ratatui renders each widget into a `Rect`/`Buffer` that the framework itself
@@ -559,7 +615,6 @@ mod tests {
     use otto_core::agent::Event;
     use ratatui::Terminal;
     use ratatui::backend::{Backend, TestBackend};
-    use unicode_width::UnicodeWidthStr as _;
 
     use super::*;
     use crate::cli::testutil;
@@ -806,21 +861,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_dialog_is_drawn_with_actions() {
+    async fn approval_dialog_is_drawn_with_clear_choices_and_truncates_long_commands() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
+        let long_command = format!("git push {}", "very-long-ref-name-".repeat(12));
         app.approval = Some(ApprovalDialog {
             id: "approval-1".to_string(),
-            command: "git push".to_string(),
-            justification: "push branch".to_string(),
+            command: long_command.clone(),
+            justification: "publish the reviewed branch".to_string(),
         });
 
-        let screen = rendered(&app, 100, 30);
+        let screen = rendered(&app, 80, 16);
 
-        assert!(screen.contains("Approve elevated Bash command"), "{screen}");
-        assert!(screen.contains("/approve approval-1"), "{screen}");
+        assert!(screen.contains("Run elevated Bash?"), "{screen}");
+        assert!(screen.contains("outside the sandbox"), "{screen}");
+        assert!(screen.contains("Command:"), "{screen}");
         assert!(screen.contains("git push"), "{screen}");
-        assert!(screen.contains("Enter/y approve"), "{screen}");
-        assert!(screen.contains("Esc/n cancel"), "{screen}");
+        assert!(screen.contains("..."), "{screen}");
+        assert!(!screen.contains(&long_command), "{screen}");
+        assert!(
+            screen.contains("Reason: publish the reviewed branch"),
+            "{screen}"
+        );
+        assert!(screen.contains("y = yes"), "{screen}");
+        assert!(screen.contains("n/Esc = no"), "{screen}");
     }
 
     #[tokio::test]

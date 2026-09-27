@@ -119,12 +119,6 @@ pub(crate) struct ApprovalDialog {
     pub justification: String,
 }
 
-impl ApprovalDialog {
-    pub(crate) fn action(&self) -> String {
-        format!("/approve {}", self.id)
-    }
-}
-
 /// Async work [`App::handle_key`] cannot start itself (every
 /// [`Controller`] method it would need is `async`). [`super::run`] awaits
 /// these one at a time, matching [`Controller::begin_operation`]'s
@@ -488,7 +482,7 @@ impl App {
 
         if let Some(approval) = &self.approval {
             match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
                     let id = approval.id.clone();
                     self.approval = None;
                     return Some(Action::Approve(id));
@@ -1279,7 +1273,9 @@ fn decode_approval_field(value: &str) -> String {
 }
 
 fn approval_hint(approval: &ApprovalDialog) -> String {
-    let mut hint = "Bash approval requested. Review the popup, then press Enter/y to approve or Esc/n to cancel.".to_string();
+    let mut hint =
+        "Bash approval requested. Review the popup, then press y to approve or n/Esc to cancel."
+            .to_string();
     if !approval.command.is_empty() {
         hint.push_str("\nCommand: ");
         hint.push_str(&approval.command);
@@ -1947,7 +1943,7 @@ mod tests {
         assert_eq!(added.len(), 2, "tool entry plus system hint: {added:?}");
         assert_eq!(added[0].kind, Some(EntryKind::Tool));
         assert_eq!(added[1].kind, Some(EntryKind::System));
-        assert!(added[1].raw.contains("press Enter/y"), "{}", added[1].raw);
+        assert!(added[1].raw.contains("press y"), "{}", added[1].raw);
         assert!(added[1].raw.contains("git push"), "{}", added[1].raw);
         let approval = app.approval.as_ref().expect("approval dialog");
         assert_eq!(approval.id, "approval-1");
@@ -1956,7 +1952,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_dialog_enter_approves_and_escape_closes() {
+    async fn approval_dialog_requires_y_and_escape_closes() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
         let controller = testutil::controller(workspace.path(), sessions.path()).await;
@@ -1970,6 +1966,15 @@ mod tests {
 
         let action = app.handle_key(
             key(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+            &cancel,
+        );
+
+        assert!(action.is_none());
+        assert!(app.approval.is_some(), "Enter must not approve implicitly");
+
+        let action = app.handle_key(
+            key(KeyCode::Char('y'), KeyModifiers::NONE),
             &controller,
             &cancel,
         );

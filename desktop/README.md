@@ -26,6 +26,20 @@ cargo build
 ```
 
 The app is arm64-only (`aarch64-apple-darwin`); there is no Intel build.
+`make desktop-sidecar` runs the first three commands.
+
+## Build Otto.app for this Mac
+
+```bash
+cargo install tauri-cli --version ^2   # once
+make desktop-app                       # from the repo root
+```
+
+Builds `desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Otto.app`
+with an ad-hoc signature (`APPLE_SIGNING_IDENTITY=-`). It needs no Apple
+Developer account. A locally built app carries no quarantine attribute, so
+Gatekeeper opens it on the Mac that built it; copied to another Mac, it is
+blocked. For distribution, use `make desktop-release`.
 
 ## Check
 

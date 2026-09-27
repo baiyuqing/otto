@@ -1513,9 +1513,8 @@ first time it runs (or when the saved folder no longer exists), runs `otto
 trust` on it, starts `otto serve --exit-on-stdin-close` as a child process,
 and loads the child's HTTP address in its main window once the child
 announces it. The window loads only that address. The page is a client of
-the same HTTP API described in this section; the one Tauri command exposed
-to it is `pick_directory`, which shows the native folder dialog for the
-sidebar's **Add workspace…** button and returns the chosen path.
+the same HTTP API described in this section. The sidebar's **Add
+workspace…** button runs the same action as **File > Open Folder…**.
 
 **File > Open Folder…** (`⌘O`) picks another directory, runs `otto trust` on
 it, registers it with the running server over `POST /v1/workspaces`, and

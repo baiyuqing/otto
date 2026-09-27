@@ -18,7 +18,7 @@ function loadMermaid(): Promise<MermaidAPI> {
   return mermaidPromise
 }
 
-export function TranscriptView(props: { items: Item[]; activeSession: boolean }) {
+export function TranscriptView(props: { items: Item[]; queuedInput?: string; activeSession: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
   // Follow the stream: keep the newest item in view as it grows.
   useEffect(() => {
@@ -26,9 +26,12 @@ export function TranscriptView(props: { items: Item[]; activeSession: boolean })
     if (el) el.scrollTop = el.scrollHeight
   }, [props.items])
 
+  const queuedInput = props.queuedInput?.trim() ?? ''
+  const hasItems = props.items.length > 0 || queuedInput.length > 0
+
   return (
     <div className="transcript" ref={ref}>
-      {props.items.length === 0 ? (
+      {!hasItems ? (
         <div className="empty-state">
           <h1>{props.activeSession ? 'Session is open' : 'No session'}</h1>
           <p>
@@ -38,7 +41,10 @@ export function TranscriptView(props: { items: Item[]; activeSession: boolean })
           </p>
         </div>
       ) : (
-        props.items.map((it, i) => <ItemView key={i} item={it} />)
+        <>
+          {props.items.map((it, i) => <ItemView key={i} item={it} />)}
+          {queuedInput && <QueuedInput text={queuedInput} />}
+        </>
       )}
     </div>
   )
@@ -203,6 +209,15 @@ export function MermaidDiagram({ code, label }: { code: string; label?: string }
       tabIndex={label ? 0 : undefined}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
+  )
+}
+
+function QueuedInput({ text }: { text: string }) {
+  return (
+    <div className="item user queued-input">
+      <span className="queued-input-badge">Queued</span>
+      {text}
+    </div>
   )
 }
 

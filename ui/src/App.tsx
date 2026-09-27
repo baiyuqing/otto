@@ -579,7 +579,7 @@ export function App() {
             {view === 'changes' ? (
               <ChangesView workspace={changesWorkspace} status={status} onError={fail} />
             ) : (
-              <TranscriptView items={items} activeSession={session !== null} />
+              <TranscriptView items={items} queuedInput={queuedInput} activeSession={session !== null} />
             )}
           </>
         )}

@@ -164,7 +164,7 @@ describe('idle wake follow', () => {
     expect(api.cancelTurn).toHaveBeenCalledWith('sess1', 'turn1')
   })
 
-  it('queues editable input while a turn is running and sends it after success', async () => {
+  it('queues input into the transcript on Enter while a turn is running and sends it after success', async () => {
     const running: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'running' } }
     const done: Session = { ...idle, turn: { id: 'turn1', trigger: 'user', status: 'ok' } }
     const nextRunning: Session = { ...idle, turn: { id: 'turn2', trigger: 'user', status: 'running' } }
@@ -178,8 +178,12 @@ describe('idle wake follow', () => {
     api.attach.mockResolvedValue(new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } }))
     await openIdleSession()
 
-    const input = screen.getByPlaceholderText('Queue next input…')
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
     fireEvent.change(input, { target: { value: 'follow up' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(input.value).toBe('')
+    expect(within(document.querySelector('.transcript') as HTMLElement).getByText('follow up')).toBeTruthy()
     expect(screen.getAllByText(/Queued next input/).length).toBeGreaterThan(0)
     expect(api.startTurn).not.toHaveBeenCalled()
     api.getSession.mockResolvedValueOnce(done).mockResolvedValue(nextRunning)
@@ -200,11 +204,15 @@ describe('idle wake follow', () => {
     api.attach.mockResolvedValue(new Response(new ReadableStream(), { headers: { 'Content-Type': 'text/event-stream' } }))
     await openIdleSession()
 
-    const input = screen.getByPlaceholderText('Queue next input…')
+    const input = screen.getByPlaceholderText('Queue next input…') as HTMLTextAreaElement
     fireEvent.change(input, { target: { value: 'follow up' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(input.value).toBe('')
+    expect(within(document.querySelector('.transcript') as HTMLElement).getByText('follow up')).toBeTruthy()
+
     fireEvent.click(screen.getByRole('button', { name: 'Withdraw queued input' }))
 
-    expect((input as HTMLTextAreaElement).value).toBe('')
+    expect(within(document.querySelector('.transcript') as HTMLElement).queryByText('follow up')).toBeNull()
     expect(api.startTurn).not.toHaveBeenCalled()
   })
 

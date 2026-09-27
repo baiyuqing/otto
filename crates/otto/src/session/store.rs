@@ -4,9 +4,11 @@
 //! later line is one entry.
 //!
 //! Ownership: a `Store` owns its file descriptor and closes it in
-//! [`Store::close`] or on drop. Concurrency: all mutable state sits behind one
-//! mutex, so a `Store` is `Send + Sync` and every method may be called from any
-//! thread. Errors: every failure is a [`PiError`]; a failed durable write
+//! [`Store::close`] or on drop. The descriptor holds an exclusive advisory
+//! lock, so another Otto process cannot open the same session to mutate it.
+//! Concurrency: all mutable state sits behind one mutex, so a `Store` is
+//! `Send + Sync` and every method may be called from any thread. Errors: every
+//! failure is a [`PiError`]; a failed durable write
 //! poisons the store with [`PiErrorKind::FatalPersistence`] and every later
 //! write returns that same error.
 //!
@@ -175,6 +177,7 @@ impl Store {
     /// Builds a store around an already-verified descriptor. The descriptor is
     /// consumed either way: on failure it is dropped and closed.
     pub(crate) fn from_file(mut file: File, path: &str) -> Result<(Self, Vec<Warning>), PiError> {
+        fsops::lock_session_exclusive(&file)?;
         reject_oversized_session_file(&file)?;
         let (decoded, mut warnings) = decode_pi_file_for_open(&mut file, path)?;
         let state = resolve_pi_store_state(&decoded)?;
@@ -545,7 +548,8 @@ impl StoreState {
                 .map_err(|error| PiError::other(format!("create session file: {error}")))?
         };
 
-        let result = self.write_initial_records(&mut file);
+        let result = fsops::lock_session_exclusive(&file)
+            .and_then(|_| self.write_initial_records(&mut file));
         let (file_bytes, entry) = match result {
             Ok(value) => value,
             Err(error) => {

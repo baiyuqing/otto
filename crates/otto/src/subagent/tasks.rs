@@ -30,6 +30,7 @@
 //! outcome.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, Utc};
@@ -126,6 +127,11 @@ pub enum TaskError {
     Canceled,
 }
 
+/// How many `agent_report` calls a child may make on its own initiative over
+/// the life of one task, before [`Tasks::send_message`] grants another. See
+/// [`crate::subagent::runner::ChildTools::report`].
+pub const REPORT_BUDGET: usize = 10;
+
 /// What the registry stores beside the record.
 struct Entry {
     task: Task,
@@ -133,6 +139,10 @@ struct Entry {
     #[allow(clippy::type_complexity)]
     history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
     inbox: Arc<Inbox>,
+    /// Remaining `agent_report` calls, shared with the child's `ChildTools`.
+    /// Starts at [`REPORT_BUDGET`] and gains one for each parent message
+    /// delivered through [`Tasks::send_message`].
+    reports_left: Arc<AtomicUsize>,
     done: Arc<Notify>,
 }
 
@@ -357,6 +367,7 @@ impl Tasks {
                     cancel,
                     history,
                     inbox: Arc::new(Inbox::new(None)),
+                    reports_left: Arc::new(AtomicUsize::new(REPORT_BUDGET)),
                     done: Arc::new(Notify::new()),
                 },
             );
@@ -546,10 +557,20 @@ impl Tasks {
         Some(Arc::clone(&entry.inbox))
     }
 
+    /// The task's `agent_report` budget counter, shared with the running
+    /// child's `ChildTools`. `None` when `reference` names no task.
+    pub fn report_allowance(&self, reference: &str) -> Option<Arc<AtomicUsize>> {
+        let state = self.lock();
+        let entry = Self::entry(&state, reference)?;
+        Some(Arc::clone(&entry.reports_left))
+    }
+
     /// Queues a parent message for a queued or running child. The returned id
-    /// is the canonical task id, even when `reference` was a task name.
+    /// is the canonical task id, even when `reference` was a task name. Also
+    /// grants the child one more `agent_report` call, on top of
+    /// [`REPORT_BUDGET`], so it can answer the message.
     pub fn send_message(&self, reference: &str, message: &str) -> Result<String, TaskError> {
-        let (id, inbox) = {
+        let (id, inbox, reports_left) = {
             let state = self.lock();
             let Some(entry) = Self::entry(&state, reference) else {
                 return Err(TaskError::NotFound(reference.to_string()));
@@ -557,7 +578,11 @@ impl Tasks {
             if entry.task.is_final() {
                 return Err(TaskError::Finished(reference.to_string()));
             }
-            (entry.task.id.clone(), Arc::clone(&entry.inbox))
+            (
+                entry.task.id.clone(),
+                Arc::clone(&entry.inbox),
+                Arc::clone(&entry.reports_left),
+            )
         };
         inbox.push(otto_core::agent::inbox::Notification {
             task_id: id.clone(),
@@ -565,6 +590,7 @@ impl Tasks {
             text: format!("[parent-message] {message}"),
             usage: None,
         });
+        reports_left.fetch_add(1, Ordering::SeqCst);
         self.signal();
         Ok(id)
     }

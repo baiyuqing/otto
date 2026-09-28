@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::{self, Signal};
@@ -35,7 +35,7 @@ use nix::unistd::Pid;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::jsonrpc::{self, RpcError};
@@ -49,15 +49,34 @@ const STDERR_TAIL_BYTES: usize = 4 * 1024;
 /// How much of the kept stderr tail is folded into the "server exited"
 /// message; smaller than `STDERR_TAIL_BYTES` so that message stays readable.
 const STDERR_EXIT_TAIL_BYTES: usize = 1024;
-/// How long `close` waits after dropping stdin, and again after `SIGTERM`,
-/// before escalating. Process exit awaits this path, so keep each grace window
-/// short: well-behaved servers usually exit as soon as stdin closes, while
-/// stubborn ones should not make `/exit` feel hung.
-const SHUTDOWN_WAIT: Duration = Duration::from_millis(250);
+/// How long the process group may handle SIGTERM before SIGKILL.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 type PendingResult = Result<Result<Value, RpcError>, CallError>;
 type Pending = HashMap<i64, oneshot::Sender<PendingResult>>;
+
+#[derive(Default)]
+struct CloseCompletion {
+    started: AtomicBool,
+    done: AtomicBool,
+    changed: Notify,
+}
+
+/// Resources owned exclusively by the child reaper. This deliberately holds
+/// only server cleanup state (never runner/session state).
+struct ChildOwner {
+    pending: Arc<Mutex<Pending>>,
+    dead: Arc<Mutex<Option<String>>>,
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    stderr_tail: Arc<std::sync::Mutex<String>>,
+    stderr_task: tokio::task::JoinHandle<()>,
+    stopping: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    done_notify: Arc<Notify>,
+    pid: u32,
+    _fence_registration: crate::failover::children::Registration,
+}
 
 /// A child process reached over stdin/stdout. See the module documentation
 /// for lifecycle and concurrency.
@@ -70,11 +89,10 @@ pub struct StdioTransport {
     dead: Arc<Mutex<Option<String>>>,
     next_id: AtomicI64,
     stderr_tail: Arc<std::sync::Mutex<String>>,
-    close_done: Mutex<bool>,
-    /// Keeps this pid registered with `failover::children::Children` for
-    /// the transport's lifetime, so a lease watchdog's fence action can
-    /// kill it independently of this transport's own shutdown path.
-    _fence_registration: crate::failover::children::Registration,
+    stopping: Arc<AtomicBool>,
+    reader_done: Arc<AtomicBool>,
+    reader_done_notify: Arc<Notify>,
+    close: Arc<CloseCompletion>,
 }
 
 impl StdioTransport {
@@ -97,6 +115,7 @@ impl StdioTransport {
         builder.stdout(Stdio::piped());
         builder.stderr(Stdio::piped());
         builder.kill_on_drop(true);
+        builder.process_group(0);
 
         let mut child = builder.spawn().map_err(|error| {
             CallError::Transport(format!("failed to start mcp server: {error}"))
@@ -107,7 +126,7 @@ impl StdioTransport {
         let fence_registration = crate::failover::children::Children::register(
             crate::failover::children::Children::global(),
             pid as i32,
-            false,
+            true,
         );
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
@@ -117,17 +136,27 @@ impl StdioTransport {
         let pending: Arc<Mutex<Pending>> = Arc::new(Mutex::new(HashMap::new()));
         let dead: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let reader_done_notify = Arc::new(Notify::new());
 
         let stderr_task = tokio::spawn(drain_stderr(stderr, stderr_tail.clone()));
-        tokio::spawn(reader_loop(
-            child,
-            stdout,
-            pending.clone(),
-            dead.clone(),
-            stdin.clone(),
-            stderr_tail.clone(),
-            stderr_task,
-        ));
+        tokio::spawn(stdout_loop(stdout, pending.clone(), stdin.clone(), pid));
+        tokio::spawn(
+            ChildOwner {
+                pending: pending.clone(),
+                dead: dead.clone(),
+                stdin: stdin.clone(),
+                stderr_tail: stderr_tail.clone(),
+                stderr_task,
+                stopping: stopping.clone(),
+                done: reader_done.clone(),
+                done_notify: reader_done_notify.clone(),
+                pid,
+                _fence_registration: fence_registration,
+            }
+            .run(child),
+        );
 
         Ok(Self {
             pid,
@@ -136,8 +165,10 @@ impl StdioTransport {
             dead,
             next_id: AtomicI64::new(1),
             stderr_tail,
-            close_done: Mutex::new(false),
-            _fence_registration: fence_registration,
+            stopping,
+            reader_done,
+            reader_done_notify,
+            close: Arc::new(CloseCompletion::default()),
         })
     }
 
@@ -175,6 +206,9 @@ impl Transport for StdioTransport {
         outbound: Outbound,
         cancel: &CancellationToken,
     ) -> Result<Result<Value, RpcError>, CallError> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(CallError::Stopping);
+        }
         if let Some(reason) = self.dead.lock().await.clone() {
             return Err(CallError::Transport(reason));
         }
@@ -186,9 +220,16 @@ impl Transport for StdioTransport {
 
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
+        if self.stopping.load(Ordering::Acquire) {
+            self.pending.lock().await.remove(&id);
+            return Err(CallError::Stopping);
+        }
 
         if let Err(error) = write_line(&self.stdin, &line).await {
             self.pending.lock().await.remove(&id);
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(CallError::Stopping);
+            }
             return Err(error);
         }
 
@@ -196,6 +237,7 @@ impl Transport for StdioTransport {
             biased;
             result = rx => match result {
                 Ok(outcome) => outcome,
+                Err(_) if self.stopping.load(Ordering::Acquire) => Err(CallError::Interrupted),
                 Err(_) => Err(CallError::Transport(
                     self.dead
                         .lock()
@@ -219,6 +261,9 @@ impl Transport for StdioTransport {
     }
 
     async fn notify(&self, outbound: Outbound) -> Result<(), CallError> {
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(CallError::Stopping);
+        }
         if let Some(reason) = self.dead.lock().await.clone() {
             return Err(CallError::Transport(reason));
         }
@@ -228,31 +273,51 @@ impl Transport for StdioTransport {
         write_line(&self.stdin, &line).await
     }
 
-    async fn close(&self) {
-        let mut done = self.close_done.lock().await;
-        if *done {
-            return;
-        }
-        *done = true;
+    fn timeout_stops_server(&self) -> bool {
+        true
+    }
 
-        // Drop stdin: most well-behaved servers exit on EOF.
-        self.stdin.lock().await.take();
-        if wait_for_exit(self.pid, SHUTDOWN_WAIT).await {
-            return;
+    async fn close(&self) {
+        self.stopping.store(true, Ordering::Release);
+        if self
+            .close
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let pid = self.pid;
+            let stdin = self.stdin.clone();
+            let pending = self.pending.clone();
+            let reader_done = self.reader_done.clone();
+            let reader_done_notify = self.reader_done_notify.clone();
+            let close = self.close.clone();
+            tokio::spawn(async move {
+                stdin.lock().await.take();
+                fail_pending(&pending, CallError::Interrupted).await;
+
+                signal_group(pid, Signal::SIGTERM);
+                if !wait_for_group_exit(pid, SHUTDOWN_WAIT).await {
+                    signal_group(pid, Signal::SIGKILL);
+                    let _ = wait_for_group_exit(pid, SHUTDOWN_WAIT).await;
+                }
+                // ChildOwner uniquely owns Child and performs wait(2).
+                wait_for_reader(&reader_done, &reader_done_notify).await;
+                close.done.store(true, Ordering::Release);
+                close.changed.notify_waiters();
+            });
         }
-        let _ = signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM);
-        if wait_for_exit(self.pid, SHUTDOWN_WAIT).await {
-            return;
-        }
-        let _ = signal::kill(Pid::from_raw(self.pid as i32), Signal::SIGKILL);
-        let _ = wait_for_exit(self.pid, SHUTDOWN_WAIT).await;
+        wait_for_close(&self.close).await;
     }
 }
 
-async fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+fn signal_group(pid: u32, sig: Signal) {
+    let _ = signal::kill(Pid::from_raw(-(pid as i32)), sig);
+}
+
+async fn wait_for_group_exit(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if process_gone(pid) {
+        if process_group_gone(pid) {
             return true;
         }
         if Instant::now() >= deadline {
@@ -262,23 +327,49 @@ async fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
     }
 }
 
-fn process_gone(pid: u32) -> bool {
+fn process_group_gone(pid: u32) -> bool {
     matches!(
-        signal::kill(Pid::from_raw(pid as i32), None),
+        signal::kill(Pid::from_raw(-(pid as i32)), None),
         Err(nix::errno::Errno::ESRCH)
     )
 }
 
-/// Reads stdout line by line, routing responses to pending calls, until the
-/// child exits or stdout closes, then fails every pending (and future) call.
-async fn reader_loop(
-    mut child: Child,
+async fn wait_for_close(close: &CloseCompletion) {
+    while !close.done.load(Ordering::Acquire) {
+        let notified = close.changed.notified();
+        if close.done.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn wait_for_reader(done: &AtomicBool, notify: &Notify) {
+    while !done.load(Ordering::Acquire) {
+        let notified = notify.notified();
+        if done.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn fail_pending(pending: &Mutex<Pending>, error: CallError) {
+    let senders: Vec<_> = std::mem::take(&mut *pending.lock().await)
+        .into_values()
+        .collect();
+    for sender in senders {
+        let _ = sender.send(Err(error.clone()));
+    }
+}
+
+/// Routes stdout responses. Child ownership and reaping deliberately live in
+/// `ChildOwner`, so a descendant inheriting stdout cannot delay wait(2).
+async fn stdout_loop(
     stdout: ChildStdout,
     pending: Arc<Mutex<Pending>>,
-    dead: Arc<Mutex<Option<String>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    stderr_tail: Arc<std::sync::Mutex<String>>,
-    stderr_task: tokio::task::JoinHandle<()>,
+    pid: u32,
 ) {
     let mut reader = tokio::io::BufReader::new(stdout);
     loop {
@@ -287,42 +378,56 @@ async fn reader_loop(
                 if let Ok(text) = String::from_utf8(line) {
                     handle_line(&text, &pending, &stdin).await;
                 }
-                // Non-UTF-8 output is not valid JSON-RPC; skipped.
             }
-            Ok(None) => break,
+            Ok(None) => return,
             Err(_) => {
-                // A line over the cap means the transport can no longer be
-                // trusted to frame messages correctly; stop trusting it.
-                let _ = child.start_kill();
-                break;
+                signal_group(pid, Signal::SIGKILL);
+                return;
             }
         }
     }
+}
 
-    let status = child.wait().await.ok();
-    // Wait for stderr to finish draining so its tail is complete before it
-    // is folded into the exit message below. Bounded: a grandchild that
-    // inherited the stderr pipe keeps it open after the child exits, and the
-    // exit must still be reported.
-    let _ = tokio::time::timeout(SHUTDOWN_WAIT, stderr_task).await;
+/// Uniquely owns and reaps the child. Its registration remains live until
+/// both wait(2) has completed and the process group is gone, even if the
+/// transport and a close waiter are dropped while detached cleanup runs.
+/// It then publishes completion and fails calls still pending on the stream.
+impl ChildOwner {
+    async fn run(self, mut child: Child) {
+        let status = child.wait().await.ok();
+        self.stdin.lock().await.take();
+        // Wait for stderr to finish draining so its tail is complete before it
+        // is folded into the exit message below. Bounded: a grandchild that
+        // inherited the stderr pipe keeps it open after the child exits, and the
+        // exit must still be reported.
+        let _ = tokio::time::timeout(SHUTDOWN_WAIT, self.stderr_task).await;
 
-    let mut reason = match status {
-        Some(status) => format!("server exited ({status})"),
-        None => "server exited".to_string(),
-    };
-    let tail = stderr_tail.lock().expect("stderr tail lock").clone();
-    let tail = tail.trim();
-    if !tail.is_empty() {
-        reason.push_str("; stderr: ");
-        reason.push_str(last_bytes(tail, STDERR_EXIT_TAIL_BYTES));
-    }
+        let mut reason = match status {
+            Some(status) => format!("server exited ({status})"),
+            None => "server exited".to_string(),
+        };
+        let tail = self.stderr_tail.lock().expect("stderr tail lock").clone();
+        let tail = tail.trim();
+        if !tail.is_empty() {
+            reason.push_str("; stderr: ");
+            reason.push_str(last_bytes(tail, STDERR_EXIT_TAIL_BYTES));
+        }
 
-    *dead.lock().await = Some(reason.clone());
-    let orphaned: Vec<_> = std::mem::take(&mut *pending.lock().await)
-        .into_values()
-        .collect();
-    for tx in orphaned {
-        let _ = tx.send(Err(CallError::Transport(reason.clone())));
+        *self.dead.lock().await = Some(reason.clone());
+        let error = if self.stopping.load(Ordering::Acquire) {
+            CallError::Interrupted
+        } else {
+            CallError::Transport(reason)
+        };
+        fail_pending(&self.pending, error).await;
+
+        // The direct child is reaped, but descendants may still be alive in its
+        // process group. Keep the failover registration until that group settles.
+        while !process_group_gone(self.pid) {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        self.done.store(true, Ordering::Release);
+        self.done_notify.notify_waiters();
     }
 }
 
@@ -422,5 +527,44 @@ async fn drain_stderr(stderr: ChildStderr, tail: Arc<std::sync::Mutex<String>>) 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn detached_close_keeps_cleaning_after_waiter_and_transport_drop() {
+        let args = vec![
+            "-c".to_string(),
+            "trap '' TERM; while :; do sleep 30; done".to_string(),
+        ];
+        let transport = Arc::new(
+            StdioTransport::spawn("/bin/sh", &args, &[], Path::new("."))
+                .await
+                .expect("spawn stubborn child"),
+        );
+        let pid = transport.pid();
+        let waiter = {
+            let transport = transport.clone();
+            tokio::spawn(async move { transport.close().await })
+        };
+        while !transport.close.started.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        waiter.abort();
+        drop(waiter);
+        drop(transport);
+
+        let deadline = Instant::now() + SHUTDOWN_WAIT + Duration::from_secs(2);
+        while !process_group_gone(pid) && Instant::now() < deadline {
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        assert!(
+            process_group_gone(pid),
+            "process group {pid} survived detached cleanup"
+        );
     }
 }

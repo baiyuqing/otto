@@ -41,6 +41,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
@@ -60,6 +61,7 @@ use super::format::{comma_int, first_runes, one_line, round_to_seconds};
 use super::interrupted;
 use super::tasks::{REPORT_BUDGET, Task, TaskError, TaskStatus, Tasks};
 use super::{Catalog, Definition, WritePolicy, inherit_snapshot};
+use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::tool::registry::Registry;
 use crate::tool::result::{capped_text_result, decode_strict_json};
@@ -181,7 +183,10 @@ pub(crate) struct TaskResultData<'a> {
 
 /// Shares one provider between the parent and every child, because [`Agent`]
 /// owns the provider it calls.
-pub struct SharedProvider(Arc<dyn Provider + Send + Sync>);
+pub struct SharedProvider {
+    provider: Arc<dyn Provider + Send + Sync>,
+    timeout: Option<Duration>,
+}
 
 #[async_trait::async_trait]
 impl Provider for SharedProvider {
@@ -191,7 +196,28 @@ impl Provider for SharedProvider {
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
-        self.0.complete(request, emit, control).await
+        if let Some(reason) = control.stop_reason() {
+            return Err(if reason == OperationStopReason::Deadline {
+                ProviderError::DeadlineExceeded
+            } else {
+                ProviderError::Cancelled
+            });
+        }
+        let child = Control::new(Deadline::child(control.remaining(), self.timeout));
+        let mut complete = std::pin::pin!(self.provider.complete(request, emit, &child));
+        let deadline = child.deadline();
+        tokio::select! {
+            biased;
+            result = &mut complete => result,
+            () = control.cancellation_token().cancelled() => {
+                child.stop(control.stop_reason().unwrap_or(OperationStopReason::UserCancellation));
+                complete.await
+            }
+            () = deadline.expired() => {
+                child.stop(OperationStopReason::Deadline);
+                complete.await
+            }
+        }
     }
 }
 
@@ -450,10 +476,15 @@ pub struct OptionsTemplate {
     pub thinking: String,
     pub compaction: CompactionSettings,
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
+    pub provider_timeout: Option<Duration>,
     pub now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     pub new_id: Arc<dyn Fn() -> String + Send + Sync>,
     pub new_operation_id:
         Arc<dyn Fn() -> Result<otto_core::model::OperationId, String> + Send + Sync>,
+    /// Absolute task budget, consumed from task creation while queued.
+    pub task_timeout: Option<Duration>,
+    /// Cooperative shutdown allowance after the task deadline fires.
+    pub cancellation_grace: Duration,
 }
 
 impl Default for OptionsTemplate {
@@ -464,11 +495,14 @@ impl Default for OptionsTemplate {
             thinking: String::new(),
             compaction: CompactionSettings::default(),
             request_sizer: None,
+            provider_timeout: None,
             now: Arc::new(Utc::now),
             new_id: Arc::new(String::new),
             new_operation_id: Arc::new(|| {
                 otto_core::model::OperationId::new("op_test").map_err(|error| error.to_string())
             }),
+            task_timeout: None,
+            cancellation_grace: Duration::from_secs(5),
         }
     }
 }
@@ -553,6 +587,16 @@ pub struct Runner {
     config: Config,
     child_registry: Arc<Registry>,
     semaphore: Arc<Semaphore>,
+}
+
+struct ChildRun {
+    cancel: CancellationToken,
+    task_id: String,
+    prompt: String,
+    child: Agent<SharedProvider, ChildTools, SharedTranscript>,
+    transcript: Transcript,
+    snapshot: Vec<Message>,
+    deadline: Deadline,
 }
 
 impl Runner {
@@ -690,6 +734,16 @@ impl Runner {
         transcript: Option<Transcript>,
         inline_definition: Option<Definition>,
     ) -> Result<Task, StartError> {
+        self.start_resolved_with_deadline(request, transcript, inline_definition, None)
+    }
+
+    fn start_resolved_with_deadline(
+        self: &Arc<Self>,
+        request: StartRequest,
+        transcript: Option<Transcript>,
+        inline_definition: Option<Definition>,
+        parent_deadline: Option<Deadline>,
+    ) -> Result<Task, StartError> {
         let now = self.now();
         let description = truncate_with_ellipsis(request.description.trim(), MAX_DESCRIPTION_CHARS);
 
@@ -738,6 +792,7 @@ impl Runner {
                 Vec::new(),
                 transcript,
                 None,
+                self.task_deadline(parent_deadline),
             );
         };
         let snapshot = if context == "inherit" {
@@ -755,7 +810,16 @@ impl Runner {
             snapshot,
             transcript,
             None,
+            self.task_deadline(parent_deadline),
         )
+    }
+
+    fn task_deadline(&self, parent: Option<Deadline>) -> Deadline {
+        let parent = parent.unwrap_or_else(Deadline::unlimited);
+        self.config
+            .template
+            .task_timeout
+            .map_or(parent, |timeout| Deadline::earlier(parent, timeout))
     }
 
     /// Resumes an interrupted sub-agent task under its original id. `target`
@@ -813,6 +877,7 @@ impl Runner {
             Vec::new(),
             Some(transcript),
             Some(record.task_id.clone()),
+            self.task_deadline(None),
         )
     }
 
@@ -824,7 +889,8 @@ impl Runner {
         transcript: Transcript,
         cancel: &CancellationToken,
     ) -> Result<Task, String> {
-        self.run_resolved(request, transcript, None, cancel).await
+        self.run_resolved(request, transcript, None, cancel, None)
+            .await
     }
 
     /// Runs using a definition snapshot captured when a durable workflow was
@@ -836,8 +902,27 @@ impl Runner {
         definition: Definition,
         cancel: &CancellationToken,
     ) -> Result<Task, String> {
-        self.run_resolved(request, transcript, Some(definition), cancel)
+        self.run_resolved(request, transcript, Some(definition), cancel, None)
             .await
+    }
+
+    /// Runs from a durable definition while inheriting the caller's absolute
+    /// deadline. The child's local task timeout may only shorten that budget.
+    pub async fn run_with_definition_control(
+        self: &Arc<Self>,
+        request: StartRequest,
+        transcript: Transcript,
+        definition: Definition,
+        control: &Control,
+    ) -> Result<Task, String> {
+        self.run_resolved(
+            request,
+            transcript,
+            Some(definition),
+            control.cancellation_token(),
+            Some(control.deadline()),
+        )
+        .await
     }
 
     async fn run_resolved(
@@ -846,9 +931,10 @@ impl Runner {
         transcript: Transcript,
         definition: Option<Definition>,
         cancel: &CancellationToken,
+        parent_deadline: Option<Deadline>,
     ) -> Result<Task, String> {
         let task = self
-            .start_resolved(request, Some(transcript), definition)
+            .start_resolved_with_deadline(request, Some(transcript), definition, parent_deadline)
             .map_err(|error| error.to_string())?;
         let id = task.id.clone();
         let result = match self.config.tasks.wait(&id, cancel).await {
@@ -889,6 +975,7 @@ impl Runner {
         snapshot: Vec<Message>,
         transcript: Option<Transcript>,
         resume_id: Option<String>,
+        deadline: Deadline,
     ) -> Result<Task, StartError> {
         let cancel = CancellationToken::new();
         // The task id names the child's file, so the transcript is built
@@ -1033,7 +1120,10 @@ impl Runner {
         };
 
         let child = Agent::with_redactor(
-            SharedProvider(Arc::clone(&self.config.provider)),
+            SharedProvider {
+                provider: Arc::clone(&self.config.provider),
+                timeout: template.provider_timeout,
+            },
             tools,
             SharedTranscript(Arc::clone(&transcript)),
             options,
@@ -1045,7 +1135,15 @@ impl Runner {
         let prompt = request.prompt;
         tokio::spawn(async move {
             runner
-                .run_child(cancel, task_id, prompt, child, transcript, snapshot)
+                .run_child(ChildRun {
+                    cancel,
+                    task_id,
+                    prompt,
+                    child,
+                    transcript,
+                    snapshot,
+                    deadline,
+                })
                 .await;
         });
 
@@ -1062,15 +1160,16 @@ impl Runner {
     /// Replays the inherited snapshot, waits for a semaphore slot or for
     /// cancellation while queued, runs the child to completion, and always
     /// finishes the task record.
-    async fn run_child(
-        &self,
-        cancel: CancellationToken,
-        task_id: String,
-        prompt: String,
-        child: Agent<SharedProvider, ChildTools, SharedTranscript>,
-        transcript: Transcript,
-        snapshot: Vec<Message>,
-    ) {
+    async fn run_child(&self, run: ChildRun) {
+        let ChildRun {
+            cancel,
+            task_id,
+            prompt,
+            child,
+            transcript,
+            snapshot,
+            deadline,
+        } = run;
         for message in snapshot {
             if let Err(error) = transcript.append(message).await {
                 cancel.cancel();
@@ -1088,6 +1187,12 @@ impl Runner {
         }
 
         let permit = tokio::select! {
+            biased;
+            () = deadline.expired() => {
+                let messages = transcript.messages();
+                self.finish(&task_id, TaskStatus::Interrupted, self.now(), &messages, Some("task deadline exceeded"), Some(&transcript));
+                return;
+            }
             permit = Arc::clone(&self.semaphore).acquire_owned() => permit,
             () = cancel.cancelled() => {
                 let messages = transcript.messages();
@@ -1104,6 +1209,10 @@ impl Runner {
             .usage
             .as_ref()
             .map(|collector| collector.for_task(&task_id));
+        let control = Control::new(deadline);
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
         let outcome = {
             let mut handle = |event: Event| {
                 if let Some(usage) = &usage {
@@ -1112,17 +1221,37 @@ impl Runner {
                 progress.handle(event);
             };
             let sink: EventSink<'_> = &mut handle;
-            child.run(&prompt, sink, &cancel).await
+            let run = child.run_with_control(&prompt, sink, &control);
+            tokio::pin!(run);
+            tokio::select! {
+                biased;
+                outcome = &mut run => outcome,
+                () = cancel.cancelled() => {
+                    control.stop(OperationStopReason::UserCancellation);
+                    run.await
+                }
+                () = deadline.expired() => {
+                    control.stop(OperationStopReason::Deadline);
+                    run.await
+                }
+            }
         };
         drop(permit);
         let _ = child.close();
 
         let status = match &outcome {
+            _ if control.stop_reason() == Some(OperationStopReason::Deadline) => {
+                TaskStatus::Interrupted
+            }
             Ok(()) => TaskStatus::Succeeded,
             Err(_) if cancel.is_cancelled() => TaskStatus::Canceled,
             Err(_) => TaskStatus::Failed,
         };
-        let error = outcome.err().map(|error| error.to_string());
+        let error = if status == TaskStatus::Interrupted {
+            Some("task deadline exceeded".to_string())
+        } else {
+            outcome.err().map(|error| error.to_string())
+        };
         let messages = transcript.messages();
         self.finish(
             &task_id,
@@ -1154,7 +1283,7 @@ impl Runner {
             result = "(sub-agent returned no final text)".to_string();
         }
         let error_text = match (status, run_error) {
-            (TaskStatus::Failed, Some(error)) => error.to_string(),
+            (TaskStatus::Failed | TaskStatus::Interrupted, Some(error)) => error.to_string(),
             _ => String::new(),
         };
 
@@ -1295,7 +1424,11 @@ pub fn completion_text(task: &Task, max_output_bytes: usize) -> String {
             "[task-notification] task {} {name} failed{model_segment} · {duration} · {calls}\n{}",
             task.id, task.error
         ),
-        // Every status but succeeded and failed renders this way; only a final
+        TaskStatus::Interrupted => format!(
+            "[task-notification] task {} {name} interrupted{model_segment} · {duration} · {calls}\n{}",
+            task.id, task.error
+        ),
+        // Every non-final status plus canceled renders this way; only a final
         // task ever reaches this function.
         TaskStatus::Canceled | TaskStatus::Queued | TaskStatus::Running => format!(
             "[task-notification] task {} {name} canceled{model_segment} · {duration} · {calls}",
@@ -2001,6 +2134,57 @@ mod tests {
             counts.lock().expect("the counter lock is intact").1 <= 2,
             "observed more than two concurrent provider calls"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_task_deadline_is_consumed_before_a_permit_is_acquired() {
+        let provider = FakeProvider::new();
+        let release = CancellationToken::new();
+        let hook_release = release.clone();
+        provider.set_hook(Arc::new(move |cancel, _request| {
+            let release = hook_release.clone();
+            Box::pin(async move {
+                tokio::select! {
+                    () = release.cancelled() => {}
+                    () = cancel.cancelled() => {}
+                }
+            })
+        }));
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.max_parallel = 1;
+        let (runner, _) = runner(config);
+        runner
+            .start(StartRequest {
+                prompt: "occupy the slot".into(),
+                ..StartRequest::default()
+            })
+            .expect("start blocker");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        let control = Control::new(Deadline::after(Duration::from_secs(2)));
+        let queued = runner.run_with_definition_control(
+            StartRequest {
+                prompt: "must not start".into(),
+                agent: "worker".into(),
+                ..StartRequest::default()
+            },
+            Arc::new(MemorySession::new()),
+            definition("worker"),
+            &control,
+        );
+        tokio::pin!(queued);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let task = queued.await.expect("deadline returns a durable task");
+
+        assert_eq!(task.status, TaskStatus::Interrupted);
+        assert_eq!(task.started_at, None);
+        assert_eq!(task.error, "task deadline exceeded");
+
+        release.cancel();
+        assert_eq!(wait_final(&tasks, "t1").await.status, TaskStatus::Succeeded);
     }
 
     #[tokio::test]

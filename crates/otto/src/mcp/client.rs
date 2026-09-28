@@ -7,9 +7,11 @@
 //! attempted. Every later request is stamped with the negotiated era so the
 //! transport can frame it correctly (modern requests carry `_meta`).
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 use super::jsonrpc::{self, METHOD_NOT_FOUND, UNSUPPORTED_PROTOCOL_VERSION};
@@ -18,6 +20,14 @@ use super::{CallError, CallOutcome, Era, Outbound, ToolInfo, ToolServer, Transpo
 /// How long era negotiation waits for `server/discover` before assuming the
 /// server does not understand it and falling back to the legacy handshake.
 const DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Grace for cooperative per-request cancellation before hard cleanup.
+const CALL_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
+/// Connect failure cleanup is itself bounded, so a broken transport cannot
+/// turn a connect deadline into an unbounded wait.
+const CONNECT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+const ACTIVE: u8 = 0;
+const STOPPING: u8 = 1;
 
 /// One connected server: its transport, negotiated era, and advertised tools.
 pub struct Client {
@@ -26,6 +36,8 @@ pub struct Client {
     era: Era,
     tools: Vec<ToolInfo>,
     call_timeout: Duration,
+    lifecycle: AtomicU8,
+    close_done: OnceCell<()>,
 }
 
 impl Client {
@@ -56,56 +68,97 @@ impl Client {
                 era,
                 tools,
                 call_timeout,
+                lifecycle: AtomicU8::new(ACTIVE),
+                close_done: OnceCell::new(),
             }),
             Ok(Err(error)) => {
-                transport.close().await;
+                close_failed_connect(transport.as_ref()).await;
                 Err(error)
             }
             Err(_) => {
-                transport.close().await;
+                close_failed_connect(transport.as_ref()).await;
                 Err(CallError::Timeout)
             }
         }
     }
 
-    /// Sends `outbound` and gives up on it after `call_timeout`.
-    ///
-    /// The timeout cancels a private child token instead of dropping the
-    /// request future, so the transport runs the cancellation path it would
-    /// run for a caller's cancellation: the pending request is released and
-    /// the server is told to stop. Dropping the future instead leaves the
-    /// call dangling on both sides, with the server still working on an
-    /// answer nobody will read.
-    ///
-    /// The caller's own cancellation keeps reporting [`CallError::Cancelled`];
-    /// only a cancellation this timeout caused becomes [`CallError::Timeout`].
+    /// Sends `outbound`, cooperatively cancels it at `call_timeout`, then
+    /// affords cancellation a bounded grace period. HTTP may abandon just
+    /// this request after grace; stdio must stop the shared stream.
     async fn request_within_timeout(
         &self,
         outbound: Outbound,
         cancel: &CancellationToken,
     ) -> Result<Result<Value, jsonrpc::RpcError>, CallError> {
+        if self.lifecycle.load(Ordering::Acquire) != ACTIVE {
+            return Err(CallError::Stopping);
+        }
+
         let child = cancel.child_token();
         let request = self.transport.request(outbound, &child);
         let mut request = std::pin::pin!(request);
-        let sleep = tokio::time::sleep(self.call_timeout);
-        let mut sleep = std::pin::pin!(sleep);
-        let mut timed_out = false;
-        loop {
-            tokio::select! {
-                outcome = &mut request => {
-                    return match outcome {
-                        Err(CallError::Cancelled) if timed_out && !cancel.is_cancelled() => {
-                            Err(CallError::Timeout)
+        let deadline = tokio::time::sleep(self.call_timeout);
+        let mut deadline = std::pin::pin!(deadline);
+        let mut caller_cancelled = tokio::select! {
+            // A response that is already available is authoritative even when
+            // cancellation or the deadline becomes ready in the same poll.
+            biased;
+            outcome = &mut request => return outcome,
+            () = cancel.cancelled() => true,
+            () = &mut deadline => false,
+        };
+
+        child.cancel();
+        let grace = tokio::time::sleep(CALL_CANCELLATION_GRACE);
+        let mut grace = std::pin::pin!(grace);
+        tokio::select! {
+            // Verified completion wins if completion and grace are both ready.
+            biased;
+            outcome = &mut request => {
+                match outcome {
+                    // Transport-level cancellation only proves that the local
+                    // waiter was released, not that the remote effect stopped.
+                    // Keep the full grace before applying hard cleanup.
+                    Err(CallError::Cancelled) if caller_cancelled => {
+                        return Err(CallError::Cancelled);
+                    }
+                    Err(CallError::Cancelled) => {
+                        tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => caller_cancelled = true,
+                            () = &mut grace => {}
                         }
-                        outcome => outcome,
-                    };
-                }
-                () = &mut sleep, if !timed_out => {
-                    timed_out = true;
-                    child.cancel();
+                    }
+                    outcome => return outcome,
                 }
             }
+            () = cancel.cancelled(), if !caller_cancelled => {
+                caller_cancelled = true;
+                (&mut grace).await;
+            }
+            () = &mut grace => {}
         }
+
+        if self.transport.timeout_stops_server() {
+            let _ = self.lifecycle.compare_exchange(
+                ACTIVE,
+                STOPPING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            self.close_transport().await;
+        }
+        if caller_cancelled {
+            Err(CallError::Cancelled)
+        } else {
+            Err(CallError::Timeout)
+        }
+    }
+
+    async fn close_transport(&self) {
+        self.close_done
+            .get_or_init(|| async { self.transport.close().await })
+            .await;
     }
 
     pub fn era(&self) -> &Era {
@@ -118,7 +171,8 @@ impl Client {
 
     /// Shuts the server down. Idempotent.
     pub async fn close(&self) {
-        self.transport.close().await;
+        self.lifecycle.store(STOPPING, Ordering::Release);
+        self.close_transport().await;
     }
 }
 
@@ -147,6 +201,10 @@ impl ToolServer for Client {
         })?;
         jsonrpc::decode_call_result(&result, &self.era).map_err(CallError::Transport)
     }
+}
+
+async fn close_failed_connect(transport: &dyn Transport) {
+    let _ = tokio::time::timeout(CONNECT_CLOSE_TIMEOUT, transport.close()).await;
 }
 
 /// Wraps `params` with `_meta` on the modern era; leaves legacy params as is.
@@ -315,6 +373,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use tokio::sync::Notify;
+
     use super::*;
     use crate::mcp::MODERN_VERSION;
     use crate::mcp::jsonrpc::RpcError;
@@ -366,6 +426,48 @@ mod tests {
 
         assert!(result.is_err(), "expected connect to fail");
         assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct HangingCloseTransport;
+
+    #[async_trait::async_trait]
+    impl Transport for HangingCloseTransport {
+        async fn request(
+            &self,
+            _outbound: Outbound,
+            _cancel: &CancellationToken,
+        ) -> Result<Result<Value, RpcError>, CallError> {
+            Err(CallError::Transport("connect failed".to_string()))
+        }
+
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+
+        async fn close(&self) {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_connect_cleanup_is_bounded() {
+        let handle = tokio::spawn(async {
+            Client::connect(
+                "test".to_string(),
+                Box::new(HangingCloseTransport),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+
+        tokio::time::advance(CONNECT_CLOSE_TIMEOUT).await;
+        let error = match handle.await.unwrap() {
+            Ok(_) => panic!("connect should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, CallError::Transport(_)));
     }
 
     /// Negotiates modern successfully, then never answers `tools/list`.
@@ -604,6 +706,235 @@ mod tests {
             !cancel.is_cancelled(),
             "a call timeout must not cancel the caller's own token"
         );
+    }
+
+    struct DeadlineCompletionTransport;
+
+    #[async_trait::async_trait]
+    impl Transport for DeadlineCompletionTransport {
+        async fn request(
+            &self,
+            outbound: Outbound,
+            _cancel: &CancellationToken,
+        ) -> Result<Result<Value, RpcError>, CallError> {
+            match outbound.method.as_str() {
+                "server/discover" => modern_discover_ok(),
+                "tools/list" => Ok(Ok(json!({"tools": []}))),
+                "tools/call" => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok(Ok(json!({"content": []})))
+                }
+                other => panic!("unexpected method {other}"),
+            }
+        }
+
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+
+        async fn close(&self) {}
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn verified_completion_wins_at_the_deadline() {
+        let client = Client::connect(
+            "test".to_string(),
+            Box::new(DeadlineCompletionTransport),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("connect");
+        let task = tokio::spawn(async move {
+            client
+                .call("finishes", json!({}), &CancellationToken::new())
+                .await
+        });
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(task.await.unwrap().is_ok());
+    }
+
+    struct BlockingCloseTransport {
+        close_calls: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for BlockingCloseTransport {
+        async fn request(
+            &self,
+            outbound: Outbound,
+            _cancel: &CancellationToken,
+        ) -> Result<Result<Value, RpcError>, CallError> {
+            match outbound.method.as_str() {
+                "server/discover" => modern_discover_ok(),
+                "tools/list" => Ok(Ok(json!({"tools": []}))),
+                other => panic!("unexpected method {other}"),
+            }
+        }
+
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+
+        async fn close(&self) {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            self.release.notified().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn every_close_caller_awaits_one_shared_completion() {
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let client = Arc::new(
+            Client::connect(
+                "test".to_string(),
+                Box::new(BlockingCloseTransport {
+                    close_calls: close_calls.clone(),
+                    release: release.clone(),
+                }),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("connect"),
+        );
+        let first = {
+            let client = client.clone();
+            tokio::spawn(async move { client.close().await })
+        };
+        let second = {
+            let client = client.clone();
+            tokio::spawn(async move { client.close().await })
+        };
+        while close_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+        assert!(!first.is_finished());
+        assert!(!second.is_finished());
+
+        release.notify_one();
+        first.await.unwrap();
+        second.await.unwrap();
+        assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct GraceTransport {
+        close_calls: Arc<AtomicUsize>,
+        stop_server: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for GraceTransport {
+        async fn request(
+            &self,
+            outbound: Outbound,
+            _cancel: &CancellationToken,
+        ) -> Result<Result<Value, RpcError>, CallError> {
+            match outbound.method.as_str() {
+                "server/discover" => modern_discover_ok(),
+                "tools/list" => Ok(Ok(json!({"tools": []}))),
+                "tools/call" => std::future::pending().await,
+                other => panic!("unexpected method {other}"),
+            }
+        }
+
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+
+        fn timeout_stops_server(&self) -> bool {
+            self.stop_server
+        }
+
+        async fn close(&self) {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn grace_client(stop_server: bool) -> (Arc<Client>, Arc<AtomicUsize>) {
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let cancel = CancellationToken::new();
+        let client = Client::connect(
+            "test".to_string(),
+            Box::new(GraceTransport {
+                close_calls: close_calls.clone(),
+                stop_server,
+            }),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            &cancel,
+        )
+        .await
+        .expect("connect");
+        (Arc::new(client), close_calls)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn http_timeout_drops_only_one_request_after_grace() {
+        let (client, close_calls) = grace_client(false).await;
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .call("slow", json!({}), &CancellationToken::new())
+                    .await
+            })
+        };
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(!task.is_finished(), "the five-second grace must be honored");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(matches!(task.await.unwrap(), Err(CallError::Timeout)));
+        assert_eq!(close_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn uncooperative_stdio_parent_cancel_gets_bounded_cleanup() {
+        let (client, close_calls) = grace_client(true).await;
+        let cancel = CancellationToken::new();
+        let task = {
+            let client = client.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move { client.call("slow", json!({}), &cancel).await })
+        };
+        tokio::task::yield_now().await;
+
+        cancel.cancel();
+        tokio::time::advance(CALL_CANCELLATION_GRACE - Duration::from_millis(1)).await;
+        assert!(!task.is_finished(), "caller cancellation must allow grace");
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        assert!(matches!(task.await.unwrap(), Err(CallError::Cancelled)));
+        assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stdio_timeout_stops_once_and_rejects_later_calls() {
+        let (client, close_calls) = grace_client(true).await;
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .call("slow", json!({}), &CancellationToken::new())
+                    .await
+            })
+        };
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(matches!(task.await.unwrap(), Err(CallError::Timeout)));
+        assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+        let later = client
+            .call("later", json!({}), &CancellationToken::new())
+            .await;
+        assert!(matches!(later, Err(CallError::Stopping)));
+        client.close().await;
+        assert_eq!(close_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

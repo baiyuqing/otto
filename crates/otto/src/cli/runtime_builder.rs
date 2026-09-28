@@ -401,8 +401,14 @@ impl Session for SharedSession {
 /// `Run` checks the redactor first. This enum keeps the provider slot
 /// non-optional, so the agent's type parameter stays concrete.
 pub enum ProviderClient {
-    Compat(Arc<Client>),
-    ChatGpt(Arc<crate::provider::chatgpt::Client>),
+    Compat {
+        client: Arc<Client>,
+        timeout: Option<Duration>,
+    },
+    ChatGpt {
+        client: Arc<crate::provider::chatgpt::Client>,
+        timeout: Option<Duration>,
+    },
     Unavailable,
     /// Test seam. `Runner` is a concrete struct, so the seam sits one layer
     /// down.
@@ -419,13 +425,55 @@ impl Provider for ProviderClient {
         control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
         match self {
-            Self::Compat(client) => client.complete(request, emit, control).await,
-            Self::ChatGpt(client) => client.complete(request, emit, control).await,
+            Self::Compat { client, timeout } => {
+                complete_with_timeout(client.as_ref(), request, emit, control, *timeout).await
+            }
+            Self::ChatGpt { client, timeout } => {
+                complete_with_timeout(client.as_ref(), request, emit, control, *timeout).await
+            }
             Self::Unavailable => Err(ProviderError::Other(
                 "provider is unavailable: redaction is incomplete".to_string(),
             )),
             #[cfg(test)]
             Self::Scripted(provider) => provider.complete(request, emit, control).await,
+        }
+    }
+}
+
+fn provider_stop_error(reason: OperationStopReason) -> ProviderError {
+    if reason == OperationStopReason::Deadline {
+        ProviderError::DeadlineExceeded
+    } else {
+        ProviderError::Cancelled
+    }
+}
+
+async fn complete_with_timeout<P: Provider + ?Sized>(
+    provider: &P,
+    request: &Request,
+    emit: StreamSink<'_>,
+    parent: &dyn OperationControl,
+    timeout: Option<Duration>,
+) -> Result<Response, ProviderError> {
+    if let Some(reason) = parent.stop_reason() {
+        return Err(provider_stop_error(reason));
+    }
+    let control = Control::new(Deadline::child(parent.remaining(), timeout));
+    let mut complete = std::pin::pin!(provider.complete(request, emit, &control));
+    let deadline = control.deadline();
+    tokio::select! {
+        biased;
+        result = &mut complete => result,
+        () = parent.cancellation_token().cancelled() => {
+            let reason = parent
+                .stop_reason()
+                .unwrap_or(OperationStopReason::UserCancellation);
+            control.stop(reason);
+            complete.await
+        }
+        () = deadline.expired() => {
+            control.stop(OperationStopReason::Deadline);
+            complete.await
         }
     }
 }
@@ -1172,15 +1220,21 @@ impl Builder {
         let client = if !self.boundary_allows_dynamic(Some(runtime)) {
             ProviderClient::Unavailable
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
-            ProviderClient::ChatGpt(Arc::new(super::login::chatgpt_client(
-                &self.auth_path,
-                &self.auth_credentials,
-                self.auth_credentials_loaded,
-            )?))
+            ProviderClient::ChatGpt {
+                client: Arc::new(super::login::chatgpt_client(
+                    &self.auth_path,
+                    &self.auth_credentials,
+                    self.auth_credentials_loaded,
+                )?),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+            }
         } else {
-            ProviderClient::Compat(Arc::new(Client::new(&runtime.base_url, &runtime.api_key)))
+            ProviderClient::Compat {
+                client: Arc::new(Client::new(&runtime.base_url, &runtime.api_key)),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+            }
         };
-        if let ProviderClient::Compat(client) = &client {
+        if let ProviderClient::Compat { client, .. } = &client {
             tools.push(Box::new(models::ListModelsTool::new(
                 Arc::clone(client),
                 max_output,
@@ -1254,10 +1308,10 @@ impl Builder {
         .collect();
 
         let request_sizer = match &client {
-            ProviderClient::Compat(client) => {
+            ProviderClient::Compat { client, .. } => {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
-            ProviderClient::ChatGpt(client) => {
+            ProviderClient::ChatGpt { client, .. } => {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
             ProviderClient::Unavailable => None,
@@ -1545,7 +1599,60 @@ mod tests {
     use crate::sandbox::direct::DirectDriver;
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
     use otto_core::config::Profile;
+    use otto_core::operation::OperationControl;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn drive_prefers_an_already_ready_completion() {
+        let parent = CancellationToken::new();
+        parent.cancel();
+        let control = Control::new(Deadline::after(Duration::ZERO));
+
+        let result = drive_with_control(async { 42 }, &parent, &control).await;
+
+        assert_eq!(result, 42);
+        assert_eq!(control.stop_reason(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_waits_for_the_owned_future_to_clean_up() {
+        let parent = CancellationToken::new();
+        let control = Control::new(Deadline::after(Duration::from_secs(5)));
+        let cleaned = AtomicBool::new(false);
+        let run = async {
+            control.cancellation_token().cancelled().await;
+            cleaned.store(true, Ordering::SeqCst);
+        };
+
+        let drive = drive_with_control(run, &parent, &control);
+        tokio::pin!(drive);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        drive.await;
+
+        assert!(cleaned.load(Ordering::SeqCst));
+        assert_eq!(control.stop_reason(), Some(OperationStopReason::Deadline));
+    }
+
+    #[tokio::test]
+    async fn parent_cancellation_keeps_its_typed_reason_and_waits_for_cleanup() {
+        let parent = CancellationToken::new();
+        let control = Control::new(Deadline::unlimited());
+        let cleaned = AtomicBool::new(false);
+        let run = async {
+            control.cancellation_token().cancelled().await;
+            cleaned.store(true, Ordering::SeqCst);
+        };
+        parent.cancel();
+
+        drive_with_control(run, &parent, &control).await;
+
+        assert!(cleaned.load(Ordering::SeqCst));
+        assert_eq!(
+            control.stop_reason(),
+            Some(OperationStopReason::UserCancellation)
+        );
+    }
 
     fn shared(root: &Path) -> Arc<Shared> {
         Arc::new(Shared {

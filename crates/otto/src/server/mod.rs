@@ -3792,7 +3792,7 @@ mod tests {
         async fn execute(
             &self,
             attempt: crate::workflow::Attempt,
-            _cancel: &CancellationToken,
+            _control: &crate::deadline::Control,
         ) -> Result<String, String> {
             Ok(format!("{} done", attempt.step_id))
         }

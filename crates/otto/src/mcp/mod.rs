@@ -15,11 +15,12 @@
 //! client list with `mem::take`, so whichever of the two runs first is the
 //! one that actually closes anything). Concurrency: [`ToolServer::call`] takes `&self` and
 //! may run concurrently; each transport serializes its own writes.
-//! Cancellation: a cancelled token aborts the in-flight call with
-//! [`CallError::Cancelled`]; the stdio transport also sends
-//! `notifications/cancelled`. A call that outruns `call_timeout_secs` takes
-//! that same path before it is reported as [`CallError::Timeout`], so a call
-//! Otto gives up on is never left running on the server. Errors: every failure is reported in band to
+//! Cancellation: a cancelled token explicitly races the in-flight call and
+//! starts the same five-second cooperative grace as `call_timeout_secs`;
+//! caller-triggered termination still reports [`CallError::Cancelled`]. HTTP
+//! then drops only that request future; stdio atomically enters stopping,
+//! rejects new calls, closes its process group once, and reports collateral
+//! pending calls as [`CallError::Interrupted`]. Errors: every failure is reported in band to
 //! the model as an error `ToolResult`; nothing here returns a `Result` to
 //! the agent loop. Security: tool names, descriptions, schemas and results
 //! are untrusted server data and are capped and redacted by the adapter.
@@ -113,6 +114,13 @@ pub enum CallError {
     Timeout,
     #[error("context canceled")]
     Cancelled,
+    /// The shared stdio server was stopped because another request could not
+    /// be cancelled within its grace period; this call may have taken effect.
+    #[error("interrupted while stopping mcp server")]
+    Interrupted,
+    /// The client has begun stopping, so this request was never dispatched.
+    #[error("mcp server is stopping")]
+    Stopping,
     /// An HTTP server rejected or lacks a bearer token; the user must run
     /// `otto mcp login <server>`.
     #[error("authorization required; run 'otto mcp login <server>'")]
@@ -177,6 +185,12 @@ pub trait Transport: Send + Sync {
     ) -> Result<Result<Value, jsonrpc::RpcError>, CallError>;
     /// Sends a notification; no response is expected.
     async fn notify(&self, outbound: Outbound) -> Result<(), CallError>;
+    /// Whether a request that ignores cancellation requires stopping the
+    /// whole shared server. Stdio overrides this; HTTP abandons only its one
+    /// independent request future.
+    fn timeout_stops_server(&self) -> bool {
+        false
+    }
     /// Releases the transport: closes the child or drops the connection.
     async fn close(&self);
 }

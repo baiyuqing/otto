@@ -30,6 +30,17 @@ impl Deadline {
         Self(Instant::now().checked_add(duration))
     }
 
+    /// Creates a child deadline no later than either the parent budget or the
+    /// local duration. An absent local duration inherits the parent exactly.
+    pub fn child(parent_remaining: Option<Duration>, local: Option<Duration>) -> Self {
+        match (parent_remaining, local) {
+            (Some(parent), Some(local)) => Self::after(parent.min(local)),
+            (Some(parent), None) => Self::after(parent),
+            (None, Some(local)) => Self::after(local),
+            (None, None) => Self::unlimited(),
+        }
+    }
+
     /// Returns the earlier of `parent` and a local deadline `duration` from
     /// now.
     ///
@@ -146,6 +157,23 @@ mod tests {
         assert_eq!(control.remaining(), Some(Duration::from_secs(5)));
         tokio::time::advance(Duration::from_secs(2)).await;
         assert_eq!(control.remaining(), Some(Duration::from_secs(3)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn child_never_extends_the_parent_budget() {
+        assert_eq!(
+            Deadline::child(Some(Duration::from_secs(3)), Some(Duration::from_secs(9))).remaining(),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            Deadline::child(Some(Duration::from_secs(9)), Some(Duration::from_secs(3))).remaining(),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            Deadline::child(Some(Duration::from_secs(4)), None).remaining(),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(Deadline::child(None, None), Deadline::unlimited());
     }
 
     #[tokio::test(start_paused = true)]

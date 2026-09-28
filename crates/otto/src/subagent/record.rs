@@ -546,24 +546,22 @@ impl Store {
             .status
             .as_deref()
             .is_some_and(|status| live_statuses.contains(&status));
-        let wants_final_only = query
-            .status
-            .as_deref()
-            .is_some_and(|status| matches!(status, "succeeded" | "failed" | "canceled"));
+        let wants_final_only = query.status.as_deref().is_some_and(|status| {
+            matches!(status, "succeeded" | "failed" | "canceled" | "interrupted")
+        });
 
         let mut candidates = Vec::new();
         if !wants_live_only {
-            let final_status = query
-                .status
-                .as_deref()
-                .filter(|status| matches!(*status, "succeeded" | "failed" | "canceled"));
+            let final_status = query.status.as_deref().filter(|status| {
+                matches!(*status, "succeeded" | "failed" | "canceled" | "interrupted")
+            });
             // limit + 1: enough to tell whether a further, older final row
             // exists without fetching every final row ever recorded.
             candidates.extend(Self::query_rows(
                 &connection,
                 &format!(
                     "SELECT {COLUMNS} FROM tasks
-                     WHERE status IN ('succeeded','failed','canceled')
+                     WHERE status IN ('succeeded','failed','canceled','interrupted')
                      AND (?1 IS NULL OR workspace = ?1)
                      AND (?2 IS NULL OR created_at < ?2)
                      AND (?3 IS NULL OR status = ?3)

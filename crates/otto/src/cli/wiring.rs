@@ -429,8 +429,8 @@ impl Builder {
         stderr: &mut dyn Write,
     ) -> Result<SubagentWiring, BuildError> {
         let provider: Arc<dyn otto_core::provider::Provider + Send + Sync> = match client {
-            ProviderClient::Compat(provider) => Arc::clone(provider) as _,
-            ProviderClient::ChatGpt(provider) => Arc::clone(provider) as _,
+            ProviderClient::Compat { client, .. } => Arc::clone(client) as _,
+            ProviderClient::ChatGpt { client, .. } => Arc::clone(client) as _,
             ProviderClient::Unavailable => return Ok(SubagentWiring::default()),
             #[cfg(test)]
             ProviderClient::Scripted(_) => return Ok(SubagentWiring::default()),
@@ -492,6 +492,9 @@ impl Builder {
                     keep_recent_tokens: runtime.compaction.keep_recent_tokens,
                 },
                 new_operation_id: Arc::new(super::runtime_builder::new_operation_id),
+                provider_timeout: runtime.resilience.deadlines.provider_timeout,
+                task_timeout: runtime.resilience.deadlines.subagent_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
                 ..OptionsTemplate::default()
             },
             prompt_for,
@@ -1719,10 +1722,13 @@ mod tests {
             max_output_bytes: 4096,
             ..Runtime::default()
         };
-        let client = ProviderClient::Compat(Arc::new(crate::provider::openaicompat::Client::new(
-            &runtime.base_url,
-            "test-key",
-        )));
+        let client = ProviderClient::Compat {
+            client: Arc::new(crate::provider::openaicompat::Client::new(
+                &runtime.base_url,
+                "test-key",
+            )),
+            timeout: runtime.resilience.deadlines.provider_timeout,
+        };
         let catalogs = CatalogWiring {
             skills: skill::Catalog::default(),
             skill_section: String::new(),

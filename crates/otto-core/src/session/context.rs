@@ -1160,20 +1160,46 @@ pub fn validate_assistant_tool_finish(
     Ok(())
 }
 
-/// Text of the result that stands in for one the session never recorded.
-pub const MISSING_TOOL_RESULT_TEXT: &str = "tool result missing from prior session";
+/// Text for the first call in a run of calls a session never recorded a
+/// result for. That call may have started running before the session
+/// stopped, so its effects are unknown rather than absent.
+pub const MAY_HAVE_RUN_TOOL_RESULT_TEXT: &str = "tool result missing from prior session: the \
+    session stopped while this call was running or before it started, so it may have run fully, \
+    partly, or not at all; check its effects before repeating it";
 
-/// The stand-in for a tool result the session never recorded. It is an error
-/// result, so the model reads the call as failed rather than as answered.
-pub fn missing_tool_result(call: &Block) -> Block {
-    Block {
-        block_type: BlockType::ToolResult,
-        text: MISSING_TOOL_RESULT_TEXT.into(),
-        tool_call_id: call.tool_call_id.clone(),
-        tool_name: call.tool_name.clone(),
-        is_error: true,
-        ..Block::default()
-    }
+/// Text for every call after the first in such a run. Otto runs the tool
+/// calls of one assistant message one at a time, so a call after the one
+/// that was interrupted never started.
+pub const NOT_EXECUTED_TOOL_RESULT_TEXT: &str = "tool result missing from prior session: this \
+    call was not executed, because the session stopped at an earlier call in the same assistant \
+    message";
+
+/// Builds the stand-in results for one run of unanswered tool calls from a
+/// single assistant message, in call order. The first call may have run
+/// before the session stopped; every later call never started, because Otto
+/// runs one call at a time and appends each result before the next call
+/// starts. Both are error results, so the model reads each call as failed
+/// rather than as answered.
+pub fn missing_tool_results(calls: &[Block]) -> Vec<Block> {
+    calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            let text = if index == 0 {
+                MAY_HAVE_RUN_TOOL_RESULT_TEXT
+            } else {
+                NOT_EXECUTED_TOOL_RESULT_TEXT
+            };
+            Block {
+                block_type: BlockType::ToolResult,
+                text: text.into(),
+                tool_call_id: call.tool_call_id.clone(),
+                tool_name: call.tool_name.clone(),
+                is_error: true,
+                ..Block::default()
+            }
+        })
+        .collect()
 }
 
 /// Splices a stand-in result in for every tool call this history leaves
@@ -1255,14 +1281,14 @@ fn repair_interrupted_tool_calls(messages: &mut Vec<Message>) -> Vec<String> {
 /// the message that made the calls the way a compaction's retained tail
 /// derives its own.
 fn stand_in_results(anchor: &Message, calls: Vec<Block>) -> Vec<Message> {
-    calls
+    missing_tool_results(&calls)
         .into_iter()
         .enumerate()
-        .map(|(index, call)| Message {
+        .map(|(index, block)| Message {
             id: format!("{}-repair-{index}", anchor.id),
             role: Role::Tool,
             created_at: anchor.created_at,
-            blocks: vec![missing_tool_result(&call)],
+            blocks: vec![block],
             ..Message::default()
         })
         .collect()
@@ -2476,13 +2502,42 @@ mod tests {
         assert_eq!(repaired.blocks[0].tool_call_id, "call-1");
         assert_eq!(repaired.blocks[0].tool_name, "read");
         assert!(repaired.blocks[0].is_error);
-        assert_eq!(repaired.blocks[0].text, MISSING_TOOL_RESULT_TEXT);
+        assert_eq!(repaired.blocks[0].text, MAY_HAVE_RUN_TOOL_RESULT_TEXT);
         assert_eq!(repaired.created_at, context.messages[1].created_at);
         assert!(
             warnings
                 .iter()
                 .any(|warning| warning.message.contains("call-1")),
             "the repair must be reported: {warnings:?}"
+        );
+    });
+
+    test!(build_context_marks_only_the_first_unanswered_call_as_possibly_run {
+        let root = user_entry("63120001", None, "root");
+        let assistant = tool_call_entry(
+            "63120002",
+            Some("63120001"),
+            &[("call-1", "read"), ("call-2", "bash"), ("call-3", "write")],
+        );
+        let result = tool_result_entry("63120003", Some("63120002"), "call-1", "read", "ok");
+        let next = user_entry("63120004", Some("63120003"), "next");
+
+        let (context, _) = build_context(&[root, assistant, result, next], "63120004")
+            .expect("build context");
+
+        let stand_ins: Vec<(&str, &str)> = context.messages[3..5]
+            .iter()
+            .map(|message| {
+                let block = &message.blocks[0];
+                (block.tool_call_id.as_str(), block.text.as_str())
+            })
+            .collect();
+        assert_eq!(
+            stand_ins,
+            vec![
+                ("call-2", MAY_HAVE_RUN_TOOL_RESULT_TEXT),
+                ("call-3", NOT_EXECUTED_TOOL_RESULT_TEXT),
+            ]
         );
     });
 

@@ -451,10 +451,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
     }
 
-    /// Drains the inbox, appending each notification as a display context
-    /// message and reporting it. A no-op when the inbox is empty.
+    /// Appends each queued notification as a display context message and
+    /// reports it, removing it from the inbox only after its append
+    /// returned. A no-op when the inbox is empty. A failed append leaves that
+    /// item and every later one queued, so a following call (or a later
+    /// resume, for a persisted inbox) delivers it exactly once more.
+    ///
+    /// The queue is read once at the top, not drained: an item pushed by
+    /// another task while this loop awaits an append is not in this read and
+    /// is picked up by the next call, in order, rather than lost or
+    /// reordered.
     async fn deliver_notifications(&self, emit: EventSink<'_>) -> Result<(), AgentError> {
-        for notification in self.options.inbox.drain() {
+        for entry in self.options.inbox.queued() {
+            let notification = entry.notification;
             let text = self.redactor.redact_string(&notification.text);
             let metadata = ContextMetadata {
                 task_id: notification.task_id.clone(),
@@ -478,6 +487,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     kind: "notification".into(),
                     source,
                 })?;
+            self.options.inbox.remove_seq(entry.seq);
             emit(Event::Notification {
                 task_id: notification.task_id,
                 text,

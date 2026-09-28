@@ -2199,6 +2199,14 @@ impl Session for FailingSession {
     ) -> Result<crate::session::CompactionMetadata, crate::session::SessionError> {
         self.inner.append_compaction(checkpoint).await
     }
+
+    fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), crate::session::SessionError> {
+        self.inner.append_custom(custom_type, data)
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -2216,6 +2224,69 @@ async fn a_failed_user_message_append_stops_before_the_provider() {
         .expect_err("the append failure stops the run");
     assert_eq!(error.to_string(), "persist user message: disk full");
     assert!(agent.provider().requests().is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_failed_notification_append_leaves_it_and_later_ones_queued() {
+    let inbox = Arc::new(Inbox::default());
+    inbox.push(Notification {
+        task_id: "t1".into(),
+        kind: Some(NotificationKind::TaskFinished),
+        text: "first".into(),
+        usage: None,
+    });
+    inbox.push(Notification {
+        task_id: "t2".into(),
+        kind: Some(NotificationKind::TaskFinished),
+        text: "second".into(),
+        usage: None,
+    });
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("never sent")]),
+        EchoExecutor::default(),
+        FailingSession::new(0),
+        Options {
+            inbox: inbox.clone(),
+            ..options()
+        },
+    );
+    let error = agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("the append failure stops the run");
+    assert_eq!(error.to_string(), "persist notification: disk full");
+    assert_eq!(
+        inbox.len(),
+        2,
+        "the failed item and the one after it must stay queued"
+    );
+    assert!(agent.provider().requests().is_empty());
+
+    // A later delivery over the same inbox, with a session that now accepts
+    // appends, delivers each notification exactly once.
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::text("ok")]),
+        EchoExecutor::default(),
+        MemorySession::new(),
+        Options {
+            inbox: inbox.clone(),
+            ..options()
+        },
+    );
+    agent
+        .run("", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect("run");
+    let texts: Vec<String> = agent
+        .session()
+        .messages()
+        .iter()
+        .filter(|message| message.role == Role::Context)
+        .map(|message| message.text())
+        .collect();
+    assert_eq!(texts, vec!["first".to_string(), "second".to_string()]);
+    assert!(inbox.is_empty());
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

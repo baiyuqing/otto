@@ -37,6 +37,9 @@ pub mod summary_details;
 pub mod summary_validate;
 pub mod tasks;
 
+/// The built-in task `/init` submits through the ordinary agent turn.
+pub const INIT_PROMPT: &str = "Create an AGENTS.md contributor guide for this repository. First inspect the workspace and check whether AGENTS.md already exists at its root. If it exists, do not overwrite or modify it. Otherwise, write a concise, repository-specific guide covering project structure, build and test commands, coding conventions, and contribution expectations.";
+
 #[cfg(test)]
 mod run_tests;
 

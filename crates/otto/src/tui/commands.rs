@@ -16,6 +16,7 @@ pub struct SlashCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashCommandKind {
     Help,
+    Init,
     Session,
     New,
     Clear,
@@ -50,6 +51,11 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/help",
         description: "show help",
         kind: SlashCommandKind::Help,
+    },
+    SlashCommand {
+        name: "/init",
+        description: "create a repository AGENTS.md guide",
+        kind: SlashCommandKind::Init,
     },
     SlashCommand {
         name: "/session",
@@ -301,6 +307,13 @@ mod tests {
     fn parsing_a_bare_command_yields_an_empty_argument() {
         let (command, argument) = parse_slash_command("/help").expect("known command");
         assert_eq!(command.name, "/help");
+        assert_eq!(argument, "");
+    }
+
+    #[test]
+    fn init_is_a_known_command() {
+        let (command, argument) = parse_slash_command("/init").expect("known command");
+        assert_eq!(command.kind, SlashCommandKind::Init);
         assert_eq!(argument, "");
     }
 

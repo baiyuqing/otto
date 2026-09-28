@@ -319,7 +319,7 @@ fn the_tui_renders_a_prompt_reply_and_restores_the_terminal_on_exit() {
     let served = Arc::new(AtomicUsize::new(0));
     const PROMPT: &str = "send the scripted prompt";
     const REPLY: &str = "reply visible over the pty smoke test";
-    let base_url = serve(Script {
+    let (base_url, _requests) = serve(Script {
         replies: vec![text_reply(REPLY)],
         served: Arc::clone(&served),
     });

@@ -571,6 +571,7 @@ mod tests {
                 vec![format!("HOME={}", home.path().display()).into_bytes()],
                 false,
                 &CancellationToken::new(),
+                &crate::cli::terminate::Terminate::new(),
             )
             .await;
             assert_eq!(code, 0, "{name}: {}", String::from_utf8_lossy(&stderr));

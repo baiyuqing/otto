@@ -55,7 +55,7 @@ fn the_binary_runs_one_prompt_turn_with_bash_and_write_under_seatbelt() {
     std::fs::write(workspace.path().join("README.md"), "# fixture\n").expect("seed README");
 
     let served = Arc::new(AtomicUsize::new(0));
-    let base_url = serve(Script {
+    let (base_url, _requests) = serve(Script {
         replies: vec![
             tool_call_reply("call-1", "bash", r#"{"command":"echo hello-from-bash"}"#),
             tool_call_reply(
@@ -141,7 +141,7 @@ fn an_interactive_approval_runs_one_exact_command_outside_seatbelt() {
     })
     .to_string();
     let served = Arc::new(AtomicUsize::new(0));
-    let base_url = serve(Script {
+    let (base_url, _requests) = serve(Script {
         replies: vec![
             tool_call_reply("call-1", "bash", &arguments),
             text_reply("approval needed"),

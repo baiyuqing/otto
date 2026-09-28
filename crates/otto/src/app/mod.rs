@@ -25,6 +25,7 @@ pub mod wake;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Duration;
 
 use otto_core::agent::inbox::Notification;
 use otto_core::agent::{AgentError, CompactionResult, EventSink};
@@ -588,6 +589,40 @@ impl Controller {
         if let Some(runner) = runner {
             runner.close_mcp().await;
         }
+    }
+
+    /// Runs a SIGTERM migration's session-side work, in the spec's order:
+    /// cancel (already done by the caller before this is called), wait for
+    /// the cancelled sub-agent tasks and record them interrupted, notify the
+    /// parent session (all three inside [`Runner::migrate`]), close MCP,
+    /// release the lease. Called from a frontend's exit tail after its own
+    /// turn was already cancelled, so it takes admission the same way a turn
+    /// does rather than assuming the controller is idle: retries on
+    /// [`PROMPT_ACTIVE`] every 20ms (the in-flight operation is the
+    /// just-cancelled turn winding down) and gives up with no warnings on
+    /// [`CLOSED`] (nothing left to migrate). Requests a close while the
+    /// admission is still held, so dropping it runs [`Self::finish_close`]
+    /// (closes the runner and the session, which writes the lease's
+    /// `released: true`); the caller's own `close_mcp`/`close` pair still
+    /// runs afterward and finds the controller already closed.
+    pub async fn migrate(&self) -> Vec<String> {
+        let admission = loop {
+            match self.begin_operation() {
+                Ok(admission) => break admission,
+                Err(ref message) if message == PROMPT_ACTIVE => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(_) => return Vec::new(),
+            }
+        };
+        let Ok(runner) = self.runner() else {
+            return Vec::new();
+        };
+        let warnings = runner.migrate().await;
+        runner.close_mcp().await;
+        self.request_close();
+        drop(admission);
+        warnings
     }
 
     // ---- turns ----
@@ -2000,6 +2035,187 @@ mod tests {
         bytes[..json.len()].copy_from_slice(json.as_bytes());
         bytes[511] = b'\n';
         bytes
+    }
+
+    /// A child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`,
+    /// matching the file `subagent::runner::spawn` creates. Duplicated from
+    /// [`crate::cli::runtime_builder::tests::child_store`]: both are
+    /// `#[cfg(test)]`-private to their own module, and the fixture is 12
+    /// lines.
+    fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transcript, String) {
+        let name = format!("{task_id}-child");
+        let store = crate::session::Store::create_child_lazy(
+            parent,
+            &name,
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: parent.parent().expect("dir").to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("child store");
+        let path = crate::session::Store::child_path(parent, &name);
+        (Arc::new(store), path.to_string_lossy().into_owned())
+    }
+
+    /// Reads a lease's fixed-size heartbeat file and reports whether its
+    /// `released` field is `true`. Parses only that one field, matching
+    /// [`crate::failover::lease`]'s own doc comment on why the heartbeat is
+    /// read back in tests elsewhere in this crate.
+    fn heartbeat_released(session_path: &str) -> bool {
+        let heartbeat = Path::new(session_path)
+            .with_extension("lease")
+            .join("heartbeat");
+        let bytes = std::fs::read(&heartbeat).expect("read heartbeat");
+        let text = String::from_utf8_lossy(&bytes);
+        text.contains("\"released\":true")
+    }
+
+    /// S7: `Controller::migrate` obtains admission, cancels and records the
+    /// running and queued sub-agent tasks interrupted, notifies the parent,
+    /// closes MCP, requests a close, and releases the session's lease when
+    /// its admission is dropped.
+    ///
+    /// Drives the sub-agent registry directly with `subagents.start(...)`
+    /// rather than a real top-level "agent" tool call from a scripted
+    /// provider: `Controller::migrate` calls `Runner::migrate`, already
+    /// covered end to end by
+    /// `runtime_builder::tests::migrate_cancels_running_and_queued_subagent_tasks_and_notifies_the_parent`,
+    /// and adds only admission/close/lease-release around it, none of which
+    /// depends on how the tasks were started.
+    #[tokio::test]
+    async fn migrate_releases_the_lease_after_cancelling_subagent_tasks() {
+        use crate::subagent::runner::StartRequest;
+        use crate::subagent::tasks::{TaskStatus, Tasks};
+        use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any, wait_status};
+        use otto_core::model::Usage;
+        use otto_core::provider::Provider;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let mut builder = builder(workspace.path(), sessions.path());
+        builder.shared_mut().config.failover = otto_core::config::Failover {
+            enabled: true,
+            lease_seconds: 12,
+        };
+        let runtime = initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("create session");
+        session.append(user("go")).await.expect("first append");
+        let session_path = session.path();
+
+        let tasks = Arc::new(Tasks::new());
+        let child_provider = FakeProvider::new();
+        child_provider.set_hook(Arc::new(|cancel, _request| {
+            Box::pin(async move { cancel.cancelled().await })
+        }));
+        child_provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+
+        let mut child_config =
+            crate::subagent::testsupport::test_config(&child_provider, &tasks, Vec::new());
+        child_config.max_parallel = 1;
+        let parent_path = PathBuf::from(&session_path);
+        child_config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&parent_path, task_id)))
+        }));
+        let (subagents, _) =
+            crate::subagent::runner::Runner::new(child_config).expect("valid config");
+        let subagents = Arc::new(subagents);
+
+        subagents
+            .start(StartRequest {
+                prompt: "first".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+        subagents
+            .start(StartRequest {
+                prompt: "second".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        assert_eq!(
+            tasks.get("t2").expect("t2 exists").status,
+            TaskStatus::Queued,
+            "t2 must stay queued behind t1 with max_parallel 1"
+        );
+
+        let mut runner = Runner::scripted(
+            session.clone(),
+            FakeProvider::new() as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+        );
+        runner.subagents = Some(subagents);
+        let info = builder.runtime_info(&runtime);
+        let controller = Controller::new(builder, true, session.clone(), runner, info);
+
+        let warnings = controller.migrate().await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        for task_id in ["t1", "t2"] {
+            assert_eq!(
+                tasks.get(task_id).expect("task exists").status,
+                TaskStatus::Canceled
+            );
+        }
+        let notifications = tasks.notifications().snapshot();
+        assert_eq!(notifications.len(), 1, "{notifications:?}");
+        assert!(notifications[0].text.contains("moved"));
+
+        assert!(
+            heartbeat_released(&session_path),
+            "migrate must release the lease"
+        );
+    }
+
+    /// S7: `Controller::migrate` on an idle lease-managed session with no
+    /// sub-agent tasks pushes no notification and still releases the lease.
+    #[tokio::test]
+    async fn migrate_on_an_idle_lease_managed_session_still_releases_the_lease() {
+        use crate::subagent::tasks::Tasks;
+        use otto_core::model::{FinishReason, Role};
+        use otto_core::provider::Provider;
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let mut builder = builder(workspace.path(), sessions.path());
+        builder.shared_mut().config.failover = otto_core::config::Failover {
+            enabled: true,
+            lease_seconds: 12,
+        };
+        let runtime = initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("create session");
+        session
+            .append(Message {
+                role: Role::Assistant,
+                blocks: vec![Block::text("done")],
+                finish_reason: Some(FinishReason::Stop),
+                created_at: chrono::Utc::now(),
+                ..Message::default()
+            })
+            .await
+            .expect("append");
+        let session_path = session.path();
+
+        let tasks = Arc::new(Tasks::new());
+        let runner = Runner::scripted(
+            session.clone(),
+            crate::subagent::testsupport::FakeProvider::new() as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+        );
+        let info = builder.runtime_info(&runtime);
+        let controller = Controller::new(builder, true, session.clone(), runner, info);
+
+        let warnings = controller.migrate().await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(tasks.notifications().is_empty());
+        assert!(
+            heartbeat_released(&session_path),
+            "migrate must release an idle session's lease too"
+        );
     }
 
     #[tokio::test]

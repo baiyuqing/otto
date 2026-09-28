@@ -570,6 +570,39 @@ impl Runner {
         let _ = tokio::time::timeout(Duration::from_secs(5), self.mcp.close()).await;
     }
 
+    /// Runs during a SIGTERM migration, after this session's turn was
+    /// already cancelled: cancels every non-final sub-agent task, waits for
+    /// each to reach a final status, and leaves one notification describing
+    /// what moved (see [`crate::failover::recovery::notify_moved`]).
+    /// Returns no warnings and does nothing when sub-agents are off
+    /// (`self.tasks` is `None`) or the session has no persisted path
+    /// (`--no-session`, so there is no children directory to scan).
+    pub async fn migrate(&self) -> Vec<String> {
+        let Some(tasks) = self.tasks.as_ref() else {
+            return Vec::new();
+        };
+        let ids = tasks.begin_migration();
+        tasks.wait_final(&ids).await;
+
+        let path = self.session().path();
+        if path.is_empty() {
+            return Vec::new();
+        }
+        let children_dir = Path::new(&path).with_extension("");
+        let max_output_bytes = self
+            .subagents
+            .as_ref()
+            .map(|subagents| subagents.max_output_bytes())
+            .unwrap_or(0);
+        crate::failover::recovery::notify_moved(
+            tasks.notifications(),
+            &children_dir,
+            &ids,
+            max_output_bytes,
+            &self.session().messages(),
+        )
+    }
+
     /// A runner with no tools whose provider the test supplies, carrying the
     /// sub-agent registry the caller owns. See [`ProviderClient::Scripted`].
     ///
@@ -2061,6 +2094,242 @@ mod tests {
         // `mem::take`; it must be a harmless no-op, not a panic or a
         // double-close.
         runner.close();
+    }
+
+    /// A [`SessionHandle`] that reports a fixed path but keeps its transcript
+    /// in memory, so [`Runner::migrate`] can compute a real `children_dir`
+    /// without a full file-backed [`Store`].
+    struct FixedPathSession {
+        inner: MemorySession,
+        path: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Session for FixedPathSession {
+        fn messages(&self) -> Vec<Message> {
+            self.inner.messages()
+        }
+
+        async fn append(&self, message: Message) -> Result<(), SessionError> {
+            self.inner.append(message).await
+        }
+
+        fn latest_compaction(&self) -> Option<CompactionMetadata> {
+            self.inner.latest_compaction()
+        }
+
+        async fn append_compaction(
+            &self,
+            checkpoint: CompactionCheckpoint,
+        ) -> Result<CompactionMetadata, SessionError> {
+            self.inner.append_compaction(checkpoint).await
+        }
+
+        fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+            self.inner.append_custom(custom_type, data)
+        }
+    }
+
+    impl SessionHandle for FixedPathSession {
+        fn header(&self) -> Header {
+            Header::default()
+        }
+
+        fn name(&self) -> String {
+            String::new()
+        }
+
+        fn path(&self) -> String {
+            self.path.clone()
+        }
+
+        fn rename(&self, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn thinking_level(&self) -> String {
+            String::new()
+        }
+
+        fn update_thinking_level(&self, _thinking: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn update_runtime(&self, _runtime: &RuntimeMetadata) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A provider `Runner::scripted` needs a value for but this test never
+    /// calls: [`Runner::migrate`] cancels sub-agent tasks and reads the
+    /// transcript directly, it never sends a parent turn.
+    struct UnusedParentProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for UnusedParentProvider {
+        async fn complete(
+            &self,
+            _request: &Request,
+            _emit: StreamSink<'_>,
+            _cancel: &CancellationToken,
+        ) -> Result<Response, ProviderError> {
+            unreachable!("migrate never sends a parent turn")
+        }
+    }
+
+    /// A child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`,
+    /// matching the file `subagent::runner::spawn` creates.
+    fn child_store(parent: &Path, task_id: &str) -> (crate::subagent::runner::Transcript, String) {
+        let name = format!("{task_id}-child");
+        let store = Store::create_child_lazy(
+            parent,
+            &name,
+            Header {
+                id: "child".into(),
+                workspace: parent.parent().expect("dir").to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: Utc::now(),
+                ..Header::default()
+            },
+        )
+        .expect("child store");
+        let path = Store::child_path(parent, &name);
+        (Arc::new(store), path.to_string_lossy().into_owned())
+    }
+
+    /// S7: the central migration path, exercised end to end from
+    /// [`Runner::migrate`] down through [`crate::subagent::tasks::Tasks::begin_migration`]
+    /// and [`crate::failover::recovery::notify_moved`]: a running task and a
+    /// queued task are both cancelled, both transcripts end up recorded
+    /// interrupted, the parent inbox gets no `task_finished` notification for
+    /// either, and it gets exactly one "moved" notification naming both.
+    #[tokio::test]
+    async fn migrate_cancels_running_and_queued_subagent_tasks_and_notifies_the_parent() {
+        use crate::subagent::runner::StartRequest;
+        use crate::subagent::tasks::TaskStatus;
+        use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any, wait_status};
+        use otto_core::agent::inbox::NotificationKind;
+        use otto_core::model::Usage;
+
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+
+        let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+
+        let child_provider = FakeProvider::new();
+        child_provider.set_hook(Arc::new(|cancel, _request| {
+            Box::pin(async move { cancel.cancelled().await })
+        }));
+        child_provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+
+        let mut child_config =
+            crate::subagent::testsupport::test_config(&child_provider, &tasks, Vec::new());
+        child_config.max_parallel = 1;
+        let child_parent = parent_path.clone();
+        child_config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&child_parent, task_id)))
+        }));
+        let (subagents, _) =
+            crate::subagent::runner::Runner::new(child_config).expect("valid config");
+        let subagents = Arc::new(subagents);
+
+        subagents
+            .start(StartRequest {
+                prompt: "first".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        subagents
+            .start(StartRequest {
+                prompt: "second".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        assert_eq!(
+            tasks.get("t2").expect("t2 exists").status,
+            TaskStatus::Queued,
+            "t2 must stay queued behind t1 with max_parallel 1"
+        );
+
+        let session = SharedSession::new(Arc::new(FixedPathSession {
+            inner: MemorySession::new(),
+            path: parent_path.to_string_lossy().into_owned(),
+        }));
+        let mut runner = Runner::scripted(
+            session,
+            Arc::new(UnusedParentProvider) as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+        );
+        runner.subagents = Some(subagents);
+
+        let warnings = runner.migrate().await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        for task_id in ["t1", "t2"] {
+            assert_eq!(
+                tasks.get(task_id).expect("task exists").status,
+                TaskStatus::Canceled
+            );
+            assert!(
+                tasks
+                    .notifications()
+                    .remove(task_id, NotificationKind::TaskFinished)
+                    .is_none(),
+                "migration must not push a task_finished notification for {task_id}"
+            );
+        }
+
+        let notifications = tasks.notifications().snapshot();
+        assert_eq!(notifications.len(), 1, "{notifications:?}");
+        let text = &notifications[0].text;
+        assert!(text.contains("moved"), "{text}");
+        assert!(text.contains("t1"), "{text}");
+        assert!(text.contains("first"), "{text}");
+        assert!(text.contains("t2"), "{text}");
+        assert!(text.contains("second"), "{text}");
+    }
+
+    /// S7: an idle session with no sub-agent tasks migrates with no
+    /// warnings and pushes no notification when its own transcript already
+    /// ends on a finished assistant turn.
+    #[tokio::test]
+    async fn migrate_on_an_idle_session_with_no_tasks_is_a_no_op() {
+        use otto_core::model::{FinishReason, Role};
+
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let tasks = Arc::new(crate::subagent::tasks::Tasks::new());
+
+        let session = SharedSession::new(Arc::new(FixedPathSession {
+            inner: MemorySession::new(),
+            path: parent_path.to_string_lossy().into_owned(),
+        }));
+        session
+            .append(Message {
+                role: Role::Assistant,
+                blocks: vec![Block::text("done")],
+                finish_reason: Some(FinishReason::Stop),
+                ..Message::default()
+            })
+            .await
+            .expect("append");
+        let runner = Runner::scripted(
+            session,
+            Arc::new(UnusedParentProvider) as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+        );
+
+        let warnings = runner.migrate().await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(tasks.notifications().is_empty());
+        assert!(tasks.is_migrating());
     }
 
     /// R6: `Builder::create_session` calls `Store::enable_failover` when

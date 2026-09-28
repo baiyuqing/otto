@@ -473,6 +473,7 @@ impl Builder {
         let session_for_resume = session_for_children.clone();
         let session_for_lease = session_for_children.clone();
         let session_for_recovery = session_for_children.clone();
+        let session_for_inbox = session_for_children.clone();
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
             provider,
@@ -521,16 +522,29 @@ impl Builder {
 
         let runner = Arc::new(runner);
         let inbox = Arc::clone(tasks.notifications());
+        // The persist hook resolves the sidecar path at write time rather than
+        // capturing `inbox_persist` here: a lazy session store's `path()` is
+        // still empty at this point (nothing has been written to it yet), so
+        // gating the hook on `inbox_persist` would permanently skip
+        // persistence for a session that gets its first write only after this
+        // function returns (see `Store::path`).
+        let no_session = self.no_session;
+        inbox.set_persist(Box::new(move |entries| {
+            if no_session {
+                return;
+            }
+            let path = session_for_inbox.path();
+            if path.is_empty() {
+                return;
+            }
+            write_inbox_file(&Path::new(&path).with_extension("inbox.json"), entries)
+        }));
         // A session with no persisted inbox path (`--no-session`, or nothing
         // written yet) never takes over a lease either, so it never has a
-        // takeover to report; the recovery push lives in this branch rather
+        // takeover to report; the recovery scan lives in this branch rather
         // than running unconditionally.
         if let Some(path) = inbox_persist {
             load_inbox(&inbox, &path);
-            let hook_path = path.clone();
-            inbox.set_persist(Box::new(move |entries| {
-                write_inbox_file(&hook_path, entries)
-            }));
             let recovery_warnings = failover::recovery::notify(
                 &inbox,
                 session_for_recovery.take_takeover(),

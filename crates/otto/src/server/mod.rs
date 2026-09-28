@@ -500,6 +500,25 @@ impl Server {
         }
     }
 
+    /// Runs a SIGTERM migration across every open session: cancels each
+    /// session's in-flight turn or compaction the same way [`Self::close`]
+    /// does, then runs [`Controller::migrate`] on each. Called by
+    /// `cli::serve::run` after [`Self::cancel_token`] was cancelled and
+    /// before [`Self::close`]; unlike `close`, this neither removes a
+    /// session from the registry nor closes a controller, so the caller's
+    /// own `close` still runs the normal shutdown right after this returns.
+    pub async fn migrate(&self) -> Vec<String> {
+        let sessions = self.all_sessions();
+        for session in &sessions {
+            session.cancel_work();
+        }
+        let mut warnings = Vec::new();
+        for session in &sessions {
+            warnings.extend(session.ctrl.migrate().await);
+        }
+        warnings
+    }
+
     // ---- routing ----
 
     /// Every route in `openapi.yaml`, plus the two token-free UI routes.
@@ -1853,7 +1872,7 @@ mod tests {
         Provider, ProviderError, Request as ProviderRequest, Response as ProviderResponse,
         StreamEvent, StreamSink,
     };
-    use otto_core::session::{CURRENT_VERSION, Header, ListResult, SessionInfo};
+    use otto_core::session::{CURRENT_VERSION, Header, ListResult, Session, SessionInfo};
     use otto_core::wire::sse::{Frame, parse_frames};
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3498,6 +3517,137 @@ mod tests {
                 .metrics_body()
                 .await
                 .contains("otto_sessions_open 0")
+        );
+    }
+
+    // ---- SIGTERM migration ----
+
+    /// A child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`,
+    /// matching the file `subagent::runner::spawn` creates. Duplicated from
+    /// [`crate::app::tests::child_store`] and
+    /// [`crate::cli::runtime_builder::tests::child_store`]: each is
+    /// `#[cfg(test)]`-private to its own module, and the fixture is 12
+    /// lines.
+    fn child_store(
+        parent: &std::path::Path,
+        task_id: &str,
+    ) -> (crate::subagent::runner::Transcript, String) {
+        let name = format!("{task_id}-child");
+        let store = crate::session::Store::create_child_lazy(
+            parent,
+            &name,
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: parent.parent().expect("dir").to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("child store");
+        let path = crate::session::Store::child_path(parent, &name);
+        (Arc::new(store), path.to_string_lossy().into_owned())
+    }
+
+    /// Reads a lease's fixed-size heartbeat file and reports whether its
+    /// `released` field is `true`. Duplicated from
+    /// [`crate::app::tests::heartbeat_released`] for the same reason as
+    /// `child_store` above.
+    fn heartbeat_released(session_path: &str) -> bool {
+        let heartbeat = std::path::Path::new(session_path)
+            .with_extension("lease")
+            .join("heartbeat");
+        let bytes = std::fs::read(&heartbeat).expect("read heartbeat");
+        String::from_utf8_lossy(&bytes).contains("\"released\":true")
+    }
+
+    /// S9(b): a `SIGTERM` decided as [`crate::cli::terminate::Action::Migrate`]
+    /// drives `Server::migrate`, which cancels every open session's work and
+    /// runs `Controller::migrate` on it. Asserts the running child task's
+    /// transcript ends `interrupted` and the session's lease heartbeat is
+    /// released, the same outcome `cli::serve::run` produces by calling
+    /// `Server::migrate` after cancelling its token.
+    #[tokio::test]
+    async fn migrate_cancels_a_running_child_task_and_releases_the_lease() {
+        use crate::cli::terminate::{Action, Terminate};
+        use crate::subagent::runner::StartRequest;
+        use crate::subagent::tasks::{TaskStatus, Tasks};
+        use crate::subagent::testsupport::{FakeProvider, assistant_text, match_any, wait_status};
+
+        let terminate = Terminate::new();
+        assert_eq!(terminate.on_signal(true), Action::Migrate);
+
+        let harness = Harness::new();
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let mut builder = testutil::builder(workspace.path(), sessions.path());
+        builder.shared_mut().config.failover = otto_core::config::Failover {
+            enabled: true,
+            lease_seconds: 12,
+        };
+        let runtime = testutil::initial_runtime(&builder);
+        let session = builder.create_session(&runtime).expect("create session");
+        session
+            .append(testutil::user("go"))
+            .await
+            .expect("first append");
+        let session_path = session.path();
+
+        let tasks = Arc::new(Tasks::new());
+        let child_provider = FakeProvider::new();
+        child_provider.set_hook(Arc::new(|cancel, _request| {
+            Box::pin(async move { cancel.cancelled().await })
+        }));
+        child_provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+
+        let mut child_config =
+            crate::subagent::testsupport::test_config(&child_provider, &tasks, Vec::new());
+        child_config.max_parallel = 1;
+        let parent_path = PathBuf::from(&session_path);
+        child_config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&parent_path, task_id)))
+        }));
+        let (subagents, _) =
+            crate::subagent::runner::Runner::new(child_config).expect("valid config");
+        let subagents = Arc::new(subagents);
+
+        subagents
+            .start(StartRequest {
+                prompt: "first".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        let mut runner = Runner::scripted(
+            session.clone(),
+            FakeProvider::new() as Arc<dyn Provider + Send + Sync>,
+            Arc::clone(&tasks),
+        );
+        runner.subagents = Some(subagents);
+        let info = builder.runtime_info(&runtime);
+        let ctrl = Controller::new(builder, true, session.clone(), runner, info);
+        harness.server.register(ctrl);
+
+        let warnings = harness.server.migrate().await;
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        assert_eq!(
+            tasks.get("t1").expect("t1 exists").status,
+            TaskStatus::Canceled
+        );
+        let children_dir = std::path::Path::new(&session_path).with_extension("");
+        let records = crate::subagent::interrupted::scan(&children_dir);
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(
+            records[0].final_status.as_deref(),
+            Some(crate::subagent::interrupted::INTERRUPTED_STATUS)
+        );
+        assert!(
+            heartbeat_released(&session_path),
+            "migrate must release the lease"
         );
     }
 

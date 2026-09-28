@@ -139,6 +139,11 @@ struct Entry {
 #[derive(Default)]
 struct State {
     closed: bool,
+    /// Set once by [`Tasks::begin_migration`]. Distinct from `closed`
+    /// (which migration also sets, via [`TaskRegistry::close`]) so
+    /// [`Tasks::is_migrating`] answers "is this a migration close" rather
+    /// than just "is this registry closed".
+    migrating: bool,
     counter: u64,
     order: Vec<String>,
     entries: HashMap<String, Entry>,
@@ -615,6 +620,50 @@ impl Tasks {
         }
     }
 
+    /// Begins a migration: marks the registry migrating, closes it the same
+    /// way [`TaskRegistry::close`] does (cancels every non-final task's
+    /// token, admits no more tasks, drops the update sender), and returns
+    /// the ids that were not yet final at that moment. Idempotent: a second
+    /// call returns an empty list.
+    pub fn begin_migration(&self) -> Vec<String> {
+        let ids = {
+            let mut state = self.lock();
+            if state.migrating {
+                return Vec::new();
+            }
+            state.migrating = true;
+            let order = state.order.clone();
+            order
+                .iter()
+                .filter(|id| {
+                    state
+                        .entries
+                        .get(id.as_str())
+                        .is_some_and(|entry| !entry.task.is_final())
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        self.close();
+        ids
+    }
+
+    /// Whether [`Tasks::begin_migration`] has run.
+    pub fn is_migrating(&self) -> bool {
+        self.lock().migrating
+    }
+
+    /// Waits for every id in `ids` to reach a final status. Built on
+    /// [`Tasks::wait`] with a token that never fires: a task whose cancel
+    /// token [`Tasks::begin_migration`] fired always reaches a final status
+    /// on its own. An id no longer in the registry is skipped.
+    pub async fn wait_final(&self, ids: &[String]) {
+        let never = CancellationToken::new();
+        for id in ids {
+            let _ = self.wait(id, &never).await;
+        }
+    }
+
     /// The number of notifications waiting for the parent.
     pub fn pending(&self) -> usize {
         self.inbox.len()
@@ -899,6 +948,74 @@ mod tests {
             Err(TaskError::Closed)
         );
         tasks.close();
+    }
+
+    #[tokio::test]
+    async fn begin_migration_cancels_every_non_final_task_and_returns_their_ids() {
+        let tasks = Tasks::new();
+        assert!(!tasks.is_migrating());
+
+        let running_cancel = CancellationToken::new();
+        let running = tasks
+            .add(
+                Task {
+                    prompt: "running".into(),
+                    ..Task::default()
+                },
+                Some(running_cancel.clone()),
+                None,
+            )
+            .expect("running task is valid");
+        tasks.mark_running(&running.id, at(1));
+
+        let queued_cancel = CancellationToken::new();
+        let queued = tasks
+            .add(
+                Task {
+                    prompt: "queued".into(),
+                    ..Task::default()
+                },
+                Some(queued_cancel.clone()),
+                None,
+            )
+            .expect("queued task is valid");
+
+        let finished = tasks
+            .add(
+                Task {
+                    prompt: "finished".into(),
+                    ..Task::default()
+                },
+                None,
+                None,
+            )
+            .expect("finished task is valid");
+        tasks.finish(&finished.id, TaskStatus::Succeeded, at(2), "done", "");
+
+        let mut ids = tasks.begin_migration();
+        ids.sort();
+        assert_eq!(ids, vec![running.id.clone(), queued.id.clone()]);
+        assert!(tasks.is_migrating());
+        assert!(tasks.is_closed(), "migration also closes the registry");
+        assert!(running_cancel.is_cancelled());
+        assert!(queued_cancel.is_cancelled());
+
+        // Idempotent: a second call finds nothing new to migrate.
+        assert_eq!(tasks.begin_migration(), Vec::<String>::new());
+
+        tasks.finish(&running.id, TaskStatus::Canceled, at(3), "", "");
+        tasks.finish(&queued.id, TaskStatus::Canceled, at(3), "", "");
+        tasks.wait_final(&ids).await;
+        assert!(tasks.get(&running.id).expect("still present").is_final());
+        assert!(tasks.get(&queued.id).expect("still present").is_final());
+    }
+
+    #[test]
+    fn is_migrating_is_false_before_begin_migration_and_true_after() {
+        let tasks = Tasks::new();
+        assert!(!tasks.is_migrating());
+        tasks.begin_migration();
+        assert!(tasks.is_migrating());
     }
 
     #[test]

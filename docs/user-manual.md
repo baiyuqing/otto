@@ -271,6 +271,12 @@ mode = "auto"
 [agent]
 shell_timeout = "120s"
 max_output_bytes = 51200
+# End-to-end deadlines are disabled when omitted.
+# turn_timeout = "30m"
+# provider_timeout = "10m"
+# subagent_timeout = "1h"
+# workflow_step_timeout = "1h"
+cancellation_grace = "5s"
 
 [agent.compaction]
 auto = true
@@ -321,6 +327,23 @@ Key points:
   session supplies one.
 - `[ui].mode` sets the frontend mode (`auto`, `tui`, `repl`).
 - `[agent].shell_timeout` and `[agent].max_output_bytes` set default limits.
+- `[agent]` also accepts optional end-to-end `turn_timeout`,
+  `provider_timeout`, `subagent_timeout`, and `workflow_step_timeout` values.
+  Omitted deadlines are unlimited for backward compatibility. A child always
+  inherits the earlier of its own configured deadline and its parent's
+  remaining deadline; compaction and follow-up work never reset that budget.
+  `cancellation_grace` defaults to `5s` and bounds cooperative cleanup before
+  Bash or a shared stdio MCP server is force-stopped.
+- Generic provider requests are not automatically retried after dispatch.
+  This includes OpenAI-compatible and ChatGPT requests that receive 429/5xx,
+  lose the connection, or have an interrupted stream, even when no response
+  delta was seen.
+
+Deadline checks are cooperative at synchronous filesystem and SQLite
+boundaries: Otto checks before and after the call, but does not detach an
+in-flight effectful closure or claim a hard wall-clock upper bound for the
+system call itself. A timeout or cancellation also does not prove that an
+external side effect did not occur.
 - `[sandbox]` configures the process-wide shell boundary:
 
   ```toml
@@ -537,10 +560,10 @@ OTTO_UI=repl otto
   `Queued next input · Ctrl+U withdraw · Esc cancels turn`). The line reads
   `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
   seconds since the turn started. The phase is `waiting for model`,
-  `reasoning`, `responding`, `compacting`, `running TOOL ARGS` (arguments
-  truncated to 60 characters), or `retry A/M after REASON, waiting DELAY` when
-  the provider request is retried after a connection error, an interrupted
-  stream, or a retryable HTTP status.
+  `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments
+  truncated to 60 characters). A `retry A/M after REASON, waiting DELAY` phase
+  is reserved for an operation whose concrete adapter has proved replay safe;
+  generic provider failures after dispatch are not retried.
 - When a thinking effort is set and the provider returns reasoning summaries,
   the summary text streams as a dimmed `reasoning` entry before the reply and
   is saved in the session, so a resumed session shows it again.
@@ -1828,6 +1851,10 @@ Recovery is deliberately conservative:
 - Unstarted ready steps may run after an explicit `resume`.
 - Pending approval requests keep the same request ID.
 - A step that was running becomes `interrupted` and the run becomes `paused`.
+- A configured `workflow_step_timeout` has the same durable result: the active
+  attempt and step become `interrupted`, the run becomes `paused`, and no
+  dependent step is admitted. Cleanup of the active effectful boundary is
+  awaited rather than detached.
 - Interrupted steps are never retried automatically. Use
   `otto workflow resume <run-id> --retry <step-id>` only after considering
   whether its last tool call may already have caused an external effect.

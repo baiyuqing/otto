@@ -20,6 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -35,6 +36,10 @@ pub mod seatbelt;
 
 #[cfg(test)]
 pub(crate) mod conformance;
+
+/// Default grace afforded after `SIGTERM` before process cleanup escalates to
+/// `SIGKILL`.
+pub(crate) const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
 
 /// The identifier a driver reports for diagnostics and settings.
 ///
@@ -275,6 +280,21 @@ pub trait Driver: Send + Sync {
         streams: Streams<'_>,
         cancel: &CancellationToken,
     ) -> (ExitStatus, Result<(), Error>);
+
+    /// Runs `request` with a caller-selected process termination grace.
+    ///
+    /// The default preserves compatibility for drivers that only implement
+    /// [`Driver::execute`].
+    async fn execute_with_grace(
+        &self,
+        request: Request,
+        streams: Streams<'_>,
+        cancel: &CancellationToken,
+        _cancellation_grace: Duration,
+    ) -> (ExitStatus, Result<(), Error>) {
+        self.execute(request, streams, cancel).await
+    }
+
     fn close(&self) -> Result<(), Error>;
 }
 
@@ -292,6 +312,20 @@ pub trait CommandExecutor: Send + Sync {
         streams: Streams<'_>,
         cancel: &CancellationToken,
     ) -> (ExitStatus, Result<(), Error>);
+
+    /// Runs `request` with a caller-selected process termination grace.
+    ///
+    /// The default preserves compatibility for executors that only implement
+    /// [`CommandExecutor::execute`].
+    async fn execute_with_grace(
+        &self,
+        request: Request,
+        streams: Streams<'_>,
+        cancel: &CancellationToken,
+        _cancellation_grace: Duration,
+    ) -> (ExitStatus, Result<(), Error>) {
+        self.execute(request, streams, cancel).await
+    }
 }
 
 /// Validates requests, enforces the policy, and owns the driver's lifetime.
@@ -402,6 +436,17 @@ impl CommandExecutor for Executor {
         streams: Streams<'_>,
         cancel: &CancellationToken,
     ) -> (ExitStatus, Result<(), Error>) {
+        self.execute_with_grace(request, streams, cancel, DEFAULT_CANCELLATION_GRACE)
+            .await
+    }
+
+    async fn execute_with_grace(
+        &self,
+        request: Request,
+        streams: Streams<'_>,
+        cancel: &CancellationToken,
+        cancellation_grace: Duration,
+    ) -> (ExitStatus, Result<(), Error>) {
         if cancel.is_cancelled() {
             return (ExitStatus::default(), Err(Error::Cancelled));
         }
@@ -418,7 +463,10 @@ impl CommandExecutor for Executor {
         if self.closed.load(Ordering::SeqCst) {
             return (ExitStatus::default(), Err(Error::Closed));
         }
-        let (mut status, result) = self.driver.execute(request, streams, cancel).await;
+        let (mut status, result) = self
+            .driver
+            .execute_with_grace(request, streams, cancel, cancellation_grace)
+            .await;
         if status.signaled {
             status.code = -1;
         }

@@ -10,6 +10,7 @@
 //! client, no bash tool, no runtime identity in the status line.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,8 +22,11 @@ use otto_core::agent::{
 };
 use otto_core::config::resolve::{Overrides, Runtime, SessionDefaults};
 use otto_core::config::{ConfigError, File, McpRuntime};
-use otto_core::model::{Block, Message, ToolDefinition};
-use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
+use otto_core::model::{Block, Message, OperationStopReason, ToolDefinition};
+use otto_core::operation::OperationControl;
+use otto_core::provider::{
+    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, StreamSink,
+};
 use otto_core::session::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, MemorySession,
     RuntimeMetadata, Session, SessionError, Snapshot,
@@ -30,6 +34,7 @@ use otto_core::session::{
 use otto_core::tool::ToolExecutor;
 use tokio_util::sync::CancellationToken;
 
+use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::provider::openaicompat::Client;
 use crate::sandbox::CommandExecutor;
@@ -398,8 +403,16 @@ impl Session for SharedSession {
 /// `Run` checks the redactor first. This enum keeps the provider slot
 /// non-optional, so the agent's type parameter stays concrete.
 pub enum ProviderClient {
-    Compat(Arc<Client>),
-    ChatGpt(Arc<crate::provider::chatgpt::Client>),
+    Compat {
+        client: Arc<Client>,
+        timeout: Option<Duration>,
+        cancellation_grace: Duration,
+    },
+    ChatGpt {
+        client: Arc<crate::provider::chatgpt::Client>,
+        timeout: Option<Duration>,
+        cancellation_grace: Duration,
+    },
     Unavailable,
     /// Test seam. `Runner` is a concrete struct, so the seam sits one layer
     /// down.
@@ -413,16 +426,129 @@ impl Provider for ProviderClient {
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<Response, ProviderError> {
+        control: &dyn OperationControl,
+    ) -> ProviderSettlement {
         match self {
-            Self::Compat(client) => client.complete(request, emit, cancel).await,
-            Self::ChatGpt(client) => client.complete(request, emit, cancel).await,
-            Self::Unavailable => Err(ProviderError::Other(
-                "provider is unavailable: redaction is incomplete".to_string(),
-            )),
+            Self::Compat {
+                client,
+                timeout,
+                cancellation_grace,
+            } => {
+                complete_with_timeout(
+                    client.as_ref(),
+                    request,
+                    emit,
+                    control,
+                    *timeout,
+                    *cancellation_grace,
+                )
+                .await
+            }
+            Self::ChatGpt {
+                client,
+                timeout,
+                cancellation_grace,
+            } => {
+                complete_with_timeout(
+                    client.as_ref(),
+                    request,
+                    emit,
+                    control,
+                    *timeout,
+                    *cancellation_grace,
+                )
+                .await
+            }
+            Self::Unavailable => ProviderSettlement::failed(
+                ProviderError::Other(
+                    "provider is unavailable: redaction is incomplete".to_string(),
+                ),
+                0,
+                otto_core::model::EffectCertainty::NotStarted,
+            ),
             #[cfg(test)]
-            Self::Scripted(provider) => provider.complete(request, emit, cancel).await,
+            Self::Scripted(provider) => provider.complete(request, emit, control).await,
+        }
+    }
+}
+
+fn provider_stop_settlement(reason: OperationStopReason) -> ProviderSettlement {
+    ProviderSettlement::stopped(
+        if reason == OperationStopReason::Deadline {
+            ProviderError::DeadlineExceeded
+        } else {
+            ProviderError::Cancelled
+        },
+        0,
+        otto_core::model::EffectCertainty::NotStarted,
+        reason,
+    )
+}
+
+async fn complete_with_timeout<P: Provider + ?Sized>(
+    provider: &P,
+    request: &Request,
+    emit: StreamSink<'_>,
+    parent: &dyn OperationControl,
+    timeout: Option<Duration>,
+    cancellation_grace: Duration,
+) -> ProviderSettlement {
+    if let Some(reason) = parent.admission_stop_reason() {
+        return provider_stop_settlement(reason);
+    }
+    let control = Control::new(Deadline::child(parent.remaining(), timeout));
+    let mut complete = std::pin::pin!(provider.complete(request, emit, &control));
+    let deadline = control.deadline();
+    let reason = tokio::select! {
+        biased;
+        result = &mut complete => return result,
+        () = parent.cancellation_token().cancelled() => {
+            let reason = parent
+                .stop_reason()
+                .unwrap_or(OperationStopReason::UserCancellation);
+            control.stop(reason);
+            reason
+        }
+        () = deadline.expired() => {
+            control.stop(OperationStopReason::Deadline);
+            OperationStopReason::Deadline
+        }
+    };
+    match tokio::time::timeout(cancellation_grace, &mut complete).await {
+        Ok(settlement) => settlement,
+        Err(_) => ProviderSettlement::stopped(
+            if reason == OperationStopReason::Deadline {
+                ProviderError::DeadlineExceeded
+            } else {
+                ProviderError::Cancelled
+            },
+            1,
+            otto_core::model::EffectCertainty::Unknown,
+            reason,
+        ),
+    }
+}
+
+async fn drive_with_control<F, T>(
+    future: F,
+    parent_cancel: &CancellationToken,
+    control: &Control,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    let mut future = std::pin::pin!(future);
+    let deadline = control.deadline();
+    tokio::select! {
+        biased;
+        result = &mut future => result,
+        () = parent_cancel.cancelled() => {
+            control.stop(OperationStopReason::UserCancellation);
+            future.await
+        }
+        () = deadline.expired() => {
+            control.stop(OperationStopReason::Deadline);
+            future.await
         }
     }
 }
@@ -430,6 +556,7 @@ impl Provider for ProviderClient {
 /// One composed agent, plus the two fixed strings a frontend may show.
 pub struct Runner {
     agent: Agent<ProviderClient, Registry, SharedSession>,
+    turn_timeout: Option<Duration>,
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
     usage: Option<crate::usage::Collector>,
@@ -459,8 +586,16 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
         let mut emit = self.collecting(emit);
-        self.agent.run(user_text, &mut emit, cancel).await
+        let run = self.agent.run_with_control(user_text, &mut emit, &control);
+        drive_with_control(run, cancel, &control).await
     }
 
     pub async fn run_with_image(
@@ -470,10 +605,18 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
         let mut emit = self.collecting(emit);
-        self.agent
-            .run_with_image(user_text, Some(image), &mut emit, cancel)
-            .await
+        let run = self
+            .agent
+            .run_with_image_control(user_text, Some(image), &mut emit, &control);
+        drive_with_control(run, cancel, &control).await
     }
 
     /// Compacts the transcript.
@@ -483,8 +626,16 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<CompactionResult, AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
         let mut emit = self.collecting(emit);
-        self.agent.compact(focus, &mut emit, cancel).await
+        let compact = self.agent.compact_with_control(focus, &mut emit, &control);
+        drive_with_control(compact, cancel, &control).await
     }
 
     fn collecting<'a>(
@@ -545,10 +696,9 @@ impl Runner {
     /// `/model`: nothing downstream needs its MCP servers gone by any
     /// particular deadline. It is not enough at process exit, where a
     /// dropped runtime can cancel the spawned task before it runs; call
-    /// [`Self::close_mcp`] there too, and call it *before* `close`, not
-    /// after: [`crate::mcp::Servers::close`] uses `mem::take` internally, so
-    /// whichever of the two runs first empties the client list and the
-    /// other becomes a no-op.
+    /// [`Self::close_mcp`] there too. Both paths await the same detached MCP
+    /// cleanup owner, so cancellation or timeout of either waiter cannot lose
+    /// the clients being closed.
     pub fn close(&self) {
         let _ = self.agent.close();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -558,14 +708,11 @@ impl Runner {
     }
 
     /// Shuts every connected MCP server down, waiting up to 5 seconds.
-    /// Idempotent with [`Self::close`]'s background close via `mem::take`,
-    /// but only awaiting this one guarantees MCP is down before the caller
-    /// proceeds. Call this *before* `close` at a process-exit site, so this
-    /// call is the one that actually drains `Servers`' client list instead
-    /// of racing a background task that a subsequent process exit could
-    /// cancel before it runs. There is nothing to release for
-    /// `Servers::default()`, so this returns immediately for a runner built
-    /// without MCP servers.
+    /// Idempotent with [`Self::close`]'s background close: all callers wait
+    /// for the same detached cleanup owner. If this caller times out, cleanup
+    /// continues and a later caller can await the same completion. There is
+    /// nothing to release for `Servers::default()`, so this returns
+    /// immediately for a runner built without MCP servers.
     pub async fn close_mcp(&self) {
         let _ = tokio::time::timeout(Duration::from_secs(5), self.mcp.close()).await;
     }
@@ -632,6 +779,7 @@ impl Runner {
                     ..Options::default()
                 },
             ),
+            turn_timeout: None,
             system_prompt: String::new(),
             definitions,
             usage: None,
@@ -1085,12 +1233,13 @@ impl Builder {
                 .command_executor
                 .clone()
                 .expect("bash_configured implies an executor");
-            let mut tool = bash::BashTool::new(
+            let mut tool = bash::BashTool::new_with_grace(
                 self.workspace,
                 executor,
                 &self.shell,
                 self.sandbox_environment.clone().unwrap_or_default(),
                 shell_timeout(runtime.shell_timeout),
+                runtime.resilience.deadlines.cancellation_grace,
                 max_output,
                 &redaction_values,
             )
@@ -1108,7 +1257,12 @@ impl Builder {
         let catalogs = self.build_catalogs(&mut tools, max_output, &mut warnings)?;
         mark_build_trace(&mut trace, "runner/catalogs");
         let (mcp_tools, mcp_connected, mcp_servers) = if connect_mcp {
-            self.connect_mcp(max_output, &mut warnings).await
+            self.connect_mcp_with_grace(
+                max_output,
+                runtime.resilience.deadlines.cancellation_grace,
+                &mut warnings,
+            )
+            .await
         } else {
             (Vec::new(), Vec::new(), self.connecting_mcp_servers())
         };
@@ -1119,15 +1273,23 @@ impl Builder {
         let client = if !self.boundary_allows_dynamic(Some(runtime)) {
             ProviderClient::Unavailable
         } else if runtime.provider == otto_core::config::PROVIDER_CHATGPT {
-            ProviderClient::ChatGpt(Arc::new(super::login::chatgpt_client(
-                &self.auth_path,
-                &self.auth_credentials,
-                self.auth_credentials_loaded,
-            )?))
+            ProviderClient::ChatGpt {
+                client: Arc::new(super::login::chatgpt_client(
+                    &self.auth_path,
+                    &self.auth_credentials,
+                    self.auth_credentials_loaded,
+                )?),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+            }
         } else {
-            ProviderClient::Compat(Arc::new(Client::new(&runtime.base_url, &runtime.api_key)))
+            ProviderClient::Compat {
+                client: Arc::new(Client::new(&runtime.base_url, &runtime.api_key)),
+                timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+            }
         };
-        if let ProviderClient::Compat(client) = &client {
+        if let ProviderClient::Compat { client, .. } = &client {
             tools.push(Box::new(models::ListModelsTool::new(
                 Arc::clone(client),
                 max_output,
@@ -1201,10 +1363,10 @@ impl Builder {
         .collect();
 
         let request_sizer = match &client {
-            ProviderClient::Compat(client) => {
+            ProviderClient::Compat { client, .. } => {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
-            ProviderClient::ChatGpt(client) => {
+            ProviderClient::ChatGpt { client, .. } => {
                 Some(client.clone() as Arc<dyn RequestSizer + Send + Sync>)
             }
             ProviderClient::Unavailable => None,
@@ -1245,6 +1407,7 @@ impl Builder {
         Ok((
             Runner {
                 agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
+                turn_timeout: runtime.resilience.deadlines.turn_timeout,
                 system_prompt,
                 definitions,
                 usage: self.usage_collector(session, runtime),
@@ -1491,7 +1654,169 @@ mod tests {
     use crate::sandbox::direct::DirectDriver;
     use crate::sandbox::{Executor, FilesystemMode, NetworkMode, Policy};
     use otto_core::config::Profile;
+    use otto_core::model::{EffectCertainty, OperationDisposition};
+    use otto_core::operation::OperationControl;
+    use otto_core::provider::ProviderSettlement;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
+
+    struct PendingProvider {
+        polls: Arc<AtomicUsize>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for PendingProvider {
+        async fn complete(
+            &self,
+            _request: &Request,
+            _emit: StreamSink<'_>,
+            control: &dyn OperationControl,
+        ) -> ProviderSettlement {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            let _drop = DropFlag(Arc::clone(&self.dropped));
+            control.cancellation_token().cancelled().await;
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_deadline_drops_an_uncooperative_future_after_grace() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let provider = PendingProvider {
+            polls: Arc::clone(&polls),
+            dropped: Arc::clone(&dropped),
+        };
+        let parent = Control::new(Deadline::unlimited());
+        let mut emit = |_| {};
+        let request = Request::default();
+        let complete = complete_with_timeout(
+            &provider,
+            &request,
+            &mut emit,
+            &parent,
+            Some(Duration::from_secs(2)),
+            Duration::from_secs(3),
+        );
+        tokio::pin!(complete);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, &mut complete)
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(
+            tokio::time::timeout(Duration::ZERO, &mut complete)
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let settlement = complete.await;
+
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(settlement.attempts, 1);
+        assert_eq!(
+            settlement.outcome.disposition,
+            OperationDisposition::DeadlineExceeded
+        );
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::Unknown
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_parent_refuses_provider_before_polling_it() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let provider = PendingProvider {
+            polls: Arc::clone(&polls),
+            dropped: Arc::new(AtomicBool::new(false)),
+        };
+        let parent = Control::new(Deadline::after(Duration::ZERO));
+        let mut emit = |_| {};
+        let request = Request::default();
+        let settlement = complete_with_timeout(
+            &provider,
+            &request,
+            &mut emit,
+            &parent,
+            None,
+            Duration::from_secs(3),
+        )
+        .await;
+
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(settlement.attempts, 0);
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        assert_eq!(
+            settlement.outcome.disposition,
+            OperationDisposition::DeadlineExceeded
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drive_prefers_an_already_ready_completion() {
+        let parent = CancellationToken::new();
+        parent.cancel();
+        let control = Control::new(Deadline::after(Duration::ZERO));
+
+        let result = drive_with_control(async { 42 }, &parent, &control).await;
+
+        assert_eq!(result, 42);
+        assert_eq!(control.stop_reason(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_waits_for_the_owned_future_to_clean_up() {
+        let parent = CancellationToken::new();
+        let control = Control::new(Deadline::after(Duration::from_secs(5)));
+        let cleaned = AtomicBool::new(false);
+        let run = async {
+            control.cancellation_token().cancelled().await;
+            cleaned.store(true, Ordering::SeqCst);
+        };
+
+        let drive = drive_with_control(run, &parent, &control);
+        tokio::pin!(drive);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        drive.await;
+
+        assert!(cleaned.load(Ordering::SeqCst));
+        assert_eq!(control.stop_reason(), Some(OperationStopReason::Deadline));
+    }
+
+    #[tokio::test]
+    async fn parent_cancellation_keeps_its_typed_reason_and_waits_for_cleanup() {
+        let parent = CancellationToken::new();
+        let control = Control::new(Deadline::unlimited());
+        let cleaned = AtomicBool::new(false);
+        let run = async {
+            control.cancellation_token().cancelled().await;
+            cleaned.store(true, Ordering::SeqCst);
+        };
+        parent.cancel();
+
+        drive_with_control(run, &parent, &control).await;
+
+        assert!(cleaned.load(Ordering::SeqCst));
+        assert_eq!(
+            control.stop_reason(),
+            Some(OperationStopReason::UserCancellation)
+        );
+    }
 
     fn shared(root: &Path) -> Arc<Shared> {
         Arc::new(Shared {
@@ -2065,17 +2390,14 @@ mod tests {
             &self,
             _request: &Request,
             _emit: StreamSink<'_>,
-            _cancel: &CancellationToken,
-        ) -> Result<Response, ProviderError> {
+            _control: &dyn OperationControl,
+        ) -> ProviderSettlement {
             unreachable!("close-ordering test never sends a turn")
         }
     }
 
-    /// Regression test for the close-ordering rule in the doc comments on
-    /// [`Runner::close`] and [`Runner::close_mcp`]: `Servers::close` uses
-    /// `mem::take`, so calling `close_mcp` (awaited) before `close`
-    /// (backgrounded) is what makes the awaited call the one that actually
-    /// closes the client, instead of racing `close`'s spawned task.
+    /// Regression test that the awaited process-exit path observes the same
+    /// shared completion as [`Runner::close`]'s background path.
     #[tokio::test]
     async fn close_mcp_before_close_actually_waits_for_the_real_close() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -2106,9 +2428,8 @@ mod tests {
             "close_mcp did not wait for the real close"
         );
 
-        // `close`'s background spawn now finds `Servers` already emptied by
-        // `mem::take`; it must be a harmless no-op, not a panic or a
-        // double-close.
+        // `close` now observes the already-completed shared cleanup. It must
+        // remain a harmless no-op, not panic or double-close.
         runner.close();
     }
 
@@ -2191,8 +2512,8 @@ mod tests {
             &self,
             _request: &Request,
             _emit: StreamSink<'_>,
-            _cancel: &CancellationToken,
-        ) -> Result<Response, ProviderError> {
+            _control: &dyn OperationControl,
+        ) -> ProviderSettlement {
             unreachable!("migrate never sends a parent turn")
         }
     }

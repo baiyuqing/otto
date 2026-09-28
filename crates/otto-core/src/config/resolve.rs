@@ -16,6 +16,7 @@ use super::{
 };
 
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_OUTPUT_BYTES: i64 = 51200;
 const DEFAULT_COMPACTION_RESERVE: i64 = 16_384;
 const DEFAULT_COMPACTION_KEEP: i64 = 20_000;
@@ -55,6 +56,34 @@ pub struct CompactionRuntime {
     pub keep_recent_tokens: i64,
 }
 
+/// Resolved cooperative deadlines for agent-owned operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeadlineRuntime {
+    pub turn_timeout: Option<Duration>,
+    pub provider_timeout: Option<Duration>,
+    pub cancellation_grace: Duration,
+    pub subagent_timeout: Option<Duration>,
+    pub workflow_step_timeout: Option<Duration>,
+}
+
+impl Default for DeadlineRuntime {
+    fn default() -> Self {
+        Self {
+            turn_timeout: None,
+            provider_timeout: None,
+            cancellation_grace: DEFAULT_CANCELLATION_GRACE,
+            subagent_timeout: None,
+            workflow_step_timeout: None,
+        }
+    }
+}
+
+/// Resolved deadline configuration for one process run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResilienceRuntime {
+    pub deadlines: DeadlineRuntime,
+}
+
 /// The fully resolved configuration for one process run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Runtime {
@@ -70,6 +99,7 @@ pub struct Runtime {
     pub shell_timeout: Duration,
     pub max_output_bytes: i64,
     pub compaction: CompactionRuntime,
+    pub resilience: ResilienceRuntime,
 }
 
 fn env_value(env: &HashMap<String, String>, key: &str) -> String {
@@ -198,6 +228,7 @@ pub fn resolve(
     }
 
     let compaction = resolve_compaction(&file.agent.compaction, &profile_config, &model)?;
+    let resilience = resolve_resilience(&file.agent)?;
 
     let mut api_key = String::new();
     if provider == super::PROVIDER_OPENAI_COMPATIBLE {
@@ -215,7 +246,44 @@ pub fn resolve(
         shell_timeout,
         max_output_bytes,
         compaction,
+        resilience,
     })
+}
+
+fn resolve_resilience(agent: &super::Agent) -> Result<ResilienceRuntime, ConfigError> {
+    let deadlines = DeadlineRuntime {
+        turn_timeout: optional_positive_duration("turn_timeout", &agent.turn_timeout)?,
+        provider_timeout: optional_positive_duration("provider_timeout", &agent.provider_timeout)?,
+        cancellation_grace: optional_positive_duration(
+            "cancellation_grace",
+            &agent.cancellation_grace,
+        )?
+        .unwrap_or(DEFAULT_CANCELLATION_GRACE),
+        subagent_timeout: optional_positive_duration("subagent_timeout", &agent.subagent_timeout)?,
+        workflow_step_timeout: optional_positive_duration(
+            "workflow_step_timeout",
+            &agent.workflow_step_timeout,
+        )?,
+    };
+
+    Ok(ResilienceRuntime { deadlines })
+}
+
+fn optional_positive_duration(
+    field: &str,
+    configured: &Option<String>,
+) -> Result<Option<Duration>, ConfigError> {
+    let Some(value) = configured else {
+        return Ok(None);
+    };
+    let nanos = parse_go_duration(value)
+        .map_err(|err| ConfigError::new(format!("invalid {field}: {err}")))?;
+    if nanos <= 0 {
+        return Err(ConfigError::new(format!(
+            "invalid {field}: must be greater than zero"
+        )));
+    }
+    Ok(Some(Duration::from_nanos(nanos as u64)))
 }
 
 fn validate_thinking(thinking: &str) -> Result<(), ConfigError> {
@@ -846,6 +914,106 @@ mod tests {
         )
         .expect("resolve");
         assert_eq!(runtime.api_key, "fallback-secret");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn resolves_deadline_defaults_and_explicit_values() {
+        let file = file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
+        let runtime = resolve(
+            &file,
+            &HashMap::new(),
+            &SessionDefaults::default(),
+            &Overrides {
+                profile: "sub".into(),
+                ..Default::default()
+            },
+        )
+        .expect("resolve defaults");
+        assert_eq!(runtime.resilience, ResilienceRuntime::default());
+
+        let mut file = file;
+        file.agent.turn_timeout = Some("1m".into());
+        file.agent.provider_timeout = Some("10s".into());
+        file.agent.cancellation_grace = Some("750ms".into());
+        file.agent.subagent_timeout = Some("2h".into());
+        file.agent.workflow_step_timeout = Some("3h".into());
+        let runtime = resolve(
+            &file,
+            &HashMap::new(),
+            &SessionDefaults::default(),
+            &Overrides {
+                profile: "sub".into(),
+                ..Default::default()
+            },
+        )
+        .expect("resolve explicit values");
+        assert_eq!(
+            runtime.resilience.deadlines,
+            DeadlineRuntime {
+                turn_timeout: Some(Duration::from_secs(60)),
+                provider_timeout: Some(Duration::from_secs(10)),
+                cancellation_grace: Duration::from_millis(750),
+                subagent_timeout: Some(Duration::from_secs(2 * 60 * 60)),
+                workflow_step_timeout: Some(Duration::from_secs(3 * 60 * 60)),
+            }
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn deadline_defaults_match_the_public_contract() {
+        assert_eq!(
+            ResilienceRuntime::default(),
+            ResilienceRuntime {
+                deadlines: DeadlineRuntime {
+                    turn_timeout: None,
+                    provider_timeout: None,
+                    cancellation_grace: Duration::from_secs(5),
+                    subagent_timeout: None,
+                    workflow_step_timeout: None,
+                },
+            }
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn rejects_invalid_deadline_durations() {
+        let fields = [
+            "turn_timeout",
+            "provider_timeout",
+            "cancellation_grace",
+            "subagent_timeout",
+            "workflow_step_timeout",
+        ];
+        for field in fields {
+            for value in ["", "0s", "-1ns", "9223372036854775808ns"] {
+                let mut file =
+                    file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
+                match field {
+                    "turn_timeout" => file.agent.turn_timeout = Some(value.into()),
+                    "provider_timeout" => file.agent.provider_timeout = Some(value.into()),
+                    "cancellation_grace" => file.agent.cancellation_grace = Some(value.into()),
+                    "subagent_timeout" => file.agent.subagent_timeout = Some(value.into()),
+                    "workflow_step_timeout" => {
+                        file.agent.workflow_step_timeout = Some(value.into());
+                    }
+                    _ => unreachable!(),
+                }
+                let err = resolve(
+                    &file,
+                    &HashMap::new(),
+                    &SessionDefaults::default(),
+                    &Overrides {
+                        profile: "sub".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+                assert!(err.to_string().contains(field), "{field}={value:?}: {err}");
+            }
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

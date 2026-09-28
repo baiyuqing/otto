@@ -120,7 +120,7 @@ fn wire(task: &crate::subagent::tasks::Task) -> Task {
             SubagentStatus::Running => TaskStatus::Running,
             SubagentStatus::Succeeded => TaskStatus::Succeeded,
             SubagentStatus::Failed => TaskStatus::Failed,
-            SubagentStatus::Canceled => TaskStatus::Canceled,
+            SubagentStatus::Canceled | SubagentStatus::Interrupted => TaskStatus::Canceled,
         },
         created_at: task.created_at.unwrap_or_default(),
         started_at: task.started_at,

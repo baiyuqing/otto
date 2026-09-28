@@ -20,6 +20,7 @@
 //! failure the agent does not own.
 
 use crate::model::{BlockType, Message, Role, ToolDefinition, Usage};
+use crate::operation::OperationControl;
 use crate::provider::{Provider, Request};
 use crate::session::{CompactionCheckpoint, CompactionDetails, CompactionMetadata, Session};
 use crate::tool::ToolExecutor;
@@ -54,8 +55,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<CompactionResult, AgentError> {
+        self.compact_with_control(focus, emit, cancel).await
+    }
+
+    /// Creates a manual checkpoint under operation-wide control.
+    pub async fn compact_with_control(
+        &self,
+        focus: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<CompactionResult, AgentError> {
         match self
-            .compact_locked(CompactionReason::Manual, focus, emit, cancel)
+            .compact_locked(CompactionReason::Manual, focus, emit, control)
             .await
         {
             Ok(result) => Ok(result),
@@ -83,7 +94,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         reason: CompactionReason,
         focus: &str,
         emit: EventSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<CompactionResult, AgentError> {
         let automatic = reason != CompactionReason::Manual;
         emit(Event::CompactionStarted {
@@ -93,7 +104,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 ..CompactionResult::default()
             },
         });
-        cancelled(cancel)?;
+        stopped(control)?;
         if !self.redactor.allows_dynamic_content() {
             return Err(AgentError::NothingToCompact);
         }
@@ -177,7 +188,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 first_maximum_bytes,
                 structured,
                 emit,
-                cancel,
+                control,
             )
             .await?;
         let mut final_summary = generated.clone();
@@ -196,7 +207,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     TURN_SUMMARY_MAXIMUM_BYTES,
                     false,
                     emit,
-                    cancel,
+                    control,
                 )
                 .await?;
             final_summary =
@@ -239,7 +250,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         };
 
         // The last cancellable point before the session's durable append.
-        cancelled(cancel)?;
+        stopped(control)?;
         let metadata = self
             .session
             .append_compaction(checkpoint)
@@ -255,7 +266,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         // A cancellation seen after the commit keeps the committed result and
         // its event, but still stops an automatic caller before it acts again.
-        cancelled(cancel)?;
+        stopped(control)?;
         Ok(result)
     }
 
@@ -352,13 +363,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         maximum_bytes: usize,
         structured: bool,
         emit: EventSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<(String, Usage, bool), AgentError> {
-        cancelled(cancel)?;
-        let child = cancel.child_token();
+        stopped(control)?;
+        let child = control.cancellation_token().child_token();
+        let summary_control = SummaryControl {
+            token: child.clone(),
+            parent: control,
+        };
         let streamed_bytes = AtomicUsize::new(0);
         let invalid_stream = AtomicBool::new(false);
 
+        let operation_id = (self.options.new_operation_id)()
+            .map_err(|message| AgentError::OperationIdentity { message })?;
         let started = (self.options.now)();
         let outcome = {
             let mut on_stream = |event: crate::provider::StreamEvent| {
@@ -377,23 +394,27 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             };
             self.provider
-                .complete(request, &mut on_stream, &child)
+                .complete(request, &mut on_stream, &summary_control)
                 .await
         };
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, duration, outcome.as_ref().err(), &child);
+        self.emit_provider_api_call(emit, operation_id, duration, &outcome);
 
-        cancelled(cancel)?;
+        stopped(control)?;
         if invalid_stream.load(Ordering::SeqCst) {
             return Err(AgentError::InvalidCompactionSummary(
                 "streamed response exceeded its bound or attempted a tool call".into(),
             ));
         }
-        let response = outcome.map_err(|error| AgentError::CompactionBoundary {
-            message: "compaction summary provider request failed".into(),
-            cause: error.to_string(),
+        let response = outcome.result.map_err(|error| match error {
+            crate::provider::ProviderError::Cancelled
+            | crate::provider::ProviderError::DeadlineExceeded => AgentError::Provider(error),
+            _ => AgentError::CompactionBoundary {
+                message: "compaction summary provider request failed".into(),
+                cause: error.to_string(),
+            },
         })?;
 
         let message = response.message;
@@ -528,13 +549,30 @@ pub fn estimate_compacted_context(
     estimate_request(&request, Some(&CompactionMetadata::default()))
 }
 
-fn cancelled(cancel: &CancellationToken) -> Result<(), AgentError> {
-    if cancel.is_cancelled() {
-        return Err(AgentError::Provider(
-            crate::provider::ProviderError::Cancelled,
-        ));
+fn stopped(control: &dyn OperationControl) -> Result<(), AgentError> {
+    if let Some(error) = super::stopped_provider_error(control) {
+        return Err(AgentError::Provider(error));
     }
     Ok(())
+}
+
+struct SummaryControl<'a> {
+    token: CancellationToken,
+    parent: &'a dyn OperationControl,
+}
+
+impl OperationControl for SummaryControl<'_> {
+    fn cancellation_token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    fn remaining(&self) -> Option<std::time::Duration> {
+        self.parent.remaining()
+    }
+
+    fn stop_reason(&self) -> Option<crate::model::OperationStopReason> {
+        self.parent.stop_reason()
+    }
 }
 
 #[cfg(test)]

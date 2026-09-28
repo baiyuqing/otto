@@ -541,29 +541,27 @@ impl Store {
         let limit = i64::from(query.limit.unwrap_or(100).clamp(1, 500));
         let connection = self.connection.lock().map_err(|_| Error)?;
 
-        let live_statuses = ["queued", "running", "interrupted"];
-        let wants_live_only = query
-            .status
-            .as_deref()
-            .is_some_and(|status| live_statuses.contains(&status));
-        let wants_final_only = query
-            .status
-            .as_deref()
-            .is_some_and(|status| matches!(status, "succeeded" | "failed" | "canceled"));
+        let wanted_status = query.status.as_deref();
+        let wants_dynamic = wanted_status.is_none()
+            || matches!(wanted_status, Some("queued" | "running" | "interrupted"));
+        let wants_final = wanted_status.is_none()
+            || matches!(
+                wanted_status,
+                Some("succeeded" | "failed" | "canceled" | "interrupted")
+            );
 
         let mut candidates = Vec::new();
-        if !wants_live_only {
-            let final_status = query
-                .status
-                .as_deref()
-                .filter(|status| matches!(*status, "succeeded" | "failed" | "canceled"));
+        if wants_final {
+            let final_status = wanted_status.filter(|status| {
+                matches!(*status, "succeeded" | "failed" | "canceled" | "interrupted")
+            });
             // limit + 1: enough to tell whether a further, older final row
             // exists without fetching every final row ever recorded.
             candidates.extend(Self::query_rows(
                 &connection,
                 &format!(
                     "SELECT {COLUMNS} FROM tasks
-                     WHERE status IN ('succeeded','failed','canceled')
+                     WHERE status IN ('succeeded','failed','canceled','interrupted')
                      AND (?1 IS NULL OR workspace = ?1)
                      AND (?2 IS NULL OR created_at < ?2)
                      AND (?3 IS NULL OR status = ?3)
@@ -572,7 +570,7 @@ impl Store {
                 params![query.workspace, query.before, final_status, limit + 1],
             )?);
         }
-        if !wants_final_only {
+        if wants_dynamic {
             // ponytail: every queued/running row is rescanned on each call,
             // because liveness is computed on read and tasks.db is never
             // pruned (see spec, "Out of scope: pruning"). Fine for local,
@@ -590,7 +588,7 @@ impl Store {
                 params![query.workspace, query.before],
             )?;
             for row in live_rows {
-                let matches = match query.status.as_deref() {
+                let matches = match wanted_status {
                     None => true,
                     Some(wanted) => wanted == row.displayed_status(),
                 };
@@ -820,6 +818,66 @@ mod tests {
         store.upsert(&context(), &finished); // context()'s pid cannot exist
         let row = store.get("s1", "t1").expect("get").expect("row exists");
         assert_eq!(row.status, "succeeded");
+    }
+
+    #[test]
+    fn interrupted_filter_merges_final_and_owner_lost_rows_across_pages() {
+        let store = Store::open_in_memory().expect("store");
+        for (id, created, status) in [
+            ("t1", "2026-09-25T10:00:00Z", TaskStatus::Interrupted),
+            ("t2", "2026-09-25T10:01:00Z", TaskStatus::Running),
+            ("t3", "2026-09-25T10:02:00Z", TaskStatus::Interrupted),
+        ] {
+            store.upsert(
+                &context(),
+                &Task {
+                    id: id.into(),
+                    status,
+                    created_at: DateTime::parse_from_rfc3339(created)
+                        .ok()
+                        .map(|v| v.with_timezone(&Utc)),
+                    ..Task::default()
+                },
+            );
+        }
+        let first = store
+            .list(&ListQuery {
+                status: Some("interrupted".into()),
+                limit: Some(2),
+                ..ListQuery::default()
+            })
+            .expect("first");
+        assert_eq!(
+            first
+                .tasks
+                .iter()
+                .map(|v| v.task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["t3", "t2"]
+        );
+        let second = store
+            .list(&ListQuery {
+                status: Some("interrupted".into()),
+                before: Some(first.next_before),
+                limit: Some(2),
+                ..ListQuery::default()
+            })
+            .expect("second");
+        assert_eq!(
+            second
+                .tasks
+                .iter()
+                .map(|v| v.task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["t1"]
+        );
+        assert!(
+            first
+                .tasks
+                .iter()
+                .chain(&second.tasks)
+                .all(|v| v.status == "interrupted")
+        );
     }
 
     #[test]

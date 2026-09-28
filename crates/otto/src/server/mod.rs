@@ -1943,8 +1943,9 @@ mod tests {
             &self,
             request: &ProviderRequest,
             emit: StreamSink<'_>,
-            cancel: &CancellationToken,
-        ) -> Result<ProviderResponse, ProviderError> {
+            control: &dyn otto_core::operation::OperationControl,
+        ) -> otto_core::provider::ProviderSettlement {
+            let cancel = control.cancellation_token();
             let call = {
                 let mut roles = self
                     .roles
@@ -1984,24 +1985,45 @@ mod tests {
             if let Some(gate) = &self.script.gate {
                 tokio::select! {
                     () = gate.cancelled() => {}
-                    () = cancel.cancelled() => return Err(ProviderError::Cancelled),
+                    () = cancel.cancelled() => {
+                        let reason = control.stop_reason().unwrap_or(
+                            otto_core::model::OperationStopReason::UserCancellation,
+                        );
+                        return otto_core::provider::ProviderSettlement::stopped(
+                            if reason == otto_core::model::OperationStopReason::Deadline {
+                                ProviderError::DeadlineExceeded
+                            } else {
+                                ProviderError::Cancelled
+                            },
+                            0,
+                            otto_core::model::EffectCertainty::NotStarted,
+                            reason,
+                        );
+                    },
                 }
             }
             if let Some(message) = &self.script.error {
-                return Err(ProviderError::Other(message.clone()));
+                return otto_core::provider::ProviderSettlement::failed(
+                    ProviderError::Other(message.clone()),
+                    0,
+                    otto_core::model::EffectCertainty::Completed,
+                );
             }
-            Ok(ProviderResponse {
-                message: Message {
-                    role: Role::Assistant,
-                    blocks: vec![Block {
-                        block_type: BlockType::Text,
-                        text: deltas.concat(),
-                        ..Block::default()
-                    }],
-                    usage: self.script.usage,
-                    ..Message::default()
+            otto_core::provider::ProviderSettlement::succeeded(
+                ProviderResponse {
+                    message: Message {
+                        role: Role::Assistant,
+                        blocks: vec![Block {
+                            block_type: BlockType::Text,
+                            text: deltas.concat(),
+                            ..Block::default()
+                        }],
+                        usage: self.script.usage,
+                        ..Message::default()
+                    },
                 },
-            })
+                0,
+            )
         }
     }
 
@@ -3791,7 +3813,7 @@ mod tests {
         async fn execute(
             &self,
             attempt: crate::workflow::Attempt,
-            _cancel: &CancellationToken,
+            _control: &crate::deadline::Control,
         ) -> Result<String, String> {
             Ok(format!("{} done", attempt.step_id))
         }

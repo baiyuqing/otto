@@ -1447,8 +1447,8 @@ mod tests {
                 &self,
                 request: &ProviderRequest,
                 emit: StreamSink<'_>,
-                _cancel: &CancellationToken,
-            ) -> Result<ProviderResponse, ProviderError> {
+                _control: &dyn otto_core::operation::OperationControl,
+            ) -> otto_core::provider::ProviderSettlement {
                 let call = {
                     let mut roles = self.roles.lock().expect("roles");
                     roles.push(
@@ -1461,20 +1461,32 @@ mod tests {
                     roles.len()
                 };
                 self.calls.send_modify(|seen| *seen = call);
-                let text = (self.reply)(call).map_err(ProviderError::Other)?;
+                let text = match (self.reply)(call) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        return otto_core::provider::ProviderSettlement::failed(
+                            ProviderError::Other(error),
+                            0,
+                            otto_core::model::EffectCertainty::NotStarted,
+                        );
+                    }
+                };
                 emit(StreamEvent::TextDelta { text: text.clone() });
-                Ok(ProviderResponse {
-                    message: Message {
-                        role: Role::Assistant,
-                        finish_reason: Some(FinishReason::Stop),
-                        blocks: vec![Block {
-                            block_type: BlockType::Text,
-                            text,
-                            ..Block::default()
-                        }],
-                        ..Message::default()
+                otto_core::provider::ProviderSettlement::succeeded(
+                    ProviderResponse {
+                        message: Message {
+                            role: Role::Assistant,
+                            finish_reason: Some(FinishReason::Stop),
+                            blocks: vec![Block {
+                                block_type: BlockType::Text,
+                                text,
+                                ..Block::default()
+                            }],
+                            ..Message::default()
+                        },
                     },
-                })
+                    0,
+                )
             }
         }
 

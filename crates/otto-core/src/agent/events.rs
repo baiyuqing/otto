@@ -159,16 +159,20 @@ pub enum Event {
     /// The provider will retry a failed attempt after `delay`; see
     /// [`crate::provider::StreamEvent::Retry`].
     ProviderRetry {
+        operation_id: OperationId,
         attempt: u32,
         max_attempts: u32,
         delay: std::time::Duration,
         reason: String,
     },
     ProviderApiCall {
+        operation_id: OperationId,
         provider: String,
         model: String,
         duration: std::time::Duration,
+        attempts: u32,
         status: ApiStatus,
+        outcome: OperationOutcome,
     },
     CompactionStarted {
         compaction: CompactionResult,
@@ -383,10 +387,17 @@ mod tests {
             }
             .name(),
             Event::ProviderApiCall {
+                operation_id: OperationId::new("provider_op").expect("operation id"),
                 provider: String::new(),
                 model: String::new(),
                 duration: std::time::Duration::ZERO,
+                attempts: 1,
                 status: ApiStatus::Ok,
+                outcome: OperationOutcome {
+                    disposition: crate::model::OperationDisposition::Succeeded,
+                    effect_certainty: crate::model::EffectCertainty::Completed,
+                    stop_reason: None,
+                },
             }
             .name(),
             Event::CompactionStarted {

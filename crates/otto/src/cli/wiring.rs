@@ -493,6 +493,7 @@ impl Builder {
                 },
                 new_operation_id: Arc::new(super::runtime_builder::new_operation_id),
                 provider_timeout: runtime.resilience.deadlines.provider_timeout,
+                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
                 task_timeout: runtime.resilience.deadlines.subagent_timeout,
                 ..OptionsTemplate::default()
             },
@@ -1758,6 +1759,7 @@ mod tests {
                 "test-key",
             )),
             timeout: runtime.resilience.deadlines.provider_timeout,
+            cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
         };
         let catalogs = CatalogWiring {
             skills: skill::Catalog::default(),

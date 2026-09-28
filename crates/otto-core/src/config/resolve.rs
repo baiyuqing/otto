@@ -17,10 +17,6 @@ use super::{
 
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
-const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 3;
-const DEFAULT_RETRY_BASE_BACKOFF: Duration = Duration::from_millis(250);
-const DEFAULT_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(500);
-const DEFAULT_RETRY_AFTER_CAP: Duration = Duration::from_secs(60);
 const DEFAULT_MAX_OUTPUT_BYTES: i64 = 51200;
 const DEFAULT_COMPACTION_RESERVE: i64 = 16_384;
 const DEFAULT_COMPACTION_KEEP: i64 = 20_000;
@@ -82,31 +78,10 @@ impl Default for DeadlineRuntime {
     }
 }
 
-/// Resolved retry attempt and delay bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RetryRuntime {
-    pub max_attempts: u32,
-    pub base_backoff: Duration,
-    pub max_backoff: Duration,
-    pub retry_after_cap: Duration,
-}
-
-impl Default for RetryRuntime {
-    fn default() -> Self {
-        Self {
-            max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
-            base_backoff: DEFAULT_RETRY_BASE_BACKOFF,
-            max_backoff: DEFAULT_RETRY_MAX_BACKOFF,
-            retry_after_cap: DEFAULT_RETRY_AFTER_CAP,
-        }
-    }
-}
-
-/// Resolved deadline and retry configuration for one process run.
+/// Resolved deadline configuration for one process run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResilienceRuntime {
     pub deadlines: DeadlineRuntime,
-    pub retry: RetryRuntime,
 }
 
 /// The fully resolved configuration for one process run.
@@ -291,37 +266,7 @@ fn resolve_resilience(agent: &super::Agent) -> Result<ResilienceRuntime, ConfigE
         )?,
     };
 
-    let max_attempts = match agent.retry.max_attempts {
-        Some(value @ 1..=100) => value as u32,
-        Some(_) => {
-            return Err(ConfigError::new(
-                "invalid max_attempts: must be between 1 and 100",
-            ));
-        }
-        None => DEFAULT_RETRY_MAX_ATTEMPTS,
-    };
-    let base_backoff = optional_positive_duration("base_backoff", &agent.retry.base_backoff)?
-        .unwrap_or(DEFAULT_RETRY_BASE_BACKOFF);
-    let max_backoff = optional_positive_duration("max_backoff", &agent.retry.max_backoff)?
-        .unwrap_or(DEFAULT_RETRY_MAX_BACKOFF);
-    if base_backoff > max_backoff {
-        return Err(ConfigError::new(
-            "invalid base_backoff: must not exceed max_backoff",
-        ));
-    }
-    let retry_after_cap =
-        optional_positive_duration("retry_after_cap", &agent.retry.retry_after_cap)?
-            .unwrap_or(DEFAULT_RETRY_AFTER_CAP);
-
-    Ok(ResilienceRuntime {
-        deadlines,
-        retry: RetryRuntime {
-            max_attempts,
-            base_backoff,
-            max_backoff,
-            retry_after_cap,
-        },
-    })
+    Ok(ResilienceRuntime { deadlines })
 }
 
 fn optional_positive_duration(
@@ -973,7 +918,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn resolves_resilience_defaults_and_explicit_values() {
+    fn resolves_deadline_defaults_and_explicit_values() {
         let file = file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
         let runtime = resolve(
             &file,
@@ -993,10 +938,6 @@ mod tests {
         file.agent.cancellation_grace = Some("750ms".into());
         file.agent.subagent_timeout = Some("2h".into());
         file.agent.workflow_step_timeout = Some("3h".into());
-        file.agent.retry.max_attempts = Some(100);
-        file.agent.retry.base_backoff = Some("1s".into());
-        file.agent.retry.max_backoff = Some("2s".into());
-        file.agent.retry.retry_after_cap = Some("30s".into());
         let runtime = resolve(
             &file,
             &HashMap::new(),
@@ -1017,20 +958,11 @@ mod tests {
                 workflow_step_timeout: Some(Duration::from_secs(3 * 60 * 60)),
             }
         );
-        assert_eq!(
-            runtime.resilience.retry,
-            RetryRuntime {
-                max_attempts: 100,
-                base_backoff: Duration::from_secs(1),
-                max_backoff: Duration::from_secs(2),
-                retry_after_cap: Duration::from_secs(30),
-            }
-        );
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn resilience_defaults_match_the_public_contract() {
+    fn deadline_defaults_match_the_public_contract() {
         assert_eq!(
             ResilienceRuntime::default(),
             ResilienceRuntime {
@@ -1041,28 +973,19 @@ mod tests {
                     subagent_timeout: None,
                     workflow_step_timeout: None,
                 },
-                retry: RetryRuntime {
-                    max_attempts: 3,
-                    base_backoff: Duration::from_millis(250),
-                    max_backoff: Duration::from_millis(500),
-                    retry_after_cap: Duration::from_secs(60),
-                },
             }
         );
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn rejects_invalid_resilience_durations() {
+    fn rejects_invalid_deadline_durations() {
         let fields = [
             "turn_timeout",
             "provider_timeout",
             "cancellation_grace",
             "subagent_timeout",
             "workflow_step_timeout",
-            "base_backoff",
-            "max_backoff",
-            "retry_after_cap",
         ];
         for field in fields {
             for value in ["", "0s", "-1ns", "9223372036854775808ns"] {
@@ -1076,9 +999,6 @@ mod tests {
                     "workflow_step_timeout" => {
                         file.agent.workflow_step_timeout = Some(value.into());
                     }
-                    "base_backoff" => file.agent.retry.base_backoff = Some(value.into()),
-                    "max_backoff" => file.agent.retry.max_backoff = Some(value.into()),
-                    "retry_after_cap" => file.agent.retry.retry_after_cap = Some(value.into()),
                     _ => unreachable!(),
                 }
                 let err = resolve(
@@ -1094,44 +1014,6 @@ mod tests {
                 assert!(err.to_string().contains(field), "{field}={value:?}: {err}");
             }
         }
-    }
-
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn rejects_invalid_retry_bounds() {
-        for attempts in [i64::MIN, -1, 0, 101, i64::MAX] {
-            let mut file =
-                file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
-            file.agent.retry.max_attempts = Some(attempts);
-            let err = resolve(
-                &file,
-                &HashMap::new(),
-                &SessionDefaults::default(),
-                &Overrides {
-                    profile: "sub".into(),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err();
-            assert!(
-                err.to_string().contains("max_attempts"),
-                "{attempts}: {err}"
-            );
-        }
-
-        let mut file = file_with_profiles("", &[("sub", profile("chatgpt", "test-model", "", ""))]);
-        file.agent.retry.base_backoff = Some("501ms".into());
-        let err = resolve(
-            &file,
-            &HashMap::new(),
-            &SessionDefaults::default(),
-            &Overrides {
-                profile: "sub".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("base_backoff"), "{err}");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

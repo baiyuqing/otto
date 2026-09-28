@@ -42,8 +42,8 @@ pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
 pub use model_limits::ModelLimits;
 pub use projects::{Project, TrustLevel};
 pub use resolve::{
-    CompactionRuntime, DeadlineRuntime, Overrides, ResilienceRuntime, RetryRuntime, Runtime,
-    SessionDefaults, resolve,
+    CompactionRuntime, DeadlineRuntime, Overrides, ResilienceRuntime, Runtime, SessionDefaults,
+    resolve,
 };
 pub use sandbox::{SandboxDriverMode, SandboxNetworkMode, SandboxSettings, resolve_sandbox};
 pub use sandbox_setup::update_sandbox;
@@ -152,20 +152,7 @@ pub struct Agent {
     pub subagent_timeout: Option<String>,
     pub workflow_step_timeout: Option<String>,
     #[serde(default)]
-    pub retry: RetryConfig,
-    #[serde(default)]
     pub compaction: CompactionConfig,
-}
-
-/// The `[agent.retry]` table. Optional fields preserve the distinction between
-/// an absent value and an explicitly invalid empty or non-positive value.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RetryConfig {
-    pub max_attempts: Option<i64>,
-    pub base_backoff: Option<String>,
-    pub max_backoff: Option<String>,
-    pub retry_after_cap: Option<String>,
 }
 
 /// The `[agent.compaction]` table. Every field is optional so absent and
@@ -297,14 +284,13 @@ api_key_env = "TEST_KEY"
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn resilience_preserves_absent_and_explicit_values() {
+    fn deadlines_preserve_absent_and_explicit_values() {
         let empty = parse("").expect("parse");
         assert_eq!(empty.agent.turn_timeout, None);
         assert_eq!(empty.agent.provider_timeout, None);
         assert_eq!(empty.agent.cancellation_grace, None);
         assert_eq!(empty.agent.subagent_timeout, None);
         assert_eq!(empty.agent.workflow_step_timeout, None);
-        assert_eq!(empty.agent.retry, RetryConfig::default());
 
         let file = parse(
             r#"[agent]
@@ -313,12 +299,6 @@ provider_timeout = "0s"
 cancellation_grace = "-1s"
 subagent_timeout = "2m"
 workflow_step_timeout = "3h"
-
-[agent.retry]
-max_attempts = 0
-base_backoff = ""
-max_backoff = "1s"
-retry_after_cap = "2s"
 "#,
         )
         .expect("parse");
@@ -327,15 +307,14 @@ retry_after_cap = "2s"
         assert_eq!(file.agent.cancellation_grace.as_deref(), Some("-1s"));
         assert_eq!(file.agent.subagent_timeout.as_deref(), Some("2m"));
         assert_eq!(file.agent.workflow_step_timeout.as_deref(), Some("3h"));
-        assert_eq!(file.agent.retry.max_attempts, Some(0));
-        assert_eq!(file.agent.retry.base_backoff.as_deref(), Some(""));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn resilience_rejects_unknown_retry_fields() {
-        let err = parse("[agent.retry]\nunknown = true\n").unwrap_err();
-        assert!(err.to_string().contains("unknown"), "{err}");
+    fn rejects_removed_agent_retry_table() {
+        let err = parse("[agent.retry]\nmax_attempts = 3\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+        assert!(err.to_string().contains("retry"), "{err}");
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

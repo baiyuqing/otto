@@ -119,11 +119,24 @@ impl Client {
         let mut request = std::pin::pin!(request);
         let deadline = tokio::time::sleep(self.call_timeout);
         let mut deadline = std::pin::pin!(deadline);
+        let mut request_released = false;
         let mut caller_cancelled = tokio::select! {
-            // A response that is already available is authoritative even when
-            // cancellation or the deadline becomes ready in the same poll.
+            // A successful/RPC response that is already available is
+            // authoritative. For stdio, however, transport-level Cancelled
+            // racing caller cancellation only releases the local waiter; it
+            // must still enter the shared-server grace path below.
             biased;
-            outcome = &mut request => return outcome,
+            outcome = &mut request => {
+                if matches!(&outcome, Err(CallError::Cancelled))
+                    && cancel.is_cancelled()
+                    && self.transport.timeout_stops_server()
+                {
+                    request_released = true;
+                    true
+                } else {
+                    return outcome;
+                }
+            },
             () = cancel.cancelled() => true,
             () = &mut deadline => false,
         };
@@ -134,20 +147,29 @@ impl Client {
         tokio::select! {
             // Verified completion wins if completion and grace are both ready.
             biased;
-            outcome = &mut request => {
+            outcome = &mut request, if !request_released => {
                 match outcome {
-                    // Transport-level cancellation only proves that the local
-                    // waiter was released, not that the remote effect stopped.
-                    // Keep the full grace before applying hard cleanup.
-                    Err(CallError::Cancelled) if caller_cancelled => {
-                        return Err(CallError::Cancelled);
+                    // Stdio releasing its local waiter does not prove the
+                    // shared server stopped the remote effect. Keep the grace
+                    // and then stop the stream. HTTP cancellation is scoped to
+                    // this request and can complete immediately.
+                    Err(CallError::Cancelled) if self.transport.timeout_stops_server() => {
+                        if caller_cancelled {
+                            (&mut grace).await;
+                        } else {
+                            tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => caller_cancelled = true,
+                                () = &mut grace => {}
+                            }
+                        }
                     }
                     Err(CallError::Cancelled) => {
-                        tokio::select! {
-                            biased;
-                            () = cancel.cancelled() => caller_cancelled = true,
-                            () = &mut grace => {}
-                        }
+                        return if caller_cancelled || cancel.is_cancelled() {
+                            Err(CallError::Cancelled)
+                        } else {
+                            Err(CallError::Timeout)
+                        };
                     }
                     outcome => return outcome,
                 }
@@ -938,6 +960,87 @@ mod tests {
 
         assert!(matches!(task.await.unwrap(), Err(CallError::Cancelled)));
         assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stdio_waits_for_grace_when_transport_acknowledges_cancellation() {
+        let grace = Duration::from_secs(1);
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let client = Arc::new(
+            Client::connect_with_grace(
+                "test".to_string(),
+                Box::new(CancelledStdioTransport {
+                    cancels: cancels.clone(),
+                    close_calls: close_calls.clone(),
+                }),
+                Duration::from_secs(5),
+                Duration::from_secs(60),
+                grace,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("connect"),
+        );
+        let cancel = CancellationToken::new();
+        let task = {
+            let client = client.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move { client.call("slow", json!({}), &cancel).await })
+        };
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        while cancels.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!task.is_finished(), "stdio cancellation must retain grace");
+
+        assert!(matches!(task.await.unwrap(), Err(CallError::Cancelled)));
+        assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            client
+                .call("later", json!({}), &CancellationToken::new())
+                .await,
+            Err(CallError::Stopping)
+        ));
+    }
+
+    struct CancelledStdioTransport {
+        cancels: Arc<AtomicUsize>,
+        close_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for CancelledStdioTransport {
+        async fn request(
+            &self,
+            outbound: Outbound,
+            cancel: &CancellationToken,
+        ) -> Result<Result<Value, RpcError>, CallError> {
+            match outbound.method.as_str() {
+                "server/discover" => modern_discover_ok(),
+                "tools/list" => Ok(Ok(json!({"tools": []}))),
+                "tools/call" => {
+                    cancel.cancelled().await;
+                    self.cancels.fetch_add(1, Ordering::SeqCst);
+                    Err(CallError::Cancelled)
+                }
+                other => panic!("unexpected method {other}"),
+            }
+        }
+
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+
+        fn timeout_stops_server(&self) -> bool {
+            true
+        }
+
+        async fn close(&self) {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[tokio::test(start_paused = true)]

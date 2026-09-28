@@ -1013,13 +1013,6 @@ impl Store {
                 params![run_id, step_id, attempt, error],
             )
             .map_err(|_| unavailable())?;
-        transaction
-            .execute(
-                "UPDATE workflow_runs SET status = 'paused', updated_at = ?2
-                 WHERE id = ?1 AND status = 'running'",
-                params![run_id, now],
-            )
-            .map_err(|_| unavailable())?;
         event(
             &transaction,
             run_id,
@@ -1027,7 +1020,8 @@ impl Store {
             step_id,
             "interrupted",
         )?;
-        event(&transaction, run_id, "run_paused", "", "paused")?;
+        // Keep the run non-retryable until every parallel owner has settled.
+        settle_run(&transaction, run_id)?;
         transaction.commit().map_err(|_| unavailable())
     }
 
@@ -1153,6 +1147,37 @@ impl Store {
             )
             .map_err(|_| unavailable())?;
         event(&transaction, run_id, "run_paused", "", "paused")?;
+        transaction.commit().map_err(|_| unavailable())
+    }
+
+    pub fn finalize_interrupted_batch(&self, run_id: &str) -> Result<(), String> {
+        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
+        let transaction = connection.transaction().map_err(|_| unavailable())?;
+        let running: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_steps
+                 WHERE run_id = ?1 AND status = 'running'",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| unavailable())?;
+        if running != 0 {
+            return Err("workflow interruption is not ready to finalize".to_string());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE workflow_runs SET status = 'paused', updated_at = ?2
+                 WHERE id = ?1 AND status = 'running'
+                   AND EXISTS (
+                       SELECT 1 FROM workflow_steps
+                       WHERE run_id = ?1 AND status = 'interrupted'
+                   )",
+                params![run_id, timestamp()],
+            )
+            .map_err(|_| unavailable())?;
+        if changed == 1 {
+            event(&transaction, run_id, "run_paused", "", "paused")?;
+        }
         transaction.commit().map_err(|_| unavailable())
     }
 
@@ -1320,6 +1345,16 @@ impl Store {
     pub fn retry(&self, run_id: &str, step_id: &str) -> Result<(), String> {
         let mut connection = self.connection.lock().map_err(|_| unavailable())?;
         let transaction = connection.transaction().map_err(|_| unavailable())?;
+        let run_status: String = transaction
+            .query_row(
+                "SELECT status FROM workflow_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| unavailable())?;
+        if run_status != "paused" {
+            return Err("workflow run is not paused".to_string());
+        }
         let changed = transaction
             .execute(
                 "UPDATE workflow_steps SET status = 'ready', result = '', error = ''
@@ -1538,6 +1573,7 @@ pub trait Executor: Send + Sync {
 struct ActiveRun {
     cancel: CancellationToken,
     done: Arc<Notify>,
+    relaunch_requested: bool,
 }
 
 pub struct Controller {
@@ -1777,7 +1813,8 @@ impl Controller {
                 .active
                 .lock()
                 .map_err(|_| "workflow runtime unavailable".to_string())?;
-            if active.contains_key(&run_id) {
+            if let Some(active) = active.get_mut(&run_id) {
+                active.relaunch_requested = true;
                 return Ok(());
             }
             active.insert(
@@ -1785,6 +1822,7 @@ impl Controller {
                 ActiveRun {
                     cancel: cancel.clone(),
                     done: Arc::clone(&done),
+                    relaunch_requested: false,
                 },
             );
         }
@@ -1793,11 +1831,23 @@ impl Controller {
             if controller.drive(&run_id, &cancel).await.is_err() {
                 let _ = controller.store.pause_run(&run_id);
             }
-            controller
+            let active = controller
                 .active
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .remove(&run_id);
+            let relaunch = !cancel.is_cancelled()
+                && (active.is_some_and(|active| active.relaunch_requested)
+                    || controller.get(&run_id).is_ok_and(|run| {
+                        run.status == RunStatus::Running
+                            && run
+                                .steps
+                                .iter()
+                                .any(|step| step.status == StepStatus::Ready)
+                    }));
+            if relaunch {
+                let _ = controller.launch(run_id.clone());
+            }
             done.notify_one();
         });
         Ok(())
@@ -1902,16 +1952,14 @@ impl Controller {
                         () = deadline.expired() => {
                             timed_out = true;
                             control.stop(otto_core::model::OperationStopReason::Deadline);
+                            // Grace is only an observation window. Keep owning
+                            // the effectful future until it safely settles.
                             match tokio::time::timeout(deadlines.cancellation_grace, &mut execute).await {
                                 Ok(result) => result,
                                 Err(_) => execute.await,
                             }
                         }
                     };
-                    if !parent_cancel.is_cancelled() && deadline.is_expired() {
-                        timed_out = true;
-                        control.stop(otto_core::model::OperationStopReason::Deadline);
-                    }
                     drop(permit);
                     (attempt, result, parent_cancel.is_cancelled(), timed_out)
                 });
@@ -1960,6 +2008,7 @@ impl Controller {
                 }
             }
             if timed_out {
+                self.store.finalize_interrupted_batch(run_id)?;
                 return Ok(());
             }
             if failed {
@@ -3376,6 +3425,117 @@ needs = ["first"]
         let done = controller.wait("run-1").await.expect("wait");
         assert_eq!(done.status, RunStatus::Succeeded);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct BoundaryExecutor(Arc<Notify>);
+
+    #[async_trait::async_trait]
+    impl Executor for BoundaryExecutor {
+        async fn execute(&self, _attempt: Attempt, _control: &Control) -> Result<String, String> {
+            self.0.notify_one();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok("boundary".into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn executor_completion_wins_at_exact_deadline_boundary() {
+        let started = Arc::new(Notify::new());
+        let definition = definition(
+            br#"version = 1
+[[steps]]
+id = "work"
+agent = "worker"
+prompt = "work"
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new_with_deadlines(
+            Arc::new(Store::open_in_memory()),
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(BoundaryExecutor(Arc::clone(&started))),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            1,
+            DeadlinePolicy {
+                step_timeout: Some(Duration::from_secs(1)),
+                cancellation_grace: Duration::from_secs(1),
+            },
+        );
+        let run = controller.start("flow", "").await.expect("start");
+        started.notified().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let done = controller.wait(&run.id).await.expect("wait");
+        assert_eq!(done.status, RunStatus::Succeeded);
+        assert_eq!(done.steps[0].result, "boundary");
+    }
+
+    struct TimeoutBatchExecutor {
+        sibling_started: Arc<Notify>,
+        sibling_release: CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl Executor for TimeoutBatchExecutor {
+        async fn execute(&self, attempt: Attempt, control: &Control) -> Result<String, String> {
+            if attempt.step_id == "timeout" {
+                control.cancellation_token().cancelled().await;
+                return Err("stopped".into());
+            }
+            self.sibling_started.notify_one();
+            self.sibling_release.cancelled().await;
+            Ok("settled".into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_is_not_retryable_before_parallel_siblings_settle() {
+        let sibling_started = Arc::new(Notify::new());
+        let sibling_release = CancellationToken::new();
+        let definition = definition(
+            br#"version = 1
+[[steps]]
+id = "timeout"
+agent = "worker"
+prompt = "timeout"
+[[steps]]
+id = "sibling"
+agent = "worker"
+prompt = "sibling"
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new_with_deadlines(
+            Arc::new(Store::open_in_memory()),
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(TimeoutBatchExecutor {
+                sibling_started: Arc::clone(&sibling_started),
+                sibling_release: sibling_release.clone(),
+            }),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            2,
+            DeadlinePolicy {
+                step_timeout: Some(Duration::from_secs(1)),
+                cancellation_grace: Duration::from_millis(100),
+            },
+        );
+        let run = controller.start("flow", "").await.expect("start");
+        sibling_started.notified().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            controller.get(&run.id).expect("run").status,
+            RunStatus::Running
+        );
+        assert!(controller.resume(&run.id, Some("timeout")).await.is_err());
+        sibling_release.cancel();
+        assert_eq!(
+            controller.wait(&run.id).await.expect("wait").status,
+            RunStatus::Paused
+        );
     }
 
     struct BlockingExecutor {

@@ -71,6 +71,7 @@ struct ChildOwner {
     stderr_task: tokio::task::JoinHandle<()>,
     cancellation_grace: Duration,
     stopping: Arc<AtomicBool>,
+    cleanup_requested: Arc<Notify>,
     done: Arc<AtomicBool>,
     done_notify: Arc<Notify>,
     pid: u32,
@@ -89,9 +90,9 @@ pub struct StdioTransport {
     next_id: AtomicI64,
     stderr_tail: Arc<std::sync::Mutex<String>>,
     stopping: Arc<AtomicBool>,
-    reader_done: Arc<AtomicBool>,
-    reader_done_notify: Arc<Notify>,
-    cancellation_grace: Duration,
+    cleanup_requested: Arc<Notify>,
+    cleanup_done: Arc<AtomicBool>,
+    cleanup_done_notify: Arc<Notify>,
     close: Arc<CloseCompletion>,
 }
 
@@ -149,8 +150,9 @@ impl StdioTransport {
         let dead: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
         let stopping = Arc::new(AtomicBool::new(false));
-        let reader_done = Arc::new(AtomicBool::new(false));
-        let reader_done_notify = Arc::new(Notify::new());
+        let cleanup_requested = Arc::new(Notify::new());
+        let cleanup_done = Arc::new(AtomicBool::new(false));
+        let cleanup_done_notify = Arc::new(Notify::new());
 
         let stderr_task = tokio::spawn(drain_stderr(stderr, stderr_tail.clone()));
         tokio::spawn(stdout_loop(stdout, pending.clone(), stdin.clone(), pid));
@@ -163,8 +165,9 @@ impl StdioTransport {
                 stderr_task,
                 cancellation_grace,
                 stopping: stopping.clone(),
-                done: reader_done.clone(),
-                done_notify: reader_done_notify.clone(),
+                cleanup_requested: cleanup_requested.clone(),
+                done: cleanup_done.clone(),
+                done_notify: cleanup_done_notify.clone(),
                 pid,
                 _fence_registration: fence_registration,
             }
@@ -179,9 +182,9 @@ impl StdioTransport {
             next_id: AtomicI64::new(1),
             stderr_tail,
             stopping,
-            reader_done,
-            reader_done_notify,
-            cancellation_grace,
+            cleanup_requested,
+            cleanup_done,
+            cleanup_done_notify,
             close: Arc::new(CloseCompletion::default()),
         })
     }
@@ -299,24 +302,17 @@ impl Transport for StdioTransport {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let pid = self.pid;
             let stdin = self.stdin.clone();
             let pending = self.pending.clone();
-            let reader_done = self.reader_done.clone();
-            let reader_done_notify = self.reader_done_notify.clone();
-            let cancellation_grace = self.cancellation_grace;
+            let cleanup_requested = self.cleanup_requested.clone();
+            let cleanup_done = self.cleanup_done.clone();
+            let cleanup_done_notify = self.cleanup_done_notify.clone();
             let close = self.close.clone();
             tokio::spawn(async move {
                 stdin.lock().await.take();
                 fail_pending(&pending, CallError::Interrupted).await;
-
-                signal_group(pid, Signal::SIGTERM);
-                if !wait_for_group_exit(pid, cancellation_grace).await {
-                    signal_group(pid, Signal::SIGKILL);
-                    let _ = wait_for_group_exit(pid, cancellation_grace).await;
-                }
-                // ChildOwner uniquely owns Child and performs wait(2).
-                wait_for_reader(&reader_done, &reader_done_notify).await;
+                cleanup_requested.notify_one();
+                wait_for_completion(&cleanup_done, &cleanup_done_notify).await;
                 close.done.store(true, Ordering::Release);
                 close.changed.notify_waiters();
             });
@@ -359,7 +355,7 @@ async fn wait_for_close(close: &CloseCompletion) {
     }
 }
 
-async fn wait_for_reader(done: &AtomicBool, notify: &Notify) {
+async fn wait_for_completion(done: &AtomicBool, notify: &Notify) {
     while !done.load(Ordering::Acquire) {
         let notified = notify.notified();
         if done.load(Ordering::Acquire) {
@@ -409,12 +405,52 @@ async fn stdout_loop(
 /// It then publishes completion and fails calls still pending on the stream.
 impl ChildOwner {
     async fn run(self, mut child: Child) {
-        let status = child.wait().await.ok();
+        // The owner is the only task that signals and reaps the child. A close
+        // waiter merely publishes `cleanup_requested`, so dropping that waiter
+        // cannot strand the process or its failover registration.
+        let (mut status, cleanup_signal) = tokio::select! {
+            result = child.wait() => (result.ok(), false),
+            () = self.cleanup_requested.notified() => (None, true),
+        };
+        let explicit_cleanup = cleanup_signal || self.stopping.load(Ordering::Acquire);
+
         self.stdin.lock().await.take();
-        // Wait for stderr to finish draining so its tail is complete before it
-        // is folded into the exit message below. Bounded: a grandchild that
-        // inherited the stderr pipe keeps it open after the child exits, and the
-        // exit must still be reported.
+        if explicit_cleanup {
+            fail_pending(&self.pending, CallError::Interrupted).await;
+        }
+
+        // Apply the same descendant cleanup after either explicit shutdown or
+        // a naturally exited leader. A leader may leave grandchildren in its
+        // process group with inherited stdio descriptors. Polling `try_wait`
+        // reaps the leader while the same single grace window observes the
+        // whole group, rather than treating a zombie as a live group forever.
+        signal_group(self.pid, Signal::SIGTERM);
+        let deadline = Instant::now() + self.cancellation_grace;
+        loop {
+            if status.is_none() {
+                status = child.try_wait().ok().flatten();
+            }
+            if status.is_some() && process_group_gone(self.pid) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        if !process_group_gone(self.pid) {
+            signal_group(self.pid, Signal::SIGKILL);
+        }
+        if status.is_none() {
+            // SIGKILL cannot be handled by the child; retaining ownership until
+            // wait(2) completes guarantees it is reaped before registration is
+            // released.
+            status = child.wait().await.ok();
+        }
+        // Descendants are not Child handles we can reap. Observe their group
+        // for one bounded window after KILL, then release registration.
+        let _ = wait_for_group_exit(self.pid, self.cancellation_grace).await;
+
         let _ = tokio::time::timeout(self.cancellation_grace, self.stderr_task).await;
 
         let mut reason = match status {
@@ -429,18 +465,12 @@ impl ChildOwner {
         }
 
         *self.dead.lock().await = Some(reason.clone());
-        let error = if self.stopping.load(Ordering::Acquire) {
+        let error = if explicit_cleanup {
             CallError::Interrupted
         } else {
             CallError::Transport(reason)
         };
         fail_pending(&self.pending, error).await;
-
-        // The direct child is reaped, but descendants may still be alive in its
-        // process group. Keep the failover registration until that group settles.
-        while !process_group_gone(self.pid) {
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
         self.done.store(true, Ordering::Release);
         self.done_notify.notify_waiters();
     }

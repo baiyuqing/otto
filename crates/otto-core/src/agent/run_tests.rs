@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use crate::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
 use crate::operation::OperationControl;
 use crate::provider::{
-    ContextOverflowError, Provider, ProviderError, Request, RequestSizer, Response, StreamEvent,
-    StreamSink,
+    ContextOverflowError, Provider, ProviderError, ProviderSettlement, Request, RequestSizer,
+    Response, StreamEvent, StreamSink,
 };
 use crate::session::{MemorySession, Session};
 use crate::tool::{ToolExecutor, ToolResult};
@@ -179,18 +179,27 @@ impl Provider for FakeProvider {
         request: &Request,
         emit: StreamSink<'_>,
         _control: &dyn OperationControl,
-    ) -> Result<Response, ProviderError> {
+    ) -> ProviderSettlement {
         self.requests
             .lock()
             .expect("requests")
             .push(request.clone());
         let Some(turn) = self.turns.lock().expect("turns").pop_front() else {
-            return Err(ProviderError::Other("no scripted turn left".into()));
+            return ProviderSettlement::failed(
+                ProviderError::Other("no scripted turn left".into()),
+                0,
+                crate::model::EffectCertainty::NotStarted,
+            );
         };
         for event in turn.events {
             emit(event);
         }
-        turn.outcome
+        match turn.outcome {
+            Ok(response) => ProviderSettlement::succeeded(response, 1),
+            Err(error) => {
+                ProviderSettlement::failed(error, 1, crate::model::EffectCertainty::Completed)
+            }
+        }
     }
 }
 
@@ -954,13 +963,18 @@ async fn a_provider_retry_is_forwarded_before_the_reply() {
     let retry = events
         .iter()
         .position(|event| {
-            *event
-                == Event::ProviderRetry {
+            matches!(
+                event,
+                Event::ProviderRetry {
+                    operation_id,
                     attempt: 2,
                     max_attempts: 3,
-                    delay: std::time::Duration::from_millis(250),
-                    reason: "HTTP 503".into(),
-                }
+                    delay,
+                    reason,
+                } if !operation_id.as_str().is_empty()
+                    && *delay == std::time::Duration::from_millis(250)
+                    && reason == "HTTP 503"
+            )
         })
         .expect("retry forwarded");
     let text = events

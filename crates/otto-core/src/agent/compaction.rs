@@ -374,6 +374,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let streamed_bytes = AtomicUsize::new(0);
         let invalid_stream = AtomicBool::new(false);
 
+        let operation_id = (self.options.new_operation_id)()
+            .map_err(|message| AgentError::OperationIdentity { message })?;
         let started = (self.options.now)();
         let outcome = {
             let mut on_stream = |event: crate::provider::StreamEvent| {
@@ -398,7 +400,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, duration, outcome.as_ref().err(), &summary_control);
+        self.emit_provider_api_call(emit, operation_id, duration, &outcome);
 
         stopped(control)?;
         if invalid_stream.load(Ordering::SeqCst) {
@@ -406,7 +408,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 "streamed response exceeded its bound or attempted a tool call".into(),
             ));
         }
-        let response = outcome.map_err(|error| match error {
+        let response = outcome.result.map_err(|error| match error {
             crate::provider::ProviderError::Cancelled
             | crate::provider::ProviderError::DeadlineExceeded => AgentError::Provider(error),
             _ => AgentError::CompactionBoundary {

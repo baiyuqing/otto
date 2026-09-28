@@ -54,7 +54,9 @@ use crate::model::{
     OperationOutcome, OperationStopReason, Role, ToolDefinition, ToolResultMetadata, zero_time,
 };
 use crate::operation::OperationControl;
-use crate::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamEvent};
+use crate::provider::{
+    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamEvent,
+};
 use crate::session::Session;
 use crate::session::operation::OperationFact;
 use crate::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
@@ -314,6 +316,29 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             return Err(self.fail(emit, AgentError::EmptyUserText));
         }
         emit(Event::AgentStarted);
+        if let Some(error) = stopped_provider_error(control) {
+            let operation_id = match (self.options.new_operation_id)() {
+                Ok(id) => id,
+                Err(message) => {
+                    return Err(self.fail(emit, AgentError::OperationIdentity { message }));
+                }
+            };
+            let reason = control
+                .stop_reason()
+                .unwrap_or(OperationStopReason::UserCancellation);
+            let settlement = ProviderSettlement::stopped(
+                if reason == OperationStopReason::Deadline {
+                    ProviderError::DeadlineExceeded
+                } else {
+                    ProviderError::Cancelled
+                },
+                0,
+                EffectCertainty::NotStarted,
+                reason,
+            );
+            self.emit_provider_api_call(emit, operation_id, std::time::Duration::ZERO, &settlement);
+            return Err(self.fail(emit, AgentError::Provider(error)));
+        }
 
         // Notifications queued before this turn started (a session-lease
         // recovery notice, a task that finished while the user was away)
@@ -454,7 +479,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     tool_call_id: block.tool_call_id.clone(),
                     arguments: arguments.get().to_owned(),
                 });
-                let mut execution = if let Some(reason) = control.stop_reason() {
+                let mut execution = if let Some(reason) = control.admission_stop_reason() {
                     stopped_tool_execution(reason)
                 } else {
                     self.tools
@@ -547,12 +572,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             }
 
-            if let Some(error) = stopped_provider_error(control) {
-                return Err(self.fail(emit, AgentError::Provider(error)));
-            }
             if !had_tool_call {
                 emit(Event::AgentFinished);
                 return Ok(());
+            }
+            if let Some(error) = stopped_provider_error(control) {
+                return Err(self.fail(emit, AgentError::Provider(error)));
             }
             if let Err(error) = self.deliver_notifications(emit).await {
                 return Err(self.fail(emit, error));
@@ -617,7 +642,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         control: &dyn OperationControl,
     ) -> Result<Response, AgentError> {
         if let Some(error) = stopped_provider_error(control) {
-            self.emit_provider_api_call(emit, std::time::Duration::ZERO, Some(&error), control);
+            let operation_id = (self.options.new_operation_id)()
+                .map_err(|message| AgentError::OperationIdentity { message })?;
+            let settlement = ProviderSettlement::stopped(
+                if matches!(&error, ProviderError::DeadlineExceeded) {
+                    ProviderError::DeadlineExceeded
+                } else {
+                    ProviderError::Cancelled
+                },
+                0,
+                EffectCertainty::NotStarted,
+                control
+                    .stop_reason()
+                    .unwrap_or(OperationStopReason::UserCancellation),
+            );
+            self.emit_provider_api_call(emit, operation_id, std::time::Duration::ZERO, &settlement);
             return Err(AgentError::Provider(error));
         }
         let (mut request, mut estimate) = self.build_normal_provider_request(state);
@@ -794,6 +833,16 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         // first text delta so the two keep their provider order.
         let mut reasoning = self.redactor.new_stream();
         let visible_output = std::sync::atomic::AtomicBool::new(false);
+        let operation_id = match (self.options.new_operation_id)() {
+            Ok(operation_id) => operation_id,
+            Err(message) => {
+                return (
+                    Response::default(),
+                    false,
+                    Some(AgentError::OperationIdentity { message }),
+                );
+            }
+        };
         let started = (self.options.now)();
         let outcome = {
             let mut on_stream = |event: StreamEvent| match event {
@@ -821,6 +870,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     delay,
                     reason,
                 } => emit(Event::ProviderRetry {
+                    operation_id: operation_id.clone(),
                     attempt,
                     max_attempts,
                     delay,
@@ -837,8 +887,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, duration, outcome.as_ref().err(), control);
-        match outcome {
+        self.emit_provider_api_call(emit, operation_id, duration, &outcome);
+        match outcome.result {
             Err(error) => (
                 Response::default(),
                 visible_output.load(std::sync::atomic::Ordering::SeqCst),
@@ -866,30 +916,25 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     pub(super) fn emit_provider_api_call(
         &self,
         emit: EventSink<'_>,
+        operation_id: OperationId,
         duration: std::time::Duration,
-        error: Option<&ProviderError>,
-        control: &dyn OperationControl,
+        settlement: &ProviderSettlement,
     ) {
-        let status = match error {
-            _ if matches!(control.stop_reason(), Some(OperationStopReason::Deadline)) => {
-                ApiStatus::Error
-            }
-            _ if matches!(
-                control.stop_reason(),
-                Some(OperationStopReason::UserCancellation)
-            ) =>
-            {
-                ApiStatus::Canceled
-            }
-            Some(ProviderError::Cancelled) => ApiStatus::Canceled,
-            None => ApiStatus::Ok,
-            Some(_) => ApiStatus::Error,
+        let status = match settlement.outcome.disposition {
+            OperationDisposition::Succeeded => ApiStatus::Ok,
+            OperationDisposition::Cancelled => ApiStatus::Canceled,
+            OperationDisposition::Error
+            | OperationDisposition::DeadlineExceeded
+            | OperationDisposition::Interrupted => ApiStatus::Error,
         };
         emit(Event::ProviderApiCall {
+            operation_id,
             provider: self.options.provider_name.clone(),
             model: self.options.model.clone(),
             duration,
+            attempts: settlement.attempts,
             status,
+            outcome: settlement.outcome.clone(),
         });
     }
 
@@ -938,7 +983,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 }
 
 fn stopped_provider_error(control: &dyn OperationControl) -> Option<ProviderError> {
-    match control.stop_reason()? {
+    match control.admission_stop_reason()? {
         OperationStopReason::Deadline => Some(ProviderError::DeadlineExceeded),
         OperationStopReason::UserCancellation
         | OperationStopReason::Shutdown
@@ -1046,7 +1091,9 @@ mod tests {
     use super::*;
     use crate::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
     use crate::operation::OperationControl;
-    use crate::provider::{Provider, ProviderError, Request, Response, StreamEvent, StreamSink};
+    use crate::provider::{
+        Provider, ProviderError, ProviderSettlement, Request, Response, StreamEvent, StreamSink,
+    };
     use crate::session::{MemorySession, Session};
     use crate::tool::{ToolExecutor, ToolResult};
 
@@ -1113,19 +1160,23 @@ mod tests {
             request: &Request,
             emit: StreamSink<'_>,
             _control: &dyn OperationControl,
-        ) -> Result<Response, ProviderError> {
+        ) -> ProviderSettlement {
             self.requests
                 .lock()
                 .expect("requests")
                 .push(request.clone());
             let turn = self.turns.lock().expect("turns").pop_front();
             let Some((events, response)) = turn else {
-                return Err(ProviderError::Other("no scripted turn left".into()));
+                return ProviderSettlement::failed(
+                    ProviderError::Other("no scripted turn left".into()),
+                    0,
+                    EffectCertainty::NotStarted,
+                );
             };
             for event in events {
                 emit(event);
             }
-            Ok(response)
+            ProviderSettlement::succeeded(response, 1)
         }
     }
 
@@ -1140,9 +1191,9 @@ mod tests {
             _request: &Request,
             _emit: StreamSink<'_>,
             control: &dyn OperationControl,
-        ) -> Result<Response, ProviderError> {
+        ) -> ProviderSettlement {
             control.cancellation_token().cancelled().await;
-            Err(ProviderError::Cancelled)
+            ProviderSettlement::failed(ProviderError::Cancelled, 1, EffectCertainty::Unknown)
         }
     }
 
@@ -1241,10 +1292,30 @@ mod tests {
             .expect("run");
 
         let api_call = Event::ProviderApiCall {
+            operation_id: OperationId::new("op_1").expect("operation id"),
             provider: "fake".into(),
             model: "test-model".into(),
             duration: std::time::Duration::ZERO,
+            attempts: 1,
             status: ApiStatus::Ok,
+            outcome: OperationOutcome {
+                disposition: OperationDisposition::Succeeded,
+                effect_certainty: EffectCertainty::Completed,
+                stop_reason: None,
+            },
+        };
+        let second_api_call = Event::ProviderApiCall {
+            operation_id: OperationId::new("op_3").expect("operation id"),
+            provider: "fake".into(),
+            model: "test-model".into(),
+            duration: std::time::Duration::ZERO,
+            attempts: 1,
+            status: ApiStatus::Ok,
+            outcome: OperationOutcome {
+                disposition: OperationDisposition::Succeeded,
+                effect_certainty: EffectCertainty::Completed,
+                stop_reason: None,
+            },
         };
         assert_eq!(
             events,
@@ -1260,14 +1331,14 @@ mod tests {
                     present: true,
                 },
                 Event::ToolCallStarted {
-                    operation_id: OperationId::new("op_1").expect("operation id"),
+                    operation_id: OperationId::new("op_2").expect("operation id"),
                     attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
                     arguments: r#"{"value":1}"#.into(),
                 },
                 Event::ToolCallFinished {
-                    operation_id: OperationId::new("op_1").expect("operation id"),
+                    operation_id: OperationId::new("op_2").expect("operation id"),
                     attempt: 1,
                     tool_name: "echo".into(),
                     tool_call_id: "call-1".into(),
@@ -1286,7 +1357,7 @@ mod tests {
                 Event::TextDelta {
                     text: "done".into()
                 },
-                api_call,
+                second_api_call,
                 Event::ProviderUsage {
                     usage: Usage::default(),
                     present: false
@@ -1467,10 +1538,17 @@ mod tests {
             vec![
                 Event::AgentStarted,
                 Event::ProviderApiCall {
+                    operation_id: OperationId::new("op_1").expect("operation id"),
                     provider: "fake".into(),
                     model: "test-model".into(),
                     duration: std::time::Duration::ZERO,
+                    attempts: 0,
                     status: ApiStatus::Canceled,
+                    outcome: OperationOutcome {
+                        disposition: OperationDisposition::Cancelled,
+                        effect_certainty: EffectCertainty::NotStarted,
+                        stop_reason: Some(OperationStopReason::UserCancellation),
+                    },
                 },
                 Event::AgentError {
                     message: "provider call was cancelled".into()

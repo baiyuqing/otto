@@ -49,7 +49,9 @@ use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{Agent, CompactionSettings, Event, EventSink, Options};
 use otto_core::model::{Message, OperationStopReason, Role, ToolDefinition};
 use otto_core::operation::OperationControl;
-use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
+use otto_core::provider::{
+    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, StreamSink,
+};
 use otto_core::session::{MemorySession, Session};
 use otto_core::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
 use serde::{Deserialize, Serialize};
@@ -186,6 +188,7 @@ pub(crate) struct TaskResultData<'a> {
 pub struct SharedProvider {
     provider: Arc<dyn Provider + Send + Sync>,
     timeout: Option<Duration>,
+    cancellation_grace: Duration,
 }
 
 #[async_trait::async_trait]
@@ -195,28 +198,49 @@ impl Provider for SharedProvider {
         request: &Request,
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
-    ) -> Result<Response, ProviderError> {
-        if let Some(reason) = control.stop_reason() {
-            return Err(if reason == OperationStopReason::Deadline {
-                ProviderError::DeadlineExceeded
-            } else {
-                ProviderError::Cancelled
-            });
+    ) -> ProviderSettlement {
+        if let Some(reason) = control.admission_stop_reason() {
+            return ProviderSettlement::stopped(
+                if reason == OperationStopReason::Deadline {
+                    ProviderError::DeadlineExceeded
+                } else {
+                    ProviderError::Cancelled
+                },
+                0,
+                otto_core::model::EffectCertainty::NotStarted,
+                reason,
+            );
         }
         let child = Control::new(Deadline::child(control.remaining(), self.timeout));
         let mut complete = std::pin::pin!(self.provider.complete(request, emit, &child));
         let deadline = child.deadline();
-        tokio::select! {
+        let reason = tokio::select! {
             biased;
-            result = &mut complete => result,
+            result = &mut complete => return result,
             () = control.cancellation_token().cancelled() => {
-                child.stop(control.stop_reason().unwrap_or(OperationStopReason::UserCancellation));
-                complete.await
+                let reason = control
+                    .stop_reason()
+                    .unwrap_or(OperationStopReason::UserCancellation);
+                child.stop(reason);
+                reason
             }
             () = deadline.expired() => {
                 child.stop(OperationStopReason::Deadline);
-                complete.await
+                OperationStopReason::Deadline
             }
+        };
+        match tokio::time::timeout(self.cancellation_grace, &mut complete).await {
+            Ok(settlement) => settlement,
+            Err(_) => ProviderSettlement::stopped(
+                if reason == OperationStopReason::Deadline {
+                    ProviderError::DeadlineExceeded
+                } else {
+                    ProviderError::Cancelled
+                },
+                1,
+                otto_core::model::EffectCertainty::Unknown,
+                reason,
+            ),
         }
     }
 }
@@ -424,7 +448,7 @@ impl ToolExecutor for ChildTools {
             ToolExecution { result, outcome }
         };
         if call.name == "agent_report" {
-            match control.stop_reason() {
+            match control.admission_stop_reason() {
                 Some(OperationStopReason::Deadline) => {
                     return local(
                         error_result("operation deadline exceeded").deadline_not_started(),
@@ -477,6 +501,7 @@ pub struct OptionsTemplate {
     pub compaction: CompactionSettings,
     pub request_sizer: Option<Arc<dyn RequestSizer + Send + Sync>>,
     pub provider_timeout: Option<Duration>,
+    pub cancellation_grace: Duration,
     pub now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     pub new_id: Arc<dyn Fn() -> String + Send + Sync>,
     pub new_operation_id:
@@ -494,6 +519,7 @@ impl Default for OptionsTemplate {
             compaction: CompactionSettings::default(),
             request_sizer: None,
             provider_timeout: None,
+            cancellation_grace: Duration::from_secs(5),
             now: Arc::new(Utc::now),
             new_id: Arc::new(String::new),
             new_operation_id: Arc::new(|| {
@@ -1120,6 +1146,7 @@ impl Runner {
             SharedProvider {
                 provider: Arc::clone(&self.config.provider),
                 timeout: template.provider_timeout,
+                cancellation_grace: template.cancellation_grace,
             },
             tools,
             SharedTranscript(Arc::clone(&transcript)),
@@ -1229,6 +1256,8 @@ impl Runner {
                 }
                 () = deadline.expired() => {
                     control.stop(OperationStopReason::Deadline);
+                    // Deadline requests cooperative stop; the effectful child
+                    // remains owned here until it safely settles.
                     run.await
                 }
             }
@@ -2182,6 +2211,37 @@ mod tests {
 
         release.cancel();
         assert_eq!(wait_final(&tasks, "t1").await.status, TaskStatus::Succeeded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_does_not_detach_effectful_child() {
+        let provider = FakeProvider::new();
+        let release = CancellationToken::new();
+        let hook_release = release.clone();
+        provider.set_hook(Arc::new(move |_cancel, _request| {
+            let release = hook_release.clone();
+            Box::pin(async move { release.cancelled().await })
+        }));
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.template.task_timeout = Some(Duration::from_secs(1));
+        let (runner, _) = runner(config);
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(tasks.get("t1").expect("task").status, TaskStatus::Running);
+        release.cancel();
+        assert_eq!(
+            wait_final(&tasks, "t1").await.status,
+            TaskStatus::Interrupted
+        );
     }
 
     #[tokio::test]

@@ -14,7 +14,9 @@ use otto_core::model::{
     Block, BlockType, FinishReason, Message, OperationStopReason, Role, ToolDefinition, Usage,
 };
 use otto_core::operation::OperationControl;
-use otto_core::provider::{Provider, ProviderError, Request, Response, StreamEvent, StreamSink};
+use otto_core::provider::{
+    Provider, ProviderError, ProviderSettlement, Request, Response, StreamEvent, StreamSink,
+};
 use otto_core::tool::ToolResult;
 use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
@@ -94,7 +96,7 @@ impl Provider for FakeProvider {
         request: &Request,
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
-    ) -> Result<Response, ProviderError> {
+    ) -> ProviderSettlement {
         let cancel = control.cancellation_token();
         let hook = {
             let mut state = self.lock();
@@ -105,11 +107,16 @@ impl Provider for FakeProvider {
             hook(cancel, request).await;
         }
         if let Some(reason) = control.stop_reason() {
-            return Err(if reason == OperationStopReason::Deadline {
-                ProviderError::DeadlineExceeded
-            } else {
-                ProviderError::Cancelled
-            });
+            return ProviderSettlement::stopped(
+                if reason == OperationStopReason::Deadline {
+                    ProviderError::DeadlineExceeded
+                } else {
+                    ProviderError::Cancelled
+                },
+                0,
+                otto_core::model::EffectCertainty::NotStarted,
+                reason,
+            );
         }
 
         let step = {
@@ -129,10 +136,14 @@ impl Provider for FakeProvider {
             match found {
                 Some(step) => step,
                 None => {
-                    return Err(ProviderError::Other(format!(
-                        "FakeProvider: no route for request (last user text: {:?})",
-                        last_user_text(request)
-                    )));
+                    return ProviderSettlement::failed(
+                        ProviderError::Other(format!(
+                            "FakeProvider: no route for request (last user text: {:?})",
+                            last_user_text(request)
+                        )),
+                        0,
+                        otto_core::model::EffectCertainty::NotStarted,
+                    );
                 }
             }
         };
@@ -140,8 +151,12 @@ impl Provider for FakeProvider {
         match step {
             // A matched route with no steps yields an empty response and no
             // error.
-            None => Ok(Response::default()),
-            Some(RouteStep::Fail(error)) => Err(ProviderError::Other(error)),
+            None => ProviderSettlement::succeeded(Response::default(), 0),
+            Some(RouteStep::Fail(error)) => ProviderSettlement::failed(
+                ProviderError::Other(error),
+                0,
+                otto_core::model::EffectCertainty::Completed,
+            ),
             Some(RouteStep::Reply(response)) => {
                 // Each text block streams whole: the agent's text accounting
                 // reads the stream, not the final response blocks.
@@ -152,7 +167,7 @@ impl Provider for FakeProvider {
                         });
                     }
                 }
-                Ok(response)
+                ProviderSettlement::succeeded(response, 0)
             }
         }
     }

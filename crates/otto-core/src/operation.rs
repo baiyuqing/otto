@@ -20,8 +20,16 @@ pub trait OperationControl: Send + Sync {
     /// Remaining operation budget, if the operation has a deadline.
     fn remaining(&self) -> Option<Duration>;
 
-    /// Why no further work may be dispatched, if the operation has stopped.
+    /// Why the operation has already stopped. This is stable terminal state;
+    /// reading it must not turn a completed operation into a timeout.
     fn stop_reason(&self) -> Option<OperationStopReason>;
+
+    /// Checks whether new work may be admitted. Native implementations use
+    /// this checkpoint to advance an expired absolute deadline into typed stop
+    /// state before an effectful future is first polled.
+    fn admission_stop_reason(&self) -> Option<OperationStopReason> {
+        self.stop_reason()
+    }
 }
 
 /// Backward-compatible unlimited operation control. Cancellation of the token
@@ -38,6 +46,10 @@ impl OperationControl for CancellationToken {
     fn stop_reason(&self) -> Option<OperationStopReason> {
         self.is_cancelled()
             .then_some(OperationStopReason::UserCancellation)
+    }
+
+    fn admission_stop_reason(&self) -> Option<OperationStopReason> {
+        self.stop_reason()
     }
 }
 

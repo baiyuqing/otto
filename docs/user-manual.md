@@ -278,12 +278,6 @@ max_output_bytes = 51200
 # workflow_step_timeout = "1h"
 cancellation_grace = "5s"
 
-[agent.retry]
-max_attempts = 3
-base_backoff = "250ms"
-max_backoff = "500ms"
-retry_after_cap = "60s"
-
 [agent.compaction]
 auto = true
 reserve_tokens = 16384
@@ -337,15 +331,13 @@ Key points:
   `provider_timeout`, `subagent_timeout`, and `workflow_step_timeout` values.
   Omitted deadlines are unlimited for backward compatibility. A child always
   inherits the earlier of its own configured deadline and its parent's
-  remaining deadline; compaction, retries, and backoff never reset that
-  budget. `cancellation_grace` defaults to `5s` and bounds cooperative cleanup
-  before Bash or a shared stdio MCP server is force-stopped.
-- `[agent.retry]` resolves the common retry budget (`max_attempts`,
-  `base_backoff`, `max_backoff`, and `retry_after_cap`). It applies only where
-  an adapter can prove a retry is safe. Generic OpenAI-compatible requests are
-  not replayed after dispatch for 429/5xx, connection loss, or an interrupted
-  stream, even when no response delta was seen; ChatGPT requests are likewise
-  not automatically retried.
+  remaining deadline; compaction and follow-up work never reset that budget.
+  `cancellation_grace` defaults to `5s` and bounds cooperative cleanup before
+  Bash or a shared stdio MCP server is force-stopped.
+- Generic provider requests are not automatically retried after dispatch.
+  This includes OpenAI-compatible and ChatGPT requests that receive 429/5xx,
+  lose the connection, or have an interrupted stream, even when no response
+  delta was seen.
 
 Deadline checks are cooperative at synchronous filesystem and SQLite
 boundaries: Otto checks before and after the call, but does not detach an

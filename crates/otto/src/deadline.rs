@@ -129,6 +129,13 @@ impl OperationControl for Control {
     fn stop_reason(&self) -> Option<OperationStopReason> {
         *self.stop_reason.lock().expect("operation stop reason")
     }
+
+    fn admission_stop_reason(&self) -> Option<OperationStopReason> {
+        if self.deadline.is_expired() {
+            self.stop(OperationStopReason::Deadline);
+        }
+        self.stop_reason()
+    }
 }
 
 #[cfg(test)]

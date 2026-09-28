@@ -28,12 +28,14 @@ use std::time::Duration;
 use futures_util::TryStreamExt;
 use tokio_util::sync::CancellationToken;
 
-use otto_core::model::OperationStopReason;
+use otto_core::model::{EffectCertainty, OperationStopReason};
 use otto_core::openaicompat::overflow::{MAX_ERROR_BODY, classify_overflow};
 use otto_core::openaicompat::protocol::{build_request, serialized_request_size};
 use otto_core::openaicompat::stream::StreamAssembler;
 use otto_core::operation::OperationControl;
-use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
+use otto_core::provider::{
+    Provider, ProviderError, ProviderSettlement, Request, RequestSizer, Response, StreamSink,
+};
 
 use crate::gourl::{self, Encoding};
 
@@ -292,7 +294,11 @@ impl Client {
         control: &dyn OperationControl,
     ) -> ProviderError {
         let body = match read_error_body(response, control).await {
-            ErrorBody::Stopped(error) => return error,
+            ErrorBody::Stopped(_) => {
+                return ProviderError::Other(format!(
+                    "OpenAI-compatible HTTP {status} (error body unavailable)"
+                ));
+            }
             ErrorBody::Unreadable => {
                 return ProviderError::Other(format!(
                     "OpenAI-compatible HTTP {status} (error body unreadable)"
@@ -301,9 +307,6 @@ impl Client {
             ErrorBody::Body(body) => body,
         };
         let safe = self.redact(&body);
-        if let Err(error) = check_running(control) {
-            return error;
-        }
         if let Some(overflow) = classify_overflow(status, &safe) {
             return ProviderError::Overflow(overflow);
         }
@@ -365,21 +368,60 @@ impl Provider for Client {
         request: &Request,
         emit: StreamSink<'_>,
         control: &dyn OperationControl,
-    ) -> Result<Response, ProviderError> {
-        check_running(control)?;
+    ) -> ProviderSettlement {
+        if let Err(error) = check_running(control) {
+            return provider_failure(error, 0, EffectCertainty::NotStarted, control);
+        }
         let ready = match &self.state {
             Ok(ready) => ready,
-            Err(error) => return Err(ProviderError::Other(error.clone())),
+            Err(error) => {
+                return ProviderSettlement::failed(
+                    ProviderError::Other(error.clone()),
+                    0,
+                    EffectCertainty::NotStarted,
+                );
+            }
         };
-        let payload = serde_json::to_vec(&build_request(request)).map_err(|error| {
-            self.safe_error(ProviderError::Other(format!(
-                "encode chat completion request: {error}"
-            )))
-        })?;
-        check_running(control)?;
-        self.attempt(ready, &payload, emit, control)
-            .await
-            .map_err(|error| self.safe_error(error))
+        let payload = match serde_json::to_vec(&build_request(request)) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return ProviderSettlement::failed(
+                    self.safe_error(ProviderError::Other(format!(
+                        "encode chat completion request: {error}"
+                    ))),
+                    0,
+                    EffectCertainty::NotStarted,
+                );
+            }
+        };
+        if let Err(error) = check_running(control) {
+            return provider_failure(error, 0, EffectCertainty::NotStarted, control);
+        }
+        match self.attempt(ready, &payload, emit, control).await {
+            Ok(response) => ProviderSettlement::succeeded(response, 1),
+            Err(error) => {
+                let certainty = match &error {
+                    ProviderError::DeadlineExceeded | ProviderError::Cancelled => {
+                        EffectCertainty::Unknown
+                    }
+                    ProviderError::Other(message)
+                        if message.starts_with("send chat completion request:")
+                            || message.starts_with("read chat completion stream:") =>
+                    {
+                        EffectCertainty::Unknown
+                    }
+                    ProviderError::Overflow(_) | ProviderError::Other(_) => {
+                        EffectCertainty::Completed
+                    }
+                };
+                let error = self.safe_error(error);
+                if certainty == EffectCertainty::Completed {
+                    ProviderSettlement::failed(error, 1, certainty)
+                } else {
+                    provider_failure(error, 1, certainty, control)
+                }
+            }
+        }
     }
 }
 
@@ -432,6 +474,30 @@ async fn with_cancel<T>(cancel: &CancellationToken, future: impl Future<Output =
     }
 }
 
+fn provider_failure(
+    error: ProviderError,
+    attempts: u32,
+    certainty: EffectCertainty,
+    control: &dyn OperationControl,
+) -> ProviderSettlement {
+    match control.stop_reason() {
+        Some(reason) => ProviderSettlement::stopped(
+            error,
+            attempts,
+            if attempts == 0 {
+                EffectCertainty::NotStarted
+            } else {
+                EffectCertainty::Unknown
+            },
+            reason,
+        ),
+        None if attempts > 0 && certainty == EffectCertainty::Unknown => {
+            ProviderSettlement::transport_lost(error, attempts)
+        }
+        None => ProviderSettlement::failed(error, attempts, certainty),
+    }
+}
+
 fn stop_error(control: &dyn OperationControl) -> Option<ProviderError> {
     control.stop_reason().map(|reason| match reason {
         OperationStopReason::Deadline => ProviderError::DeadlineExceeded,
@@ -444,7 +510,14 @@ fn stop_error(control: &dyn OperationControl) -> Option<ProviderError> {
 }
 
 fn check_running(control: &dyn OperationControl) -> Result<(), ProviderError> {
-    match stop_error(control) {
+    match control.admission_stop_reason().map(|reason| match reason {
+        OperationStopReason::Deadline => ProviderError::DeadlineExceeded,
+        OperationStopReason::UserCancellation
+        | OperationStopReason::Shutdown
+        | OperationStopReason::Migration
+        | OperationStopReason::TransportLost
+        | OperationStopReason::ProcessLost => ProviderError::Cancelled,
+    }) {
         Some(error) => Err(error),
         None => Ok(()),
     }
@@ -721,6 +794,7 @@ mod tests {
         client
             .complete(request, &mut emit, &CancellationToken::new())
             .await
+            .result
     }
 
     #[tokio::test]
@@ -731,10 +805,15 @@ mod tests {
         .await;
         let client = Client::new(&server.base_url, "key");
         let mut emit = |_: StreamEvent| panic!("no event is emitted after deadline");
-        let error = client
+        let settlement = client
             .complete(&model_request(), &mut emit, &StoppedControl::deadline())
-            .await
-            .unwrap_err();
+            .await;
+        assert_eq!(settlement.attempts, 0);
+        assert_eq!(
+            settlement.outcome.effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        let error = settlement.result.unwrap_err();
         assert!(
             matches!(error, ProviderError::DeadlineExceeded),
             "{error:?}"
@@ -757,10 +836,15 @@ mod tests {
             let client = Client::new(&server.base_url, "key");
             let mut events = Vec::new();
             let mut emit = |event| events.push(event);
-            let error = client
+            let settlement = client
                 .complete(&model_request(), &mut emit, &CancellationToken::new())
-                .await
-                .expect_err("the first status is returned");
+                .await;
+            assert_eq!(settlement.attempts, 1);
+            assert_eq!(
+                settlement.outcome.effect_certainty,
+                EffectCertainty::Completed
+            );
+            let error = settlement.result.expect_err("the first status is returned");
             assert!(error.to_string().contains(&status.to_string()));
             assert_eq!(attempts.load(Ordering::SeqCst), 1, "status {status}");
             assert!(
@@ -819,6 +903,7 @@ mod tests {
         Client::new(&server.base_url, "key")
             .complete(&model_request(), &mut emit, &CancellationToken::new())
             .await
+            .result
             .expect_err("the first interrupted stream is returned");
         assert!(!events.is_empty());
         assert_eq!(attempts.load(Ordering::SeqCst), 1);

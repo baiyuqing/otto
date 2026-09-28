@@ -126,7 +126,7 @@ impl ToolExecutor for Registry {
     }
 
     async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution {
-        if let Some(reason) = control.stop_reason() {
+        if let Some(reason) = control.admission_stop_reason() {
             return stopped_not_started(reason);
         }
 
@@ -143,22 +143,7 @@ impl ToolExecutor for Registry {
         let result = tool
             .execute(call.arguments, control.cancellation_token())
             .await;
-        let has_override = result.outcome_override.is_some();
         let mut execution = settle_tool_result(result);
-
-        if let Some(reason) = control.stop_reason()
-            && !has_override
-        {
-            execution.outcome = outcome(
-                if reason == OperationStopReason::Deadline {
-                    OperationDisposition::DeadlineExceeded
-                } else {
-                    OperationDisposition::Cancelled
-                },
-                EffectCertainty::Unknown,
-            );
-            execution.outcome.stop_reason = Some(reason);
-        }
 
         if let Some(guard) = &self.guard
             && let Err(text) = guard.after()
@@ -178,6 +163,7 @@ mod tests {
     use crate::tool::testutil::raw;
     use crate::tool::{definition, text_result};
     use otto_core::model::{OperationId, OperationStopReason};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio_util::sync::CancellationToken;
 
     struct FakeTool {
@@ -201,6 +187,24 @@ mod tests {
                 cancel.cancel();
             }
             self.result.clone().unwrap_or_else(|| text_result("ok"))
+        }
+    }
+
+    struct CountingTool(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Tool for CountingTool {
+        fn definition(&self) -> ToolDefinition {
+            definition("write", "", serde_json::json!({"type": "object"}))
+        }
+
+        async fn execute(
+            &self,
+            _arguments: &serde_json::value::RawValue,
+            _cancel: &CancellationToken,
+        ) -> ToolResult {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            text_result("ran")
         }
     }
 
@@ -229,6 +233,42 @@ mod tests {
                 cancel,
             )
             .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_deadline_refuses_dispatch_before_polling_the_tool() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry =
+            Registry::new(vec![Box::new(CountingTool(Arc::clone(&calls)))]).expect("registry");
+        let control = crate::deadline::Control::new(crate::deadline::Deadline::after(
+            std::time::Duration::ZERO,
+        ));
+        let operation_id = operation_id();
+        let execution = registry
+            .execute(
+                ToolCall {
+                    operation_id: &operation_id,
+                    name: "write",
+                    arguments: &raw("{}"),
+                    attempt: 1,
+                },
+                &control,
+            )
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            execution.outcome.disposition,
+            OperationDisposition::DeadlineExceeded
+        );
+        assert_eq!(
+            execution.outcome.effect_certainty,
+            EffectCertainty::NotStarted
+        );
+        assert_eq!(
+            execution.outcome.stop_reason,
+            Some(OperationStopReason::Deadline)
+        );
     }
 
     #[test]
@@ -340,7 +380,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_observed_after_dispatch_is_unknown_without_an_override() {
+    async fn completed_tool_result_wins_over_late_cancellation() {
         let registry = Registry::new(vec![Box::new(FakeTool {
             name: "write",
             result: None,
@@ -354,17 +394,17 @@ mod tests {
         assert_eq!(execution.result.content, "ok");
         assert_eq!(
             execution.outcome.disposition,
-            OperationDisposition::Cancelled
+            OperationDisposition::Succeeded
         );
-        assert_eq!(execution.outcome.effect_certainty, EffectCertainty::Unknown);
         assert_eq!(
-            execution.outcome.stop_reason,
-            Some(OperationStopReason::UserCancellation)
+            execution.outcome.effect_certainty,
+            EffectCertainty::Completed
         );
+        assert_eq!(execution.outcome.stop_reason, None);
     }
 
     #[tokio::test]
-    async fn an_explicit_override_wins_over_cancellation_observed_after_dispatch() {
+    async fn an_explicit_override_remains_authoritative_after_cancellation() {
         let registry = Registry::new(vec![Box::new(FakeTool {
             name: "write",
             result: Some(ToolResult::error("rejected").not_started()),

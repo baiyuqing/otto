@@ -1187,7 +1187,9 @@ The listener resolves in this order: `--listen` > `--socket` >
 
 **Unix socket.** Otto creates a missing parent directory with mode `0700`,
 creates the socket file with mode `0600`, and refuses to start if a live
-server already owns that path. File permissions are the only access control;
+server already owns that path. A socket file left by a process that did not
+run the normal shutdown, for example after `SIGKILL` or a second `SIGTERM`,
+is replaced at the next start. File permissions are the only access control;
 requests carry no token.
 
 **Loopback TCP.** `--listen HOST:PORT` accepts only loopback hosts:

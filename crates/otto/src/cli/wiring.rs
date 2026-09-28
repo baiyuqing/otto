@@ -29,6 +29,7 @@ use otto_core::safetext::dynamic_redaction_marker;
 use tokio_util::sync::CancellationToken;
 
 use super::runtime_builder::{BuildError, Builder, ProviderClient, SharedSession};
+use crate::failover;
 use crate::mcp;
 use crate::memory::guard::{CompositeGuard, DefaultGuard, ExactGuard};
 use crate::memory::scope::new_workspace_scope;
@@ -469,6 +470,9 @@ impl Builder {
         });
         let usage = self.usage_collector(session, runtime);
         let session_for_children = session.clone();
+        let session_for_resume = session_for_children.clone();
+        let session_for_lease = session_for_children.clone();
+        let session_for_recovery = session_for_children.clone();
         let session = session.clone();
         let (runner, warnings) = SubagentRunner::new(RunnerConfig {
             provider,
@@ -499,6 +503,16 @@ impl Builder {
             usage,
             child_session: Some(child_sessions(session_for_children)),
             checker: self.skill_checker.clone(),
+            lease: Some(Arc::new(move || session_for_lease.lease())),
+            workspace_path: PathBuf::from(&self.workspace_path),
+            children_dir: Some(Arc::new(move || {
+                let path = session_for_resume.path();
+                if path.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(path).with_extension(""))
+                }
+            })),
         })
         .map_err(|error| format!("create sub-agent runner: {error}"))?;
         for warning in &warnings {
@@ -507,12 +521,26 @@ impl Builder {
 
         let runner = Arc::new(runner);
         let inbox = Arc::clone(tasks.notifications());
+        // A session with no persisted inbox path (`--no-session`, or nothing
+        // written yet) never takes over a lease either, so it never has a
+        // takeover to report; the recovery push lives in this branch rather
+        // than running unconditionally.
         if let Some(path) = inbox_persist {
             load_inbox(&inbox, &path);
             let hook_path = path.clone();
             inbox.set_persist(Box::new(move |entries| {
                 write_inbox_file(&hook_path, entries)
             }));
+            let recovery_warnings = failover::recovery::notify(
+                &inbox,
+                session_for_recovery.take_takeover(),
+                &children_dir,
+                runtime.max_output_bytes.max(0) as usize,
+                &otto_core::session::Session::messages(&session_for_recovery),
+            );
+            for warning in &recovery_warnings {
+                let _ = writeln!(stderr, "warning: {warning}");
+            }
         }
         tools.extend(subagent::tools::tools(&runner));
         // Parent-only; the child registry drops the timer tools by name.
@@ -1250,6 +1278,9 @@ fn child_sessions(parent: SharedSession) -> ChildSession {
         let name = format!("{task_id}-{}", header.id);
         let store = crate::session::Store::create_child_lazy(&parent_path, &name, header)
             .map_err(|error| error.to_string())?;
+        if let Some(lease) = parent.lease() {
+            store.set_lease_check(lease);
+        }
         let path = crate::session::Store::child_path(&parent_path, &name);
         Ok(Some((
             Arc::new(store) as Transcript,
@@ -1309,6 +1340,42 @@ mod tests {
     fn children_of_an_in_memory_parent_stay_in_memory() {
         let build = child_sessions(SharedSession::memory(otto_core::session::Header::default()));
         assert!(build("t1").expect("build").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_child_store_refuses_to_append_after_the_parent_lease_is_lost() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let lease = crate::failover::lease::Lease::for_test(workspace.path());
+        let store = crate::session::Store::create(
+            root.path(),
+            otto_core::session::Header {
+                id: "parent".into(),
+                workspace: workspace.path().to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("parent");
+        store.set_lease_check(Arc::clone(&lease));
+        let build = child_sessions(SharedSession::new(Arc::new(store)));
+
+        let (child, _path) = build("t1").expect("build").expect("persisted");
+
+        lease.mark_lost_for_test("test fence");
+
+        let message = otto_core::model::Message {
+            role: otto_core::model::Role::User,
+            blocks: vec![otto_core::model::Block::text("hello")],
+            ..otto_core::model::Message::default()
+        };
+        let error = child
+            .append(message)
+            .await
+            .expect_err("append must be rejected once the parent lease is lost");
+        assert!(error.to_string().contains("session lease lost"), "{error}");
     }
 
     #[tokio::test]
@@ -1543,6 +1610,346 @@ mod tests {
         .expect("scope");
         assert_eq!(scope.namespace, NAMESPACE_WORKSPACE);
         assert!(scope.id.starts_with("sha256:"), "{}", scope.id);
+    }
+
+    // -----------------------------------------------------------------
+    // R12: build_subagents reports a takeover through the recovery push.
+    //
+    // A takeover is simulated the same way `session::tests` does: a lease
+    // directory is written by hand (no live `Lease` of this process's own),
+    // with `lease_seconds` = 6. `Prepared::prepare`/`activate` then performs
+    // a real takeover, populating the returned store's `take_takeover()` and
+    // handing this process a live `Keeper::global` lease. `L` must stay at
+    // or above 6: the watchdog fences a live global-keeper lease at 5L/6
+    // staleness, and the renewal thread ticks every 1s, so L < 6 leaves no
+    // margin and calls `libc::_exit(75)` mid-test. `Prepared::prepare`'s
+    // 7L/6 takeover wait is therefore about 7s per test.
+    // -----------------------------------------------------------------
+
+    fn recovery_test_header(workspace: &Path) -> otto_core::session::Header {
+        otto_core::session::Header {
+            id: "parent".into(),
+            workspace: workspace.to_string_lossy().into_owned(),
+            provider: "openai-compatible".into(),
+            model: "test-model".into(),
+            created_at: chrono::Utc::now(),
+            ..otto_core::session::Header::default()
+        }
+    }
+
+    fn recovery_dangling_call(id: &str, name: &str) -> otto_core::model::Message {
+        otto_core::model::Message {
+            role: otto_core::model::Role::Assistant,
+            blocks: vec![otto_core::model::Block {
+                block_type: otto_core::model::BlockType::ToolCall,
+                tool_call_id: id.into(),
+                tool_name: name.into(),
+                arguments: Some(
+                    serde_json::value::RawValue::from_string("{}".into()).expect("valid JSON"),
+                ),
+                ..otto_core::model::Block::default()
+            }],
+            created_at: chrono::Utc::now(),
+            finish_reason: Some(otto_core::model::FinishReason::ToolCalls),
+            ..otto_core::model::Message::default()
+        }
+    }
+
+    fn recovery_assistant_text(text: &str) -> otto_core::model::Message {
+        otto_core::model::Message {
+            role: otto_core::model::Role::Assistant,
+            blocks: vec![otto_core::model::Block::text(text)],
+            created_at: chrono::Utc::now(),
+            finish_reason: Some(otto_core::model::FinishReason::Stop),
+            ..otto_core::model::Message::default()
+        }
+    }
+
+    /// The `lease.json` + `epoch-<epoch>` + `heartbeat` layout
+    /// `failover::lease` writes, reproduced by hand so no live `Lease` of
+    /// this process's own is ever created; see the section header above and
+    /// `session::tests`'s helper of the same shape.
+    fn recovery_write_lease_dir_by_hand(session_path: &Path, host: &str, pid: u32) {
+        let dir = session_path.with_extension("lease");
+        std::fs::create_dir_all(&dir).expect("create lease dir by hand");
+        std::fs::write(
+            dir.join("lease.json"),
+            serde_json::json!({ "lease_seconds": 6u64 }).to_string(),
+        )
+        .expect("write lease.json by hand");
+        std::fs::write(dir.join("epoch-1"), b"{}").expect("write epoch marker by hand");
+        let json = serde_json::json!({
+            "epoch": 1u64,
+            "host": host,
+            "pid": pid,
+            "released": false,
+            "seq": 1u64,
+        })
+        .to_string();
+        let mut bytes = vec![b' '; 512];
+        bytes[..json.len()].copy_from_slice(json.as_bytes());
+        bytes[511] = b'\n';
+        std::fs::write(dir.join("heartbeat"), bytes).expect("write heartbeat by hand");
+    }
+
+    /// Builds a `Builder` and its `build_subagents` call args over a fresh
+    /// workspace/session root, with sub-agents unconditionally enabled.
+    fn recovery_test_builder(root: &Path) -> (Builder, Runtime, ProviderClient, CatalogWiring) {
+        let session_root = root.join("sessions");
+        let builder = crate::cli::testutil::builder(root, &session_root);
+        let runtime = Runtime {
+            provider: "openai-compatible".to_string(),
+            base_url: "http://127.0.0.1:0".to_string(),
+            model: "test-model".to_string(),
+            max_output_bytes: 4096,
+            ..Runtime::default()
+        };
+        let client = ProviderClient::Compat(Arc::new(crate::provider::openaicompat::Client::new(
+            &runtime.base_url,
+            "test-key",
+        )));
+        let catalogs = CatalogWiring {
+            skills: skill::Catalog::default(),
+            skill_section: String::new(),
+            agents: AgentsRuntime {
+                enabled: true,
+                roots: Vec::new(),
+                max_parallel: 4,
+            },
+            agent_catalog: subagent::Catalog::default(),
+            agent_section: String::new(),
+        };
+        (builder, runtime, client, catalogs)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recovery_call_build_subagents(
+        builder: &Builder,
+        runtime: &Runtime,
+        client: &ProviderClient,
+        catalogs: &CatalogWiring,
+        session: &SharedSession,
+    ) -> SubagentWiring {
+        let mut tools = Vec::new();
+        let mut stderr = Vec::new();
+        let redactor = Redactor::with_completeness(&[], true);
+        let prompt_for = builder.child_prompt_for(runtime, "host", "");
+        builder
+            .build_subagents(
+                &mut tools,
+                catalogs,
+                client,
+                &[],
+                &redactor,
+                runtime,
+                session,
+                prompt_for,
+                Vec::new(),
+                &mut stderr,
+            )
+            .expect("build_subagents")
+    }
+
+    #[test]
+    fn a_takeover_with_a_dangling_call_and_an_interrupted_child_pushes_one_recovery_notification() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let session_root = root.path().join("sessions");
+        std::fs::create_dir_all(&session_root).expect("create session root");
+
+        let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+            .expect("create parent");
+        parent
+            .append_message(&recovery_dangling_call("call-1", "read"))
+            .expect("append dangling call");
+        let parent_path = parent.path();
+        parent.close().expect("close before simulating a takeover");
+
+        // A pre-existing inbox sidecar: build_subagents must load this and
+        // keep it queued alongside the recovery push, not replace it.
+        let inbox_path = Path::new(&parent_path).with_extension("inbox.json");
+        std::fs::write(
+            &inbox_path,
+            serde_json::to_vec_pretty(&[otto_core::agent::inbox::Entry {
+                seq: 0,
+                notification: otto_core::agent::inbox::Notification {
+                    task_id: "t0".to_string(),
+                    kind: Some(otto_core::agent::inbox::NotificationKind::TaskFinished),
+                    text: "already queued".to_string(),
+                    usage: None,
+                },
+            }])
+            .expect("encode inbox"),
+        )
+        .expect("write inbox sidecar");
+
+        // An interrupted child transcript: `otto.task_spec` with no
+        // `otto.task_result`.
+        let child = crate::session::Store::create_child_lazy(
+            &parent_path,
+            "t1-child",
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: workspace.to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("create child");
+        child
+            .append_custom_entry(
+                crate::subagent::runner::TASK_SPEC_CUSTOM_TYPE,
+                &serde_json::json!({
+                    "id": "t1",
+                    "name": "worker",
+                    "description": "",
+                    "model": "test-model",
+                    "context": "fresh",
+                    "prompt": "do it",
+                    "definition": null,
+                })
+                .to_string(),
+            )
+            .expect("append task_spec");
+        child.close().expect("close child");
+        let children_dir = Path::new(&parent_path).with_extension("");
+
+        recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
+
+        let (activated, _warnings) =
+            crate::session::Prepared::prepare(Path::new(&parent_path), None)
+                .expect("prepare takes over")
+                .activate()
+                .expect("activate");
+        let session = SharedSession::new(Arc::new(activated));
+
+        let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
+        let wiring =
+            recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+
+        let inbox = wiring.inbox.expect("inbox");
+        let queued = inbox.queued();
+        assert_eq!(queued.len(), 2, "{queued:?}");
+        assert_eq!(queued[0].notification.text, "already queued");
+        assert!(
+            queued[1].notification.text.contains("stopped-host"),
+            "{}",
+            queued[1].notification.text
+        );
+        assert!(
+            queued[1].notification.text.contains("read"),
+            "{}",
+            queued[1].notification.text
+        );
+        assert!(
+            queued[1].notification.text.contains("t1"),
+            "{}",
+            queued[1].notification.text
+        );
+
+        let on_disk: Vec<otto_core::agent::inbox::Entry> =
+            serde_json::from_str(&std::fs::read_to_string(&inbox_path).expect("read inbox file"))
+                .expect("decode inbox file");
+        assert_eq!(on_disk.len(), 2, "{on_disk:?}");
+
+        let records = crate::subagent::interrupted::scan(&children_dir);
+        let record = records
+            .iter()
+            .find(|record| record.task_id == "t1")
+            .expect("the child transcript was scanned");
+        assert_eq!(
+            record.final_status,
+            Some(crate::subagent::interrupted::INTERRUPTED_STATUS.to_string()),
+            "notify's mark_interrupted call must have run after the push"
+        );
+    }
+
+    #[test]
+    fn a_takeover_with_no_dangling_state_and_no_children_pushes_nothing() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let session_root = root.path().join("sessions");
+        std::fs::create_dir_all(&session_root).expect("create session root");
+
+        let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+            .expect("create parent");
+        parent
+            .append_message(&recovery_assistant_text("all done"))
+            .expect("append finished turn");
+        let parent_path = parent.path();
+        parent.close().expect("close before simulating a takeover");
+
+        recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
+
+        let (activated, _warnings) =
+            crate::session::Prepared::prepare(Path::new(&parent_path), None)
+                .expect("prepare takes over")
+                .activate()
+                .expect("activate");
+        assert!(
+            activated.take_takeover().is_some(),
+            "sanity: the parent must actually have been taken over"
+        );
+        // Re-open to get an un-taken `take_takeover()` back for the build,
+        // since the sanity check above just consumed it.
+        activated.close().expect("close");
+        let (activated, _warnings) = crate::session::Store::open(Path::new(&parent_path))
+            .expect("reopen without a lease dir race: no other holder exists");
+
+        let session = SharedSession::new(Arc::new(activated));
+        let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
+        let wiring =
+            recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+
+        let inbox = wiring.inbox.expect("inbox");
+        assert!(inbox.is_empty(), "{:?}", inbox.queued());
+    }
+
+    #[test]
+    fn a_second_build_subagents_for_the_same_store_pushes_nothing_more() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let session_root = root.path().join("sessions");
+        std::fs::create_dir_all(&session_root).expect("create session root");
+
+        let parent = crate::session::Store::create(&session_root, recovery_test_header(&workspace))
+            .expect("create parent");
+        parent
+            .append_message(&recovery_dangling_call("call-1", "read"))
+            .expect("append dangling call");
+        let parent_path = parent.path();
+        parent.close().expect("close before simulating a takeover");
+
+        recovery_write_lease_dir_by_hand(Path::new(&parent_path), "stopped-host", 4242);
+
+        let (activated, _warnings) =
+            crate::session::Prepared::prepare(Path::new(&parent_path), None)
+                .expect("prepare takes over")
+                .activate()
+                .expect("activate");
+        let session = SharedSession::new(Arc::new(activated));
+
+        let (builder, runtime, client, catalogs) = recovery_test_builder(root.path());
+        let first = recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+        assert_eq!(first.inbox.expect("inbox").len(), 1);
+
+        // The second call builds a fresh `Tasks`/`Inbox` that reloads the
+        // sidecar the first call persisted, so it still shows that one
+        // entry; the assertion is that the count does not grow to 2, which
+        // it would if `notify` pushed again from a takeover that
+        // `take_takeover()` had already consumed on the first call.
+        let second =
+            recovery_call_build_subagents(&builder, &runtime, &client, &catalogs, &session);
+        assert_eq!(
+            second.inbox.expect("inbox").len(),
+            1,
+            "take_takeover() already consumed the record on the first call, so the second call must not push again"
+        );
     }
 }
 

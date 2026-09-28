@@ -277,6 +277,15 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         }
         emit(Event::AgentStarted);
 
+        // Notifications queued before this turn started (a session-lease
+        // recovery notice, a task that finished while the user was away)
+        // are delivered before the user's own message is appended, so the
+        // provider sees them first: the user's prompt reads as a response
+        // to what is already in the transcript, not the other way around.
+        if let Err(error) = self.deliver_notifications(emit).await {
+            return Err(self.fail(emit, error));
+        }
+
         let mut state = RunDispatchState::default();
         if !text.is_empty() || image.is_some() {
             let redacted = self.redactor.redact_string(user_text);
@@ -324,9 +333,6 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 .last_memory_context
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = state.memory_context.clone();
-        }
-        if let Err(error) = self.deliver_notifications(emit).await {
-            return Err(self.fail(emit, error));
         }
 
         loop {

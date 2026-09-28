@@ -42,6 +42,8 @@ const AGENT_CONTEXT_DESCRIPTION: &str = "How the sub-agent starts. fresh (defaul
 
 const AGENT_NAME_DESCRIPTION: &str = "Optional task name, unique in this session; usable instead of the task id in agent_wait, agent_status, and /task. 1 to 64 letters, digits, '_' or '-'.";
 
+const AGENT_RESUME_DESCRIPTION: &str = "Task id or name of an interrupted sub-agent task in this session. With resume set, this continues that task on its own transcript instead of starting a new one: prompt is the next user message delivered to it, and agent, model, context, name, and description must be absent.";
+
 /// The `agent`, `agent_wait` and `agent_status` definitions, without a built
 /// [`Runner`]. The redaction boundary check needs the tool set a real runner
 /// would register, and none of the three definitions read runner state.
@@ -108,6 +110,10 @@ fn agent_definition() -> ToolDefinition {
                     "type": "string",
                     "enum": ["fresh", "inherit"],
                     "description": AGENT_CONTEXT_DESCRIPTION
+                },
+                "resume": {
+                    "type": "string",
+                    "description": AGENT_RESUME_DESCRIPTION
                 }
             },
             "required": ["prompt"]
@@ -192,6 +198,8 @@ struct AgentArgs {
     context: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    resume: String,
 }
 
 struct AgentTool {
@@ -209,6 +217,10 @@ impl Tool for AgentTool {
             Ok(args) => args,
             Err(message) => return error_result(message),
         };
+        let resume_target = args.resume.trim().to_string();
+        if !resume_target.is_empty() {
+            return self.execute_resume(&resume_target, args, cancel).await;
+        }
         if args.prompt.trim().is_empty() {
             return error_result("prompt is required");
         }
@@ -255,6 +267,58 @@ impl Tool for AgentTool {
         } else {
             format!("task {} {name} started", task.id)
         };
+        if !args.wait {
+            return text_result(started);
+        }
+
+        match wait_tasks(
+            self.runner.tasks(),
+            std::slice::from_ref(&task.id),
+            self.runner.max_output_bytes(),
+            cancel,
+        )
+        .await
+        {
+            Ok(text) => text_result(text),
+            Err(remaining) => error_result(format!(
+                "wait canceled; still running: {}",
+                remaining.join(", ")
+            )),
+        }
+    }
+}
+
+impl AgentTool {
+    /// The `resume` branch of `agent`: continues an interrupted sub-agent
+    /// task on its own transcript instead of starting a new one.
+    async fn execute_resume(
+        &self,
+        target: &str,
+        args: AgentArgs,
+        cancel: &CancellationToken,
+    ) -> ToolResult {
+        if args.prompt.trim().is_empty() {
+            return error_result("prompt is required");
+        }
+        for (field, value) in [
+            ("agent", &args.agent),
+            ("model", &args.model),
+            ("context", &args.context),
+            ("name", &args.name),
+            ("description", &args.description),
+        ] {
+            if !value.trim().is_empty() {
+                return error_result(format!("resume does not accept {field}"));
+            }
+        }
+
+        let task = match self.runner.resume(target, args.prompt) {
+            Ok(task) => task,
+            Err(error) => return error_result(error),
+        };
+
+        let name = agent_label(&task);
+        let started = format!("task {} {name} resumed", task.id);
         if !args.wait {
             return text_result(started);
         }

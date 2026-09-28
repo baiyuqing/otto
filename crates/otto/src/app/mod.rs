@@ -1278,9 +1278,25 @@ async fn open_current(
     builder: &Arc<Builder>,
     path: &Path,
 ) -> Result<(Current, Vec<String>), String> {
-    let prepared =
-        sessionfs::Prepared::prepare_listed(&builder.session_root, &builder.workspace_path, path)
-            .map_err(|error| builder.redact_error(&error.to_string(), None))?;
+    let create_lease = builder
+        .create_lease()
+        .map_err(|error| builder.redact_error(&error, None))?;
+    // A lease-managed open can block up to 7*lease_seconds/6 (35s at the
+    // default 30s lease) waiting out another host's holder; run it on a
+    // blocking thread so it does not stall this async task's runtime worker.
+    let blocking_builder = Arc::clone(builder);
+    let blocking_path = path.to_path_buf();
+    let prepared = tokio::task::spawn_blocking(move || {
+        sessionfs::Prepared::prepare_listed(
+            &blocking_builder.session_root,
+            &blocking_builder.workspace_path,
+            &blocking_path,
+            create_lease,
+        )
+    })
+    .await
+    .map_err(|error| format!("session open task panicked: {error}"))?
+    .map_err(|error| builder.redact_error(&error.to_string(), None))?;
     let info = prepared.info();
     let metadata = RuntimeMetadata {
         profile: info.profile.clone(),
@@ -1709,7 +1725,7 @@ mod tests {
         // The same open sequence as `--resume PATH` in `cli::run`.
         let builder = builder(workspace.path(), sessions.path());
         let runtime = initial_runtime(&builder);
-        let (store, _) = crate::session::Prepared::prepare(Path::new(&archived.path))
+        let (store, _) = crate::session::Prepared::prepare(Path::new(&archived.path), None)
             .expect("prepare archived")
             .activate()
             .expect("activate archived");
@@ -1959,6 +1975,99 @@ mod tests {
         assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
         assert_eq!(controller.info().session_id, first.session_id);
         assert_eq!(controller.history().len(), 1);
+    }
+
+    /// The `heartbeat` file layout `failover::lease` writes, reproduced here
+    /// to simulate a running holder without a live `Lease` of this process's
+    /// own (see [`crate::session::tests`]'s test-safety note for the same
+    /// pattern).
+    fn lease_heartbeat_bytes(
+        epoch: u64,
+        host: &str,
+        pid: u32,
+        released: bool,
+        seq: u64,
+    ) -> Vec<u8> {
+        let json = serde_json::json!({
+            "epoch": epoch,
+            "host": host,
+            "pid": pid,
+            "released": released,
+            "seq": seq,
+        })
+        .to_string();
+        let mut bytes = vec![b' '; 512];
+        bytes[..json.len()].copy_from_slice(json.as_bytes());
+        bytes[511] = b'\n';
+        bytes
+    }
+
+    #[tokio::test]
+    async fn resuming_a_session_held_by_another_renewing_holder_fails_and_keeps_the_current_session()
+     {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let controller = controller(workspace.path(), sessions.path()).await;
+        controller
+            .current_session()
+            .append(user("first"))
+            .await
+            .expect("append");
+        let first = controller.info();
+
+        controller.new_session().await.expect("new session");
+        controller
+            .current_session()
+            .append(user("second"))
+            .await
+            .expect("append");
+        let second = controller.info();
+
+        let dir = Path::new(&first.session_path).with_extension("lease");
+        std::fs::create_dir_all(&dir).expect("create lease dir");
+        std::fs::write(
+            dir.join("lease.json"),
+            serde_json::json!({ "lease_seconds": 2 }).to_string(),
+        )
+        .expect("write lease.json");
+        std::fs::write(dir.join("epoch-1"), b"{}").expect("write epoch marker");
+        std::fs::write(
+            dir.join("heartbeat"),
+            lease_heartbeat_bytes(1, "other-host", 4242, false, 1),
+        )
+        .expect("write heartbeat");
+
+        let heartbeat_path = dir.join("heartbeat");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer_stop = Arc::clone(&stop);
+        let writer = std::thread::spawn(move || {
+            let mut seq = 2u64;
+            while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::fs::write(
+                    &heartbeat_path,
+                    lease_heartbeat_bytes(1, "other-host", 4242, false, seq),
+                )
+                .expect("rewrite heartbeat");
+                seq += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+
+        let error = controller
+            .resume_session(&first.session_path)
+            .await
+            .expect_err("holder is still live");
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().expect("join heartbeat writer");
+
+        assert!(error.contains("other-host"), "{error}");
+        assert!(error.contains("4242"), "{error}");
+        assert_eq!(
+            controller.info().session_id,
+            second.session_id,
+            "the current session must stay in place after a failed resume"
+        );
     }
 
     #[tokio::test]

@@ -9,9 +9,11 @@
 
 use std::fs::{File, Metadata};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use otto_core::session::{PiError, SessionInfo, Warning};
+
+use crate::failover::lease;
 
 use super::fsops;
 use super::list::{
@@ -20,6 +22,50 @@ use super::list::{
 use super::store::Store;
 
 const ARCHIVE_DIRECTORY_NAME: &str = "archive";
+
+/// The lease [`Prepared::prepare`]/[`Prepared::prepare_listed`] acquired for
+/// a session's path, and how it was acquired.
+type AcquiredLease = (Arc<lease::Lease>, lease::Acquired);
+
+/// Acquires the lease backing `path`, when it has one.
+///
+/// `create_lease` is `Some(lease_seconds)` when the caller wants a session
+/// with no lease directory yet to get one, e.g. because `[failover]` is
+/// enabled; the directory is created only when `path` is not already
+/// lease-managed. Whether or not a directory was just created, a session
+/// that is lease-managed by the time this returns always has its lease
+/// acquired, so a session another host made lease-managed is honored even
+/// when this call passed `None`.
+fn acquire_lease_if_managed(
+    path: &Path,
+    create_lease: Option<u64>,
+) -> Result<Option<AcquiredLease>, PiError> {
+    if let Some(lease_seconds) = create_lease
+        && !lease::is_lease_managed(path)
+            .map_err(|error| PiError::other(format!("check session lease directory: {error}")))?
+    {
+        lease::create_lease_dir(path, lease_seconds)
+            .map_err(|error| PiError::other(format!("create session lease directory: {error}")))?;
+    }
+    let managed = lease::is_lease_managed(path)
+        .map_err(|error| PiError::other(format!("check session lease directory: {error}")))?;
+    if !managed {
+        return Ok(None);
+    }
+    match lease::Lease::acquire(path) {
+        Ok((lease, acquired)) => Ok(Some((lease, acquired))),
+        Err(error) => Err(PiError::invalid(format!("open session: {error}"))),
+    }
+}
+
+/// Releases a lease acquired earlier in `prepare`/`prepare_listed` when a
+/// later step in the same call fails, so a failed open never leaves a lease
+/// held with no `Prepared` or `Store` left to release it.
+fn release_on_prepare_failure(lease: &Option<AcquiredLease>) {
+    if let Some((lease, _)) = lease.as_ref() {
+        let _ = lease.release();
+    }
+}
 
 /// How a prepared handle re-checks, at activation time, that the path it was
 /// opened through still names the same file.
@@ -42,6 +88,10 @@ pub struct Prepared {
     handle: Mutex<Option<(File, Metadata)>>,
     info: SessionInfo,
     identity: Identity,
+    /// The lease acquired opening `path`, when it is lease-managed. Moved
+    /// into the [`Store`] on [`Prepared::activate`]; released by
+    /// [`Prepared::close`] or, if neither ran, by `drop`.
+    lease: Mutex<Option<AcquiredLease>>,
 }
 
 /// A completed archive move.
@@ -53,24 +103,57 @@ pub struct ArchiveResult {
 
 impl Prepared {
     /// Pins the session file at `path`, read-write, refusing a symlink.
-    pub fn prepare(path: &Path) -> Result<Self, PiError> {
-        let (file, metadata) = open_prepared_session_file_no_follow(path)?;
-        fsops::lock_session_exclusive(&file)?;
+    ///
+    /// `create_lease` is `Some(lease_seconds)` when `[failover]` is enabled;
+    /// see [`acquire_lease_if_managed`] for what that does and does not
+    /// depend on `path` already being lease-managed. The lease, when any, is
+    /// acquired before the session file is opened, so a takeover's rename of
+    /// `path` (see `lease::Lease::acquire`) happens before this call ever
+    /// opens a descriptor on it.
+    pub fn prepare(path: &Path, create_lease: Option<u64>) -> Result<Self, PiError> {
+        let lease = acquire_lease_if_managed(path, create_lease)?;
+        let (file, metadata) =
+            match open_prepared_session_file_no_follow(path).and_then(|(file, metadata)| {
+                fsops::lock_session_exclusive(&file)?;
+                Ok((file, metadata))
+            }) {
+                Ok(value) => value,
+                Err(error) => {
+                    release_on_prepare_failure(&lease);
+                    return Err(error);
+                }
+            };
         let path = path.to_string_lossy().into_owned();
-        Self::from_opened(path.clone(), file, metadata, Identity::Path(path))
+        Self::from_opened(path.clone(), file, metadata, Identity::Path(path), lease)
     }
 
     /// Pins a candidate that `list` returned for this root and workspace.
     ///
     /// Every attacker-controlled component below the root is traversed with
     /// `openat` and `O_NOFOLLOW` before the descriptor is pinned, and the
-    /// session's recorded workspace must match the expected one.
-    pub fn prepare_listed(root: &Path, workspace: &str, path: &Path) -> Result<Self, PiError> {
+    /// session's recorded workspace must match the expected one. `create_lease`
+    /// is as in [`Prepared::prepare`].
+    pub fn prepare_listed(
+        root: &Path,
+        workspace: &str,
+        path: &Path,
+        create_lease: Option<u64>,
+    ) -> Result<Self, PiError> {
         let (root_path, workspace_canonical, basename, candidate_path) =
             validate_listed_candidate_path(root, workspace, path)?;
+        let lease = acquire_lease_if_managed(Path::new(&candidate_path), create_lease)?;
         let (file, metadata) =
-            open_listed_prepared_session_file(&root_path, &workspace_canonical, &basename)?;
-        fsops::lock_session_exclusive(&file)?;
+            match open_listed_prepared_session_file(&root_path, &workspace_canonical, &basename)
+                .and_then(|(file, metadata)| {
+                    fsops::lock_session_exclusive(&file)?;
+                    Ok((file, metadata))
+                }) {
+                Ok(value) => value,
+                Err(error) => {
+                    release_on_prepare_failure(&lease);
+                    return Err(error);
+                }
+            };
         let prepared = Self::from_opened(
             candidate_path,
             file,
@@ -80,6 +163,7 @@ impl Prepared {
                 workspace: workspace_canonical.clone(),
                 basename,
             },
+            lease,
         )?;
         match fsops::canonical_workspace(Path::new(&prepared.info.cwd)) {
             Ok(candidate) if candidate == workspace_canonical => Ok(prepared),
@@ -97,14 +181,21 @@ impl Prepared {
         mut file: File,
         metadata: Metadata,
         identity: Identity,
+        lease: Option<AcquiredLease>,
     ) -> Result<Self, PiError> {
-        let (info, _) = inspect_opened_session(&path, &mut file, &metadata)?;
-        Ok(Self {
-            path,
-            handle: Mutex::new(Some((file, metadata))),
-            info,
-            identity,
-        })
+        match inspect_opened_session(&path, &mut file, &metadata) {
+            Ok((info, _)) => Ok(Self {
+                path,
+                handle: Mutex::new(Some((file, metadata))),
+                info,
+                identity,
+                lease: Mutex::new(lease),
+            }),
+            Err(error) => {
+                release_on_prepare_failure(&lease);
+                Err(error)
+            }
+        }
     }
 
     /// The listing row read while preparing.
@@ -139,7 +230,15 @@ impl Prepared {
                 "prepared session metadata changed before activation",
             ));
         }
-        Store::from_file(file, &self.path)
+        // Only now, with every check passed, does the lease pass to the
+        // `Store`: an `activate` that fails above leaves the lease with
+        // `self`, released by `drop` when this `Prepared` goes out of scope.
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| PiError::other("prepared session mutex is poisoned"))?
+            .take();
+        Store::from_file(file, &self.path, lease)
     }
 
     fn verify_identity(&self, prepared: &Metadata) -> Result<(), PiError> {
@@ -178,13 +277,38 @@ impl Prepared {
         }
     }
 
-    /// Abandons the handle. Safe after activation and idempotent.
+    /// Abandons the handle. Safe after activation and idempotent. Releases
+    /// the lease, when [`Prepared::activate`] has not already taken it.
     pub fn close(&self) -> Result<(), PiError> {
         self.handle
             .lock()
             .map_err(|_| PiError::other("prepared session mutex is poisoned"))?
             .take();
+        let lease = self
+            .lease
+            .lock()
+            .map_err(|_| PiError::other("prepared session mutex is poisoned"))?
+            .take();
+        if let Some((lease, _)) = lease {
+            lease
+                .release()
+                .map_err(|error| PiError::other(format!("release session lease: {error}")))?;
+        }
         Ok(())
+    }
+}
+
+impl Drop for Prepared {
+    /// Best-effort: releases a lease this handle acquired but never
+    /// activated or closed, e.g. because `?` returned early from a caller
+    /// holding a `Prepared`. Errors are not observable from `drop` and are
+    /// discarded.
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.lease.lock()
+            && let Some((lease, _)) = guard.take()
+        {
+            let _ = lease.release();
+        }
     }
 }
 
@@ -195,7 +319,7 @@ impl Prepared {
 /// workspace. The move is atomic and never replaces an existing archived
 /// session; on success the file exists only under `archive/`.
 pub fn archive(root: &Path, workspace: &str, path: &Path) -> Result<ArchiveResult, PiError> {
-    Prepared::prepare_listed(root, workspace, path)?.archive(root, workspace)
+    Prepared::prepare_listed(root, workspace, path, None)?.archive(root, workspace)
 }
 
 impl Prepared {
@@ -284,6 +408,19 @@ pub(crate) fn archive_open_file(
         fsops::rename_excl(&children, &destination.with_extension("")).map_err(|error| {
             PiError::other(format!(
                 "session archived to {}, but moving its sub-agent transcripts failed: {error}",
+                destination.display()
+            ))
+        })?;
+    }
+    // A lease-managed session's lease directory moves with it, after the
+    // session file and its children, so `Lease::release` (called through
+    // `Store::close` while a caller still holds the lease past this move)
+    // still finds its files afterward.
+    let lease_dir = lease::lease_dir(Path::new(&candidate_path));
+    if lease_dir.is_dir() {
+        fsops::rename_excl(&lease_dir, &lease::lease_dir(&destination)).map_err(|error| {
+            PiError::other(format!(
+                "session archived to {}, but moving its lease directory failed: {error}",
                 destination.display()
             ))
         })?;

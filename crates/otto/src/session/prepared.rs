@@ -268,12 +268,15 @@ pub(crate) fn archive_open_file(
     // destination, closing the check-then-rename race.
     fsops::rename_excl(Path::new(&candidate_path), &destination)
         .map_err(|error| PiError::other(format!("archive session file: {error}")))?;
-    // Archiving ends the session, so its outstanding timers end with it: the
-    // sidecar is removed rather than moved. Best-effort, because the session
-    // file has already moved and there is no state left to roll back to. A
-    // live session also clears its in-process timers in
-    // `app::Controller::archive_current_session`.
+    // Archiving ends the session, so its outstanding timers and queued
+    // notifications end with it: both sidecars are removed rather than
+    // moved. Best-effort, because the session file has already moved and
+    // there is no state left to roll back to. A live session also clears its
+    // in-process timers in `app::Controller::archive_current_session`; the
+    // in-process inbox is dropped there too, along with the rest of the
+    // replaced runner.
     let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("reminders.json"));
+    let _ = std::fs::remove_file(Path::new(&candidate_path).with_extension("inbox.json"));
     // Sub-agent transcripts live in `<stem>/` beside the session file
     // (`Store::create_child_lazy`) and move with it.
     let children = Path::new(&candidate_path).with_extension("");

@@ -438,7 +438,13 @@ impl Builder {
             return Ok(SubagentWiring::default());
         }
 
-        let persist = self.reminder_persist_path(session);
+        let persist = self.sidecar_path(session, "reminders.json");
+        // A task id must stay unique within the session across resumes, so
+        // the counter picks up after the highest `t<k>` already used by a
+        // child transcript file, rather than always starting at `t1`.
+        let children_dir = PathBuf::from(session.path()).with_extension("");
+        let starting_counter = subagent::tasks::highest_task_counter(&children_dir);
+        let inbox_persist = self.sidecar_path(session, "inbox.json");
         let tasks = Arc::new(match &self.task_recorder {
             Some(store) => {
                 let (pid, process_started_at) = subagent::record::current_process();
@@ -447,7 +453,7 @@ impl Builder {
                 } else {
                     session.header().id
                 };
-                Tasks::with_recorder(
+                Tasks::with_recorder_from(
                     Arc::clone(store) as Arc<dyn subagent::record::Recorder>,
                     subagent::record::TaskContext {
                         parent_session,
@@ -456,9 +462,10 @@ impl Builder {
                         pid,
                         process_started_at,
                     },
+                    starting_counter,
                 )
             }
-            None => Tasks::new(),
+            None => Tasks::new_from(starting_counter),
         });
         let usage = self.usage_collector(session, runtime);
         let session_for_children = session.clone();
@@ -500,6 +507,13 @@ impl Builder {
 
         let runner = Arc::new(runner);
         let inbox = Arc::clone(tasks.notifications());
+        if let Some(path) = inbox_persist {
+            load_inbox(&inbox, &path);
+            let hook_path = path.clone();
+            inbox.set_persist(Box::new(move |entries| {
+                write_inbox_file(&hook_path, entries)
+            }));
+        }
         tools.extend(subagent::tools::tools(&runner));
         // Parent-only; the child registry drops the timer tools by name.
         let reminders = Arc::new(match persist {
@@ -515,19 +529,18 @@ impl Builder {
         })
     }
 
-    fn reminder_persist_path(&self, session: &SharedSession) -> Option<PathBuf> {
-        if self.no_session {
+    /// Where a top-level session sidecar (`reminders.json`, `inbox.json`)
+    /// lives: beside the session file, also when that file is in `archive/`
+    /// and was resumed by path. Archiving removes the sidecars from there, and
+    /// `remind::session_file_exists` checks for the session file there. `None`
+    /// for `--no-session`. Child inboxes are never persisted: only the
+    /// registry built for the top-level session installs the hook.
+    fn sidecar_path(&self, session: &SharedSession, extension: &str) -> Option<PathBuf> {
+        let path = session.path();
+        if self.no_session || path.is_empty() {
             return None;
         }
-        let id = session.header().id;
-        if id.is_empty() {
-            return None;
-        }
-        Some(
-            crate::session::session_directory(&self.session_root, &self.workspace_path)
-                .ok()?
-                .join(format!("{id}.reminders.json")),
-        )
+        Some(Path::new(&path).with_extension(extension))
     }
 
     /// A second set of the parent's non-memory tools, for the children. Boxed
@@ -1245,6 +1258,48 @@ fn child_sessions(parent: SharedSession) -> ChildSession {
     })
 }
 
+/// Loads `<id>.inbox.json` into `inbox`, if the file exists and decodes.
+/// Otherwise the inbox starts empty, exactly like a missing or corrupt
+/// `<id>.reminders.json`. Must run before the inbox is shared with any
+/// producer, so the loaded items are the ones a wake decision sees.
+fn load_inbox(inbox: &Inbox, path: &Path) {
+    let loaded: Vec<otto_core::agent::inbox::Entry> = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    inbox.load(loaded);
+}
+
+/// Mirrors the inbox's current entries to `path` via
+/// [`remind::replace_private`], the same temporary-file/`fsync`/rename/
+/// directory-`fsync` pattern `Reminders` uses for `<id>.reminders.json`,
+/// including removing the file once the inbox is empty. A write failure is
+/// dropped, the same as a reminder file write failure from a timer firing in
+/// the background (`Inner::fire`): there is no foreground caller to report it
+/// to.
+///
+/// Skips the write once the session's own file is gone
+/// ([`remind::session_file_exists`]): a notification pushed after this
+/// session is archived — a sub-agent finishing late, or a timer racing the
+/// archive on another thread — must not recreate the sidecar the archive
+/// already removed.
+fn write_inbox_file(path: &Path, entries: &[otto_core::agent::inbox::Entry]) {
+    if entries.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    if !remind::session_file_exists(path, ".inbox.json") {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(body) = serde_json::to_vec_pretty(entries) else {
+        return;
+    };
+    let _ = remind::replace_private(path, &body);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1282,6 +1337,50 @@ mod tests {
             .join("t1-");
         assert!(path.starts_with(&*prefix.to_string_lossy()), "{path}");
         assert!(path.ends_with(".jsonl"), "{path}");
+    }
+
+    #[test]
+    fn a_reopened_inbox_loads_its_sidecar_and_the_file_is_updated_after_delivery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("s1.inbox.json");
+        std::fs::write(
+            &path,
+            r#"[
+                {"seq":0,"task_id":"t1","kind":"task_finished","text":"first","usage":null},
+                {"seq":1,"task_id":"t2","kind":"task_finished","text":"second","usage":null}
+            ]"#,
+        )
+        .expect("write sidecar");
+
+        let inbox = Inbox::new(None);
+        load_inbox(&inbox, &path);
+        let hook_path = path.clone();
+        inbox.set_persist(Box::new(move |entries| {
+            write_inbox_file(&hook_path, entries)
+        }));
+
+        let queued = inbox.queued();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|entry| entry.notification.text.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+
+        // Delivery removes each loaded item by sequence number, exactly like
+        // `deliver_notifications`, so every one is handled exactly once.
+        let mut delivered = Vec::new();
+        for entry in inbox.queued() {
+            delivered.push(entry.notification.text.clone());
+            inbox.remove_seq(entry.seq);
+        }
+        assert_eq!(delivered, ["first", "second"]);
+        assert!(inbox.is_empty());
+        assert!(
+            !path.exists(),
+            "the sidecar is removed once every loaded notification has been delivered"
+        );
     }
 
     /// A database path whose parent is a regular file, so every open fails

@@ -108,6 +108,16 @@ impl Inner {
         let Some(path) = self.path.as_ref() else {
             return Ok(());
         };
+        if !session_file_exists(path, ".reminders.json") {
+            // The session's own file is gone: archived, or (rarely) never
+            // written yet. Either way there is nothing to reconcile against.
+            // This is what actually stops a timer whose `fire` is racing
+            // `archive_current_session` on another thread from recreating
+            // the sidecar the archive just deleted; `armed` only serializes
+            // `fire` against `Reminders::clear`, not against the archive
+            // itself. See `session_file_exists`.
+            return Ok(());
+        }
         if armed.is_empty() {
             if let Err(error) = std::fs::remove_file(path)
                 && error.kind() != std::io::ErrorKind::NotFound
@@ -121,34 +131,42 @@ impl Inner {
                 .map_err(|error| format!("create reminder directory: {error}"))?;
         }
         let items: Vec<&StoredReminder> = armed.iter().map(|entry| &entry.item).collect();
-        let mut tmp = path.clone();
-        tmp.as_mut_os_string().push(".tmp");
         let body = serde_json::to_vec_pretty(&items)
             .map_err(|error| format!("encode reminders: {error}"))?;
-        write_private(&tmp, &body)?;
-        std::fs::rename(&tmp, path).map_err(|error| format!("persist reminders: {error}"))
+        replace_private(path, &body)
     }
 
-    /// Delivers the timer, unless it was cancelled while its sleep was waking.
+    /// Delivers the timer, unless it was cancelled while its sleep was
+    /// waking. The notification is pushed into the inbox before the timer is
+    /// removed from the sidecar file, so an exit between the two only risks
+    /// firing this timer again on the next resume, never losing it.
+    ///
+    /// The `armed` lock is held across the find, the push, and the removal.
+    /// `Reminders::cancel` also removes under this lock, so a cancel that
+    /// runs concurrently with a fire either wins outright (the entry is gone
+    /// before `fire` looks it up) or loses outright (the entry, and the
+    /// notification, are already committed); it cannot land in between and
+    /// let a cancelled timer still notify. `Inbox::push` takes only the
+    /// inbox's own state lock and never locks `armed`, so holding `armed`
+    /// here cannot deadlock against it.
     fn fire(&self, id: &str) {
-        let item = {
-            let mut armed = self.armed.lock().expect(STATE_MUTEX);
-            let Some(index) = armed.iter().position(|entry| entry.item.id == id) else {
-                return;
-            };
-            let entry = armed.remove(index);
-            let _ = self.save(&armed);
-            entry.item
+        let mut armed = self.armed.lock().expect(STATE_MUTEX);
+        let Some(index) = armed.iter().position(|entry| entry.item.id == id) else {
+            return;
         };
+        let message = armed[index].item.message.clone();
         self.inbox.push(Notification {
             task_id: "timer".into(),
-            text: format!("[timer] {}", item.message),
+            text: format!("[timer] {message}"),
             ..Notification::default()
         });
+        armed.remove(index);
+        let _ = self.save(&armed);
     }
 }
 
-fn write_private(path: &Path, body: &[u8]) -> Result<(), String> {
+/// Writes `body` to `path` with mode 0600 and `fsync`s it.
+pub(crate) fn write_private(path: &Path, body: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -160,6 +178,50 @@ fn write_private(path: &Path, body: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("write reminders: {error}"))?;
     file.sync_all()
         .map_err(|error| format!("sync reminders: {error}"))
+}
+
+/// Writes `body` to `path`'s `.tmp` sibling ([`write_private`]: mode 0600,
+/// `fsync`d), renames it over `path`, then `fsync`s the containing directory.
+///
+/// A rename is only durable once its directory entry is itself synced: a
+/// host crash right after a successful rename can still lose it otherwise.
+/// Shared by the reminders sidecar (`<id>.reminders.json`, via
+/// [`Inner::save`]) and the inbox sidecar (`<id>.inbox.json`, via
+/// `write_inbox_file` in `cli::wiring`), so the temporary-file/fsync/rename
+/// pattern exists in exactly one place.
+pub(crate) fn replace_private(path: &Path, body: &[u8]) -> Result<(), String> {
+    let mut tmp = path.to_path_buf();
+    tmp.as_mut_os_string().push(".tmp");
+    write_private(&tmp, body)?;
+    std::fs::rename(&tmp, path).map_err(|error| format!("persist reminders: {error}"))?;
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::File::open(directory)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("sync reminder directory: {error}"))
+}
+
+/// Whether the session `sidecar` belongs to still has its own `<id>.jsonl`
+/// beside it, derived by stripping `suffix` (`.reminders.json` or
+/// `.inbox.json`) from `sidecar`'s file name to recover `id`. `true` when the
+/// name does not have the expected suffix, so a caller that is unsure never
+/// blocks a write on that account.
+///
+/// `session::prepared::archive_open_file` renames the session's own file
+/// into `archive/` before it removes the sidecars, so this is `false` for
+/// the rest of that call and afterwards. Shared by the reminders sidecar
+/// (via [`Inner::save`]) and the inbox sidecar (via `write_inbox_file` in
+/// `cli::wiring`).
+pub(crate) fn session_file_exists(sidecar: &Path, suffix: &str) -> bool {
+    let Some(name) = sidecar.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    let Some(id) = name.strip_suffix(suffix) else {
+        return true;
+    };
+    sidecar.with_file_name(format!("{id}.jsonl")).exists()
 }
 
 /// The session's outstanding timers: what is armed, what is on disk, and how
@@ -529,6 +591,10 @@ mod tests {
 
     fn persist_setup() -> (tempfile::TempDir, PathBuf, Arc<Inbox>) {
         let directory = tempfile::tempdir().expect("temp dir");
+        // `Inner::save` skips writing once `session.jsonl` is gone (the
+        // archive-race guard), so a stand-in for it must exist beside the
+        // sidecar for these tests to exercise ordinary persistence.
+        std::fs::write(directory.path().join("session.jsonl"), b"").expect("stub session file");
         let path = directory.path().join("session.reminders.json");
         (directory, path, Arc::new(Inbox::default()))
     }
@@ -666,6 +732,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_notification_is_queued_before_the_timer_leaves_the_file() {
+        let (_directory, path, _unused) = persist_setup();
+        // The inbox's change callback runs synchronously inside `push`,
+        // before `fire` goes on to remove the timer from the sidecar. If the
+        // sidecar still lists the timer at that point, the push happened
+        // first.
+        let seen_on_disk_at_push = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = Arc::clone(&seen_on_disk_at_push);
+        let probe_path = path.clone();
+        let inbox = Arc::new(Inbox::new(Some(Box::new(move || {
+            let stored = persisted(&probe_path);
+            if stored.iter().any(|item| item.message == "check ordering") {
+                probe.store(true, Ordering::SeqCst);
+            }
+        }))));
+        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        reminders
+            .schedule(Duration::ZERO, "check ordering".into())
+            .expect("schedule");
+
+        wait_until_fired(&inbox).await;
+
+        assert!(
+            seen_on_disk_at_push.load(Ordering::SeqCst),
+            "the timer must still be on disk when its notification is pushed"
+        );
+        assert!(
+            persisted(&path).is_empty(),
+            "the timer is removed once it has fired"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fire_after_the_session_file_is_gone_does_not_recreate_the_sidecar() {
+        // Mirrors what `session::prepared::archive_open_file` leaves behind:
+        // the session's own file gone, and its sidecars already removed. A
+        // timer racing that archive on another thread must still notify the
+        // in-process inbox (at-least-once delivery), but must not recreate
+        // the sidecar file for a session that no longer exists.
+        let (directory, path, inbox) = persist_setup();
+        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let item = reminders
+            .schedule(Duration::from_secs(60), "late".into())
+            .expect("schedule");
+        assert!(
+            path.exists(),
+            "the sidecar exists while the session is live"
+        );
+
+        std::fs::remove_file(directory.path().join("session.jsonl")).expect("remove session file");
+        let _ = std::fs::remove_file(&path);
+
+        reminders.inner.fire(&item.id);
+
+        assert!(
+            !inbox.is_empty(),
+            "the notification still reaches the in-process inbox"
+        );
+        assert!(
+            !path.exists(),
+            "a fire that races the archive must not recreate the sidecar"
+        );
+    }
+
+    #[test]
+    fn session_file_exists_checks_the_id_derived_from_the_sidecar_suffix() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let sidecar = directory.path().join("s1.reminders.json");
+
+        assert!(
+            !session_file_exists(&sidecar, ".reminders.json"),
+            "no session file yet"
+        );
+
+        std::fs::write(directory.path().join("s1.jsonl"), b"").expect("write session file");
+        assert!(
+            session_file_exists(&sidecar, ".reminders.json"),
+            "the session file now exists"
+        );
+
+        std::fs::remove_file(directory.path().join("s1.jsonl")).expect("remove session file");
+        assert!(
+            !session_file_exists(&sidecar, ".reminders.json"),
+            "archiving removed it again"
+        );
+    }
+
+    #[tokio::test]
     async fn dropping_the_registry_keeps_unfired_reminders_on_disk() {
         let (_directory, path, inbox) = persist_setup();
         {
@@ -739,6 +893,49 @@ mod tests {
         assert_eq!(stored.len(), 1, "{stored:?}");
         assert_eq!(stored[0].message, "keep");
         assert_eq!(reminders.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_racing_a_fire_never_lets_both_win() {
+        // `Inner::fire` and `Reminders::cancel` both remove the timer under
+        // the same `armed` lock, so they must serialize: either the cancel
+        // wins outright (no notification) or the fire wins outright (the
+        // cancel sees "unknown timer"), never a canceled timer that still
+        // notifies. Drive `fire` from a real OS thread against `cancel` on
+        // this one, synchronized by a barrier, to force the two onto the
+        // lock at the same instant instead of relying on `tokio::select!`'s
+        // branch-selection timing.
+        let (_directory, path, inbox) = persist_setup();
+        let reminders = Reminders::with_persist(Arc::clone(&inbox), path.clone());
+        let item = reminders
+            .schedule(Duration::from_secs(60), "race".into())
+            .expect("schedule");
+        let id = item.id.clone();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let fire_inner = Arc::clone(&reminders.inner);
+        let fire_id = id.clone();
+        let fire_barrier = Arc::clone(&barrier);
+        let fire_thread = std::thread::spawn(move || {
+            fire_barrier.wait();
+            fire_inner.fire(&fire_id);
+        });
+
+        barrier.wait();
+        let cancel_result = reminders.cancel(&id);
+        fire_thread.join().expect("fire thread panicked");
+
+        let notified = !inbox.is_empty();
+        match cancel_result {
+            Ok(_) => assert!(
+                !notified,
+                "cancel reported success but the timer also notified"
+            ),
+            Err(_) => assert!(
+                notified,
+                "fire won the race but left no notification behind"
+            ),
+        }
     }
 
     #[tokio::test]

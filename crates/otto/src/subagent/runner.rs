@@ -48,7 +48,7 @@ use otto_core::model::{Message, Role, ToolDefinition};
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{MemorySession, Session};
 use otto_core::tool::{ToolExecutor, ToolResult};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -84,6 +84,49 @@ const GENERIC_SUBAGENT_INSTRUCTION: &str = "You are running as a sub-agent of Ot
 const DEFAULT_MAX_PARALLEL: usize = 4;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 16384;
 const MAX_DESCRIPTION_CHARS: usize = 80;
+
+/// The `customType` of the entry a child transcript gets as soon as its task
+/// is created, before the child agent runs. See [`spawn`](Runner::spawn).
+const TASK_SPEC_CUSTOM_TYPE: &str = "otto.task_spec";
+
+/// The `customType` of the entry a child transcript gets when its task
+/// reaches a terminal status. See [`finish`](Runner::finish).
+const TASK_RESULT_CUSTOM_TYPE: &str = "otto.task_result";
+
+/// The JSON `data` of an `otto.task_spec` custom entry: the task as created,
+/// and the agent definition as resolved at start (the same snapshot
+/// [`Runner::run_with_definition`] uses), so a queued task's transcript
+/// already records what it was asked to do before it starts.
+#[derive(Debug, Serialize)]
+struct TaskSpecData<'a> {
+    id: &'a str,
+    name: &'a str,
+    description: &'a str,
+    model: &'a str,
+    context: &'a str,
+    definition: Option<TaskSpecDefinition<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TaskSpecDefinition<'a> {
+    name: &'a str,
+    body: &'a str,
+    /// The definition's own tool allowlist, `None` for every child tool.
+    /// Unresolved against the live registry, matching what
+    /// [`Runner::run_with_definition`] snapshots.
+    tools: Option<&'a [String]>,
+    #[serde(rename = "writePolicy")]
+    write_policy: &'a str,
+    #[serde(rename = "writePaths")]
+    write_paths: &'a [String],
+}
+
+/// The JSON `data` of an `otto.task_result` custom entry.
+#[derive(Debug, Serialize)]
+struct TaskResultData<'a> {
+    status: &'a str,
+    error: &'a str,
+}
 
 /// Shares one provider between the parent and every child, because [`Agent`]
 /// owns the provider it calls.
@@ -132,6 +175,14 @@ impl Session for SharedTranscript {
         checkpoint: otto_core::session::CompactionCheckpoint,
     ) -> Result<otto_core::session::CompactionMetadata, otto_core::session::SessionError> {
         self.0.append_compaction(checkpoint).await
+    }
+
+    fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), otto_core::session::SessionError> {
+        self.0.append_custom(custom_type, data)
     }
 }
 
@@ -689,12 +740,35 @@ impl Runner {
                 }
                 Ok(None) => Arc::new(MemorySession::new()),
                 Err(error) => {
-                    self.finish(&task.id, TaskStatus::Failed, now, &[], Some(&error));
+                    // No transcript was built, so there is nothing to append
+                    // otto.task_result to.
+                    self.finish(&task.id, TaskStatus::Failed, now, &[], Some(&error), None);
                     return Ok(self.config.tasks.get(&task.id).unwrap_or(task));
                 }
             },
         };
         let _ = slot.set(Arc::clone(&transcript));
+
+        // Written before the child runs, so a queued task that never starts
+        // still has a transcript recording what it was asked to do.
+        append_task_custom(
+            &transcript,
+            TASK_SPEC_CUSTOM_TYPE,
+            &TaskSpecData {
+                id: &task.id,
+                name: &task.name,
+                description: &task.description,
+                model: &task.model,
+                context: &task.context,
+                definition: definition.as_ref().map(|definition| TaskSpecDefinition {
+                    name: &definition.name,
+                    body: &definition.body,
+                    tools: definition.tools.as_deref(),
+                    write_policy: definition.write_policy.as_str(),
+                    write_paths: &definition.write_paths,
+                }),
+            },
+        );
 
         let tools = ChildTools {
             registry: Arc::clone(&self.child_registry),
@@ -801,6 +875,7 @@ impl Runner {
                     self.now(),
                     &messages,
                     Some(&error.to_string()),
+                    Some(&transcript),
                 );
                 return;
             }
@@ -810,7 +885,7 @@ impl Runner {
             permit = Arc::clone(&self.semaphore).acquire_owned() => permit,
             () = cancel.cancelled() => {
                 let messages = transcript.messages();
-                self.finish(&task_id, TaskStatus::Canceled, self.now(), &messages, None);
+                self.finish(&task_id, TaskStatus::Canceled, self.now(), &messages, None, Some(&transcript));
                 return;
             }
         };
@@ -843,13 +918,22 @@ impl Runner {
         };
         let error = outcome.err().map(|error| error.to_string());
         let messages = transcript.messages();
-        self.finish(&task_id, status, self.now(), &messages, error.as_deref());
+        self.finish(
+            &task_id,
+            status,
+            self.now(),
+            &messages,
+            error.as_deref(),
+            Some(&transcript),
+        );
     }
 
     /// Marks a task final and pushes its completion notification. The
-    /// notification is pushed before the registry update that releases
-    /// [`Tasks::wait`], so a caller unblocked by a wait always finds it
-    /// already in the inbox.
+    /// notification is pushed before `otto.task_result` is appended to
+    /// `transcript` (`None` when the task never got one, such as when the
+    /// child-session builder itself failed), and before the registry update
+    /// that releases [`Tasks::wait`], so a caller unblocked by a wait always
+    /// finds the notification already in the inbox.
     fn finish(
         &self,
         task_id: &str,
@@ -857,6 +941,7 @@ impl Runner {
         finished_at: DateTime<Utc>,
         messages: &[Message],
         run_error: Option<&str>,
+        transcript: Option<&Transcript>,
     ) {
         let mut result = last_assistant_text(messages);
         if result.is_empty() {
@@ -879,10 +964,33 @@ impl Runner {
             text: completion_text(&final_task, self.config.max_output_bytes),
             usage: final_task.usage_present.then_some(final_task.usage),
         });
+        if let Some(transcript) = transcript {
+            append_task_custom(
+                transcript,
+                TASK_RESULT_CUSTOM_TYPE,
+                &TaskResultData {
+                    status: status.as_str(),
+                    error: &error_text,
+                },
+            );
+        }
         self.config
             .tasks
             .finish(task_id, status, finished_at, &result, &error_text);
     }
+}
+
+/// Encodes `data` and appends it to `transcript` as a `custom` entry typed
+/// `custom_type`. A failure to encode or append is dropped, the same way
+/// [`Recorder::upsert`](crate::subagent::record::Recorder::upsert) drops a
+/// task record write failure: in TUI mode a stderr write from a background
+/// task is drawn over the screen. The task's completion notification to the
+/// parent does not depend on these entries.
+fn append_task_custom(transcript: &Transcript, custom_type: &str, data: &impl Serialize) {
+    let Ok(json) = serde_json::to_string(data) else {
+        return;
+    };
+    let _ = transcript.append_custom(custom_type, &json);
 }
 
 /// Why [`Runner::start`] refused a request. Every variant is reported before a
@@ -1610,6 +1718,287 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn otto_task_spec_is_written_before_the_child_runs_and_covers_a_queued_task() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        let block = CancellationToken::new();
+        let hook_block = block.clone();
+        provider.set_hook(Arc::new(move |cancel, _request| {
+            let block = hook_block.clone();
+            Box::pin(async move {
+                tokio::select! {
+                    () = block.cancelled() => {}
+                    () = cancel.cancelled() => {}
+                }
+            })
+        }));
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.max_parallel = 1;
+        config.catalog = catalog(vec![Definition {
+            body: "Review the change.".into(),
+            tools: Some(vec!["read".into()]),
+            write_policy: WritePolicy::ReadOnly,
+            write_paths: vec!["docs/**".into()],
+            ..definition("reviewer")
+        }]);
+        let parent = parent_path.clone();
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&parent, task_id, false)))
+        }));
+        let (runner, _) = runner(config);
+
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        runner
+            .start(StartRequest {
+                agent: "reviewer".into(),
+                description: "look this over".into(),
+                prompt: "look at this".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        assert_eq!(
+            tasks.get("t2").expect("t2 exists").status,
+            TaskStatus::Queued,
+            "the second task must stay queued behind the first"
+        );
+
+        // Read both transcripts while t2 is still queued: a queued task that
+        // never started must already have otto.task_spec on file.
+        for (task_id, want_definition) in [("t1", false), ("t2", true)] {
+            let task = tasks.get(task_id).expect("task exists");
+            let path = dir
+                .path()
+                .join("parent")
+                .join(format!("{task_id}-child.jsonl"));
+            let entries = read_custom_entries(&path);
+            assert_eq!(entries[0].0, "otto.runtime", "{entries:?}");
+            assert_eq!(entries[1].0, "otto.task_spec", "{entries:?}");
+            let data = &entries[1].1;
+            assert_eq!(data["id"], task_id);
+            assert_eq!(data["name"], task.name);
+            assert_eq!(data["description"], task.description);
+            assert_eq!(data["model"], task.model);
+            assert_eq!(data["context"], task.context);
+            if want_definition {
+                let definition = &data["definition"];
+                assert_eq!(definition["name"], "reviewer");
+                assert_eq!(definition["body"], "Review the change.");
+                assert_eq!(definition["tools"], serde_json::json!(["read"]));
+                assert_eq!(definition["writePolicy"], "read_only");
+                assert_eq!(definition["writePaths"], serde_json::json!(["docs/**"]));
+            } else {
+                assert!(data["definition"].is_null(), "{data:?}");
+            }
+        }
+
+        block.cancel();
+        wait_final(&tasks, "t1").await;
+        wait_final(&tasks, "t2").await;
+    }
+
+    /// A transcript wrapper that asserts, at the moment `otto.task_result` is
+    /// appended, that the task's completion notification already sits in the
+    /// parent inbox. This checks the order `finish`
+    /// (crates/otto/src/subagent/runner.rs) is required to follow: the
+    /// notification is pushed before the transcript entry is appended.
+    struct OrderCheckingTranscript {
+        inner: Transcript,
+        tasks: Arc<Tasks>,
+        task_id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Session for OrderCheckingTranscript {
+        fn messages(&self) -> Vec<Message> {
+            self.inner.messages()
+        }
+
+        async fn append(&self, message: Message) -> Result<(), otto_core::session::SessionError> {
+            self.inner.append(message).await
+        }
+
+        fn latest_compaction(&self) -> Option<otto_core::session::CompactionMetadata> {
+            self.inner.latest_compaction()
+        }
+
+        async fn append_compaction(
+            &self,
+            checkpoint: otto_core::session::CompactionCheckpoint,
+        ) -> Result<otto_core::session::CompactionMetadata, otto_core::session::SessionError>
+        {
+            self.inner.append_compaction(checkpoint).await
+        }
+
+        fn append_custom(
+            &self,
+            custom_type: &str,
+            data: &str,
+        ) -> Result<(), otto_core::session::SessionError> {
+            if custom_type == TASK_RESULT_CUSTOM_TYPE {
+                let pushed = self
+                    .tasks
+                    .notifications()
+                    .snapshot()
+                    .iter()
+                    .any(|notification| {
+                        notification.task_id == self.task_id
+                            && notification.kind == Some(NotificationKind::TaskFinished)
+                    });
+                assert!(
+                    pushed,
+                    "otto.task_result for {} was appended before its completion notification was pushed",
+                    self.task_id
+                );
+            }
+            self.inner.append_custom(custom_type, data)
+        }
+    }
+
+    #[tokio::test]
+    async fn otto_task_result_is_appended_after_the_notification_when_succeeded() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        let parent = parent_path.clone();
+        let checking_tasks = Arc::clone(&tasks);
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            let (inner, path) = child_store(&parent, task_id, false);
+            let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
+                inner,
+                tasks: Arc::clone(&checking_tasks),
+                task_id: task_id.to_string(),
+            });
+            Ok(Some((wrapped, path)))
+        }));
+        let (runner, _) = runner(config);
+
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        let done = wait_final(&tasks, "t1").await;
+        assert_eq!(done.status, TaskStatus::Succeeded, "{}", done.error);
+
+        let path = dir.path().join("parent").join("t1-child.jsonl");
+        let (custom_type, data) = read_custom_entries(&path)
+            .into_iter()
+            .last()
+            .expect("otto.runtime is at least present");
+        assert_eq!(custom_type, "otto.task_result");
+        assert_eq!(data["status"], "succeeded");
+        assert_eq!(data["error"], "");
+    }
+
+    #[tokio::test]
+    async fn otto_task_result_is_appended_after_the_notification_when_failed() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![RouteStep::Fail("provider exploded".into())]);
+
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        let parent = parent_path.clone();
+        let checking_tasks = Arc::clone(&tasks);
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            let (inner, path) = child_store(&parent, task_id, false);
+            let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
+                inner,
+                tasks: Arc::clone(&checking_tasks),
+                task_id: task_id.to_string(),
+            });
+            Ok(Some((wrapped, path)))
+        }));
+        let (runner, _) = runner(config);
+
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        let done = wait_final(&tasks, "t1").await;
+        assert_eq!(done.status, TaskStatus::Failed);
+
+        let path = dir.path().join("parent").join("t1-child.jsonl");
+        let (custom_type, data) = read_custom_entries(&path)
+            .into_iter()
+            .last()
+            .expect("otto.runtime is at least present");
+        assert_eq!(custom_type, "otto.task_result");
+        assert_eq!(data["status"], "failed");
+        assert!(
+            data["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("provider exploded"),
+            "{data:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn otto_task_result_is_appended_after_the_notification_when_canceled() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        provider.set_hook(Arc::new(|cancel, _request| {
+            Box::pin(async move { cancel.cancelled().await })
+        }));
+
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        let parent = parent_path.clone();
+        let checking_tasks = Arc::clone(&tasks);
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            let (inner, path) = child_store(&parent, task_id, false);
+            let wrapped: Transcript = Arc::new(OrderCheckingTranscript {
+                inner,
+                tasks: Arc::clone(&checking_tasks),
+                task_id: task_id.to_string(),
+            });
+            Ok(Some((wrapped, path)))
+        }));
+        let (runner, _) = runner(config);
+
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+        tasks.cancel("t1").expect("cancel succeeds");
+        let done = wait_final(&tasks, "t1").await;
+        assert_eq!(done.status, TaskStatus::Canceled);
+
+        let path = dir.path().join("parent").join("t1-child.jsonl");
+        let (custom_type, data) = read_custom_entries(&path)
+            .into_iter()
+            .last()
+            .expect("otto.runtime is at least present");
+        assert_eq!(custom_type, "otto.task_result");
+        assert_eq!(data["status"], "canceled");
+        assert_eq!(data["error"], "");
+    }
+
+    #[tokio::test]
     async fn task_record_fields_update_across_provider_steps() {
         let provider = FakeProvider::new();
         provider.add_route(
@@ -1972,6 +2361,29 @@ mod tests {
         store.lock().expect("lock").fail_writes = fail;
         let path = crate::session::Store::child_path(parent, &name);
         (Arc::new(store), path.to_string_lossy().into_owned())
+    }
+
+    /// The `custom` entries in a child transcript file, as `(customType,
+    /// data)` pairs, in file order.
+    fn read_custom_entries(path: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+        std::fs::read_to_string(path)
+            .expect("read child transcript")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|entry| entry.get("type").and_then(|value| value.as_str()) == Some("custom"))
+            .map(|entry| {
+                let custom_type = entry
+                    .get("customType")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let data = entry
+                    .get("data")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                (custom_type, data)
+            })
+            .collect()
     }
 
     #[tokio::test]

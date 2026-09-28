@@ -71,8 +71,8 @@ Keep `crates/otto`'s `subagent` module behind the runner's construction path:
 children are built only through it; the agent loop knows tasks only through
 its own task registry and never imports `subagent` directly; frontends reach
 tasks only through the shared task-lister facade; children never receive
-`agent*`, `remember`, `forget`, `memory_search`, or `remind*`; child transcripts are not
-persisted. `agent_send` queues parent task updates in a child's private inbox
+`agent*`, `remember`, `forget`, `memory_search`, or `remind*`; a child's inbox is
+not persisted. `agent_send` queues parent task updates in a child's private inbox
 and child agents read them only at normal agent-loop notification checkpoints;
 it does not interrupt an in-flight provider or tool call. `agent_report` is a
 child-only tool that queues progress reports in the parent's task inbox without
@@ -131,6 +131,7 @@ server or OAuth round-trip.
 - `otto_core::provider::Response::message` is the single source of finish reason and usage. `Message::usage == None` means unavailable; `Some(Usage::default())` means explicitly reported zero. Preserve explicit presence (`usage_present` on `CompactionResult` and on the task records) through events, task progress, notifications, aggregates, and supported persistence metadata instead of inferring absence from zero counters. Keep legacy Pi normalization in the decoder.
 - Keep provider-token persistence in `crates/otto::usage`: collection maps neutral agent events to content-free records, SQLite only appends and aggregates those records, and frontends query through the server API. Never store prompts, response text, tool arguments, or tool output in the usage database.
 - Keep context associations in the typed `ContextMetadata`. Prefer the structured `task_id` over notification wording; text parsing is only a legacy-history fallback. Preserve append-only Pi v3 compatibility and namespaced optional details, including the explicit-zero usage marker. Do not rewrite old records or invent missing historical metadata.
+- `Session::append_custom` writes a Pi v3 `custom` entry; `pi_entry_to_context_messages` skips `custom` entries, so they never reach a model context. The trait method has no default body: every implementor, including wrappers such as `SharedSession`, states whether it writes or drops the entry. The sub-agent runner writes `otto.task_spec` after the task slot is set and `otto.task_result` after the completion notification is pushed, and drops a write failure. When a session is reopened with unanswered tool calls, the first unanswered call gets `MAY_HAVE_RUN_TOOL_RESULT_TEXT` and the later ones `NOT_EXECUTED_TOOL_RESULT_TEXT` (`otto_core::session::context::missing_tool_results`); tool calls run one at a time, so the answered calls are a prefix.
 - `otto_core::tool::ToolResult::persisted_content == None` selects `content`; `Some` selects its value, including `Some("")`; `persisted_text` applies that rule. Preserve redaction and the current-turn full-result overlay. Reuse tool definitions and assembly helpers, including `tool::bash::bash_definition` in `crates/otto`; keep conservative preflight and the `Registry::new` validation.
 - Tool arguments decode model output rather than a strict client. An optional list argument deserializes with `tool::empty_as_none`, so an empty list reads as an absent key and a model that sends `[]` beside the arguments it is using is still served; `crates/otto/tests/tool_argument_contract.rs` scans the tool sources for one that does not.
 - `Provider` and `Tool`/`ToolExecutor` instances are shared concurrently, so every trait method takes `&self`. Requests and arguments are borrowed for the duration of the call; returned responses, results, and definitions are owned by the caller. Per-call `StreamSink` callbacks are ordered and finish before `Provider::complete` returns; `Event` payloads are owned values, so consumers keep what they need without further copying.
@@ -142,6 +143,7 @@ server or OAuth round-trip.
 - `Controller::request_close` is nonblocking. External lifecycle owners cancel active work as appropriate and call the synchronous `Controller::close` to complete cleanup. An idle close request alone does not release resources. Preserve exactly-once session/runner cleanup, cleanup errors, and post-close `info`/`history` snapshots; reentrancy is tracked by the admission generation (`begin_operation`/`Admission`), not by thread or stack inspection.
 - Treat `subagent::tasks::Task` as a query snapshot. Update existing task progress and completion through `Tasks::mark_running`, `record_provider_step`, `record_tool_call`, and `finish`; preserve task identity, terminal states, and notification-before-`wait` ordering. A cancellation request is not proof that execution has stopped. The agent loop sees the registry only as `otto_core::agent::TaskRegistry`.
 - Frontends use `Controller::tasks` (`app::TaskView` over the wire-shaped `app::Task`), never the mutable `Tasks` registry or the raw `Inbox`. Host inbound adapters call `Controller::notify` instead of touching `Inbox` directly. Call `Controller::prepare_wake` before publishing a wake turn, then `WakeOperation::run` it once or drop it. Dropping an unstarted claim releases it on cancellation/shutdown. `Tasks::updates` is a coalescing `tokio::sync::watch` signal, not a broadcast subscription; add no competing scheduler. Normal and wake turns share cancellation, event delivery, and compaction accounting; one-shot runs propagate wake failures.
+- `otto_core::agent::inbox::Inbox` numbers every item (`Entry::seq`) and runs its persist hook under the inbox lock after every change. `cli::wiring` installs the hook only for a file-backed top-level session; it mirrors the queue to `<id>.inbox.json` through `tool::remind::replace_private` (temporary file, `fsync`, rename, directory `fsync`) and skips the write once `<id>.jsonl` is gone, so an archive is not undone by a late push. `deliver_notifications` removes an item by sequence number only after the session append succeeded, so delivery is at least once. `Inbox::load` runs before any producer holds the inbox and signals the change callback when it restored items; that signal is how a reopened session gets its wake turn. `remind`'s `Inner::fire` pushes the notification and removes the timer under one hold of the `armed` lock.
 - Use `auth::Service` (`login`/`logout`/`status`) and `Controller::switch_profile`/`set_default_profile` for shared use cases. Credential paths and concrete services belong in the composition root; OAuth and credential files stay in `crates/otto`'s `auth` module. Frontends own presentation, not credential persistence. Preserve the startup credential snapshot (`cli::login::capture_auth_credentials`) and restart requirement, and refresh backend state after a profile switch even when saving the default fails.
 
 ## Development isolation and ownership
@@ -273,18 +275,20 @@ proxies `/v1` to the server, so the page stays same-origin and no CORS is
 involved. Wire types in `ui/src/types.ts` mirror
 [openapi.yaml](../testdata/server/openapi.yaml); update both together.
 
-## Test-driven development
+## Tests
 
-TDD is required for feature work and bug fixes:
+Feature work and bug fixes ship with tests that check the behavior the change
+adds or fixes:
 
-1. Write or update the failing test first.
-2. Run the smallest relevant `cargo test ...` command and watch it fail for the expected reason.
-3. Make the minimal code change.
-4. Re-run the focused test.
-5. Re-run the broader relevant crate or repository gates.
+1. Each test covers behavior the change defines: an input, a state, or an
+   error path, not the structure of the implementation.
+2. A test must fail when the behavior it covers breaks. When that is not
+   evident from the test, check it once by breaking the behavior locally.
+3. Run the smallest relevant `cargo test ...` command, then the broader
+   relevant crate or repository gates.
 
-Do not add production behavior without a failing test first unless the user
-explicitly approves an exception for docs-only work or another non-code change.
+Tests may be written before, during, or after the code. Docs-only and other
+non-code changes need no tests.
 Keep unit tests next to the module they cover (`#[cfg(test)] mod tests`), and
 integration tests in the crate's `tests/` directory. Prefer
 `#[test]`/`#[tokio::test]` and `tempfile::TempDir`. TTY-specific coverage must

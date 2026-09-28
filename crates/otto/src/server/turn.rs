@@ -198,9 +198,15 @@ impl Turn {
                         metrics.provider_api_request(provider, model, status.name(), *duration);
                         return;
                     }
-                    Event::ToolCallStarted { .. } => state.tool_start = Some(Instant::now()),
+                    Event::ToolCallStarted { tool_name, .. } => {
+                        state.tool_start = Some(Instant::now());
+                        metrics.operation_attempt(tool_name);
+                    }
                     Event::ToolCallFinished {
-                        tool_name, result, ..
+                        tool_name,
+                        result,
+                        outcome,
+                        ..
                     } => {
                         let elapsed = state
                             .tool_start
@@ -210,6 +216,20 @@ impl Turn {
                         let tool_name = tool_name.clone();
                         drop(state);
                         metrics.tool_call(&tool_name, is_error, elapsed);
+                        if outcome.effect_certainty == otto_core::model::EffectCertainty::Unknown {
+                            let disposition = match outcome.disposition {
+                                otto_core::model::OperationDisposition::Succeeded => "succeeded",
+                                otto_core::model::OperationDisposition::Error => "error",
+                                otto_core::model::OperationDisposition::Cancelled => "cancelled",
+                                otto_core::model::OperationDisposition::DeadlineExceeded => {
+                                    "deadline_exceeded"
+                                }
+                                otto_core::model::OperationDisposition::Interrupted => {
+                                    "interrupted"
+                                }
+                            };
+                            metrics.operation_unknown_effect(&tool_name, disposition);
+                        }
                         let mut state = self.lock();
                         state.events.push(wire);
                         drop(state);
@@ -367,17 +387,27 @@ mod tests {
     fn a_finished_tool_call_is_measured_and_buffered() {
         let (turn, metrics) = turn();
         let mut emit = turn.emitter(&metrics);
+        let operation_id = otto_core::model::OperationId::new("op_test").unwrap();
         emit(Event::ToolCallStarted {
+            operation_id: operation_id.clone(),
+            attempt: 1,
             tool_name: "bash".to_string(),
             tool_call_id: "c1".to_string(),
             arguments: String::new(),
         });
         emit(Event::ToolCallFinished {
+            operation_id,
+            attempt: 1,
             tool_name: "bash".to_string(),
             tool_call_id: "c1".to_string(),
             result: ToolResult {
                 content: "ok".to_string(),
                 ..ToolResult::default()
+            },
+            outcome: otto_core::model::OperationOutcome {
+                disposition: otto_core::model::OperationDisposition::Succeeded,
+                effect_certainty: otto_core::model::EffectCertainty::Completed,
+                stop_reason: None,
             },
         });
         drop(emit);
@@ -387,6 +417,48 @@ mod tests {
                 .render()
                 .contains(r#"otto_tool_calls_total{tool="bash",status="ok"} 1"#)
         );
+        assert!(
+            metrics
+                .render()
+                .contains(r#"otto_operation_attempts_total{kind="tool_call",tool="bash"} 1"#)
+        );
+        assert!(!metrics.render().contains("op_test"));
+        assert!(!metrics.render().contains("content=\"ok\""));
+    }
+
+    #[test]
+    fn an_unknown_effect_is_counted_without_operation_content() {
+        let (turn, metrics) = turn();
+        let mut emit = turn.emitter(&metrics);
+        let operation_id = otto_core::model::OperationId::new("op_secretish").unwrap();
+        emit(Event::ToolCallStarted {
+            operation_id: operation_id.clone(),
+            attempt: 1,
+            tool_name: "mcp_call_tool".to_string(),
+            tool_call_id: "c1".to_string(),
+            arguments: r#"{"secret":"do-not-store"}"#.to_string(),
+        });
+        emit(Event::ToolCallFinished {
+            operation_id,
+            attempt: 1,
+            tool_name: "mcp_call_tool".to_string(),
+            tool_call_id: "c1".to_string(),
+            result: ToolResult::error("raw upstream body"),
+            outcome: otto_core::model::OperationOutcome {
+                disposition: otto_core::model::OperationDisposition::Interrupted,
+                effect_certainty: otto_core::model::EffectCertainty::Unknown,
+                stop_reason: Some(otto_core::model::OperationStopReason::TransportLost),
+            },
+        });
+        drop(emit);
+
+        let rendered = metrics.render();
+        assert!(rendered.contains(
+            r#"otto_operation_unknown_effects_total{kind="tool_call",tool="mcp_call_tool",disposition="interrupted"} 1"#
+        ));
+        for sensitive in ["op_secretish", "do-not-store", "raw upstream body"] {
+            assert!(!rendered.contains(sensitive), "metrics leaked {sensitive}");
+        }
     }
 
     #[test]

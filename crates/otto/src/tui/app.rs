@@ -1223,9 +1223,11 @@ impl App {
                 false
             }
             Event::ToolCallStarted {
+                operation_id,
                 tool_name,
                 tool_call_id,
                 arguments,
+                ..
             } => {
                 self.entries.push(Entry {
                     id: format!("streaming-tool-{}", self.entries.len()),
@@ -1233,14 +1235,18 @@ impl App {
                     tool_call_id,
                     tool_name,
                     tool_args: arguments,
+                    operation_id: Some(operation_id.to_string()),
                     ..Entry::default()
                 });
                 false
             }
             Event::ToolCallFinished {
+                operation_id,
                 tool_name,
                 tool_call_id,
                 result,
+                outcome,
+                ..
             } => {
                 let approval = bash_approval_request(&tool_name, &result);
                 if let Some(entry) = self.entries.iter_mut().rev().find(|entry| {
@@ -1249,6 +1255,10 @@ impl App {
                     entry.tool_output = result.content;
                     entry.tool_error = result.is_error;
                     entry.tool_done = true;
+                    entry.operation_id = Some(operation_id.to_string());
+                    entry.disposition = Some(outcome.disposition);
+                    entry.effect_certainty = Some(outcome.effect_certainty);
+                    entry.stop_reason = outcome.stop_reason;
                 }
                 if let Some(approval) = approval {
                     self.push_system(approval_hint(&approval));
@@ -2017,6 +2027,8 @@ mod tests {
             text: "second".to_string(),
         });
         app.apply_event(Event::ToolCallStarted {
+            operation_id: otto_core::model::OperationId::new("op_test").expect("operation id"),
+            attempt: 1,
             tool_name: "bash".to_string(),
             tool_call_id: "call-1".to_string(),
             arguments: String::new(),
@@ -2033,11 +2045,15 @@ mod tests {
         let before = app.entries.len();
 
         app.apply_event(Event::ToolCallStarted {
+            operation_id: otto_core::model::OperationId::new("op_approval").expect("operation id"),
+            attempt: 1,
             tool_name: "bash".to_string(),
             tool_call_id: "call-1".to_string(),
             arguments: r#"{"command":"git push"}"#.to_string(),
         });
         app.apply_event(Event::ToolCallFinished {
+            operation_id: otto_core::model::OperationId::new("op_approval").expect("operation id"),
+            attempt: 1,
             tool_name: "bash".to_string(),
             tool_call_id: "call-1".to_string(),
             result: otto_core::tool::ToolResult {
@@ -2045,11 +2061,25 @@ mod tests {
                 is_error: true,
                 ..Default::default()
             },
+            outcome: otto_core::model::OperationOutcome {
+                disposition: otto_core::model::OperationDisposition::Error,
+                effect_certainty: otto_core::model::EffectCertainty::NotStarted,
+                stop_reason: None,
+            },
         });
 
         let added = &app.entries[before..];
         assert_eq!(added.len(), 2, "tool entry plus system hint: {added:?}");
         assert_eq!(added[0].kind, Some(EntryKind::Tool));
+        assert_eq!(added[0].operation_id.as_deref(), Some("op_approval"));
+        assert_eq!(
+            added[0].disposition,
+            Some(otto_core::model::OperationDisposition::Error)
+        );
+        assert_eq!(
+            added[0].effect_certainty,
+            Some(otto_core::model::EffectCertainty::NotStarted)
+        );
         assert_eq!(added[1].kind, Some(EntryKind::System));
         assert!(added[1].raw.contains("press y"), "{}", added[1].raw);
         assert!(added[1].raw.contains("git push"), "{}", added[1].raw);

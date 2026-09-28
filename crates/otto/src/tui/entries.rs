@@ -10,7 +10,10 @@
 //! reintroduce it if profiling shows markdown rendering is a hot path at large
 //! scrollback sizes.
 
-use otto_core::model::{Block, BlockType, Message, Role, Usage};
+use otto_core::model::{
+    Block, BlockType, EffectCertainty, Message, OperationDisposition, OperationStopReason, Role,
+    Usage,
+};
 use otto_core::session::COMPACTION_CONTEXT_TYPE;
 
 /// What one transcript entry renders as.
@@ -50,6 +53,10 @@ pub struct Entry {
     pub tool_output: String,
     pub tool_error: bool,
     pub tool_done: bool,
+    pub operation_id: Option<String>,
+    pub disposition: Option<OperationDisposition>,
+    pub effect_certainty: Option<EffectCertainty>,
+    pub stop_reason: Option<OperationStopReason>,
 }
 
 impl Entry {
@@ -316,8 +323,18 @@ fn preserve_unknown_tool_block(role: &Role, block: &Block) -> bool {
         || block.is_error
 }
 
+fn copy_tool_result_metadata(entry: &mut Entry, block: &Block) {
+    let Some(metadata) = block.operation_metadata.as_ref() else {
+        return;
+    };
+    entry.operation_id = metadata.operation_id.as_ref().map(ToString::to_string);
+    entry.disposition = Some(metadata.disposition);
+    entry.effect_certainty = Some(metadata.effect_certainty);
+    entry.stop_reason = metadata.stop_reason;
+}
+
 fn orphan_tool_entry(base_id: &str, block_index: usize, block: &Block, done: bool) -> Entry {
-    Entry {
+    let mut entry = Entry {
         tool_call_id: block.tool_call_id.clone(),
         tool_name: block.tool_name.clone(),
         tool_args: raw_arguments(block),
@@ -325,7 +342,9 @@ fn orphan_tool_entry(base_id: &str, block_index: usize, block: &Block, done: boo
         tool_error: block.is_error,
         tool_done: done,
         ..Entry::new(format!("{base_id}-tool-{block_index}"), EntryKind::Tool)
-    }
+    };
+    copy_tool_result_metadata(&mut entry, block);
+    entry
 }
 
 /// Pairs a tool-result block with its earliest unmatched call, in call order.
@@ -351,6 +370,7 @@ fn pair_tool_result(
     entry.tool_output = block.text.clone();
     entry.tool_error = block.is_error;
     entry.tool_done = true;
+    copy_tool_result_metadata(entry, block);
     if entry.tool_name.is_empty() {
         entry.tool_name = block.tool_name.clone();
     }
@@ -382,7 +402,7 @@ fn saturating_add_non_negative(total: i64, delta: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use otto_core::model::ContextMetadata;
+    use otto_core::model::{ContextMetadata, OperationId, ToolResultMetadata};
 
     fn user(text: &str) -> Message {
         Message {
@@ -481,6 +501,68 @@ mod tests {
         assert!(entry.tool_done);
         assert_eq!(entry.tool_output, "ok");
         assert!(!entry.tool_error);
+    }
+
+    #[test]
+    fn a_tool_result_copies_typed_operation_metadata() {
+        let history = [
+            Message {
+                role: Role::Assistant,
+                blocks: vec![Block {
+                    block_type: BlockType::ToolCall,
+                    tool_call_id: "call-1".into(),
+                    tool_name: "bash".into(),
+                    arguments: Some(serde_json::value::RawValue::from_string("{}".into()).unwrap()),
+                    ..Block::default()
+                }],
+                ..Message::default()
+            },
+            Message {
+                role: Role::Tool,
+                blocks: vec![Block {
+                    block_type: BlockType::ToolResult,
+                    tool_call_id: "call-1".into(),
+                    tool_name: "bash".into(),
+                    text: "connection lost".into(),
+                    is_error: true,
+                    operation_metadata: Some(ToolResultMetadata {
+                        operation_id: Some(OperationId::new("op_1").expect("operation id")),
+                        disposition: OperationDisposition::Interrupted,
+                        effect_certainty: EffectCertainty::Unknown,
+                        stop_reason: Some(OperationStopReason::TransportLost),
+                    }),
+                    ..Block::default()
+                }],
+                ..Message::default()
+            },
+        ];
+        let (entries, _) = entries_from_history(&history);
+        let entry = &entries[0];
+        assert_eq!(entry.operation_id.as_deref(), Some("op_1"));
+        assert_eq!(entry.disposition, Some(OperationDisposition::Interrupted));
+        assert_eq!(entry.effect_certainty, Some(EffectCertainty::Unknown));
+        assert_eq!(entry.stop_reason, Some(OperationStopReason::TransportLost));
+    }
+
+    #[test]
+    fn a_legacy_tool_result_has_no_invented_operation_metadata() {
+        let history = [Message {
+            role: Role::Tool,
+            blocks: vec![Block {
+                block_type: BlockType::ToolResult,
+                tool_call_id: "call-1".into(),
+                tool_name: "bash".into(),
+                text: "looks uncertain in prose".into(),
+                is_error: true,
+                ..Block::default()
+            }],
+            ..Message::default()
+        }];
+        let (entries, _) = entries_from_history(&history);
+        assert_eq!(entries[0].operation_id, None);
+        assert_eq!(entries[0].disposition, None);
+        assert_eq!(entries[0].effect_certainty, None);
+        assert_eq!(entries[0].stop_reason, None);
     }
 
     #[test]

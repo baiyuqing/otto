@@ -25,8 +25,8 @@ use tokio_util::sync::CancellationToken;
 use super::read::read_validated_text_file;
 use super::result::decode_strict_json;
 use super::workspace::Workspace;
-use super::write::write_file_atomic;
-use super::{Tool, definition, empty_as_none, error_result, text_result};
+use super::write::{DirectorySync, sync_directory, write_file_atomic};
+use super::{Tool, definition, empty_as_none, error_result, preflight_error, text_result};
 
 /// Lines of unchanged context kept on either side of a hunk.
 const DIFF_CONTEXT_LINES: usize = 3;
@@ -123,11 +123,23 @@ fn replacement(old_text: Option<&str>, new_text: Option<&str>) -> Result<EditRep
 /// Replaces text in a workspace file.
 pub struct EditTool<'a> {
     workspace: &'a Workspace,
+    sync_directory: DirectorySync,
 }
 
 impl<'a> EditTool<'a> {
     pub fn new(workspace: &'a Workspace) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            sync_directory,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_directory_sync(workspace: &'a Workspace, sync_directory: DirectorySync) -> Self {
+        Self {
+            workspace,
+            sync_directory,
+        }
     }
 
     fn execute_locked(&self, rel_path: &str, edits: &[EditReplacement]) -> ToolResult {
@@ -150,8 +162,13 @@ impl<'a> EditTool<'a> {
             Ok(relative) => relative,
             Err(error) => return error_result(error),
         };
-        if let Err(message) = write_file_atomic(self.workspace, &relative, replaced.as_bytes()) {
-            return error_result(message);
+        if let Err(error) = write_file_atomic(
+            self.workspace,
+            &relative,
+            replaced.as_bytes(),
+            self.sync_directory,
+        ) {
+            return error.into_tool_result();
         }
         text_result(format!("edited {rel_path}\n{diff}"))
     }
@@ -210,18 +227,18 @@ impl Tool for EditTool<'_> {
     async fn execute(&self, arguments: &RawValue, _cancel: &CancellationToken) -> ToolResult {
         let request: EditRequest = match decode_strict_json(arguments.get(), &["path"]) {
             Ok(request) => request,
-            Err(message) => return error_result(message),
+            Err(message) => return preflight_error(message),
         };
         if request.path.is_empty() {
-            return error_result("missing required argument: path");
+            return preflight_error("missing required argument: path");
         }
         let edits = match request.replacements() {
             Ok(edits) => edits,
-            Err(message) => return error_result(message),
+            Err(message) => return preflight_error(message),
         };
         let key = match self.workspace.write_relative(Path::new(&request.path)) {
             Ok(key) => key,
-            Err(error) => return error_result(error),
+            Err(error) => return preflight_error(error),
         };
         let _guard = self.workspace.lock_path(&key).await;
         self.execute_locked(&request.path, &edits)
@@ -755,6 +772,11 @@ fn common_lines(a: &[&str], b: &[&str]) -> (usize, usize) {
 mod tests {
     use super::*;
     use crate::tool::testutil::{run, workspace};
+    use otto_core::model::{EffectCertainty, OperationDisposition};
+
+    fn fail_directory_sync(_directory: &std::fs::File) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected directory sync failure"))
+    }
 
     fn sample(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let root = tempfile::tempdir().unwrap();
@@ -792,6 +814,31 @@ mod tests {
             missing_old.is_error && missing_old.content.contains("old_text"),
             "{missing_old:?}"
         );
+        assert_eq!(
+            missing_old.outcome_override.unwrap().effect_certainty,
+            EffectCertainty::NotStarted
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_sync_failure_after_edit_rename_is_unknown() {
+        let (root, path) = sample("before\n");
+        let workspace = workspace(root.path());
+        let tool = EditTool::with_directory_sync(&workspace, fail_directory_sync);
+
+        let result = run(
+            &tool,
+            r#"{"path":"sample.txt","old_text":"before","new_text":"after"}"#,
+        )
+        .await;
+
+        assert!(result.is_error, "{result:?}");
+        let outcome = result
+            .outcome_override
+            .expect("post-rename failure override");
+        assert_eq!(outcome.disposition, OperationDisposition::Error);
+        assert_eq!(outcome.effect_certainty, EffectCertainty::Unknown);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "after\n");
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@
 //! no terminal. See [`super::gutter`] for why wrapping happens here instead of
 //! in `Paragraph::wrap`.
 
+use otto_core::model::{EffectCertainty, OperationDisposition};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -104,14 +105,36 @@ fn entry_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>>
 /// lines plus a count of the rest, so a long `bash` output cannot push the
 /// reply that follows it off the screen; `Ctrl+O` ([`super::app::App`]'s
 /// details flag) shows the call id, the arguments, and the output in full.
+fn tool_outcome_label(entry: &Entry) -> Option<&'static str> {
+    match entry.effect_certainty? {
+        EffectCertainty::Unknown => Some("Outcome unknown — check effects before retrying"),
+        EffectCertainty::NotStarted => Some("Did not run"),
+        EffectCertainty::KnownNoEffect => Some("Known no effect"),
+        EffectCertainty::Completed => match entry.disposition? {
+            OperationDisposition::Succeeded => Some("Completed"),
+            OperationDisposition::Error => Some("Failed with a known result"),
+            _ => None,
+        },
+    }
+}
+
 fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> {
+    let unknown = entry.effect_certainty == Some(EffectCertainty::Unknown);
     let dim = Style::default().add_modifier(Modifier::DIM);
-    let marker_style = if entry.tool_error {
+    let marker_style = if unknown {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if entry.tool_error {
         Style::default().fg(Color::Red)
     } else {
         Style::default().fg(Color::Cyan)
     };
-    let result_style = if entry.tool_error {
+    let result_style = if unknown {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if entry.tool_error {
         Style::default().fg(Color::Red)
     } else {
         dim
@@ -146,11 +169,18 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
             }
         }
         if entry.tool_done {
+            if let Some(label) = tool_outcome_label(entry) {
+                push_result(&mut lines, label.to_string(), true);
+            }
             for (index, line) in escape_plain_text(&entry.tool_output)
                 .split('\n')
                 .enumerate()
             {
-                push_result(&mut lines, line.to_string(), index == 0);
+                push_result(
+                    &mut lines,
+                    line.to_string(),
+                    tool_outcome_label(entry).is_none() && index == 0,
+                );
             }
         }
         return lines;
@@ -160,13 +190,25 @@ fn tool_lines(entry: &Entry, details: bool, width: usize) -> Vec<Line<'static>> 
     if !entry.tool_done {
         return lines;
     }
+    let outcome_label = tool_outcome_label(entry);
+    if let Some(label) = outcome_label {
+        push_result(&mut lines, label.to_string(), true);
+    }
     if entry.tool_output.trim().is_empty() {
-        push_result(&mut lines, "(no output)".to_string(), true);
+        push_result(
+            &mut lines,
+            "(no output)".to_string(),
+            outcome_label.is_none(),
+        );
         return lines;
     }
     let output: Vec<&str> = entry.tool_output.lines().collect();
     for (index, line) in output.iter().take(TOOL_RESULT_LINES).enumerate() {
-        push_result(&mut lines, preview(line), index == 0);
+        push_result(
+            &mut lines,
+            preview(line),
+            outcome_label.is_none() && index == 0,
+        );
     }
     match output.len().saturating_sub(TOOL_RESULT_LINES) {
         0 => {}
@@ -454,6 +496,54 @@ mod tests {
         let mut call = tool_entry("bash", "", "boom");
         call.tool_error = true;
         let rendered = entry_lines(&call, false, 60);
+        assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn unknown_outcome_is_a_warning_even_when_the_tool_errored() {
+        let mut call = tool_entry("bash", "", "connection lost");
+        call.tool_error = true;
+        call.disposition = Some(OperationDisposition::Interrupted);
+        call.effect_certainty = Some(EffectCertainty::Unknown);
+        let rendered = entry_lines(&call, false, 100);
+        assert_eq!(
+            rows(&rendered)[1],
+            "  ⎿ Outcome unknown — check effects before retrying"
+        );
+        assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Yellow));
+        assert!(
+            rendered[1].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn completed_error_has_a_known_result_label() {
+        let mut call = tool_entry("bash", "", "exit 1");
+        call.tool_error = true;
+        call.disposition = Some(OperationDisposition::Error);
+        call.effect_certainty = Some(EffectCertainty::Completed);
+        assert_eq!(
+            rows(&entry_lines(&call, false, 100))[1],
+            "  ⎿ Failed with a known result"
+        );
+    }
+
+    #[test]
+    fn legacy_tool_result_keeps_the_old_output_first_rendering() {
+        let mut call = tool_entry(
+            "bash",
+            "",
+            "Outcome unknown — check effects before retrying",
+        );
+        call.tool_error = true;
+        let rendered = entry_lines(&call, false, 100);
+        assert_eq!(
+            rows(&rendered)[1],
+            "  ⎿ Outcome unknown — check effects before retrying"
+        );
         assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Red));
     }
 

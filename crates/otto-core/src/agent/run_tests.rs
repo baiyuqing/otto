@@ -226,21 +226,28 @@ impl ToolExecutor for EchoExecutor {
 
     async fn execute(
         &self,
-        name: &str,
-        arguments: &RawValue,
+        call: crate::tool::ToolCall<'_>,
         _cancel: &CancellationToken,
-    ) -> ToolResult {
-        if name != "echo" {
-            return ToolResult::unknown_tool(name);
+    ) -> crate::tool::ToolExecution {
+        if call.name != "echo" {
+            return crate::tool::ToolExecution {
+                result: ToolResult::unknown_tool(call.name),
+                outcome: crate::model::OperationOutcome {
+                    disposition: crate::model::OperationDisposition::Error,
+                    effect_certainty: crate::model::EffectCertainty::NotStarted,
+                    stop_reason: None,
+                },
+            };
         }
-        ToolResult {
+        crate::tool::ToolExecution::completed(ToolResult {
             content: self
                 .content
                 .clone()
-                .unwrap_or_else(|| arguments.get().to_owned()),
+                .unwrap_or_else(|| call.arguments.get().to_owned()),
             persisted_content: self.persisted.clone(),
             is_error: false,
-        }
+            outcome_override: None,
+        })
     }
 }
 
@@ -2147,16 +2154,16 @@ impl ToolExecutor for CancellingExecutor {
 
     async fn execute(
         &self,
-        _name: &str,
-        arguments: &RawValue,
+        call: crate::tool::ToolCall<'_>,
         _cancel: &CancellationToken,
-    ) -> ToolResult {
+    ) -> crate::tool::ToolExecution {
         self.cancel.cancel();
-        ToolResult {
-            content: arguments.get().to_owned(),
+        crate::tool::ToolExecution::completed(ToolResult {
+            content: call.arguments.get().to_owned(),
             persisted_content: None,
             is_error: false,
-        }
+            outcome_override: None,
+        })
     }
 }
 
@@ -2211,6 +2218,148 @@ impl Session for FailingSession {
     ) -> Result<(), crate::session::SessionError> {
         self.inner.append_custom(custom_type, data)
     }
+}
+
+struct OperationFailingSession {
+    inner: MemorySession,
+    fail_at: usize,
+    fact_appends: AtomicUsize,
+}
+
+impl OperationFailingSession {
+    fn new(fail_at: usize) -> Self {
+        Self {
+            inner: MemorySession::new(),
+            fail_at,
+            fact_appends: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Session for OperationFailingSession {
+    fn messages(&self) -> Vec<Message> {
+        self.inner.messages()
+    }
+
+    async fn append(&self, message: Message) -> Result<(), crate::session::SessionError> {
+        self.inner.append(message).await
+    }
+
+    fn latest_compaction(&self) -> Option<crate::session::CompactionMetadata> {
+        self.inner.latest_compaction()
+    }
+
+    async fn append_compaction(
+        &self,
+        checkpoint: crate::session::CompactionCheckpoint,
+    ) -> Result<crate::session::CompactionMetadata, crate::session::SessionError> {
+        self.inner.append_compaction(checkpoint).await
+    }
+
+    fn append_operation_fact(
+        &self,
+        fact: crate::session::OperationFact,
+    ) -> Result<(), crate::session::SessionError> {
+        if self.fact_appends.fetch_add(1, Ordering::SeqCst) == self.fail_at {
+            return Err(crate::session::SessionError::Persist(
+                "operation disk full".into(),
+            ));
+        }
+        self.inner.append_operation_fact(fact)
+    }
+
+    fn operation_history(&self) -> Vec<crate::session::OperationFact> {
+        self.inner.operation_history()
+    }
+
+    fn operation_ledger(&self) -> crate::session::OperationLedger {
+        self.inner.operation_ledger()
+    }
+
+    fn append_custom(
+        &self,
+        custom_type: &str,
+        data: &str,
+    ) -> Result<(), crate::session::SessionError> {
+        self.inner.append_custom(custom_type, data)
+    }
+}
+
+struct CountingExecutor {
+    calls: Arc<AtomicUsize>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl ToolExecutor for CountingExecutor {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        EchoExecutor::default().definitions()
+    }
+
+    async fn execute(
+        &self,
+        call: crate::tool::ToolCall<'_>,
+        _cancel: &CancellationToken,
+    ) -> crate::tool::ToolExecution {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        crate::tool::ToolExecution::completed(ToolResult {
+            content: call.arguments.get().to_owned(),
+            ..ToolResult::default()
+        })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_failed_attempt_fact_stops_before_tool_dispatch() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::tool_call("c1", r#"{"value":1}"#)]),
+        CountingExecutor {
+            calls: Arc::clone(&calls),
+        },
+        OperationFailingSession::new(0),
+        options(),
+    );
+
+    let error = agent
+        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("attempt fact failure stops the run");
+    assert!(error.to_string().contains("operation attempt"), "{error}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(agent.session().operation_history().is_empty());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn a_failed_terminal_fact_stops_after_dispatch_without_a_tool_result() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = Agent::new(
+        FakeProvider::new(vec![Turn::tool_call("c1", r#"{"value":1}"#)]),
+        CountingExecutor {
+            calls: Arc::clone(&calls),
+        },
+        OperationFailingSession::new(1),
+        options(),
+    );
+
+    let error = agent
+        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("terminal fact failure stops the run");
+    assert!(error.to_string().contains("operation terminal"), "{error}");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(agent.session().operation_history().len(), 1);
+    assert!(
+        !agent
+            .session()
+            .messages()
+            .iter()
+            .any(|message| message.role == Role::Tool)
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

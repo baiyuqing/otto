@@ -17,7 +17,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use crate::model::ContextMetadata;
+use crate::model::{
+    ContextMetadata, EffectCertainty, OperationDisposition, OperationId, OperationOutcome,
+    OperationStopReason,
+};
 
 use super::PiError;
 
@@ -356,6 +359,26 @@ pub struct PiOttoDetails {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub usage_present: bool,
+    #[serde(
+        rename = "operationId",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub operation_id: Option<OperationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<OperationDisposition>,
+    #[serde(
+        rename = "effectCertainty",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effect_certainty: Option<EffectCertainty>,
+    #[serde(
+        rename = "stopReason",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stop_reason: Option<OperationStopReason>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -383,12 +406,21 @@ pub fn decode_pi_otto_details(raw: Option<&RawValue>) -> Result<Option<PiOttoDet
     if raw.get().trim() == "null" {
         return Ok(None);
     }
-    let Ok(details) = serde_json::from_str::<PiDetails>(raw.get()) else {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw.get()) else {
         return Ok(None);
     };
-    let Some(otto) = details.otto else {
+    let Some(otto_value) = value
+        .as_object()
+        .and_then(|details| details.get("otto"))
+        .cloned()
+    else {
         return Ok(None);
     };
+    if otto_value.is_null() {
+        return Ok(None);
+    }
+    let otto: PiOttoDetails = serde_json::from_value(otto_value)
+        .map_err(|error| PiError::invalid(format!("invalid Otto Pi details: {error}")))?;
     if !otto.task_id.is_empty()
         && let Err(error) = (ContextMetadata {
             task_id: otto.task_id.clone(),
@@ -398,6 +430,24 @@ pub fn decode_pi_otto_details(raw: Option<&RawValue>) -> Result<Option<PiOttoDet
         return Err(PiError::invalid(format!(
             "invalid context metadata: {error}"
         )));
+    }
+    let has_outcome = otto.disposition.is_some()
+        || otto.effect_certainty.is_some()
+        || otto.stop_reason.is_some()
+        || otto.operation_id.is_some();
+    if has_outcome {
+        let outcome = OperationOutcome {
+            disposition: otto
+                .disposition
+                .ok_or_else(|| PiError::invalid("operation disposition is required"))?,
+            effect_certainty: otto
+                .effect_certainty
+                .ok_or_else(|| PiError::invalid("operation effect certainty is required"))?,
+            stop_reason: otto.stop_reason,
+        };
+        outcome
+            .validate()
+            .map_err(|error| PiError::invalid(format!("invalid operation metadata: {error}")))?;
     }
     Ok(Some(otto))
 }

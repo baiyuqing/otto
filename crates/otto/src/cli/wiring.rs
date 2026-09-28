@@ -491,6 +491,7 @@ impl Builder {
                     reserve_tokens: runtime.compaction.reserve_tokens,
                     keep_recent_tokens: runtime.compaction.keep_recent_tokens,
                 },
+                new_operation_id: Arc::new(super::runtime_builder::new_operation_id),
                 ..OptionsTemplate::default()
             },
             prompt_for,

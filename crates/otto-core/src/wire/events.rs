@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::agent::events::{CompactionPlan, CompactionResult, Event};
-use crate::model::Usage;
+use crate::model::{EffectCertainty, OperationDisposition, OperationStopReason, Usage};
 
 fn is_empty(value: &str) -> bool {
     value.is_empty()
@@ -18,6 +18,14 @@ pub struct WireToolResult {
     pub content: String,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<OperationDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_certainty: Option<EffectCertainty>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<OperationStopReason>,
 }
 
 /// `compaction_started` and `compaction_completed`'s payload.
@@ -90,6 +98,10 @@ pub struct WireEvent {
     pub tool_name: String,
     #[serde(default, skip_serializing_if = "is_empty")]
     pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "is_empty")]
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_args: Option<Box<RawValue>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +130,8 @@ impl PartialEq for WireEvent {
             && self.text == other.text
             && self.tool_name == other.tool_name
             && self.tool_call_id == other.tool_call_id
+            && self.operation_id == other.operation_id
+            && self.attempt == other.attempt
             && self.tool_args.as_ref().map(|raw| raw.get())
                 == other.tool_args.as_ref().map(|raw| raw.get())
             && self.result == other.result
@@ -142,24 +156,37 @@ pub fn to_wire(event: &Event) -> WireEvent {
     match event {
         Event::TextDelta { text } | Event::ReasoningDelta { text } => wire.text = text.clone(),
         Event::ToolCallStarted {
+            operation_id,
+            attempt,
             tool_name,
             tool_call_id,
             arguments,
         } => {
+            wire.operation_id = operation_id.to_string();
+            wire.attempt = Some(*attempt);
             wire.tool_name = tool_name.clone();
             wire.tool_call_id = tool_call_id.clone();
             wire.tool_args = tool_args_raw(arguments);
         }
         Event::ToolCallFinished {
+            operation_id,
+            attempt,
             tool_name,
             tool_call_id,
             result,
+            outcome,
         } => {
+            wire.operation_id = operation_id.to_string();
+            wire.attempt = Some(*attempt);
             wire.tool_name = tool_name.clone();
             wire.tool_call_id = tool_call_id.clone();
             wire.result = Some(WireToolResult {
                 content: result.content.clone(),
                 is_error: result.is_error,
+                operation_id: operation_id.to_string(),
+                disposition: Some(outcome.disposition),
+                effect_certainty: Some(outcome.effect_certainty),
+                stop_reason: outcome.stop_reason,
             });
         }
         Event::ProviderUsage { usage, present } => {
@@ -243,7 +270,20 @@ pub fn to_wire_plan(plan: &CompactionPlan) -> WirePlan {
 mod tests {
     use super::*;
     use crate::agent::events::{ApiStatus, CompactionMode, CompactionReason};
+    use crate::model::{EffectCertainty, OperationDisposition, OperationId, OperationOutcome};
     use crate::tool::ToolResult;
+
+    fn operation_id() -> OperationId {
+        OperationId::new("op_test").expect("operation id")
+    }
+
+    fn completed_error() -> OperationOutcome {
+        OperationOutcome {
+            disposition: OperationDisposition::Error,
+            effect_certainty: EffectCertainty::Completed,
+            stop_reason: None,
+        }
+    }
 
     fn json(event: &Event) -> String {
         serde_json::to_string(&to_wire(event)).expect("wire event serializes")
@@ -261,11 +301,13 @@ mod tests {
     fn tool_call_started_passes_valid_argument_json_through() {
         assert_eq!(
             json(&Event::ToolCallStarted {
+                operation_id: operation_id(),
+                attempt: 1,
                 tool_name: "bash".into(),
                 tool_call_id: "c1".into(),
                 arguments: r#"{"b":1,"a":2}"#.into(),
             }),
-            r#"{"type":"tool_call_started","tool_name":"bash","tool_call_id":"c1","tool_args":{"b":1,"a":2}}"#
+            r#"{"type":"tool_call_started","tool_name":"bash","tool_call_id":"c1","operation_id":"op_test","attempt":1,"tool_args":{"b":1,"a":2}}"#
         );
     }
 
@@ -273,11 +315,13 @@ mod tests {
     fn tool_call_started_quotes_arguments_that_are_not_json() {
         assert_eq!(
             json(&Event::ToolCallStarted {
+                operation_id: operation_id(),
+                attempt: 1,
                 tool_name: "bash".into(),
                 tool_call_id: "c1".into(),
                 arguments: "not json".into(),
             }),
-            r#"{"type":"tool_call_started","tool_name":"bash","tool_call_id":"c1","tool_args":"not json"}"#
+            r#"{"type":"tool_call_started","tool_name":"bash","tool_call_id":"c1","operation_id":"op_test","attempt":1,"tool_args":"not json"}"#
         );
     }
 
@@ -290,15 +334,19 @@ mod tests {
     fn tool_call_finished_carries_the_result() {
         assert_eq!(
             json(&Event::ToolCallFinished {
+                operation_id: operation_id(),
+                attempt: 1,
                 tool_name: "read".into(),
                 tool_call_id: "c2".into(),
                 result: ToolResult {
                     content: "x".into(),
                     persisted_content: None,
                     is_error: true,
+                    outcome_override: None,
                 },
+                outcome: completed_error(),
             }),
-            r#"{"type":"tool_call_finished","tool_name":"read","tool_call_id":"c2","result":{"content":"x","is_error":true}}"#
+            r#"{"type":"tool_call_finished","tool_name":"read","tool_call_id":"c2","operation_id":"op_test","attempt":1,"result":{"content":"x","is_error":true,"operation_id":"op_test","disposition":"error","effect_certainty":"completed"}}"#
         );
     }
 

@@ -178,7 +178,8 @@ impl McpTool {
             _ => Err(error_result(format!(
                 "mcp {}: arguments must be a JSON object",
                 self.server_name()
-            ))),
+            ))
+            .not_started()),
         }
     }
 
@@ -215,11 +216,18 @@ impl McpTool {
     fn map_error(&self, error: CallError) -> ToolResult {
         let server = self.server_name();
         match error {
-            CallError::Cancelled => error_result(CONTEXT_CANCELED),
+            CallError::Cancelled => error_result(CONTEXT_CANCELED).cancelled_unknown(),
+            CallError::Timeout => {
+                error_result(format!("mcp {server}: timed out")).deadline_unknown()
+            }
+            CallError::Rpc { .. } => error_result(self.redact(&format!("mcp {server}: {error}"))),
+            CallError::Transport(_) => {
+                error_result(self.redact(&format!("mcp {server}: {error}"))).transport_unknown()
+            }
             CallError::NeedsLogin => error_result(format!(
                 "mcp {server}: authorization required; run 'otto mcp login {server}'"
-            )),
-            other => error_result(self.redact(&format!("mcp {server}: {other}"))),
+            ))
+            .not_started(),
         }
     }
 }
@@ -294,7 +302,7 @@ impl Tool for McpTool {
 
     async fn execute(&self, arguments: &RawValue, cancel: &CancellationToken) -> ToolResult {
         if cancel.is_cancelled() {
-            return error_result(CONTEXT_CANCELED);
+            return error_result(CONTEXT_CANCELED).cancelled_not_started();
         }
         let args = match self.parse_arguments(arguments) {
             Ok(args) => args,
@@ -395,7 +403,8 @@ impl Tool for McpSearchTools {
         let args: SearchArgs = match serde_json::from_str(arguments.get()) {
             Ok(args) => args,
             Err(error) => {
-                return error_result(format!("mcp_search_tools: invalid arguments: {error}"));
+                return error_result(format!("mcp_search_tools: invalid arguments: {error}"))
+                    .not_started();
             }
         };
         let terms: Vec<String> = args
@@ -464,17 +473,19 @@ impl Tool for McpCallTool {
         let args: CallArgs = match serde_json::from_str(arguments.get()) {
             Ok(args) => args,
             Err(error) => {
-                return error_result(format!("mcp_call_tool: invalid arguments: {error}"));
+                return error_result(format!("mcp_call_tool: invalid arguments: {error}"))
+                    .not_started();
             }
         };
         let Some(entry) = self.catalog.get(&args.tool) else {
-            return error_result(format!("mcp_call_tool: unknown MCP tool {:?}", args.tool));
+            return error_result(format!("mcp_call_tool: unknown MCP tool {:?}", args.tool))
+                .not_started();
         };
         let call_args = args
             .arguments
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         if !call_args.is_object() {
-            return error_result("mcp_call_tool: arguments must be a JSON object");
+            return error_result("mcp_call_tool: arguments must be a JSON object").not_started();
         }
         let tool = McpTool::new(
             Arc::clone(&entry.server),
@@ -1081,6 +1092,7 @@ mod tests {
         let result = run(&tool, "{}").await;
         assert!(result.is_error);
         assert_eq!(result.content, "mcp s: -32601 not found");
+        assert!(result.outcome_override.is_none());
     }
 
     #[tokio::test]
@@ -1093,6 +1105,10 @@ mod tests {
         let result = run(&tool, "{}").await;
         assert!(result.is_error);
         assert_eq!(result.content, "mcp s: child exited (1)");
+        assert_eq!(
+            result.outcome_override.unwrap().effect_certainty,
+            otto_core::model::EffectCertainty::Unknown
+        );
     }
 
     #[tokio::test]
@@ -1120,6 +1136,15 @@ mod tests {
         let result = run(&tool, "{}").await;
         assert!(result.is_error);
         assert_eq!(result.content, "mcp s: timed out");
+        let outcome = result.outcome_override.unwrap();
+        assert_eq!(
+            outcome.disposition,
+            otto_core::model::OperationDisposition::DeadlineExceeded
+        );
+        assert_eq!(
+            outcome.effect_certainty,
+            otto_core::model::EffectCertainty::Unknown
+        );
     }
 
     #[tokio::test]
@@ -1129,6 +1154,15 @@ mod tests {
         let result = run(&tool, "{}").await;
         assert!(result.is_error);
         assert_eq!(result.content, CONTEXT_CANCELED);
+        let outcome = result.outcome_override.unwrap();
+        assert_eq!(
+            outcome.disposition,
+            otto_core::model::OperationDisposition::Cancelled
+        );
+        assert_eq!(
+            outcome.effect_certainty,
+            otto_core::model::EffectCertainty::Unknown
+        );
     }
 
     #[tokio::test]

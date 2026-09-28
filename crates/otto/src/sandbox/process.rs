@@ -245,6 +245,7 @@ impl Manager {
     /// Returns [`Error::Closed`] once [`Manager::close`] has begun, and
     /// [`Error::Cancelled`] when `cancel` fires. In the cancelled case the
     /// returned [`Outcome`] still describes how the child died.
+    #[allow(dead_code)]
     pub(crate) async fn run(
         &self,
         spec: Spec,

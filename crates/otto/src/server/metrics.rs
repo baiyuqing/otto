@@ -14,7 +14,10 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use otto_core::model::Usage;
+use otto_core::model::{
+    EffectCertainty, OperationDisposition, OperationId, OperationOutcome, OperationStopReason,
+    Usage,
+};
 
 use crate::app::TaskStatus;
 
@@ -68,6 +71,16 @@ pub struct SessionContext {
     pub context_input_tokens_pending: bool,
 }
 
+pub struct ProviderOperationMetric<'a> {
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub status: &'a str,
+    pub elapsed: Duration,
+    pub operation_id: &'a OperationId,
+    pub attempts: u32,
+    pub outcome: &'a OperationOutcome,
+}
+
 #[derive(Debug, Clone, Default)]
 struct SessionContextValues {
     context_window: i64,
@@ -81,6 +94,7 @@ type ToolKey = (String, String);
 type OperationUnknownKey = (String, String);
 type ProviderApiKey = (String, String, String);
 type ProviderApiDurationKey = (String, String);
+type ProviderOutcomeKey = (String, String, String, String, String);
 type SessionContextKey = (String, String, String);
 
 #[derive(Debug, Default)]
@@ -90,6 +104,8 @@ struct State {
 
     provider_api_total: BTreeMap<ProviderApiKey, u64>,
     provider_api_duration: BTreeMap<ProviderApiDurationKey, Histogram>,
+    provider_attempts_total: BTreeMap<ProviderApiDurationKey, u64>,
+    provider_outcomes_total: BTreeMap<ProviderOutcomeKey, u64>,
 
     sessions_open: i64,
     turns_active: i64,
@@ -157,23 +173,36 @@ impl Metrics {
             .observe(elapsed.as_secs_f64());
     }
 
-    pub fn provider_api_request(
-        &self,
-        provider: &str,
-        model: &str,
-        status: &str,
-        elapsed: Duration,
-    ) {
+    pub fn provider_api_request(&self, sample: ProviderOperationMetric<'_>) {
+        debug_assert!(!sample.operation_id.as_str().is_empty());
         let mut state = self.lock();
         *state
             .provider_api_total
-            .entry((provider.to_string(), model.to_string(), status.to_string()))
+            .entry((
+                sample.provider.to_string(),
+                sample.model.to_string(),
+                sample.status.to_string(),
+            ))
+            .or_default() += 1;
+        *state
+            .provider_attempts_total
+            .entry((sample.provider.to_string(), sample.model.to_string()))
+            .or_default() += u64::from(sample.attempts);
+        *state
+            .provider_outcomes_total
+            .entry((
+                sample.provider.to_string(),
+                sample.model.to_string(),
+                disposition_name(sample.outcome.disposition).to_string(),
+                certainty_name(sample.outcome.effect_certainty).to_string(),
+                stop_reason_name(sample.outcome.stop_reason).to_string(),
+            ))
             .or_default() += 1;
         state
             .provider_api_duration
-            .entry((provider.to_string(), model.to_string()))
+            .entry((sample.provider.to_string(), sample.model.to_string()))
             .or_insert_with(|| Histogram::new(TURN_TOOL_BUCKETS))
-            .observe(elapsed.as_secs_f64());
+            .observe(sample.elapsed.as_secs_f64());
     }
 
     /// The gauge set is rebuilt on every scrape so a closed session's series
@@ -324,6 +353,11 @@ impl Metrics {
             &state.http_duration,
         );
         write_counter_provider_api_requests(&mut out, &state.provider_api_total);
+        write_provider_operation_counters(
+            &mut out,
+            &state.provider_attempts_total,
+            &state.provider_outcomes_total,
+        );
         write_histogram_provider_api_requests(&mut out, &state.provider_api_duration);
         write_gauge(
             &mut out,
@@ -513,6 +547,78 @@ fn write_counter_provider_api_requests(out: &mut String, data: &BTreeMap<Provide
             quote_label(provider),
             quote_label(model),
             quote_label(status)
+        );
+    }
+}
+
+fn disposition_name(value: OperationDisposition) -> &'static str {
+    match value {
+        OperationDisposition::Succeeded => "succeeded",
+        OperationDisposition::Error => "error",
+        OperationDisposition::Cancelled => "cancelled",
+        OperationDisposition::DeadlineExceeded => "deadline_exceeded",
+        OperationDisposition::Interrupted => "interrupted",
+    }
+}
+
+fn certainty_name(value: EffectCertainty) -> &'static str {
+    match value {
+        EffectCertainty::NotStarted => "not_started",
+        EffectCertainty::KnownNoEffect => "known_no_effect",
+        EffectCertainty::Completed => "completed",
+        EffectCertainty::Unknown => "unknown",
+    }
+}
+
+fn stop_reason_name(value: Option<OperationStopReason>) -> &'static str {
+    match value {
+        None => "none",
+        Some(OperationStopReason::UserCancellation) => "user_cancellation",
+        Some(OperationStopReason::Deadline) => "deadline",
+        Some(OperationStopReason::Shutdown) => "shutdown",
+        Some(OperationStopReason::Migration) => "migration",
+        Some(OperationStopReason::TransportLost) => "transport_lost",
+        Some(OperationStopReason::ProcessLost) => "process_lost",
+    }
+}
+
+fn write_provider_operation_counters(
+    out: &mut String,
+    attempts: &BTreeMap<ProviderApiDurationKey, u64>,
+    outcomes: &BTreeMap<ProviderOutcomeKey, u64>,
+) {
+    const ATTEMPTS: &str = "otto_provider_attempts_total";
+    write_help(
+        out,
+        ATTEMPTS,
+        "counter",
+        "Total provider transport attempts.",
+    );
+    for ((provider, model), value) in attempts {
+        let _ = writeln!(
+            out,
+            "{ATTEMPTS}{{provider={},model={}}} {value}",
+            quote_label(provider),
+            quote_label(model)
+        );
+    }
+
+    const OUTCOMES: &str = "otto_provider_operations_total";
+    write_help(
+        out,
+        OUTCOMES,
+        "counter",
+        "Logical provider operations by typed terminal outcome.",
+    );
+    for ((provider, model, disposition, certainty, stop_reason), value) in outcomes {
+        let _ = writeln!(
+            out,
+            "{OUTCOMES}{{provider={},model={},disposition={},certainty={},stop_reason={}}} {value}",
+            quote_label(provider),
+            quote_label(model),
+            quote_label(disposition),
+            quote_label(certainty),
+            quote_label(stop_reason)
         );
     }
 }
@@ -737,11 +843,27 @@ mod tests {
     #[test]
     fn provider_api_requests_count_and_bucket() {
         let metrics = Metrics::new();
-        metrics.provider_api_request("openai-compatible", "test-model", "ok", millis(1500));
+        let operation_id = OperationId::new("provider_op").expect("operation id");
+        let outcome = OperationOutcome {
+            disposition: OperationDisposition::DeadlineExceeded,
+            effect_certainty: EffectCertainty::Unknown,
+            stop_reason: Some(OperationStopReason::Deadline),
+        };
+        metrics.provider_api_request(ProviderOperationMetric {
+            provider: "openai-compatible",
+            model: "test-model",
+            status: "error",
+            elapsed: millis(1500),
+            operation_id: &operation_id,
+            attempts: 2,
+            outcome: &outcome,
+        });
         assert_lines(
             &metrics.render(),
             &[
-                r#"otto_provider_api_requests_total{provider="openai-compatible",model="test-model",status="ok"} 1"#,
+                r#"otto_provider_api_requests_total{provider="openai-compatible",model="test-model",status="error"} 1"#,
+                r#"otto_provider_attempts_total{provider="openai-compatible",model="test-model"} 2"#,
+                r#"otto_provider_operations_total{provider="openai-compatible",model="test-model",disposition="deadline_exceeded",certainty="unknown",stop_reason="deadline"} 1"#,
                 r#"otto_provider_api_request_duration_seconds_bucket{provider="openai-compatible",model="test-model",le="2.5"} 1"#,
                 r#"otto_provider_api_request_duration_seconds_bucket{provider="openai-compatible",model="test-model",le="+Inf"} 1"#,
                 r#"otto_provider_api_request_duration_seconds_count{provider="openai-compatible",model="test-model"} 1"#,

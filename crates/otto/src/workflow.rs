@@ -14,6 +14,7 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::deadline::{Control, Deadline};
 use crate::subagent::WritePolicy;
 
 const MAX_DEFINITION_BYTES: usize = 1 << 20;
@@ -984,6 +985,46 @@ impl Store {
         transaction.commit().map_err(|_| unavailable())
     }
 
+    pub fn interrupt_attempt(
+        &self,
+        run_id: &str,
+        step_id: &str,
+        attempt: u32,
+        error: &str,
+    ) -> Result<(), String> {
+        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
+        let transaction = connection.transaction().map_err(|_| unavailable())?;
+        let now = timestamp();
+        let changed = transaction
+            .execute(
+                "UPDATE workflow_attempts SET status = 'interrupted', error = ?4,
+                    finished_at = ?5
+                 WHERE run_id = ?1 AND step_id = ?2 AND attempt = ?3 AND status = 'running'",
+                params![run_id, step_id, attempt, error, now],
+            )
+            .map_err(|_| unavailable())?;
+        if changed != 1 {
+            return Err("workflow attempt is not running".to_string());
+        }
+        transaction
+            .execute(
+                "UPDATE workflow_steps SET status = 'interrupted', error = ?4
+                 WHERE run_id = ?1 AND id = ?2 AND attempt = ?3 AND status = 'running'",
+                params![run_id, step_id, attempt, error],
+            )
+            .map_err(|_| unavailable())?;
+        event(
+            &transaction,
+            run_id,
+            "step_interrupted",
+            step_id,
+            "interrupted",
+        )?;
+        // Keep the run non-retryable until every parallel owner has settled.
+        settle_run(&transaction, run_id)?;
+        transaction.commit().map_err(|_| unavailable())
+    }
+
     pub fn recover(&self, workspace: &str) -> Result<usize, String> {
         let mut connection = self.connection.lock().map_err(|_| unavailable())?;
         let transaction = connection.transaction().map_err(|_| unavailable())?;
@@ -1106,6 +1147,37 @@ impl Store {
             )
             .map_err(|_| unavailable())?;
         event(&transaction, run_id, "run_paused", "", "paused")?;
+        transaction.commit().map_err(|_| unavailable())
+    }
+
+    pub fn finalize_interrupted_batch(&self, run_id: &str) -> Result<(), String> {
+        let mut connection = self.connection.lock().map_err(|_| unavailable())?;
+        let transaction = connection.transaction().map_err(|_| unavailable())?;
+        let running: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_steps
+                 WHERE run_id = ?1 AND status = 'running'",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| unavailable())?;
+        if running != 0 {
+            return Err("workflow interruption is not ready to finalize".to_string());
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE workflow_runs SET status = 'paused', updated_at = ?2
+                 WHERE id = ?1 AND status = 'running'
+                   AND EXISTS (
+                       SELECT 1 FROM workflow_steps
+                       WHERE run_id = ?1 AND status = 'interrupted'
+                   )",
+                params![run_id, timestamp()],
+            )
+            .map_err(|_| unavailable())?;
+        if changed == 1 {
+            event(&transaction, run_id, "run_paused", "", "paused")?;
+        }
         transaction.commit().map_err(|_| unavailable())
     }
 
@@ -1273,6 +1345,16 @@ impl Store {
     pub fn retry(&self, run_id: &str, step_id: &str) -> Result<(), String> {
         let mut connection = self.connection.lock().map_err(|_| unavailable())?;
         let transaction = connection.transaction().map_err(|_| unavailable())?;
+        let run_status: String = transaction
+            .query_row(
+                "SELECT status FROM workflow_runs WHERE id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| unavailable())?;
+        if run_status != "paused" {
+            return Err("workflow run is not paused".to_string());
+        }
         let changed = transaction
             .execute(
                 "UPDATE workflow_steps SET status = 'ready', result = '', error = ''
@@ -1466,10 +1548,24 @@ pub struct Attempt {
     pub transcript_path: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeadlinePolicy {
+    pub step_timeout: Option<Duration>,
+    pub cancellation_grace: Duration,
+}
+
+impl Default for DeadlinePolicy {
+    fn default() -> Self {
+        Self {
+            step_timeout: None,
+            cancellation_grace: Duration::from_secs(5),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Executor: Send + Sync {
-    async fn execute(&self, attempt: Attempt, cancel: &CancellationToken)
-    -> Result<String, String>;
+    async fn execute(&self, attempt: Attempt, control: &Control) -> Result<String, String>;
 
     async fn close(&self) {}
 }
@@ -1477,6 +1573,7 @@ pub trait Executor: Send + Sync {
 struct ActiveRun {
     cancel: CancellationToken,
     done: Arc<Notify>,
+    relaunch_requested: bool,
 }
 
 pub struct Controller {
@@ -1487,6 +1584,7 @@ pub struct Controller {
     transcript_root: PathBuf,
     runtime: RuntimeIdentity,
     semaphore: Arc<Semaphore>,
+    deadlines: DeadlinePolicy,
     active: Mutex<HashMap<String, ActiveRun>>,
     guard: Mutex<Option<Box<dyn Send>>>,
 }
@@ -1502,6 +1600,29 @@ impl Controller {
         runtime: RuntimeIdentity,
         max_parallel: usize,
     ) -> Arc<Self> {
+        Self::new_with_deadlines(
+            store,
+            catalog,
+            executor,
+            workspace,
+            transcript_root,
+            runtime,
+            max_parallel,
+            DeadlinePolicy::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_deadlines(
+        store: Arc<Store>,
+        catalog: Catalog,
+        executor: Arc<dyn Executor>,
+        workspace: String,
+        transcript_root: PathBuf,
+        runtime: RuntimeIdentity,
+        max_parallel: usize,
+        deadlines: DeadlinePolicy,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             catalog,
@@ -1510,6 +1631,7 @@ impl Controller {
             transcript_root,
             runtime,
             semaphore: Arc::new(Semaphore::new(max_parallel.max(1))),
+            deadlines,
             active: Mutex::new(HashMap::new()),
             guard: Mutex::new(None),
         })
@@ -1691,7 +1813,8 @@ impl Controller {
                 .active
                 .lock()
                 .map_err(|_| "workflow runtime unavailable".to_string())?;
-            if active.contains_key(&run_id) {
+            if let Some(active) = active.get_mut(&run_id) {
+                active.relaunch_requested = true;
                 return Ok(());
             }
             active.insert(
@@ -1699,6 +1822,7 @@ impl Controller {
                 ActiveRun {
                     cancel: cancel.clone(),
                     done: Arc::clone(&done),
+                    relaunch_requested: false,
                 },
             );
         }
@@ -1707,11 +1831,23 @@ impl Controller {
             if controller.drive(&run_id, &cancel).await.is_err() {
                 let _ = controller.store.pause_run(&run_id);
             }
-            controller
+            let active = controller
                 .active
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .remove(&run_id);
+            let relaunch = !cancel.is_cancelled()
+                && (active.is_some_and(|active| active.relaunch_requested)
+                    || controller.get(&run_id).is_ok_and(|run| {
+                        run.status == RunStatus::Running
+                            && run
+                                .steps
+                                .iter()
+                                .any(|step| step.status == StepStatus::Ready)
+                    }));
+            if relaunch {
+                let _ = controller.launch(run_id.clone());
+            }
             done.notify_one();
         });
         Ok(())
@@ -1796,18 +1932,54 @@ impl Controller {
                     transcript_path,
                 };
                 let executor = Arc::clone(&self.executor);
-                let attempt_cancel = cancel.clone();
+                let parent_cancel = cancel.clone();
+                let deadlines = self.deadlines;
                 attempts.spawn(async move {
-                    let result = executor.execute(attempt.clone(), &attempt_cancel).await;
+                    let deadline = deadlines
+                        .step_timeout
+                        .map_or_else(Deadline::unlimited, Deadline::after);
+                    let control = Control::new(deadline);
+                    let execute = executor.execute(attempt.clone(), &control);
+                    tokio::pin!(execute);
+                    let mut timed_out = false;
+                    let result = tokio::select! {
+                        biased;
+                        result = &mut execute => result,
+                        () = parent_cancel.cancelled() => {
+                            control.stop(otto_core::model::OperationStopReason::UserCancellation);
+                            execute.await
+                        }
+                        () = deadline.expired() => {
+                            timed_out = true;
+                            control.stop(otto_core::model::OperationStopReason::Deadline);
+                            // Grace is only an observation window. Keep owning
+                            // the effectful future until it safely settles.
+                            match tokio::time::timeout(deadlines.cancellation_grace, &mut execute).await {
+                                Ok(result) => result,
+                                Err(_) => execute.await,
+                            }
+                        }
+                    };
                     drop(permit);
-                    (attempt, result, attempt_cancel.is_cancelled())
+                    (attempt, result, parent_cancel.is_cancelled(), timed_out)
                 });
             }
 
             let mut failed = false;
+            let mut timed_out = false;
             while let Some(joined) = attempts.join_next().await {
-                let (attempt, result, canceled) =
+                let (attempt, result, canceled, attempt_timed_out) =
                     joined.map_err(|_| "workflow attempt task failed".to_string())?;
+                if attempt_timed_out {
+                    self.store.interrupt_attempt(
+                        &attempt.run_id,
+                        &attempt.step_id,
+                        attempt.attempt,
+                        "workflow step deadline exceeded",
+                    )?;
+                    timed_out = true;
+                    continue;
+                }
                 if canceled {
                     self.store.cancel_attempt(
                         &attempt.run_id,
@@ -1834,6 +2006,10 @@ impl Controller {
                         failed = true;
                     }
                 }
+            }
+            if timed_out {
+                self.store.finalize_interrupted_batch(run_id)?;
+                return Ok(());
             }
             if failed {
                 self.store.finalize_failed(run_id)?;
@@ -2344,8 +2520,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
+    use otto_core::operation::OperationControl;
     use tokio::sync::Notify;
-    use tokio_util::sync::CancellationToken;
 
     fn definition(source: &[u8]) -> Definition {
         let mut definition = parse_definition("flow", source, &|_| true).expect("definition");
@@ -2965,11 +3141,7 @@ needs = ["research"]
 
     #[async_trait::async_trait]
     impl Executor for FakeExecutor {
-        async fn execute(
-            &self,
-            attempt: Attempt,
-            _cancel: &CancellationToken,
-        ) -> Result<String, String> {
+        async fn execute(&self, attempt: Attempt, _control: &Control) -> Result<String, String> {
             Ok(format!("{} complete", attempt.step_id))
         }
     }
@@ -3150,15 +3322,11 @@ needs = ["work", "approve"]
 
     #[async_trait::async_trait]
     impl Executor for FailAndCancelExecutor {
-        async fn execute(
-            &self,
-            attempt: Attempt,
-            cancel: &CancellationToken,
-        ) -> Result<String, String> {
+        async fn execute(&self, attempt: Attempt, control: &Control) -> Result<String, String> {
             if attempt.step_id == "fail" {
                 return Err("failed".to_string());
             }
-            cancel.cancelled().await;
+            control.cancellation_token().cancelled().await;
             self.sibling_stopped.store(true, Ordering::SeqCst);
             Err("context canceled".to_string())
         }
@@ -3209,11 +3377,7 @@ needs = ["sibling"]
 
     #[async_trait::async_trait]
     impl Executor for CountingExecutor {
-        async fn execute(
-            &self,
-            attempt: Attempt,
-            _cancel: &CancellationToken,
-        ) -> Result<String, String> {
+        async fn execute(&self, attempt: Attempt, _control: &Control) -> Result<String, String> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(format!("{} done", attempt.step_id))
         }
@@ -3263,19 +3427,126 @@ needs = ["first"]
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    struct BoundaryExecutor(Arc<Notify>);
+
+    #[async_trait::async_trait]
+    impl Executor for BoundaryExecutor {
+        async fn execute(&self, _attempt: Attempt, _control: &Control) -> Result<String, String> {
+            self.0.notify_one();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok("boundary".into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn executor_completion_wins_at_exact_deadline_boundary() {
+        let started = Arc::new(Notify::new());
+        let definition = definition(
+            br#"version = 1
+[[steps]]
+id = "work"
+agent = "worker"
+prompt = "work"
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new_with_deadlines(
+            Arc::new(Store::open_in_memory()),
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(BoundaryExecutor(Arc::clone(&started))),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            1,
+            DeadlinePolicy {
+                step_timeout: Some(Duration::from_secs(1)),
+                cancellation_grace: Duration::from_secs(1),
+            },
+        );
+        let run = controller.start("flow", "").await.expect("start");
+        started.notified().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let done = controller.wait(&run.id).await.expect("wait");
+        assert_eq!(done.status, RunStatus::Succeeded);
+        assert_eq!(done.steps[0].result, "boundary");
+    }
+
+    struct TimeoutBatchExecutor {
+        sibling_started: Arc<Notify>,
+        sibling_release: CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl Executor for TimeoutBatchExecutor {
+        async fn execute(&self, attempt: Attempt, control: &Control) -> Result<String, String> {
+            if attempt.step_id == "timeout" {
+                control.cancellation_token().cancelled().await;
+                return Err("stopped".into());
+            }
+            self.sibling_started.notify_one();
+            self.sibling_release.cancelled().await;
+            Ok("settled".into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_is_not_retryable_before_parallel_siblings_settle() {
+        let sibling_started = Arc::new(Notify::new());
+        let sibling_release = CancellationToken::new();
+        let definition = definition(
+            br#"version = 1
+[[steps]]
+id = "timeout"
+agent = "worker"
+prompt = "timeout"
+[[steps]]
+id = "sibling"
+agent = "worker"
+prompt = "sibling"
+"#,
+        );
+        let transcripts = tempfile::tempdir().expect("transcripts");
+        let controller = Controller::new_with_deadlines(
+            Arc::new(Store::open_in_memory()),
+            Catalog::from_definitions(vec![definition]),
+            Arc::new(TimeoutBatchExecutor {
+                sibling_started: Arc::clone(&sibling_started),
+                sibling_release: sibling_release.clone(),
+            }),
+            "/workspace".into(),
+            transcripts.path().into(),
+            RuntimeIdentity::default(),
+            2,
+            DeadlinePolicy {
+                step_timeout: Some(Duration::from_secs(1)),
+                cancellation_grace: Duration::from_millis(100),
+            },
+        );
+        let run = controller.start("flow", "").await.expect("start");
+        sibling_started.notified().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            controller.get(&run.id).expect("run").status,
+            RunStatus::Running
+        );
+        assert!(controller.resume(&run.id, Some("timeout")).await.is_err());
+        sibling_release.cancel();
+        assert_eq!(
+            controller.wait(&run.id).await.expect("wait").status,
+            RunStatus::Paused
+        );
+    }
+
     struct BlockingExecutor {
         started: Arc<Notify>,
     }
 
     #[async_trait::async_trait]
     impl Executor for BlockingExecutor {
-        async fn execute(
-            &self,
-            _attempt: Attempt,
-            cancel: &CancellationToken,
-        ) -> Result<String, String> {
+        async fn execute(&self, _attempt: Attempt, control: &Control) -> Result<String, String> {
             self.started.notify_one();
-            cancel.cancelled().await;
+            control.cancellation_token().cancelled().await;
             Err("context canceled".to_string())
         }
     }

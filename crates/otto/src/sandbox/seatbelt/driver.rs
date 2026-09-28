@@ -35,8 +35,8 @@ use super::state;
 use super::{profile, selftest};
 use crate::sandbox::process::{Manager, Outcome, Spec};
 use crate::sandbox::{
-    Capabilities, Driver, DriverId, Error, ExitStatus, NetworkMode, PrivateDirectories, Request,
-    Streams, UnavailableReason,
+    Capabilities, DEFAULT_CANCELLATION_GRACE, Driver, DriverId, Error, ExitStatus, NetworkMode,
+    PrivateDirectories, Request, Streams, UnavailableReason,
 };
 
 /// The only binary this driver ever executes.
@@ -537,6 +537,17 @@ impl Driver for SeatbeltDriver {
         streams: Streams<'_>,
         cancel: &CancellationToken,
     ) -> (ExitStatus, Result<(), Error>) {
+        self.execute_with_grace(request, streams, cancel, DEFAULT_CANCELLATION_GRACE)
+            .await
+    }
+
+    async fn execute_with_grace(
+        &self,
+        request: Request,
+        streams: Streams<'_>,
+        cancel: &CancellationToken,
+        cancellation_grace: Duration,
+    ) -> (ExitStatus, Result<(), Error>) {
         if !self.valid_request(&request) {
             return (ExitStatus::default(), Err(Error::InvalidRequest));
         }
@@ -569,13 +580,14 @@ impl Driver for SeatbeltDriver {
         let mut stderr = StderrFilter::new(streams.stderr, Some(&latch));
         let (outcome, result) = self
             .processes
-            .run(
+            .run_with_grace(
                 spec,
                 Streams {
                     stdout: streams.stdout,
                     stderr: &mut stderr,
                 },
                 cancel,
+                cancellation_grace,
             )
             .await;
         let finish = stderr.finish();

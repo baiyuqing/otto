@@ -1,15 +1,16 @@
 //! Native child processes with process-group lifetime control.
 //!
-//! Every child is the leader of a fresh process group, and the group is killed
-//! both when the caller cancels and after the leader exits, so a backgrounded
-//! descendant cannot outlive the execution that started it.
+//! Every child is the leader of a fresh process group. Once cancellation,
+//! manager close, or leader exit starts cleanup, the group receives `SIGTERM`,
+//! gets a bounded grace period, and is then killed if it remains alive.
 //!
 //! Ownership: [`Manager`] owns the set of running children. A [`Manager`] is
 //! shared behind `&self` and is safe to use from any task.
 //!
-//! Cancellation: cancelling the token passed to [`Manager::run`] kills the
-//! whole group and makes the call return [`Error::Cancelled`] once the child
-//! has been reaped. The exit status of the killed child is still reported.
+//! Cancellation: cancelling the token passed to [`Manager::run`] starts
+//! cooperative cleanup and makes the call return [`Error::Cancelled`] if it
+//! wins the race with leader completion. The final child status is still
+//! reported.
 //!
 //! Errors: only the fixed sandbox errors escape, never a message derived from
 //! the request, so a launch failure cannot leak an argument or a path.
@@ -19,15 +20,16 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nix::errno::Errno;
 use nix::sys::signal::Signal;
 use nix::unistd::{AccessFlags, Pid};
 use tokio::io::AsyncReadExt;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{Error, Streams};
+use super::{DEFAULT_CANCELLATION_GRACE, Error, Streams};
 
 /// Bounds how long the post-exit drain waits for a descendant that inherited
 /// the child's pipe. Signals are sent before it, so it only limits how long a
@@ -62,22 +64,163 @@ pub(crate) struct Outcome {
     pub(crate) signal: String,
 }
 
-/// Per-child termination bookkeeping, shared by the running task and
-/// [`Manager::close`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupTrigger {
+    Completion,
+    Cancellation,
+    Close,
+}
+
+/// The single owner of process-group cleanup transitions.
 #[derive(Debug, Default)]
 struct Termination {
-    group_signaled: bool,
-    terminated: bool,
+    trigger: Option<CleanupTrigger>,
+    term_deadline: Option<Instant>,
+    kill_sent: bool,
+    observation_deadline: Option<Instant>,
+    leader_reaped: bool,
+    group_gone: bool,
+    settled: bool,
+    failure: Option<Error>,
 }
 
 #[derive(Debug)]
 struct Entry {
     pid: i32,
+    cancellation_grace: Duration,
     termination: Mutex<Termination>,
+    cleanup_changed: tokio::sync::Notify,
     /// Keeps this process group registered with `failover::children::Children`
     /// for the entry's lifetime, so a lease watchdog's fence action can kill
     /// it independently of this manager's own lifecycle.
     _fence_registration: crate::failover::children::Registration,
+}
+
+impl Entry {
+    fn begin_cleanup(&self, trigger: CleanupTrigger) {
+        let mut state = self.termination.lock().expect("termination state");
+        if state.trigger.is_some() {
+            return;
+        }
+        state.trigger = Some(trigger);
+        state.term_deadline = Some(Instant::now() + self.cancellation_grace);
+        signal_group(self.pid, Signal::SIGTERM, &mut state);
+        settle_cleanup(&mut state);
+        drop(state);
+        self.cleanup_changed.notify_one();
+    }
+
+    fn leader_completed(&self) {
+        let mut state = self.termination.lock().expect("termination state");
+        state.leader_reaped = true;
+        // Once wait(2) yields a status, completion is retained unless
+        // cancellation already won the race. Close is only a cleanup trigger.
+        if !matches!(state.trigger, Some(CleanupTrigger::Cancellation)) {
+            state.trigger = Some(CleanupTrigger::Completion);
+        }
+        if state.term_deadline.is_none() {
+            state.term_deadline = Some(Instant::now() + self.cancellation_grace);
+            signal_group(self.pid, Signal::SIGTERM, &mut state);
+        }
+        if !state.group_gone {
+            match nix::sys::signal::kill(Pid::from_raw(-self.pid), None) {
+                Err(Errno::ESRCH) => state.group_gone = true,
+                Ok(()) | Err(Errno::EPERM) => {}
+                Err(_) => state.failure = Some(Error::ChildTerminate),
+            }
+        }
+        settle_cleanup(&mut state);
+        drop(state);
+        self.cleanup_changed.notify_one();
+    }
+
+    fn advance_cleanup(&self) {
+        let mut state = self.termination.lock().expect("termination state");
+        if state.settled || state.trigger.is_none() {
+            return;
+        }
+        let group = Pid::from_raw(-self.pid);
+        match nix::sys::signal::kill(group, None) {
+            Err(Errno::ESRCH) => state.group_gone = true,
+            Ok(()) | Err(Errno::EPERM) => {}
+            Err(_) => state.failure = Some(Error::ChildTerminate),
+        }
+
+        let now = Instant::now();
+        if !state.group_gone
+            && !state.kill_sent
+            && state.term_deadline.is_some_and(|deadline| now >= deadline)
+        {
+            match nix::sys::signal::kill(Pid::from_raw(-self.pid), Signal::SIGKILL) {
+                Ok(()) => {
+                    state.kill_sent = true;
+                    state.observation_deadline = Some(now + GROUP_OBSERVATION_DEADLINE);
+                }
+                Err(Errno::ESRCH) => state.group_gone = true,
+                Err(_) => {
+                    state.failure = Some(Error::ChildTerminate);
+                    state.settled = true;
+                }
+            }
+        }
+        if state.kill_sent
+            && !state.group_gone
+            && state
+                .observation_deadline
+                .is_some_and(|deadline| now >= deadline)
+        {
+            state.failure = Some(Error::ChildTerminate);
+            state.settled = true;
+        }
+        settle_cleanup(&mut state);
+        drop(state);
+        self.cleanup_changed.notify_one();
+    }
+
+    fn next_cleanup_wake(&self) -> Option<Instant> {
+        let state = self.termination.lock().expect("termination state");
+        if state.settled || state.trigger.is_none() {
+            return None;
+        }
+        if state.kill_sent {
+            Some(Instant::now() + GROUP_OBSERVATION_INTERVAL)
+        } else {
+            state.term_deadline
+        }
+    }
+
+    fn settled(&self) -> bool {
+        self.termination.lock().expect("termination state").settled
+    }
+
+    fn cancelled(&self) -> bool {
+        matches!(
+            self.termination.lock().expect("termination state").trigger,
+            Some(CleanupTrigger::Cancellation)
+        )
+    }
+
+    fn failure(&self) -> Option<Error> {
+        self.termination
+            .lock()
+            .expect("termination state")
+            .failure
+            .clone()
+    }
+}
+
+fn signal_group(pid: i32, signal: Signal, state: &mut Termination) {
+    match nix::sys::signal::kill(Pid::from_raw(-pid), signal) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => state.group_gone = true,
+        Err(_) => state.failure = Some(Error::ChildTerminate),
+    }
+}
+
+fn settle_cleanup(state: &mut Termination) {
+    if state.leader_reaped && state.group_gone {
+        state.settled = true;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +250,19 @@ impl Manager {
         spec: Spec,
         streams: Streams<'_>,
         cancel: &CancellationToken,
+    ) -> (Outcome, Result<(), Error>) {
+        self.run_with_grace(spec, streams, cancel, DEFAULT_CANCELLATION_GRACE)
+            .await
+    }
+
+    /// Runs `spec` with a caller-selected grace between `SIGTERM` and
+    /// `SIGKILL`.
+    pub(crate) async fn run_with_grace(
+        &self,
+        spec: Spec,
+        streams: Streams<'_>,
+        cancel: &CancellationToken,
+        cancellation_grace: Duration,
     ) -> (Outcome, Result<(), Error>) {
         if cancel.is_cancelled() {
             return (Outcome::default(), Err(Error::Cancelled));
@@ -148,7 +304,9 @@ impl Manager {
             };
             let entry = Arc::new(Entry {
                 pid: pid as i32,
+                cancellation_grace,
                 termination: Mutex::new(Termination::default()),
+                cleanup_changed: tokio::sync::Notify::new(),
                 _fence_registration: crate::failover::children::Children::register(
                     crate::failover::children::Children::global(),
                     pid as i32,
@@ -162,10 +320,7 @@ impl Manager {
         };
         let (entry, mut child) = entry;
 
-        let (outcome, mut failure) = drain(&mut child, streams, cancel, &entry).await;
-        if let Err(error) = terminate(&entry) {
-            failure = failure.or(Some(error));
-        }
+        let (outcome, failure) = drain(&mut child, streams, cancel, &entry).await;
 
         {
             let mut state = self.state.lock().expect("process state");
@@ -176,9 +331,9 @@ impl Manager {
         (outcome, failure.map_or(Ok(()), Err))
     }
 
-    /// Kills every live group, waits for their executions to finish, and
-    /// rejects later runs. Idempotent: concurrent and later callers wait for
-    /// the first close and observe its result.
+    /// Cooperatively terminates every live group, waits for their executions
+    /// to settle, and rejects later runs. Idempotent: concurrent and later
+    /// callers wait for the first close and observe its result.
     ///
     /// Blocking: this waits for active executions, so it must not be called
     /// from the only worker thread of a current-thread runtime.
@@ -194,17 +349,15 @@ impl Manager {
         let active: Vec<Arc<Entry>> = state.active.values().cloned().collect();
         drop(state);
 
-        let mut failure = None;
         for entry in &active {
-            if let Err(error) = terminate(entry) {
-                failure = failure.or(Some(error));
-            }
+            entry.begin_cleanup(CleanupTrigger::Close);
         }
 
         let mut state = self.state.lock().expect("process state");
         while !state.active.is_empty() {
             state = self.progress.wait(state).expect("process state");
         }
+        let failure = active.iter().find_map(|entry| entry.failure());
         state.close_error = failure.clone();
         state.closed = true;
         drop(state);
@@ -213,8 +366,8 @@ impl Manager {
     }
 }
 
-/// Copies both pipes into `streams` until the child exits and the pipes reach
-/// end of file, killing the group if `cancel` fires.
+/// Copies both pipes while driving bounded process-group cleanup. The entry
+/// remains active until the leader is reaped and the group is observed gone.
 async fn drain(
     child: &mut tokio::process::Child,
     streams: Streams<'_>,
@@ -227,23 +380,39 @@ async fn drain(
     let mut err_chunk = vec![0u8; PIPE_CHUNK];
     let mut status = None;
     let mut failure = None;
-    let mut cancelled = false;
-    let mut deadline = None;
+    let mut cancellation_observed = false;
+    let mut pipe_deadline = None;
 
     loop {
-        if stdout.is_none() && stderr.is_none() && status.is_some() {
+        entry.advance_cleanup();
+        if status.is_some() && entry.settled() && stdout.is_none() && stderr.is_none() {
             break;
         }
-        if let Some(deadline) = deadline
-            && Instant::now() >= deadline
-        {
-            // A descendant outside the group still holds the write end.
+        if pipe_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             stdout = None;
             stderr = None;
             continue;
         }
+
+        let cleanup_wake = entry.next_cleanup_wake();
+        let cleanup_changed = entry.cleanup_changed.notified();
         tokio::select! {
             biased;
+            result = child.wait(), if status.is_none() => {
+                match result {
+                    Ok(exit) => status = Some(exit),
+                    Err(_) => {
+                        failure = failure.or(Some(Error::ChildWait));
+                        status = Some(std::process::ExitStatus::default());
+                    }
+                }
+                entry.leader_completed();
+                pipe_deadline.get_or_insert_with(|| Instant::now() + DRAIN_DEADLINE);
+            }
+            () = cancel.cancelled(), if !cancellation_observed && status.is_none() => {
+                cancellation_observed = true;
+                entry.begin_cleanup(CleanupTrigger::Cancellation);
+            }
             result = read_from(&mut stdout, &mut out_chunk), if stdout.is_some() => {
                 match result {
                     Ok(0) => stdout = None,
@@ -274,38 +443,17 @@ async fn drain(
                     }
                 }
             }
-            result = child.wait(), if status.is_none() => {
-                match result {
-                    Ok(exit) => status = Some(exit),
-                    Err(_) => {
-                        failure = failure.or(Some(Error::ChildWait));
-                        status = Some(std::process::ExitStatus::default());
-                    }
-                }
-                // The group is killed as soon as the leader is reaped, so a
-                // backgrounded descendant cannot outlive the execution. The
-                // deadline then only bounds a descendant that survives the
-                // signal while still holding a pipe.
-                if let Err(error) = terminate(entry) {
-                    failure = failure.or(Some(error));
-                }
-                deadline.get_or_insert_with(|| Instant::now() + DRAIN_DEADLINE);
-            }
-            () = cancel.cancelled(), if !cancelled => {
-                cancelled = true;
-                if let Err(error) = terminate(entry) {
-                    failure = failure.or(Some(error));
-                }
-            }
-            () = sleep_until(deadline), if deadline.is_some() => {}
+            () = sleep_until(cleanup_wake), if cleanup_wake.is_some() => {}
+            () = cleanup_changed => {}
+            () = sleep_until(pipe_deadline), if pipe_deadline.is_some() => {}
         }
     }
 
-    let outcome = status.map_or_else(Outcome::default, outcome_from);
-    if cancelled {
+    failure = failure.or_else(|| entry.failure());
+    if entry.cancelled() {
         failure = Some(Error::Cancelled);
     }
-    (outcome, failure)
+    (status.map_or_else(Outcome::default, outcome_from), failure)
 }
 
 async fn read_from<R>(pipe: &mut Option<R>, buffer: &mut [u8]) -> std::io::Result<usize>
@@ -320,7 +468,7 @@ where
 
 async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => std::future::pending().await,
     }
 }
@@ -338,58 +486,6 @@ fn outcome_from(status: std::process::ExitStatus) -> Outcome {
         code: status.code().unwrap_or(-1),
         signaled: false,
         signal: String::new(),
-    }
-}
-
-/// Kills the child's whole process group.
-///
-/// `ESRCH` means the group is already gone. Darwin answers `EPERM` while the
-/// group still holds an unreaped zombie, which happens routinely between the
-/// leader's exit and the drain loop reaping it. The `kern.proc.pgrp` sysctl
-/// would settle that case by reporting the group terminated once every member
-/// is a zombie, but it has no safe Rust binding, so this polls
-/// `kill(-pid, 0)` for a bounded window and accepts the group only once the
-/// probe answers `ESRCH`.
-///
-/// The poll errs toward reporting a failure. A zombie this process will never
-/// reap, such as a reparented grandchild still held by `launchd`, keeps
-/// answering `EPERM` and yields [`Error::ChildTerminate`] even though the
-/// group is harmless. It never accepts a group that still holds a live member:
-/// one that cannot be signalled keeps the probe at `EPERM`.
-///
-/// Blocking: the poll sleeps on the calling thread for at most
-/// [`GROUP_OBSERVATION_DEADLINE`]. Only the `EPERM` path sleeps at all, and the
-/// call sites that run on a runtime worker reach it after their own child is
-/// reaped, where the first probe already answers `ESRCH`.
-fn terminate(entry: &Entry) -> Result<(), Error> {
-    let mut termination = entry.termination.lock().expect("termination state");
-    if termination.terminated {
-        return Ok(());
-    }
-    let group = Pid::from_raw(-entry.pid);
-    match nix::sys::signal::kill(group, Signal::SIGKILL) {
-        Ok(()) => {
-            termination.group_signaled = true;
-            Ok(())
-        }
-        Err(Errno::ESRCH) => {
-            termination.terminated = true;
-            Ok(())
-        }
-        Err(Errno::EPERM) => {
-            let deadline = Instant::now() + GROUP_OBSERVATION_DEADLINE;
-            loop {
-                if let Err(Errno::ESRCH) = nix::sys::signal::kill(group, None) {
-                    termination.terminated = true;
-                    return Ok(());
-                }
-                if Instant::now() >= deadline {
-                    return Err(Error::ChildTerminate);
-                }
-                std::thread::sleep(GROUP_OBSERVATION_INTERVAL);
-            }
-        }
-        Err(_) => Err(Error::ChildTerminate),
     }
 }
 
@@ -642,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_cancelled_run_reports_both_the_signal_and_the_cancellation() {
+    async fn cancellation_allows_a_cooperative_term_exit() {
         let manager = Manager::default();
         let mut stdout = std::io::sink();
         let mut stderr = std::io::sink();
@@ -656,7 +752,7 @@ mod tests {
             .run(
                 spec(
                     "/bin/sh",
-                    &["-c", "sleep 30"],
+                    &["-c", "trap 'exit 23' TERM; while :; do sleep 1; done"],
                     std::path::Path::new("/"),
                     &["PATH=/usr/bin:/bin"],
                 ),
@@ -668,10 +764,141 @@ mod tests {
             )
             .await;
         assert_eq!(result, Err(Error::Cancelled));
-        assert_eq!(outcome.code, -1);
+        assert_eq!(outcome.code, 23);
+        assert!(!outcome.signaled);
+        manager.close().expect("close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_escalates_an_ignored_term_to_kill() {
+        let manager = Manager::default();
+        let mut stdout = std::io::sink();
+        let mut stderr = std::io::sink();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            token.cancel();
+        });
+        let (outcome, result) = manager
+            .run(
+                spec(
+                    "/bin/sh",
+                    &["-c", "trap '' TERM; while :; do sleep 1; done"],
+                    std::path::Path::new("/"),
+                    &["PATH=/usr/bin:/bin"],
+                ),
+                Streams {
+                    stdout: &mut stdout,
+                    stderr: &mut stderr,
+                },
+                &cancel,
+            )
+            .await;
+        assert_eq!(result, Err(Error::Cancelled));
         assert!(outcome.signaled);
         assert_eq!(outcome.signal, "killed");
         manager.close().expect("close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn custom_cancellation_grace_escalates_before_the_default() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let ready = directory.path().join("ready");
+        let command = format!(
+            "trap '' TERM; : > '{}'; while :; do sleep 1; done",
+            ready.display()
+        );
+        let manager = Arc::new(Manager::default());
+        let runner = manager.clone();
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let run = tokio::spawn(async move {
+            let mut stdout = std::io::sink();
+            let mut stderr = std::io::sink();
+            runner
+                .run_with_grace(
+                    spec(
+                        "/bin/sh",
+                        &["-c", &command],
+                        directory.path(),
+                        &["PATH=/usr/bin:/bin"],
+                    ),
+                    Streams {
+                        stdout: &mut stdout,
+                        stderr: &mut stderr,
+                    },
+                    &child_cancel,
+                    Duration::from_millis(50),
+                )
+                .await
+        });
+
+        for _ in 0..1_000 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(ready.exists(), "child did not install its TERM handler");
+
+        let cancelled_at = std::time::Instant::now();
+        cancel.cancel();
+        let (outcome, result) = tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("custom grace should kill before the default five seconds")
+            .expect("run task");
+        assert!(
+            cancelled_at.elapsed() >= Duration::from_millis(40),
+            "SIGKILL preceded the configured grace"
+        );
+        assert_eq!(result, Err(Error::Cancelled));
+        assert!(outcome.signaled);
+        assert_eq!(outcome.signal, "killed");
+        manager.close().expect("close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_close_cooperatively_cleans_up_once() {
+        let manager = Arc::new(Manager::default());
+        let runner = manager.clone();
+        let run = tokio::spawn(async move {
+            let mut stdout = std::io::sink();
+            let mut stderr = std::io::sink();
+            let cancel = CancellationToken::new();
+            runner
+                .run(
+                    spec(
+                        "/bin/sh",
+                        &["-c", "trap 'exit 24' TERM; while :; do sleep 1; done"],
+                        std::path::Path::new("/"),
+                        &["PATH=/usr/bin:/bin"],
+                    ),
+                    Streams {
+                        stdout: &mut stdout,
+                        stderr: &mut stderr,
+                    },
+                    &cancel,
+                )
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let first = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.close())
+        };
+        let second = {
+            let manager = manager.clone();
+            std::thread::spawn(move || manager.close())
+        };
+        assert_eq!(first.join().expect("first close"), Ok(()));
+        assert_eq!(second.join().expect("second close"), Ok(()));
+
+        let (outcome, result) = run.await.expect("run task");
+        result.expect("run result");
+        assert_eq!(outcome.code, 24);
+        assert!(!outcome.signaled);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

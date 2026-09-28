@@ -18,7 +18,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use otto_core::model::ToolDefinition;
+use otto_core::model::{
+    EffectCertainty, OperationDisposition, OperationOutcome, OperationStopReason, ToolDefinition,
+};
 use otto_core::safetext::dynamic_redaction_marker;
 use otto_core::tool::ToolResult;
 use serde::Deserialize;
@@ -220,6 +222,16 @@ impl McpTool {
             CallError::Timeout => {
                 error_result(format!("mcp {server}: timed out")).deadline_unknown()
             }
+            CallError::Interrupted => {
+                let mut result = error_result(format!("mcp {server}: {error}"));
+                result.outcome_override = Some(OperationOutcome {
+                    disposition: OperationDisposition::Interrupted,
+                    effect_certainty: EffectCertainty::Unknown,
+                    stop_reason: Some(OperationStopReason::TransportLost),
+                });
+                result
+            }
+            CallError::Stopping => error_result(format!("mcp {server}: {error}")).not_started(),
             CallError::Rpc { .. } => error_result(self.redact(&format!("mcp {server}: {error}"))),
             CallError::Transport(_) => {
                 error_result(self.redact(&format!("mcp {server}: {error}"))).transport_unknown()
@@ -1163,6 +1175,30 @@ mod tests {
             outcome.effect_certainty,
             otto_core::model::EffectCertainty::Unknown
         );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_collateral_call_is_interrupted_unknown() {
+        let server = FakeServer::new("s", Err(CallError::Interrupted));
+        let tool = tool(server, &info("t"), 1024);
+        let result = run(&tool, "{}").await;
+        let outcome = result.outcome_override.expect("typed outcome");
+        assert_eq!(outcome.disposition, OperationDisposition::Interrupted);
+        assert_eq!(outcome.effect_certainty, EffectCertainty::Unknown);
+        assert_eq!(
+            outcome.stop_reason,
+            Some(OperationStopReason::TransportLost)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopping_server_rejects_before_dispatch() {
+        let server = FakeServer::new("s", Err(CallError::Stopping));
+        let tool = tool(server, &info("t"), 1024);
+        let result = run(&tool, "{}").await;
+        let outcome = result.outcome_override.expect("typed outcome");
+        assert_eq!(outcome.disposition, OperationDisposition::Error);
+        assert_eq!(outcome.effect_certainty, EffectCertainty::NotStarted);
     }
 
     #[tokio::test]

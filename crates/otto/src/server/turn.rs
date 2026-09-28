@@ -21,7 +21,7 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::metrics::Metrics;
+use super::metrics::{Metrics, ProviderOperationMetric};
 
 pub const TURN_RUNNING: &str = "running";
 pub const TURN_OK: &str = "ok";
@@ -187,15 +187,26 @@ impl Turn {
                         state.usage.cached_input_tokens += usage.cached_input_tokens;
                     }
                     Event::ProviderApiCall {
+                        operation_id,
                         provider,
                         model,
                         duration,
+                        attempts,
                         status,
+                        outcome,
                     } => {
                         // The metric is recorded and the call returns: the API
                         // call is not part of the event stream.
                         drop(state);
-                        metrics.provider_api_request(provider, model, status.name(), *duration);
+                        metrics.provider_api_request(ProviderOperationMetric {
+                            provider,
+                            model,
+                            status: status.name(),
+                            elapsed: *duration,
+                            operation_id,
+                            attempts: *attempts,
+                            outcome,
+                        });
                         return;
                     }
                     Event::ToolCallStarted { tool_name, .. } => {
@@ -217,18 +228,10 @@ impl Turn {
                         drop(state);
                         metrics.tool_call(&tool_name, is_error, elapsed);
                         if outcome.effect_certainty == otto_core::model::EffectCertainty::Unknown {
-                            let disposition = match outcome.disposition {
-                                otto_core::model::OperationDisposition::Succeeded => "succeeded",
-                                otto_core::model::OperationDisposition::Error => "error",
-                                otto_core::model::OperationDisposition::Cancelled => "cancelled",
-                                otto_core::model::OperationDisposition::DeadlineExceeded => {
-                                    "deadline_exceeded"
-                                }
-                                otto_core::model::OperationDisposition::Interrupted => {
-                                    "interrupted"
-                                }
-                            };
-                            metrics.operation_unknown_effect(&tool_name, disposition);
+                            metrics.operation_unknown_effect(
+                                &tool_name,
+                                disposition_name(outcome.disposition),
+                            );
                         }
                         let mut state = self.lock();
                         state.events.push(wire);
@@ -248,6 +251,16 @@ impl Turn {
                 metrics.tokens(usage);
             }
         }
+    }
+}
+
+fn disposition_name(disposition: otto_core::model::OperationDisposition) -> &'static str {
+    match disposition {
+        otto_core::model::OperationDisposition::Succeeded => "succeeded",
+        otto_core::model::OperationDisposition::Error => "error",
+        otto_core::model::OperationDisposition::Cancelled => "cancelled",
+        otto_core::model::OperationDisposition::DeadlineExceeded => "deadline_exceeded",
+        otto_core::model::OperationDisposition::Interrupted => "interrupted",
     }
 }
 
@@ -371,15 +384,30 @@ mod tests {
         let (turn, metrics) = turn();
         let mut emit = turn.emitter(&metrics);
         emit(Event::ProviderApiCall {
+            operation_id: otto_core::model::OperationId::new("provider_op").expect("operation id"),
             provider: "chatgpt".to_string(),
             model: "gpt-5".to_string(),
             duration: std::time::Duration::from_millis(1500),
+            attempts: 1,
             status: ApiStatus::Ok,
+            outcome: otto_core::model::OperationOutcome {
+                disposition: otto_core::model::OperationDisposition::Succeeded,
+                effect_certainty: otto_core::model::EffectCertainty::Completed,
+                stop_reason: None,
+            },
         });
         drop(emit);
         assert!(turn.snapshot(0).0.is_empty());
         assert!(metrics.render().contains(
             r#"otto_provider_api_requests_total{provider="chatgpt",model="gpt-5",status="ok"} 1"#
+        ));
+        assert!(
+            metrics
+                .render()
+                .contains(r#"otto_provider_attempts_total{provider="chatgpt",model="gpt-5"} 1"#)
+        );
+        assert!(metrics.render().contains(
+            r#"otto_provider_operations_total{provider="chatgpt",model="gpt-5",disposition="succeeded",certainty="completed",stop_reason="none"} 1"#
         ));
     }
 

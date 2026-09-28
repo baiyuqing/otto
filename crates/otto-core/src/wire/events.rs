@@ -209,11 +209,14 @@ pub fn to_wire(event: &Event) -> WireEvent {
         }
         Event::CompactionPlanned { plan } => wire.plan = Some(to_wire_plan(plan)),
         Event::ProviderRetry {
+            operation_id,
             attempt,
             max_attempts,
             delay,
             reason,
         } => {
+            wire.operation_id = operation_id.to_string();
+            wire.attempt = Some(*attempt);
             wire.retry = Some(WireRetry {
                 attempt: *attempt,
                 max_attempts: *max_attempts,
@@ -436,10 +439,17 @@ mod tests {
     fn provider_api_call_carries_only_its_type() {
         assert_eq!(
             json(&Event::ProviderApiCall {
+                operation_id: operation_id(),
                 provider: "openai-compatible".into(),
                 model: "gpt".into(),
                 duration: std::time::Duration::from_millis(5),
+                attempts: 1,
                 status: ApiStatus::Ok,
+                outcome: OperationOutcome {
+                    disposition: OperationDisposition::Succeeded,
+                    effect_certainty: EffectCertainty::Completed,
+                    stop_reason: None,
+                },
             }),
             r#"{"type":"provider_api_call"}"#
         );

@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 use super::record::{Recorder, TaskContext};
 
 /// A sub-agent task's position in its lifecycle:
-/// queued -> running -> {succeeded, failed, canceled}.
+/// queued -> running -> {succeeded, failed, canceled, interrupted}.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TaskStatus {
     #[default]
@@ -52,6 +52,8 @@ pub enum TaskStatus {
     Succeeded,
     Failed,
     Canceled,
+    /// Execution stopped at a durable boundary and may be explicitly resumed.
+    Interrupted,
 }
 
 impl TaskStatus {
@@ -63,12 +65,16 @@ impl TaskStatus {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::Canceled => "canceled",
+            Self::Interrupted => "interrupted",
         }
     }
 
     /// Whether this is a terminal status.
     pub fn is_final(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Canceled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Canceled | Self::Interrupted
+        )
     }
 }
 

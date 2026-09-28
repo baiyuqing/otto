@@ -7,18 +7,22 @@
 //! Ownership: the request is borrowed read-only for the duration of the call
 //! and must not be retained. The returned [`Response`] belongs to the caller.
 //!
-//! Concurrency and cancellation: the `emit` callback is called synchronously
-//! and in order from inside `complete`, and must not be called after `complete`
-//! returns. When the token is cancelled, an implementation stops the call and
-//! returns [`ProviderError::Cancelled`].
+//! Concurrency and operation control: the `emit` callback is called
+//! synchronously and in order from inside `complete`, and must not be called
+//! after `complete` returns. Implementations observe the shared operation
+//! control without resetting its budget. User cancellation returns
+//! [`ProviderError::Cancelled`], while deadline exhaustion returns
+//! [`ProviderError::DeadlineExceeded`].
 //!
 //! Errors: every failure is a [`ProviderError`]. A context-window rejection is
 //! [`ProviderError::Overflow`] so the agent can distinguish it from a transport
 //! failure.
 
-use tokio_util::sync::CancellationToken;
-
-use crate::model::{Message, ToolDefinition};
+use crate::model::{
+    EffectCertainty, Message, OperationDisposition, OperationOutcome, OperationStopReason,
+    ToolDefinition,
+};
+use crate::operation::OperationControl;
 
 /// One completion request. Built fresh from session state for each provider
 /// call; implementations translate it to their wire format.
@@ -36,6 +40,85 @@ pub struct Request {
 pub struct Response {
     /// The single source of response finish and usage metadata.
     pub message: Message,
+}
+
+/// The result and content-free metadata for one logical provider operation.
+#[derive(Debug)]
+pub struct ProviderSettlement {
+    pub result: Result<Response, ProviderError>,
+    /// Requests whose send future began polling.
+    pub attempts: u32,
+    pub outcome: OperationOutcome,
+}
+
+impl ProviderSettlement {
+    pub fn succeeded(response: Response, attempts: u32) -> Self {
+        Self {
+            result: Ok(response),
+            attempts,
+            outcome: OperationOutcome {
+                disposition: OperationDisposition::Succeeded,
+                effect_certainty: EffectCertainty::Completed,
+                stop_reason: None,
+            },
+        }
+    }
+
+    pub fn failed(error: ProviderError, attempts: u32, effect_certainty: EffectCertainty) -> Self {
+        let (disposition, stop_reason) = match error {
+            ProviderError::DeadlineExceeded => (
+                OperationDisposition::DeadlineExceeded,
+                Some(OperationStopReason::Deadline),
+            ),
+            ProviderError::Cancelled => (
+                OperationDisposition::Cancelled,
+                Some(OperationStopReason::UserCancellation),
+            ),
+            _ => (OperationDisposition::Error, None),
+        };
+        Self {
+            result: Err(error),
+            attempts,
+            outcome: OperationOutcome {
+                disposition,
+                effect_certainty,
+                stop_reason,
+            },
+        }
+    }
+
+    pub fn transport_lost(error: ProviderError, attempts: u32) -> Self {
+        Self::stopped(
+            error,
+            attempts,
+            EffectCertainty::Unknown,
+            OperationStopReason::TransportLost,
+        )
+    }
+
+    pub fn stopped(
+        error: ProviderError,
+        attempts: u32,
+        effect_certainty: EffectCertainty,
+        reason: OperationStopReason,
+    ) -> Self {
+        Self {
+            result: Err(error),
+            attempts,
+            outcome: OperationOutcome {
+                disposition: match reason {
+                    OperationStopReason::Deadline => OperationDisposition::DeadlineExceeded,
+                    OperationStopReason::UserCancellation => OperationDisposition::Cancelled,
+                    OperationStopReason::Shutdown
+                    | OperationStopReason::Migration
+                    | OperationStopReason::TransportLost
+                    | OperationStopReason::ProcessLost => OperationDisposition::Interrupted,
+                },
+                effect_certainty,
+                stop_reason: Some(reason),
+            },
+        }
+    }
 }
 
 /// An incremental update observed while a response streams.
@@ -118,6 +201,9 @@ pub enum ProviderError {
     /// The request does not fit in the model's context window.
     #[error(transparent)]
     Overflow(#[from] ContextOverflowError),
+    /// The operation's deadline was exhausted.
+    #[error("provider call deadline exceeded")]
+    DeadlineExceeded,
     /// The call stopped because its cancellation token was cancelled.
     #[error("provider call was cancelled")]
     Cancelled,
@@ -157,13 +243,45 @@ pub trait Provider {
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<Response, ProviderError>;
+        control: &dyn OperationControl,
+    ) -> ProviderSettlement;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_settlements_are_valid_and_content_free() {
+        let not_started = ProviderSettlement::failed(
+            ProviderError::Other("local preflight".into()),
+            0,
+            EffectCertainty::NotStarted,
+        );
+        assert_eq!(not_started.attempts, 0);
+        not_started
+            .outcome
+            .validate()
+            .expect("valid preflight outcome");
+
+        let completed = ProviderSettlement::succeeded(Response::default(), 1);
+        assert_eq!(completed.attempts, 1);
+        assert_eq!(
+            completed.outcome.effect_certainty,
+            EffectCertainty::Completed
+        );
+        completed.outcome.validate().expect("valid success outcome");
+
+        let lost = ProviderSettlement::transport_lost(ProviderError::Other("transport".into()), 1);
+        assert_eq!(lost.attempts, 1);
+        assert_eq!(lost.outcome.disposition, OperationDisposition::Interrupted);
+        assert_eq!(lost.outcome.effect_certainty, EffectCertainty::Unknown);
+        assert_eq!(
+            lost.outcome.stop_reason,
+            Some(OperationStopReason::TransportLost)
+        );
+        lost.outcome.validate().expect("valid transport outcome");
+    }
 
     #[test]
     fn context_overflow_error_display() {
@@ -213,6 +331,14 @@ mod tests {
             ..ContextOverflowError::default()
         });
         assert_eq!(error.to_string(), "context window exceeded (HTTP 400)");
+    }
+
+    #[test]
+    fn provider_error_deadline_text() {
+        assert_eq!(
+            ProviderError::DeadlineExceeded.to_string(),
+            "provider call deadline exceeded"
+        );
     }
 
     #[test]

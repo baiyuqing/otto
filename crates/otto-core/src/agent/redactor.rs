@@ -135,7 +135,10 @@ impl Redactor {
     pub fn redact_error(&self, error: AgentError) -> AgentError {
         if !self.complete {
             return match &error {
-                AgentError::Provider(ProviderError::Cancelled) | AgentError::EmptyUserText => error,
+                AgentError::Provider(
+                    ProviderError::Cancelled | ProviderError::DeadlineExceeded,
+                )
+                | AgentError::EmptyUserText => error,
                 AgentError::InvalidCompactionSummary(cause) if cause.is_empty() => error,
                 _ => AgentError::Redacted {
                     message: String::new(),

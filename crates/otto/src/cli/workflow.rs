@@ -9,13 +9,14 @@ use chrono::Utc;
 use nix::fcntl::{Flock, FlockArg};
 use otto_core::config::resolve::Runtime;
 use otto_core::session::{CURRENT_VERSION, Header, Session};
-use tokio_util::sync::CancellationToken;
 
 use super::runtime_builder::{Builder, MemoryHandle, Runner, SharedSession, random_id};
+use crate::deadline::Control;
 use crate::subagent::runner::{Runner as SubagentRunner, StartRequest};
 use crate::subagent::tasks::TaskStatus;
 use crate::workflow::{
-    ApprovalRequest, Attempt, Catalog, Controller, Executor, Run, RunStatus, RuntimeIdentity, Store,
+    ApprovalRequest, Attempt, Catalog, Controller, DeadlinePolicy, Executor, Run, RunStatus,
+    RuntimeIdentity, Store,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,11 +183,7 @@ struct AgentExecutor {
 
 #[async_trait::async_trait]
 impl Executor for AgentExecutor {
-    async fn execute(
-        &self,
-        attempt: Attempt,
-        cancel: &CancellationToken,
-    ) -> Result<String, String> {
+    async fn execute(&self, attempt: Attempt, control: &Control) -> Result<String, String> {
         let store = Arc::new(
             crate::session::Store::create(
                 &attempt.transcript_root,
@@ -222,7 +219,7 @@ impl Executor for AgentExecutor {
         };
         let task = self
             .runner
-            .run_with_definition(
+            .run_with_definition_control(
                 StartRequest {
                     prompt: attempt.prompt,
                     description: attempt.step_id,
@@ -232,7 +229,7 @@ impl Executor for AgentExecutor {
                 },
                 transcript,
                 definition,
-                cancel,
+                control,
             )
             .await;
         let close = store.close().map_err(|error| error.to_string());
@@ -242,6 +239,11 @@ impl Executor for AgentExecutor {
             TaskStatus::Succeeded => Ok(task.result),
             TaskStatus::Canceled => Err("context canceled".to_string()),
             TaskStatus::Failed => Err(task.error),
+            TaskStatus::Interrupted => Err(if task.error.is_empty() {
+                "workflow child was interrupted".to_string()
+            } else {
+                task.error
+            }),
             TaskStatus::Queued | TaskStatus::Running => {
                 Err("workflow child did not reach a terminal state".to_string())
             }
@@ -290,7 +292,7 @@ pub async fn build_controller(
         &builder.workspace_path,
     )
     .map_err(|error| error.to_string())?;
-    let controller = Controller::new(
+    let controller = Controller::new_with_deadlines(
         store,
         catalog,
         Arc::new(AgentExecutor {
@@ -311,6 +313,10 @@ pub async fn build_controller(
             model: runtime.model.clone(),
         },
         usize::try_from(agents.max_parallel).unwrap_or(1),
+        DeadlinePolicy {
+            step_timeout: runtime.resilience.deadlines.workflow_step_timeout,
+            cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
+        },
     );
     controller.set_guard(Box::new(lock));
     Ok(controller)

@@ -10,16 +10,17 @@
 //! Ownership: every server's client is created at runner build, shared by
 //! `Arc` between the tools that use it, and shut down by [`Servers::close`],
 //! called in the background from `Runner::close` (runner swap: `/new`,
-//! `/load`, `/model`) or awaited from `Runner::close_mcp` (process exit,
-//! where the awaited call must run first: `Servers::close` empties its
-//! client list with `mem::take`, so whichever of the two runs first is the
-//! one that actually closes anything). Concurrency: [`ToolServer::call`] takes `&self` and
+//! `/load`, `/model`) or awaited from `Runner::close_mcp` (process exit).
+//! The first caller starts a detached cleanup owner; every caller waits for
+//! that same completion, so cancellation of a waiter cannot lose the clients.
+//! Concurrency: [`ToolServer::call`] takes `&self` and
 //! may run concurrently; each transport serializes its own writes.
-//! Cancellation: a cancelled token aborts the in-flight call with
-//! [`CallError::Cancelled`]; the stdio transport also sends
-//! `notifications/cancelled`. A call that outruns `call_timeout_secs` takes
-//! that same path before it is reported as [`CallError::Timeout`], so a call
-//! Otto gives up on is never left running on the server. Errors: every failure is reported in band to
+//! Cancellation: a cancelled token explicitly races the in-flight call and
+//! starts the runtime-configured cooperative grace used alongside
+//! `call_timeout_secs`; caller-triggered termination still reports [`CallError::Cancelled`]. HTTP
+//! then drops only that request future; stdio atomically enters stopping,
+//! rejects new calls, closes its process group once, and reports collateral
+//! pending calls as [`CallError::Interrupted`]. Errors: every failure is reported in band to
 //! the model as an error `ToolResult`; nothing here returns a `Result` to
 //! the agent loop. Security: tool names, descriptions, schemas and results
 //! are untrusted server data and are capped and redacted by the adapter.
@@ -31,11 +32,17 @@ pub mod oauth;
 pub mod sse;
 pub mod stdio;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+/// Default cooperative cancellation grace retained by compatibility constructors.
+pub(crate) const DEFAULT_CANCELLATION_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(5);
 
 /// The protocol era a server negotiated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +120,13 @@ pub enum CallError {
     Timeout,
     #[error("context canceled")]
     Cancelled,
+    /// The shared stdio server was stopped because another request could not
+    /// be cancelled within its grace period; this call may have taken effect.
+    #[error("interrupted while stopping mcp server")]
+    Interrupted,
+    /// The client has begun stopping, so this request was never dispatched.
+    #[error("mcp server is stopping")]
+    Stopping,
     /// An HTTP server rejected or lacks a bearer token; the user must run
     /// `otto mcp login <server>`.
     #[error("authorization required; run 'otto mcp login <server>'")]
@@ -177,6 +191,12 @@ pub trait Transport: Send + Sync {
     ) -> Result<Result<Value, jsonrpc::RpcError>, CallError>;
     /// Sends a notification; no response is expected.
     async fn notify(&self, outbound: Outbound) -> Result<(), CallError>;
+    /// Whether a request that ignores cancellation requires stopping the
+    /// whole shared server. Stdio overrides this; HTTP abandons only its one
+    /// independent request future.
+    fn timeout_stops_server(&self) -> bool {
+        false
+    }
     /// Releases the transport: closes the child or drops the connection.
     async fn close(&self);
 }
@@ -200,12 +220,20 @@ pub struct ServerStatus {
     pub state: ServerState,
 }
 
+#[derive(Default)]
+struct CloseCompletion {
+    started: AtomicBool,
+    done: AtomicBool,
+    changed: Notify,
+}
+
 /// The connected servers of one runner: their status rows for `/mcp` and the
 /// handles `Runner::close`/`Runner::close_mcp` shut down.
 #[derive(Default)]
 pub struct Servers {
     status: Mutex<Vec<ServerStatus>>,
     clients: Mutex<Vec<Arc<client::Client>>>,
+    close: Arc<CloseCompletion>,
 }
 
 impl Servers {
@@ -221,12 +249,36 @@ impl Servers {
         self.status.lock().expect("mcp status lock").clone()
     }
 
-    /// Shuts every client down. Idempotent.
+    /// Shuts every client down. Idempotent. Cleanup is owned by a detached
+    /// task, while every caller waits for its shared completion.
     pub async fn close(&self) {
-        let clients = std::mem::take(&mut *self.clients.lock().expect("mcp client lock"));
-        for client in clients {
-            client.close().await;
+        if self
+            .close
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let clients = std::mem::take(&mut *self.clients.lock().expect("mcp client lock"));
+            let close = self.close.clone();
+            tokio::spawn(async move {
+                for client in clients {
+                    client.close().await;
+                }
+                close.done.store(true, Ordering::Release);
+                close.changed.notify_waiters();
+            });
         }
+        wait_for_close(&self.close).await;
+    }
+}
+
+async fn wait_for_close(close: &CloseCompletion) {
+    while !close.done.load(Ordering::Acquire) {
+        let notified = close.changed.notified();
+        if close.done.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -295,8 +347,88 @@ pub(crate) mod test_support {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use tokio::sync::Notify;
+
     use super::test_support::connected_client;
     use super::*;
+
+    #[tokio::test]
+    async fn aborted_first_close_waiter_does_not_lose_cleanup_owner() {
+        let closed = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let client = client::Client::connect(
+            "fake".to_string(),
+            Box::new(BlockingCloseTransport {
+                closed: closed.clone(),
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("connect");
+        let servers = Arc::new(Servers::default());
+        servers.push(
+            ServerStatus {
+                name: "fake".to_string(),
+                transport: "stdio",
+                era: Some(Era::Modern),
+                state: ServerState::Connected { tools: 0 },
+            },
+            Some(Arc::new(client)),
+        );
+
+        let first = {
+            let servers = servers.clone();
+            tokio::spawn(async move { servers.close().await })
+        };
+        entered.notified().await;
+        first.abort();
+        let second = {
+            let servers = servers.clone();
+            tokio::spawn(async move { servers.close().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished());
+        assert!(!closed.load(Ordering::SeqCst));
+
+        release.notify_one();
+        second.await.expect("second waiter");
+        assert!(closed.load(Ordering::SeqCst));
+    }
+
+    struct BlockingCloseTransport {
+        closed: Arc<AtomicBool>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for BlockingCloseTransport {
+        async fn request(
+            &self,
+            outbound: Outbound,
+            _cancel: &CancellationToken,
+        ) -> Result<Result<Value, jsonrpc::RpcError>, CallError> {
+            match outbound.method.as_str() {
+                "tools/list" => Ok(Ok(serde_json::json!({"tools": []}))),
+                _ => Ok(Ok(serde_json::json!({}))),
+            }
+        }
+
+        async fn notify(&self, _outbound: Outbound) -> Result<(), CallError> {
+            Ok(())
+        }
+
+        async fn close(&self) {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.closed.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[tokio::test]
     async fn close_waits_for_every_connected_client_to_close() {

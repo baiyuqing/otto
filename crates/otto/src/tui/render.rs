@@ -152,7 +152,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(queued) = &app.queued_input {
         let queued = Entry {
             kind: Some(super::entries::EntryKind::User),
-            raw: format!("Queued: {queued}"),
+            raw: format!("Queued for current turn: {queued}"),
             ..Entry::default()
         };
         if !lines.is_empty() {
@@ -360,12 +360,12 @@ fn composer_lines(input: &[char], cursor: usize, width: u16) -> (Vec<String>, u1
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     let (title, style) = if app.busy() && app.queued_input.is_some() {
         (
-            "Queued next input · Ctrl+U withdraw · Esc cancels turn",
+            "Queued for next checkpoint · Ctrl+U withdraw · Esc cancels turn",
             Style::default().fg(Color::Cyan),
         )
     } else if app.busy() {
         (
-            "Working — type, then Enter to queue next input · Esc cancels turn",
+            "Working — Enter queues for this turn · Esc cancels turn",
             Style::default().fg(Color::Magenta),
         )
     } else {
@@ -1018,9 +1018,12 @@ mod tests {
 
         let screen = rendered(&app, 72, 12);
 
-        assert!(screen.contains("❯ Queued: follow up"), "{screen}");
         assert!(
-            screen.contains("Queued next input · Ctrl+U withdraw"),
+            screen.contains("❯ Queued for current turn: follow up"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Queued for next checkpoint · Ctrl+U withdraw"),
             "{screen}"
         );
         assert!(

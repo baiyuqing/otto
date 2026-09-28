@@ -1,8 +1,9 @@
 //! The queue of notifications delivered into the next provider request.
 //!
 //! A subagent task pushes its terminal result or a progress report here; a
-//! parent pushes a message for a child. The agent drains the queue at the top
-//! of each turn and turns every item into one context message.
+//! parent pushes a message for a child, and a frontend can queue user input
+//! for a running turn. The agent drains the queue at safe checkpoints and
+//! persists user input as user messages and every other item as context.
 //!
 //! Ownership: the queue is shared. Producers hold an `Arc<Inbox>` and the agent
 //! holds another. Nothing takes ownership of the items until they are removed.
@@ -34,6 +35,8 @@ pub enum NotificationKind {
     TaskReport,
     /// A message addressed to this agent.
     Message,
+    /// User input submitted while this agent is already running.
+    UserMessage,
 }
 
 impl NotificationKind {
@@ -43,6 +46,7 @@ impl NotificationKind {
             Self::TaskFinished => "task_finished",
             Self::TaskReport => "task_report",
             Self::Message => "message",
+            Self::UserMessage => "user_message",
         }
     }
 }
@@ -392,6 +396,7 @@ mod tests {
         assert_eq!(NotificationKind::TaskFinished.as_str(), "task_finished");
         assert_eq!(NotificationKind::TaskReport.as_str(), "task_report");
         assert_eq!(NotificationKind::Message.as_str(), "message");
+        assert_eq!(NotificationKind::UserMessage.as_str(), "user_message");
     }
 
     #[test]

@@ -555,9 +555,12 @@ OTTO_UI=repl otto
   carries in a reply.
 - Entries are separated by a blank line.
 - While a turn is running, an animated status line is shown under the
-  transcript, and the composer title reads `Working — type, then Enter to
-  queue next input · Esc cancels turn` (or, once a next input is queued,
-  `Queued next input · Ctrl+U withdraw · Esc cancels turn`). The line reads
+  transcript, and the composer title reads `Working — Enter queues for this
+  turn · Esc cancels turn` (or, once input is queued, `Queued for next
+  checkpoint · Ctrl+U withdraw · Esc cancels turn`). Ordinary input is
+  delivered within the same turn after the current provider response or tool
+  call finishes; `agent_wait` yields immediately. Slash commands still wait
+  until the turn finishes. The status line reads
   `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
   seconds since the turn started. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, or `running TOOL ARGS` (arguments

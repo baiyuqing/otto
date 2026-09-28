@@ -1104,18 +1104,32 @@ impl Runner {
         final_task.result = result.clone();
         final_task.error = error_text.clone();
 
-        self.config.tasks.notifications().push(Notification {
-            task_id: task_id.to_string(),
-            kind: Some(NotificationKind::TaskFinished),
-            text: completion_text(&final_task, self.config.max_output_bytes),
-            usage: final_task.usage_present.then_some(final_task.usage),
-        });
+        // A task cancelled by `Tasks::begin_migration` moved because its
+        // process is leaving, not because it failed or was asked to stop:
+        // skip the ordinary completion notification (`notify_moved` sends
+        // one notification for the whole migration instead) and record the
+        // transcript's own result as "interrupted" rather than "canceled",
+        // matching how a takeover-side scan would classify it.
+        let migrating = status == TaskStatus::Canceled && self.config.tasks.is_migrating();
+        if !migrating {
+            self.config.tasks.notifications().push(Notification {
+                task_id: task_id.to_string(),
+                kind: Some(NotificationKind::TaskFinished),
+                text: completion_text(&final_task, self.config.max_output_bytes),
+                usage: final_task.usage_present.then_some(final_task.usage),
+            });
+        }
         if let Some(transcript) = transcript {
+            let result_status = if migrating {
+                crate::subagent::interrupted::INTERRUPTED_STATUS
+            } else {
+                status.as_str()
+            };
             append_task_custom(
                 transcript,
                 TASK_RESULT_CUSTOM_TYPE,
                 &TaskResultData {
-                    status: status.as_str(),
+                    status: result_status,
                     error: &error_text,
                 },
             );
@@ -2151,6 +2165,76 @@ mod tests {
         assert_eq!(custom_type, "otto.task_result");
         assert_eq!(data["status"], "canceled");
         assert_eq!(data["error"], "");
+    }
+
+    #[tokio::test]
+    async fn migration_marks_running_and_queued_tasks_interrupted_and_pushes_no_finished_notification()
+     {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let provider = FakeProvider::new();
+        provider.set_hook(Arc::new(|cancel, _request| {
+            Box::pin(async move { cancel.cancelled().await })
+        }));
+
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, Vec::new());
+        config.max_parallel = 1;
+        let parent = parent_path.clone();
+        config.child_session = Some(Arc::new(move |task_id: &str| {
+            Ok(Some(child_store(&parent, task_id, false)))
+        }));
+        let (runner, _) = runner(config);
+
+        runner
+            .start(StartRequest {
+                prompt: "first".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        wait_status(&tasks, "t1", TaskStatus::Running).await;
+
+        runner
+            .start(StartRequest {
+                prompt: "second".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+        assert_eq!(
+            tasks.get("t2").expect("t2 exists").status,
+            TaskStatus::Queued,
+            "t2 must stay queued behind t1 with max_parallel 1"
+        );
+
+        let ids = tasks.begin_migration();
+        assert_eq!(ids, vec!["t1".to_string(), "t2".to_string()]);
+        tasks.wait_final(&ids).await;
+
+        for task_id in ["t1", "t2"] {
+            assert_eq!(
+                tasks.get(task_id).expect("task exists").status,
+                TaskStatus::Canceled
+            );
+            assert!(
+                tasks
+                    .notifications()
+                    .remove(task_id, NotificationKind::TaskFinished)
+                    .is_none(),
+                "migration must not push a task_finished notification for {task_id}"
+            );
+
+            let path = dir
+                .path()
+                .join("parent")
+                .join(format!("{task_id}-child.jsonl"));
+            let (custom_type, data) = read_custom_entries(&path)
+                .into_iter()
+                .last()
+                .expect("otto.runtime is at least present");
+            assert_eq!(custom_type, "otto.task_result");
+            assert_eq!(data["status"], "interrupted", "{task_id}: {data:?}");
+            assert_eq!(data["error"], "", "{task_id}: {data:?}");
+        }
     }
 
     #[tokio::test]

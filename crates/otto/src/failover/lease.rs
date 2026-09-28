@@ -275,7 +275,7 @@ fn pwrite_all(file: &std::fs::File, buf: &[u8], mut offset: i64) -> std::io::Res
     Ok(())
 }
 
-fn local_hostname() -> String {
+pub(crate) fn local_hostname() -> String {
     let mut buf = vec![0u8; 256];
     // SAFETY: buf has 256 bytes of writable storage; gethostname writes at
     // most that many bytes, including the NUL terminator, into it.
@@ -634,8 +634,7 @@ impl Keeper {
     /// `SIGKILL` to every child started by [`Children::global`], then
     /// `libc::_exit(FENCED_EXIT_STATUS)`.
     pub(crate) fn global() -> &'static Arc<Keeper> {
-        static INSTANCE: OnceLock<Arc<Keeper>> = OnceLock::new();
-        INSTANCE.get_or_init(|| {
+        GLOBAL.get_or_init(|| {
             Keeper::new(
                 Box::new(|| {
                     // SAFETY: _exit is always valid to call and does not run
@@ -734,6 +733,32 @@ impl Keeper {
         self.children.kill_all();
         (self.on_fence)();
     }
+
+    /// True when at least one registered lease is still live (its `Arc` has
+    /// not been dropped) and neither released, superseded, nor fenced: this
+    /// process is still the acknowledged holder of at least one session.
+    fn holds_any(&self) -> bool {
+        self.live_leases().iter().any(|lease| {
+            !lease.released.load(Ordering::Acquire)
+                && !lease.superseded.load(Ordering::Acquire)
+                && !lease.fenced.load(Ordering::Acquire)
+        })
+    }
+}
+
+/// Backs [`Keeper::global`]. A module-level static, rather than one local to
+/// `global()`, so [`holds_lease`] can check it with `.get()` without ever
+/// calling `.get_or_init()`: a process that never acquired a lease must not
+/// create the keeper (and start its renewal and watchdog threads) just to
+/// answer "no".
+static GLOBAL: OnceLock<Arc<Keeper>> = OnceLock::new();
+
+/// Whether this process currently holds at least one session lease. Reads
+/// the global keeper only if [`Keeper::global`] already created it, so
+/// calling this before any lease was ever acquired is free and starts
+/// nothing.
+pub fn holds_lease() -> bool {
+    GLOBAL.get().is_some_and(|keeper| keeper.holds_any())
 }
 
 /// Acquires `session_path`'s lease, using `clock` for the liveness-window
@@ -1704,5 +1729,46 @@ mod tests {
             b"{\"a\":1}\n{\"a\":2}\n",
             "the new log holds only the complete lines"
         );
+    }
+
+    #[test]
+    fn holds_any_is_false_with_nothing_registered() {
+        let keeper = no_op_keeper();
+        assert!(!keeper.holds_any());
+    }
+
+    #[test]
+    fn holds_any_is_true_after_acquire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("s.jsonl");
+        create_lease_dir(&session_path, 6).unwrap();
+        let keeper = no_op_keeper();
+        let (_lease, _acquired) = acquire_with(&session_path, &FakeClock::new(), &keeper).unwrap();
+
+        assert!(keeper.holds_any());
+    }
+
+    #[test]
+    fn holds_any_is_false_after_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("s.jsonl");
+        create_lease_dir(&session_path, 6).unwrap();
+        let keeper = no_op_keeper();
+        let (lease, _acquired) = acquire_with(&session_path, &FakeClock::new(), &keeper).unwrap();
+
+        lease.release().unwrap();
+        assert!(!keeper.holds_any());
+    }
+
+    #[test]
+    fn holds_any_is_false_once_the_lease_arc_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("s.jsonl");
+        create_lease_dir(&session_path, 6).unwrap();
+        let keeper = no_op_keeper();
+        let (lease, _acquired) = acquire_with(&session_path, &FakeClock::new(), &keeper).unwrap();
+
+        drop(lease);
+        assert!(!keeper.holds_any());
     }
 }

@@ -707,7 +707,7 @@ impl Factory for ServeFactory {
 // ---- the command ----
 
 /// What [`run`] needs from `cli::run`'s composition root.
-pub struct ServeOptions {
+pub struct ServeOptions<'a> {
     pub builder: Builder,
     pub runtime: Runtime,
     /// Exactly one of its two fields is set.
@@ -727,10 +727,14 @@ pub struct ServeOptions {
     /// caller to close it; [`run`] rejects that combination before bind, like
     /// `open`.
     pub exit_on_stdin_close: Option<Box<dyn BufRead + Send + 'static>>,
+    /// Set to "serving" before bind so a SIGTERM with no held lease cancels
+    /// serve instead of killing the process; read after the listen loop
+    /// returns to decide whether to run the migration.
+    pub terminate: &'a super::terminate::Terminate,
 }
 
 pub async fn run(
-    options: ServeOptions,
+    options: ServeOptions<'_>,
     stdout: &mut (dyn Write + Send),
     stderr: &mut (dyn Write + Send),
     cancel: &CancellationToken,
@@ -743,7 +747,9 @@ pub async fn run(
         reloader,
         open,
         exit_on_stdin_close,
+        terminate,
     } = options;
+    terminate.set_serve();
 
     if let Err(message) = require_tcp_for_open(open, &listen) {
         let _ = control.close().await;
@@ -838,9 +844,6 @@ pub async fn run(
     });
     let inbound = inbound::maybe_start(Arc::clone(&server), feishu, serve_cancel.clone());
 
-    // SIGTERM is how a long-running `otto serve` is asked to shut down; the
-    // process token covers SIGINT already.
-    let terminate = spawn_terminate(serve_cancel.clone());
     let _stdin_watch = spawn_stdin_watch(exit_on_stdin_close, serve_cancel.clone());
     let serve_error = server::serve(listener, server.router(), serve_cancel.clone())
         .await
@@ -849,10 +852,12 @@ pub async fn run(
     if let Some(handle) = inbound {
         let _ = handle.await;
     }
-    if let Some(handle) = terminate {
-        let _ = handle.await;
-    }
     server.cancel_token().cancel();
+    if terminate.migrating() {
+        for warning in server.migrate().await {
+            let _ = writeln!(stderr, "warning: {warning}");
+        }
+    }
     let close_error = server.close().await.err();
     let sandbox_error = control.close().await.err();
 
@@ -969,19 +974,6 @@ fn bind(listen: &ServerRuntime) -> Result<(Listener, String), String> {
     };
     let listener = listen_unix(&socket).map_err(|error| format!("serve: {error}"))?;
     Ok((listener, String::new()))
-}
-
-/// Cancels `token` on SIGTERM, ending when the token is cancelled from anywhere
-/// else.
-fn spawn_terminate(token: CancellationToken) -> Option<tokio::task::JoinHandle<()>> {
-    let mut signals =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()?;
-    Some(tokio::spawn(async move {
-        tokio::select! {
-            _ = signals.recv() => token.cancel(),
-            _ = token.cancelled() => {}
-        }
-    }))
 }
 
 #[cfg(test)]

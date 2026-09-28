@@ -34,7 +34,7 @@ fn run_prompt(
     replies: Vec<String>,
     served: Arc<AtomicUsize>,
 ) -> (String, String, bool) {
-    let base_url = serve(Script { replies, served });
+    let (base_url, _requests) = serve(Script { replies, served });
     configure(home, &base_url);
 
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_otto"));

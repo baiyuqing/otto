@@ -2,8 +2,9 @@
 
 Status: approved 2026-09-28. Step 1 (durable notifications and the local
 part of the commit rule) and step 2 (the lease, takeover, the recovery
-notification, and `agent` `resume`) are implemented; step 3 (`SIGTERM`
-migration) is not. Current behavior is in the user manual's "Continuing a
+notification, and `agent` `resume`) and step 3 (`SIGTERM` migration) are
+implemented. The NFSv4 manual acceptance run is documented but has not been
+run. Current behavior is in the user manual's "Continuing a
 session on another host" section.
 
 ## A session cannot continue on another host today
@@ -534,6 +535,7 @@ or by two lease instances with injected clocks.
 
 A manual acceptance run with two Linux containers on one NFSv4 export is
 documented in the development guide. It is not part of `make check`.
+The containers run on two hosts, because containers on one kernel share one NFS client and its page cache.
 
 ## Approved decisions
 

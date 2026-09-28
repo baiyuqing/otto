@@ -17,6 +17,7 @@ use std::path::Path;
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
 use otto_core::model::{Message, Role};
 
+use crate::failover::lease;
 use crate::session::{Takeover, UnansweredCall};
 use crate::subagent::interrupted::{self, ChildRecord};
 
@@ -83,6 +84,57 @@ pub fn notify(
     warnings
 }
 
+/// Reports a SIGTERM migration's cancelled sub-agent tasks to `inbox`: the
+/// tasks named in `task_ids` were cancelled by
+/// [`crate::subagent::tasks::Tasks::begin_migration`] and already marked
+/// interrupted by `subagent::runner::Runner::finish`'s own migration branch,
+/// through their own already-open transcript `Store`, so unlike [`notify`]
+/// this never calls [`interrupted::mark_interrupted`] itself.
+///
+/// A no-op when nothing was migrated and the parent's own transcript already
+/// ends on a finished assistant turn. An id in `task_ids` whose transcript is
+/// not recorded as interrupted (the task finished on its own right before
+/// the migration cancelled it, or its transcript write failed) is reported
+/// as one warning instead of being included in the notification.
+pub fn notify_moved(
+    inbox: &Inbox,
+    children_dir: &Path,
+    task_ids: &[String],
+    max_output_bytes: usize,
+    parent_messages: &[Message],
+) -> Vec<String> {
+    let scanned = interrupted::scan(children_dir);
+    let mut moved = Vec::new();
+    let mut warnings = Vec::new();
+    for id in task_ids {
+        match scanned.iter().find(|child| {
+            &child.task_id == id
+                && child.final_status.as_deref() == Some(interrupted::INTERRUPTED_STATUS)
+        }) {
+            Some(child) => moved.push(child.clone()),
+            None => warnings.push(format!("migration: task {id}: not recorded as interrupted")),
+        }
+    }
+
+    if moved.is_empty() && ends_with_a_finished_assistant_turn(parent_messages) {
+        return warnings;
+    }
+
+    let header = format!(
+        "This session was moved: host {} pid {} received SIGTERM and cancelled its running tool calls and sub-agent tasks.\n",
+        lease::local_hostname(),
+        std::process::id(),
+    );
+    let text = render_body(&header, &[], &moved, max_output_bytes);
+    inbox.push(Notification {
+        task_id: String::new(),
+        kind: Some(NotificationKind::Message),
+        text,
+        usage: None,
+    });
+    warnings
+}
+
 fn ends_with_a_finished_assistant_turn(messages: &[Message]) -> bool {
     matches!(
         messages.last(),
@@ -91,14 +143,27 @@ fn ends_with_a_finished_assistant_turn(messages: &[Message]) -> bool {
 }
 
 fn render(takeover: &Takeover, interrupted: &[ChildRecord], max_output_bytes: usize) -> String {
-    let mut text = format!(
+    let header = format!(
         "This session was taken over from another host: the previous holder was fenced at epoch {}, host {}, pid {}.\n",
         takeover.holder.epoch, takeover.holder.host, takeover.holder.pid
     );
+    render_body(&header, &takeover.repaired, interrupted, max_output_bytes)
+}
 
-    if !takeover.repaired.is_empty() {
+/// The body shared by [`render`] and [`notify_moved`]: a header line
+/// naming what happened, the repaired-call section, one section per
+/// interrupted child, and the resume footer.
+fn render_body(
+    header: &str,
+    repaired: &[UnansweredCall],
+    interrupted: &[ChildRecord],
+    max_output_bytes: usize,
+) -> String {
+    let mut text = header.to_string();
+
+    if !repaired.is_empty() {
         text.push_str("\nCalls left unanswered in this session when it was taken over:\n");
-        for call in &takeover.repaired {
+        for call in repaired {
             text.push_str(&render_call(call));
         }
     }
@@ -303,6 +368,131 @@ mod tests {
             1000,
             &[assistant("", true)],
         );
+        assert_eq!(inbox.len(), 1);
+    }
+
+    /// Writes a child transcript at `<parent without .jsonl>/<task_id>-child.jsonl`
+    /// with an `otto.task_spec` entry, and, when `status` is `Some`, a
+    /// trailing `otto.task_result` entry carrying it, matching the shape
+    /// [`interrupted::scan`] reads.
+    fn child_with_result(parent: &Path, task_id: &str, prompt: &str, status: Option<&str>) {
+        let workspace = parent.parent().expect("dir");
+        let child = crate::session::Store::create_child_lazy(
+            parent,
+            &format!("{task_id}-child"),
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: workspace.to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: chrono::Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("create child");
+        child
+            .append_custom_entry(
+                crate::subagent::runner::TASK_SPEC_CUSTOM_TYPE,
+                &serde_json::json!({
+                    "id": task_id,
+                    "name": "worker",
+                    "description": "review the change",
+                    "model": "test-model",
+                    "context": "fresh",
+                    "prompt": prompt,
+                    "definition": null,
+                })
+                .to_string(),
+            )
+            .expect("append task_spec");
+        if let Some(status) = status {
+            child
+                .append_custom_entry(
+                    crate::subagent::runner::TASK_RESULT_CUSTOM_TYPE,
+                    &serde_json::json!({"status": status, "error": ""}).to_string(),
+                )
+                .expect("append task_result");
+        }
+        child.close().expect("close child");
+    }
+
+    #[test]
+    fn notify_moved_names_the_host_pid_and_each_kept_task() {
+        let root = tempfile::tempdir().expect("root");
+        let parent_path = root.path().join("parent.jsonl");
+        child_with_result(
+            &parent_path,
+            "t1",
+            "do the thing",
+            Some(interrupted::INTERRUPTED_STATUS),
+        );
+
+        let inbox = Inbox::new(None);
+        let children_dir = parent_path.with_extension("");
+        let warnings = notify_moved(&inbox, &children_dir, &["t1".to_string()], 1000, &[]);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(inbox.len(), 1);
+        let text = inbox.snapshot()[0].text.clone();
+        assert!(text.contains("moved"), "{text}");
+        assert!(text.contains(&lease::local_hostname()), "{text}");
+        assert!(text.contains(&std::process::id().to_string()), "{text}");
+        assert!(text.contains("t1"), "{text}");
+        assert!(text.contains("worker"), "{text}");
+        assert!(text.contains("do the thing"), "{text}");
+        assert!(text.contains("stays interrupted"), "{text}");
+    }
+
+    #[test]
+    fn notify_moved_reports_a_task_id_not_recorded_as_interrupted_as_one_warning() {
+        let root = tempfile::tempdir().expect("root");
+        let parent_path = root.path().join("parent.jsonl");
+
+        let inbox = Inbox::new(None);
+        let children_dir = parent_path.with_extension("");
+        let warnings = notify_moved(
+            &inbox,
+            &children_dir,
+            &["missing".to_string()],
+            1000,
+            &[assistant("done", false)],
+        );
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("missing"), "{warnings:?}");
+        assert!(
+            inbox.is_empty(),
+            "no kept task plus a finished parent turn must push nothing"
+        );
+    }
+
+    #[test]
+    fn notify_moved_pushes_nothing_with_no_kept_task_and_a_finished_parent_turn() {
+        let inbox = Inbox::new(None);
+        let dir = tempfile::tempdir().expect("dir");
+        let warnings = notify_moved(
+            &inbox,
+            &dir.path().join("children"),
+            &[],
+            1000,
+            &[assistant("done", false)],
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(inbox.is_empty());
+    }
+
+    #[test]
+    fn notify_moved_pushes_one_notification_with_no_kept_task_and_a_parent_turn_mid_tool_call() {
+        let inbox = Inbox::new(None);
+        let dir = tempfile::tempdir().expect("dir");
+        let warnings = notify_moved(
+            &inbox,
+            &dir.path().join("children"),
+            &[],
+            1000,
+            &[assistant("", true)],
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(inbox.len(), 1);
     }
 

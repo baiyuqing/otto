@@ -111,6 +111,7 @@ async fn run_serve(
             environment,
             false,
             &cancel,
+            &otto::cli::terminate::Terminate::new(),
         )
         .await
     });
@@ -159,7 +160,7 @@ async fn serve_refuses_a_non_loopback_listen_address() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn serve_listens_on_loopback_tcp_behind_the_token() {
-    let base_url = serve(Script {
+    let (base_url, _requests) = serve(Script {
         replies: vec![text_reply("served")],
         served: Arc::new(AtomicUsize::new(0)),
     });

@@ -326,7 +326,7 @@ async fn run_app<B: Backend>(
         }
         match &app.agents {
             Some(_) if agents_refresh.is_none() => {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                let mut interval = tokio::time::interval(agents_view::REFRESH_INTERVAL);
                 interval.reset();
                 agents_refresh = Some(interval);
             }
@@ -584,19 +584,42 @@ fn propagate_turn_error(error: ReplError) -> Result<(), ReplError> {
 /// with. So the sink only forwards each [`Event`] down `events`, and this loop
 /// applies it, letting the same loop also redraw on a key, a resize, and every
 /// [`render::SPINNER_FRAME`] so the thinking indicator animates while nothing
-/// is streaming.
+/// is streaming. An open `/agents` overlay is also re-queried on
+/// [`agents_view::REFRESH_INTERVAL`], the same cadence the idle loop uses.
+#[allow(clippy::too_many_arguments)]
 async fn drive_turn<B: Backend, T, E>(
     app: &mut App,
     terminal: &mut Terminal<B>,
     keys: &mut mpsc::Receiver<TuiEvent>,
     events: &mut mpsc::UnboundedReceiver<Event>,
     turn: &CancellationToken,
+    controller: &Controller,
     future: impl Future<Output = Result<T, E>>,
     mut apply: impl FnMut(&mut App, Event),
 ) -> Result<T, E> {
     tokio::pin!(future);
     let mut frames = tokio::time::interval(render::SPINNER_FRAME);
+    // Mirrors `run_app`'s `agents_refresh`: `None` while the overlay is
+    // closed, and `reset()` right after creation so the first tick lands a
+    // full interval out rather than immediately (`open`/`handle_key` already
+    // ran a fresh query).
+    let mut agents_refresh: Option<tokio::time::Interval> = None;
     loop {
+        match &app.agents {
+            Some(_) if agents_refresh.is_none() => {
+                let mut interval = tokio::time::interval(agents_view::REFRESH_INTERVAL);
+                interval.reset();
+                agents_refresh = Some(interval);
+            }
+            None => agents_refresh = None,
+            Some(_) => {}
+        }
+        let tick = async {
+            match agents_refresh.as_mut() {
+                Some(interval) => interval.tick().await,
+                None => std::future::pending().await,
+            };
+        };
         tokio::select! {
             result = &mut future => {
                 // `select!` picks at random between ready branches, so the
@@ -609,7 +632,12 @@ async fn drive_turn<B: Backend, T, E>(
             }
             Some(event) = events.recv() => apply(app, event),
             Some(event) = keys.recv() => {
-                apply_turn_key(app, terminal, event, turn);
+                apply_turn_key(app, terminal, event, turn, controller);
+            }
+            () = tick => {
+                if let Some(view) = &mut app.agents {
+                    view.tick(controller);
+                }
             }
             _ = frames.tick() => {}
         }
@@ -617,10 +645,14 @@ async fn drive_turn<B: Backend, T, E>(
     }
 }
 
-/// Handles one event delivered while a turn is running: the interrupt keys
-/// cancel it, scroll/wheel/drag still navigate the transcript, and ordinary
-/// composer keys edit the single queued draft that will be submitted after a
-/// successful turn.
+/// Handles one event delivered while a turn is running: Ctrl+C always cancels
+/// it; Esc cancels it too unless the `/agents` overlay is open, in which case
+/// [`App::handle_turn_key`] routes keys to the overlay instead (Esc there
+/// closes the overlay, or leaves its detail pane, without cancelling).
+/// Scroll/wheel/drag still navigate the transcript, and ordinary composer
+/// keys edit the single queued draft that will be submitted after a
+/// successful turn — except a draft that resolves to `/agents`, which
+/// `handle_turn_key` opens immediately instead of queuing.
 ///
 /// Scrolling has to work here and not only between turns: a streaming turn
 /// is when there is most output to read back through.
@@ -629,14 +661,13 @@ fn apply_turn_key<B: Backend>(
     terminal: &mut Terminal<B>,
     event: TuiEvent,
     turn: &CancellationToken,
+    controller: &Controller,
 ) {
     match event {
         TuiEvent::Key(key) => {
             app.selection = None;
-            if App::is_interrupt_key(&key) {
+            if app.handle_turn_key(key, controller) {
                 turn.cancel();
-            } else {
-                app.handle_busy_composer_key(key);
             }
         }
         TuiEvent::Paste(text) => app.insert_text(&text),
@@ -680,6 +711,7 @@ async fn run_turn<B: Backend>(
             keys,
             &mut received,
             &turn,
+            controller,
             async {
                 match image {
                     Some(image) => {
@@ -774,6 +806,7 @@ async fn run_wake<B: Backend>(
             keys,
             &mut received,
             &turn,
+            controller,
             wake.run(&mut sink, &turn),
             |app, event| {
                 if app.apply_event(event) {
@@ -827,6 +860,7 @@ async fn run_compact<B: Backend>(
             keys,
             &mut received,
             &turn,
+            controller,
             controller.compact(&focus, &mut sink, &turn),
             |app, event| {
                 if let Event::CompactionCompleted { compaction } = &event {
@@ -1313,7 +1347,7 @@ mod tests {
         .expect("wheel event");
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(40, 10)).expect("terminal");
-        apply_turn_key(&mut app, &mut terminal, wheel_up, &turn);
+        apply_turn_key(&mut app, &mut terminal, wheel_up, &turn, &controller);
 
         assert_eq!(app.scroll, Some(9));
         assert!(!turn.is_cancelled());
@@ -1323,6 +1357,7 @@ mod tests {
             &mut terminal,
             TuiEvent::Key(KeyCode::Esc.into()),
             &turn,
+            &controller,
         );
         assert!(turn.is_cancelled());
     }

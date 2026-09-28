@@ -591,6 +591,8 @@ an exact command. In the REPL, type the command and press `Enter`.
 Shared commands:
 
 - `/help` shows command help.
+- `/init` asks the agent to inspect the repository and create a concise root
+  `AGENTS.md` contributor guide. If the file already exists, it is left unchanged.
 - `/session` shows session details (ID, path, provider, model, thinking effort,
   and sandbox state, plus the session name once `/rename` has set one).
 - `/new` closes the current session and starts a fresh one in the same process.

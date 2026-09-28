@@ -29,7 +29,7 @@ pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 const LOGO: &str = "     ____  __  __\n    / __ \\/ /_/ /____\n   / /_/ / __/ __/ __ \\\n   \\____/\\__/\\__/\\____/\n";
 
-const HELP: &str = "/help     show commands\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
+const HELP: &str = "/help     show commands\n/init     create a repository AGENTS.md guide\n/exit     exit Otto\n/new      start a new session\n/clear    start a new session\n/session  show session details\n/rename <name> rename current session\n/archive  archive current session and start a new one\n/model [profile] [--thinking LEVEL] [--save] show current model, or switch profiles\n/thinking [LEVEL] [--save] show or set reasoning effort\n/compact [focus] compact context\n/sandbox [reload] show sandbox state, or apply the current [sandbox] configuration\n/sandbox allow <path> let sandboxed commands read a path\n/sandbox network allow|deny set sandboxed network access\n/approve <id> allow one exact elevated Bash command\n/memory search <query> | /memory forget <id> | /memory review <id> accept|reject\n/remember [--scope user|workspace] [--kind K] [--key K] <text>\n/skills   list available skills\n/skill <name> show a skill\n/tasks    list sub-agent tasks\n/task <id> show a task's steps and result\n/task cancel <id> cancel a queued or running task\n/agents   list the latest 50 recorded sub-agent tasks, any session\n/timers   list this session's timers\n/timers cancel <id> cancel a timer\n/login [status] sign in to ChatGPT (or show status)\n/logout   sign out of ChatGPT\n/mcp      show configured MCP servers and their status\n/mcp login <server> sign in to an MCP server that uses OAuth\n";
 
 /// Why the loop stopped.
 #[derive(Debug)]
@@ -291,6 +291,14 @@ impl<'a> Repl<'a> {
                         break 'dispatch None;
                     }
                     let _ = write!(self.stdout, "{HELP}");
+                    Some(false)
+                }
+                "init" => {
+                    if !args.is_empty() {
+                        break 'dispatch None;
+                    }
+                    self.prompt(super::repl_commands::INIT_PROMPT, cancel)
+                        .await?;
                     Some(false)
                 }
                 "exit" => {
@@ -1178,6 +1186,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_submits_the_builtin_agent_task_and_rejects_arguments() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let sessions = tempfile::tempdir().expect("sessions");
+        let provider = ScriptedProvider::new(|_| Ok("ok".to_string()));
+        let controller = scripted_controller(
+            workspace.path(),
+            sessions.path(),
+            Arc::clone(&provider),
+            Arc::new(Tasks::new()),
+        );
+
+        let (_stdout, stderr, result) = session("/init\n/init now\n/exit\n", &controller).await;
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(provider.calls(), 1);
+        assert_eq!(stderr, "unknown command: /init now\n");
+        let history = controller.history();
+        assert!(history.iter().any(|message| {
+            message.role == Role::User && message.text() == super::super::repl_commands::INIT_PROMPT
+        }));
+    }
+
+    #[tokio::test]
     async fn help_and_session_describe_the_ported_commands_and_the_session() {
         let workspace = tempfile::tempdir().expect("workspace");
         let sessions = tempfile::tempdir().expect("sessions");
@@ -1195,6 +1226,7 @@ mod tests {
         assert_eq!(stderr, "");
         for expected in [
             "/help     show commands",
+            "/init     create a repository AGENTS.md guide",
             "/exit     exit Otto",
             "/new      start a new session",
             "/session  show session details",

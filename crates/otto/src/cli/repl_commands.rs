@@ -57,6 +57,8 @@ pub(crate) const TIMERS_USAGE: &str = "usage: /timers [cancel <id>]";
 pub(crate) const TIMERS_UNAVAILABLE: &str = "timers are not available";
 pub(crate) const SKILL_USAGE: &str = "usage: /skill <name>";
 pub(crate) const MCP_USAGE: &str = "usage: /mcp | /mcp login <server>";
+/// The built-in task `/init` submits through the ordinary agent turn.
+pub(crate) const INIT_PROMPT: &str = "Create an AGENTS.md contributor guide for this repository. First inspect the workspace and check whether AGENTS.md already exists at its root. If it exists, do not overwrite or modify it. Otherwise, write a concise, repository-specific guide covering project structure, build and test commands, coding conventions, and contribution expectations.";
 
 impl Controller {
     /// The bound service and its two scopes, or `None` when memory is unusable

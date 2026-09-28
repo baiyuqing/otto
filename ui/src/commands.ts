@@ -1,3 +1,5 @@
+import { initPrompt } from 'otto-web'
+
 export type WebCommand =
   | { kind: 'prompt'; text: string }
   | { kind: 'help' }
@@ -24,6 +26,7 @@ export interface WebCommandSuggestion {
 
 export const supportedCommands: WebCommandSuggestion[] = [
   { name: '/help', description: 'show web commands' },
+  { name: '/init', description: 'create a repository AGENTS.md guide' },
   { name: '/session', description: 'show current session details' },
   { name: '/new', description: 'start a new session' },
   { name: '/clear', description: 'start a new session' },
@@ -56,6 +59,8 @@ export function parseWebCommand(text: string): WebCommand {
   switch (command) {
     case '/help':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'help' }
+    case '/init':
+      return argument ? { kind: 'prompt', text: trimmed } : { kind: 'prompt', text: initPrompt() }
     case '/session':
       return argument ? { kind: 'prompt', text: trimmed } : { kind: 'session' }
     case '/new':

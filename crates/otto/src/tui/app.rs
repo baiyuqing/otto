@@ -896,7 +896,7 @@ impl App {
                     self.push_system(format!("unknown command: {line}"));
                     return None;
                 }
-                Some(Action::Prompt(repl_commands::INIT_PROMPT.to_string()))
+                Some(Action::Prompt(otto_core::agent::INIT_PROMPT.to_string()))
             }
             SlashCommandKind::Exit => {
                 if !args.is_empty() {
@@ -2237,7 +2237,7 @@ mod tests {
 
         let action = app.dispatch_line("/init", &controller, &cancel);
         assert!(
-            matches!(action, Some(Action::Prompt(prompt)) if prompt == repl_commands::INIT_PROMPT)
+            matches!(action, Some(Action::Prompt(prompt)) if prompt == otto_core::agent::INIT_PROMPT)
         );
 
         assert!(

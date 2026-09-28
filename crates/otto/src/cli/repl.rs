@@ -297,8 +297,7 @@ impl<'a> Repl<'a> {
                     if !args.is_empty() {
                         break 'dispatch None;
                     }
-                    self.prompt(super::repl_commands::INIT_PROMPT, cancel)
-                        .await?;
+                    self.prompt(otto_core::agent::INIT_PROMPT, cancel).await?;
                     Some(false)
                 }
                 "exit" => {
@@ -1204,7 +1203,7 @@ mod tests {
         assert_eq!(stderr, "unknown command: /init now\n");
         let history = controller.history();
         assert!(history.iter().any(|message| {
-            message.role == Role::User && message.text() == super::super::repl_commands::INIT_PROMPT
+            message.role == Role::User && message.text() == otto_core::agent::INIT_PROMPT
         }));
     }
 

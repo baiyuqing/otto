@@ -1242,14 +1242,16 @@ composer:
 - Below 720px wide the sidebar is hidden; the **Sessions** button in the top
   bar shows it as an overlay, and opening a session hides it again.
 - Typing `/` in the composer shows local suggestions for supported Web slash
-  commands; Tab or click completes the highlighted command. Web commands backed
-  by existing server APIs run locally instead of starting a provider turn:
-  `/help`, `/session`, `/new`, `/clear`, `/resume`, `/model`, `/rename <name>`,
-  `/compact [focus]`, `/sandbox`, `/sandbox reload`, `/approve <id>`,
-  `/tasks`, `/task <id|name>`, `/task cancel <id|name>`, `/mcp`, and `/exit`.
-  `/resume` asks you to choose a session from the sidebar; `/exit` asks you to
-  close the browser tab because a page cannot reliably close a tab it did not
-  open. `/approve <id>` grants one pending elevated Bash command through
+  commands; Tab or click completes the highlighted command. Supported commands
+  are `/help`, `/init`, `/session`, `/new`, `/clear`, `/resume`, `/model`,
+  `/rename <name>`, `/compact [focus]`, `/sandbox`, `/sandbox reload`,
+  `/approve <id>`, `/tasks`, `/task <id|name>`, `/task cancel <id|name>`,
+  `/mcp`, and `/exit`. Commands backed by existing server APIs run locally
+  instead of starting a provider turn. `/init` submits the same built-in
+  `AGENTS.md` contributor-guide task as the terminal frontends. `/resume` asks
+  you to choose a session from the sidebar; `/exit` asks you to close the
+  browser tab because a page cannot reliably close a tab it did not open.
+  `/approve <id>` grants one pending elevated Bash command through
   `POST /v1/sessions/{id}/approvals/{approval_id}` and then submits the retry
   prompt the server returns as the next turn.
   `/mcp` shows each configured server's connection state only; signing in

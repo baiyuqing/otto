@@ -8,9 +8,11 @@
 //! tools are. Concurrency: `execute` takes `&self` and may run concurrently.
 //! Cancellation and errors follow the executor contract: a cancelled token
 //! produces an error result, and failures are reported in band, never as a
-//! `Result`. An unregistered name produces [`ToolResult::unknown_tool`].
+//! `Result`. An unregistered name produces [`ToolResult::unknown_tool`] and
+//! calls neither guard hook.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use otto_core::model::ToolDefinition;
 use otto_core::tool::{ToolExecutor, ToolResult};
@@ -19,10 +21,26 @@ use tokio_util::sync::CancellationToken;
 
 use super::Tool;
 
+/// A check run around every registered tool call. `before` can refuse the
+/// call before the tool runs; `after` can flag a call that ran but whose
+/// effects the caller should not trust. Both return operator-facing text
+/// on failure.
+pub trait CallGuard: Send + Sync {
+    /// Runs before the tool call. An `Err` refuses the call instead of
+    /// running it, so it never runs against state the guard has already
+    /// decided not to trust, such as a session lease that has been lost.
+    fn before(&self) -> Result<(), String>;
+    /// Runs after the tool call returns. An `Err` flags a call that ran but
+    /// whose effects the caller should not trust as durable, such as a
+    /// workspace sync that failed after the call finished.
+    fn after(&self) -> Result<(), String>;
+}
+
 /// A named, ordered set of tools.
 pub struct Registry {
     ordered: Vec<Box<dyn Tool + Send + Sync>>,
     by_name: HashMap<String, usize>,
+    guard: Option<Arc<dyn CallGuard>>,
 }
 
 impl Registry {
@@ -40,7 +58,15 @@ impl Registry {
         Ok(Self {
             ordered: tools,
             by_name,
+            guard: None,
         })
+    }
+
+    /// Runs `guard.before()`/`guard.after()` around every registered tool
+    /// call. Replaces any guard set by an earlier call.
+    pub fn with_guard(mut self, guard: Arc<dyn CallGuard>) -> Self {
+        self.guard = Some(guard);
+        self
     }
 
     /// The registered tool with this name, if any.
@@ -68,10 +94,26 @@ impl ToolExecutor for Registry {
         arguments: &RawValue,
         cancel: &CancellationToken,
     ) -> ToolResult {
-        match self.lookup(name) {
-            Some(tool) => tool.execute(arguments, cancel).await,
-            None => ToolResult::unknown_tool(name),
+        let Some(tool) = self.lookup(name) else {
+            return ToolResult::unknown_tool(name);
+        };
+
+        if let Some(guard) = &self.guard
+            && let Err(text) = guard.before()
+        {
+            return ToolResult::error(text);
         }
+
+        let mut result = tool.execute(arguments, cancel).await;
+
+        if let Some(guard) = &self.guard
+            && let Err(text) = guard.after()
+        {
+            result.content = format!("{text}\n\n{}", result.content);
+            result.is_error = true;
+        }
+
+        result
     }
 }
 
@@ -145,5 +187,70 @@ mod tests {
             .execute("read", &raw("{}"), &CancellationToken::new())
             .await;
         assert!(!result.is_error && result.content == "ok", "{result:?}");
+    }
+
+    struct FakeGuard {
+        before_result: Result<(), String>,
+        after_result: Result<(), String>,
+    }
+
+    impl CallGuard for FakeGuard {
+        fn before(&self) -> Result<(), String> {
+            self.before_result.clone()
+        }
+
+        fn after(&self) -> Result<(), String> {
+            self.after_result.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_before_failure_skips_the_tool() {
+        let registry = Registry::new(vec![fake("read")])
+            .unwrap()
+            .with_guard(Arc::new(FakeGuard {
+                before_result: Err("lease lost".to_string()),
+                after_result: Ok(()),
+            }));
+
+        let result = registry
+            .execute("read", &raw("{}"), &CancellationToken::new())
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "lease lost");
+    }
+
+    #[tokio::test]
+    async fn an_after_failure_wraps_a_successful_result() {
+        let registry = Registry::new(vec![fake("read")])
+            .unwrap()
+            .with_guard(Arc::new(FakeGuard {
+                before_result: Ok(()),
+                after_result: Err("sync failed".to_string()),
+            }));
+
+        let result = registry
+            .execute("read", &raw("{}"), &CancellationToken::new())
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "sync failed\n\nok");
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_name_calls_neither_hook() {
+        let registry = Registry::new(vec![fake("read")])
+            .unwrap()
+            .with_guard(Arc::new(FakeGuard {
+                before_result: Err("should not be called".to_string()),
+                after_result: Err("should not be called".to_string()),
+            }));
+
+        let result = registry
+            .execute("missing", &raw("{}"), &CancellationToken::new())
+            .await;
+
+        assert_eq!(result.content, "unknown tool: missing");
     }
 }

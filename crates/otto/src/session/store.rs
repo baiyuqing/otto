@@ -19,10 +19,10 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use otto_core::model::{Message, Role, Usage};
+use otto_core::model::{Block, Message, Role, Usage};
 use otto_core::session::compaction::{
     compaction_details_present, compaction_usage_to_pi, is_real_compaction_context_entry,
     latest_compaction_metadata, validate_compaction_checkpoint,
@@ -41,7 +41,52 @@ use otto_core::session::{
     decode_pi_file, encode_pi_record, index_context_entries,
 };
 
+use crate::failover::lease;
+
 use super::fsops;
+
+/// One tool call left unanswered when a session was taken over mid-turn:
+/// the name and arguments the model called with, and whether it is the one
+/// call that may have already reached the tool before the interruption.
+/// Shared between the takeover repair in [`Store::from_file`] and
+/// `subagent::interrupted`'s scan of an interrupted child transcript, since
+/// both report the same kind of unanswered call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnansweredCall {
+    pub name: String,
+    pub arguments: String,
+    pub may_have_run: bool,
+}
+
+/// Builds the unanswered-call list for a message history that ends mid-turn:
+/// the first pending call is marked `may_have_run`, because Otto cannot tell
+/// whether it reached the tool before the interruption; the rest are marked
+/// not executed, since a provider that stops mid-turn issues its tool calls
+/// in order and waits for each result before continuing.
+pub(crate) fn unanswered_calls_from(pending: &[Block]) -> Vec<UnansweredCall> {
+    pending
+        .iter()
+        .enumerate()
+        .map(|(index, call)| UnansweredCall {
+            name: call.tool_name.clone(),
+            arguments: call
+                .arguments
+                .as_ref()
+                .map_or_else(|| "{}".to_string(), |raw| raw.get().to_string()),
+            may_have_run: index == 0,
+        })
+        .collect()
+}
+
+/// Recorded when [`Prepared::activate`](super::prepared::Prepared::activate)
+/// builds a store from a taken-over lease epoch: the holder the epoch was
+/// taken from, and the calls the store's dangling-tool-call repair gave
+/// synthetic results to, in the order they were repaired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Takeover {
+    pub holder: lease::Holder,
+    pub repaired: Vec<UnansweredCall>,
+}
 
 /// Everything the store mutates, behind one lock.
 #[derive(Debug)]
@@ -67,6 +112,20 @@ pub(crate) struct StoreState {
     pub(crate) file_path: Option<PathBuf>,
     /// The Pi header's `parentSession`: the parent session file path.
     pub(crate) parent_session: Option<String>,
+    /// The lease backing this session, when it is lease-managed. Checked
+    /// before every durable write; see [`StoreState::check_lease`].
+    pub(crate) lease: Option<Arc<lease::Lease>>,
+    /// Whether `close` releases `lease`: true for the store that acquired
+    /// it, false for a child transcript that only checks the parent's
+    /// lease (see [`Store::set_lease_check`]).
+    pub(crate) owns_lease: bool,
+    /// Set by `create` when the session should acquire its own lease
+    /// directory on the first durable write; consumed and cleared by
+    /// [`StoreState::ensure_file`].
+    pub(crate) enable_failover: Option<u64>,
+    /// Recorded once, by `Prepared::activate`, when this store was opened by
+    /// taking over another holder's lease epoch.
+    pub(crate) takeover: Option<Takeover>,
     /// Test-only fault injection for the durable-write path.
     #[cfg(test)]
     pub(crate) fail_writes: bool,
@@ -112,10 +171,26 @@ impl Store {
                 closed: false,
                 file_path: None,
                 parent_session: None,
+                lease: None,
+                owns_lease: false,
+                enable_failover: None,
+                takeover: None,
                 #[cfg(test)]
                 fail_writes: false,
             }),
         })
+    }
+
+    /// Marks this lazy, top-level store to acquire its own lease directory
+    /// (`lease_seconds` as `L`) on its first durable write, in place of
+    /// opening one already prepared by [`Prepared::prepare`]. For sessions
+    /// `Store::create`/`create_lazy` builds directly, such as a freshly
+    /// started REPL session; a child transcript never calls this and never
+    /// gets its own lease directory.
+    pub fn enable_failover(&self, lease_seconds: u64) -> Result<(), PiError> {
+        let mut state = self.lock()?;
+        state.enable_failover = Some(lease_seconds);
+        Ok(())
     }
 
     /// Returns a lazy store for a sub-agent transcript of the parent session
@@ -159,24 +234,41 @@ impl Store {
     /// touches disk. For a transcript this process does not own, where
     /// [`Store::open`]'s repair-and-append behavior would be wrong.
     pub fn read_transcript(path: impl AsRef<Path>) -> Result<Vec<Message>, PiError> {
+        Ok(Self::read_entries(path)?.1)
+    }
+
+    /// Reads a session file's raw entries in file order and its resolved
+    /// message transcript, with the same read-only behavior as
+    /// [`Store::read_transcript`]. For callers that need custom entries.
+    pub fn read_entries(path: impl AsRef<Path>) -> Result<(Vec<PiEntry>, Vec<Message>), PiError> {
         let mut file = File::open(path.as_ref())
             .map_err(|error| PiError::other(format!("open session file: {error}")))?;
         reject_oversized_session_file(&file)?;
         let decoded = decode_pi_file_read_only(&mut file)?;
-        Ok(resolve_pi_store_state(&decoded)?.messages)
+        let messages = resolve_pi_store_state(&decoded)?.messages;
+        Ok((decoded.entries, messages))
     }
 
     /// Opens an existing session for appending, repairing an incomplete final
     /// line and any tool call left without a result.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<Warning>), PiError> {
         let path = path.as_ref();
-        let prepared = super::prepared::Prepared::prepare(path)?;
+        let prepared = super::prepared::Prepared::prepare(path, None)?;
         prepared.activate()
     }
 
     /// Builds a store around an already-verified descriptor. The descriptor is
-    /// consumed either way: on failure it is dropped and closed.
-    pub(crate) fn from_file(mut file: File, path: &str) -> Result<(Self, Vec<Warning>), PiError> {
+    /// consumed either way: on failure it is dropped and closed. `lease` is
+    /// the lease [`Prepared::activate`](super::prepared::Prepared::activate)
+    /// acquired opening `path`, when the session is lease-managed, together
+    /// with whether the acquisition took over another holder's epoch; the
+    /// resulting store owns that lease (releases it on
+    /// [`Store::close`]/drop) and records a [`Takeover`] when it does.
+    pub(crate) fn from_file(
+        mut file: File,
+        path: &str,
+        lease: Option<(Arc<lease::Lease>, lease::Acquired)>,
+    ) -> Result<(Self, Vec<Warning>), PiError> {
         fsops::lock_session_exclusive(&file)?;
         reject_oversized_session_file(&file)?;
         let (decoded, mut warnings) = decode_pi_file_for_open(&mut file, path)?;
@@ -185,6 +277,12 @@ impl Store {
         let position = file
             .seek(SeekFrom::End(0))
             .map_err(|error| PiError::other(format!("seek session file: {error}")))?;
+
+        let (lease_value, acquired) = match lease {
+            Some((lease, acquired)) => (Some(lease), Some(acquired)),
+            None => (None, None),
+        };
+        let owns_lease = lease_value.is_some();
 
         let store = Self {
             state: Mutex::new(StoreState {
@@ -206,11 +304,19 @@ impl Store {
                 closed: false,
                 file_path: None,
                 parent_session: None,
+                lease: lease_value,
+                owns_lease,
+                enable_failover: None,
+                takeover: None,
                 #[cfg(test)]
                 fail_writes: false,
             }),
         };
-        warnings.extend(store.repair_dangling_tool_calls()?);
+        let (repair_warnings, repaired) = store.repair_dangling_tool_calls()?;
+        warnings.extend(repair_warnings);
+        if let Some(lease::Acquired::TakenOver(holder)) = acquired {
+            store.lock()?.takeover = Some(Takeover { holder, repaired });
+        }
         let mut guard = store.lock()?;
         if let Some(file) = guard.file.as_mut() {
             file.seek(SeekFrom::End(0)).map_err(|error| {
@@ -219,6 +325,28 @@ impl Store {
         }
         drop(guard);
         Ok((store, warnings))
+    }
+
+    /// The lease backing this store, when it is lease-managed.
+    pub fn lease(&self) -> Option<Arc<lease::Lease>> {
+        self.lock().expect("session mutex").lease.clone()
+    }
+
+    /// Takes the takeover record left by [`Store::from_file`] when this
+    /// store was opened by taking over another holder's lease epoch.
+    /// `None` on every call after the first.
+    pub fn take_takeover(&self) -> Option<Takeover> {
+        self.lock().expect("session mutex").takeover.take()
+    }
+
+    /// Sets `lease` for check-only use: every durable write is checked
+    /// against it (see [`StoreState::check_lease`]), but [`Store::close`]
+    /// does not release it. For a child transcript whose lease is the
+    /// parent session's.
+    pub fn set_lease_check(&self, lease: Arc<lease::Lease>) {
+        let mut state = self.lock().expect("session mutex");
+        state.lease = Some(lease);
+        state.owns_lease = false;
     }
 
     pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, StoreState>, PiError> {
@@ -496,7 +624,11 @@ impl Store {
         Ok(metadata)
     }
 
-    /// Closes the session file. Idempotent.
+    /// Closes the session file. Idempotent. Releases the lease this store
+    /// acquired (see [`Store::set_lease_check`] for a store that only
+    /// checks a lease it does not own), but only once the file has synced,
+    /// so a lease is never given up while a write to it might still be in
+    /// flight on disk.
     pub fn close(&self) -> Result<(), PiError> {
         let mut state = self.lock()?;
         if state.closed {
@@ -507,7 +639,15 @@ impl Store {
             return Ok(());
         };
         file.sync_all()
-            .map_err(|error| PiError::other(format!("close session file: {error}")))
+            .map_err(|error| PiError::other(format!("close session file: {error}")))?;
+        if state.owns_lease
+            && let Some(lease) = state.lease.as_ref()
+        {
+            lease
+                .release()
+                .map_err(|error| PiError::other(format!("release session lease: {error}")))?;
+        }
+        Ok(())
     }
 
     /// Appends a stand-in error result for each tool call a session that
@@ -517,8 +657,9 @@ impl Store {
     /// repaired in an append-only file. A call left unanswered with history
     /// after it is repaired in memory on every resolve instead; see
     /// `otto_core::session::context::build_context`.
-    fn repair_dangling_tool_calls(&self) -> Result<Vec<Warning>, PiError> {
+    fn repair_dangling_tool_calls(&self) -> Result<(Vec<Warning>, Vec<UnansweredCall>), PiError> {
         let pending = pending_tool_calls(&self.messages())?;
+        let repaired = unanswered_calls_from(&pending);
         let stand_ins = missing_tool_results(&pending);
         let mut warnings = Vec::new();
         for (call, block) in pending.into_iter().zip(stand_ins) {
@@ -536,7 +677,25 @@ impl Store {
                 call.tool_call_id
             )));
         }
-        Ok(warnings)
+        Ok((warnings, repaired))
+    }
+}
+
+impl Drop for Store {
+    /// Best-effort: releases a lease this store owns and never released,
+    /// e.g. because the caller dropped the store without calling
+    /// [`Store::close`]. Errors are not observable from `drop` and are
+    /// discarded.
+    fn drop(&mut self) {
+        let Ok(state) = self.state.lock() else {
+            return;
+        };
+        if !state.closed
+            && state.owns_lease
+            && let Some(lease) = state.lease.as_ref()
+        {
+            let _ = lease.release();
+        }
     }
 }
 
@@ -569,6 +728,7 @@ impl StoreState {
                 (directory, path)
             }
         };
+
         std::fs::create_dir_all(&directory)
             .map_err(|error| PiError::other(format!("create session directory: {error}")))?;
         std::fs::set_permissions(
@@ -576,6 +736,22 @@ impl StoreState {
             <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
         )
         .map_err(|error| PiError::other(format!("chmod session directory: {error}")))?;
+
+        // A lazy, top-level store `Store::enable_failover` marked: acquire its
+        // own lease directory before the session file exists, so the file is
+        // never written without lease protection. A child transcript never
+        // has `enable_failover` set (see `Store::create_child_lazy`). The
+        // session directory must exist first: the lease directory is created
+        // beside the (not yet written) session file.
+        if let Some(lease_seconds) = self.enable_failover.take() {
+            lease::create_lease_dir(&path, lease_seconds).map_err(|error| {
+                PiError::other(format!("create session lease directory: {error}"))
+            })?;
+            let (lease, _acquired) = lease::Lease::acquire(&path)
+                .map_err(|error| PiError::other(format!("acquire session lease: {error}")))?;
+            self.lease = Some(lease);
+            self.owns_lease = true;
+        }
 
         let mut file = {
             use std::os::unix::fs::OpenOptionsExt;
@@ -590,6 +766,7 @@ impl StoreState {
         };
 
         let result = fsops::lock_session_exclusive(&file)
+            .and_then(|_| self.check_lease())
             .and_then(|_| self.write_initial_records(&mut file));
         let (file_bytes, entry) = match result {
             Ok(value) => value,
@@ -731,8 +908,23 @@ impl StoreState {
         Ok(record_bytes)
     }
 
+    /// Checks the lease backing this store, if any, poisoning the store with
+    /// the check's text when the lease has been lost or is not renewing.
+    /// Called before every durable write.
+    pub(crate) fn check_lease(&mut self) -> Result<(), PiError> {
+        if let Some(lease) = self.lease.as_ref()
+            && let Err(text) = lease.check()
+        {
+            let fatal = PiError::fatal(text);
+            self.fatal = Some(fatal.clone());
+            return Err(fatal);
+        }
+        Ok(())
+    }
+
     /// Writes one record and `fsync`s it, poisoning the store on failure.
     pub(crate) fn write_record(&mut self, encoded: &[u8]) -> Result<(), PiError> {
+        self.check_lease()?;
         #[cfg(test)]
         if self.fail_writes {
             let fatal = PiError::fatal("write session record: injected failure");

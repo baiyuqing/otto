@@ -8,7 +8,7 @@
 //! method takes the store's own mutex, so a `Store` is `Send + Sync`. Errors:
 //! everything is an `otto_core::session::PiError`.
 
-mod fsops;
+pub(crate) mod fsops;
 mod list;
 mod prepared;
 mod store;
@@ -20,4 +20,5 @@ pub use fsops::clean_go_path;
 pub(crate) use fsops::workspace_key;
 pub use list::{MAX_LIST_SESSIONS, inspect, list, session_directory};
 pub use prepared::{ArchiveResult, Prepared, archive};
-pub use store::Store;
+pub(crate) use store::unanswered_calls_from;
+pub use store::{Store, Takeover, UnansweredCall};

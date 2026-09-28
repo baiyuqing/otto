@@ -74,6 +74,10 @@ struct Termination {
 struct Entry {
     pid: i32,
     termination: Mutex<Termination>,
+    /// Keeps this process group registered with `failover::children::Children`
+    /// for the entry's lifetime, so a lease watchdog's fence action can kill
+    /// it independently of this manager's own lifecycle.
+    _fence_registration: crate::failover::children::Registration,
 }
 
 #[derive(Debug, Default)]
@@ -145,6 +149,11 @@ impl Manager {
             let entry = Arc::new(Entry {
                 pid: pid as i32,
                 termination: Mutex::new(Termination::default()),
+                _fence_registration: crate::failover::children::Children::register(
+                    crate::failover::children::Children::global(),
+                    pid as i32,
+                    true,
+                ),
             });
             state.active.insert(entry.pid, entry.clone());
             // The child is handed to the drain loop below while the lock is

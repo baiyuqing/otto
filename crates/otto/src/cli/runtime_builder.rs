@@ -30,6 +30,7 @@ use otto_core::session::{
 use otto_core::tool::ToolExecutor;
 use tokio_util::sync::CancellationToken;
 
+use crate::failover;
 use crate::provider::openaicompat::Client;
 use crate::sandbox::CommandExecutor;
 use crate::session::Store;
@@ -109,6 +110,20 @@ pub trait SessionHandle: Session + Send + Sync {
     fn snapshot(&self) -> Snapshot {
         Snapshot::default()
     }
+
+    /// The lease backing this session, when it is lease-managed. A
+    /// transcript that is never lease-managed (e.g. [`MemoryHandle`])
+    /// keeps the default.
+    fn lease(&self) -> Option<Arc<crate::failover::lease::Lease>> {
+        None
+    }
+
+    /// The takeover recorded when this session was opened by taking over
+    /// another holder's lease epoch, taken once. A transcript that is
+    /// never lease-managed keeps the default.
+    fn take_takeover(&self) -> Option<crate::session::Takeover> {
+        None
+    }
 }
 
 impl SessionHandle for Store {
@@ -154,6 +169,14 @@ impl SessionHandle for Store {
 
     fn snapshot(&self) -> Snapshot {
         Store::snapshot(self)
+    }
+
+    fn lease(&self) -> Option<Arc<crate::failover::lease::Lease>> {
+        Store::lease(self)
+    }
+
+    fn take_takeover(&self) -> Option<crate::session::Takeover> {
+        Store::take_takeover(self)
     }
 }
 
@@ -331,6 +354,14 @@ impl SharedSession {
 
     pub fn snapshot(&self) -> Snapshot {
         self.0.snapshot()
+    }
+
+    pub fn lease(&self) -> Option<Arc<crate::failover::lease::Lease>> {
+        self.0.lease()
+    }
+
+    pub fn take_takeover(&self) -> Option<crate::session::Takeover> {
+        self.0.take_takeover()
     }
 }
 
@@ -745,6 +776,19 @@ impl Builder {
     pub(crate) fn shared_mut(&mut self) -> &mut Shared {
         Arc::get_mut(&mut self.shared).expect("shared: not uniquely owned")
     }
+
+    /// The `lease_seconds` to pass as `create_lease` to
+    /// `Prepared::prepare`/`prepare_listed` when opening a session for this
+    /// workspace, resolved from `[failover]`: `Some(lease_seconds)` when
+    /// enabled, `None` otherwise. `[failover]` is not validated at startup
+    /// (unlike most tables it has no per-turn resolution path to piggyback
+    /// on), so an invalid `lease_seconds` is reported here, at the point a
+    /// session is opened, rather than at process start.
+    pub fn create_lease(&self) -> Result<Option<u64>, String> {
+        let runtime =
+            otto_core::config::resolve_failover(&self.config).map_err(|error| error.to_string())?;
+        Ok(runtime.enabled.then_some(runtime.lease_seconds))
+    }
 }
 
 impl Builder {
@@ -1097,6 +1141,7 @@ impl Builder {
 
         let registry =
             Registry::new(tools).map_err(|error| format!("create tool registry: {error}"))?;
+        let registry = with_lease_guard(registry, session, &self.workspace_path);
         let definitions = registry.definitions();
         let base_prompt = system_prompt_for(
             &definitions,
@@ -1264,6 +1309,14 @@ impl Builder {
         }
         let store = Store::create_lazy(&self.session_root, header)
             .map_err(|error| self.redact_error(&error.to_string(), Some(runtime)))?;
+        if let Some(lease_seconds) = self
+            .create_lease()
+            .map_err(|error| self.redact_error(&error, Some(runtime)))?
+        {
+            store
+                .enable_failover(lease_seconds)
+                .map_err(|error| self.redact_error(&error.to_string(), Some(runtime)))?;
+        }
         Ok(SharedSession::new(Arc::new(store)))
     }
 }
@@ -1302,6 +1355,20 @@ pub(crate) fn random_id() -> std::io::Result<String> {
 /// need to own their workspace.
 pub fn leaked_workspace(root: &Path) -> Result<&'static Workspace, std::io::Error> {
     Ok(Box::leak(Box::new(Workspace::new(root)?)))
+}
+
+/// Installs the session-lease commit guard: a tool call through `registry`
+/// refuses to run once `session`'s lease has been lost, and each call syncs
+/// `workspace_path` to disk once it finishes. `session.lease()` returns
+/// `None` for a session that is not lease-managed, so the guard is then a
+/// no-op (see `failover::CommitGuard`).
+fn with_lease_guard(registry: Registry, session: &SharedSession, workspace_path: &str) -> Registry {
+    let session = session.clone();
+    let lease: failover::LeaseSource = Arc::new(move || session.lease());
+    registry.with_guard(Arc::new(failover::CommitGuard::new(
+        lease,
+        PathBuf::from(workspace_path),
+    )))
 }
 
 /// A negative or oversized cap is clamped rather than wrapped, and the tools
@@ -1496,6 +1563,15 @@ mod tests {
         };
     }
 
+    fn user_message(text: &str) -> Message {
+        Message {
+            role: otto_core::model::Role::User,
+            blocks: vec![Block::text(text)],
+            created_at: Utc::now(),
+            ..Message::default()
+        }
+    }
+
     fn runtime() -> Runtime {
         Runtime {
             profile: "default".to_string(),
@@ -1545,6 +1621,51 @@ mod tests {
                 "remind_status",
                 "remind_cancel"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn with_lease_guard_refuses_a_tool_call_once_the_session_lease_is_lost() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let lease = failover::lease::Lease::for_test(tmp.path());
+        lease.mark_lost_for_test("test fence");
+        let header = Header {
+            id: "session-1".to_string(),
+            workspace: tmp.path().to_string_lossy().into_owned(),
+            provider: "openai-compatible".to_string(),
+            model: "test-model".to_string(),
+            created_at: Utc::now(),
+            ..Header::default()
+        };
+        let store = Store::create_lazy(tmp.path().join("sessions"), header).expect("store");
+        store.set_lease_check(Arc::clone(&lease));
+        let session = SharedSession::new(Arc::new(store));
+
+        let stub = crate::subagent::testsupport::StubTool::new(
+            "write",
+            otto_core::tool::ToolResult {
+                content: "wrote".to_string(),
+                ..otto_core::tool::ToolResult::default()
+            },
+        );
+        let calls = stub.counter();
+        let registry = Registry::new(vec![stub.boxed()]).expect("registry");
+        let registry = with_lease_guard(registry, &session, "/workspace");
+
+        let result = registry
+            .execute(
+                "write",
+                &crate::tool::testutil::raw("{}"),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(result.is_error, "{result:?}");
+        assert!(result.content.contains("session lease lost"), "{result:?}");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the tool must not run once the session lease is lost"
         );
     }
 
@@ -1940,5 +2061,68 @@ mod tests {
         // `mem::take`; it must be a harmless no-op, not a panic or a
         // double-close.
         runner.close();
+    }
+
+    /// R6: `Builder::create_session` calls `Store::enable_failover` when
+    /// `[failover]` is enabled, so the first append creates a lease
+    /// directory beside the session file.
+    #[tokio::test]
+    async fn create_session_with_failover_enabled_acquires_a_lease_on_first_append() {
+        let root = tempfile::tempdir().expect("root");
+        let mut shared = shared(root.path());
+        Arc::get_mut(&mut shared)
+            .expect("uniquely owned")
+            .no_session = false;
+        Arc::get_mut(&mut shared)
+            .expect("uniquely owned")
+            .config
+            .failover = otto_core::config::Failover {
+            enabled: true,
+            lease_seconds: 12,
+        };
+        let builder = builder_for(shared, root.path());
+
+        let session = builder.create_session(&runtime()).expect("create session");
+        assert!(
+            session.lease().is_none(),
+            "a lazy store has no lease until the first append"
+        );
+
+        session
+            .append(user_message("hello"))
+            .await
+            .expect("first append");
+
+        let path = session.path();
+        let dir = Path::new(&path).with_extension("lease");
+        assert!(dir.join("lease.json").is_file());
+        assert!(dir.join("epoch-1").is_file());
+        assert!(session.lease().is_some());
+
+        session.close().expect("close");
+    }
+
+    /// R6: `[failover]` disabled (the default) creates no lease directory.
+    #[tokio::test]
+    async fn create_session_with_failover_disabled_creates_no_lease_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let mut shared = shared(root.path());
+        Arc::get_mut(&mut shared)
+            .expect("uniquely owned")
+            .no_session = false;
+        let builder = builder_for(shared, root.path());
+
+        let session = builder.create_session(&runtime()).expect("create session");
+        session
+            .append(user_message("hello"))
+            .await
+            .expect("first append");
+
+        let path = session.path();
+        let dir = Path::new(&path).with_extension("lease");
+        assert!(!dir.exists());
+        assert!(session.lease().is_none());
+
+        session.close().expect("close");
     }
 }

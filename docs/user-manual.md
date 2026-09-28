@@ -301,6 +301,10 @@ enabled = false
 # binary = "lark-cli"
 # chat_ids = ["oc_xxx"]         # required for inbound to start
 
+[failover]
+enabled = false
+lease_seconds = 30
+
 [profiles.example]
 provider = "openai-compatible"
 base_url = "https://example.invalid/v1"
@@ -373,6 +377,14 @@ Key points:
   in `lark-cli`'s own store, not in Otto config: unknown keys such as `token`
   fail config load. A missing binary logs an error and disables inbound;
   serve keeps running. The TUI and REPL do not spawn this consumer.
+- `[failover]` decides whether a session gets a lease directory so it can be
+  continued on another host (see
+  [Continuing a session on another host](#continuing-a-session-on-another-host)).
+  `enabled` (default `false`) applies only to sessions without a lease
+  directory, including new ones; a session that already has one uses its lease
+  whatever this setting is. `lease_seconds` (default `30`, minimum `12`) is
+  written into a new lease directory and cannot be changed for that session
+  afterwards. TOML-only, no CLI flag or environment variable.
 - Each `[profiles.NAME]` declares `provider`, `base_url`, `model`, and
   `api_key_env`. Optional `thinking` sets that profile's default reasoning
   effort (`low`, `medium`, `high`, `xhigh`, or `max`); omit it to let the
@@ -752,7 +764,7 @@ Notes:
   starts with an `otto.task_spec` custom entry (task id, name, description,
   model, `context` (`fresh` or `inherit`), and the agent definition if one
   was used) and ends with an `otto.task_result` custom entry (`status`
-  `succeeded`, `failed`, or `canceled`, and the error text). Otto does not
+  `succeeded`, `failed`, `canceled`, or `interrupted`, and the error text). Otto does not
   add these entries to the child's model context. Task ids continue from the
   highest `t<N>` in the transcript directory, so a resumed session does not
   reuse an id.
@@ -761,7 +773,8 @@ Notes:
   `<session-id>.inbox.json` beside the session file, mode `0600`, and removed
   from it once delivered to the model. Reopening the session restores them,
   and the REPL, the TUI, and `otto serve` start a wake turn to deliver them.
-  Delivery is at least once: a notification appended to the session just
+  A turn started by user input delivers pending notifications before the
+  user's message. Delivery is at least once: a notification appended to the session just
   before Otto exits can be delivered again after the session is reopened.
   Archiving the session deletes the file. A write failure is not reported.
   `--no-session` keeps notifications in memory only.
@@ -777,6 +790,65 @@ Notes:
   data. They do not contain provider API keys, OAuth tokens, authorization
   headers, or cookie values, and Otto does not persist private sandbox profile
   paths as runtime metadata.
+
+### Continuing a session on another host
+
+A session whose directory `~/.otto/sessions/<workspace-key>/` is on a shared
+file system can be continued by an Otto process on another host or container
+after the first host is lost. Otto allows one writer per session through a
+lease in `<session-id>.lease/` beside the session file.
+
+- With `[failover] enabled = true`, a new session creates its lease directory
+  on its first write, and opening an existing session without one creates it.
+  Once `<session-id>.lease/` exists, every open, resume, and archive of that
+  session uses the lease, on every host, whatever that host's `[failover]`
+  setting is. There is no command that removes the lease from a session.
+- Opening a lease-managed session that another process holds and renews fails
+  with `session is held by host <host> pid <pid> (lease epoch <n>)`. When
+  the holder exited
+  cleanly, the open succeeds at once. When the holder stopped without
+  releasing the lease, the open waits 7/6 of `lease_seconds` (35 s with the
+  default) without output, then takes the session over.
+- On a takeover Otto moves the old log to
+  `<session-id>.lease/fenced-<n>.jsonl` and continues from a copy that holds
+  only its complete records, so a write from the stopped host after that point
+  does not reach the session. Tool calls without results get the error results
+  described above. Otto then queues one notification to the model that names
+  the stopped host and pid, the calls without results (marked "may have run"
+  or "not executed"), and each sub-agent task that had not finished, and starts
+  a wake turn in the REPL, the TUI, and `otto serve`. With `--prompt`, the
+  notification is delivered before the prompt. Each listed task is recorded as
+  `interrupted`; a task that cannot be recorded is reported as a warning on
+  standard error. No notification is queued when there is nothing to report
+  (no call without a result, no unfinished task, and the session ends on a
+  finished assistant reply), or when sub-agents are disabled or no provider is
+  configured.
+- The model continues an interrupted task with the `agent` tool's `resume`
+  argument (the task id or name) and a `prompt`. The task keeps its recorded
+  agent definition, model, and context; `resume` on a task that is not
+  interrupted is an error. A task that is not continued stays interrupted.
+  Effects of calls without results are not undone.
+- A process that holds a lease renews it every third of `lease_seconds`. When
+  renewal has not succeeded for 5/6 of `lease_seconds`, or another host has
+  taken the session over, the process kills the processes its tools started
+  and exits with status `75` without writing. Tool calls and log writes are
+  refused once the lease is lost.
+- On Linux, after each tool call of a lease-managed session Otto runs
+  `syncfs(2)` on the workspace's file system before the result is written; a
+  sync failure turns the result into an error. macOS has no such sync, so
+  `bash` and MCP effects of a call with a result can be missing on the next
+  host.
+- Requirements and limits: the file system must make data durable when `fsync`
+  returns, show another host's synced data to a later `open`, and provide
+  atomic exclusive create and atomic rename. This has not been tested on any
+  network file system. Writes the stopped host had already handed to its
+  kernel can still reach the workspace, `<session-id>.inbox.json`,
+  `<session-id>.reminders.json`, and sub-agent transcripts. The lease assumes
+  clock-rate differences and process suspensions between hosts stay under a
+  third of `lease_seconds`. Workflow runs, memory, usage, and task records
+  stay on the host that wrote them. Every host must run an Otto version that
+  checks for `<session-id>.lease/`; an older version writes the session with
+  only the file lock.
 
 ### Optional Pi interoperability probe
 

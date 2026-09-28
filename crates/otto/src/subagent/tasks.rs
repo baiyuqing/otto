@@ -267,6 +267,31 @@ impl Tasks {
     /// Any validation error leaves the registry unchanged: no id is consumed.
     pub fn add(
         &self,
+        task: Task,
+        cancel: Option<CancellationToken>,
+        history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
+    ) -> Result<Task, TaskError> {
+        self.insert(None, task, cancel, history)
+    }
+
+    /// Registers a task under a caller-chosen id instead of the next counted
+    /// one, and does not advance the id counter. Used to resume an
+    /// interrupted sub-agent task under the id its transcript already
+    /// recorded. `id` must not already be in use by another entry in this
+    /// registry; name validation is the same as [`Tasks::add`].
+    pub fn add_with_id(
+        &self,
+        id: String,
+        task: Task,
+        cancel: Option<CancellationToken>,
+        history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
+    ) -> Result<Task, TaskError> {
+        self.insert(Some(id), task, cancel, history)
+    }
+
+    fn insert(
+        &self,
+        id_override: Option<String>,
         mut task: Task,
         cancel: Option<CancellationToken>,
         history: Option<Arc<dyn Fn() -> Vec<Message> + Send + Sync>>,
@@ -294,8 +319,19 @@ impl Tasks {
                     )));
                 }
             }
-            state.counter += 1;
-            task.id = format!("t{}", state.counter);
+            let id = match id_override {
+                Some(id) => {
+                    if state.entries.contains_key(&id) {
+                        return Err(TaskError::Invalid(format!("task \"{id}\" already exists")));
+                    }
+                    id
+                }
+                None => {
+                    state.counter += 1;
+                    format!("t{}", state.counter)
+                }
+            };
+            task.id = id.clone();
             task.name = name.clone();
             task.status = TaskStatus::Queued;
             task.started_at = None;
@@ -308,7 +344,6 @@ impl Tasks {
             task.usage_present = false;
             task.result = String::new();
             task.error = String::new();
-            let id = task.id.clone();
             let created = task.clone();
             state.entries.insert(
                 id.clone(),
@@ -864,6 +899,52 @@ mod tests {
             Err(TaskError::Closed)
         );
         tasks.close();
+    }
+
+    #[test]
+    fn add_with_id_rejects_an_id_already_registered_and_leaves_the_registry_unchanged() {
+        let tasks = Tasks::new();
+        tasks
+            .add_with_id(
+                "t5".to_string(),
+                Task {
+                    prompt: "first".into(),
+                    ..Task::default()
+                },
+                None,
+                None,
+            )
+            .expect("the first registration under t5 is valid");
+
+        let error = tasks
+            .add_with_id(
+                "t5".to_string(),
+                Task {
+                    prompt: "second".into(),
+                    ..Task::default()
+                },
+                None,
+                None,
+            )
+            .expect_err("a duplicate id must be rejected");
+        assert_eq!(
+            error,
+            TaskError::Invalid("task \"t5\" already exists".to_string())
+        );
+
+        let list = tasks.list();
+        assert_eq!(list.len(), 1, "the rejected call must not add an entry");
+        assert_eq!(list[0].prompt, "first");
+
+        // The id counter only advances on the auto-id path, so it must still
+        // be at zero: the next plain `add` gets "t1", not "t6".
+        let next = tasks
+            .add(Task::default(), None, None)
+            .expect("a plain add still works");
+        assert_eq!(
+            next.id, "t1",
+            "add_with_id must never advance the auto-id counter"
+        );
     }
 
     #[test]

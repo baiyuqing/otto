@@ -105,6 +105,30 @@ pub fn open_at_no_follow(dir: &Dir, name: &str, flags: libc::c_int) -> io::Resul
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// `openat(dir, name, flags|O_CREAT|O_CLOEXEC|O_NOFOLLOW, mode)`. Add
+/// `O_EXCL` to `flags` to fail with `EEXIST` on an existing name. `name` must
+/// be a single path component.
+pub fn create_at_no_follow(
+    dir: &Dir,
+    name: &str,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> io::Result<File> {
+    let c = c_name(name)?;
+    // SAFETY: dir.fd() is open for the duration of the call and c is a valid
+    // NUL-terminated name.
+    let fd = open_result(unsafe {
+        libc::openat(
+            dir.fd(),
+            c.as_ptr(),
+            flags | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::c_uint::from(mode),
+        )
+    })?;
+    // SAFETY: fd is a fresh descriptor this function now owns.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 /// Opens a directory with `O_NOFOLLOW|O_DIRECTORY`.
 pub fn open_dir_no_follow(path: &Path) -> io::Result<Dir> {
     let c = c_path(path)?;

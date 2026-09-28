@@ -300,6 +300,9 @@ pub(crate) fn test_config(
         usage: None,
         child_session: None,
         checker: None,
+        children_dir: None,
+        lease: None,
+        workspace_path: std::path::PathBuf::new(),
     }
 }
 

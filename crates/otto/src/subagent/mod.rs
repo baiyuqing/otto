@@ -13,6 +13,7 @@
 pub mod definition;
 pub mod format;
 pub mod inherit;
+pub mod interrupted;
 pub mod prompt;
 pub mod record;
 pub mod runner;

@@ -1,7 +1,10 @@
 # Session failover
 
 Status: approved 2026-09-28. Step 1 (durable notifications and the local
-part of the commit rule) is implemented; steps 2 and 3 are not.
+part of the commit rule) and step 2 (the lease, takeover, the recovery
+notification, and `agent` `resume`) are implemented; step 3 (`SIGTERM`
+migration) is not. Current behavior is in the user manual's "Continuing a
+session on another host" section.
 
 ## A session cannot continue on another host today
 
@@ -181,7 +184,9 @@ The lease duration L is also a property of the session. The host that
 creates `<id>.lease/` writes its local `lease_seconds` (default 30) into it,
 and every host uses that value; a different local `lease_seconds` has no
 effect on an existing lease. One L on all hosts is required by the timing
-condition below. The directory is created atomically:
+condition below. The configuration rejects `lease_seconds` below 12, so
+that the L/3 gap is at least 4 s, which covers the 1 s watchdog check and
+the 1 s heartbeat poll. The directory is created atomically:
 
 1. Create `<id>.lease.tmp-<random>/`, write `lease.json`
    (`{"lease_seconds": L}`) into it, and `fsync` the file and the directory.
@@ -328,8 +333,9 @@ After a takeover from an unreleased epoch, Otto pushes one notification into
 the durable inbox. The push signals the task registry's update channel. The
 REPL, the TUI, and `otto serve` start a wake turn on that signal, also when
 it was sent before they began waiting on the channel.
-`otto --resume <id> --prompt <text>` delivers it at the start of the prompt
-turn. The text lists:
+`otto --resume <id> --prompt <text>` delivers it before the prompt: the
+agent turn loop appends pending notifications before the user's message, for
+every turn started by user input. The text lists:
 
 - the fenced epoch's host and pid;
 - every tool call that the open-time repair gave a synthetic result, marked

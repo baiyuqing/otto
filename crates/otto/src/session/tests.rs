@@ -1538,7 +1538,7 @@ fn prepare_does_not_mutate_before_activation_and_transfers_ownership() {
     store.close().expect("close");
     let before = fs::read(&path).expect("read");
 
-    let prepared = Prepared::prepare(Path::new(&path)).expect("prepare");
+    let prepared = Prepared::prepare(Path::new(&path), None).expect("prepare");
     assert_eq!(prepared.info().id, "550e8400-e29b-41d4-a716-446655440000");
     assert_eq!(
         fs::read(&path).expect("read"),
@@ -1561,7 +1561,7 @@ fn prepare_does_not_mutate_before_activation_and_transfers_ownership() {
 fn prepared_activate_rejects_path_replacement_without_mutation() {
     let temp = TempDir::new();
     let path = seeded_session(&temp);
-    let prepared = Prepared::prepare(Path::new(&path)).expect("prepare");
+    let prepared = Prepared::prepare(Path::new(&path), None).expect("prepare");
 
     let other = temp.join("other.jsonl");
     fs::copy(&path, &other).expect("copy");
@@ -1583,7 +1583,7 @@ fn prepared_activate_rejects_path_replacement_without_mutation() {
 fn prepared_close_is_idempotent_and_safe_after_activation() {
     let temp = TempDir::new();
     let path = seeded_session(&temp);
-    let prepared = Prepared::prepare(Path::new(&path)).expect("prepare");
+    let prepared = Prepared::prepare(Path::new(&path), None).expect("prepare");
     prepared.close().expect("close");
     prepared.close().expect("close again");
     let error = prepared.activate().expect_err("must reject");
@@ -1601,7 +1601,7 @@ fn prepare_rejects_symlink() {
     let path = seeded_session(&temp);
     let link = temp.join("link.jsonl");
     std::os::unix::fs::symlink(&path, &link).expect("symlink");
-    let error = Prepared::prepare(&link).expect_err("must reject");
+    let error = Prepared::prepare(&link, None).expect_err("must reject");
     assert_eq!(error.kind(), PiErrorKind::Invalid);
     assert!(error.to_string().contains("session file is a symlink"));
 }
@@ -1610,14 +1610,18 @@ fn prepare_rejects_symlink() {
 fn prepare_listed_rejects_candidates_outside_the_workspace_directory() {
     let temp = TempDir::new();
     let (root, workspace, paths) = seeded_workspace(&temp, 1);
-    let prepared =
-        Prepared::prepare_listed(&root, &workspace.to_string_lossy(), Path::new(&paths[0]))
-            .expect("prepare listed");
+    let prepared = Prepared::prepare_listed(
+        &root,
+        &workspace.to_string_lossy(),
+        Path::new(&paths[0]),
+        None,
+    )
+    .expect("prepare listed");
     prepared.close().expect("close");
 
     let outside = temp.join("outside.jsonl");
     fs::copy(&paths[0], &outside).expect("copy");
-    let error = Prepared::prepare_listed(&root, &workspace.to_string_lossy(), &outside)
+    let error = Prepared::prepare_listed(&root, &workspace.to_string_lossy(), &outside, None)
         .expect_err("must reject");
     assert_eq!(error.kind(), PiErrorKind::Invalid);
     assert!(
@@ -2295,7 +2299,7 @@ fn inspect_sanitizes_picker_metadata() {
 fn prepared_activate_rejects_metadata_identity_mismatch_without_mutation() {
     let temp = TempDir::new();
     let path = seeded_session(&temp);
-    let prepared = Prepared::prepare(Path::new(&path)).expect("prepare");
+    let prepared = Prepared::prepare(Path::new(&path), None).expect("prepare");
 
     // Same inode, different session: only the metadata check catches this.
     let replacement = TempDir::new();
@@ -2336,8 +2340,13 @@ fn prepare_listed_rejects_workspace_directory_symlink_replacement() {
     )
     .expect("symlink");
 
-    let error = Prepared::prepare_listed(&root, &workspace.to_string_lossy(), Path::new(&paths[0]))
-        .expect_err("must reject");
+    let error = Prepared::prepare_listed(
+        &root,
+        &workspace.to_string_lossy(),
+        Path::new(&paths[0]),
+        None,
+    )
+    .expect_err("must reject");
     assert_eq!(error.kind(), PiErrorKind::Invalid);
     assert_eq!(fs::read(&outside_path).expect("read"), outside_before);
 }
@@ -2380,4 +2389,543 @@ fn archive_rejects_symlinked_archive_directory() {
         Path::new(&paths[0]).exists(),
         "the source must stay in place"
     );
+}
+
+// ---------------------------------------------------------------------------
+// session failover lease
+//
+// Test safety: `Lease::acquire` (used by `Prepared::prepare`/`prepare_listed`
+// and `Store::enable_failover`) registers with the process-wide
+// `failover::lease::Keeper`, whose watchdog calls `libc::_exit(75)` on a
+// lease this process holds if it goes more than 5L/6 without renewal or is
+// superseded. Every test below that ends up holding such a lease uses
+// `lease_seconds` (`L`) >= 6 and releases (`close`) it within milliseconds of
+// acquiring, well inside the 5L/6 margin. A "stopped holder" is simulated by
+// writing `epoch-<n>` and `heartbeat` by hand, with no live `Lease` of our
+// own; a "running holder" is simulated with a thread that rewrites the
+// heartbeat file every 200ms, never with a second live lease.
+// ---------------------------------------------------------------------------
+
+/// The JSON+padding+newline byte layout `failover::lease` writes to a lease
+/// directory's `heartbeat` file, reproduced here to simulate a holder by
+/// hand.
+fn lease_heartbeat_bytes(epoch: u64, host: &str, pid: u32, released: bool, seq: u64) -> Vec<u8> {
+    let json = serde_json::json!({
+        "epoch": epoch,
+        "host": host,
+        "pid": pid,
+        "released": released,
+        "seq": seq,
+    })
+    .to_string();
+    let mut bytes = vec![b' '; 512];
+    bytes[..json.len()].copy_from_slice(json.as_bytes());
+    bytes[511] = b'\n';
+    bytes
+}
+
+/// Writes a lease directory by hand -- `lease.json`, one `epoch-<epoch>`
+/// marker and an initial `heartbeat` -- without acquiring a live [`Lease`],
+/// to simulate a holder another host left behind. Returns the directory.
+fn write_lease_dir_by_hand(
+    session_path: &Path,
+    lease_seconds: u64,
+    epoch: u64,
+    host: &str,
+    pid: u32,
+    released: bool,
+) -> PathBuf {
+    let dir = session_path.with_extension("lease");
+    fs::create_dir_all(&dir).expect("create lease dir by hand");
+    fs::write(
+        dir.join("lease.json"),
+        serde_json::json!({ "lease_seconds": lease_seconds }).to_string(),
+    )
+    .expect("write lease.json by hand");
+    fs::write(dir.join(format!("epoch-{epoch}")), b"{}").expect("write epoch marker by hand");
+    fs::write(
+        dir.join("heartbeat"),
+        lease_heartbeat_bytes(epoch, host, pid, released, 1),
+    )
+    .expect("write heartbeat by hand");
+    dir
+}
+
+/// Reads a lease directory's `heartbeat` file and parses its JSON prefix.
+fn read_lease_heartbeat(dir: &Path) -> serde_json::Value {
+    let bytes = fs::read(dir.join("heartbeat")).expect("read heartbeat");
+    let text = String::from_utf8_lossy(&bytes);
+    serde_json::from_str(text.trim_end()).expect("parse heartbeat")
+}
+
+// R1 (`[failover]` config resolution) is covered by
+// `otto_core::config::failover`'s own tests, not here.
+
+// R2: lease-managed open.
+
+#[test]
+fn prepare_fails_when_a_lease_managed_sessions_holder_is_still_renewing() {
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let session_path = Path::new(&path);
+    // `L` = 2: this process's own acquire fails (`Held`), so it never holds
+    // a live lease and a short `L` is safe here (see the section header).
+    let dir = write_lease_dir_by_hand(session_path, 2, 1, "holder-host", 4242, false);
+
+    let heartbeat_path = dir.join("heartbeat");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_stop = std::sync::Arc::clone(&stop);
+    let writer = std::thread::spawn(move || {
+        let mut seq = 2u64;
+        while !writer_stop.load(Ordering::Relaxed) {
+            fs::write(
+                &heartbeat_path,
+                lease_heartbeat_bytes(1, "holder-host", 4242, false, seq),
+            )
+            .expect("rewrite heartbeat");
+            seq += 1;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+
+    let error = Prepared::prepare(session_path, None).expect_err("holder is still live");
+
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("join heartbeat writer");
+
+    let text = error.to_string();
+    assert!(text.contains("holder-host"), "{text}");
+    assert!(text.contains("4242"), "{text}");
+}
+
+#[test]
+fn prepare_with_no_create_lease_and_no_lease_directory_creates_none() {
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let session_path = Path::new(&path);
+
+    let prepared = Prepared::prepare(session_path, None).expect("prepare");
+    let (store, _warnings) = prepared.activate().expect("activate");
+    assert!(store.lease().is_none());
+    assert!(
+        !session_path.with_extension("lease").exists(),
+        "no lease directory should be created"
+    );
+    store.close().expect("close");
+}
+
+#[test]
+fn prepare_with_create_lease_creates_a_lease_directory_for_an_existing_session() {
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let session_path = Path::new(&path);
+    assert!(!crate::failover::lease::is_lease_managed(session_path).expect("check lease managed"));
+
+    let prepared = Prepared::prepare(session_path, Some(6)).expect("prepare");
+    let (store, _warnings) = prepared.activate().expect("activate");
+
+    let lease_dir = session_path.with_extension("lease");
+    assert!(lease_dir.join("lease.json").is_file());
+    assert!(lease_dir.join("epoch-1").is_file());
+    let meta: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(lease_dir.join("lease.json")).expect("read lease.json"),
+    )
+    .expect("parse lease.json");
+    assert_eq!(meta["lease_seconds"], 6);
+
+    store.close().expect("close");
+}
+
+#[test]
+fn prepare_honors_lease_seconds_already_recorded_in_an_existing_lease_directory() {
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let session_path = Path::new(&path);
+    crate::failover::lease::create_lease_dir(session_path, 30).expect("create lease dir");
+
+    let prepared = Prepared::prepare(session_path, Some(40)).expect("prepare");
+    let (store, _warnings) = prepared.activate().expect("activate");
+    let lease = store.lease().expect("lease-managed store");
+    assert_eq!(lease.duration(), std::time::Duration::from_secs(30));
+
+    store.close().expect("close");
+}
+
+// R3: `Prepared` carries the acquired lease; closing without activating
+// releases it.
+
+#[test]
+fn prepared_close_of_a_lease_managed_session_releases_the_lease_for_the_next_open() {
+    let temp = TempDir::new();
+    let path = seeded_session(&temp);
+    let session_path = Path::new(&path);
+
+    let prepared = Prepared::prepare(session_path, Some(6)).expect("prepare");
+    prepared.close().expect("close without activating");
+
+    let lease_dir = session_path.with_extension("lease");
+    let heartbeat = read_lease_heartbeat(&lease_dir);
+    assert_eq!(heartbeat["released"], true);
+
+    let started = std::time::Instant::now();
+    let prepared2 = Prepared::prepare(session_path, None).expect("reopen");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "a released epoch must be taken over without waiting"
+    );
+    let (store2, _warnings) = prepared2.activate().expect("activate");
+    assert!(
+        store2.take_takeover().is_none(),
+        "a fresh acquire records no takeover"
+    );
+    store2.close().expect("close");
+}
+
+// R4: `Store` holds the lease and checks it before every durable write.
+
+#[test]
+fn a_write_after_the_lease_is_marked_lost_fails_and_poisons_the_store_without_growing_the_file() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    let path = store.path();
+    let dir = Path::new(&path).with_extension("lease");
+    fs::create_dir_all(&dir).expect("create lease dir");
+    let lease = crate::failover::lease::Lease::for_test(&dir);
+    {
+        let mut state = store.lock().expect("lock store");
+        state.lease = Some(lease.clone());
+        state.owns_lease = true;
+    }
+    lease.mark_lost_for_test("test induced loss");
+
+    let before = fs::metadata(&path).expect("stat").len();
+    let error = store
+        .append_message(&user("hello"))
+        .expect_err("write must fail once the lease is lost");
+    assert!(error.to_string().contains("session lease lost"), "{error}");
+
+    let error2 = store
+        .append_message(&user("again"))
+        .expect_err("store stays poisoned");
+    assert_eq!(
+        error.to_string(),
+        error2.to_string(),
+        "a poisoned store returns the same error on every later write"
+    );
+
+    let after = fs::metadata(&path).expect("stat").len();
+    assert_eq!(
+        before, after,
+        "a failed write must not change the file length"
+    );
+}
+
+#[test]
+fn close_of_an_owned_lease_writes_a_released_heartbeat() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    let path = store.path();
+    let dir = Path::new(&path).with_extension("lease");
+    fs::create_dir_all(&dir).expect("create lease dir");
+    let lease = crate::failover::lease::Lease::for_test(&dir);
+    {
+        let mut state = store.lock().expect("lock store");
+        state.lease = Some(lease);
+        state.owns_lease = true;
+    }
+
+    store.close().expect("close");
+
+    let heartbeat = read_lease_heartbeat(&dir);
+    assert_eq!(heartbeat["released"], true);
+}
+
+#[test]
+fn close_of_a_check_only_lease_does_not_release_it() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    let path = store.path();
+    let dir = Path::new(&path).with_extension("lease");
+    fs::create_dir_all(&dir).expect("create lease dir");
+    let lease = crate::failover::lease::Lease::for_test(&dir);
+    store.set_lease_check(lease);
+
+    let before = fs::read(dir.join("heartbeat")).expect("read heartbeat");
+    store.close().expect("close");
+    let after = fs::read(dir.join("heartbeat")).expect("read heartbeat");
+    assert_eq!(
+        before, after,
+        "close must not write a heartbeat for a lease this store does not own"
+    );
+}
+
+// R5: a takeover from a stopped holder is recorded on the store and the
+// dangling calls it left are repaired.
+
+#[test]
+fn takeover_through_prepare_records_the_holder_and_repairs_the_dangling_calls() {
+    let temp = TempDir::new();
+    let (store, _root) = new_store(&temp);
+    store
+        .append_message(&tool_calls(&[("call-1", "read"), ("call-2", "bash")]))
+        .expect("append dangling calls");
+    let path = store.path();
+    store
+        .close()
+        .expect("close before simulating a stopped holder");
+    let original_bytes = fs::read(&path).expect("read original log");
+
+    let session_path = Path::new(&path);
+    // `L` = 6, the minimum for a lease this process ends up holding live
+    // (see the section header); the takeover wait is 7L/6 = 7s.
+    let dir = write_lease_dir_by_hand(session_path, 6, 1, "stopped-host", 9001, false);
+
+    let prepared = Prepared::prepare(session_path, None).expect("prepare takes over");
+    let (activated, _warnings) = prepared.activate().expect("activate");
+
+    let takeover = activated.take_takeover().expect("takeover recorded");
+    assert_eq!(takeover.holder.host, "stopped-host");
+    assert_eq!(takeover.holder.pid, 9001);
+    assert_eq!(takeover.repaired.len(), 2);
+    assert_eq!(takeover.repaired[0].name, "read");
+    assert!(takeover.repaired[0].may_have_run);
+    assert_eq!(takeover.repaired[1].name, "bash");
+    assert!(!takeover.repaired[1].may_have_run);
+
+    let (_entries, messages) = Store::read_entries(&path).expect("read repaired log");
+    let tool_messages = messages
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .count();
+    assert_eq!(
+        tool_messages, 2,
+        "both dangling calls got synthetic results"
+    );
+
+    let fenced = fs::read(dir.join("fenced-1.jsonl")).expect("read fenced copy");
+    assert_eq!(
+        fenced, original_bytes,
+        "the fenced copy holds the original log bytes"
+    );
+
+    activated.close().expect("close");
+}
+
+// R6: new sessions.
+
+#[test]
+fn enable_failover_creates_the_lease_directory_only_at_the_first_append() {
+    let temp = TempDir::new();
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let root = temp.join("root");
+    let store = Store::create_lazy(&root, test_header(&workspace)).expect("create lazy");
+    store.enable_failover(12).expect("enable failover");
+
+    assert!(
+        !root.exists(),
+        "a lazy store must not touch disk before the first append"
+    );
+
+    store.append_message(&user("hello")).expect("first append");
+
+    let path = store.path();
+    let dir = Path::new(&path).with_extension("lease");
+    assert!(dir.join("lease.json").is_file());
+    assert!(dir.join("epoch-1").is_file());
+    let meta: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("lease.json")).expect("read lease.json"))
+            .expect("parse lease.json");
+    assert_eq!(meta["lease_seconds"], 12);
+
+    store.close().expect("close");
+}
+
+#[test]
+fn a_lazy_store_without_enable_failover_creates_no_lease_directory() {
+    let temp = TempDir::new();
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let root = temp.join("root");
+    let store = Store::create_lazy(&root, test_header(&workspace)).expect("create lazy");
+
+    store.append_message(&user("hello")).expect("first append");
+
+    let path = store.path();
+    let dir = Path::new(&path).with_extension("lease");
+    assert!(!dir.exists());
+    store.close().expect("close");
+}
+
+#[test]
+fn two_stores_racing_enable_failover_for_the_same_session_id_leave_exactly_one_lease_directory_and_one_writer()
+ {
+    let temp = TempDir::new();
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let root = temp.join("root");
+
+    let store_a = std::sync::Arc::new(
+        Store::create_lazy(&root, test_header(&workspace)).expect("create lazy a"),
+    );
+    let store_b = std::sync::Arc::new(
+        Store::create_lazy(&root, test_header(&workspace)).expect("create lazy b"),
+    );
+    store_a.enable_failover(12).expect("enable failover a");
+    store_b.enable_failover(12).expect("enable failover b");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let (ba, sa) = (
+        std::sync::Arc::clone(&barrier),
+        std::sync::Arc::clone(&store_a),
+    );
+    let thread_a = std::thread::spawn(move || {
+        ba.wait();
+        sa.append_message(&user("from a"))
+    });
+    let (bb, sb) = (
+        std::sync::Arc::clone(&barrier),
+        std::sync::Arc::clone(&store_b),
+    );
+    let thread_b = std::thread::spawn(move || {
+        bb.wait();
+        sb.append_message(&user("from b"))
+    });
+
+    let result_a = thread_a.join().expect("join a");
+    let result_b = thread_b.join().expect("join b");
+
+    let ok_count = [&result_a, &result_b]
+        .into_iter()
+        .filter(|result| result.is_ok())
+        .count();
+    assert_eq!(ok_count, 1, "exactly one racing writer must win");
+
+    let winner = if result_a.is_ok() { &store_a } else { &store_b };
+    let path = winner.path();
+    assert!(!path.is_empty(), "the winner must have created the file");
+    // Every line must be complete, LF-terminated JSON: the loser's failed
+    // attempt must not have left a half-written record behind.
+    let lines = json_lines(Path::new(&path));
+    assert_eq!(
+        lines.len(),
+        3,
+        "header, the runtime entry, and the one appended message, nothing else"
+    );
+    let dir = Path::new(&path).with_extension("lease");
+    assert!(dir.join("epoch-1").is_file());
+
+    store_a.close().ok();
+    store_b.close().ok();
+}
+
+// R7: archive.
+
+/// Creates a lease-managed session with one message and closes it, returning
+/// (root, workspace, session path).
+fn seeded_lease_managed_session(temp: &TempDir) -> (PathBuf, PathBuf, String) {
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&workspace).expect("create workspace");
+    let root = temp.join("root");
+    let store = Store::create_lazy(&root, test_header(&workspace)).expect("create lazy");
+    store.enable_failover(12).expect("enable failover");
+    store.append_message(&user("hello")).expect("append");
+    let path = store.path();
+    store.close().expect("close");
+    (root, workspace, path)
+}
+
+#[test]
+fn archive_of_a_lease_managed_session_moves_the_lease_directory_and_releases_it() {
+    let temp = TempDir::new();
+    let (root, workspace, path) = seeded_lease_managed_session(&temp);
+    let source_lease_dir = Path::new(&path).with_extension("lease");
+    assert!(source_lease_dir.is_dir());
+
+    let result = archive(&root, &workspace.to_string_lossy(), Path::new(&path)).expect("archive");
+
+    assert!(
+        !source_lease_dir.exists(),
+        "the lease directory must move with the session file"
+    );
+    let archived_lease_dir = Path::new(&result.path).with_extension("lease");
+    assert!(archived_lease_dir.join("lease.json").is_file());
+    assert!(archived_lease_dir.join("epoch-1").is_file());
+    let heartbeat = read_lease_heartbeat(&archived_lease_dir);
+    assert_eq!(
+        heartbeat["released"], true,
+        "archiving releases the lease after the move"
+    );
+}
+
+#[test]
+fn archive_fails_and_moves_nothing_while_another_holder_is_still_renewing() {
+    let temp = TempDir::new();
+    let (root, workspace, path) = seeded_lease_managed_session(&temp);
+    let session_path = Path::new(&path);
+    let dir = session_path.with_extension("lease");
+    // Overwrite the epoch our own store had released with a live-looking
+    // holder: `L` = 2, since our own acquire attempt here always fails
+    // (`Held`) and never registers a lease with the real Keeper.
+    fs::write(
+        dir.join("lease.json"),
+        serde_json::json!({ "lease_seconds": 2 }).to_string(),
+    )
+    .expect("rewrite lease.json");
+    fs::write(dir.join("epoch-2"), b"{}").expect("write epoch-2 marker");
+    fs::write(
+        dir.join("heartbeat"),
+        lease_heartbeat_bytes(2, "other-host", 5150, false, 1),
+    )
+    .expect("write heartbeat");
+
+    let heartbeat_path = dir.join("heartbeat");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_stop = std::sync::Arc::clone(&stop);
+    let writer = std::thread::spawn(move || {
+        let mut seq = 2u64;
+        while !writer_stop.load(Ordering::Relaxed) {
+            fs::write(
+                &heartbeat_path,
+                lease_heartbeat_bytes(2, "other-host", 5150, false, seq),
+            )
+            .expect("rewrite heartbeat");
+            seq += 1;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+
+    let before = fs::read(&path).expect("read session file before archive attempt");
+    let error =
+        archive(&root, &workspace.to_string_lossy(), session_path).expect_err("holder is live");
+
+    stop.store(true, Ordering::Relaxed);
+    writer.join().expect("join heartbeat writer");
+
+    assert!(error.to_string().contains("other-host"), "{error}");
+    assert!(session_path.exists(), "the session file must stay in place");
+    assert_eq!(
+        fs::read(&path).expect("read session file after failed archive"),
+        before,
+        "a failed archive must not modify the session file"
+    );
+    assert!(dir.is_dir(), "the lease directory must stay in place");
+}
+
+#[test]
+fn prepare_of_an_archived_lease_managed_session_acquires_without_waiting() {
+    let temp = TempDir::new();
+    let (root, workspace, path) = seeded_lease_managed_session(&temp);
+
+    let result = archive(&root, &workspace.to_string_lossy(), Path::new(&path)).expect("archive");
+    let archived_path = Path::new(&result.path);
+
+    let started = std::time::Instant::now();
+    let prepared = Prepared::prepare(archived_path, None).expect("prepare archived session");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "a released lease must be acquired without waiting"
+    );
+    prepared.close().expect("close");
 }

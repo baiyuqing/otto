@@ -5329,6 +5329,40 @@ mod tests {
         assert_eq!(done["trigger"], turn::TRIGGER_TASK);
     }
 
+    /// R13: `failover::recovery::notify` pushes through the same
+    /// `tasks.notifications()` inbox `build_subagents` wires the recovery
+    /// push into, so it starts a wake turn the same way any other pending
+    /// notification does; no separate signaling code exists for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_recovery_notification_starts_a_wake_turn_while_idle() {
+        let (harness, tasks) = wake_harness(Script {
+            deltas: vec!["ok".to_string()],
+            ..Script::default()
+        });
+        harness.create().await;
+
+        let takeover = crate::session::Takeover {
+            holder: crate::failover::lease::Holder {
+                epoch: 1,
+                host: "stopped-host".to_string(),
+                pid: 4242,
+            },
+            repaired: Vec::new(),
+        };
+        crate::failover::recovery::notify(
+            tasks.notifications(),
+            Some(takeover),
+            &tempfile::tempdir().expect("dir").path().join("children"),
+            1000,
+            &[],
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), harness.provider.wait_started(1))
+            .await
+            .expect("the recovery notification did not start a wake turn");
+        assert_eq!(harness.provider.roles(), vec![Role::Context]);
+    }
+
     #[tokio::test]
     async fn notify_open_sessions_fans_out_to_every_open_controller() {
         let harness = Harness::new();

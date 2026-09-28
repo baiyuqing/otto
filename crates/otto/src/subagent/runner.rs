@@ -38,6 +38,7 @@
 //!   still fails the task with the same message, just asynchronously.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -54,8 +55,10 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::format::{comma_int, first_runes, one_line, round_to_seconds};
+use super::interrupted;
 use super::tasks::{Task, TaskError, TaskStatus, Tasks};
 use super::{Catalog, Definition, WritePolicy, inherit_snapshot};
+use crate::failover;
 use crate::tool::registry::Registry;
 use crate::tool::result::{capped_text_result, decode_strict_json};
 use crate::tool::{CONTEXT_CANCELED, Tool, definition, error_result, text_result};
@@ -87,45 +90,91 @@ const MAX_DESCRIPTION_CHARS: usize = 80;
 
 /// The `customType` of the entry a child transcript gets as soon as its task
 /// is created, before the child agent runs. See [`spawn`](Runner::spawn).
-const TASK_SPEC_CUSTOM_TYPE: &str = "otto.task_spec";
+///
+/// `pub(crate)` so [`crate::subagent::interrupted::scan`] can find this entry
+/// type without duplicating the literal.
+pub(crate) const TASK_SPEC_CUSTOM_TYPE: &str = "otto.task_spec";
 
 /// The `customType` of the entry a child transcript gets when its task
 /// reaches a terminal status. See [`finish`](Runner::finish).
-const TASK_RESULT_CUSTOM_TYPE: &str = "otto.task_result";
+///
+/// `pub(crate)` so [`crate::subagent::interrupted`] can find and write this
+/// entry type without duplicating the literal.
+pub(crate) const TASK_RESULT_CUSTOM_TYPE: &str = "otto.task_result";
 
 /// The JSON `data` of an `otto.task_spec` custom entry: the task as created,
 /// and the agent definition as resolved at start (the same snapshot
 /// [`Runner::run_with_definition`] uses), so a queued task's transcript
 /// already records what it was asked to do before it starts.
-#[derive(Debug, Serialize)]
-struct TaskSpecData<'a> {
-    id: &'a str,
-    name: &'a str,
-    description: &'a str,
-    model: &'a str,
-    context: &'a str,
-    definition: Option<TaskSpecDefinition<'a>>,
+///
+/// `pub(crate)` and `Deserialize` so [`crate::subagent::interrupted::scan`]
+/// reads back the exact type [`Runner::spawn`] writes, instead of a
+/// hand-copied twin. `prompt` defaults on deserialize so a transcript written
+/// before this field existed still parses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TaskSpecData {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) model: String,
+    pub(crate) context: String,
+    #[serde(default)]
+    pub(crate) prompt: String,
+    pub(crate) definition: Option<TaskSpecDefinition>,
 }
 
-#[derive(Debug, Serialize)]
-struct TaskSpecDefinition<'a> {
-    name: &'a str,
-    body: &'a str,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TaskSpecDefinition {
+    pub(crate) name: String,
+    pub(crate) body: String,
     /// The definition's own tool allowlist, `None` for every child tool.
     /// Unresolved against the live registry, matching what
     /// [`Runner::run_with_definition`] snapshots.
-    tools: Option<&'a [String]>,
+    #[serde(default)]
+    pub(crate) tools: Option<Vec<String>>,
     #[serde(rename = "writePolicy")]
-    write_policy: &'a str,
-    #[serde(rename = "writePaths")]
-    write_paths: &'a [String],
+    pub(crate) write_policy: String,
+    #[serde(rename = "writePaths", default)]
+    pub(crate) write_paths: Vec<String>,
+}
+
+impl TaskSpecDefinition {
+    /// Rebuilds a [`Definition`] from this snapshot, for a resumed task: the
+    /// fields a spawn actually reads (`name`, `body`, `tools`, `write_policy`,
+    /// `write_paths`) come from the recording; `description`, `model`,
+    /// `context`, `directory`, `path` and `is_skill_derived` are not part of
+    /// the `otto.task_spec` snapshot and are left at their default.
+    ///
+    /// Fails when `write_policy` is not one of the recognized values, naming
+    /// it in the error, rather than silently falling back to a default
+    /// policy for a task whose recorded write coordination cannot be
+    /// honored.
+    pub(crate) fn to_definition(&self) -> Result<Definition, String> {
+        let write_policy = self.write_policy.parse().map_err(|error: String| {
+            format!(
+                "recorded task_spec has write_policy {:?}: {error}",
+                self.write_policy
+            )
+        })?;
+        Ok(Definition {
+            name: self.name.clone(),
+            tools: self.tools.clone(),
+            write_policy,
+            write_paths: self.write_paths.clone(),
+            body: self.body.clone(),
+            ..Definition::default()
+        })
+    }
 }
 
 /// The JSON `data` of an `otto.task_result` custom entry.
+///
+/// `pub(crate)` so [`crate::subagent::interrupted::mark_interrupted`] writes
+/// the same shape [`Runner::finish`] does.
 #[derive(Debug, Serialize)]
-struct TaskResultData<'a> {
-    status: &'a str,
-    error: &'a str,
+pub(crate) struct TaskResultData<'a> {
+    pub(crate) status: &'a str,
+    pub(crate) error: &'a str,
 }
 
 /// Shares one provider between the parent and every child, because [`Agent`]
@@ -413,6 +462,19 @@ pub struct Config {
     /// The automatic skill contract check. `None` disables it: `AgentTool`
     /// then triggers no check, regardless of the definition delegated to.
     pub checker: Option<Arc<crate::skill::check::Checker>>,
+    /// Locates the current session's children directory for [`Runner::resume`],
+    /// read lazily because a lazy parent session has no path until its first
+    /// write; returns `None` while that is still the case. `None` (the field
+    /// itself) disables `Runner::resume`.
+    pub children_dir: Option<Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>>,
+    /// Queried once per child tool call by the [`failover::CommitGuard`]
+    /// installed on the child registry: the lease backing the parent
+    /// session, or `None` when it is not lease-managed. `None` (the field
+    /// itself) installs no guard, which is what every test config uses.
+    pub lease: Option<failover::LeaseSource>,
+    /// The workspace the commit guard syncs to disk after a child tool call
+    /// finishes. Ignored when `lease` is `None`.
+    pub workspace_path: PathBuf,
 }
 
 /// One delegation request.
@@ -456,10 +518,16 @@ impl Runner {
             .into_iter()
             .filter(|tool| !EXCLUDED_CHILD_TOOLS.contains(&tool.definition().name.as_str()))
             .collect();
-        let child_registry = Arc::new(
-            Registry::new(child_tools)
-                .map_err(|error| format!("subagent: child registry: {error}"))?,
-        );
+        let child_registry = Registry::new(child_tools)
+            .map_err(|error| format!("subagent: child registry: {error}"))?;
+        let child_registry = match &config.lease {
+            Some(lease) => child_registry.with_guard(Arc::new(failover::CommitGuard::new(
+                Arc::clone(lease),
+                config.workspace_path.clone(),
+            ))),
+            None => child_registry,
+        };
+        let child_registry = Arc::new(child_registry);
         let child_names: BTreeSet<String> = child_registry
             .definitions()
             .into_iter()
@@ -616,6 +684,7 @@ impl Runner {
                 now,
                 Vec::new(),
                 transcript,
+                None,
             );
         };
         let snapshot = if context == "inherit" {
@@ -632,6 +701,65 @@ impl Runner {
             now,
             snapshot,
             transcript,
+            None,
+        )
+    }
+
+    /// Resumes an interrupted sub-agent task under its original id. `target`
+    /// matches a child transcript's task id first, then its name, among the
+    /// current session's children. `prompt` becomes the task's next user
+    /// message; the run replays no inherited snapshot, since the existing
+    /// transcript already holds the task's history.
+    pub fn resume(self: &Arc<Self>, target: &str, prompt: String) -> Result<Task, StartError> {
+        let locate = self
+            .config
+            .children_dir
+            .as_ref()
+            .ok_or(StartError::ResumeNoSession)?;
+        let children_dir = locate().ok_or(StartError::ResumeNoSession)?;
+
+        let records = interrupted::scan(&children_dir);
+        let record = records
+            .iter()
+            .find(|record| record.task_id == target)
+            .or_else(|| records.iter().find(|record| record.name == target))
+            .ok_or_else(|| StartError::ResumeNotFound(target.to_string()))?;
+        if record.final_status.as_deref() != Some(interrupted::INTERRUPTED_STATUS) {
+            return Err(StartError::ResumeNotInterrupted(record.task_id.clone()));
+        }
+
+        let (store, _warnings) = crate::session::Store::open(&record.path)
+            .map_err(|error| StartError::ResumeFailed(error.to_string()))?;
+        if let Some(lease) = self.config.lease.as_ref().and_then(|source| source()) {
+            store.set_lease_check(lease);
+        }
+        let transcript: Transcript = Arc::new(store);
+        let definition = record
+            .definition
+            .as_ref()
+            .map(TaskSpecDefinition::to_definition)
+            .transpose()
+            .map_err(StartError::ResumeFailed)?;
+        let now = self.now();
+        let description = truncate_with_ellipsis(record.description.trim(), MAX_DESCRIPTION_CHARS);
+        let request = StartRequest {
+            prompt,
+            description: record.description.clone(),
+            name: record.name.clone(),
+            model: record.model.clone(),
+            agent: record.agent.clone(),
+            context: record.context.clone(),
+        };
+        self.spawn(
+            request,
+            definition,
+            description,
+            record.model.clone(),
+            record.context.clone(),
+            now,
+            Vec::new(),
+            Some(transcript),
+            Some(record.task_id.clone()),
         )
     }
 
@@ -692,6 +820,10 @@ impl Runner {
     }
 
     /// Creates the task record, builds the child agent, and spawns it.
+    /// `resume_id` is `Some` only from [`Runner::resume`]: the task is
+    /// registered under that id instead of a freshly counted one, and no
+    /// `otto.task_spec` entry is written, since the transcript already has
+    /// one from the task's original run.
     #[allow(clippy::too_many_arguments)]
     fn spawn(
         self: &Arc<Self>,
@@ -703,33 +835,42 @@ impl Runner {
         now: DateTime<Utc>,
         snapshot: Vec<Message>,
         transcript: Option<Transcript>,
+        resume_id: Option<String>,
     ) -> Result<Task, StartError> {
         let cancel = CancellationToken::new();
         // The task id names the child's file, so the transcript is built
         // after the task is registered; history reads it once it is set.
         let slot: Arc<std::sync::OnceLock<Transcript>> = Arc::default();
         let history_source = Arc::clone(&slot);
-        let task = self.config.tasks.add(
-            Task {
-                name: request.name.trim().to_string(),
-                agent: definition
-                    .as_ref()
-                    .map_or(String::new(), |d| d.name.clone()),
-                description,
-                prompt: request.prompt.clone(),
-                context,
-                model: model.clone(),
-                created_at: Some(now),
-                ..Task::default()
-            },
-            Some(cancel.clone()),
-            Some(Arc::new(move || {
-                history_source
-                    .get()
-                    .map(|transcript| transcript.messages())
-                    .unwrap_or_default()
-            })),
-        )?;
+        let task_template = Task {
+            name: request.name.trim().to_string(),
+            agent: definition
+                .as_ref()
+                .map_or(String::new(), |d| d.name.clone()),
+            description,
+            prompt: request.prompt.clone(),
+            context,
+            model: model.clone(),
+            created_at: Some(now),
+            ..Task::default()
+        };
+        let history = Some(Arc::new(move || {
+            history_source
+                .get()
+                .map(|transcript| transcript.messages())
+                .unwrap_or_default()
+        }) as Arc<dyn Fn() -> Vec<Message> + Send + Sync>);
+        let task = match resume_id.clone() {
+            Some(id) => {
+                self.config
+                    .tasks
+                    .add_with_id(id, task_template, Some(cancel.clone()), history)?
+            }
+            None => self
+                .config
+                .tasks
+                .add(task_template, Some(cancel.clone()), history)?,
+        };
         let transcript = match (transcript, &self.config.child_session) {
             (Some(transcript), _) => transcript,
             (None, None) => Arc::new(MemorySession::new()),
@@ -750,25 +891,30 @@ impl Runner {
         let _ = slot.set(Arc::clone(&transcript));
 
         // Written before the child runs, so a queued task that never starts
-        // still has a transcript recording what it was asked to do.
-        append_task_custom(
-            &transcript,
-            TASK_SPEC_CUSTOM_TYPE,
-            &TaskSpecData {
-                id: &task.id,
-                name: &task.name,
-                description: &task.description,
-                model: &task.model,
-                context: &task.context,
-                definition: definition.as_ref().map(|definition| TaskSpecDefinition {
-                    name: &definition.name,
-                    body: &definition.body,
-                    tools: definition.tools.as_deref(),
-                    write_policy: definition.write_policy.as_str(),
-                    write_paths: &definition.write_paths,
-                }),
-            },
-        );
+        // still has a transcript recording what it was asked to do. Skipped
+        // when resuming: the transcript already has this entry from the
+        // task's original run.
+        if resume_id.is_none() {
+            append_task_custom(
+                &transcript,
+                TASK_SPEC_CUSTOM_TYPE,
+                &TaskSpecData {
+                    id: task.id.clone(),
+                    name: task.name.clone(),
+                    description: task.description.clone(),
+                    model: task.model.clone(),
+                    context: task.context.clone(),
+                    prompt: task.prompt.clone(),
+                    definition: definition.as_ref().map(|definition| TaskSpecDefinition {
+                        name: definition.name.clone(),
+                        body: definition.body.clone(),
+                        tools: definition.tools.clone(),
+                        write_policy: definition.write_policy.as_str().to_string(),
+                        write_paths: definition.write_paths.clone(),
+                    }),
+                },
+            );
+        }
 
         let tools = ChildTools {
             registry: Arc::clone(&self.child_registry),
@@ -1005,6 +1151,14 @@ pub enum StartError {
     InheritUnavailable,
     #[error("{0}")]
     Registry(#[from] TaskError),
+    #[error("resume needs a saved session")]
+    ResumeNoSession,
+    #[error("no sub-agent task {0} in this session")]
+    ResumeNotFound(String),
+    #[error("task {0} is not interrupted")]
+    ResumeNotInterrupted(String),
+    #[error("resume: {0}")]
+    ResumeFailed(String),
 }
 
 /// Turns a child's events into task record updates. It never forwards an event
@@ -1197,9 +1351,9 @@ fn first_non_empty(candidates: &[&str]) -> String {
 mod tests {
     use super::*;
     use crate::subagent::testsupport::{
-        FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, match_any,
-        match_prompt, raw, redaction, redactor, stub, test_config, test_prompt_for, tool_names,
-        wait_status,
+        FakeProvider, RouteStep, StubTool, assistant_text, assistant_tool_call, last_user_text,
+        match_any, match_prompt, raw, redaction, redactor, stub, test_config, test_prompt_for,
+        tool_names, wait_status,
     };
     use otto_core::agent::inbox::NotificationKind;
     use otto_core::model::{Block, BlockType, FinishReason, Message, Role, Usage};
@@ -1790,6 +1944,7 @@ mod tests {
             assert_eq!(data["description"], task.description);
             assert_eq!(data["model"], task.model);
             assert_eq!(data["context"], task.context);
+            assert_eq!(data["prompt"], task.prompt);
             if want_definition {
                 let definition = &data["definition"];
                 assert_eq!(definition["name"], "reviewer");
@@ -2056,6 +2211,66 @@ mod tests {
         assert_eq!(final_task.usage.input_tokens, 30);
         assert_eq!(final_task.usage.output_tokens, 13);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn child_registry_refuses_a_tool_call_once_the_parent_lease_is_lost() {
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![
+                assistant_tool_call("call-1", "write", "{}", Usage::default()),
+                assistant_text("final report", Usage::default()),
+            ],
+        );
+
+        let write = StubTool::new(
+            "write",
+            ToolResult {
+                content: "wrote".into(),
+                ..ToolResult::default()
+            },
+        );
+        let calls = write.counter();
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let lease = failover::lease::Lease::for_test(tmp.path());
+        lease.mark_lost_for_test("test fence");
+
+        let tasks = Arc::new(Tasks::new());
+        let mut config = test_config(&provider, &tasks, vec![write.boxed()]);
+        config.lease = Some(Arc::new(move || Some(Arc::clone(&lease))));
+        let (runner, _) = runner(config);
+        runner
+            .start(StartRequest {
+                prompt: "go".into(),
+                ..StartRequest::default()
+            })
+            .expect("start succeeds");
+
+        wait_final(&tasks, "t1").await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the tool must not run once the session lease is lost"
+        );
+        let requests = provider.requests();
+        let result_block = requests
+            .get(1)
+            .expect("a follow-up request carrying the tool result")
+            .messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .find(|block| {
+                block.block_type == BlockType::ToolResult && block.tool_call_id == "call-1"
+            })
+            .expect("the tool result reached the follow-up request");
+        assert!(result_block.is_error, "{result_block:?}");
+        assert!(
+            result_block.text.contains("session lease lost"),
+            "{result_block:?}"
+        );
     }
 
     #[tokio::test]
@@ -2769,5 +2984,469 @@ mod tests {
         );
         assert_eq!(got, want);
         assert!(got.contains("truncated"), "{got}");
+    }
+
+    // -----------------------------------------------------------------------
+    // resume
+    // -----------------------------------------------------------------------
+
+    /// An assistant message with one dangling tool call, for building fixture
+    /// transcripts directly.
+    fn dangling_call() -> Message {
+        Message {
+            role: Role::Assistant,
+            blocks: vec![Block {
+                block_type: BlockType::ToolCall,
+                tool_call_id: "call-1".into(),
+                tool_name: "read".into(),
+                arguments: Some(raw("{}")),
+                ..Block::default()
+            }],
+            finish_reason: Some(FinishReason::ToolCalls),
+            created_at: Utc::now(),
+            ..Message::default()
+        }
+    }
+
+    /// Writes a child transcript directly, bypassing the runner: an
+    /// `otto.task_spec` entry, the prompt as a user message when `started`,
+    /// a dangling tool call when `dangling`, and an `otto.task_result` entry
+    /// with `status`. Returns the file path. Sets up the fixtures the resume
+    /// tests below exercise through [`Runner::resume`] and the `agent` tool.
+    #[allow(clippy::too_many_arguments)]
+    fn interrupted_fixture(
+        parent: &std::path::Path,
+        task_id: &str,
+        prompt: &str,
+        definition: Option<TaskSpecDefinition>,
+        started: bool,
+        dangling: bool,
+        status: &str,
+    ) -> PathBuf {
+        let name = format!("{task_id}-child");
+        let store = crate::session::Store::create_child_lazy(
+            parent,
+            &name,
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: parent.parent().expect("dir").to_string_lossy().into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("child store");
+
+        let spec = serde_json::to_string(&TaskSpecData {
+            id: task_id.to_string(),
+            name: String::new(),
+            description: String::new(),
+            model: "test-model".to_string(),
+            context: "fresh".to_string(),
+            prompt: prompt.to_string(),
+            definition,
+        })
+        .expect("serialize task_spec");
+        store
+            .append_custom_entry(TASK_SPEC_CUSTOM_TYPE, &spec)
+            .expect("append task_spec");
+
+        if started {
+            let message = Message {
+                role: Role::User,
+                blocks: vec![Block::text(prompt)],
+                created_at: Utc::now(),
+                ..Message::default()
+            };
+            store.append_message(&message).expect("append prompt");
+        }
+        if dangling {
+            store
+                .append_message(&dangling_call())
+                .expect("append dangling call");
+        }
+
+        let result = serde_json::to_string(&TaskResultData { status, error: "" })
+            .expect("serialize task_result");
+        store
+            .append_custom_entry(TASK_RESULT_CUSTOM_TYPE, &result)
+            .expect("append task_result");
+
+        let path = crate::session::Store::child_path(parent, &name);
+        store.close().expect("close");
+        path
+    }
+
+    /// A [`Config`] whose `children_dir` resolves to `dir`, for resume tests.
+    fn config_with_children_dir(
+        provider: &Arc<FakeProvider>,
+        tasks: &Arc<Tasks>,
+        dir: PathBuf,
+    ) -> Config {
+        let mut config = test_config(provider, tasks, Vec::new());
+        config.children_dir = Some(Arc::new(move || Some(dir.clone())));
+        config
+    }
+
+    #[tokio::test]
+    async fn resume_continues_an_interrupted_task_through_the_agent_tool() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        let path = interrupted_fixture(
+            &parent_path,
+            "t1",
+            "look at this",
+            Some(TaskSpecDefinition {
+                name: "reviewer".to_string(),
+                body: "Review the change.".to_string(),
+                tools: None,
+                write_policy: "read_only".to_string(),
+                write_paths: Vec::new(),
+            }),
+            true,
+            true,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        provider.add_route(
+            match_any,
+            vec![assistant_text("all done", Usage::default())],
+        );
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+        let result = agent_tool
+            .execute(
+                &raw(r#"{"resume":"t1","prompt":"continue please"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+
+        let final_task = wait_final(&tasks, "t1").await;
+        assert_eq!(final_task.id, "t1");
+        assert_eq!(final_task.status, TaskStatus::Succeeded);
+
+        let notification = tasks
+            .notifications()
+            .remove("t1", NotificationKind::TaskFinished)
+            .expect("a task_finished notification reaches the parent inbox");
+        assert_eq!(
+            notification.text,
+            completion_text(&final_task, runner.max_output_bytes())
+        );
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(
+            request.system_prompt.contains("Review the change."),
+            "system prompt must use the recorded definition body: {}",
+            request.system_prompt
+        );
+        assert_eq!(last_user_text(request), "continue please");
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.role == Role::Tool
+                    && message
+                        .blocks
+                        .iter()
+                        .any(|block| block.tool_call_id == "call-1")),
+            "the request must carry the synthetic result for the dangling call: {:?}",
+            request.messages
+        );
+
+        let entries = read_custom_entries(&path);
+        let last = entries.last().expect("at least one custom entry");
+        assert_eq!(last.0, "otto.task_result");
+        assert_eq!(last.1["status"], "succeeded");
+    }
+
+    #[tokio::test]
+    async fn resume_of_a_never_started_task_sends_the_new_prompt_as_the_first_message() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(
+            &parent_path,
+            "t1",
+            "look at this",
+            None,
+            false,
+            false,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        provider.add_route(match_any, vec![assistant_text("done", Usage::default())]);
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+
+        runner
+            .resume("t1", "start now".to_string())
+            .expect("resume succeeds");
+        wait_final(&tasks, "t1").await;
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages.len(), 1, "{:?}", requests[0].messages);
+        assert_eq!(requests[0].messages[0].role, Role::User);
+        assert_eq!(requests[0].messages[0].text(), "start now");
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_resume_of_a_task_that_is_not_interrupted() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(&parent_path, "t1", "go", None, true, false, "succeeded");
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+
+        let result = agent_tool
+            .execute(
+                &raw(r#"{"resume":"t1","prompt":"continue"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("not interrupted"),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_resume_of_an_unknown_task() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        std::fs::create_dir_all(&children_dir).expect("create children dir");
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+
+        let result = agent_tool
+            .execute(
+                &raw(r#"{"resume":"unknown","prompt":"continue"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("unknown"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_resume_with_model_set() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(
+            &parent_path,
+            "t1",
+            "go",
+            None,
+            true,
+            false,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+
+        let result = agent_tool
+            .execute(
+                &raw(r#"{"resume":"t1","prompt":"continue","model":"gpt-4o"}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("model"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_resume_without_a_prompt() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(
+            &parent_path,
+            "t1",
+            "go",
+            None,
+            true,
+            false,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let tools = crate::subagent::tools::tools(&runner);
+        let agent_tool = tools
+            .iter()
+            .find(|tool| tool.definition().name == "agent")
+            .expect("the agent tool is registered");
+
+        let result = agent_tool
+            .execute(
+                &raw(r#"{"resume":"t1","prompt":"   "}"#),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("prompt is required"),
+            "{}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_of_a_task_already_resumed_and_running_again_is_rejected() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+
+        let store = crate::session::Store::create_child_lazy(
+            &parent_path,
+            "t1-child",
+            otto_core::session::Header {
+                id: "child".into(),
+                workspace: parent_path
+                    .parent()
+                    .expect("dir")
+                    .to_string_lossy()
+                    .into_owned(),
+                provider: "openai-compatible".into(),
+                model: "test-model".into(),
+                created_at: Utc::now(),
+                ..otto_core::session::Header::default()
+            },
+        )
+        .expect("child store");
+
+        let spec = serde_json::to_string(&TaskSpecData {
+            id: "t1".to_string(),
+            name: String::new(),
+            description: String::new(),
+            model: "test-model".to_string(),
+            context: "fresh".to_string(),
+            prompt: "look at this".to_string(),
+            definition: None,
+        })
+        .expect("serialize task_spec");
+        store
+            .append_custom_entry(TASK_SPEC_CUSTOM_TYPE, &spec)
+            .expect("append task_spec");
+
+        let result = serde_json::to_string(&TaskResultData {
+            status: interrupted::INTERRUPTED_STATUS,
+            error: "",
+        })
+        .expect("serialize task_result");
+        store
+            .append_custom_entry(TASK_RESULT_CUSTOM_TYPE, &result)
+            .expect("append task_result");
+
+        // The task was resumed and ran again: a user message and an assistant
+        // reply were appended after the otto.task_result entry.
+        store
+            .append_message(&Message {
+                role: Role::User,
+                blocks: vec![Block::text("continue please")],
+                created_at: Utc::now(),
+                ..Message::default()
+            })
+            .expect("append resumed prompt");
+        store
+            .append_message(&Message {
+                role: Role::Assistant,
+                blocks: vec![Block::text("still working")],
+                finish_reason: Some(FinishReason::Stop),
+                created_at: Utc::now(),
+                ..Message::default()
+            })
+            .expect("append resumed reply");
+        store.close().expect("close");
+
+        let records = interrupted::scan(&children_dir);
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].final_status, None,
+            "an entry appended after otto.task_result must clear final_status"
+        );
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+        let error = runner
+            .resume("t1", "again".to_string())
+            .expect_err("resume must reject a task that is running again");
+        assert_eq!(error, StartError::ResumeNotInterrupted("t1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn resume_fails_when_the_recorded_write_policy_is_unrecognized() {
+        let dir = tempfile::tempdir().expect("dir");
+        let parent_path = dir.path().join("parent.jsonl");
+        let children_dir = parent_path.with_extension("");
+        interrupted_fixture(
+            &parent_path,
+            "t1",
+            "go",
+            Some(TaskSpecDefinition {
+                name: "reviewer".to_string(),
+                body: "Review the change.".to_string(),
+                tools: None,
+                write_policy: "bogus".to_string(),
+                write_paths: Vec::new(),
+            }),
+            true,
+            false,
+            interrupted::INTERRUPTED_STATUS,
+        );
+
+        let provider = FakeProvider::new();
+        let tasks = Arc::new(Tasks::new());
+        let (runner, _) = runner(config_with_children_dir(&provider, &tasks, children_dir));
+
+        let error = runner
+            .resume("t1", "continue".to_string())
+            .expect_err("resume must reject an unrecognized write_policy");
+        let StartError::ResumeFailed(message) = error else {
+            panic!("expected ResumeFailed, got {error:?}");
+        };
+        assert!(message.contains("bogus"), "{message}");
     }
 }

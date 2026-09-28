@@ -529,15 +529,20 @@ pub async fn run(
     let mut prepared_initial = None;
     let mut metadata = None;
     if !session_path.is_empty() {
+        let create_lease = match builder.create_lease() {
+            Ok(create_lease) => create_lease,
+            Err(error) => return fail(stderr, &builder.redact_error(&error, None)),
+        };
         let prepared = if listed_session_path {
             session::Prepared::prepare_listed(
                 &session_root,
                 &workspace_path,
                 Path::new(&session_path),
+                create_lease,
             )
             .map_err(|error| error.to_string())
         } else {
-            prepare_session(Path::new(&session_path), &workspace_path)
+            prepare_session(Path::new(&session_path), &workspace_path, create_lease)
         };
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -888,8 +893,13 @@ fn spawn_mcp_runner_swap(
 }
 
 /// A directly named session file must belong to the current workspace.
-fn prepare_session(path: &Path, workspace: &str) -> Result<session::Prepared, String> {
-    let prepared = session::Prepared::prepare(path).map_err(|error| error.to_string())?;
+fn prepare_session(
+    path: &Path,
+    workspace: &str,
+    create_lease: Option<u64>,
+) -> Result<session::Prepared, String> {
+    let prepared =
+        session::Prepared::prepare(path, create_lease).map_err(|error| error.to_string())?;
     match validate_session_workspace(&prepared.info().cwd, workspace) {
         Ok(()) => Ok(prepared),
         Err(message) => {

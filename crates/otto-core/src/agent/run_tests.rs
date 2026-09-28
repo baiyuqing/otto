@@ -376,7 +376,7 @@ async fn image_without_text_is_persisted_and_sent() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-async fn pending_notifications_are_delivered_after_the_user_message() {
+async fn pending_notifications_are_delivered_before_the_user_message() {
     let inbox = Arc::new(Inbox::default());
     inbox.push(Notification {
         task_id: "t1".into(),
@@ -409,19 +409,23 @@ async fn pending_notifications_are_delivered_after_the_user_message() {
         .await
         .expect("run");
 
+    // A notification queued before the turn started is delivered before the
+    // user's own message is appended: the provider sees it as something the
+    // user's prompt responds to, not the other way around.
     let messages = agent.session().messages();
-    assert_eq!(messages[1].role, Role::Context);
-    assert_eq!(messages[1].context_type, "task_notification");
-    assert_eq!(messages[1].text(), "child finished");
-    assert!(messages[1].display);
+    assert_eq!(messages[0].role, Role::Context);
+    assert_eq!(messages[0].context_type, "task_notification");
+    assert_eq!(messages[0].text(), "child finished");
+    assert!(messages[0].display);
     assert_eq!(
-        messages[1]
+        messages[0]
             .context_metadata
             .as_ref()
             .expect("metadata")
             .task_id,
         "t1"
     );
+    assert_eq!(messages[1].role, Role::User);
     assert!(inbox.is_empty(), "the inbox was not drained");
     assert!(
         names(&collect(&events)).contains(&"notification"),

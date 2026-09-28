@@ -71,6 +71,10 @@ pub struct StdioTransport {
     next_id: AtomicI64,
     stderr_tail: Arc<std::sync::Mutex<String>>,
     close_done: Mutex<bool>,
+    /// Keeps this pid registered with `failover::children::Children` for
+    /// the transport's lifetime, so a lease watchdog's fence action can
+    /// kill it independently of this transport's own shutdown path.
+    _fence_registration: crate::failover::children::Registration,
 }
 
 impl StdioTransport {
@@ -100,6 +104,11 @@ impl StdioTransport {
         let pid = child.id().ok_or_else(|| {
             CallError::Transport("mcp server exited before it could be tracked".to_string())
         })?;
+        let fence_registration = crate::failover::children::Children::register(
+            crate::failover::children::Children::global(),
+            pid as i32,
+            false,
+        );
         let stdin = child.stdin.take().expect("stdin is piped");
         let stdout = child.stdout.take().expect("stdout is piped");
         let stderr = child.stderr.take().expect("stderr is piped");
@@ -128,6 +137,7 @@ impl StdioTransport {
             next_id: AtomicI64::new(1),
             stderr_tail,
             close_done: Mutex::new(false),
+            _fence_registration: fence_registration,
         })
     }
 

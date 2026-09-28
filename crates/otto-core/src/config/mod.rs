@@ -16,6 +16,7 @@
 pub mod agents;
 pub mod duration;
 pub mod edit;
+pub mod failover;
 pub mod inbound;
 pub mod mcp;
 pub mod memory;
@@ -34,6 +35,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 pub use agents::{Agents, AgentsRuntime, resolve_agents};
+pub use failover::{Failover, FailoverRuntime, resolve_failover};
 pub use inbound::{FeishuRuntime, Inbound, resolve_feishu};
 pub use mcp::{Mcp, McpAuth, McpRuntime, McpServer, McpServerRuntime, McpTransport, resolve_mcp};
 pub use memory::{Memory, MemoryRuntime, MemorySQLite, resolve_memory};
@@ -89,6 +91,8 @@ pub struct File {
     pub server: Server,
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    #[serde(default)]
+    pub failover: Failover,
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
     #[serde(default)]

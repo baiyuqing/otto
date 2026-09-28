@@ -107,11 +107,9 @@ fn side_margin(area: Rect) -> Rect {
     }
 }
 
-/// The composer's inner-row floor with an empty or short value. Grows with
-/// wrapped input up to [`INPUT_BOX_THRESHOLD`] as normal; only squeezed
-/// toward 1 by [`composer_and_panel_height`] on a terminal too short to give
-/// the composer this much room even with the panel dropped.
-const COMPOSER_MIN_INNER_ROWS: u16 = 3;
+/// The composer's inner-row floor with an empty or short value. Wrapped input
+/// grows it up to [`INPUT_BOX_THRESHOLD`] as normal.
+const COMPOSER_MIN_INNER_ROWS: u16 = 1;
 
 /// The composer box's total height (inner rows plus the two border rows) for
 /// a given inner-row floor. Grows to fit wrapped input up to
@@ -429,9 +427,10 @@ fn draw_panel(frame: &mut Frame, tasks: &[&Task], area: Rect) {
     let shown = tasks.len().min(4);
     let overflow = tasks.len() > 4;
     let rows = if overflow { 3 } else { shown };
+    let columns = panel_columns(&tasks[..rows]);
     let mut lines: Vec<Line<'static>> = tasks[..rows]
         .iter()
-        .map(|task| panel_row_line(task, now, area.width))
+        .map(|task| panel_row_line(task, now, area.width, columns))
         .collect();
     if overflow {
         lines.push(Line::styled(
@@ -442,20 +441,72 @@ fn draw_panel(frame: &mut Frame, tasks: &[&Task], area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// One panel row: a status marker (the running spinner or a static queued
-/// marker), the task id, its name (for an unnamed task, its agent, or
-/// `default` as `/agents` shows a task with no agent), how long it has been
-/// running or queued, and its description, escaped and truncated to fit the
-/// row with no wrapping. Name and agent need no escaping: both are
-/// validated to `[A-Za-z0-9_-]` when the task is created.
-fn panel_row_line(task: &Task, now: chrono::DateTime<chrono::Utc>, width: u16) -> Line<'static> {
-    let marker = panel_marker(task, now);
-    let name = [task.name.as_str(), task.agent.as_str()]
+#[derive(Clone, Copy)]
+struct PanelColumns {
+    name: usize,
+    model: usize,
+}
+
+fn panel_columns(tasks: &[&Task]) -> PanelColumns {
+    PanelColumns {
+        name: tasks
+            .iter()
+            .map(|task| UnicodeWidthStr::width(panel_name(task)))
+            .max()
+            .unwrap_or_default(),
+        model: tasks
+            .iter()
+            .map(|task| UnicodeWidthStr::width(panel_model(task).as_str()))
+            .max()
+            .unwrap_or_default(),
+    }
+}
+
+fn panel_name(task: &Task) -> &str {
+    [task.name.as_str(), task.agent.as_str()]
         .into_iter()
         .find(|label| !label.is_empty())
-        .unwrap_or("default");
+        .unwrap_or("default")
+}
+
+fn panel_model(task: &Task) -> String {
+    if task.model.is_empty() {
+        "?".to_string()
+    } else {
+        escape_single_line_text(&task.model)
+    }
+}
+
+/// One panel row: status, task id, name, model, live input/output tokens,
+/// elapsed time, and description. Columns expand to their longest visible
+/// value; only the trailing description is clipped to the terminal width.
+fn panel_row_line(
+    task: &Task,
+    now: chrono::DateTime<chrono::Utc>,
+    width: u16,
+    columns: PanelColumns,
+) -> Line<'static> {
+    let marker = panel_marker(task, now);
+    let name = panel_name(task);
+    let model = panel_model(task);
+    let (input_tokens, output_tokens) = if task.usage_present {
+        (
+            format_token_count(task.usage.input_tokens),
+            format_token_count(task.usage.output_tokens),
+        )
+    } else {
+        ("-".to_string(), "-".to_string())
+    };
     let elapsed = panel_elapsed(task, now);
-    let prefix = format!("{marker} {} {name}  {elapsed}  ", task.id);
+    let prefix = format!(
+        "{marker} {} {} {} in:{} out:{} {}  ",
+        fit_column(&task.id, 4, Alignment::Left),
+        fit_column(name, columns.name, Alignment::Left),
+        fit_column(&model, columns.model, Alignment::Left),
+        fit_column(&input_tokens, 6, Alignment::Right),
+        fit_column(&output_tokens, 6, Alignment::Right),
+        fit_column(&elapsed, 6, Alignment::Right),
+    );
     let remaining = (width as usize).saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
     let description = truncate_to_width(
         &escape_single_line_text(&one_line(&task.description)),
@@ -508,6 +559,14 @@ fn truncate_to_width(value: &str, max_width: usize) -> String {
         width += ch_width;
     }
     out
+}
+
+fn fit_column(value: &str, width: usize, alignment: Alignment) -> String {
+    let padding = " ".repeat(width.saturating_sub(UnicodeWidthStr::width(value)));
+    match alignment {
+        Alignment::Right => format!("{padding}{value}"),
+        _ => format!("{value}{padding}"),
+    }
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -1384,12 +1443,12 @@ mod tests {
         assert!(status_row.contains("alpha/gpt-alpha"), "{status_row:?}");
     }
 
-    /// The composer's empty-input floor is 3 inner rows, so the box (with its
-    /// two border rows) is 5 rows tall.
+    /// The composer's empty-input floor is 1 inner row, so the box (with its
+    /// two border rows) is 3 rows tall.
     #[tokio::test]
-    async fn empty_composer_is_five_rows_tall() {
+    async fn empty_composer_is_three_rows_tall() {
         let (_workspace, _sessions, app) = app_fixture().await;
-        assert_eq!(composer_height(&app, 80, COMPOSER_MIN_INNER_ROWS), 5);
+        assert_eq!(composer_height(&app, 80, COMPOSER_MIN_INNER_ROWS), 3);
     }
 
     /// With no queued or running task the panel takes no rows at all, and a
@@ -1434,8 +1493,8 @@ mod tests {
     }
 
     /// At the minimum terminal size (40x8) with four running tasks, the rows
-    /// are transcript 1, composer 5, panel 1, status 1: the panel gives up
-    /// its rows before the composer shrinks below its 3-row minimum.
+    /// are transcript 1, composer 3, panel 3, status 1: the panel gives up
+    /// rows before the composer shrinks below its 1-row minimum.
     #[tokio::test]
     async fn the_minimum_size_keeps_the_transcript_row_and_the_status_line() {
         let (_workspace, _sessions, mut app) = app_fixture().await;
@@ -1449,14 +1508,16 @@ mod tests {
         assert_eq!(rows.len(), height as usize);
 
         // Row 0 is the transcript; the composer's titled top border is row 1
-        // and its bottom border row 5, so it kept 3 inner rows.
+        // and its bottom border row 3, so it kept 1 inner row.
         assert!(rows[1].contains("Otto"), "{rows:?}");
         assert!(
-            rows[5].contains('─') && !rows[5].contains("Otto"),
+            rows[3].contains('─') && !rows[3].contains("Otto"),
             "{rows:?}"
         );
-        assert!(rows[6].contains("t1"), "{rows:?}");
-        assert!(!rows.join("\n").contains("t2"), "{rows:?}");
+        assert!(rows[4].contains("t1"), "{rows:?}");
+        assert!(rows[5].contains("t2"), "{rows:?}");
+        assert!(rows[6].contains("t3"), "{rows:?}");
+        assert!(!rows.join("\n").contains("t4"), "{rows:?}");
         // The footer text is longer than this width, but it still starts
         // with the profile/model field, so this confirms the status line
         // landed on the frame's last row rather than being pushed off it.
@@ -1468,7 +1529,7 @@ mod tests {
     #[test]
     fn an_unnamed_panel_row_falls_back_to_the_agent() {
         let text = |task: &Task| -> String {
-            panel_row_line(task, chrono::Utc::now(), 80)
+            panel_row_line(task, chrono::Utc::now(), 80, panel_columns(&[task]))
                 .spans
                 .iter()
                 .map(|span| span.content.as_ref())
@@ -1476,9 +1537,58 @@ mod tests {
         };
         let mut task = running_task("t1", "", "check the diff");
         task.agent = "reviewer".into();
-        assert!(text(&task).contains("t1 reviewer "), "{}", text(&task));
+        assert!(text(&task).contains("reviewer ?"), "{}", text(&task));
         task.agent.clear();
-        assert!(text(&task).contains("t1 default "), "{}", text(&task));
+        assert!(text(&task).contains("default ?"), "{}", text(&task));
+    }
+
+    #[test]
+    fn the_panel_shows_the_model_and_live_input_output_tokens() {
+        let mut task = running_task("t1", "review", "check the diff");
+        task.model = "gpt-5.5".into();
+        task.usage_present = true;
+        task.usage.input_tokens = 12_310;
+        task.usage.output_tokens = 842;
+
+        let line = line_text(&panel_row_line(
+            &task,
+            chrono::Utc::now(),
+            100,
+            panel_columns(&[&task]),
+        ));
+
+        assert!(line.contains("gpt-5.5 in: 12.3k out:   842"), "{line}");
+    }
+
+    #[test]
+    fn panel_columns_align_across_different_name_lengths() {
+        let mut short = running_task("t1", "a", "first description");
+        short.model = "gpt-5.5".into();
+        short.usage_present = true;
+        short.usage.input_tokens = 10;
+        short.usage.output_tokens = 2;
+        let mut long = running_task("t2", "much-longer-name", "second description");
+        long.model = "openai-compatible/model-alpha".into();
+        long.usage_present = true;
+        long.usage.input_tokens = 12_310;
+        long.usage.output_tokens = 842;
+
+        let columns = panel_columns(&[&short, &long]);
+        let short = line_text(&panel_row_line(&short, chrono::Utc::now(), 120, columns));
+        let long = line_text(&panel_row_line(&long, chrono::Utc::now(), 120, columns));
+
+        assert!(long.contains("much-longer-name"), "{long}");
+        assert!(long.contains("openai-compatible/model-alpha"), "{long}");
+        assert_eq!(
+            short.find("gpt-5.5"),
+            long.find("openai-compatible/model-alpha")
+        );
+        assert_eq!(short.find("in:"), long.find("in:"));
+        assert_eq!(short.find("out:"), long.find("out:"));
+        assert_eq!(
+            short.find("first description"),
+            long.find("second description")
+        );
     }
 
     /// The sub-agent panel needs the idle loop's 1-second redraw timer iff at
@@ -1696,11 +1806,11 @@ mod tests {
 
         let (x, y) = cursor(&app, 100, 20);
 
-        // One line of input still fills the composer's 3-row minimum, so the
-        // box is 5 rows (3 inner + 2 borders) and the caret sits on the
+        // One line of input fills the composer's 1-row minimum, so the box is
+        // 3 rows (1 inner + 2 borders) and the caret sits on the
         // first inner row, `composer height` rows above the bottom of the
         // frame (the status line takes the last row; there is no panel row).
-        assert_eq!((x, y), (SIDE_MARGIN + 1 + 6, 20 - 5));
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 6, 20 - 3));
     }
 
     /// A hard line break moves the caret to the next composer row.
@@ -1712,9 +1822,9 @@ mod tests {
 
         let (x, y) = cursor(&app, 100, 20);
 
-        // Two lines still fit within the composer's 3-row minimum (5 rows
-        // including borders); the caret follows to the second inner row.
-        assert_eq!((x, y), (SIDE_MARGIN + 1 + 2, 20 - 5 + 1));
+        // Two lines grow the composer to 4 rows including borders; the caret
+        // follows to the second inner row.
+        assert_eq!((x, y), (SIDE_MARGIN + 1 + 2, 20 - 4 + 1));
     }
 
     /// Past [`INPUT_BOX_THRESHOLD`] rows the composer stops growing, so it

@@ -9,6 +9,7 @@ use serde_json::value::RawValue;
 use tokio_util::sync::CancellationToken;
 
 use crate::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
+use crate::operation::OperationControl;
 use crate::provider::{
     ContextOverflowError, Provider, ProviderError, Request, RequestSizer, Response, StreamEvent,
     StreamSink,
@@ -177,7 +178,7 @@ impl Provider for FakeProvider {
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        _cancel: &CancellationToken,
+        _control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
         self.requests
             .lock()
@@ -227,7 +228,7 @@ impl ToolExecutor for EchoExecutor {
     async fn execute(
         &self,
         call: crate::tool::ToolCall<'_>,
-        _cancel: &CancellationToken,
+        _control: &dyn OperationControl,
     ) -> crate::tool::ToolExecution {
         if call.name != "echo" {
             return crate::tool::ToolExecution {
@@ -1391,6 +1392,49 @@ async fn an_overflow_after_visible_text_is_not_retried() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn an_overflow_after_visible_reasoning_is_not_retried() {
+    assert_overflow_after_visible_delta_is_not_retried(StreamEvent::ReasoningDelta {
+        text: "visible reasoning that is long enough to clear redaction buffering".into(),
+    })
+    .await;
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn an_overflow_after_a_tool_call_delta_is_not_retried() {
+    assert_overflow_after_visible_delta_is_not_retried(StreamEvent::ToolCallDelta {
+        tool_call_id: "call-1".into(),
+        tool_name: "echo".into(),
+        arguments: r#"{"value":"partial"}"#.into(),
+    })
+    .await;
+}
+
+async fn assert_overflow_after_visible_delta_is_not_retried(event: StreamEvent) {
+    let provider = FakeProvider::new(vec![Turn::overflow().with_events(vec![event])]);
+    let agent = Agent::new(
+        provider,
+        EchoExecutor::default(),
+        seeded_session().await,
+        Options {
+            compaction: CompactionSettings {
+                auto: true,
+                ..CompactionSettings::default()
+            },
+            ..options()
+        },
+    );
+    let error = agent
+        .run("hello", &mut |_| {}, &CancellationToken::new())
+        .await
+        .expect_err("the overflow is reported");
+    assert!(error.to_string().contains("context window exceeded"));
+    assert!(agent.provider().summary_requests().is_empty());
+    assert_eq!(agent.provider().normal_requests().len(), 1);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn a_second_overflow_after_the_retry_stops_the_turn() {
     let provider = FakeProvider::new(vec![
         Turn::overflow(),
@@ -2155,7 +2199,7 @@ impl ToolExecutor for CancellingExecutor {
     async fn execute(
         &self,
         call: crate::tool::ToolCall<'_>,
-        _cancel: &CancellationToken,
+        _control: &dyn OperationControl,
     ) -> crate::tool::ToolExecution {
         self.cancel.cancel();
         crate::tool::ToolExecution::completed(ToolResult {
@@ -2301,7 +2345,7 @@ impl ToolExecutor for CountingExecutor {
     async fn execute(
         &self,
         call: crate::tool::ToolCall<'_>,
-        _cancel: &CancellationToken,
+        _control: &dyn OperationControl,
     ) -> crate::tool::ToolExecution {
         self.calls.fetch_add(1, Ordering::SeqCst);
         crate::tool::ToolExecution::completed(ToolResult {

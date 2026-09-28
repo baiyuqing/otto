@@ -46,7 +46,8 @@ use chrono::{DateTime, Utc};
 use otto_core::agent::inbox::{Inbox, Notification, NotificationKind};
 use otto_core::agent::redactor::Redactor;
 use otto_core::agent::{Agent, CompactionSettings, Event, EventSink, Options};
-use otto_core::model::{Message, Role, ToolDefinition};
+use otto_core::model::{Message, OperationStopReason, Role, ToolDefinition};
+use otto_core::operation::OperationControl;
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{MemorySession, Session};
 use otto_core::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
@@ -188,9 +189,9 @@ impl Provider for SharedProvider {
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
-        self.0.complete(request, emit, cancel).await
+        self.0.complete(request, emit, control).await
     }
 }
 
@@ -375,7 +376,7 @@ impl ToolExecutor for ChildTools {
         definitions
     }
 
-    async fn execute(&self, call: ToolCall<'_>, cancel: &CancellationToken) -> ToolExecution {
+    async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution {
         let local = |mut result: ToolResult| {
             let outcome =
                 result
@@ -397,8 +398,16 @@ impl ToolExecutor for ChildTools {
             ToolExecution { result, outcome }
         };
         if call.name == "agent_report" {
-            if cancel.is_cancelled() {
-                return local(error_result(CONTEXT_CANCELED).cancelled_not_started());
+            match control.stop_reason() {
+                Some(OperationStopReason::Deadline) => {
+                    return local(
+                        error_result("operation deadline exceeded").deadline_not_started(),
+                    );
+                }
+                Some(_) => {
+                    return local(error_result(CONTEXT_CANCELED).cancelled_not_started());
+                }
+                None => {}
             }
             let args: AgentReportArgs = match decode_strict_json(call.arguments.get(), &["message"])
             {
@@ -429,7 +438,7 @@ impl ToolExecutor for ChildTools {
         if let Err(message) = self.permits_write_tool(call.name, call.arguments) {
             return local(crate::tool::error_result(message).not_started());
         }
-        self.registry.execute(call, cancel).await
+        self.registry.execute(call, control).await
     }
 }
 

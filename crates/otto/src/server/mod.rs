@@ -1943,8 +1943,9 @@ mod tests {
             &self,
             request: &ProviderRequest,
             emit: StreamSink<'_>,
-            cancel: &CancellationToken,
+            control: &dyn otto_core::operation::OperationControl,
         ) -> Result<ProviderResponse, ProviderError> {
+            let cancel = control.cancellation_token();
             let call = {
                 let mut roles = self
                     .roles

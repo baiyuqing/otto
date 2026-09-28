@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
 use otto_core::agent::redactor::Redactor;
-use otto_core::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
+use otto_core::model::{
+    Block, BlockType, FinishReason, Message, OperationStopReason, Role, ToolDefinition, Usage,
+};
+use otto_core::operation::OperationControl;
 use otto_core::provider::{Provider, ProviderError, Request, Response, StreamEvent, StreamSink};
 use otto_core::tool::ToolResult;
 use serde_json::value::RawValue;
@@ -90,8 +93,9 @@ impl Provider for FakeProvider {
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
+        let cancel = control.cancellation_token();
         let hook = {
             let mut state = self.lock();
             state.calls.push(request.clone());
@@ -100,8 +104,12 @@ impl Provider for FakeProvider {
         if let Some(hook) = hook {
             hook(cancel, request).await;
         }
-        if cancel.is_cancelled() {
-            return Err(ProviderError::Cancelled);
+        if let Some(reason) = control.stop_reason() {
+            return Err(if reason == OperationStopReason::Deadline {
+                ProviderError::DeadlineExceeded
+            } else {
+                ProviderError::Cancelled
+            });
         }
 
         let step = {

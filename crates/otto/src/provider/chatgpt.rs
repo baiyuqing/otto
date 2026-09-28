@@ -11,9 +11,10 @@
 //! Concurrency: `complete` takes `&self`; the token source serializes its own
 //! refreshes, so one client can serve a parent agent and its sub-agents.
 //!
-//! Cancellation: the token fetch, the request send, and every body read race
-//! the caller's [`CancellationToken`]. A cancelled call returns
-//! [`ProviderError::Cancelled`].
+//! Operation control: the token fetch, request send, and every body read observe
+//! the caller's cancellation token. Deadline and user cancellation remain
+//! distinct, while a fully received and validated response wins a simultaneous
+//! stop.
 //!
 //! Errors: every failure outside the stream decoder is one of three fixed
 //! strings, so no endpoint text and no credential can reach the caller. A
@@ -21,8 +22,7 @@
 //! the account id redacted.
 //!
 //! Two deliberate decisions:
-//!   - ponytail: no retry on 429/5xx, so the status is returned on the first
-//!     attempt.
+//!   - no retry on 429/5xx, so the status is returned on the first attempt.
 //!   - reqwest exposes no cap on the size of a response header block, so no
 //!     bound is enforced on it. The same gap exists in
 //!     [`crate::provider::openaicompat`].
@@ -30,17 +30,16 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::auth::token::TokenSource;
 use futures_util::TryStreamExt;
 use otto_core::agent::redactor::{Redactor, StreamRedactor};
-use otto_core::model::Message;
+use otto_core::model::{Message, OperationStopReason};
 use otto_core::openairesponses::protocol::{build_request, serialized_request_size};
 use otto_core::openairesponses::stream::StreamAssembler;
+use otto_core::operation::OperationControl;
 use otto_core::provider::{
     Provider, ProviderError, Request, RequestSizer, Response, StreamEvent, StreamSink,
 };
-use tokio_util::sync::CancellationToken;
-
-use crate::auth::token::TokenSource;
 
 /// The ChatGPT backend that serves subscription traffic.
 const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -97,36 +96,32 @@ impl Client {
 #[async_trait::async_trait]
 impl Provider for Client {
     /// Sends one request to the Responses backend and assembles the stream.
-    ///
-    /// There is no retry: a 429 or a 5xx is reported on the first attempt.
+    /// There is no retry: every failure is reported on the first attempt.
     async fn complete(
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
+        check_running(control)?;
         let http = match &self.http {
             Ok(http) => http,
             Err(error) => return Err(ProviderError::Other(error.clone())),
         };
-        let credentials = match self.tokens.token(cancel).await {
-            Ok(credentials) => credentials,
-            // The token source has its own fixed errors; none of them is
-            // inspected, so nothing it saw can reach the caller.
-            Err(_) if cancel.is_cancelled() => return Err(ProviderError::Cancelled),
-            Err(_) => return Err(ProviderError::Other(AUTHORIZATION_FAILED.to_owned())),
-        };
+        let credentials =
+            match await_control(control, self.tokens.token(control.cancellation_token())).await? {
+                Ok(credentials) => credentials,
+                Err(_) => {
+                    check_running(control)?;
+                    return Err(ProviderError::Other(AUTHORIZATION_FAILED.to_owned()));
+                }
+            };
         let access_token = credentials.access_token;
         if access_token.trim().is_empty() || self.account_id.trim().is_empty() {
-            if cancel.is_cancelled() {
-                return Err(ProviderError::Cancelled);
-            }
+            check_running(control)?;
             return Err(ProviderError::Other(AUTHORIZATION_FAILED.to_owned()));
         }
 
-        // The redactor is built before anything is sent, so a credential that
-        // cannot be redacted stops the request instead of streaming output
-        // that could carry it.
         let redactor = Redactor::new(&[access_token.clone(), self.account_id.clone()]);
         if !redactor.allows_dynamic_content() {
             return Err(ProviderError::Other(REQUEST_FAILED.to_owned()));
@@ -134,6 +129,7 @@ impl Provider for Client {
 
         let payload = serde_json::to_vec(&build_request(request))
             .map_err(|error| ProviderError::Other(format!("encode responses request: {error}")))?;
+        check_running(control)?;
 
         let send = http
             .post(format!("{}/responses", self.base_url))
@@ -145,15 +141,17 @@ impl Provider for Client {
             .header("originator", ORIGINATOR)
             .body(payload)
             .send();
-        let response = match with_cancel(cancel, send).await {
-            None => return Err(ProviderError::Cancelled),
-            Some(Ok(response)) => response,
-            Some(Err(_)) => return Err(ProviderError::Other(REQUEST_FAILED.to_owned())),
+        let response = match await_control(control, send).await? {
+            Ok(response) => response,
+            Err(_) => {
+                check_running(control)?;
+                return Err(ProviderError::Other(REQUEST_FAILED.to_owned()));
+            }
         };
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            // The body is never read, so no part of it can reach the error.
+            check_running(control)?;
             return Err(ProviderError::Other(format!(
                 "chatgpt responses HTTP {status}"
             )));
@@ -162,40 +160,51 @@ impl Provider for Client {
         let mut events = EventRedactor::new(&redactor);
         let mut assembler = StreamAssembler::new();
         let mut body = Box::pin(response.bytes_stream());
-        let result = loop {
-            if assembler.is_done() {
-                break Ok(());
-            }
-            let chunk = match with_cancel(cancel, body.try_next()).await {
-                None => return Err(ProviderError::Cancelled),
-                Some(Ok(Some(chunk))) => chunk,
-                Some(Ok(None)) => break Ok(()),
-                // A read failure reports the fixed request failure, never the
-                // transport's own text.
-                Some(Err(_)) => break Err(ProviderError::Other(REQUEST_FAILED.to_owned())),
+        loop {
+            let chunk = match await_control(control, body.try_next()).await? {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => {
+                    check_running(control)?;
+                    return Err(ProviderError::Other(REQUEST_FAILED.to_owned()));
+                }
             };
             if let Err(error) = assembler.push(&chunk, &mut |event| events.emit(event, &mut *emit))
             {
-                break Err(ProviderError::Other(
+                check_running(control)?;
+                return Err(ProviderError::Other(
+                    redactor.redact_string(&error.to_string()),
+                ));
+            }
+            // Completion is accepted immediately after the complete event has
+            // been validated, so a simultaneous stop cannot overwrite it.
+            if assembler.is_done() {
+                let response = match assembler.finish(&mut |event| events.emit(event, &mut *emit)) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        check_running(control)?;
+                        return Err(ProviderError::Other(
+                            redactor.redact_string(&error.to_string()),
+                        ));
+                    }
+                };
+                events.flush(&mut *emit);
+                return Ok(Response {
+                    message: redact_message(&redactor, response.message),
+                });
+            }
+            check_running(control)?;
+        }
+
+        let response = match assembler.finish(&mut |event| events.emit(event, &mut *emit)) {
+            Ok(response) => response,
+            Err(error) => {
+                check_running(control)?;
+                return Err(ProviderError::Other(
                     redactor.redact_string(&error.to_string()),
                 ));
             }
         };
-        if let Err(error) = result {
-            if cancel.is_cancelled() {
-                return Err(ProviderError::Cancelled);
-            }
-            return Err(error);
-        }
-        let response = assembler
-            .finish(&mut |event| events.emit(event, &mut *emit))
-            .map_err(|error| {
-                if cancel.is_cancelled() {
-                    ProviderError::Cancelled
-                } else {
-                    ProviderError::Other(redactor.redact_string(&error.to_string()))
-                }
-            })?;
         events.flush(&mut *emit);
         Ok(Response {
             message: redact_message(&redactor, response.message),
@@ -343,16 +352,37 @@ impl<'a> EventRedactor<'a> {
     }
 }
 
-/// Races `future` against the cancellation token. `None` means the token was
-/// cancelled and `future` was dropped without completing.
-async fn with_cancel<T>(
-    cancel: &CancellationToken,
+fn stop_error(control: &dyn OperationControl) -> Option<ProviderError> {
+    control.stop_reason().map(|reason| match reason {
+        OperationStopReason::Deadline => ProviderError::DeadlineExceeded,
+        OperationStopReason::UserCancellation
+        | OperationStopReason::Shutdown
+        | OperationStopReason::Migration
+        | OperationStopReason::TransportLost
+        | OperationStopReason::ProcessLost => ProviderError::Cancelled,
+    })
+}
+
+fn check_running(control: &dyn OperationControl) -> Result<(), ProviderError> {
+    match stop_error(control) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Runs one await against the operation token. A ready future wins the token
+/// race; callers still inspect the stop reason before accepting partial work.
+async fn await_control<T>(
+    control: &dyn OperationControl,
     future: impl std::future::Future<Output = T>,
-) -> Option<T> {
+) -> Result<T, ProviderError> {
+    check_running(control)?;
     tokio::select! {
         biased;
-        () = cancel.cancelled() => None,
-        value = future => Some(value),
+        value = future => Ok(value),
+        () = control.cancellation_token().cancelled() => {
+            Err(stop_error(control).unwrap_or(ProviderError::Cancelled))
+        }
     }
 }
 
@@ -379,6 +409,37 @@ mod tests {
     use crate::auth::testserver::{self, sse_response};
     use otto_core::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
     use otto_core::provider::StreamEvent;
+    use tokio_util::sync::CancellationToken;
+
+    struct StoppedControl {
+        token: CancellationToken,
+        reason: OperationStopReason,
+    }
+
+    impl StoppedControl {
+        fn deadline() -> Self {
+            let token = CancellationToken::new();
+            token.cancel();
+            Self {
+                token,
+                reason: OperationStopReason::Deadline,
+            }
+        }
+    }
+
+    impl OperationControl for StoppedControl {
+        fn cancellation_token(&self) -> &CancellationToken {
+            &self.token
+        }
+
+        fn remaining(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+
+        fn stop_reason(&self) -> Option<OperationStopReason> {
+            Some(self.reason)
+        }
+    }
 
     const CANNED_STREAM: &str = concat!(
         "event: response.output_text.delta\n",
@@ -742,6 +803,25 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    #[tokio::test]
+    async fn rate_limits_and_server_errors_are_not_retried() {
+        for status in [429, 503] {
+            let server = testserver::spawn(move |_| {
+                testserver::status_response(status, "provider body is not exposed")
+            })
+            .await;
+            let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+
+            let (result, events) = complete(&client, &Request::default()).await;
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                format!("chatgpt responses HTTP {status}")
+            );
+            assert_eq!(server.count(), 1, "status {status}");
+            assert!(events.is_empty());
+        }
+    }
+
     /// A connection that is refused carries no provider text into the error.
     #[tokio::test]
     async fn a_transport_failure_reports_a_fixed_request_failure() {
@@ -783,6 +863,22 @@ mod tests {
             result.unwrap_err().to_string(),
             "responses stream ended without response.completed"
         );
+    }
+
+    #[tokio::test]
+    async fn a_deadline_stopped_call_reports_deadline_exceeded() {
+        let server = testserver::spawn(|_| sse_response(CANNED_STREAM)).await;
+        let client = Client::with_base_url(&server.url, static_tokens("token"), "acct-1");
+        let mut sink = |_: StreamEvent| panic!("no event is emitted after deadline");
+        let error = client
+            .complete(&Request::default(), &mut sink, &StoppedControl::deadline())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProviderError::DeadlineExceeded),
+            "{error:?}"
+        );
+        assert_eq!(server.count(), 0);
     }
 
     /// The per-call token, not a process-level one, decides that the turn is

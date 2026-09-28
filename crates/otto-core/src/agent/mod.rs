@@ -53,6 +53,7 @@ use crate::model::{
     Block, BlockType, ContextMetadata, EffectCertainty, Message, OperationDisposition, OperationId,
     OperationOutcome, OperationStopReason, Role, ToolDefinition, ToolResultMetadata, zero_time,
 };
+use crate::operation::OperationControl;
 use crate::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamEvent};
 use crate::session::Session;
 use crate::session::operation::OperationFact;
@@ -272,7 +273,18 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
-        self.run_with_image(user_text, None, emit, cancel).await
+        self.run_with_control(user_text, emit, cancel).await
+    }
+
+    /// Runs one turn under operation-wide cancellation and deadline control.
+    pub async fn run_with_control(
+        &self,
+        user_text: &str,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
+        self.run_with_image_control(user_text, None, emit, control)
+            .await
     }
 
     pub async fn run_with_image(
@@ -282,8 +294,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        self.run_with_image_control(user_text, image, emit, cancel)
+            .await
+    }
+
+    /// Runs one turn with an optional image under operation-wide control.
+    pub async fn run_with_image_control(
+        &self,
+        user_text: &str,
+        image: Option<Block>,
+        emit: EventSink<'_>,
+        control: &dyn OperationControl,
+    ) -> Result<(), AgentError> {
         if !self.redactor.allows_dynamic_content() {
-            return self.run_with_incomplete_redactions(emit, cancel);
+            return self.run_with_incomplete_redactions(emit, control);
         }
         let text = trim_go_space(user_text);
         if text.is_empty() && image.is_none() && self.options.inbox.is_empty() {
@@ -332,7 +356,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     limit: self.options.memory_recall_limit,
                     token_budget: self.options.memory_recall_token_budget,
                 };
-                match binding.recall(&request, cancel).await {
+                match binding.recall(&request, control.cancellation_token()).await {
                     Ok(result) => {
                         state.memory_context = self
                             .redactor
@@ -351,7 +375,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
 
         loop {
             let response = match self
-                .dispatch_normal_provider_step(emit, &mut state, cancel)
+                .dispatch_normal_provider_step(emit, &mut state, control)
                 .await
             {
                 Ok(response) => response,
@@ -430,15 +454,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     tool_call_id: block.tool_call_id.clone(),
                     arguments: arguments.get().to_owned(),
                 });
-                let mut execution = if cancel.is_cancelled() {
-                    ToolExecution {
-                        result: ToolResult::error(ProviderError::Cancelled.to_string()),
-                        outcome: OperationOutcome {
-                            disposition: OperationDisposition::Cancelled,
-                            effect_certainty: EffectCertainty::NotStarted,
-                            stop_reason: Some(OperationStopReason::UserCancellation),
-                        },
-                    }
+                let mut execution = if let Some(reason) = control.stop_reason() {
+                    stopped_tool_execution(reason)
                 } else {
                     self.tools
                         .execute(
@@ -448,7 +465,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                                 arguments: &arguments,
                                 attempt,
                             },
-                            cancel,
+                            control,
                         )
                         .await
                 };
@@ -530,8 +547,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
             }
 
-            if cancel.is_cancelled() {
-                return Err(self.fail(emit, AgentError::Provider(ProviderError::Cancelled)));
+            if let Some(error) = stopped_provider_error(control) {
+                return Err(self.fail(emit, AgentError::Provider(error)));
             }
             if !had_tool_call {
                 emit(Event::AgentFinished);
@@ -597,8 +614,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self,
         emit: EventSink<'_>,
         state: &mut RunDispatchState,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<Response, AgentError> {
+        if let Some(error) = stopped_provider_error(control) {
+            self.emit_provider_api_call(emit, std::time::Duration::ZERO, Some(&error), control);
+            return Err(AgentError::Provider(error));
+        }
         let (mut request, mut estimate) = self.build_normal_provider_request(state);
         let triggers = automatic_compaction_triggers(&self.options.compaction);
 
@@ -609,7 +630,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             if !state.proactive_attempted {
                 state.proactive_attempted = true;
                 match self
-                    .compact_locked(CompactionReason::Threshold, "", emit, cancel)
+                    .compact_locked(CompactionReason::Threshold, "", emit, control)
                     .await
                 {
                     Err(error) if error.is_nothing_to_compact() => {
@@ -624,9 +645,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         state.proactive_attempted = false;
                     }
                     Err(error) => {
-                        if let Some(cancellation) =
-                            automatic_cancellation(cancel.is_cancelled(), &error)
-                        {
+                        if let Some(stop) = stopped_provider_error(control) {
+                            return Err(AgentError::Provider(stop));
+                        }
+                        if let Some(cancellation) = automatic_cancellation(false, &error) {
                             return Err(cancellation);
                         }
                         if estimate >= hard_trigger {
@@ -640,8 +662,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                         });
                     }
                     Ok(_) => {
-                        if cancel.is_cancelled() {
-                            return Err(AgentError::Provider(ProviderError::Cancelled));
+                        if let Some(error) = stopped_provider_error(control) {
+                            return Err(AgentError::Provider(error));
                         }
                         (request, estimate) = self.build_normal_provider_request(state);
                         if estimate > hard_trigger {
@@ -660,21 +682,21 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         }
 
-        let (response, visible_text, error) = self
-            .complete_normal_provider_attempt(&request, emit, cancel)
+        let (response, visible_output, error) = self
+            .complete_normal_provider_attempt(&request, emit, control)
             .await;
         let Some(original_overflow) = error else {
             return Ok(response);
         };
         if !self.options.compaction.auto
-            || visible_text
+            || visible_output
             || !is_typed_context_overflow(&original_overflow)
         {
             return Err(original_overflow);
         }
 
         if let Err(compaction_error) = self
-            .compact_locked(CompactionReason::Overflow, "", emit, cancel)
+            .compact_locked(CompactionReason::Overflow, "", emit, control)
             .await
         {
             if compaction_error.is_nothing_to_compact() {
@@ -688,9 +710,10 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 });
                 return Err(original_overflow);
             }
-            if let Some(cancellation) =
-                automatic_cancellation(cancel.is_cancelled(), &compaction_error)
-            {
+            if let Some(stop) = stopped_provider_error(control) {
+                return Err(AgentError::Provider(stop));
+            }
+            if let Some(cancellation) = automatic_cancellation(false, &compaction_error) {
                 return Err(cancellation);
             }
             return Err(automatic_dispatch_error(
@@ -698,8 +721,8 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 vec![original_overflow.to_string(), compaction_error.to_string()],
             ));
         }
-        if cancel.is_cancelled() {
-            return Err(AgentError::Provider(ProviderError::Cancelled));
+        if let Some(error) = stopped_provider_error(control) {
+            return Err(AgentError::Provider(error));
         }
 
         let (retry_request, retry_estimate) = self.build_normal_provider_request(state);
@@ -712,7 +735,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             ));
         }
         let (response, _, error) = self
-            .complete_normal_provider_attempt(&retry_request, emit, cancel)
+            .complete_normal_provider_attempt(&retry_request, emit, control)
             .await;
         match error {
             Some(error) if is_typed_context_overflow(&error) => Err(automatic_dispatch_error(
@@ -764,19 +787,20 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         &self,
         request: &Request,
         emit: EventSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> (Response, bool, Option<AgentError>) {
         let mut stream = self.redactor.new_stream();
         // Reasoning has its own redaction stream; it is flushed before the
         // first text delta so the two keep their provider order.
         let mut reasoning = self.redactor.new_stream();
-        let visible_text = std::sync::atomic::AtomicBool::new(false);
+        let visible_output = std::sync::atomic::AtomicBool::new(false);
         let started = (self.options.now)();
         let outcome = {
             let mut on_stream = |event: StreamEvent| match event {
                 StreamEvent::ReasoningDelta { text: delta } => {
                     let text = reasoning.write(&delta);
                     if !text.is_empty() {
+                        visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
                         emit(Event::ReasoningDelta { text });
                     }
                 }
@@ -787,7 +811,7 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     }
                     let text = stream.write(&delta);
                     if !text.is_empty() {
-                        visible_text.store(true, std::sync::atomic::Ordering::SeqCst);
+                        visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
                         emit(Event::TextDelta { text });
                     }
                 }
@@ -802,20 +826,22 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                     delay,
                     reason,
                 }),
-                StreamEvent::ToolCallDelta { .. } => {}
+                StreamEvent::ToolCallDelta { .. } => {
+                    visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
             };
             self.provider
-                .complete(request, &mut on_stream, cancel)
+                .complete(request, &mut on_stream, control)
                 .await
         };
         let duration = ((self.options.now)() - started)
             .to_std()
             .unwrap_or_default();
-        self.emit_provider_api_call(emit, duration, outcome.as_ref().err(), cancel);
+        self.emit_provider_api_call(emit, duration, outcome.as_ref().err(), control);
         match outcome {
             Err(error) => (
                 Response::default(),
-                visible_text.load(std::sync::atomic::Ordering::SeqCst),
+                visible_output.load(std::sync::atomic::Ordering::SeqCst),
                 Some(AgentError::Provider(error)),
             ),
             Ok(response) => {
@@ -825,12 +851,12 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
                 }
                 let text = stream.flush();
                 if !text.is_empty() {
-                    visible_text.store(true, std::sync::atomic::Ordering::SeqCst);
+                    visible_output.store(true, std::sync::atomic::Ordering::SeqCst);
                     emit(Event::TextDelta { text });
                 }
                 (
                     response,
-                    visible_text.load(std::sync::atomic::Ordering::SeqCst),
+                    visible_output.load(std::sync::atomic::Ordering::SeqCst),
                     None,
                 )
             }
@@ -842,10 +868,19 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
         emit: EventSink<'_>,
         duration: std::time::Duration,
         error: Option<&ProviderError>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) {
         let status = match error {
-            _ if cancel.is_cancelled() => ApiStatus::Canceled,
+            _ if matches!(control.stop_reason(), Some(OperationStopReason::Deadline)) => {
+                ApiStatus::Error
+            }
+            _ if matches!(
+                control.stop_reason(),
+                Some(OperationStopReason::UserCancellation)
+            ) =>
+            {
+                ApiStatus::Canceled
+            }
             Some(ProviderError::Cancelled) => ApiStatus::Canceled,
             None => ApiStatus::Ok,
             Some(_) => ApiStatus::Error,
@@ -864,11 +899,11 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
     fn run_with_incomplete_redactions(
         &self,
         emit: EventSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<(), AgentError> {
         emit(Event::AgentStarted);
-        if cancel.is_cancelled() {
-            return Err(self.fail(emit, AgentError::Provider(ProviderError::Cancelled)));
+        if let Some(error) = stopped_provider_error(control) {
+            return Err(self.fail(emit, AgentError::Provider(error)));
         }
         emit(Event::AgentFinished);
         Ok(())
@@ -899,6 +934,43 @@ impl<P: Provider, T: ToolExecutor, S: Session> Agent<P, T, S> {
             }
         }
         redacted
+    }
+}
+
+fn stopped_provider_error(control: &dyn OperationControl) -> Option<ProviderError> {
+    match control.stop_reason()? {
+        OperationStopReason::Deadline => Some(ProviderError::DeadlineExceeded),
+        OperationStopReason::UserCancellation
+        | OperationStopReason::Shutdown
+        | OperationStopReason::Migration
+        | OperationStopReason::TransportLost
+        | OperationStopReason::ProcessLost => Some(ProviderError::Cancelled),
+    }
+}
+
+fn stopped_tool_execution(reason: OperationStopReason) -> ToolExecution {
+    let (error, disposition) = match reason {
+        OperationStopReason::UserCancellation => {
+            (ProviderError::Cancelled, OperationDisposition::Cancelled)
+        }
+        OperationStopReason::Deadline => (
+            ProviderError::DeadlineExceeded,
+            OperationDisposition::DeadlineExceeded,
+        ),
+        OperationStopReason::Shutdown
+        | OperationStopReason::Migration
+        | OperationStopReason::TransportLost
+        | OperationStopReason::ProcessLost => {
+            (ProviderError::Cancelled, OperationDisposition::Interrupted)
+        }
+    };
+    ToolExecution {
+        result: ToolResult::error(error.to_string()),
+        outcome: OperationOutcome {
+            disposition,
+            effect_certainty: EffectCertainty::NotStarted,
+            stop_reason: Some(reason),
+        },
     }
 }
 
@@ -973,9 +1045,29 @@ mod tests {
 
     use super::*;
     use crate::model::{Block, BlockType, FinishReason, Message, Role, ToolDefinition, Usage};
+    use crate::operation::OperationControl;
     use crate::provider::{Provider, ProviderError, Request, Response, StreamEvent, StreamSink};
     use crate::session::{MemorySession, Session};
     use crate::tool::{ToolExecutor, ToolResult};
+
+    struct StoppedControl {
+        token: CancellationToken,
+        reason: OperationStopReason,
+    }
+
+    impl OperationControl for StoppedControl {
+        fn cancellation_token(&self) -> &CancellationToken {
+            &self.token
+        }
+
+        fn remaining(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::ZERO)
+        }
+
+        fn stop_reason(&self) -> Option<OperationStopReason> {
+            Some(self.reason)
+        }
+    }
 
     fn fixed_clock() -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000, 0).expect("in range")
@@ -1020,7 +1112,7 @@ mod tests {
             &self,
             request: &Request,
             emit: StreamSink<'_>,
-            _cancel: &CancellationToken,
+            _control: &dyn OperationControl,
         ) -> Result<Response, ProviderError> {
             self.requests
                 .lock()
@@ -1047,9 +1139,9 @@ mod tests {
             &self,
             _request: &Request,
             _emit: StreamSink<'_>,
-            cancel: &CancellationToken,
+            control: &dyn OperationControl,
         ) -> Result<Response, ProviderError> {
-            cancel.cancelled().await;
+            control.cancellation_token().cancelled().await;
             Err(ProviderError::Cancelled)
         }
     }
@@ -1071,7 +1163,7 @@ mod tests {
         async fn execute(
             &self,
             call: crate::tool::ToolCall<'_>,
-            _cancel: &CancellationToken,
+            _control: &dyn OperationControl,
         ) -> crate::tool::ToolExecution {
             if call.name != "echo" {
                 return crate::tool::ToolExecution {
@@ -1235,7 +1327,7 @@ mod tests {
             async fn execute(
                 &self,
                 _call: crate::tool::ToolCall<'_>,
-                _cancel: &CancellationToken,
+                _control: &dyn OperationControl,
             ) -> crate::tool::ToolExecution {
                 crate::tool::ToolExecution::completed(ToolResult {
                     content: "live".into(),
@@ -1299,6 +1391,55 @@ mod tests {
             }]
         );
         assert!(agent.session().messages().is_empty());
+    }
+
+    #[test]
+    fn deadline_tool_stop_is_typed_and_not_started() {
+        let execution = stopped_tool_execution(OperationStopReason::Deadline);
+        assert_eq!(
+            execution.outcome,
+            OperationOutcome {
+                disposition: OperationDisposition::DeadlineExceeded,
+                effect_certainty: EffectCertainty::NotStarted,
+                stop_reason: Some(OperationStopReason::Deadline),
+            }
+        );
+        assert_eq!(
+            execution.result.content,
+            ProviderError::DeadlineExceeded.to_string()
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn deadline_before_provider_dispatch_is_a_typed_error() {
+        let provider = ScriptedProvider::new(Vec::new());
+        let agent = Agent::new(
+            provider,
+            EchoExecutor,
+            MemorySession::default(),
+            test_options(),
+        );
+        let control = StoppedControl {
+            token: CancellationToken::new(),
+            reason: OperationStopReason::Deadline,
+        };
+        let error = agent
+            .run_with_control("hello", &mut |_| {}, &control)
+            .await
+            .expect_err("deadline must stop dispatch");
+        assert!(matches!(
+            error,
+            AgentError::Provider(ProviderError::DeadlineExceeded)
+        ));
+        assert!(
+            agent
+                .provider()
+                .requests
+                .lock()
+                .expect("requests")
+                .is_empty()
+        );
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

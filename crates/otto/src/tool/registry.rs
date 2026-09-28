@@ -6,9 +6,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use otto_core::model::{EffectCertainty, OperationDisposition, OperationOutcome, ToolDefinition};
+use otto_core::model::{
+    EffectCertainty, OperationDisposition, OperationOutcome, OperationStopReason, ToolDefinition,
+};
+use otto_core::operation::OperationControl;
 use otto_core::tool::{ToolCall, ToolExecution, ToolExecutor, ToolResult};
-use tokio_util::sync::CancellationToken;
 
 use super::{CONTEXT_CANCELED, Tool};
 
@@ -78,6 +80,20 @@ fn not_started(result: ToolResult) -> ToolExecution {
     }
 }
 
+fn stopped_not_started(reason: OperationStopReason) -> ToolExecution {
+    let (text, disposition) = match reason {
+        OperationStopReason::Deadline => (
+            "operation deadline exceeded",
+            OperationDisposition::DeadlineExceeded,
+        ),
+        _ => (CONTEXT_CANCELED, OperationDisposition::Cancelled),
+    };
+    let mut execution = not_started(ToolResult::error(text));
+    execution.outcome.disposition = disposition;
+    execution.outcome.stop_reason = Some(reason);
+    execution
+}
+
 /// Tool overrides may narrow a completed result to a more conservative
 /// certainty. They may never upgrade an uncertain result to `Completed`.
 fn settle_tool_result(mut result: ToolResult) -> ToolExecution {
@@ -109,13 +125,9 @@ impl ToolExecutor for Registry {
         self.ordered.iter().map(|tool| tool.definition()).collect()
     }
 
-    async fn execute(&self, call: ToolCall<'_>, cancel: &CancellationToken) -> ToolExecution {
-        if cancel.is_cancelled() {
-            let mut execution = not_started(ToolResult::error(CONTEXT_CANCELED));
-            execution.outcome.disposition = OperationDisposition::Cancelled;
-            execution.outcome.stop_reason =
-                Some(otto_core::model::OperationStopReason::UserCancellation);
-            return execution;
+    async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution {
+        if let Some(reason) = control.stop_reason() {
+            return stopped_not_started(reason);
         }
 
         let Some(tool) = self.lookup(call.name) else {
@@ -128,14 +140,24 @@ impl ToolExecutor for Registry {
             return not_started(ToolResult::error(text));
         }
 
-        let result = tool.execute(call.arguments, cancel).await;
+        let result = tool
+            .execute(call.arguments, control.cancellation_token())
+            .await;
         let has_override = result.outcome_override.is_some();
         let mut execution = settle_tool_result(result);
 
-        if cancel.is_cancelled() && !has_override {
-            execution.outcome = outcome(OperationDisposition::Cancelled, EffectCertainty::Unknown);
-            execution.outcome.stop_reason =
-                Some(otto_core::model::OperationStopReason::UserCancellation);
+        if let Some(reason) = control.stop_reason()
+            && !has_override
+        {
+            execution.outcome = outcome(
+                if reason == OperationStopReason::Deadline {
+                    OperationDisposition::DeadlineExceeded
+                } else {
+                    OperationDisposition::Cancelled
+                },
+                EffectCertainty::Unknown,
+            );
+            execution.outcome.stop_reason = Some(reason);
         }
 
         if let Some(guard) = &self.guard
@@ -156,6 +178,7 @@ mod tests {
     use crate::tool::testutil::raw;
     use crate::tool::{definition, text_result};
     use otto_core::model::{OperationId, OperationStopReason};
+    use tokio_util::sync::CancellationToken;
 
     struct FakeTool {
         name: &'static str,

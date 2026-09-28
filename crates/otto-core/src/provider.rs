@@ -7,18 +7,19 @@
 //! Ownership: the request is borrowed read-only for the duration of the call
 //! and must not be retained. The returned [`Response`] belongs to the caller.
 //!
-//! Concurrency and cancellation: the `emit` callback is called synchronously
-//! and in order from inside `complete`, and must not be called after `complete`
-//! returns. When the token is cancelled, an implementation stops the call and
-//! returns [`ProviderError::Cancelled`].
+//! Concurrency and operation control: the `emit` callback is called
+//! synchronously and in order from inside `complete`, and must not be called
+//! after `complete` returns. Implementations observe the shared operation
+//! control without resetting its budget. User cancellation returns
+//! [`ProviderError::Cancelled`], while deadline exhaustion returns
+//! [`ProviderError::DeadlineExceeded`].
 //!
 //! Errors: every failure is a [`ProviderError`]. A context-window rejection is
 //! [`ProviderError::Overflow`] so the agent can distinguish it from a transport
 //! failure.
 
-use tokio_util::sync::CancellationToken;
-
 use crate::model::{Message, ToolDefinition};
+use crate::operation::OperationControl;
 
 /// One completion request. Built fresh from session state for each provider
 /// call; implementations translate it to their wire format.
@@ -118,6 +119,9 @@ pub enum ProviderError {
     /// The request does not fit in the model's context window.
     #[error(transparent)]
     Overflow(#[from] ContextOverflowError),
+    /// The operation's deadline was exhausted.
+    #[error("provider call deadline exceeded")]
+    DeadlineExceeded,
     /// The call stopped because its cancellation token was cancelled.
     #[error("provider call was cancelled")]
     Cancelled,
@@ -157,7 +161,7 @@ pub trait Provider {
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<Response, ProviderError>;
 }
 
@@ -213,6 +217,14 @@ mod tests {
             ..ContextOverflowError::default()
         });
         assert_eq!(error.to_string(), "context window exceeded (HTTP 400)");
+    }
+
+    #[test]
+    fn provider_error_deadline_text() {
+        assert_eq!(
+            ProviderError::DeadlineExceeded.to_string(),
+            "provider call deadline exceeded"
+        );
     }
 
     #[test]

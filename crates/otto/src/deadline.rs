@@ -1,8 +1,13 @@
 //! Monotonic deadlines for native asynchronous operations.
 
 use std::future::pending;
+use std::sync::Mutex;
 use std::time::Duration;
+
+use otto_core::model::OperationStopReason;
+use otto_core::operation::OperationControl;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 /// An absolute monotonic deadline, or no deadline at all.
 ///
@@ -68,10 +73,80 @@ impl Deadline {
     }
 }
 
+/// Invocation-scoped native operation control.
+///
+/// The deadline is absolute and immutable. The first stop request wins, then
+/// cancels the private token used to interrupt in-flight asynchronous work.
+pub struct Control {
+    deadline: Deadline,
+    token: CancellationToken,
+    stop_reason: Mutex<Option<OperationStopReason>>,
+}
+
+impl Control {
+    pub fn new(deadline: Deadline) -> Self {
+        Self {
+            deadline,
+            token: CancellationToken::new(),
+            stop_reason: Mutex::new(None),
+        }
+    }
+
+    /// Records the first stop reason and interrupts in-flight work.
+    pub fn stop(&self, reason: OperationStopReason) {
+        let mut current = self.stop_reason.lock().expect("operation stop reason");
+        if current.is_none() {
+            *current = Some(reason);
+            self.token.cancel();
+        }
+    }
+
+    pub fn deadline(&self) -> Deadline {
+        self.deadline
+    }
+}
+
+impl OperationControl for Control {
+    fn cancellation_token(&self) -> &CancellationToken {
+        &self.token
+    }
+
+    fn remaining(&self) -> Option<Duration> {
+        self.deadline.remaining()
+    }
+
+    fn stop_reason(&self) -> Option<OperationStopReason> {
+        *self.stop_reason.lock().expect("operation stop reason")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Deadline;
+    use super::{Control, Deadline};
+    use otto_core::model::OperationStopReason;
+    use otto_core::operation::OperationControl;
     use std::time::Duration;
+
+    #[test]
+    fn control_preserves_the_first_typed_stop_reason() {
+        let control = Control::new(Deadline::unlimited());
+        assert_eq!(control.stop_reason(), None);
+        assert!(!control.cancellation_token().is_cancelled());
+
+        control.stop(OperationStopReason::Deadline);
+        control.stop(OperationStopReason::UserCancellation);
+
+        assert_eq!(control.stop_reason(), Some(OperationStopReason::Deadline));
+        assert!(control.cancellation_token().is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn control_reports_the_same_absolute_remaining_budget() {
+        let control = Control::new(Deadline::after(Duration::from_secs(5)));
+        assert_eq!(control.remaining(), Some(Duration::from_secs(5)));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(control.remaining(), Some(Duration::from_secs(3)));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn earlier_uses_the_earliest_absolute_deadline() {

@@ -2,7 +2,7 @@
 //!
 //! The wire codec lives in [`otto_core::openaicompat`]; this module owns only
 //! the parts that need the network: base-URL validation, connection settings,
-//! the retry policy, the bounded error-body reader, and API-key redaction.
+//! the single-attempt policy, bounded error-body reader, and API-key redaction.
 //!
 //! Ownership: a [`Client`] owns its base URL, its API key, and its
 //! [`reqwest::Client`]. The request passed to `complete` is borrowed and never
@@ -12,10 +12,10 @@
 //! client can serve a parent agent and its sub-agents at the same time.
 //! `reqwest::Client` shares its connection pool across those calls.
 //!
-//! Cancellation: every await, the request send, each body read, and the retry
-//! backoff, races the caller's [`CancellationToken`]. A cancelled call returns
-//! [`ProviderError::Cancelled`] and never a transport error, so the agent can
-//! tell "the user stopped this" apart from "the provider failed".
+//! Operation control: every network await observes the caller's cancellation
+//! token. Stop reasons are checked before and after partial work; deadline and
+//! user cancellation remain distinct. A fully received and validated response
+//! wins a simultaneous stop.
 //!
 //! Errors: every failure is a [`ProviderError`]. Text of an
 //! [`ProviderError::Other`] is passed through API-key redaction before it
@@ -23,20 +23,17 @@
 //! allowlisted code, and two token counts, never provider text.
 
 use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{NaiveDateTime, Utc};
 use futures_util::TryStreamExt;
 use tokio_util::sync::CancellationToken;
 
+use otto_core::model::OperationStopReason;
 use otto_core::openaicompat::overflow::{MAX_ERROR_BODY, classify_overflow};
 use otto_core::openaicompat::protocol::{build_request, serialized_request_size};
 use otto_core::openaicompat::stream::StreamAssembler;
-use otto_core::provider::{
-    Provider, ProviderError, Request, RequestSizer, Response, StreamEvent, StreamSink,
-};
+use otto_core::operation::OperationControl;
+use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 
 use crate::gourl::{self, Encoding};
 
@@ -54,19 +51,11 @@ const KEEPALIVE: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Largest number of redirect hops followed before the policy stops.
 const MAX_REDIRECTS: usize = 3;
-/// Total attempts, the first plus at most two retries.
-const MAX_ATTEMPTS: u32 = 3;
-/// Backoff before the first retry; it doubles for each further retry.
-const BASE_BACKOFF: Duration = Duration::from_millis(250);
 /// The text an API key is replaced with when it is long enough to hold it.
 const REDACTED: &str = "[REDACTED]";
 /// Largest `GET /models` body read. A larger catalog is an error rather than
 /// an unbounded buffer.
 const MAX_MODELS_BODY: usize = 8 << 20;
-
-/// Waits out a retry backoff. Injected so tests observe the delays without
-/// waiting for them; production uses [`tokio::time::sleep`].
-type Sleeper = Arc<dyn Fn(Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// A usable client: the base URL passed validation and the HTTP client built.
 struct Ready {
@@ -83,7 +72,6 @@ pub struct Client {
     /// `Err` records why the client is unusable. Construction never fails; the
     /// stored message is returned from the first `complete`.
     state: Result<Ready, String>,
-    sleep: Sleeper,
 }
 
 impl Client {
@@ -100,7 +88,6 @@ impl Client {
         Self {
             api_key: api_key.to_string(),
             state,
-            sleep: Arc::new(|delay| Box::pin(tokio::time::sleep(delay))),
         }
     }
 
@@ -113,7 +100,6 @@ impl Client {
         Self {
             api_key: api_key.to_string(),
             state: Self::ready(base_url, http),
-            sleep: Arc::new(|delay| Box::pin(tokio::time::sleep(delay))),
         }
     }
 
@@ -122,15 +108,6 @@ impl Client {
             Some(base_url) => Ok(Ready { base_url, http }),
             None => Err("invalid OpenAI-compatible base URL".to_string()),
         }
-    }
-
-    /// Replaces the backoff sleeper so a test can record delays instead of
-    /// waiting. Cancellation is handled by the caller of the sleeper, so a
-    /// test sleeper only has to resolve.
-    #[cfg(test)]
-    fn with_sleeper(mut self, sleep: Sleeper) -> Self {
-        self.sleep = sleep;
-        self
     }
 
     /// Lists the model ids the endpoint reports at `GET {base}/models`, sorted
@@ -178,7 +155,7 @@ impl Client {
         if !status.is_success() {
             let status = status.as_u16();
             return Err(match read_error_body(response, cancel).await {
-                ErrorBody::Cancelled => ProviderError::Cancelled,
+                ErrorBody::Stopped(error) => error,
                 ErrorBody::Unreadable => ProviderError::Other(format!(
                     "OpenAI-compatible HTTP {status} (error body unreadable)"
                 )),
@@ -232,8 +209,9 @@ impl Client {
         ready: &Ready,
         payload: &[u8],
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
-    ) -> Result<Response, Failure> {
+        control: &dyn OperationControl,
+    ) -> Result<Response, ProviderError> {
+        check_running(control)?;
         let send = ready
             .http
             .post(format!("{}/chat/completions", ready.base_url))
@@ -242,61 +220,67 @@ impl Client {
             .header("Accept", "text/event-stream")
             .body(payload.to_vec())
             .send();
-        let response = match with_cancel(cancel, send).await {
-            None => return Err(Failure::cancelled()),
-            Some(Ok(response)) => response,
-            Some(Err(error)) => {
-                // A redirect-policy rejection is a decision, not a transient
-                // fault, so it is the one send failure that is not retried.
-                let retryable = !error.is_redirect();
-                return Err(Failure {
-                    error: ProviderError::Other(format!(
-                        "send chat completion request: {}",
-                        error_chain(&error)
-                    )),
-                    emitted: false,
-                    retryable,
-                    retry_after: None,
-                    reason: "connection error".into(),
-                });
+        let response = match await_control(control, send).await? {
+            Ok(response) => response,
+            Err(error) => {
+                check_running(control)?;
+                return Err(ProviderError::Other(format!(
+                    "send chat completion request: {}",
+                    error_chain(&error)
+                )));
             }
         };
 
         let status = response.status();
         if !status.is_success() {
-            return Err(self.error_response(status.as_u16(), response, cancel).await);
+            return Err(self
+                .error_response(status.as_u16(), response, control)
+                .await);
         }
 
         let mut assembler = StreamAssembler::new();
         let mut body = Box::pin(response.bytes_stream());
         while !assembler.is_done() {
-            let chunk = match with_cancel(cancel, body.try_next()).await {
-                None => return Err(Failure::cancelled()),
-                Some(Ok(Some(chunk))) => chunk,
-                Some(Ok(None)) => break,
-                // The only retryable stream failure: the body was cut short
-                // before the response finished.
-                Some(Err(error)) => {
-                    return Err(Failure {
-                        error: ProviderError::Other(format!(
-                            "read chat completion stream: {}",
-                            error_chain(&error)
-                        )),
-                        emitted: assembler.emitted(),
-                        retryable: true,
-                        retry_after: None,
-                        reason: "stream interrupted".into(),
-                    });
+            let chunk = match await_control(control, body.try_next()).await? {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    check_running(control)?;
+                    return Err(ProviderError::Other(format!(
+                        "read chat completion stream: {}",
+                        error_chain(&error)
+                    )));
                 }
             };
-            if let Err(error) = assembler.push(&chunk, &mut *emit) {
-                return Err(Failure::fatal(error.to_string(), assembler.emitted()));
+            {
+                if let Err(error) = assembler.push(&chunk, &mut *emit) {
+                    check_running(control)?;
+                    return Err(ProviderError::Other(error.to_string()));
+                }
+                // Once a complete response has been received and validated, it
+                // wins a simultaneous stop. Before then, the stop reason wins.
+                if assembler.is_done() {
+                    return match assembler.finish(&mut *emit) {
+                        Ok(response) => Ok(response),
+                        Err(error) => {
+                            check_running(control)?;
+                            Err(ProviderError::Other(error.to_string()))
+                        }
+                    };
+                }
+                check_running(control)?;
             }
         }
-        let emitted = assembler.emitted();
-        assembler
+        let result = assembler
             .finish(&mut *emit)
-            .map_err(|error| Failure::fatal(error.to_string(), emitted))
+            .map_err(|error| ProviderError::Other(error.to_string()));
+        match result {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                check_running(control)?;
+                Err(error)
+            }
+        }
     }
 
     /// Turns a non-2xx response into a failure, reading a bounded prefix of
@@ -305,52 +289,28 @@ impl Client {
         &self,
         status: u16,
         response: reqwest::Response,
-        cancel: &CancellationToken,
-    ) -> Failure {
-        // The header is captured on every non-2xx status, retryable or not, and
-        // consulted only when a retry is decided on.
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(parse_retry_after);
-        let body = match read_error_body(response, cancel).await {
-            ErrorBody::Cancelled => return Failure::cancelled(),
+        control: &dyn OperationControl,
+    ) -> ProviderError {
+        let body = match read_error_body(response, control).await {
+            ErrorBody::Stopped(error) => return error,
             ErrorBody::Unreadable => {
-                return Failure {
-                    error: ProviderError::Other(format!(
-                        "OpenAI-compatible HTTP {status} (error body unreadable)"
-                    )),
-                    emitted: false,
-                    retryable: is_retryable_status(status),
-                    retry_after,
-                    reason: format!("HTTP {status}"),
-                };
+                return ProviderError::Other(format!(
+                    "OpenAI-compatible HTTP {status} (error body unreadable)"
+                ));
             }
             ErrorBody::Body(body) => body,
         };
-        // Redaction runs before classification so that an API key which itself
-        // reads like an overflow message cannot forge a typed overflow error.
         let safe = self.redact(&body);
+        if let Err(error) = check_running(control) {
+            return error;
+        }
         if let Some(overflow) = classify_overflow(status, &safe) {
-            return Failure {
-                error: ProviderError::Overflow(overflow),
-                emitted: false,
-                retryable: false,
-                retry_after: None,
-                reason: String::new(),
-            };
+            return ProviderError::Overflow(overflow);
         }
-        Failure {
-            error: ProviderError::Other(format!(
-                "OpenAI-compatible HTTP {status}: {}",
-                String::from_utf8_lossy(&safe).trim()
-            )),
-            emitted: false,
-            retryable: is_retryable_status(status),
-            retry_after,
-            reason: format!("HTTP {status}"),
-        }
+        ProviderError::Other(format!(
+            "OpenAI-compatible HTTP {status}: {}",
+            String::from_utf8_lossy(&safe).trim()
+        ))
     }
 
     /// Redacts the API key from text that is about to leave the module.
@@ -397,18 +357,16 @@ impl Client {
 
 #[async_trait::async_trait]
 impl Provider for Client {
-    /// Sends one chat completion and assembles the streamed response.
-    ///
-    /// Retries at most twice, and only while nothing has been emitted: once
-    /// the frontend has seen part of a response, a retry would duplicate it.
-    /// Retryable failures are HTTP 429 and 5xx, a send failure that is not a
-    /// redirect-policy rejection, and a body cut short mid-stream.
+    /// Sends exactly one chat completion and assembles its streamed response.
+    /// Transport errors, 429/5xx statuses, and interrupted streams are never
+    /// retried because a transport cannot prove that the request had no effect.
     async fn complete(
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
+        check_running(control)?;
         let ready = match &self.state {
             Ok(ready) => ready,
             Err(error) => return Err(ProviderError::Other(error.clone())),
@@ -418,32 +376,10 @@ impl Provider for Client {
                 "encode chat completion request: {error}"
             )))
         })?;
-
-        for attempt in 0..MAX_ATTEMPTS {
-            let failure = match self.attempt(ready, &payload, &mut *emit, cancel).await {
-                Ok(response) => return Ok(response),
-                Err(failure) => failure,
-            };
-            if cancel.is_cancelled() {
-                return Err(ProviderError::Cancelled);
-            }
-            if !failure.retryable || failure.emitted || attempt == MAX_ATTEMPTS - 1 {
-                return Err(self.safe_error(failure.error));
-            }
-            let delay = failure
-                .retry_after
-                .unwrap_or(BASE_BACKOFF * (1u32 << attempt));
-            emit(StreamEvent::Retry {
-                attempt: attempt + 2,
-                max_attempts: MAX_ATTEMPTS,
-                delay,
-                reason: failure.reason,
-            });
-            if with_cancel(cancel, (self.sleep)(delay)).await.is_none() {
-                return Err(ProviderError::Cancelled);
-            }
-        }
-        unreachable!("the loop returns on the last attempt")
+        check_running(control)?;
+        self.attempt(ready, &payload, emit, control)
+            .await
+            .map_err(|error| self.safe_error(error))
     }
 }
 
@@ -456,47 +392,9 @@ impl RequestSizer for Client {
     }
 }
 
-/// One failed attempt, and what the retry loop needs to decide about it.
-struct Failure {
-    error: ProviderError,
-    /// A stream event already reached the caller, so a retry would duplicate
-    /// visible output.
-    emitted: bool,
-    retryable: bool,
-    /// The delay a `Retry-After` header asked for, used only when retrying.
-    retry_after: Option<Duration>,
-    /// What [`StreamEvent::Retry`] reports: the HTTP status or the transport
-    /// error class. Never body text.
-    reason: String,
-}
-
-impl Failure {
-    fn cancelled() -> Self {
-        Self {
-            error: ProviderError::Cancelled,
-            emitted: false,
-            retryable: false,
-            retry_after: None,
-            reason: String::new(),
-        }
-    }
-
-    /// A decoding failure: the response arrived intact and was rejected, so
-    /// repeating the request would only produce the same rejection.
-    fn fatal(message: String, emitted: bool) -> Self {
-        Self {
-            error: ProviderError::Other(message),
-            emitted,
-            retryable: false,
-            retry_after: None,
-            reason: String::new(),
-        }
-    }
-}
-
 /// The outcome of reading a bounded prefix of an error body.
 enum ErrorBody {
-    Cancelled,
+    Stopped(ProviderError),
     Unreadable,
     Body(Vec<u8>),
 }
@@ -505,28 +403,66 @@ enum ErrorBody {
 ///
 /// Reading stops as soon as the bound is passed, so the rest of the body is
 /// never buffered. The result is truncated to exactly the bound.
-async fn read_error_body(response: reqwest::Response, cancel: &CancellationToken) -> ErrorBody {
+async fn read_error_body(response: reqwest::Response, control: &dyn OperationControl) -> ErrorBody {
     let mut stream = Box::pin(response.bytes_stream());
     let mut body: Vec<u8> = Vec::new();
     while body.len() <= MAX_ERROR_BODY {
-        match with_cancel(cancel, stream.try_next()).await {
-            None => return ErrorBody::Cancelled,
-            Some(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
-            Some(Ok(None)) => break,
-            Some(Err(_)) => return ErrorBody::Unreadable,
+        match await_control(control, stream.try_next()).await {
+            Err(error) => return ErrorBody::Stopped(error),
+            Ok(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
+            Ok(Ok(None)) => break,
+            Ok(Err(_)) => {
+                if let Err(error) = check_running(control) {
+                    return ErrorBody::Stopped(error);
+                }
+                return ErrorBody::Unreadable;
+            }
         }
     }
     body.truncate(MAX_ERROR_BODY);
     ErrorBody::Body(body)
 }
 
-/// Races `future` against the cancellation token. `None` means the token was
-/// cancelled, in which case `future` was dropped without completing.
+/// Races a model-list await against its legacy per-call cancellation token.
 async fn with_cancel<T>(cancel: &CancellationToken, future: impl Future<Output = T>) -> Option<T> {
     tokio::select! {
         biased;
-        () = cancel.cancelled() => None,
         value = future => Some(value),
+        () = cancel.cancelled() => None,
+    }
+}
+
+fn stop_error(control: &dyn OperationControl) -> Option<ProviderError> {
+    control.stop_reason().map(|reason| match reason {
+        OperationStopReason::Deadline => ProviderError::DeadlineExceeded,
+        OperationStopReason::UserCancellation
+        | OperationStopReason::Shutdown
+        | OperationStopReason::Migration
+        | OperationStopReason::TransportLost
+        | OperationStopReason::ProcessLost => ProviderError::Cancelled,
+    })
+}
+
+fn check_running(control: &dyn OperationControl) -> Result<(), ProviderError> {
+    match stop_error(control) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Runs one await against the operation token. A ready future wins the token
+/// race; callers still inspect the stop reason before accepting partial work.
+async fn await_control<T>(
+    control: &dyn OperationControl,
+    future: impl Future<Output = T>,
+) -> Result<T, ProviderError> {
+    check_running(control)?;
+    tokio::select! {
+        biased;
+        value = future => Ok(value),
+        () = control.cancellation_token().cancelled() => {
+            Err(stop_error(control).unwrap_or(ProviderError::Cancelled))
+        }
     }
 }
 
@@ -541,44 +477,6 @@ fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
         source = cause.source();
     }
     text
-}
-
-/// Reports whether a status is worth another attempt: rate limiting, or any
-/// server-side error.
-fn is_retryable_status(status: u16) -> bool {
-    status == 429 || (500..=599).contains(&status)
-}
-
-/// The three date layouts Go's `http.ParseTime` accepts, as chrono formats.
-/// None of them carries a usable offset, so all three are read as UTC, which
-/// is what the two GMT-anchored layouts mean and the closest reading of the
-/// third.
-const HTTP_DATE_FORMATS: [&str; 3] = [
-    "%a, %d %b %Y %H:%M:%S GMT",
-    "%A, %d-%b-%y %H:%M:%S %Z",
-    "%a %b %e %H:%M:%S %Y",
-];
-
-/// Parses a `Retry-After` header value into a delay.
-///
-/// A non-negative integer count of seconds wins. Otherwise an HTTP date is
-/// tried and its distance from now is used, clamped at zero for a date in the
-/// past. Anything else yields `None`, and the caller falls back to the
-/// exponential backoff.
-fn parse_retry_after(value: &str) -> Option<Duration> {
-    if value.is_empty() {
-        return None;
-    }
-    if let Ok(seconds) = value.trim().parse::<i64>() {
-        return u64::try_from(seconds).ok().map(Duration::from_secs);
-    }
-    let now = Utc::now();
-    for format in HTTP_DATE_FORMATS {
-        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, format) {
-            return Some((parsed.and_utc() - now).to_std().unwrap_or(Duration::ZERO));
-        }
-    }
-    None
 }
 
 /// The hardened client used when the caller supplies none.
@@ -656,8 +554,8 @@ fn normalize_base_url(base_url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use otto_core::model::{Block, Message, Role};
     use otto_core::provider::StreamEvent;
@@ -670,12 +568,42 @@ mod tests {
     const DONE_STREAM: &str =
         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
+    struct StoppedControl {
+        token: CancellationToken,
+        reason: OperationStopReason,
+    }
+
+    impl StoppedControl {
+        fn deadline() -> Self {
+            let token = CancellationToken::new();
+            token.cancel();
+            Self {
+                token,
+                reason: OperationStopReason::Deadline,
+            }
+        }
+    }
+
+    impl OperationControl for StoppedControl {
+        fn cancellation_token(&self) -> &CancellationToken {
+            &self.token
+        }
+
+        fn remaining(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+
+        fn stop_reason(&self) -> Option<OperationStopReason> {
+            Some(self.reason)
+        }
+    }
+
     /// A loopback HTTP/1.1 origin server.
     ///
     /// The accept loop is aborted when the guard is dropped, so a test never
     /// leaks a listener. Handlers return the exact bytes to write, which lets
     /// the same helper serve well-formed responses and the truncated or absent
-    /// ones the retry tests need.
+    /// ones the single-attempt tests need.
     struct TestServer {
         base_url: String,
         accept: tokio::task::JoinHandle<()>,
@@ -780,25 +708,6 @@ mod tests {
         out.into_bytes()
     }
 
-    /// A sleeper that records every delay and returns immediately.
-    fn recording_sleeper() -> (Sleeper, Arc<Mutex<Vec<Duration>>>) {
-        let delays = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&delays);
-        let sleeper: Sleeper = Arc::new(move |delay| {
-            recorded
-                .lock()
-                .expect("delay log is not poisoned")
-                .push(delay);
-            Box::pin(std::future::ready(()))
-        });
-        (sleeper, delays)
-    }
-
-    /// A sleeper that fails the test if the retry loop ever waits.
-    fn forbidden_sleeper() -> Sleeper {
-        Arc::new(|_| panic!("a non-retryable response slept"))
-    }
-
     fn model_request() -> Request {
         Request {
             model: "model".to_string(),
@@ -814,273 +723,109 @@ mod tests {
             .await
     }
 
-    // --- retry -----------------------------------------------------------
+    #[tokio::test]
+    async fn a_deadline_stopped_call_reports_deadline_exceeded() {
+        let server = spawn_server(|_head, _body| {
+            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
+        })
+        .await;
+        let client = Client::new(&server.base_url, "key");
+        let mut emit = |_: StreamEvent| panic!("no event is emitted after deadline");
+        let error = client
+            .complete(&model_request(), &mut emit, &StoppedControl::deadline())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProviderError::DeadlineExceeded),
+            "{error:?}"
+        );
+    }
+
+    // --- single attempt --------------------------------------------------
 
     #[tokio::test]
-    async fn retries_rate_limits_and_server_errors_at_most_twice() {
+    async fn rate_limits_and_server_errors_are_not_retried() {
         for status in [429u16, 503] {
             let attempts = Arc::new(AtomicUsize::new(0));
             let counter = Arc::clone(&attempts);
             let server = spawn_server(move |_head, _body| {
-                if counter.fetch_add(1, Ordering::SeqCst) < 2 {
-                    return http_response(status, &[], "try again");
-                }
-                http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
+                counter.fetch_add(1, Ordering::SeqCst);
+                http_response(status, &[], "try again")
             })
             .await;
 
-            let (sleeper, delays) = recording_sleeper();
-            let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-            complete(&client, &model_request())
+            let client = Client::new(&server.base_url, "key");
+            let mut events = Vec::new();
+            let mut emit = |event| events.push(event);
+            let error = client
+                .complete(&model_request(), &mut emit, &CancellationToken::new())
                 .await
-                .expect("the third attempt succeeds");
-
-            assert_eq!(attempts.load(Ordering::SeqCst), 3, "status {status}");
-            assert_eq!(
-                *delays.lock().expect("delay log is not poisoned"),
-                vec![Duration::from_millis(250), Duration::from_millis(500)],
-                "status {status}"
+                .expect_err("the first status is returned");
+            assert!(error.to_string().contains(&status.to_string()));
+            assert_eq!(attempts.load(Ordering::SeqCst), 1, "status {status}");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, StreamEvent::Retry { .. })),
+                "status {status} emitted a retry"
             );
         }
     }
 
     #[tokio::test]
-    async fn each_retry_is_reported_before_its_backoff_without_the_body() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&attempts);
-        let server = spawn_server(move |_head, _body| {
-            if counter.fetch_add(1, Ordering::SeqCst) < 2 {
-                return http_response(503, &[], "secret body text");
-            }
-            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
-        })
-        .await;
-        let (sleeper, _) = recording_sleeper();
-        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-
-        let mut events = Vec::new();
-        let mut emit = |event: StreamEvent| events.push(event);
-        client
-            .complete(&model_request(), &mut emit, &CancellationToken::new())
-            .await
-            .expect("the third attempt succeeds");
-
-        let retry = |attempt, delay| StreamEvent::Retry {
-            attempt,
-            max_attempts: 3,
-            delay: Duration::from_millis(delay),
-            reason: "HTTP 503".into(),
-        };
-        let retries: Vec<_> = events
-            .into_iter()
-            .filter(|event| matches!(event, StreamEvent::Retry { .. }))
-            .collect();
-        assert_eq!(retries, vec![retry(2, 250), retry(3, 500)]);
-    }
-
-    #[tokio::test]
-    async fn honors_retry_after_seconds() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&attempts);
-        let server = spawn_server(move |_head, _body| {
-            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                return http_response(429, &[("Retry-After", "0")], "retry");
-            }
-            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
-        })
-        .await;
-
-        let (sleeper, delays) = recording_sleeper();
-        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-        complete(&client, &model_request())
-            .await
-            .expect("the second attempt succeeds");
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            *delays.lock().expect("delay log is not poisoned"),
-            vec![Duration::ZERO]
-        );
-    }
-
-    #[tokio::test]
-    async fn honors_retry_after_http_date() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&attempts);
-        let server = spawn_server(move |_head, _body| {
-            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                let at = (Utc::now() + chrono::TimeDelta::seconds(10))
-                    .format("%a, %d %b %Y %H:%M:%S GMT")
-                    .to_string();
-                return http_response(429, &[("Retry-After", &at)], "retry");
-            }
-            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
-        })
-        .await;
-
-        let (sleeper, delays) = recording_sleeper();
-        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-        complete(&client, &model_request())
-            .await
-            .expect("the second attempt succeeds");
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        let delays = delays.lock().expect("delay log is not poisoned");
-        assert_eq!(delays.len(), 1);
-        assert!(
-            delays[0] > Duration::from_secs(8) && delays[0] <= Duration::from_secs(10),
-            "delay = {:?}",
-            delays[0]
-        );
-    }
-
-    #[tokio::test]
-    async fn does_not_retry_redirect_policy_errors() {
+    async fn send_errors_are_not_retried() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
         let server = spawn_server(move |_head, _body| {
             counter.fetch_add(1, Ordering::SeqCst);
-            http_response(302, &[("Location", "/elsewhere")], "")
+            Vec::new()
         })
         .await;
 
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                attempt.error("redirect blocked")
-            }))
-            .build()
-            .expect("build a test HTTP client");
-        let client = Client::with_http_client(&server.base_url, "key", http)
-            .with_sleeper(forbidden_sleeper());
-
-        complete(&client, &model_request())
+        complete(&Client::new(&server.base_url, "key"), &model_request())
             .await
-            .expect_err("a blocked redirect is an error");
+            .expect_err("the first send failure is returned");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn retries_connection_errors() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&attempts);
-        let server = spawn_server(move |_head, _body| {
-            if counter.fetch_add(1, Ordering::SeqCst) < 2 {
-                return Vec::new();
-            }
-            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
-        })
-        .await;
-
-        let (sleeper, _) = recording_sleeper();
-        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-        complete(&client, &model_request())
-            .await
-            .expect("the third attempt succeeds");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn retries_stream_read_error_before_delta() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&attempts);
-        let server = spawn_server(move |_head, _body| {
-            if counter.fetch_add(1, Ordering::SeqCst) < 2 {
-                return truncated_stream("");
-            }
-            http_response(200, &[("Content-Type", "text/event-stream")], DONE_STREAM)
-        })
-        .await;
-
-        let (sleeper, _) = recording_sleeper();
-        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-        complete(&client, &model_request())
-            .await
-            .expect("the third attempt succeeds");
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn does_not_retry_after_a_visible_delta() {
-        let cases = [
-            r#"{"choices":[{"delta":{"content":"visible"}}]}"#,
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"read","arguments":"{"}}]}}]}"#,
-        ];
-        for data in cases {
-            let attempts = Arc::new(AtomicUsize::new(0));
-            let counter = Arc::clone(&attempts);
-            let server = spawn_server(move |_head, _body| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                truncated_stream(&format!("data: {data}\n\n"))
-            })
-            .await;
-
-            let client = Client::new(&server.base_url, "key").with_sleeper(forbidden_sleeper());
-            let seen = Arc::new(AtomicUsize::new(0));
-            let counted = Arc::clone(&seen);
-            let mut emit = move |_: StreamEvent| {
-                counted.fetch_add(1, Ordering::SeqCst);
-            };
-            let error = client
-                .complete(&model_request(), &mut emit, &CancellationToken::new())
-                .await
-                .expect_err("a truncated body is an error");
-
-            assert!(seen.load(Ordering::SeqCst) > 0, "no delta reached the sink");
-            assert!(
-                error.to_string().contains("read chat completion stream"),
-                "error = {error}"
-            );
-            assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn stops_after_three_retryable_attempts() {
+    async fn stream_cut_before_any_delta_is_not_retried() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
         let server = spawn_server(move |_head, _body| {
             counter.fetch_add(1, Ordering::SeqCst);
-            http_response(503, &[], "still unavailable")
+            truncated_stream("")
         })
         .await;
 
-        let (sleeper, delays) = recording_sleeper();
-        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-        complete(&client, &model_request())
+        complete(&Client::new(&server.base_url, "key"), &model_request())
             .await
-            .expect_err("every attempt failed");
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        assert_eq!(delays.lock().expect("delay log is not poisoned").len(), 2);
+            .expect_err("the first interrupted stream is returned");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn cancellation_during_retry_backoff_returns_cancelled() {
-        let server = spawn_server(|_head, _body| http_response(503, &[], "retry later")).await;
+    async fn stream_cut_after_a_delta_is_not_retried() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let server = spawn_server(move |_head, _body| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            truncated_stream("data: {\"choices\":[{\"delta\":{\"content\":\"visible\"}}]}\n\n")
+        })
+        .await;
 
-        let (started, sleeping) = tokio::sync::oneshot::channel::<()>();
-        let started = Arc::new(Mutex::new(Some(started)));
-        let sleeper: Sleeper = Arc::new(move |_| {
-            if let Some(sender) = started.lock().expect("sender is not poisoned").take() {
-                let _ = sender.send(());
-            }
-            Box::pin(std::future::pending::<()>())
-        });
-        let client = Client::new(&server.base_url, "key").with_sleeper(sleeper);
-
-        let cancel = CancellationToken::new();
-        let canceller = cancel.clone();
-        let mut emit = |_: StreamEvent| {};
-        let request = model_request();
-        let (result, ()) =
-            tokio::join!(client.complete(&request, &mut emit, &cancel), async move {
-                let _ = sleeping.await;
-                canceller.cancel();
-            });
+        let mut events = Vec::new();
+        let mut emit = |event| events.push(event);
+        Client::new(&server.base_url, "key")
+            .complete(&model_request(), &mut emit, &CancellationToken::new())
+            .await
+            .expect_err("the first interrupted stream is returned");
+        assert!(!events.is_empty());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(
-            matches!(result, Err(ProviderError::Cancelled)),
-            "result = {:?}",
-            result.err().map(|error| error.to_string())
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Retry { .. }))
         );
     }
 
@@ -1105,7 +850,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&source.base_url, "secret").with_sleeper(forbidden_sleeper());
+        let client = Client::new(&source.base_url, "secret");
         let error = complete(&client, &model_request())
             .await
             .expect_err("a cross-origin redirect is rejected");
@@ -1159,7 +904,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, KEY).with_sleeper(forbidden_sleeper());
+        let client = Client::new(&server.base_url, KEY);
         let message = complete(&client, &model_request())
             .await
             .expect_err("401 is an error")
@@ -1191,7 +936,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, KEY).with_sleeper(forbidden_sleeper());
+        let client = Client::new(&server.base_url, KEY);
         let error = complete(&client, &model_request())
             .await
             .expect_err("400 is an error");
@@ -1219,7 +964,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, "secret").with_sleeper(forbidden_sleeper());
+        let client = Client::new(&server.base_url, "secret");
         let error = complete(&client, &model_request())
             .await
             .expect_err("400 is an error");
@@ -1249,7 +994,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, KEY).with_sleeper(forbidden_sleeper());
+        let client = Client::new(&server.base_url, KEY);
         let error = complete(&client, &model_request())
             .await
             .expect_err("413 is an error");
@@ -1282,7 +1027,7 @@ mod tests {
         })
         .await;
 
-        let client = Client::new(&server.base_url, "key").with_sleeper(forbidden_sleeper());
+        let client = Client::new(&server.base_url, "key");
         let error = complete(&client, &model_request())
             .await
             .expect_err("400 is an error");

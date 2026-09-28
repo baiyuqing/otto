@@ -1447,7 +1447,7 @@ mod tests {
                 &self,
                 request: &ProviderRequest,
                 emit: StreamSink<'_>,
-                _cancel: &CancellationToken,
+                _control: &dyn otto_core::operation::OperationControl,
             ) -> Result<ProviderResponse, ProviderError> {
                 let call = {
                     let mut roles = self.roles.lock().expect("roles");

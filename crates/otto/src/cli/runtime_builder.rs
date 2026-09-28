@@ -10,6 +10,7 @@
 //! client, no bash tool, no runtime identity in the status line.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,7 +22,8 @@ use otto_core::agent::{
 };
 use otto_core::config::resolve::{Overrides, Runtime, SessionDefaults};
 use otto_core::config::{ConfigError, File, McpRuntime};
-use otto_core::model::{Block, Message, ToolDefinition};
+use otto_core::model::{Block, Message, OperationStopReason, ToolDefinition};
+use otto_core::operation::OperationControl;
 use otto_core::provider::{Provider, ProviderError, Request, RequestSizer, Response, StreamSink};
 use otto_core::session::{
     CURRENT_VERSION, CompactionCheckpoint, CompactionMetadata, Header, MemorySession,
@@ -30,6 +32,7 @@ use otto_core::session::{
 use otto_core::tool::ToolExecutor;
 use tokio_util::sync::CancellationToken;
 
+use crate::deadline::{Control, Deadline};
 use crate::failover;
 use crate::provider::openaicompat::Client;
 use crate::sandbox::CommandExecutor;
@@ -413,16 +416,40 @@ impl Provider for ProviderClient {
         &self,
         request: &Request,
         emit: StreamSink<'_>,
-        cancel: &CancellationToken,
+        control: &dyn OperationControl,
     ) -> Result<Response, ProviderError> {
         match self {
-            Self::Compat(client) => client.complete(request, emit, cancel).await,
-            Self::ChatGpt(client) => client.complete(request, emit, cancel).await,
+            Self::Compat(client) => client.complete(request, emit, control).await,
+            Self::ChatGpt(client) => client.complete(request, emit, control).await,
             Self::Unavailable => Err(ProviderError::Other(
                 "provider is unavailable: redaction is incomplete".to_string(),
             )),
             #[cfg(test)]
-            Self::Scripted(provider) => provider.complete(request, emit, cancel).await,
+            Self::Scripted(provider) => provider.complete(request, emit, control).await,
+        }
+    }
+}
+
+async fn drive_with_control<F, T>(
+    future: F,
+    parent_cancel: &CancellationToken,
+    control: &Control,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    let mut future = std::pin::pin!(future);
+    let deadline = control.deadline();
+    tokio::select! {
+        biased;
+        result = &mut future => result,
+        () = parent_cancel.cancelled() => {
+            control.stop(OperationStopReason::UserCancellation);
+            future.await
+        }
+        () = deadline.expired() => {
+            control.stop(OperationStopReason::Deadline);
+            future.await
         }
     }
 }
@@ -430,6 +457,7 @@ impl Provider for ProviderClient {
 /// One composed agent, plus the two fixed strings a frontend may show.
 pub struct Runner {
     agent: Agent<ProviderClient, Registry, SharedSession>,
+    turn_timeout: Option<Duration>,
     system_prompt: String,
     definitions: Vec<ToolDefinition>,
     usage: Option<crate::usage::Collector>,
@@ -459,8 +487,16 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
         let mut emit = self.collecting(emit);
-        self.agent.run(user_text, &mut emit, cancel).await
+        let run = self.agent.run_with_control(user_text, &mut emit, &control);
+        drive_with_control(run, cancel, &control).await
     }
 
     pub async fn run_with_image(
@@ -470,10 +506,18 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<(), AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
         let mut emit = self.collecting(emit);
-        self.agent
-            .run_with_image(user_text, Some(image), &mut emit, cancel)
-            .await
+        let run = self
+            .agent
+            .run_with_image_control(user_text, Some(image), &mut emit, &control);
+        drive_with_control(run, cancel, &control).await
     }
 
     /// Compacts the transcript.
@@ -483,8 +527,16 @@ impl Runner {
         emit: EventSink<'_>,
         cancel: &CancellationToken,
     ) -> Result<CompactionResult, AgentError> {
+        let control = Control::new(
+            self.turn_timeout
+                .map_or_else(Deadline::unlimited, Deadline::after),
+        );
+        if cancel.is_cancelled() {
+            control.stop(OperationStopReason::UserCancellation);
+        }
         let mut emit = self.collecting(emit);
-        self.agent.compact(focus, &mut emit, cancel).await
+        let compact = self.agent.compact_with_control(focus, &mut emit, &control);
+        drive_with_control(compact, cancel, &control).await
     }
 
     fn collecting<'a>(
@@ -632,6 +684,7 @@ impl Runner {
                     ..Options::default()
                 },
             ),
+            turn_timeout: None,
             system_prompt: String::new(),
             definitions,
             usage: None,
@@ -1245,6 +1298,7 @@ impl Builder {
         Ok((
             Runner {
                 agent: Agent::with_redactor(client, registry, session.clone(), options, redactor),
+                turn_timeout: runtime.resilience.deadlines.turn_timeout,
                 system_prompt,
                 definitions,
                 usage: self.usage_collector(session, runtime),
@@ -2065,7 +2119,7 @@ mod tests {
             &self,
             _request: &Request,
             _emit: StreamSink<'_>,
-            _cancel: &CancellationToken,
+            _control: &dyn OperationControl,
         ) -> Result<Response, ProviderError> {
             unreachable!("close-ordering test never sends a turn")
         }
@@ -2191,7 +2245,7 @@ mod tests {
             &self,
             _request: &Request,
             _emit: StreamSink<'_>,
-            _cancel: &CancellationToken,
+            _control: &dyn OperationControl,
         ) -> Result<Response, ProviderError> {
             unreachable!("migrate never sends a parent turn")
         }

@@ -8,8 +8,8 @@
 //! concurrently on a shared executor. Executors report cancellation and the
 //! certainty of any externally visible effects in the typed outcome.
 
+use crate::operation::OperationControl;
 use serde_json::value::RawValue;
-use tokio_util::sync::CancellationToken;
 
 use crate::model::{
     EffectCertainty, OperationDisposition, OperationId, OperationOutcome, OperationStopReason,
@@ -113,6 +113,16 @@ impl ToolResult {
         self
     }
 
+    /// Marks a deadline observed before dispatch.
+    pub fn deadline_not_started(mut self) -> Self {
+        self.outcome_override = Some(OperationOutcome {
+            disposition: OperationDisposition::DeadlineExceeded,
+            effect_certainty: EffectCertainty::NotStarted,
+            stop_reason: Some(OperationStopReason::Deadline),
+        });
+        self
+    }
+
     /// Marks cancellation after dispatch, when effects cannot be established.
     pub fn cancelled_unknown(mut self) -> Self {
         self.outcome_override = Some(OperationOutcome {
@@ -153,7 +163,7 @@ pub trait ToolExecutor {
 
     /// Runs one attempt. A name this executor does not serve must settle as
     /// `Error + NotStarted` with [`ToolResult::unknown_tool`].
-    async fn execute(&self, call: ToolCall<'_>, cancel: &CancellationToken) -> ToolExecution;
+    async fn execute(&self, call: ToolCall<'_>, control: &dyn OperationControl) -> ToolExecution;
 }
 
 #[cfg(test)]

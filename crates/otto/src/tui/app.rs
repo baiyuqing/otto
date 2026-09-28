@@ -296,13 +296,18 @@ pub(crate) struct App {
     phase: (String, Instant),
     pub status: Option<String>,
     ctrl_c_armed_at: Option<Instant>,
+    /// Snapshot of this session's sub-agent registry, refreshed from the
+    /// controller before every draw (see [`App::refresh_tasks`]). The panel
+    /// ([`super::render`]) reads only this field, never the registry itself,
+    /// so rendering performs no lock or query.
+    pub tasks: Vec<crate::subagent::tasks::Task>,
 }
 
 impl App {
     pub fn new(controller: &Controller) -> Self {
         let (entries, usage) = entries::entries_from_history(&controller.history());
         let history = History::seeded(prompt_history(&entries));
-        Self {
+        let mut app = Self {
             entries,
             usage,
             info: controller.info(),
@@ -324,7 +329,20 @@ impl App {
             phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
-        }
+            tasks: Vec::new(),
+        };
+        app.refresh_tasks(controller);
+        app
+    }
+
+    /// Refreshes [`App::tasks`] from the controller's live sub-agent
+    /// registry. Called before every draw so [`super::render`] never locks
+    /// or queries the registry itself.
+    pub(crate) fn refresh_tasks(&mut self, controller: &Controller) {
+        self.tasks = controller
+            .subagent_tasks()
+            .map(|tasks| tasks.list())
+            .unwrap_or_default();
     }
 
     /// Marks a turn as started. [`super::run_turn`]/[`super::run_compact`]/
@@ -1757,6 +1775,7 @@ mod tests {
             phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
+            tasks: Vec::new(),
         };
         assert!(app.handle_ctrl_c().is_none());
         assert_eq!(app.status.as_deref(), Some(CTRL_C_EXIT_STATUS));
@@ -1787,6 +1806,7 @@ mod tests {
             phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
+            tasks: Vec::new(),
         };
         assert!(app.handle_ctrl_c().is_none());
         assert!(app.input.is_empty());
@@ -1932,6 +1952,7 @@ mod tests {
             phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
+            tasks: Vec::new(),
         };
         let event = key(KeyCode::Char('?'), KeyModifiers::NONE);
         // No controller is available in a unit test; '?' with pending text
@@ -1965,6 +1986,7 @@ mod tests {
             phase: (String::new(), Instant::now()),
             status: None,
             ctrl_c_armed_at: None,
+            tasks: Vec::new(),
         };
 
         app.insert_text("one\ntwo");

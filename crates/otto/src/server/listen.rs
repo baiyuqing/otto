@@ -8,13 +8,13 @@
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A bound listener, either flavour.
 #[derive(Debug)]
 pub enum Listener {
     Tcp(tokio::net::TcpListener),
-    Unix(tokio::net::UnixListener),
+    Unix(tokio::net::UnixListener, SocketFile),
 }
 
 impl Listener {
@@ -25,12 +25,39 @@ impl Listener {
                 .local_addr()
                 .map(|address| address.to_string())
                 .unwrap_or_default(),
-            Self::Unix(listener) => listener
+            Self::Unix(listener, _) => listener
                 .local_addr()
                 .ok()
                 .and_then(|address| address.as_pathname().map(|path| path.display().to_string()))
                 .unwrap_or_default(),
         }
+    }
+}
+
+/// Removes the Unix socket file at `path` when dropped, but only if it still
+/// names the same socket this listener bound (matched by device and inode):
+/// by the time this drops, another `otto serve` may already have replaced a
+/// stale path with its own socket, and that one must not be deleted. A
+/// stat-then-unlink race window remains between the check and the removal.
+#[derive(Debug)]
+pub struct SocketFile {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl Drop for SocketFile {
+    fn drop(&mut self) {
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if !metadata.file_type().is_socket() {
+            return;
+        }
+        if metadata.dev() != self.dev || metadata.ino() != self.ino {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -40,7 +67,8 @@ impl Listener {
 /// exists it must be owned by the current user and not group- or
 /// world-accessible. A leftover socket file at `path` is dialed to tell a
 /// live server (rejected as "already running") from a stale one (removed and
-/// replaced).
+/// replaced). Dropping the returned listener removes the socket file at
+/// `path` unless the path now names a different file.
 pub fn listen_unix(path: &str) -> Result<Listener, String> {
     let directory = Path::new(path).parent().unwrap_or(Path::new("."));
     ensure_socket_directory(directory)?;
@@ -53,7 +81,20 @@ pub fn listen_unix(path: &str) -> Result<Listener, String> {
         let _ = std::fs::remove_file(path);
         return Err(format!("chmod {path}: {error}"));
     }
-    Ok(Listener::Unix(listener))
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(listener);
+            let _ = std::fs::remove_file(path);
+            return Err(format!("stat socket {path}: {error}"));
+        }
+    };
+    let socket_file = SocketFile {
+        path: PathBuf::from(path),
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    };
+    Ok(Listener::Unix(listener, socket_file))
 }
 
 fn ensure_socket_directory(directory: &Path) -> Result<(), String> {
@@ -231,11 +272,14 @@ mod tests {
     #[tokio::test]
     async fn a_stale_socket_is_replaced() {
         let directory = tempfile::tempdir().expect("tempdir");
+        let parent = directory.path().join("sub");
+        std::fs::create_dir(&parent).expect("mkdir");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         let path = socket_path(&directory);
-        let first = listen_unix(&path).expect("listen");
-        // Nothing unlinks the path, so dropping the listener leaves exactly
-        // the stale socket a killed process leaves behind.
-        drop(first);
+        // std's `UnixListener` does not unlink its path on drop, so this
+        // leaves the same stale socket a killed `otto serve` leaves behind.
+        let stale = std::os::unix::net::UnixListener::bind(&path).expect("bind stale");
+        drop(stale);
         assert!(
             std::fs::symlink_metadata(&path)
                 .expect("stale entry")
@@ -243,6 +287,32 @@ mod tests {
                 .is_socket()
         );
         let _second = listen_unix(&path).expect("stale socket should be replaced");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_listener_removes_the_socket_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = socket_path(&directory);
+        let listener = listen_unix(&path).expect("listen");
+        drop(listener);
+        let error = std::fs::symlink_metadata(&path).expect_err("socket file should be removed");
+        assert_eq!(error.kind(), ErrorKind::NotFound, "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_socket_replaced_before_drop_is_left_in_place() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = socket_path(&directory);
+        let listener = listen_unix(&path).expect("listen");
+
+        std::fs::remove_file(&path).expect("remove");
+        let replacement = std::os::unix::net::UnixListener::bind(&path).expect("bind replacement");
+
+        drop(listener);
+
+        let metadata = std::fs::symlink_metadata(&path).expect("replacement should remain");
+        assert!(metadata.file_type().is_socket());
+        drop(replacement);
     }
 
     #[tokio::test]

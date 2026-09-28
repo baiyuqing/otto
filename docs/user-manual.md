@@ -532,9 +532,11 @@ OTTO_UI=repl otto
   carries in a reply.
 - Entries are separated by a blank line.
 - While a turn is running, an animated status line is shown under the
-  transcript, and the composer title reads `Working (Esc to cancel)`. The line
-  reads `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and
-  the seconds since the turn started. The phase is `waiting for model`,
+  transcript, and the composer title reads `Working — type, then Enter to
+  queue next input · Esc cancels turn` (or, once a next input is queued,
+  `Queued next input · Ctrl+U withdraw · Esc cancels turn`). The line reads
+  `PHASE · Ns · turn Ms`: the current phase, the seconds spent in it, and the
+  seconds since the turn started. The phase is `waiting for model`,
   `reasoning`, `responding`, `compacting`, `running TOOL ARGS` (arguments
   truncated to 60 characters), or `retry A/M after REASON, waiting DELAY` when
   the provider request is retried after a connection error, an interrupted
@@ -556,6 +558,9 @@ OTTO_UI=repl otto
   lines already submitted, and `↓` past the newest one restores what was being
   typed. It starts from the prompts the session already had, so a resumed
   session can recall its own, and it is not persisted across runs.
+- The composer shows at least 3 input rows even when empty or short, and
+  grows with wrapped input up to 12 rows before it scrolls instead of
+  growing further.
 - `/image <path>` attaches one PNG, JPEG, or WebP image to the next ordinary
   prompt. The path may contain spaces. A later `/image` replaces the pending
   image.
@@ -566,10 +571,20 @@ OTTO_UI=repl otto
   trailing blanks dropped, including the padding a prompt's band adds, so a
   command or a code block pastes as it was written; indentation the text
   itself carried is kept.
-- The footer shows profile/model, reasoning effort, the sandbox state
-  (`seatbelt · workspace-write · network allowed`, `sandbox off · WARNING: bash
-  is unsandboxed`, or `bash disabled · sandbox unavailable`), the workspace,
-  token totals, the context percentage, and the session ID when space allows.
+- Below the composer, a panel lists this session's sub-agent tasks that are
+  queued or running, one row each: a status marker, the task id, its name,
+  how long it has been queued or running, and its description. It shows at
+  most 4 rows; with more than 4 such tasks the panel shows the first 3 and a
+  `+N more` row for the rest. It covers only this session's in-memory tasks,
+  not other sessions' or finished tasks — use `/agents` for the full record
+  of every session's tasks, running or finished. The panel takes no rows
+  when the session has no queued or running task.
+- The footer is always the terminal's last row, below the composer and the
+  sub-agent panel. It shows profile/model, reasoning effort, the sandbox
+  state (`seatbelt · workspace-write · network allowed`, `sandbox off ·
+  WARNING: bash is unsandboxed`, or `bash disabled · sandbox unavailable`),
+  the workspace, token totals, the context percentage, and the session ID
+  when space allows.
 - If the terminal is smaller than `40x8`, Otto shows a resize message.
 
 ### TUI keys

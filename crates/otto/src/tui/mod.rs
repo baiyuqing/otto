@@ -290,6 +290,22 @@ enum IdleEvent {
     Input(Option<TuiEvent>),
     Registry(bool),
     AgentsTick,
+    TasksTick,
+}
+
+/// Refreshes the sub-agent panel snapshot and redraws. The sole place
+/// `run_app` calls `terminal.draw`, so the panel is never stale by more than
+/// one frame.
+fn redraw<B: Backend>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    controller: &Controller,
+) -> Result<(), ReplError> {
+    app.refresh_tasks(controller);
+    terminal
+        .draw(|frame| render::draw(frame, app))
+        .map(|_| ())
+        .map_err(draw_error)
 }
 
 async fn run_app<B: Backend>(
@@ -300,9 +316,7 @@ async fn run_app<B: Backend>(
 ) -> Result<(), ReplError> {
     let mut app = App::new(controller);
     let mut pending_image = None;
-    terminal
-        .draw(|frame| render::draw(frame, &app))
-        .map_err(draw_error)?;
+    redraw(terminal, &mut app, controller)?;
 
     let mut updates: Option<(Arc<Tasks>, watch::Receiver<u64>)> = None;
     // The `/agents` overlay's 2-second refresh (spec: "It refreshes every 2
@@ -311,6 +325,11 @@ async fn run_app<B: Backend>(
     // the first tick 2 seconds out, since `open()`/`handle_key` already ran
     // a fresh query and an immediate tick would just repeat it.
     let mut agents_refresh: Option<tokio::time::Interval> = None;
+    // The sub-agent panel's 1-second refresh, so a queued/running task's
+    // elapsed time keeps advancing between registry changes. Exists only
+    // while the snapshot holds a queued or running task, matching
+    // `agents_refresh`'s open/closed lifecycle above.
+    let mut tasks_refresh: Option<tokio::time::Interval> = None;
     loop {
         match controller.subagent_tasks() {
             Some(tasks) => {
@@ -333,6 +352,15 @@ async fn run_app<B: Backend>(
             None => agents_refresh = None,
             Some(_) => {}
         }
+        if render::needs_task_clock(&app.tasks) {
+            if tasks_refresh.is_none() {
+                let mut interval = tokio::time::interval(render::TASKS_PANEL_REFRESH_INTERVAL);
+                interval.reset();
+                tasks_refresh = Some(interval);
+            }
+        } else {
+            tasks_refresh = None;
+        }
         let event = {
             let signal = async {
                 match updates.as_mut() {
@@ -346,11 +374,18 @@ async fn run_app<B: Backend>(
                     None => std::future::pending().await,
                 };
             };
+            let tasks_tick = async {
+                match tasks_refresh.as_mut() {
+                    Some(interval) => interval.tick().await,
+                    None => std::future::pending().await,
+                };
+            };
             tokio::select! {
                 _ = cancel.cancelled() => return Err(ReplError::Cancelled),
                 event = keys.recv() => IdleEvent::Input(event),
                 open = signal => IdleEvent::Registry(open),
                 () = tick => IdleEvent::AgentsTick,
+                () = tasks_tick => IdleEvent::TasksTick,
             }
         };
         let event = match event {
@@ -358,9 +393,11 @@ async fn run_app<B: Backend>(
                 if let Some(view) = &mut app.agents {
                     view.tick(controller);
                 }
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
+                redraw(terminal, &mut app, controller)?;
+                continue;
+            }
+            IdleEvent::TasksTick => {
+                redraw(terminal, &mut app, controller)?;
                 continue;
             }
             IdleEvent::Input(event) => event,
@@ -373,9 +410,7 @@ async fn run_app<B: Backend>(
                     propagate_turn_error(error)?;
                 }
                 app.refresh_info(controller);
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
+                redraw(terminal, &mut app, controller)?;
                 continue;
             }
         };
@@ -384,16 +419,12 @@ async fn run_app<B: Backend>(
             TuiEvent::Key(key) => key,
             TuiEvent::Paste(text) => {
                 app.insert_text(&text);
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
+                redraw(terminal, &mut app, controller)?;
                 continue;
             }
             TuiEvent::Wheel { up } => {
                 app.scroll_wheel(up);
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
+                redraw(terminal, &mut app, controller)?;
                 continue;
             }
             TuiEvent::Select { phase, col, row } => {
@@ -401,16 +432,12 @@ async fn run_app<B: Backend>(
                     && let Err(error) = selection::copy(&text)
                 {
                     app.push_system(format!("copy: {error}"));
-                    terminal
-                        .draw(|frame| render::draw(frame, &app))
-                        .map_err(draw_error)?;
+                    redraw(terminal, &mut app, controller)?;
                 }
                 continue;
             }
             TuiEvent::Redraw => {
-                terminal
-                    .draw(|frame| render::draw(frame, &app))
-                    .map_err(draw_error)?;
+                redraw(terminal, &mut app, controller)?;
                 continue;
             }
         };
@@ -557,9 +584,7 @@ async fn run_app<B: Backend>(
         }
 
         app.refresh_info(controller);
-        terminal
-            .draw(|frame| render::draw(frame, &app))
-            .map_err(draw_error)?;
+        redraw(terminal, &mut app, controller)?;
     }
 }
 
@@ -641,6 +666,7 @@ async fn drive_turn<B: Backend, T, E>(
             }
             _ = frames.tick() => {}
         }
+        app.refresh_tasks(controller);
         let _ = terminal.draw(|frame| render::draw(frame, app));
     }
 }

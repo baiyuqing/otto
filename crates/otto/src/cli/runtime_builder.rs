@@ -209,6 +209,10 @@ impl Session for MemoryHandle {
     ) -> Result<CompactionMetadata, SessionError> {
         self.inner.append_compaction(checkpoint).await
     }
+
+    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        self.inner.append_custom(custom_type, data)
+    }
 }
 
 impl SessionHandle for MemoryHandle {
@@ -349,6 +353,10 @@ impl Session for SharedSession {
         checkpoint: CompactionCheckpoint,
     ) -> Result<CompactionMetadata, SessionError> {
         self.0.append_compaction(checkpoint).await
+    }
+
+    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        self.0.append_custom(custom_type, data)
     }
 }
 

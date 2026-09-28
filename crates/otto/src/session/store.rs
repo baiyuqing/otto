@@ -28,7 +28,7 @@ use otto_core::session::compaction::{
     latest_compaction_metadata, validate_compaction_checkpoint,
 };
 use otto_core::session::context::{
-    add_resolved_usage, format_persisted_timestamp, format_rfc3339_nano, missing_tool_result,
+    add_resolved_usage, format_persisted_timestamp, format_rfc3339_nano, missing_tool_results,
     model_message_to_pi_entry, parse_rfc3339, pending_tool_calls, snapshot_from_state,
 };
 use otto_core::session::pi::{
@@ -361,6 +361,26 @@ impl Store {
         Ok(())
     }
 
+    /// Appends a `custom` entry with the given `customType` and pre-encoded
+    /// JSON `data`, unconditionally (unlike [`Store::update_runtime`], which
+    /// skips the write when nothing changed). The
+    /// [`Session::append_custom`](otto_core::session::Session::append_custom)
+    /// override for `Store` calls this.
+    pub fn append_custom_entry(&self, custom_type: &str, data: &str) -> Result<(), PiError> {
+        let mut state = self.lock()?;
+        state.writable()?;
+        state.ensure_file_fatal()?;
+
+        let timestamp = format_persisted_timestamp(Utc::now(), "custom entry")?;
+        let entry_id = state.new_entry_id("custom")?;
+        let mut entry = PiEntry::new("custom", &entry_id, state.leaf_id.clone(), &timestamp);
+        entry.custom = Some(PiCustom {
+            custom_type: custom_type.to_owned(),
+            data: Some(raw_value(data.to_owned())?),
+        });
+        state.append_entry(entry, entry_id)
+    }
+
     /// Records a new display name for the session.
     pub fn rename(&self, name: &str) -> Result<(), PiError> {
         let name = name.trim();
@@ -499,12 +519,13 @@ impl Store {
     /// `otto_core::session::context::build_context`.
     fn repair_dangling_tool_calls(&self) -> Result<Vec<Warning>, PiError> {
         let pending = pending_tool_calls(&self.messages())?;
+        let stand_ins = missing_tool_results(&pending);
         let mut warnings = Vec::new();
-        for call in pending {
+        for (call, block) in pending.into_iter().zip(stand_ins) {
             let message = Message {
                 role: Role::Tool,
                 created_at: Utc::now(),
-                blocks: vec![missing_tool_result(&call)],
+                blocks: vec![block],
                 ..Message::default()
             };
             self.append_message(&message).map_err(|error| {
@@ -752,6 +773,11 @@ impl Session for Store {
         checkpoint: CompactionCheckpoint,
     ) -> Result<CompactionMetadata, SessionError> {
         Store::append_compaction(self, &checkpoint)
+            .map_err(|error| SessionError::Persist(error.to_string()))
+    }
+
+    fn append_custom(&self, custom_type: &str, data: &str) -> Result<(), SessionError> {
+        Store::append_custom_entry(self, custom_type, data)
             .map_err(|error| SessionError::Persist(error.to_string()))
     }
 }

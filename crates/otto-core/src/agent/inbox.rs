@@ -5,23 +5,28 @@
 //! of each turn and turns every item into one context message.
 //!
 //! Ownership: the queue is shared. Producers hold an `Arc<Inbox>` and the agent
-//! holds another. Nothing takes ownership of the items until `drain`.
+//! holds another. Nothing takes ownership of the items until they are removed.
 //!
 //! Concurrency: every method locks an internal mutex and is safe to call from
 //! any task. The change callback runs after the lock is released, so it may
-//! call back into the inbox without deadlocking.
+//! call back into the inbox without deadlocking. The persistence hook (see
+//! [`Inbox::set_persist`]) runs while the lock is held, so the written file
+//! never disagrees with the in-memory order.
 //!
 //! Errors: none. A poisoned lock is recovered rather than reported, because
 //! losing queued notifications is worse than continuing with the queue a
 //! panicking producer left behind.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+
+use serde::{Deserialize, Serialize};
 
 use crate::model::Usage;
 
 /// Why a notification was pushed. This selects the context type and, for the
 /// parent-facing runner, the rendered text format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     /// A task reached a terminal state.
     TaskFinished,
@@ -43,7 +48,7 @@ impl NotificationKind {
 }
 
 /// One item queued for delivery into the next provider request.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Notification {
     pub task_id: String,
     pub kind: Option<NotificationKind>,
@@ -63,11 +68,36 @@ impl Notification {
     }
 }
 
+/// A notification plus the sequence number it was pushed with. Sequence
+/// numbers are unique within one inbox and increase with every push; a
+/// reloaded inbox continues counting after the highest number it loaded
+/// (see [`Inbox::load`]). Delivery removes an item by sequence number
+/// instead of by position, so a push that lands during delivery is neither
+/// lost nor reordered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Entry {
+    pub seq: u64,
+    #[serde(flatten)]
+    pub notification: Notification,
+}
+
+#[derive(Default)]
+struct State {
+    items: Vec<Entry>,
+    next_seq: u64,
+}
+
+/// The signature [`Inbox::set_persist`] takes.
+pub type PersistHook = Box<dyn Fn(&[Entry]) + Send + Sync>;
+
 /// A first-in first-out queue of notifications.
 #[derive(Default)]
 pub struct Inbox {
-    items: Mutex<Vec<Notification>>,
+    state: Mutex<State>,
     on_change: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Set at most once, before the inbox is shared with producers. Runs
+    /// under the state lock on every mutation; see the module documentation.
+    persist: OnceLock<PersistHook>,
 }
 
 impl std::fmt::Debug for Inbox {
@@ -83,48 +113,126 @@ impl Inbox {
     /// Creates an empty inbox.
     ///
     /// `on_change`, when given, runs after every `push`, after a `drain` that
-    /// removed items, and after a `remove` that removed an item. It runs
-    /// without the lock held. Frontends use it to wake a waiting turn.
+    /// removed items, after a `remove`/`remove_seq` that removed an item, and
+    /// after a `load` that seeded at least one entry. It runs without the
+    /// lock held. Frontends use it to wake a waiting turn.
     pub fn new(on_change: Option<Box<dyn Fn() + Send + Sync>>) -> Self {
         Self {
-            items: Mutex::new(Vec::new()),
+            state: Mutex::new(State::default()),
             on_change,
+            persist: OnceLock::new(),
+        }
+    }
+
+    /// Installs the persistence hook. It is called with the full, current
+    /// item list, in queue order, under the state lock, after every mutation.
+    /// A later call is ignored: only the first hook installed takes effect.
+    /// Call this, and [`Self::load`] if there is a file to restore, before
+    /// sharing the inbox with any producer.
+    pub fn set_persist(&self, hook: PersistHook) {
+        let _ = self.persist.set(hook);
+    }
+
+    /// Seeds the inbox from previously persisted entries, in file order, and
+    /// continues sequence numbering after the highest one loaded. For use
+    /// once, right after construction and before any push. It never runs the
+    /// persistence hook, because it restores exactly what is already on
+    /// disk, but it does run the change callback when `entries` is
+    /// non-empty, so a frontend that only starts a wake turn on a change
+    /// signal still picks up notifications that were already queued when the
+    /// session was reopened.
+    pub fn load(&self, entries: Vec<Entry>) {
+        let loaded_any = !entries.is_empty();
+        {
+            let mut state = self.lock();
+            state.next_seq = entries
+                .iter()
+                .map(|entry| entry.seq)
+                .max()
+                .map_or(0, |highest| highest + 1);
+            state.items = entries;
+        }
+        if loaded_any {
+            self.notify();
         }
     }
 
     /// Appends a notification to the back of the queue.
     pub fn push(&self, notification: Notification) {
-        self.lock().push(notification);
+        {
+            let mut state = self.lock();
+            let seq = state.next_seq;
+            state.next_seq += 1;
+            state.items.push(Entry { seq, notification });
+            self.persist(&state.items);
+        }
         self.notify();
     }
 
     /// Returns every queued notification in push order and empties the queue.
     pub fn drain(&self) -> Vec<Notification> {
-        let items = std::mem::take(&mut *self.lock());
+        let items = {
+            let mut state = self.lock();
+            let items = std::mem::take(&mut state.items);
+            if !items.is_empty() {
+                self.persist(&state.items);
+            }
+            items
+        };
         if !items.is_empty() {
             self.notify();
         }
-        items
+        items.into_iter().map(|entry| entry.notification).collect()
     }
 
     /// Removes and returns the first notification with this task id and kind.
     pub fn remove(&self, task_id: &str, kind: NotificationKind) -> Option<Notification> {
         let removed = {
-            let mut items = self.lock();
-            items
+            let mut state = self.lock();
+            let removed = state
+                .items
                 .iter()
-                .position(|item| item.task_id == task_id && item.kind == Some(kind))
-                .map(|index| items.remove(index))
+                .position(|entry| {
+                    entry.notification.task_id == task_id && entry.notification.kind == Some(kind)
+                })
+                .map(|index| state.items.remove(index));
+            if removed.is_some() {
+                self.persist(&state.items);
+            }
+            removed
         };
         if removed.is_some() {
             self.notify();
         }
-        removed
+        removed.map(|entry| entry.notification)
+    }
+
+    /// Removes the entry with this sequence number, if it is still queued.
+    /// Delivery uses this, rather than draining or removing by position, so a
+    /// notification pushed while delivery is in progress stays queued in
+    /// order instead of being skipped or delivered twice.
+    pub fn remove_seq(&self, seq: u64) -> Option<Notification> {
+        let removed = {
+            let mut state = self.lock();
+            let removed = state
+                .items
+                .iter()
+                .position(|entry| entry.seq == seq)
+                .map(|index| state.items.remove(index));
+            if removed.is_some() {
+                self.persist(&state.items);
+            }
+            removed
+        };
+        if removed.is_some() {
+            self.notify();
+        }
+        removed.map(|entry| entry.notification)
     }
 
     /// The number of queued notifications.
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().items.len()
     }
 
     /// Whether the queue holds nothing.
@@ -134,13 +242,31 @@ impl Inbox {
 
     /// Copies queued notifications without draining them.
     pub fn snapshot(&self) -> Vec<Notification> {
-        self.lock().clone()
+        self.lock()
+            .items
+            .iter()
+            .map(|entry| entry.notification.clone())
+            .collect()
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Notification>> {
-        self.items
+    /// Copies queued entries, sequence numbers included, without draining
+    /// them. Delivery reads the queue this way, then removes each entry by
+    /// sequence number once its append has returned.
+    pub fn queued(&self) -> Vec<Entry> {
+        self.lock().items.clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Calls the persistence hook, if any. The caller holds the state lock.
+    fn persist(&self, items: &[Entry]) {
+        if let Some(hook) = self.persist.get() {
+            hook(items);
+        }
     }
 
     fn notify(&self) {
@@ -266,5 +392,171 @@ mod tests {
         assert_eq!(NotificationKind::TaskFinished.as_str(), "task_finished");
         assert_eq!(NotificationKind::TaskReport.as_str(), "task_report");
         assert_eq!(NotificationKind::Message.as_str(), "message");
+    }
+
+    #[test]
+    fn sequence_numbers_are_unique_and_increase_with_every_push() {
+        let inbox = Inbox::new(None);
+        inbox.push(notification("t1", NotificationKind::Message));
+        inbox.push(notification("t2", NotificationKind::Message));
+        let queued = inbox.queued();
+        assert_eq!(queued.len(), 2);
+        assert!(queued[0].seq < queued[1].seq);
+    }
+
+    #[test]
+    fn load_continues_numbering_after_the_highest_loaded_sequence() {
+        let inbox = Inbox::new(None);
+        inbox.load(vec![
+            Entry {
+                seq: 5,
+                notification: notification("t1", NotificationKind::Message),
+            },
+            Entry {
+                seq: 9,
+                notification: notification("t2", NotificationKind::Message),
+            },
+        ]);
+        assert_eq!(inbox.len(), 2);
+        inbox.push(notification("t3", NotificationKind::Message));
+        let queued = inbox.queued();
+        assert_eq!(queued[2].seq, 10);
+    }
+
+    #[test]
+    fn load_with_entries_signals_a_change_but_never_persists() {
+        let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&changes);
+        let inbox = Inbox::new(Some(Box::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        let persists = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorder = Arc::clone(&persists);
+        inbox.set_persist(Box::new(move |_entries| {
+            recorder.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        inbox.load(vec![
+            Entry {
+                seq: 0,
+                notification: notification("t1", NotificationKind::Message),
+            },
+            Entry {
+                seq: 1,
+                notification: notification("t2", NotificationKind::Message),
+            },
+        ]);
+
+        assert_eq!(
+            changes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a load that seeds entries runs the change callback exactly once"
+        );
+        assert_eq!(
+            persists.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "load restores what is already on disk, so it must not persist"
+        );
+    }
+
+    #[test]
+    fn load_with_no_entries_signals_nothing() {
+        let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&changes);
+        let inbox = Inbox::new(Some(Box::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })));
+        let persists = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorder = Arc::clone(&persists);
+        inbox.set_persist(Box::new(move |_entries| {
+            recorder.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+
+        inbox.load(Vec::new());
+
+        assert_eq!(
+            changes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an empty load has nothing to wake a turn for"
+        );
+        assert_eq!(persists.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn remove_seq_takes_only_the_matching_entry_and_a_concurrent_push_stays_queued() {
+        let inbox = Inbox::new(None);
+        inbox.push(notification("t1", NotificationKind::Message));
+        inbox.push(notification("t2", NotificationKind::Message));
+        let queued = inbox.queued();
+        assert_eq!(queued.len(), 2);
+
+        // A push that lands between reading the queue and removing its first
+        // entry (simulating a push racing a delivery loop) must not be lost
+        // or reordered.
+        inbox.push(notification("t3", NotificationKind::Message));
+
+        let removed = inbox.remove_seq(queued[0].seq).expect("first entry");
+        assert_eq!(removed.task_id, "t1");
+
+        let remaining = inbox.queued();
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|entry| entry.notification.task_id.as_str())
+                .collect::<Vec<_>>(),
+            ["t2", "t3"]
+        );
+
+        assert!(inbox.remove_seq(queued[0].seq).is_none(), "already removed");
+    }
+
+    #[test]
+    fn the_persist_hook_sees_the_full_list_after_every_mutation() {
+        let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        let inbox = Inbox::new(None);
+        inbox.set_persist(Box::new(move |entries| {
+            recorder.lock().unwrap().push(
+                entries
+                    .iter()
+                    .map(|entry| entry.notification.task_id.clone())
+                    .collect(),
+            );
+        }));
+
+        inbox.push(notification("t1", NotificationKind::Message));
+        inbox.push(notification("t2", NotificationKind::Message));
+        let seq = inbox.queued()[0].seq;
+        inbox.remove_seq(seq);
+
+        let calls = seen.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                vec!["t1".to_string()],
+                vec!["t1".to_string(), "t2".to_string()],
+                vec!["t2".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_second_persist_hook_is_ignored() {
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let inbox = Inbox::new(None);
+        let first = Arc::clone(&first_calls);
+        inbox.set_persist(Box::new(move |_| {
+            first.fetch_add(1, Ordering::SeqCst);
+        }));
+        let second = Arc::clone(&second_calls);
+        inbox.set_persist(Box::new(move |_| {
+            second.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        inbox.push(notification("t1", NotificationKind::Message));
+
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 0);
     }
 }

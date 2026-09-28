@@ -191,17 +191,38 @@ impl Default for Tasks {
 impl Tasks {
     /// Creates an empty registry.
     pub fn new() -> Self {
-        Self::new_inner(None)
+        Self::new_inner(None, 0)
+    }
+
+    /// Creates an empty registry, without a recorder, whose id counter starts
+    /// at `starting_counter`. See [`Tasks::with_recorder_from`].
+    pub fn new_from(starting_counter: u64) -> Self {
+        Self::new_inner(None, starting_counter)
     }
 
     /// Creates an empty registry that mirrors every task it changes into
     /// `recorder`, tagged with the fixed `context` (parent session,
     /// workspace, and owning process).
     pub fn with_recorder(recorder: Arc<dyn Recorder>, context: TaskContext) -> Self {
-        Self::new_inner(Some((recorder, context)))
+        Self::new_inner(Some((recorder, context)), 0)
     }
 
-    fn new_inner(recorder: Option<(Arc<dyn Recorder>, TaskContext)>) -> Self {
+    /// Creates an empty registry whose id counter starts at `starting_counter`,
+    /// so the next task added gets id `t{starting_counter + 1}`. Used to
+    /// resume a session without reusing a task id a prior run already gave
+    /// to a child transcript; see [`highest_task_counter`].
+    pub fn with_recorder_from(
+        recorder: Arc<dyn Recorder>,
+        context: TaskContext,
+        starting_counter: u64,
+    ) -> Self {
+        Self::new_inner(Some((recorder, context)), starting_counter)
+    }
+
+    fn new_inner(
+        recorder: Option<(Arc<dyn Recorder>, TaskContext)>,
+        starting_counter: u64,
+    ) -> Self {
         let (sender, receiver) = watch::channel(0);
         let updates = Arc::new(Updates {
             sender: Mutex::new(Some(sender)),
@@ -213,7 +234,10 @@ impl Tasks {
             inbox_updates.signal();
         }))));
         Self {
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State {
+                counter: starting_counter,
+                ..State::default()
+            }),
             inbox,
             updates,
             updates_receiver: receiver,
@@ -643,6 +667,37 @@ fn is_reserved_task_name(name: &str) -> bool {
     }
 }
 
+/// The highest task counter used by a child transcript file name
+/// `t<counter>-<random id>.jsonl` in `dir`, or 0 if `dir` does not exist or
+/// has no matching name. Names that do not match are ignored. Pass the
+/// result as `starting_counter` to [`Tasks::with_recorder_from`] so a
+/// resumed session's task ids do not collide with a prior run's.
+pub fn highest_task_counter(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut highest = 0;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix('t') else {
+            continue;
+        };
+        let Some(digits) = rest.split('-').next() else {
+            continue;
+        };
+        if digits.is_empty() || !rest[digits.len()..].starts_with('-') {
+            continue;
+        }
+        if let Ok(counter) = digits.parse::<u64>() {
+            highest = highest.max(counter);
+        }
+    }
+    highest
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -667,6 +722,35 @@ mod tests {
             }],
             ..Message::default()
         }
+    }
+
+    #[test]
+    fn loading_a_notification_signals_before_any_receiver_subscribes() {
+        // `Tasks::updates()` clones a stored receiver that this registry
+        // never reads itself, so a signal sent before a frontend calls
+        // `updates()` still shows up as `has_changed()` on the frontend's
+        // first check. This is what lets a reopened session's already-queued
+        // notifications start a wake turn instead of waiting for the next
+        // user prompt.
+        let tasks = Tasks::new();
+        tasks
+            .notifications()
+            .load(vec![otto_core::agent::inbox::Entry {
+                seq: 0,
+                notification: otto_core::agent::inbox::Notification {
+                    task_id: "t1".into(),
+                    kind: Some(NotificationKind::Message),
+                    text: "queued while the session was closed".into(),
+                    usage: None,
+                },
+            }]);
+
+        let receiver = tasks.updates();
+        assert!(
+            receiver.has_changed().expect("the channel is open"),
+            "a load that seeded a notification must signal"
+        );
+        assert_eq!(tasks.pending(), 1);
     }
 
     #[tokio::test]
@@ -1068,5 +1152,39 @@ mod tests {
         let finished = tasks.get(&task.id).expect("the task still exists");
         assert_eq!(finished.status, TaskStatus::Succeeded);
         assert_eq!(finished.result, "done");
+    }
+
+    #[test]
+    fn highest_task_counter_is_the_largest_t_prefixed_file_name() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        for name in ["t3-abcd.jsonl", "t7-wxyz.jsonl", "t1-aaaa.jsonl"] {
+            std::fs::write(temp.path().join(name), b"").expect("write fixture file");
+        }
+        // Names that do not match `t<digits>-...` must be ignored, not parsed
+        // as a higher counter.
+        for name in [
+            "parent.jsonl",
+            "t-nodigits.jsonl",
+            "t9nodash.jsonl",
+            "task10.jsonl",
+        ] {
+            std::fs::write(temp.path().join(name), b"").expect("write fixture file");
+        }
+
+        assert_eq!(highest_task_counter(temp.path()), 7);
+    }
+
+    #[test]
+    fn highest_task_counter_is_zero_for_a_missing_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let missing = temp.path().join("does-not-exist");
+        assert_eq!(highest_task_counter(&missing), 0);
+    }
+
+    #[test]
+    fn a_resumed_registry_continues_the_task_id_counter() {
+        let tasks = Tasks::new_from(7);
+        let task = tasks.add(Task::default(), None, None).expect("valid");
+        assert_eq!(task.id, "t8");
     }
 }

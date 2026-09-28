@@ -8,8 +8,8 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// One scripted SSE reply per model turn.
 pub struct Script {
@@ -26,6 +26,25 @@ pub fn tool_call_reply(id: &str, name: &str, arguments: &str) -> String {
     )
 }
 
+/// Two tool calls in one reply, matching how the provider streams a turn
+/// that starts a sub-agent and runs a second tool in the same turn.
+pub fn two_tool_call_reply(
+    id1: &str,
+    name1: &str,
+    arguments1: &str,
+    id2: &str,
+    name2: &str,
+    arguments2: &str,
+) -> String {
+    let arguments1 = serde_json::to_string(arguments1).expect("encode arguments1");
+    let arguments2 = serde_json::to_string(arguments2).expect("encode arguments2");
+    format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id1}\",\"type\":\"function\",\"function\":{{\"name\":\"{name1}\",\"arguments\":{arguments1}}}}},{{\"index\":1,\"id\":\"{id2}\",\"type\":\"function\",\"function\":{{\"name\":\"{name2}\",\"arguments\":{arguments2}}}}}]}}}}]}}\n\n\
+         data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+         data: [DONE]\n\n"
+    )
+}
+
 pub fn text_reply(text: &str) -> String {
     let text = serde_json::to_string(text).expect("encode text");
     format!(
@@ -35,13 +54,16 @@ pub fn text_reply(text: &str) -> String {
     )
 }
 
-/// Serves `script` on an ephemeral loopback port and returns its base URL.
+/// Serves `script` on an ephemeral loopback port and returns its base URL
+/// and the raw request bodies received so far, in arrival order.
 ///
 /// The listener thread ends when the process does; a test binary that fails
 /// early therefore never blocks on it.
-pub fn serve(script: Script) -> String {
+pub fn serve(script: Script) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
     let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
@@ -72,6 +94,10 @@ pub fn serve(script: Script) -> String {
                     Ok(read) => body.extend_from_slice(&buffer[..read]),
                 }
             }
+            captured
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&body).into_owned());
             let index = script.served.fetch_add(1, Ordering::SeqCst);
             let reply = script
                 .replies
@@ -86,5 +112,5 @@ pub fn serve(script: Script) -> String {
             let _ = stream.flush();
         }
     });
-    base_url
+    (base_url, requests)
 }

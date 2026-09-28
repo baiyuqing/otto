@@ -190,6 +190,7 @@ fn skill_checker(
 /// strings); `terminal` says whether stdin and stdout are both a terminal.
 /// Both are parameters rather than reads of process state so the whole
 /// startup path is reachable from tests.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     args: &[String],
     mut stdin: Box<dyn BufRead + Send + 'static>,
@@ -198,6 +199,7 @@ pub async fn run(
     environment_entries: Vec<Vec<u8>>,
     terminal: bool,
     cancel: &CancellationToken,
+    terminate: &super::terminate::Terminate,
 ) -> i32 {
     let startup_started = Instant::now();
     let mut startup_trace: StartupTrace;
@@ -689,6 +691,7 @@ pub async fn run(
                 reloader,
                 open: options.open,
                 exit_on_stdin_close,
+                terminate,
             },
             stdout,
             stderr,
@@ -809,6 +812,11 @@ pub async fn run(
     cancel.cancel();
     if let Some(task) = mcp_swap {
         task.abort();
+    }
+    if terminate.migrating() {
+        for warning in controller.migrate().await {
+            let _ = writeln!(stderr, "warning: {warning}");
+        }
     }
     controller.close_mcp().await;
     let controller_error = controller.close();
@@ -1710,6 +1718,7 @@ driver = "off"
             environment,
             false,
             &tokio_util::sync::CancellationToken::new(),
+            &crate::cli::terminate::Terminate::new(),
         )
         .await;
 
@@ -1738,6 +1747,7 @@ driver = "off"
             Vec::new(),
             false,
             &tokio_util::sync::CancellationToken::new(),
+            &crate::cli::terminate::Terminate::new(),
         )
         .await;
         assert_eq!(code, 2);
@@ -1759,6 +1769,7 @@ driver = "off"
             Vec::new(),
             false,
             &tokio_util::sync::CancellationToken::new(),
+            &crate::cli::terminate::Terminate::new(),
         )
         .await;
         assert_eq!(code, 0);

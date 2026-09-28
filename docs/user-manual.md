@@ -828,6 +828,23 @@ lease in `<session-id>.lease/` beside the session file.
   agent definition, model, and context; `resume` on a task that is not
   interrupted is an error. A task that is not continued stays interrupted.
   Effects of calls without results are not undone.
+- `SIGTERM` to a process that holds a lease (the REPL, the TUI, `--prompt`, or
+  `otto serve`) moves the session to the next host that opens it. Otto
+  cancels every running turn, tool call, and sub-agent task, waits until each
+  agent has written a result for every call, records each task that was
+  queued or running as `interrupted`, queues one notification that says the
+  session was moved and lists those tasks in the format above, closes MCP
+  servers, marks the lease released, and exits `0`. The next open, on any
+  host, takes the session at once, without the 7/6 wait and without moving
+  the log, and the notification starts a wake turn there. A running tool call
+  is cancelled, not waited for; its result says so. No notification is queued
+  when no task was cancelled and the session ends on a finished assistant
+  reply. A second `SIGTERM` exits at once without releasing the lease, so the
+  next host takes the session over as after a lost host. A scheduler must
+  allow more time before `SIGKILL` than the cancellation takes; the
+  Kubernetes default is 30 s. A process that holds no lease handles `SIGTERM`
+  as it did before: `otto serve` shuts down, and the REPL, the TUI, and
+  `--prompt` are ended by the signal.
 - A process that holds a lease renews it every third of `lease_seconds`. When
   renewal has not succeeded for 5/6 of `lease_seconds`, or another host has
   taken the session over, the process kills the processes its tools started
@@ -1106,7 +1123,9 @@ Override them with `--shell-timeout` and `--max-output-bytes` or `[agent]`.
 
 ## Headless mode
 
-`--prompt` runs a single prompt without interaction and exits: `0` on success,
+`--prompt` runs a single prompt without interaction and exits: `0` on success
+or after a `SIGTERM` that moved a lease-managed session (see
+[Continuing a session on another host](#continuing-a-session-on-another-host)),
 `1` on error, `130` on interrupt. The value is the prompt text, or `@PATH` to
 read the prompt from a file (bounded to 1 MiB).
 
@@ -1620,7 +1639,11 @@ when the child reaches the next normal notification checkpoint.
 requests, cancels every active turn and compaction, closes every session,
 removes the socket file (socket mode), and exits `0`. With
 `--exit-on-stdin-close`, end of file on stdin, or a failed read, starts the
-same shutdown.
+same shutdown. When an open session holds a lease, `SIGTERM` first moves
+every open session as described in
+[Continuing a session on another host](#continuing-a-session-on-another-host),
+and a second `SIGTERM` exits at once; without a lease a second `SIGTERM` has
+no effect.
 
 ### Examples
 

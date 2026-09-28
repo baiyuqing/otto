@@ -16,6 +16,11 @@ use crate::app::Controller;
 use crate::subagent::format::{first_runes, one_line};
 use crate::subagent::record::{ListQuery, TaskRow};
 
+/// How often an open overlay re-reads `tasks.db`, whether Otto is idle or a
+/// turn is running. Shared by the idle loop and [`super::drive_turn`] so both
+/// refresh on the same cadence.
+pub(crate) const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The column headers, in the order [`columns`] returns them.
 pub(crate) const COLUMN_HEADERS: [&str; 10] = [
     "Status",

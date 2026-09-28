@@ -95,6 +95,20 @@ lock permits only one scheduler process. A process loss changes running steps
 to `interrupted` and the run to `paused`; retry is always explicit because an
 external tool effect may already have happened.
 
+Deadline ownership is layered and monotonic. Native admission converts each
+configured duration to one absolute `deadline::Deadline`; children derive the
+earlier of their local policy and the parent's remaining budget. `otto-core`
+receives only the wasm-safe `operation::OperationControl` capability and must
+not read a native clock. Provider retries, compaction, task queueing, and
+workflow attempts consume the same logical budget rather than restarting it.
+The fixed race rule is completion-first only after the owner has obtained and
+validated the result; otherwise the typed stop reason wins. Effectful futures
+are never detached with session writers, leases, child processes, or mutable
+workflow handles. Bash process groups and shared stdio MCP servers own their
+TERM/grace/KILL/reap sequence; HTTP MCP abandons only the timed-out request.
+Synchronous filesystem and SQLite boundaries are checked before and after the
+call and do not claim a hard wall-clock bound.
+
 Keep `crates/otto`'s `mcp` module behind `crate::mcp`'s client, transport, and
 OAuth types; `crate::tool::mcp` (the model-facing tool adapter) and
 `Builder::connect_mcp` in `crates/otto/src/cli/wiring.rs` are the only two

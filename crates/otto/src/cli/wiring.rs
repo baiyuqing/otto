@@ -494,7 +494,6 @@ impl Builder {
                 new_operation_id: Arc::new(super::runtime_builder::new_operation_id),
                 provider_timeout: runtime.resilience.deadlines.provider_timeout,
                 task_timeout: runtime.resilience.deadlines.subagent_timeout,
-                cancellation_grace: runtime.resilience.deadlines.cancellation_grace,
                 ..OptionsTemplate::default()
             },
             prompt_for,
@@ -604,12 +603,13 @@ impl Builder {
                 .command_executor
                 .clone()
                 .expect("bash_configured implies an executor");
-            let tool = crate::tool::bash::BashTool::new(
+            let tool = crate::tool::bash::BashTool::new_with_grace(
                 self.workspace,
                 executor,
                 &self.shell,
                 self.sandbox_environment.clone().unwrap_or_default(),
                 super::runtime_builder::shell_timeout(runtime.shell_timeout),
+                runtime.resilience.deadlines.cancellation_grace,
                 max_output,
                 redaction_values,
             )
@@ -669,6 +669,21 @@ impl Builder {
         Vec<ConnectedServer>,
         Arc<mcp::Servers>,
     ) {
+        self.connect_mcp_with_grace(max_output, mcp::DEFAULT_CANCELLATION_GRACE, warnings)
+            .await
+    }
+
+    /// Connects MCP servers using the runtime cooperative cancellation grace.
+    pub async fn connect_mcp_with_grace(
+        &self,
+        max_output: usize,
+        cancellation_grace: Duration,
+        warnings: &mut (dyn Write + Send),
+    ) -> (
+        Vec<Box<dyn Tool + Send + Sync>>,
+        Vec<ConnectedServer>,
+        Arc<mcp::Servers>,
+    ) {
         let servers = Arc::new(mcp::Servers::default());
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         let mut connected: Vec<ConnectedServer> = Vec::new();
@@ -698,7 +713,13 @@ impl Builder {
                     };
                 };
                 let result = match self
-                    .connect_one(&server, connect_timeout, call_timeout, &cancel)
+                    .connect_one(
+                        &server,
+                        connect_timeout,
+                        call_timeout,
+                        cancellation_grace,
+                        &cancel,
+                    )
                     .await
                 {
                     Ok((client, bearer)) => McpConnectResult::Connected(client, bearer),
@@ -846,6 +867,7 @@ impl Builder {
         server: &otto_core::config::McpServerRuntime,
         connect_timeout: Duration,
         call_timeout: Duration,
+        cancellation_grace: Duration,
         cancel: &CancellationToken,
     ) -> Result<(mcp::client::Client, Option<Arc<dyn mcp::BearerSource>>), mcp::CallError> {
         match &server.transport {
@@ -855,13 +877,20 @@ impl Builder {
                 env,
                 cwd,
             } => {
-                let transport =
-                    mcp::stdio::StdioTransport::spawn(command, args, env, Path::new(cwd)).await?;
-                let client = mcp::client::Client::connect(
+                let transport = mcp::stdio::StdioTransport::spawn_with_grace(
+                    command,
+                    args,
+                    env,
+                    Path::new(cwd),
+                    cancellation_grace,
+                )
+                .await?;
+                let client = mcp::client::Client::connect_with_grace(
                     server.name.clone(),
                     Box::new(transport),
                     connect_timeout,
                     call_timeout,
+                    cancellation_grace,
                     cancel,
                 )
                 .await?;
@@ -883,11 +912,12 @@ impl Builder {
                     bearer.clone(),
                     call_timeout,
                 )?;
-                let client = mcp::client::Client::connect(
+                let client = mcp::client::Client::connect_with_grace(
                     server.name.clone(),
                     Box::new(transport),
                     connect_timeout,
                     call_timeout,
+                    cancellation_grace,
                     cancel,
                 )
                 .await?;

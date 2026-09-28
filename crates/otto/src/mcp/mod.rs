@@ -16,8 +16,8 @@
 //! one that actually closes anything). Concurrency: [`ToolServer::call`] takes `&self` and
 //! may run concurrently; each transport serializes its own writes.
 //! Cancellation: a cancelled token explicitly races the in-flight call and
-//! starts the same five-second cooperative grace as `call_timeout_secs`;
-//! caller-triggered termination still reports [`CallError::Cancelled`]. HTTP
+//! starts the runtime-configured cooperative grace used alongside
+//! `call_timeout_secs`; caller-triggered termination still reports [`CallError::Cancelled`]. HTTP
 //! then drops only that request future; stdio atomically enters stopping,
 //! rejects new calls, closes its process group once, and reports collateral
 //! pending calls as [`CallError::Interrupted`]. Errors: every failure is reported in band to
@@ -37,6 +37,10 @@ use std::sync::{Arc, Mutex};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+
+/// Default cooperative cancellation grace retained by compatibility constructors.
+pub(crate) const DEFAULT_CANCELLATION_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(5);
 
 /// The protocol era a server negotiated.
 #[derive(Debug, Clone, PartialEq, Eq)]

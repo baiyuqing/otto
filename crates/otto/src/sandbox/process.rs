@@ -29,10 +29,7 @@ use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{Error, Streams};
-
-/// Grace afforded to a process group after `SIGTERM` before `SIGKILL`.
-const TERMINATION_GRACE: Duration = Duration::from_secs(5);
+use super::{DEFAULT_CANCELLATION_GRACE, Error, Streams};
 
 /// Bounds how long the post-exit drain waits for a descendant that inherited
 /// the child's pipe. Signals are sent before it, so it only limits how long a
@@ -90,6 +87,7 @@ struct Termination {
 #[derive(Debug)]
 struct Entry {
     pid: i32,
+    cancellation_grace: Duration,
     termination: Mutex<Termination>,
     cleanup_changed: tokio::sync::Notify,
     /// Keeps this process group registered with `failover::children::Children`
@@ -105,7 +103,7 @@ impl Entry {
             return;
         }
         state.trigger = Some(trigger);
-        state.term_deadline = Some(Instant::now() + TERMINATION_GRACE);
+        state.term_deadline = Some(Instant::now() + self.cancellation_grace);
         signal_group(self.pid, Signal::SIGTERM, &mut state);
         settle_cleanup(&mut state);
         drop(state);
@@ -121,7 +119,7 @@ impl Entry {
             state.trigger = Some(CleanupTrigger::Completion);
         }
         if state.term_deadline.is_none() {
-            state.term_deadline = Some(Instant::now() + TERMINATION_GRACE);
+            state.term_deadline = Some(Instant::now() + self.cancellation_grace);
             signal_group(self.pid, Signal::SIGTERM, &mut state);
         }
         if !state.group_gone {
@@ -253,6 +251,19 @@ impl Manager {
         streams: Streams<'_>,
         cancel: &CancellationToken,
     ) -> (Outcome, Result<(), Error>) {
+        self.run_with_grace(spec, streams, cancel, DEFAULT_CANCELLATION_GRACE)
+            .await
+    }
+
+    /// Runs `spec` with a caller-selected grace between `SIGTERM` and
+    /// `SIGKILL`.
+    pub(crate) async fn run_with_grace(
+        &self,
+        spec: Spec,
+        streams: Streams<'_>,
+        cancel: &CancellationToken,
+        cancellation_grace: Duration,
+    ) -> (Outcome, Result<(), Error>) {
         if cancel.is_cancelled() {
             return (Outcome::default(), Err(Error::Cancelled));
         }
@@ -293,6 +304,7 @@ impl Manager {
             };
             let entry = Arc::new(Entry {
                 pid: pid as i32,
+                cancellation_grace,
                 termination: Mutex::new(Termination::default()),
                 cleanup_changed: tokio::sync::Notify::new(),
                 _fence_registration: crate::failover::children::Children::register(
@@ -783,6 +795,63 @@ mod tests {
                 &cancel,
             )
             .await;
+        assert_eq!(result, Err(Error::Cancelled));
+        assert!(outcome.signaled);
+        assert_eq!(outcome.signal, "killed");
+        manager.close().expect("close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn custom_cancellation_grace_escalates_before_the_default() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let ready = directory.path().join("ready");
+        let command = format!(
+            "trap '' TERM; : > '{}'; while :; do sleep 1; done",
+            ready.display()
+        );
+        let manager = Arc::new(Manager::default());
+        let runner = manager.clone();
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let run = tokio::spawn(async move {
+            let mut stdout = std::io::sink();
+            let mut stderr = std::io::sink();
+            runner
+                .run_with_grace(
+                    spec(
+                        "/bin/sh",
+                        &["-c", &command],
+                        directory.path(),
+                        &["PATH=/usr/bin:/bin"],
+                    ),
+                    Streams {
+                        stdout: &mut stdout,
+                        stderr: &mut stderr,
+                    },
+                    &child_cancel,
+                    Duration::from_millis(50),
+                )
+                .await
+        });
+
+        for _ in 0..1_000 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(ready.exists(), "child did not install its TERM handler");
+
+        let cancelled_at = std::time::Instant::now();
+        cancel.cancel();
+        let (outcome, result) = tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("custom grace should kill before the default five seconds")
+            .expect("run task");
+        assert!(
+            cancelled_at.elapsed() >= Duration::from_millis(40),
+            "SIGKILL preceded the configured grace"
+        );
         assert_eq!(result, Err(Error::Cancelled));
         assert!(outcome.signaled);
         assert_eq!(outcome.signal, "killed");

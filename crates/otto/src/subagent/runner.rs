@@ -483,8 +483,6 @@ pub struct OptionsTemplate {
         Arc<dyn Fn() -> Result<otto_core::model::OperationId, String> + Send + Sync>,
     /// Absolute task budget, consumed from task creation while queued.
     pub task_timeout: Option<Duration>,
-    /// Cooperative shutdown allowance after the task deadline fires.
-    pub cancellation_grace: Duration,
 }
 
 impl Default for OptionsTemplate {
@@ -502,7 +500,6 @@ impl Default for OptionsTemplate {
                 otto_core::model::OperationId::new("op_test").map_err(|error| error.to_string())
             }),
             task_timeout: None,
-            cancellation_grace: Duration::from_secs(5),
         }
     }
 }

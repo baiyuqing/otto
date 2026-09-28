@@ -49,8 +49,6 @@ const STDERR_TAIL_BYTES: usize = 4 * 1024;
 /// How much of the kept stderr tail is folded into the "server exited"
 /// message; smaller than `STDERR_TAIL_BYTES` so that message stays readable.
 const STDERR_EXIT_TAIL_BYTES: usize = 1024;
-/// How long the process group may handle SIGTERM before SIGKILL.
-const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 type PendingResult = Result<Result<Value, RpcError>, CallError>;
@@ -71,6 +69,7 @@ struct ChildOwner {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stderr_tail: Arc<std::sync::Mutex<String>>,
     stderr_task: tokio::task::JoinHandle<()>,
+    cancellation_grace: Duration,
     stopping: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     done_notify: Arc<Notify>,
@@ -92,6 +91,7 @@ pub struct StdioTransport {
     stopping: Arc<AtomicBool>,
     reader_done: Arc<AtomicBool>,
     reader_done_notify: Arc<Notify>,
+    cancellation_grace: Duration,
     close: Arc<CloseCompletion>,
 }
 
@@ -103,6 +103,18 @@ impl StdioTransport {
         args: &[String],
         env: &[(String, String)],
         cwd: &Path,
+    ) -> Result<Self, CallError> {
+        Self::spawn_with_grace(command, args, env, cwd, super::DEFAULT_CANCELLATION_GRACE).await
+    }
+
+    /// Spawns a server whose shutdown and stderr-drain waits use
+    /// `cancellation_grace`.
+    pub async fn spawn_with_grace(
+        command: &str,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: &Path,
+        cancellation_grace: Duration,
     ) -> Result<Self, CallError> {
         let mut builder = Command::new(command);
         builder.args(args);
@@ -149,6 +161,7 @@ impl StdioTransport {
                 stdin: stdin.clone(),
                 stderr_tail: stderr_tail.clone(),
                 stderr_task,
+                cancellation_grace,
                 stopping: stopping.clone(),
                 done: reader_done.clone(),
                 done_notify: reader_done_notify.clone(),
@@ -168,6 +181,7 @@ impl StdioTransport {
             stopping,
             reader_done,
             reader_done_notify,
+            cancellation_grace,
             close: Arc::new(CloseCompletion::default()),
         })
     }
@@ -290,15 +304,16 @@ impl Transport for StdioTransport {
             let pending = self.pending.clone();
             let reader_done = self.reader_done.clone();
             let reader_done_notify = self.reader_done_notify.clone();
+            let cancellation_grace = self.cancellation_grace;
             let close = self.close.clone();
             tokio::spawn(async move {
                 stdin.lock().await.take();
                 fail_pending(&pending, CallError::Interrupted).await;
 
                 signal_group(pid, Signal::SIGTERM);
-                if !wait_for_group_exit(pid, SHUTDOWN_WAIT).await {
+                if !wait_for_group_exit(pid, cancellation_grace).await {
                     signal_group(pid, Signal::SIGKILL);
-                    let _ = wait_for_group_exit(pid, SHUTDOWN_WAIT).await;
+                    let _ = wait_for_group_exit(pid, cancellation_grace).await;
                 }
                 // ChildOwner uniquely owns Child and performs wait(2).
                 wait_for_reader(&reader_done, &reader_done_notify).await;
@@ -400,7 +415,7 @@ impl ChildOwner {
         // is folded into the exit message below. Bounded: a grandchild that
         // inherited the stderr pipe keeps it open after the child exits, and the
         // exit must still be reported.
-        let _ = tokio::time::timeout(SHUTDOWN_WAIT, self.stderr_task).await;
+        let _ = tokio::time::timeout(self.cancellation_grace, self.stderr_task).await;
 
         let mut reason = match status {
             Some(status) => format!("server exited ({status})"),
@@ -558,7 +573,8 @@ mod tests {
         drop(waiter);
         drop(transport);
 
-        let deadline = Instant::now() + SHUTDOWN_WAIT + Duration::from_secs(2);
+        let deadline =
+            Instant::now() + crate::mcp::DEFAULT_CANCELLATION_GRACE + Duration::from_secs(2);
         while !process_group_gone(pid) && Instant::now() < deadline {
             tokio::time::sleep(POLL_INTERVAL).await;
         }

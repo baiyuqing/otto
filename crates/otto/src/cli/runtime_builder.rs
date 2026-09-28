@@ -1186,12 +1186,13 @@ impl Builder {
                 .command_executor
                 .clone()
                 .expect("bash_configured implies an executor");
-            let mut tool = bash::BashTool::new(
+            let mut tool = bash::BashTool::new_with_grace(
                 self.workspace,
                 executor,
                 &self.shell,
                 self.sandbox_environment.clone().unwrap_or_default(),
                 shell_timeout(runtime.shell_timeout),
+                runtime.resilience.deadlines.cancellation_grace,
                 max_output,
                 &redaction_values,
             )
@@ -1209,7 +1210,12 @@ impl Builder {
         let catalogs = self.build_catalogs(&mut tools, max_output, &mut warnings)?;
         mark_build_trace(&mut trace, "runner/catalogs");
         let (mcp_tools, mcp_connected, mcp_servers) = if connect_mcp {
-            self.connect_mcp(max_output, &mut warnings).await
+            self.connect_mcp_with_grace(
+                max_output,
+                runtime.resilience.deadlines.cancellation_grace,
+                &mut warnings,
+            )
+            .await
         } else {
             (Vec::new(), Vec::new(), self.connecting_mcp_servers())
         };

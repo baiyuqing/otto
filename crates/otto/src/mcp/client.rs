@@ -20,8 +20,6 @@ use super::{CallError, CallOutcome, Era, Outbound, ToolInfo, ToolServer, Transpo
 /// How long era negotiation waits for `server/discover` before assuming the
 /// server does not understand it and falling back to the legacy handshake.
 const DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
-/// Grace for cooperative per-request cancellation before hard cleanup.
-const CALL_CANCELLATION_GRACE: Duration = Duration::from_secs(5);
 /// Connect failure cleanup is itself bounded, so a broken transport cannot
 /// turn a connect deadline into an unbounded wait.
 const CONNECT_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,6 +34,7 @@ pub struct Client {
     era: Era,
     tools: Vec<ToolInfo>,
     call_timeout: Duration,
+    cancellation_grace: Duration,
     lifecycle: AtomicU8,
     close_done: OnceCell<()>,
 }
@@ -54,6 +53,26 @@ impl Client {
         call_timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<Client, CallError> {
+        Self::connect_with_grace(
+            name,
+            transport,
+            connect_timeout,
+            call_timeout,
+            super::DEFAULT_CANCELLATION_GRACE,
+            cancel,
+        )
+        .await
+    }
+
+    /// Connects with a caller-selected cooperative cancellation grace.
+    pub async fn connect_with_grace(
+        name: String,
+        transport: Box<dyn Transport>,
+        connect_timeout: Duration,
+        call_timeout: Duration,
+        cancellation_grace: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Client, CallError> {
         let outcome = tokio::time::timeout(connect_timeout, async {
             let era = negotiate_era(transport.as_ref(), connect_timeout, cancel).await?;
             let tools = fetch_all_tools(transport.as_ref(), &era, cancel).await?;
@@ -68,6 +87,7 @@ impl Client {
                 era,
                 tools,
                 call_timeout,
+                cancellation_grace,
                 lifecycle: AtomicU8::new(ACTIVE),
                 close_done: OnceCell::new(),
             }),
@@ -109,7 +129,7 @@ impl Client {
         };
 
         child.cancel();
-        let grace = tokio::time::sleep(CALL_CANCELLATION_GRACE);
+        let grace = tokio::time::sleep(self.cancellation_grace);
         let mut grace = std::pin::pin!(grace);
         tokio::select! {
             // Verified completion wins if completion and grace are both ready.
@@ -857,10 +877,13 @@ mod tests {
         }
     }
 
-    async fn grace_client(stop_server: bool) -> (Arc<Client>, Arc<AtomicUsize>) {
+    async fn grace_client(
+        stop_server: bool,
+        cancellation_grace: Duration,
+    ) -> (Arc<Client>, Arc<AtomicUsize>) {
         let close_calls = Arc::new(AtomicUsize::new(0));
         let cancel = CancellationToken::new();
-        let client = Client::connect(
+        let client = Client::connect_with_grace(
             "test".to_string(),
             Box::new(GraceTransport {
                 close_calls: close_calls.clone(),
@@ -868,6 +891,7 @@ mod tests {
             }),
             Duration::from_secs(5),
             Duration::from_secs(1),
+            cancellation_grace,
             &cancel,
         )
         .await
@@ -877,7 +901,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn http_timeout_drops_only_one_request_after_grace() {
-        let (client, close_calls) = grace_client(false).await;
+        let grace = Duration::from_millis(25);
+        let (client, close_calls) = grace_client(false, grace).await;
         let task = {
             let client = client.clone();
             tokio::spawn(async move {
@@ -887,16 +912,17 @@ mod tests {
             })
         };
 
-        tokio::time::advance(Duration::from_secs(5)).await;
-        assert!(!task.is_finished(), "the five-second grace must be honored");
-        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::time::advance(Duration::from_secs(1) + grace - Duration::from_millis(1)).await;
+        assert!(!task.is_finished(), "the configured grace must be honored");
+        tokio::time::advance(Duration::from_millis(1)).await;
         assert!(matches!(task.await.unwrap(), Err(CallError::Timeout)));
         assert_eq!(close_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
     async fn uncooperative_stdio_parent_cancel_gets_bounded_cleanup() {
-        let (client, close_calls) = grace_client(true).await;
+        let grace = Duration::from_millis(25);
+        let (client, close_calls) = grace_client(true, grace).await;
         let cancel = CancellationToken::new();
         let task = {
             let client = client.clone();
@@ -906,7 +932,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         cancel.cancel();
-        tokio::time::advance(CALL_CANCELLATION_GRACE - Duration::from_millis(1)).await;
+        tokio::time::advance(grace - Duration::from_millis(1)).await;
         assert!(!task.is_finished(), "caller cancellation must allow grace");
         tokio::time::advance(Duration::from_millis(1)).await;
 
@@ -916,7 +942,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stdio_timeout_stops_once_and_rejects_later_calls() {
-        let (client, close_calls) = grace_client(true).await;
+        let grace = Duration::from_millis(25);
+        let (client, close_calls) = grace_client(true, grace).await;
         let task = {
             let client = client.clone();
             tokio::spawn(async move {
@@ -926,7 +953,7 @@ mod tests {
             })
         };
 
-        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::time::advance(Duration::from_secs(1) + grace).await;
         assert!(matches!(task.await.unwrap(), Err(CallError::Timeout)));
         assert_eq!(close_calls.load(Ordering::SeqCst), 1);
         let later = client

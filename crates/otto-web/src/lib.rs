@@ -394,6 +394,10 @@ mod tests {
                 args: "{\n  \"command\": \"ls\"\n}".into(),
                 result: Some("a.go".into()),
                 is_error: Some(false),
+                operation_id: None,
+                disposition: None,
+                effect_certainty: None,
+                stop_reason: None,
                 created_at: String::new(),
             }]
         );

@@ -78,6 +78,7 @@ struct SessionContextValues {
 
 type HttpKey = (String, String, String);
 type ToolKey = (String, String);
+type OperationUnknownKey = (String, String);
 type ProviderApiKey = (String, String, String);
 type ProviderApiDurationKey = (String, String);
 type SessionContextKey = (String, String, String);
@@ -98,6 +99,8 @@ struct State {
 
     tool_calls_total: BTreeMap<ToolKey, u64>,
     tool_duration: BTreeMap<String, Histogram>,
+    operation_attempts_total: BTreeMap<String, u64>,
+    operation_unknown_effects_total: BTreeMap<OperationUnknownKey, u64>,
 
     tokens_total: BTreeMap<String, u64>,
 
@@ -224,6 +227,22 @@ impl Metrics {
             .observe(elapsed.as_secs_f64());
     }
 
+    pub fn operation_attempt(&self, tool: &str) {
+        *self
+            .lock()
+            .operation_attempts_total
+            .entry(tool.to_string())
+            .or_default() += 1;
+    }
+
+    pub fn operation_unknown_effect(&self, tool: &str, disposition: &str) {
+        *self
+            .lock()
+            .operation_unknown_effects_total
+            .entry((tool.to_string(), disposition.to_string()))
+            .or_default() += 1;
+    }
+
     pub fn tokens(&self, usage: &Usage) {
         let mut state = self.lock();
         if usage.input_tokens != 0 {
@@ -333,6 +352,11 @@ impl Metrics {
             state.turn_duration.as_ref(),
         );
         write_counter_tool_calls(&mut out, &state.tool_calls_total);
+        write_operation_counters(
+            &mut out,
+            &state.operation_attempts_total,
+            &state.operation_unknown_effects_total,
+        );
         write_histogram_by_label(
             &mut out,
             "otto_tool_call_duration_seconds",
@@ -502,6 +526,43 @@ fn write_counter_tool_calls(out: &mut String, data: &BTreeMap<ToolKey, u64>) {
             "{NAME}{{tool={},status={}}} {value}",
             quote_label(tool),
             quote_label(status)
+        );
+    }
+}
+
+fn write_operation_counters(
+    out: &mut String,
+    attempts: &BTreeMap<String, u64>,
+    unknown: &BTreeMap<OperationUnknownKey, u64>,
+) {
+    const ATTEMPTS: &str = "otto_operation_attempts_total";
+    write_help(
+        out,
+        ATTEMPTS,
+        "counter",
+        "Durably recorded operation attempts by kind and tool.",
+    );
+    for (tool, value) in attempts {
+        let _ = writeln!(
+            out,
+            "{ATTEMPTS}{{kind=\"tool_call\",tool={}}} {value}",
+            quote_label(tool)
+        );
+    }
+
+    const UNKNOWN: &str = "otto_operation_unknown_effects_total";
+    write_help(
+        out,
+        UNKNOWN,
+        "counter",
+        "Terminal operations with unknown external effects by kind, tool, and disposition.",
+    );
+    for ((tool, disposition), value) in unknown {
+        let _ = writeln!(
+            out,
+            "{UNKNOWN}{{kind=\"tool_call\",tool={},disposition={}}} {value}",
+            quote_label(tool),
+            quote_label(disposition)
         );
     }
 }

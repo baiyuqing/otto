@@ -1218,6 +1218,7 @@ impl Builder {
             system_prompt_parts,
             thinking: runtime.thinking.clone(),
             now: Box::new(Utc::now),
+            new_operation_id: Box::new(new_operation_id),
             request_sizer,
             compaction: CompactionSettings {
                 auto: runtime.compaction.auto,
@@ -1377,6 +1378,12 @@ pub(crate) fn random_id() -> std::io::Result<String> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// A fresh opaque operation identity for durable tool-attempt facts.
+pub(crate) fn new_operation_id() -> Result<otto_core::model::OperationId, String> {
+    let random = random_id().map_err(|error| format!("read operation randomness: {error}"))?;
+    otto_core::model::OperationId::new(format!("op_{random}")).map_err(|error| error.to_string())
 }
 
 /// Leaks one workspace for the process lifetime.
@@ -1685,16 +1692,25 @@ mod tests {
         let registry = Registry::new(vec![stub.boxed()]).expect("registry");
         let registry = with_lease_guard(registry, &session, "/workspace");
 
+        let operation_id = otto_core::model::OperationId::new("op_test").unwrap();
+        let arguments = crate::tool::testutil::raw("{}");
         let result = registry
             .execute(
-                "write",
-                &crate::tool::testutil::raw("{}"),
+                otto_core::tool::ToolCall {
+                    operation_id: &operation_id,
+                    name: "write",
+                    arguments: &arguments,
+                    attempt: 1,
+                },
                 &CancellationToken::new(),
             )
             .await;
 
-        assert!(result.is_error, "{result:?}");
-        assert!(result.content.contains("session lease lost"), "{result:?}");
+        assert!(result.result.is_error, "{result:?}");
+        assert!(
+            result.result.content.contains("session lease lost"),
+            "{result:?}"
+        );
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             0,

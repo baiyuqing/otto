@@ -321,11 +321,11 @@ impl BashTool {
     /// runs, but nothing it produced may be described.
     async fn execute_suppressed(&self, command: &str, cancel: &CancellationToken) -> ToolResult {
         if cancel.is_cancelled() {
-            return ToolResult::default();
+            return ToolResult::default().cancelled_not_started();
         }
         let mut stdout = std::io::sink();
         let mut stderr = std::io::sink();
-        let (_, outcome, _) = self
+        let (_, outcome, timed_out) = self
             .run_with(
                 &self.executor,
                 &self.environment,
@@ -336,11 +336,17 @@ impl BashTool {
             )
             .await;
         match outcome {
-            Ok(()) | Err(Error::Cancelled) => ToolResult::default(),
+            Ok(()) => ToolResult::default(),
+            Err(Error::Cancelled) if cancel.is_cancelled() => {
+                ToolResult::default().cancelled_unknown()
+            }
+            Err(Error::Cancelled) if timed_out => ToolResult::default().deadline_unknown(),
+            Err(Error::Cancelled) => ToolResult::default().cancelled_unknown(),
             Err(_) => ToolResult {
                 is_error: true,
                 ..ToolResult::default()
-            },
+            }
+            .transport_unknown(),
         }
     }
 
@@ -349,13 +355,15 @@ impl BashTool {
             return ToolResult {
                 is_error: true,
                 ..ToolResult::default()
-            };
+            }
+            .not_started();
         }
         ToolResult {
             content: redact_exact_text(message, &self.redact_values, &self.redaction_marker),
             is_error: true,
             ..ToolResult::default()
         }
+        .not_started()
     }
 
     fn result(
@@ -382,11 +390,20 @@ impl BashTool {
     }
 }
 
-fn infrastructure_result() -> ToolResult {
-    ToolResult {
+fn infrastructure_result(error: &Error) -> ToolResult {
+    let result = ToolResult {
         content: SANDBOX_EXECUTION_UNAVAILABLE.to_owned(),
         is_error: true,
         ..ToolResult::default()
+    };
+    match error {
+        Error::Closed
+        | Error::InvalidRequest
+        | Error::UnsupportedPolicy
+        | Error::Unavailable(_)
+        | Error::EnvironmentUnsafe
+        | Error::ChildLaunch => result.not_started(),
+        Error::ChildWait | Error::ChildTerminate | Error::Cancelled => result.transport_unknown(),
     }
 }
 
@@ -485,12 +502,14 @@ this exact elevated Bash command after approval."
             }
         };
         if cancel.is_cancelled() {
-            return self.result(
-                &CappedByteCollector::new(self.max_output_bytes),
-                &CappedByteCollector::new(self.max_output_bytes),
-                &ExitStatus::default(),
-                "status: cancelled",
-            );
+            return self
+                .result(
+                    &CappedByteCollector::new(self.max_output_bytes),
+                    &CappedByteCollector::new(self.max_output_bytes),
+                    &ExitStatus::default(),
+                    "status: cancelled",
+                )
+                .cancelled_not_started();
         }
 
         let mut stdout = RedactingCollector::new(
@@ -513,8 +532,10 @@ this exact elevated Bash command after approval."
                 cancel,
             )
             .await;
-        if matches!(outcome, Err(ref error) if *error != Error::Cancelled) {
-            return infrastructure_result();
+        if let Err(ref error) = outcome
+            && *error != Error::Cancelled
+        {
+            return infrastructure_result(error);
         }
         stdout.flush();
         stderr.flush();
@@ -528,7 +549,16 @@ this exact elevated Bash command after approval."
         } else {
             format!("exit_code: {}", status.code)
         };
-        self.result(stdout.collector(), stderr.collector(), &status, &summary)
+        let result = self.result(stdout.collector(), stderr.collector(), &status, &summary);
+        if cancel.is_cancelled() {
+            result.cancelled_unknown()
+        } else if timed_out {
+            result.deadline_unknown()
+        } else if outcome.is_err() {
+            result.cancelled_unknown()
+        } else {
+            result
+        }
     }
 }
 
@@ -754,6 +784,13 @@ mod tests {
             &strings(redactions),
         )
         .expect("the fixture configuration is valid")
+    }
+
+    fn outcome(result: &ToolResult) -> &otto_core::model::OperationOutcome {
+        result
+            .outcome_override
+            .as_ref()
+            .expect("the concrete tool classified this boundary")
     }
 
     async fn run(tool: &BashTool, command: &str) -> ToolResult {
@@ -1481,6 +1518,10 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
             assert!(result.is_error, "{arguments}: {result:?}");
             assert!(result.content.contains(want), "{arguments}: {result:?}");
             assert!(!result.content.contains(secret), "{arguments}: {result:?}");
+            assert_eq!(
+                outcome(&result).effect_certainty,
+                otto_core::model::EffectCertainty::NotStarted
+            );
             assert_eq!(executor.calls(), 0, "{arguments}");
         }
     }
@@ -1517,6 +1558,14 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
             .await;
         assert!(!result.is_error, "{result:?}");
         assert_eq!(result.content, "stdout:\n\nstderr:\n\nstatus: cancelled");
+        assert_eq!(
+            outcome(&result).effect_certainty,
+            otto_core::model::EffectCertainty::NotStarted
+        );
+        assert_eq!(
+            outcome(&result).disposition,
+            otto_core::model::OperationDisposition::Cancelled
+        );
         assert_eq!(executor.calls(), 0);
     }
 
@@ -1565,6 +1614,10 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
             result.content,
             "stdout:\npartial output\nstderr:\n\nstatus: cancelled; signal: killed"
         );
+        assert_eq!(
+            outcome(&result).effect_certainty,
+            otto_core::model::EffectCertainty::Unknown
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1589,6 +1642,14 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
         assert_eq!(
             result.content,
             "stdout:\n\nstderr:\n\nstatus: timed out after 3s; signal: killed"
+        );
+        assert_eq!(
+            outcome(&result).disposition,
+            otto_core::model::OperationDisposition::DeadlineExceeded
+        );
+        assert_eq!(
+            outcome(&result).effect_certainty,
+            otto_core::model::EffectCertainty::Unknown
         );
     }
 
@@ -1697,6 +1758,13 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
             let result = run(&tool, "ignored").await;
             assert!(result.is_error, "{error:?}: {result:?}");
             assert_eq!(result.content, SANDBOX_EXECUTION_UNAVAILABLE, "{error:?}");
+            let expected = match error {
+                Error::ChildWait | Error::ChildTerminate => {
+                    otto_core::model::EffectCertainty::Unknown
+                }
+                _ => otto_core::model::EffectCertainty::NotStarted,
+            };
+            assert_eq!(outcome(&result).effect_certainty, expected);
         }
     }
 
@@ -1955,14 +2023,20 @@ The command did not run. Only the user can approve it in Otto; do not run /appro
             .collect();
         assert_eq!(definitions, vec!["bash".to_owned()]);
 
+        let operation_id = otto_core::model::OperationId::new("op_test").unwrap();
+        let arguments = raw(r#"{"command":"true"}"#);
         let result = otto_core::tool::ToolExecutor::execute(
             &registry,
-            "bash",
-            &raw(r#"{"command":"true"}"#),
+            otto_core::tool::ToolCall {
+                operation_id: &operation_id,
+                name: "bash",
+                arguments: &arguments,
+                attempt: 1,
+            },
             &CancellationToken::new(),
         )
         .await;
-        assert!(!result.is_error, "{result:?}");
+        assert!(!result.result.is_error, "{result:?}");
         let requests = executor.requests();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].env.is_empty());

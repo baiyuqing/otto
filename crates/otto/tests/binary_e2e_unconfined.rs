@@ -98,7 +98,8 @@ fn the_binary_runs_a_turn_with_bash_and_write_when_the_sandbox_is_off() {
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("[tool result] wrote notes.txt (21 bytes)"),
+        stdout.contains("[tool result] Completed (operation op_")
+            && stdout.contains("): wrote notes.txt (21 bytes)"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(stdout.contains("all done"), "stdout:\n{stdout}");
@@ -140,7 +141,8 @@ fn without_a_confined_driver_bash_is_unavailable_but_file_tools_still_run() {
         "stderr:\n{stderr}"
     );
     assert!(
-        stdout.contains("[tool result] wrote notes.txt (21 bytes)"),
+        stdout.contains("[tool result] Completed (operation op_")
+            && stdout.contains("): wrote notes.txt (21 bytes)"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert_eq!(

@@ -143,8 +143,27 @@ function toolArgumentSummary(name: string, args: string): string {
   return firstLine(args)
 }
 
+function toolOutcomeLabel(item: Extract<Item, { kind: 'tool' }>): string | null {
+  switch (item.effect_certainty) {
+    case 'unknown':
+      return 'Outcome unknown — check effects before retrying'
+    case 'not_started':
+      return 'Did not run'
+    case 'known_no_effect':
+      return 'Known no effect'
+    case 'completed':
+      if (item.disposition === 'succeeded') return 'Completed'
+      if (item.disposition === 'error') return 'Failed with a known result'
+      return null
+    default:
+      return null
+  }
+}
+
 function toolResultSummary(item: Extract<Item, { kind: 'tool' }>): string {
   if (item.result === undefined) return 'Running…'
+  const typed = toolOutcomeLabel(item)
+  if (typed) return typed
   if (!item.result.trim()) return item.isError ? 'Failed: no output' : 'Done: no output'
   const more = item.result.split(/\r?\n/).length - 1
   const suffix = more > 0 ? ` (+${more} ${more === 1 ? 'line' : 'lines'})` : ''
@@ -246,9 +265,10 @@ function ItemView({ item }: { item: Item }) {
         </details>
       )
     }
-    case 'tool':
+    case 'tool': {
+      const unknownOutcome = item.effect_certainty === 'unknown'
       return (
-        <details className={`item tool${item.isError ? ' error' : ''}`}>
+        <details className={`item tool${unknownOutcome ? ' outcome-unknown' : item.isError ? ' error' : ''}`}>
           <summary>
             <span className="tool-heading">
               <Timestamp value={itemCreatedAt(item)} />
@@ -261,6 +281,7 @@ function ItemView({ item }: { item: Item }) {
           {item.result !== undefined && <pre>{item.result}</pre>}
         </details>
       )
+    }
     case 'notice':
       return <div className="item notice">{item.text}</div>
     case 'error':
